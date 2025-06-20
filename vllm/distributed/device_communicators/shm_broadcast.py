@@ -1,23 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import os
 import pickle
-import sys
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from multiprocessing import shared_memory
-from typing import List, Optional, Tuple, Union
+from threading import Event
+from typing import Any, Optional, Union
 from unittest.mock import patch
 
 import torch
 import torch.distributed as dist
+import zmq
 from torch.distributed import ProcessGroup
 from zmq import IPV6  # type: ignore
 from zmq import SUB, SUBSCRIBE, XPUB, XPUB_VERBOSE, Context  # type: ignore
 
 import vllm.envs as envs
-from vllm.distributed.utils import StatelessProcessGroup
+from vllm.distributed.utils import StatelessProcessGroup, sched_yield
 from vllm.logger import init_logger
 from vllm.utils import (get_ip, get_open_port, get_open_zmq_ipc_path,
                         is_valid_ipv6_address)
@@ -26,19 +27,42 @@ VLLM_RINGBUFFER_WARNING_INTERVAL = envs.VLLM_RINGBUFFER_WARNING_INTERVAL
 
 logger = init_logger(__name__)
 
-# We prefer to use os.sched_yield as it results in tighter polling loops,
-# measured to be around 3e-7 seconds. However on earlier versions of Python
-# os.sched_yield() does not release the GIL, so we fall back to time.sleep(0)
-USE_SCHED_YIELD = ((sys.version_info[:3] >= (3, 11, 1))
-                   or (sys.version_info[:2] == (3, 10)
-                       and sys.version_info[2] >= 8))
+
+class SpinTimer:
+
+    def record_activity(self):
+        pass
+
+    def spin(self):
+        sched_yield()
 
 
-def sched_yield():
-    if USE_SCHED_YIELD:
-        os.sched_yield()
-    else:
-        time.sleep(0)
+class SpinSleepTimer(SpinTimer):
+    """
+    In setups which have long inactivity periods it is desirable to reduce
+    system power consumption when vllm does nothing. This would lead to more
+    CPU thermal headroom when a request eventually comes, especially when
+    multiple GPUs are connected as each GPU would otherwise pin one thread at
+    100% CPU usage.
+
+    The simplest solution is to reduce polling frequency when there is no
+    activity for a certain period of time.
+    """
+
+    def __init__(self, busy_loop_s: float = 3.0, wait_sleep_s: float = 0.1):
+        self.last_activity = time.monotonic()
+        self.busy_loop_s = busy_loop_s
+        self.wait_sleep_s = wait_sleep_s
+
+    def record_activity(self):
+        self.last_activity = time.monotonic()
+
+    def spin(self):
+        curr_time = time.monotonic()
+        if curr_time >= self.last_activity + self.busy_loop_s:
+            time.sleep(self.wait_sleep_s)
+        else:
+            sched_yield()
 
 
 class ShmRingBuffer:
@@ -55,7 +79,7 @@ class ShmRingBuffer:
         of items that can be stored in the buffer are known in advance.
         In this case, we don't need to synchronize the access to
          the buffer.
-        
+
         Buffer memory layout:
                   data                                 metadata
                     |                                      |
@@ -171,9 +195,9 @@ class ShmRingBuffer:
 
 @dataclass
 class Handle:
-    local_reader_ranks: List[int] = field(default_factory=list)
+    local_reader_ranks: list[int] = field(default_factory=list)
 
-    buffer_handle: Optional[Tuple[int, int, int, str]] = None
+    buffer_handle: Optional[tuple[int, int, int, str]] = None
     local_subscribe_addr: Optional[str] = None
     remote_subscribe_addr: Optional[str] = None
     remote_addr_ipv6: bool = False
@@ -185,7 +209,7 @@ class MessageQueue:
         self,
         n_reader,  # number of all readers
         n_local_reader,  # number of local readers through shared memory
-        local_reader_ranks: Optional[List[int]] = None,
+        local_reader_ranks: Optional[list[int]] = None,
         max_chunk_bytes: int = 1024 * 1024 * 10,
         max_chunks: int = 10,
         connect_ip: Optional[str] = None,
@@ -239,7 +263,7 @@ class MessageQueue:
                 self.remote_socket.setsockopt(IPV6, 1)
                 remote_addr_ipv6 = True
                 connect_ip = f"[{connect_ip}]"
-            socket_addr = f"tcp://*:{remote_subscribe_port}"
+            socket_addr = f"tcp://{connect_ip}:{remote_subscribe_port}"
             self.remote_socket.bind(socket_addr)
             remote_subscribe_addr = f"tcp://{connect_ip}:{remote_subscribe_port}"
         else:
@@ -251,6 +275,7 @@ class MessageQueue:
         self.local_reader_rank = -1
         # rank does not matter for remote readers
         self._is_remote_reader = False
+        self._read_spin_timer = SpinTimer()
 
         self.handle = Handle(
             local_reader_ranks=local_reader_ranks,
@@ -289,6 +314,9 @@ class MessageQueue:
             self.local_socket.connect(socket_addr)
 
             self.remote_socket = None
+
+            self._read_spin_timer = SpinSleepTimer(
+            ) if envs.VLLM_SLEEP_WHEN_IDLE else SpinTimer()
         else:
             self.buffer = None  # type: ignore
             self.current_idx = -1
@@ -400,7 +428,9 @@ class MessageQueue:
                 break
 
     @contextmanager
-    def acquire_read(self, timeout: Optional[float] = None):
+    def acquire_read(self,
+                     timeout: Optional[float] = None,
+                     cancel: Optional[Event] = None):
         assert self._is_local_reader, "Only readers can acquire read"
         start_time = time.monotonic()
         n_warning = 1
@@ -418,17 +448,20 @@ class MessageQueue:
                     # we need to wait until it is written
 
                     # Release the processor to other threads
-                    sched_yield()
+                    self._read_spin_timer.spin()
 
                     # if we wait for a long time, log a message
                     if (time.monotonic() - start_time
                             > VLLM_RINGBUFFER_WARNING_INTERVAL * n_warning):
                         logger.debug(
                             ("No available shared memory broadcast block found"
-                             "in %s second."),
+                             " in %s second."),
                             VLLM_RINGBUFFER_WARNING_INTERVAL,
                         )
                         n_warning += 1
+
+                    if cancel is not None and cancel.is_set():
+                        raise RuntimeError("cancelled")
 
                     # if we time out, raise an exception
                     if (timeout is not None
@@ -446,6 +479,8 @@ class MessageQueue:
                 metadata_buffer[self.local_reader_rank + 1] = 1
                 self.current_idx = (self.current_idx +
                                     1) % self.buffer.max_chunks
+
+                self._read_spin_timer.record_activity()
                 break
 
     def enqueue(self, obj, timeout: Optional[float] = None):
@@ -464,10 +499,12 @@ class MessageQueue:
         if self.n_remote_reader > 0:
             self.remote_socket.send(serialized_obj)
 
-    def dequeue(self, timeout: Optional[float] = None):
+    def dequeue(self,
+                timeout: Optional[float] = None,
+                cancel: Optional[Event] = None):
         """ Read from message queue with optional timeout (in seconds) """
         if self._is_local_reader:
-            with self.acquire_read(timeout) as buf:
+            with self.acquire_read(timeout, cancel) as buf:
                 overflow = buf[0] == 1
                 if not overflow:
                     # no need to know the size of serialized object
@@ -475,14 +512,20 @@ class MessageQueue:
                     # see https://docs.python.org/3/library/pickle.html
                     obj = pickle.loads(buf[1:])
             if overflow:
-                recv = self.local_socket.recv()
-                obj = pickle.loads(recv)
+                obj = MessageQueue.recv(self.local_socket, timeout)
         elif self._is_remote_reader:
-            recv = self.remote_socket.recv()
-            obj = pickle.loads(recv)
+            obj = MessageQueue.recv(self.remote_socket, timeout)
         else:
             raise RuntimeError("Only readers can dequeue")
         return obj
+
+    @staticmethod
+    def recv(socket: zmq.Socket, timeout: Optional[float]) -> Any:
+        timeout_ms = None if timeout is None else int(timeout * 1000)
+        if not socket.poll(timeout=timeout_ms):
+            raise TimeoutError
+        recv = socket.recv(copy=False)
+        return pickle.loads(recv.buffer)
 
     def broadcast_object(self, obj=None):
         if self._is_writer:

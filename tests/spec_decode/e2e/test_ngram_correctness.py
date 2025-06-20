@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """This docstring details important information on the testing methodology.
 
 Most of the tests rely on "greedy equality", where we expect the output of
@@ -21,8 +22,8 @@ However, we still need to verify below scenario could be passed:
     * Test greedy equality under preemption
     * Test greedy equality under various ngram sizes / speculative sizes
 
-With those tests, we can say at least, ngram spec would not break the correctess
-for the target model outputs.
+With those tests, we can say at least, ngram spec would not break the
+correctness for the target model outputs.
 """
 
 import pytest
@@ -39,6 +40,9 @@ from .conftest import run_equality_correctness_test
 
         # Print spec metrics.
         "disable_log_stats": False,
+
+        # The original model is float32, keep it for numerical stability.
+        "dtype": "float32",
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [
     {
@@ -96,6 +100,9 @@ def test_ngram_e2e_greedy_correctness(vllm_runner, common_llm_kwargs,
 
         # Print spec metrics.
         "disable_log_stats": False,
+
+        # The original model is float32, keep it for numerical stability.
+        "dtype": "float32",
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [
     {
@@ -152,13 +159,16 @@ def test_ngram_e2e_greedy_logprobs(vllm_runner, common_llm_kwargs,
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
-        "block_size": 8,
+        "block_size": 16,
         # 2 for small prompt, 256//8 for generated.
         "num_gpu_blocks_override": 2 + 256 // 8,
         "max_model_len": (2 + 256 // 8) * 8,
 
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
+
+        # The original model is float32, keep it for numerical stability.
+        "dtype": "float32",
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [
     {
@@ -220,6 +230,9 @@ def test_ngram_e2e_greedy_correctness_with_preemption(
 
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
+
+        # The original model is float32, keep it for numerical stability.
+        "dtype": "float32",
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
@@ -280,6 +293,9 @@ def test_ngram_different_k(vllm_runner, common_llm_kwargs,
 
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
+
+        # The original model is float32, keep it for numerical stability.
+        "dtype": "float32",
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
@@ -336,6 +352,9 @@ def test_ngram_disable_queue(vllm_runner, common_llm_kwargs,
 
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
+
+        # The original model is float32, keep it for numerical stability.
+        "dtype": "float32",
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])

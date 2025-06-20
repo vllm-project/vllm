@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Sampling parameters for text generation."""
 import copy
 from dataclasses import dataclass
@@ -8,11 +9,11 @@ from typing import Annotated, Any, Optional, Union
 
 import msgspec
 from pydantic import BaseModel
+from typing_extensions import deprecated
 
 from vllm.logger import init_logger
 from vllm.logits_process import LogitsProcessor
 from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.transformers_utils.tokenizers.mistral import MistralTokenizer
 
 logger = init_logger(__name__)
 
@@ -37,7 +38,12 @@ class GuidedDecodingParams:
     json_object: Optional[bool] = None
     """These are other options that can be set"""
     backend: Optional[str] = None
+    backend_was_auto: bool = False
+    disable_fallback: bool = False
+    disable_any_whitespace: bool = False
+    disable_additional_properties: bool = False
     whitespace_pattern: Optional[str] = None
+    structural_tag: Optional[str] = None
 
     @staticmethod
     def from_optional(
@@ -48,9 +54,10 @@ class GuidedDecodingParams:
         json_object: Optional[bool] = None,
         backend: Optional[str] = None,
         whitespace_pattern: Optional[str] = None,
+        structural_tag: Optional[str] = None,
     ) -> Optional["GuidedDecodingParams"]:
-        if all(arg is None
-               for arg in (json, regex, choice, grammar, json_object)):
+        if all(arg is None for arg in (json, regex, choice, grammar,
+                                       json_object, structural_tag)):
             return None
         # Extract json schemas from pydantic models
         if isinstance(json, (BaseModel, type(BaseModel))):
@@ -63,26 +70,8 @@ class GuidedDecodingParams:
             json_object=json_object,
             backend=backend,
             whitespace_pattern=whitespace_pattern,
+            structural_tag=structural_tag,
         )
-
-    @property
-    def backend_name(self) -> str:
-        """Return the backend name without any options.
-        
-        For example if the backend is "xgrammar:no-fallback", returns "xgrammar"
-        """
-        return (self.backend or "").split(":")[0]
-
-    def backend_options(self) -> list[str]:
-        """Return the backend options as a list of strings."""
-        if not self.backend or ":" not in self.backend:
-            return []
-        return self.backend.split(":")[1].split(",")
-
-    def no_fallback(self) -> bool:
-        """Returns True if the "no-fallback" option is supplied for the guided
-        decoding backend"""
-        return "no-fallback" in self.backend_options()
 
     def __post_init__(self):
         """Validate that some fields are mutually exclusive."""
@@ -94,6 +83,27 @@ class GuidedDecodingParams:
             raise ValueError(
                 "You can only use one kind of guided decoding but multiple are "
                 f"specified: {self.__dict__}")
+
+        if self.backend is not None and ":" in self.backend:
+            self._extract_backend_options()
+
+    @deprecated(
+        "Passing guided decoding backend options inside backend in the format "
+        "'backend:...' is deprecated. This will be removed in v0.10.0. Please "
+        "use the dedicated arguments '--disable-fallback', "
+        "'--disable-any-whitespace' and '--disable-additional-properties' "
+        "instead.")
+    def _extract_backend_options(self):
+        """Extract backend options from the backend string."""
+        assert isinstance(self.backend, str)
+        self.backend, options = self.backend.split(":")
+        options_set = set(options.strip().split(","))
+        if "no-fallback" in options_set:
+            self.disable_fallback = True
+        if "disable-any-whitespace" in options_set:
+            self.disable_any_whitespace = True
+        if "no-additional-properties" in options_set:
+            self.disable_additional_properties = True
 
 
 class RequestOutputKind(Enum):
@@ -140,7 +150,7 @@ class SamplingParams(
         top_p: Float that controls the cumulative probability of the top tokens
             to consider. Must be in (0, 1]. Set to 1 to consider all tokens.
         top_k: Integer that controls the number of top tokens to consider. Set
-            to -1 to consider all tokens.
+            to 0 (or -1) to consider all tokens.
         min_p: Float that represents the minimum probability for a token to be
             considered, relative to the probability of the most likely token.
             Must be in [0, 1]. Set to 0 to disable this.
@@ -176,9 +186,10 @@ class SamplingParams(
         logits_processors: list of functions that modify logits based on
             previously generated tokens, and optionally prompt tokens as
             a first argument.
-        truncate_prompt_tokens: If set to an integer k, will use only the last k
-            tokens from the prompt (i.e., left truncation). Defaults to None
-            (i.e., no truncation).
+        truncate_prompt_tokens: If set to -1, will use the truncation size
+            supported by the model. If set to an integer k, will use only
+            the last k tokens from the prompt (i.e., left truncation).
+            Defaults to None (i.e., no truncation).
         guided_decoding: If provided, the engine will construct a guided
             decoding logits processor from these parameters. Defaults to None.
         logit_bias: If provided, the engine will construct a logits processor
@@ -187,8 +198,8 @@ class SamplingParams(
             processor which only retains scores for the given token ids.
             Defaults to None.
         extra_args: Arbitrary additional args, that can be used by custom
-            sampling implementations. Not used by any in-tree sampling
-            implementations.
+            sampling implementations, plugins, etc. Not used by any in-tree
+            sampling implementations.
     """
 
     n: int = 1
@@ -199,7 +210,7 @@ class SamplingParams(
     repetition_penalty: float = 1.0
     temperature: float = 1.0
     top_p: float = 1.0
-    top_k: int = -1
+    top_k: int = 0
     min_p: float = 0.0
     seed: Optional[int] = None
     stop: Optional[Union[str, list[str]]] = None
@@ -246,7 +257,7 @@ class SamplingParams(
         repetition_penalty: Optional[float] = 1.0,
         temperature: Optional[float] = 1.0,
         top_p: Optional[float] = 1.0,
-        top_k: int = -1,
+        top_k: int = 0,
         min_p: float = 0.0,
         seed: Optional[int] = None,
         stop: Optional[Union[str, list[str]]] = None,
@@ -366,7 +377,7 @@ class SamplingParams(
         if self.temperature < _SAMPLING_EPS:
             # Zero temperature means greedy sampling.
             self.top_p = 1.0
-            self.top_k = -1
+            self.top_k = 0
             self.min_p = 0.0
             self._verify_greedy_sampling()
 
@@ -379,6 +390,17 @@ class SamplingParams(
                              f"type {type(self.n)}")
         if self.n < 1:
             raise ValueError(f"n must be at least 1, got {self.n}.")
+        if self.best_of is not None:
+            if not isinstance(self.best_of, int):
+                raise ValueError(
+                    f"best_of must be an integer, got {type(self.best_of)}")
+            if self.best_of < 1:
+                raise ValueError(
+                    f"best_of must be at least 1, got {self.best_of}")
+            if self.best_of < self.n:
+                raise ValueError(
+                    f"best_of must be greater than or equal to n, "
+                    f"got n={self.n} and best_of={self.best_of}.")
         if not -2.0 <= self.presence_penalty <= 2.0:
             raise ValueError("presence_penalty must be in [-2, 2], got "
                              f"{self.presence_penalty}.")
@@ -394,8 +416,9 @@ class SamplingParams(
                 f"temperature must be non-negative, got {self.temperature}.")
         if not 0.0 < self.top_p <= 1.0:
             raise ValueError(f"top_p must be in (0, 1], got {self.top_p}.")
-        if self.top_k < -1 or self.top_k == 0:
-            raise ValueError(f"top_k must be -1 (disable), or at least 1, "
+        # quietly accept -1 as disabled, but prefer 0
+        if self.top_k < -1:
+            raise ValueError(f"top_k must be 0 (disable), or at least 1, "
                              f"got {self.top_k}.")
         if not isinstance(self.top_k, int):
             raise TypeError(
@@ -423,6 +446,10 @@ class SamplingParams(
                 and self.truncate_prompt_tokens < 1):
             raise ValueError(f"truncate_prompt_tokens must be >= 1, "
                              f"got {self.truncate_prompt_tokens}")
+        assert isinstance(self.stop_token_ids, list)
+        if not all(isinstance(st_id, int) for st_id in self.stop_token_ids):
+            raise ValueError(f"stop_token_ids must contain only integers, "
+                             f"got {self.stop_token_ids}.")
         assert isinstance(self.stop, list)
         if any(not stop_str for stop_str in self.stop):
             raise ValueError("stop cannot contain an empty string.")
@@ -476,13 +503,8 @@ class SamplingParams(
             for add_prefix_space in [False, True]:
                 prefix = " " if add_prefix_space else ""
                 prompt = prefix + bad_word.lstrip()
-
-                if isinstance(tokenizer, MistralTokenizer):
-                    # Mistral tokenizers should not add special tokens
-                    prompt_token_ids = tokenizer.encode(text=prompt)
-                else:
-                    prompt_token_ids = tokenizer.encode(
-                        text=prompt, add_special_tokens=False)
+                prompt_token_ids = tokenizer.encode(text=prompt,
+                                                    add_special_tokens=False)
 
                 # If no space at the beginning
                 # or if prefix space produces a new word token

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from typing import List, Optional, Tuple
 
@@ -97,3 +98,6 @@ class PlaceholderBlockSpaceManager(BlockSpaceManager):
 
     def get_num_cached_tokens(self, seq: Sequence) -> int:
         return 0
+
+    def remove_seq_from_computed_blocks_tracker(self, seq: Sequence) -> None:
+        return

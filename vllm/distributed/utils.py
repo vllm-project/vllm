@@ -1,28 +1,48 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Copyright 2023 The vLLM team.
 # Adapted from
 # https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/core/tensor_parallel/utils.py
 # Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
 import dataclasses
-import datetime
+import os
 import pickle
+import socket
+import sys
 import time
+import uuid
 from collections import deque
-from typing import Any, Deque, Dict, Optional, Sequence, Tuple
+from collections.abc import Sequence
+from datetime import timedelta
+from typing import Any, Optional
 
 import torch
 from torch.distributed import ProcessGroup, TCPStore
 from torch.distributed.distributed_c10d import (Backend, PrefixStore,
                                                 _get_default_timeout,
-                                                _unregister_process_group,
-                                                is_nccl_available)
+                                                _unregister_process_group)
 from torch.distributed.rendezvous import rendezvous
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.utils import get_tcp_uri, is_torch_equal_or_newer
 
 logger = init_logger(__name__)
+
+# We prefer to use os.sched_yield as it results in tighter polling loops,
+# measured to be around 3e-7 seconds. However on earlier versions of Python
+# os.sched_yield() does not release the GIL, so we fall back to time.sleep(0)
+USE_SCHED_YIELD = ((sys.version_info[:3] >= (3, 11, 1))
+                   or (sys.version_info[:2] == (3, 10)
+                       and sys.version_info[2] >= 8))
+
+
+def sched_yield():
+    if USE_SCHED_YIELD:
+        os.sched_yield()
+    else:
+        time.sleep(0)
 
 
 def ensure_divisibility(numerator, denominator):
@@ -67,7 +87,7 @@ def split_tensor_along_last_dim(
 
 
 def get_pp_indices(num_hidden_layers: int, pp_rank: int,
-                   pp_size: int) -> Tuple[int, int]:
+                   pp_size: int) -> tuple[int, int]:
     """Try to evenly distribute layers across partitions.
 
     If the number of layers is not divisible by the number of partitions,
@@ -123,18 +143,22 @@ class StatelessProcessGroup:
     rank: int
     world_size: int
     store: torch._C._distributed_c10d.Store
+
+    # stores a reference to the socket so that the file descriptor stays alive
+    socket: Optional[socket.socket]
+
     data_expiration_seconds: int = 3600  # 1 hour
 
     # dst rank -> counter
-    send_dst_counter: Dict[int, int] = dataclasses.field(default_factory=dict)
+    send_dst_counter: dict[int, int] = dataclasses.field(default_factory=dict)
     # src rank -> counter
-    recv_src_counter: Dict[int, int] = dataclasses.field(default_factory=dict)
+    recv_src_counter: dict[int, int] = dataclasses.field(default_factory=dict)
     broadcast_send_counter: int = 0
-    broadcast_recv_src_counter: Dict[int, int] = dataclasses.field(
+    broadcast_recv_src_counter: dict[int, int] = dataclasses.field(
         default_factory=dict)
 
     # A deque to store the data entries, with key and timestamp.
-    entries: Deque[Tuple[str,
+    entries: deque[tuple[str,
                          float]] = dataclasses.field(default_factory=deque)
 
     def __post_init__(self):
@@ -205,10 +229,141 @@ class StatelessProcessGroup:
                 gathered_objs.append(recv_obj)
         return gathered_objs
 
-    def barrier(self):
-        """A barrier to synchronize all ranks."""
+    def barrier(self, timeout: float = 30.0):
+        """A robust barrier to synchronize all ranks.
+
+
+        Uses a multi-phase approach to ensure all processes reach the barrier
+        before proceeding:
+
+        1. Each process signals it has reached the barrier
+
+        2. Each process signals that it has confirmed the arrival of all other
+        ranks.
+
+        3. Rank 0 waits for all other ranks to signal their departure to ensure
+        that all ranks have departed the barrier first.
+
+        Args:
+            timeout: Maximum time in seconds to wait for each phase (in seconds)
+
+
+        Raises:
+            RuntimeError: If coordination fails or times out
+        """
+        # Generate a barrier ID that is globally unique
+        try:
+            if self.rank == 0:
+                barrier_id = f"barrier_{uuid.uuid4()}"
+                self.broadcast_obj(barrier_id, src=0)
+            else:
+                barrier_id = self.broadcast_obj(None, src=0)
+        except Exception as e:
+            raise RuntimeError("Failed to broadcast barrier_id") from e
+
+        # Phase 1: Signal arrival at barrier
+        # Wait for all processes to arrive
+        # We need all ranks to confirm the arrival of all other ranks.
+        # This is the key synchronization point.
+        arrival_key = f"arrival_{barrier_id}_{self.rank}"
+        try:
+            self.store.set(arrival_key, b"1")
+        except Exception as e:
+            raise RuntimeError("Failed to signal barrier arrival") from e
+
+        start_time = time.time()
+        processes_arrived: set[int] = set()
+
+        while len(processes_arrived) < self.world_size:
+            # Check for timeout
+            cur_time = time.time()
+            if cur_time - start_time > timeout:
+                raise RuntimeError("Barrier timed out after %f seconds",
+                                   timeout)
+
+            # Check for each process
+            for i in range(self.world_size):
+                if i in processes_arrived:
+                    continue
+
+                key = f"arrival_{barrier_id}_{i}"
+                try:
+                    # Try to get the key - if it exists, we'll get a value
+                    # If it doesn't exist, it will throw an exception
+                    self.store.get(key)
+                    processes_arrived.add(i)
+                except KeyError:
+                    # Key doesn't exist yet
+                    pass
+                except Exception as check_e:
+                    logger.debug("Error checking key existence: %s", check_e)
+                    sched_yield()
+
+            # Short sleep to avoid tight polling
+            if len(processes_arrived) < self.world_size:
+                sched_yield()
+
+        # Phase 2: Signal departure from barrier
+        # We only care to block at this stage in rank 0, which runs the
+        # server side of the TCPStore. We want to make sure that all
+        # clients have departed the barrier before rank 0 in case the
+        # next thing after the barrier is a shutdown, including tearing
+        # down the TCPStore. Other ranks can exit the barrier immediately
+        # after signaling their departure.
+        departure_key = f"departure_{barrier_id}_{self.rank}"
+        try:
+            self.store.set(departure_key, b"1")
+        except Exception as e:
+            raise RuntimeError("Failed to signal barrier departure") from e
+
+        if self.rank != 0:
+            return
+
+        # Make rank 0 wait for all processes to signal departure
+        start_time = time.time()
+        processes_departed: set[int] = set()
+
+        while len(processes_departed) < self.world_size:
+            # Check for timeout
+            if time.time() - start_time > timeout:
+                raise RuntimeError("Barrier departure timed out after %f s",
+                                   timeout)
+
+            # Check for each process
+            for i in range(self.world_size):
+                if i in processes_departed:
+                    continue
+
+                key = f"departure_{barrier_id}_{i}"
+                try:
+                    # Try to get the key - if it exists, we'll get a value
+                    # If it doesn't exist, it will throw an exception
+                    self.store.get(key)
+                    processes_departed.add(i)
+                except KeyError:
+                    # Key doesn't exist yet
+                    pass
+                except Exception as check_e:
+                    logger.debug("Error checking key existence: %s", check_e)
+                    sched_yield()
+
+            # Short sleep to avoid tight polling
+            if len(processes_departed) < self.world_size:
+                sched_yield()
+
+        # Clean up keys to avoid leaking memory in the store
         for i in range(self.world_size):
-            self.broadcast_obj(None, src=i)
+            try:
+                self.store.delete_key(f"arrival_{barrier_id}_{i}")
+            except Exception:
+                logger.debug("Error deleting key: %s",
+                             f'arrival_{barrier_id}_{i}')
+
+            try:
+                self.store.delete_key(f"departure_{barrier_id}_{i}")
+            except Exception:
+                logger.debug("Error deleting key: %s",
+                             f'departure_{barrier_id}_{i}')
 
     @staticmethod
     def create(
@@ -234,19 +389,71 @@ class StatelessProcessGroup:
         can call `StatelessProcessGroup.create` to form a group, and then process A, B,
         C, and D can call `StatelessProcessGroup.create` to form another group.
         """ # noqa
+        launch_server = rank == 0
+        if launch_server:
+            # listen on the specified interface (instead of 0.0.0.0)
+            listen_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            listen_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            listen_socket.bind((host, port))
+            listen_socket.listen()
+            listen_fd = listen_socket.fileno()
+        else:
+            listen_socket = None
+            listen_fd = None
+
         store = TCPStore(
             host_name=host,
             port=port,
             world_size=world_size,
-            is_master=(rank == 0),
-            timeout=datetime.timedelta(seconds=store_timeout),
+            is_master=launch_server,
+            timeout=timedelta(seconds=store_timeout),
+            use_libuv=False,  # for now: github.com/pytorch/pytorch/pull/150215
+            master_listen_fd=listen_fd,
         )
 
         return StatelessProcessGroup(
             rank=rank,
             world_size=world_size,
             store=store,
+            socket=listen_socket,
             data_expiration_seconds=data_expiration_seconds)
+
+
+def init_gloo_process_group(backend: Backend, prefix_store: PrefixStore,
+                            group_rank: int, group_size: int,
+                            timeout: timedelta) -> ProcessGroup:
+    """
+    Stateless init ProcessGroup with gloo backend compatible with 
+    different torch versions.
+    """
+    if is_torch_equal_or_newer("2.6"):
+        pg = ProcessGroup(
+            prefix_store,
+            group_rank,
+            group_size,
+        )
+    else:
+        options = ProcessGroup.Options(backend=backend)
+        pg = ProcessGroup(
+            prefix_store,
+            group_rank,
+            group_size,
+            options,
+        )
+    from torch.distributed.distributed_c10d import ProcessGroupGloo
+    backend_class = ProcessGroupGloo(prefix_store,
+                                     group_rank,
+                                     group_size,
+                                     timeout=timeout)
+    backend_type = ProcessGroup.BackendType.GLOO
+    device = torch.device("cpu")
+    if is_torch_equal_or_newer("2.6"):
+        # _set_default_backend is supported in torch >= 2.6
+        pg._set_default_backend(backend_type)
+    backend_class._set_sequence_number_for_group()
+
+    pg._register_backend(device, backend_type, backend_class)
+    return pg
 
 
 def stateless_init_torch_distributed_process_group(
@@ -283,7 +490,7 @@ def stateless_init_torch_distributed_process_group(
     always formed with process 1, 2, ..., 8, and the additional communication
     channel is formed with process 9 and 10.
     """
-    init_method = f"tcp://{host}:{port}"
+    init_method = get_tcp_uri(host, port)
     backend = Backend(backend)  # it is basically string
     timeout = _get_default_timeout(backend)
 
@@ -298,40 +505,19 @@ def stateless_init_torch_distributed_process_group(
     # different systems (e.g. RPC) in case the store is multi-tenant.
     prefix_store = PrefixStore(init_method, store)
 
-    pg: ProcessGroup = ProcessGroup(
-        prefix_store,
-        group_rank,
-        group_size,
-    )
-
     if backend == "gloo":
-        from torch.distributed.distributed_c10d import ProcessGroupGloo
-        backend_class = ProcessGroupGloo(prefix_store,
-                                         group_rank,
-                                         group_size,
-                                         timeout=timeout)
-        backend_type = ProcessGroup.BackendType.GLOO
-        device = torch.device("cpu")
-    elif backend == "nccl":
-        assert is_nccl_available()
-        from torch.distributed.distributed_c10d import ProcessGroupNCCL
-
-        backend_options = ProcessGroupNCCL.Options()
-        backend_options._timeout = timeout
-
-        backend_class = ProcessGroupNCCL(prefix_store, group_rank, group_size,
-                                         backend_options)
-        backend_type = ProcessGroup.BackendType.NCCL
-        device = torch.device("cuda")
-    else:
-        raise RuntimeError(f"Unsupported torch distributed backend: {backend}")
-
-    pg._set_default_backend(backend_type)
-    backend_class._set_sequence_number_for_group()
-
-    pg._register_backend(device, backend_type, backend_class)
-
-    return pg
+        return init_gloo_process_group(backend=backend,
+                                       prefix_store=prefix_store,
+                                       group_rank=group_rank,
+                                       group_size=group_size,
+                                       timeout=timeout)
+    from vllm.platforms import current_platform
+    return current_platform.stateless_init_device_torch_dist_pg(
+        backend=backend,
+        prefix_store=prefix_store,
+        group_rank=group_rank,
+        group_size=group_size,
+        timeout=timeout)
 
 
 def stateless_destroy_torch_distributed_process_group(
@@ -340,7 +526,11 @@ def stateless_destroy_torch_distributed_process_group(
     Destroy ProcessGroup returned by
         stateless_init_torch_distributed_process_group().
     """
-    # Lazy import for non-CUDA backends.
-    from torch.distributed.distributed_c10d import _shutdown_backend
-    _shutdown_backend(pg)
+    if is_torch_equal_or_newer("2.7"):
+        pg.shutdown()
+    else:
+        # Lazy import for non-CUDA backends.
+        from torch.distributed.distributed_c10d import _shutdown_backend
+        _shutdown_backend(pg)
+
     _unregister_process_group(pg.group_name)

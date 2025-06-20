@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Copyright 2024 the HuggingFace Inc. team. All rights reserved.
 #
@@ -17,18 +18,17 @@
 
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Dict, Literal, Optional, Set, Tuple, TypedDict, Union
+from typing import Literal, Optional, TypedDict, Union
 
 import torch
 from torch import nn
-from transformers import (BatchFeature, Idefics3Config, Idefics3ImageProcessor,
-                          Idefics3Processor)
+from transformers import (AddedToken, BatchFeature, Idefics3Config,
+                          Idefics3ImageProcessor, Idefics3Processor)
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.sampling_metadata import SamplingMetadata
@@ -86,7 +86,7 @@ class Idefics3ProcessingInfo(BaseProcessingInfo):
     def get_hf_processor(
         self,
         *,
-        size: Optional[Dict[str, int]] = None,
+        size: Optional[dict[str, int]] = None,
         **kwargs: object,
     ) -> Idefics3Processor:
         if size is not None:
@@ -199,13 +199,21 @@ class Idefics3ProcessingInfo(BaseProcessingInfo):
 
         return grid_w * grid_h + 1
 
+    # TODO: Remove after requiring transformers>=4.52
+    def _get_content(self, token: Union[AddedToken, str]) -> str:
+        if isinstance(token, str):
+            return token
+
+        return token.content
+
     def _get_image_token(
             self,
             processor: Optional[Idefics3Processor]) -> tuple[str, str, str]:
         if processor is None:
             processor = self.get_hf_processor()
-        image_token = processor.image_token.content
-        fake_image_token = processor.fake_image_token.content
+
+        image_token = self._get_content(processor.image_token)
+        fake_image_token = self._get_content(processor.fake_image_token)
         global_image_token = processor.global_image_tag
         return image_token, fake_image_token, global_image_token
 
@@ -603,7 +611,6 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal,
         if self.config.text_config.tie_word_embeddings:
             self.lm_head.weight = self.model.text_model.wte.weight
         self.logits_processor = LogitsProcessor(config.text_config.vocab_size)
-        self.sampler = get_sampler()
 
     def _validate_pixel_values(self, data: torch.Tensor) -> torch.Tensor:
         h = w = self.config.vision_config.image_size
@@ -699,11 +706,11 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal,
     def get_language_model(self) -> torch.nn.Module:
         return self.model
 
-    def get_multimodal_embeddings(
-            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
+    def get_multimodal_embeddings(self,
+                                  **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
-            return None
+            return []
 
         return self._process_image_input(image_input)
 
@@ -713,7 +720,8 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal,
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.model.get_input_embeddings(input_ids)
-        if multimodal_embeddings is not None:
+        if multimodal_embeddings is not None \
+            and len(multimodal_embeddings) != 0:
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids,
                 inputs_embeds,
@@ -754,16 +762,8 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal,
                                        sampling_metadata)
         return logits
 
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(logits, sampling_metadata)
-        return next_tokens
-
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
 

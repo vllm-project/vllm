@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
-import re
-from typing import List, Optional, Set, Tuple, Type, Union
+from typing import Optional, Union
 
 import huggingface_hub
+import regex as re
 from huggingface_hub.utils import (EntryNotFoundError, HfHubHTTPError,
                                    HFValidationError, RepositoryNotFoundError)
 from torch import nn
@@ -37,7 +38,7 @@ from vllm.model_executor.models.utils import WeightsMapper
 
 logger = init_logger(__name__)
 
-_all_lora_classes: Set[Type[BaseLayerWithLoRA]] = {
+_all_lora_classes: set[type[BaseLayerWithLoRA]] = {
     VocabParallelEmbeddingWithLoRA,
     ColumnParallelLinearWithLoRA,
     MergedColumnParallelLinearWithLoRA,
@@ -58,7 +59,7 @@ _all_lora_classes: Set[Type[BaseLayerWithLoRA]] = {
 def from_layer(layer: nn.Module,
                max_loras: int,
                lora_config: LoRAConfig,
-               packed_modules_list: List,
+               packed_modules_list: list,
                model_config: Optional[PretrainedConfig] = None) -> nn.Module:
     for lora_cls in _all_lora_classes:
         # specifying kwargs so they can be easily accessed in decorator
@@ -99,7 +100,7 @@ def replace_submodule(model: nn.Module, module_name: str,
 def parse_fine_tuned_lora_name(
         name: str,
         weights_mapper: Optional[WeightsMapper] = None
-) -> Tuple[str, bool, bool]:
+) -> tuple[str, bool, bool]:
     """Parse the name of lora weights.
 
     args:
@@ -108,40 +109,47 @@ def parse_fine_tuned_lora_name(
         weights_mapper: maps the name of weight, e.g.
             `model.` -> `language_model.model.`,
     return:
-        Tuple(module_name, is_lora_a):
+        tuple(module_name, is_lora_a):
             module_name: the name of the module, e.g. model.dense1,
             is_lora_a whether the tensor is lora_a or lora_b.
             is_bias whether the tensor is lora bias.
     """
 
-    # LoRA weight qualified name always starts with `base_model.model.`,
+    # LoRA weight qualified name usually starts with `base_model.model.`,
     # so we remove the prefix `base_model.model.` to make the following
     # mapping correctly.
-    if "base_model.model." in name:
+    if name.startswith("base_model.model."):
         name = name.replace("base_model.model.", "")
         name = weights_mapper._map_name(name) if weights_mapper else name
         # recover the prefix `base_model.model.`
         name = "base_model.model." + name
+    else:
+        name = weights_mapper._map_name(name) if weights_mapper else name
+
+    # In some situations, we may not start with `base_model.model.`.
+    # If we don't (e.g., ibm-granite/granite-speech-3.3-8b),
+    # we should keep the prefix intact.
+    start_index = 2 if name.startswith("base_model.model.") else 0
 
     parts = name.split(".")
     if parts[-1] == "weight" and (parts[-2] == "lora_A"
                                   or parts[-2] == "lora_B"):
-        new_name = ".".join(parts[2:-2])
+        new_name = ".".join(parts[start_index:-2])
         return new_name, parts[-2] == "lora_A", False
 
     if parts[-1] == "lora_embedding_A" or parts[-1] == "lora_embedding_B":
-        new_name = ".".join(parts[2:-1])
+        new_name = ".".join(parts[start_index:-1])
         return new_name, parts[-1] == "lora_embedding_A", False
 
     if parts[-1] == "bias":
-        new_name = ".".join(parts[2:-2])
+        new_name = ".".join(parts[start_index:-2])
         return new_name, False, True
 
     raise ValueError(f"{name} is unsupported LoRA weight")
 
 
-def is_regex_target_modules(load_modules: Union[str, List[str]],
-                            expected_lora_modules: List[str]) -> bool:
+def is_regex_target_modules(load_modules: Union[str, list[str]],
+                            expected_lora_modules: list[str]) -> bool:
     """
     PEFT supports passing `target_modules` in the form of regular expressions, 
     such as `model.*(q_proj|k_proj|v_proj)$`. This function is mainly used to 
@@ -172,11 +180,11 @@ def is_regex_target_modules(load_modules: Union[str, List[str]],
     return False
 
 
-def get_supported_lora_modules(model: nn.Module) -> List[str]:
+def get_supported_lora_modules(model: nn.Module) -> list[str]:
     """
     In vLLM, all linear layers support LoRA.
     """
-    supported_lora_modules: Set[str] = set()
+    supported_lora_modules: set[str] = set()
     # step1: traverse the model to get all the linear subfixes.
     for name, module in model.named_modules():
         if isinstance(module, (LinearBase, )):

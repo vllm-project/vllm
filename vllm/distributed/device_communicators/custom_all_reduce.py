@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from contextlib import contextmanager
-from typing import List, Optional, Union
+from typing import Optional, Union
 
 import torch
 import torch.distributed as dist
@@ -265,7 +266,8 @@ class CustomAllreduce:
 
     def close(self):
         if not self.disabled and self._ptr:
-            ops.dispose(self._ptr)
+            if ops is not None:
+                ops.dispose(self._ptr)
             self._ptr = 0
             self.free_shared_buffer(self.meta_ptrs, rank=self.rank)
             self.free_shared_buffer(self.buffer_ptrs, rank=self.rank)
@@ -276,7 +278,7 @@ class CustomAllreduce:
     @staticmethod
     def create_shared_buffer(size_in_bytes: int,
                              group: Optional[ProcessGroup] = None,
-                             uncached: Optional[bool] = False) -> List[int]:
+                             uncached: Optional[bool] = False) -> list[int]:
         pointer, handle = ops.allocate_shared_buffer_and_handle(size_in_bytes)
 
         world_size = dist.get_world_size(group=group)
@@ -284,7 +286,7 @@ class CustomAllreduce:
         handles = [None] * world_size
         dist.all_gather_object(handles, handle, group=group)
 
-        pointers: List[int] = []
+        pointers: list[int] = []
         for i, h in enumerate(handles):
             if i == rank:
                 pointers.append(pointer)  # type: ignore
@@ -293,9 +295,10 @@ class CustomAllreduce:
         return pointers
 
     @staticmethod
-    def free_shared_buffer(pointers: List[int],
+    def free_shared_buffer(pointers: list[int],
                            group: Optional[ProcessGroup] = None,
                            rank: Optional[int] = 0) -> None:
         if rank is None:
             rank = dist.get_rank(group=group)
-        ops.free_shared_buffer(pointers[rank])
+        if ops is not None:
+            ops.free_shared_buffer(pointers[rank])

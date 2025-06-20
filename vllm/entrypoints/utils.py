@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
 import functools
 import os
+from typing import Any, Optional
 
 from fastapi import Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -12,12 +14,25 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
+VLLM_SUBCMD_PARSER_EPILOG = (
+    "Tip: Use `vllm [serve|run-batch] --help=<keyword>` "
+    "to explore arguments from help.\n"
+    "   - To view a argument group:     --help=ModelConfig\n"
+    "   - To view a single argument:    --help=max-num-seqs\n"
+    "   - To search by keyword:         --help=max\n"
+    "   - To list all groups:           --help=listgroup")
+
 
 async def listen_for_disconnect(request: Request) -> None:
     """Returns if a disconnect message is received"""
     while True:
         message = await request.receive()
         if message["type"] == "http.disconnect":
+            if request.app.state.enable_server_load_tracking:
+                # on timeout/cancellation the BackgroundTask in load_aware_call
+                # cannot decrement the server load metrics.
+                # Must be decremented by with_cancellation instead.
+                request.app.state.server_load_metrics -= 1
             break
 
 
@@ -134,3 +149,85 @@ def cli_env_setup():
     if "VLLM_WORKER_MULTIPROC_METHOD" not in os.environ:
         logger.debug("Setting VLLM_WORKER_MULTIPROC_METHOD to 'spawn'")
         os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+
+
+def _validate_truncation_size(
+    max_model_len: int,
+    truncate_prompt_tokens: Optional[int],
+    tokenization_kwargs: Optional[dict[str, Any]] = None,
+) -> Optional[int]:
+
+    if truncate_prompt_tokens is not None:
+        if truncate_prompt_tokens <= -1:
+            truncate_prompt_tokens = max_model_len
+
+        if truncate_prompt_tokens > max_model_len:
+            raise ValueError(
+                f"truncate_prompt_tokens value ({truncate_prompt_tokens}) "
+                f"is greater than max_model_len ({max_model_len})."
+                f" Please, select a smaller truncation size.")
+
+        if tokenization_kwargs is not None:
+            tokenization_kwargs["truncation"] = True
+            tokenization_kwargs["max_length"] = truncate_prompt_tokens
+
+    return truncate_prompt_tokens
+
+
+def show_filtered_argument_or_group_from_help(parser, subcommand_name):
+    import sys
+
+    # Only handle --help=<keyword> for the current subcommand.
+    # Since subparser_init() runs for all subcommands during CLI setup,
+    # we skip processing if the subcommand name is not in sys.argv.
+    if subcommand_name not in sys.argv:
+        return
+
+    for arg in sys.argv:
+        if arg.startswith('--help='):
+            search_keyword = arg.split('=', 1)[1]
+
+            # List available groups
+            if search_keyword == 'listgroup':
+                print("\nAvailable argument groups:")
+                for group in parser._action_groups:
+                    if group.title and not group.title.startswith(
+                            "positional arguments"):
+                        print(f"  - {group.title}")
+                        if group.description:
+                            print("    " + group.description.strip())
+                        print()
+                sys.exit(0)
+
+            # For group search
+            formatter = parser._get_formatter()
+            for group in parser._action_groups:
+                if group.title and group.title.lower() == search_keyword.lower(
+                ):
+                    formatter.start_section(group.title)
+                    formatter.add_text(group.description)
+                    formatter.add_arguments(group._group_actions)
+                    formatter.end_section()
+                    print(formatter.format_help())
+                    sys.exit(0)
+
+            # For single arg
+            matched_actions = []
+
+            for group in parser._action_groups:
+                for action in group._group_actions:
+                    # search option name
+                    if any(search_keyword.lower() in opt.lower()
+                           for opt in action.option_strings):
+                        matched_actions.append(action)
+
+            if matched_actions:
+                print(f"\nParameters matching '{search_keyword}':\n")
+                formatter = parser._get_formatter()
+                formatter.add_arguments(matched_actions)
+                print(formatter.format_help())
+                sys.exit(0)
+
+            print(f"\nNo group or parameter matching '{search_keyword}'")
+            print("Tip: use `--help=listgroup` to view all groups.")
+            sys.exit(1)

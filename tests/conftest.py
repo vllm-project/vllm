@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
 import os
 import tempfile
-from collections import UserList
 from enum import Enum
 from typing import Any, Callable, Optional, TypedDict, TypeVar, Union
 
@@ -21,9 +20,10 @@ from transformers.models.auto.auto_factory import _BaseAutoModelClass
 from tests.models.utils import (TokensTextLogprobs,
                                 TokensTextLogprobsPromptLogprobs)
 from vllm import LLM, SamplingParams
+from vllm.assets.audio import AudioAsset
 from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
-from vllm.config import TaskOption, TokenizerPoolConfig, _get_and_verify_dtype
+from vllm.config import TaskOption, _get_and_verify_dtype
 from vllm.connections import global_http_connection
 from vllm.distributed import (cleanup_dist_env_and_memory,
                               init_distributed_environment,
@@ -33,6 +33,7 @@ from vllm.inputs import (ExplicitEncoderDecoderPrompt, TextPrompt,
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams
+from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils import cuda_device_count_stateless
 
 logger = init_logger(__name__)
@@ -57,16 +58,12 @@ def _read_prompts(filename: str) -> list[str]:
         return prompts
 
 
-class _ImageAssetPrompts(TypedDict):
+class ImageAssetPrompts(TypedDict):
     stop_sign: str
     cherry_blossom: str
 
 
-class _ImageAssetsBase(UserList[ImageAsset]):
-    pass
-
-
-class _ImageAssets(_ImageAssetsBase):
+class ImageTestAssets(list[ImageAsset]):
 
     def __init__(self) -> None:
         super().__init__([
@@ -74,7 +71,7 @@ class _ImageAssets(_ImageAssetsBase):
             ImageAsset("cherry_blossom"),
         ])
 
-    def prompts(self, prompts: _ImageAssetPrompts) -> list[str]:
+    def prompts(self, prompts: ImageAssetPrompts) -> list[str]:
         """
         Convenience method to define the prompt for each test image.
 
@@ -84,29 +81,44 @@ class _ImageAssets(_ImageAssetsBase):
         return [prompts["stop_sign"], prompts["cherry_blossom"]]
 
 
-class _VideoAssetPrompts(TypedDict):
-    sample_demo_1: str
+class VideoAssetPrompts(TypedDict):
+    baby_reading: str
 
 
-class _VideoAssetsBase(UserList[VideoAsset]):
-    pass
-
-
-class _VideoAssets(_VideoAssetsBase):
+class VideoTestAssets(list[VideoAsset]):
 
     def __init__(self) -> None:
         super().__init__([
-            VideoAsset("sample_demo_1.mp4"),
+            VideoAsset("baby_reading"),
         ])
 
-    def prompts(self, prompts: _VideoAssetPrompts) -> list[str]:
-        return [prompts["sample_demo_1"]]
+    def prompts(self, prompts: VideoAssetPrompts) -> list[str]:
+        return [prompts["baby_reading"]]
 
 
-IMAGE_ASSETS = _ImageAssets()
-"""Singleton instance of :class:`_ImageAssets`."""
-VIDEO_ASSETS = _VideoAssets()
-"""Singleton instance of :class:`_VideoAssets`."""
+class AudioAssetPrompts(TypedDict):
+    mary_had_lamb: str
+    winning_call: str
+
+
+class AudioTestAssets(list[AudioAsset]):
+
+    def __init__(self) -> None:
+        super().__init__([
+            AudioAsset("mary_had_lamb"),
+            AudioAsset("winning_call"),
+        ])
+
+    def prompts(self, prompts: AudioAssetPrompts) -> list[str]:
+        return [prompts["mary_had_lamb"], prompts["winning_call"]]
+
+
+IMAGE_ASSETS = ImageTestAssets()
+"""Singleton instance of {class}`ImageTestAssets`."""
+VIDEO_ASSETS = VideoTestAssets()
+"""Singleton instance of {class}`VideoTestAssets`."""
+AUDIO_ASSETS = AudioTestAssets()
+"""Singleton instance of {class}`AudioTestAssets`."""
 
 
 @pytest.fixture(scope="function", autouse=True)
@@ -134,6 +146,7 @@ def run_with_both_engines(request, monkeypatch):
     # Automatically runs tests twice, once with V1 and once without
     use_v1 = request.param
     # Tests decorated with `@skip_v1` are only run without v1
+    skip_v0 = request.node.get_closest_marker("skip_v0")
     skip_v1 = request.node.get_closest_marker("skip_v1")
 
     if use_v1:
@@ -141,6 +154,8 @@ def run_with_both_engines(request, monkeypatch):
             pytest.skip("Skipping test on vllm V1")
         monkeypatch.setenv('VLLM_USE_V1', '1')
     else:
+        if skip_v0:
+            pytest.skip("Skipping test on vllm V0")
         monkeypatch.setenv('VLLM_USE_V1', '0')
 
     yield
@@ -254,13 +269,18 @@ def example_long_prompts() -> list[str]:
 
 
 @pytest.fixture(scope="session")
-def image_assets() -> _ImageAssets:
+def image_assets() -> ImageTestAssets:
     return IMAGE_ASSETS
 
 
 @pytest.fixture(scope="session")
-def video_assets() -> _VideoAssets:
+def video_assets() -> VideoTestAssets:
     return VIDEO_ASSETS
+
+
+@pytest.fixture(scope="session")
+def audio_assets() -> AudioTestAssets:
+    return AUDIO_ASSETS
 
 
 _T = TypeVar("_T", nn.Module, torch.Tensor, BatchEncoding, BatchFeature, dict)
@@ -272,7 +292,8 @@ class HfRunner:
     def get_default_device(self):
         from vllm.platforms import current_platform
 
-        return ("cpu" if current_platform.is_cpu() else "cuda")
+        return ("cpu"
+                if current_platform.is_cpu() else current_platform.device_type)
 
     def wrap_device(self, x: _T, device: Optional[str] = None) -> _T:
         if x is None or isinstance(x, (bool, )):
@@ -295,19 +316,26 @@ class HfRunner:
         dtype: str = "auto",
         *,
         model_kwargs: Optional[dict[str, Any]] = None,
+        trust_remote_code: bool = True,
         is_sentence_transformer: bool = False,
         is_cross_encoder: bool = False,
         skip_tokenizer_init: bool = False,
         auto_cls: type[_BaseAutoModelClass] = AutoModelForCausalLM,
     ) -> None:
+        model_name = maybe_model_redirect(model_name)
         self.model_name = model_name
 
         self.config = AutoConfig.from_pretrained(
             model_name,
-            trust_remote_code=True,
+            trust_remote_code=trust_remote_code,
         )
         self.device = self.get_default_device()
-        self.dtype = torch_dtype = _get_and_verify_dtype(self.config, dtype)
+        self.dtype = torch_dtype = _get_and_verify_dtype(
+            self.model_name,
+            self.config,
+            dtype=dtype,
+            is_pooling_model=is_sentence_transformer or is_cross_encoder,
+        )
 
         model_kwargs = model_kwargs if model_kwargs is not None else {}
         model_kwargs.setdefault("torch_dtype", torch_dtype)
@@ -320,7 +348,7 @@ class HfRunner:
                 model_name,
                 device=self.device,
                 model_kwargs=model_kwargs,
-                trust_remote_code=True,
+                trust_remote_code=trust_remote_code,
             )
         elif is_cross_encoder:
             # Lazy init required for AMD CI
@@ -330,19 +358,25 @@ class HfRunner:
                 model_name,
                 device=self.device,
                 automodel_args=model_kwargs,
-                trust_remote_code=True,
+                trust_remote_code=trust_remote_code,
             )
         else:
             model = auto_cls.from_pretrained(
                 model_name,
-                trust_remote_code=True,
+                trust_remote_code=trust_remote_code,
                 **model_kwargs,
             )
+
+            # in case some unquantized custom models are not in same dtype
+            if (getattr(model, "quantization_method", None) is None
+                    and any(p.dtype != self.dtype
+                            for p in model.parameters())):
+                model = model.to(dtype=self.dtype)
 
             if (getattr(model, "quantization_method", None) != "bitsandbytes"
                     and len({p.device
                              for p in model.parameters()}) < 2):
-                model = model.to(self.device)
+                model = model.to(device=self.device)
 
             self.model = model
 
@@ -350,7 +384,7 @@ class HfRunner:
             self.tokenizer = AutoTokenizer.from_pretrained(
                 model_name,
                 torch_dtype=torch_dtype,
-                trust_remote_code=True,
+                trust_remote_code=trust_remote_code,
             )
 
         # don't put this import at the top level
@@ -359,7 +393,7 @@ class HfRunner:
         self.processor = AutoProcessor.from_pretrained(
             model_name,
             torch_dtype=torch_dtype,
-            trust_remote_code=True,
+            trust_remote_code=trust_remote_code,
         )
         if skip_tokenizer_init:
             self.tokenizer = self.processor.tokenizer
@@ -390,10 +424,15 @@ class HfRunner:
                 processor_kwargs["images"] = image
             if videos is not None and (video := videos[i]) is not None:
                 processor_kwargs["videos"] = video
-            if audios is not None and (audio_tuple := audios[i]) is not None:
-                audio, sr = audio_tuple
-                processor_kwargs["audio"] = audio
-                processor_kwargs["sampling_rate"] = sr
+            if audios is not None and (audio_inputs := audios[i]) is not None:
+                # HACK - not all processors take sampling_rate; we should
+                # clean this up in the future.
+                if len(audio_inputs) == 2:
+                    audio, sr = audio_inputs
+                    processor_kwargs["audio"] = audio
+                    processor_kwargs["sampling_rate"] = sr
+                else:
+                    processor_kwargs["audio"] = audio_inputs
 
             inputs = self.processor(**processor_kwargs)
             if isinstance(inputs, BatchFeature):
@@ -402,6 +441,15 @@ class HfRunner:
             all_inputs.append(inputs)
 
         return all_inputs
+
+    def get_prompt_embeddings(self, prompts: list[str]) -> list[torch.Tensor]:
+        all_inputs = self.get_inputs(prompts)
+        embeddings = []
+        for inputs in all_inputs:
+            input_ids = self.wrap_device(inputs)["input_ids"]
+            embedding = self.model.get_input_embeddings()(input_ids).squeeze(0)
+            embeddings.append(embedding)
+        return embeddings
 
     def classify(self, prompts: list[str]) -> list[str]:
         # output is final logits
@@ -531,7 +579,10 @@ class HfRunner:
         for _, hidden_state in enumerate(hidden_states):
             last_hidden_states = hidden_state[-1][0]
             logits = torch.matmul(
-                last_hidden_states.to(output_embeddings.weight.device),
+                last_hidden_states.to(
+                    device=output_embeddings.weight.device,
+                    dtype=output_embeddings.weight.dtype,
+                ),
                 output_embeddings.weight.t(),
             )
             if getattr(output_embeddings, "bias", None) is not None:
@@ -681,8 +732,12 @@ class HfRunner:
                **kwargs) -> list[list[torch.Tensor]]:
         return self.model.encode(prompts, *args, **kwargs)
 
-    def predict(self, prompts: list[list[str]]) -> torch.Tensor:
-        return self.model.predict(prompts, convert_to_tensor=True)
+    def predict(self, prompts: list[list[str]], *args,
+                **kwargs) -> torch.Tensor:
+        return self.model.predict(prompts,
+                                  *args,
+                                  convert_to_tensor=True,
+                                  **kwargs)
 
     def __enter__(self):
         return self
@@ -700,7 +755,7 @@ def hf_runner():
 class VllmRunner:
     """
     The default value of some arguments have been modified from
-    :class:`~vllm.LLM` as follows:
+    {class}`~vllm.LLM` as follows:
 
     - `trust_remote_code`: Set to `True` instead of `False` for convenience.
     - `seed`: Set to `0` instead of `None` for test reproducibility.
@@ -708,7 +763,7 @@ class VllmRunner:
     - `block_size`: Set to `16` instead of `None` to reduce memory usage.
     - `enable_chunked_prefill`: Set to `False` instead of `None` for
       test reproducibility.
-    - `enforce_eager`: Set to `False` instead of `None` to test CUDA graph.
+    - `enforce_eager`: Set to `False` to test CUDA graph.
     """
 
     def __init__(
@@ -749,7 +804,7 @@ class VllmRunner:
 
     def get_inputs(
         self,
-        prompts: list[str],
+        prompts: Union[list[str], list[torch.Tensor]],
         images: Optional[PromptImageInput] = None,
         videos: Optional[PromptVideoInput] = None,
         audios: Optional[PromptAudioInput] = None,
@@ -771,16 +826,18 @@ class VllmRunner:
             if audios is not None and (audio := audios[i]) is not None:
                 multi_modal_data["audio"] = audio
 
-            inputs.append(
-                TextPrompt(prompt=prompt,
-                           multi_modal_data=multi_modal_data
-                           if multi_modal_data else None))
+            text_prompt_kwargs = {
+                ("prompt" if isinstance(prompt, str) else "prompt_embeds"):
+                prompt,
+                "multi_modal_data": multi_modal_data or None
+            }
+            inputs.append(TextPrompt(**text_prompt_kwargs))
 
         return inputs
 
     def generate(
         self,
-        prompts: list[str],
+        prompts: Union[list[str], list[torch.Tensor]],
         sampling_params: SamplingParams,
         images: Optional[PromptImageInput] = None,
         videos: Optional[PromptVideoInput] = None,
@@ -806,7 +863,7 @@ class VllmRunner:
                 output_str = sample.text
                 output_ids = list(sample.token_ids)
                 req_sample_output_ids.append(prompt_ids + output_ids)
-                req_sample_output_strs.append(prompt_str + output_str)
+                req_sample_output_strs.append((prompt_str or "") + output_str)
             outputs.append((req_sample_output_ids, req_sample_output_strs))
         return outputs
 
@@ -873,7 +930,7 @@ class VllmRunner:
 
     def generate_greedy(
         self,
-        prompts: list[str],
+        prompts: Union[list[str], list[torch.Tensor]],
         max_tokens: int,
         images: Optional[PromptImageInput] = None,
         videos: Optional[PromptVideoInput] = None,
@@ -925,6 +982,7 @@ class VllmRunner:
         max_tokens: int,
         num_logprobs: int,
         num_prompt_logprobs: Optional[int] = None,
+        skip_special_tokens: bool = True,
     ) -> Union[list[TokensTextLogprobs],
                list[TokensTextLogprobsPromptLogprobs]]:
         greedy_logprobs_params = SamplingParams(
@@ -932,6 +990,7 @@ class VllmRunner:
             max_tokens=max_tokens,
             logprobs=num_logprobs,
             prompt_logprobs=(num_prompt_logprobs),
+            skip_special_tokens=skip_special_tokens,
         )
         '''
         Greedy logprobs generation for vLLM encoder/decoder models
@@ -987,8 +1046,10 @@ class VllmRunner:
         self,
         text_1: Union[str, list[str]],
         text_2: Union[str, list[str]],
+        *args,
+        **kwargs,
     ) -> list[float]:
-        req_outputs = self.model.score(text_1, text_2)
+        req_outputs = self.model.score(text_1, text_2, *args, **kwargs)
         return [req_output.outputs.score for req_output in req_outputs]
 
     def apply_model(self, func: Callable[[nn.Module], _R]) -> list[_R]:
@@ -1006,20 +1067,6 @@ class VllmRunner:
 @pytest.fixture(scope="session")
 def vllm_runner():
     return VllmRunner
-
-
-def get_tokenizer_pool_config(tokenizer_group_type):
-    if tokenizer_group_type is None:
-        return None
-    if tokenizer_group_type == "ray":
-        return TokenizerPoolConfig(pool_size=1,
-                                   pool_type="ray",
-                                   extra_config={})
-    if isinstance(tokenizer_group_type, type):
-        return TokenizerPoolConfig(pool_size=1,
-                                   pool_type=tokenizer_group_type,
-                                   extra_config={})
-    raise ValueError(f"Unknown tokenizer_group_type: {tokenizer_group_type}")
 
 
 @pytest.fixture()

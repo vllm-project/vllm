@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import functools
 from typing import Callable, List, cast
@@ -56,8 +57,11 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
         scheduled computation.
 
         Args:
-          seq_group: the outputs are associated with this :class:`SequenceGroup`
-          outputs: the :class:`SequenceGroupOutput`s for all scheduler steps
+          seq_group: the outputs are associated with this
+              [`SequenceGroup`][vllm.sequence.SequenceGroup]
+          outputs: the
+              [`SequenceGroupOutput`][vllm.sequence.SequenceGroupOutput]s
+              for all scheduler steps
         """
         for output in outputs:
             # Concatenate single-step prompt logprob processing results.
@@ -67,7 +71,7 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
     @staticmethod
     @functools.lru_cache
     def _log_prompt_logprob_unsupported_warning_once():
-        # Reminder: Please update docs/source/features/compatibility_matrix.md
+        # Reminder: Please update docs/features/compatibility_matrix.md
         # If the feature combo become valid
         logger.warning(
             "Prompt logprob is not supported by multi step workers. "
@@ -167,6 +171,7 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
                              sampling_params: SamplingParams) -> None:
         output_token_ids = [sample.output_token for sample in valid_samples]
         output_logprobs = [sample.logprobs for sample in valid_samples]
+        output_embeds = [sample.output_embed for sample in valid_samples]
 
         # Truncate to max_tokens if necessary.
         remaining_tokens = sampling_params.max_tokens - (seq.get_output_len() +
@@ -178,7 +183,7 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
         # generates a fixed number of tokens without evaluating stopping
         # conditions within the block. This can cause an eos token to be
         # unintentionally ignored.
-        if not sampling_params.ignore_eos:
+        if not sampling_params.ignore_eos and self.detokenizer:
             eos_token_id = self.get_tokenizer_for_seq(seq).eos_token_id
             # Avoiding .index calls as exception throwing in the happy path
             # is expensive.
@@ -190,11 +195,12 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
         is_prefill_sampled_token = seq.data.get_num_uncomputed_tokens() == 0
         # Incrementally append tokens to the sequence, as if we had only one new
         # token.
-        for output_token_id, output_logprob in zip(output_token_ids,
-                                                   output_logprobs):
+        for output_token_id, output_logprob, output_embed in zip(
+                output_token_ids, output_logprobs, output_embeds):
             seq.append_token_id(
                 token_id=output_token_id,
                 logprobs=output_logprob,
+                token_embed=output_embed,
             )
 
             if is_prefill_sampled_token:

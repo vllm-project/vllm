@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Iterable, Optional, Set, Tuple
+from collections.abc import Iterable
+from typing import Optional
 
 import torch
 from torch import nn
@@ -15,10 +17,9 @@ from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
-from vllm.model_executor.layers.pooler import (CrossEncodingPooler, Pooler,
+from vllm.model_executor.layers.pooler import (ClassifierPooler, Pooler,
                                                PoolingType)
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -39,24 +40,19 @@ class BertEmbedding(nn.Module):
         self.size = config.hidden_size
         self.word_embeddings = VocabParallelEmbedding(config.vocab_size,
                                                       config.hidden_size)
-
+        self.position_embeddings = VocabParallelEmbedding(
+            config.max_position_embeddings, config.hidden_size)
         self.token_type_embeddings = VocabParallelEmbedding(
             config.type_vocab_size, config.hidden_size)
         self.LayerNorm = nn.LayerNorm(config.hidden_size,
                                       eps=config.layer_norm_eps)
+        self.position_ids = nn.Parameter(
+            torch.empty((1, config.max_position_embeddings)), )
 
         self.position_embedding_type = config.position_embedding_type
-        if self.position_embedding_type == "absolute":
-            self.position_embeddings = VocabParallelEmbedding(
-                config.max_position_embeddings, config.hidden_size)
-            self.position_ids = nn.Parameter(
-                torch.empty((1, config.max_position_embeddings)), )
-        elif self.position_embedding_type == "rotary":
-            self.position_embeddings = None
-            self.position_ids = None
-        else:
-            raise ValueError("Only 'absolute' and 'rotary' " +
-                             "position_embedding_type is supported")
+        if self.position_embedding_type != "absolute":
+            raise ValueError("Only 'absolute' position_embedding_type" +
+                             " is supported")
 
     def forward(
         self,
@@ -70,6 +66,9 @@ class BertEmbedding(nn.Module):
         # Input embeddings.
         inputs_embeds = self.word_embeddings(input_ids)
 
+        # Position embeddings.
+        position_embeddings = self.position_embeddings(position_ids)
+
         if token_type_ids is None:
             token_type_ids = torch.zeros(input_shape,
                                          dtype=torch.long,
@@ -77,12 +76,7 @@ class BertEmbedding(nn.Module):
 
         token_type_embeddings = self.token_type_embeddings(token_type_ids)
 
-        embeddings = inputs_embeds + token_type_embeddings
-
-        if self.position_embedding_type == "absolute":
-            position_embeddings = self.position_embeddings(position_ids)
-            embeddings += position_embeddings
-
+        embeddings = inputs_embeds + token_type_embeddings + position_embeddings
         embeddings = self.LayerNorm(embeddings)
         return embeddings
 
@@ -106,10 +100,7 @@ class BertPooler(nn.Module):
 @support_torch_compile
 class BertEncoder(nn.Module):
 
-    def __init__(self,
-                 vllm_config: VllmConfig,
-                 rotary_kwargs: Optional[dict] = None,
-                 prefix: str = ""):
+    def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
@@ -118,18 +109,16 @@ class BertEncoder(nn.Module):
             BertLayer(config=config,
                       cache_config=cache_config,
                       quant_config=quant_config,
-                      rotary_kwargs=rotary_kwargs,
                       prefix=f"{prefix}.layer.{layer_idx}")
             for layer_idx in range(config.num_hidden_layers)
         ])
 
     def forward(
         self,
-        positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         for layer in self.layer:
-            hidden_states = layer(positions, hidden_states)
+            hidden_states = layer(hidden_states)
         return hidden_states
 
 
@@ -139,7 +128,6 @@ class BertLayer(nn.Module):
                  config: BertConfig,
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None,
-                 rotary_kwargs: Optional[dict] = None,
                  prefix: str = ""):
         super().__init__()
 
@@ -149,7 +137,6 @@ class BertLayer(nn.Module):
             layer_norm_eps=config.layer_norm_eps,
             cache_config=cache_config,
             quant_config=quant_config,
-            rotary_kwargs=rotary_kwargs,
             prefix=f"{prefix}.attention")
 
         self.intermediate = BertIntermediate(
@@ -165,8 +152,8 @@ class BertLayer(nn.Module):
                                  quant_config=quant_config,
                                  prefix=f"{prefix}.output")
 
-    def forward(self, positions: torch.Tensor, hidden_states: torch.Tensor):
-        attn_output = self.attention(positions, hidden_states)
+    def forward(self, hidden_states: torch.Tensor):
+        attn_output = self.attention(hidden_states)
         intermediate_output = self.intermediate(attn_output)
         output = self.output(intermediate_output, attn_output)
         return output
@@ -181,7 +168,6 @@ class BertAttention(nn.Module):
         layer_norm_eps: float,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
-        rotary_kwargs: Optional[dict] = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -190,7 +176,6 @@ class BertAttention(nn.Module):
                                       num_attention_heads=num_attention_heads,
                                       cache_config=cache_config,
                                       quant_config=quant_config,
-                                      rotary_kwargs=rotary_kwargs,
                                       prefix=f"{prefix}.output")
 
         self.output = BertSelfOutput(hidden_size=hidden_size,
@@ -200,10 +185,9 @@ class BertAttention(nn.Module):
 
     def forward(
         self,
-        positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        self_output = self.self(positions, hidden_states)
+        self_output = self.self(hidden_states)
         return self.output(self_output, hidden_states)
 
 
@@ -215,7 +199,6 @@ class BertSelfAttention(nn.Module):
         num_attention_heads: int,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
-        rotary_kwargs: Optional[dict] = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -244,11 +227,6 @@ class BertSelfAttention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.qkv_proj")
 
-        if rotary_kwargs:
-            self.rotary_emb = get_rope(**rotary_kwargs)
-        else:
-            self.rotary_emb = None
-
         self.attn = Attention(num_heads=self.num_heads,
                               head_size=self.head_dim,
                               scale=self.scaling,
@@ -260,15 +238,10 @@ class BertSelfAttention(nn.Module):
 
     def forward(
         self,
-        positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-
-        if self.rotary_emb:
-            q, k = self.rotary_emb(positions, q, k)
-
         output = self.attn(q, k, v)
         return output
 
@@ -350,13 +323,11 @@ class BertModel(nn.Module, SupportsQuant):
                  vllm_config: VllmConfig,
                  prefix: str = "",
                  embedding_class: type = BertEmbedding,
-                 rotary_kwargs: Optional[dict] = None,
                  add_pooling_layer: bool = False):
         super().__init__()
         config = vllm_config.model_config.hf_config
         self.embeddings = embedding_class(config)
         self.encoder = BertEncoder(vllm_config=vllm_config,
-                                   rotary_kwargs=rotary_kwargs,
                                    prefix=f"{prefix}.encoder")
         self.pooler = BertPooler(config) if add_pooling_layer else None
 
@@ -378,10 +349,10 @@ class BertModel(nn.Module, SupportsQuant):
                 seq_lens=attn_metadata.seq_lens_tensor,
                 position_ids=position_ids,
                 token_type_ids=token_type_ids)
-        return self.encoder(position_ids, hidden_states)
+        return self.encoder(hidden_states)
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "query", "q"),
@@ -390,7 +361,7 @@ class BertModel(nn.Module, SupportsQuant):
         ]
 
         params_dict = dict(self.named_parameters())
-        loaded_params: Set[str] = set()
+        loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             if self.pooler is None and "pooler" in name:
                 continue
@@ -432,7 +403,6 @@ class BertEmbeddingModel(nn.Module, SupportsV0Only, SupportsQuant):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         pooler_config = vllm_config.model_config.pooler_config
-        self.config = vllm_config.model_config.hf_config
         self.model = self._build_model(vllm_config=vllm_config,
                                        prefix=maybe_prefix(prefix, "model"))
         self._pooler = self._build_pooler(pooler_config)
@@ -456,7 +426,7 @@ class BertEmbeddingModel(nn.Module, SupportsV0Only, SupportsQuant):
     ) -> Optional[PoolerOutput]:
         return self._pooler(hidden_states, pooling_metadata)
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         weights = self.hf_to_vllm_mapper.apply(weights)
         weights = ((name, data) for name, data in weights
                    if not name.startswith("lm_head."))
@@ -476,8 +446,8 @@ class BertEmbeddingModel(nn.Module, SupportsV0Only, SupportsQuant):
                                                 softmax=False)
 
 
-class BertForSequenceClassification(nn.Module, SupportsCrossEncoding,
-                                    SupportsQuant):
+class BertForSequenceClassification(nn.Module, SupportsV0Only,
+                                    SupportsCrossEncoding, SupportsQuant):
     """A model that uses Bert to provide embedding functionalities.
 
    This class encapsulates the BertModel and provides an interface for
@@ -501,10 +471,10 @@ class BertForSequenceClassification(nn.Module, SupportsCrossEncoding,
                               embedding_class=BertEmbedding,
                               add_pooling_layer=True)
         self.classifier = nn.Linear(config.hidden_size, config.num_labels)
-        self._pooler = CrossEncodingPooler(config, self.classifier,
-                                           self.bert.pooler)
+        self._pooler = ClassifierPooler(vllm_config.model_config,
+                                        self.classifier, self.bert.pooler)
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
 
         self_weights = []
 

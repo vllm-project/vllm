@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import logging
 import time
 from abc import ABC, abstractmethod
-from typing import Optional
+from typing import Callable, Optional
 
 import numpy as np
 import prometheus_client
@@ -11,19 +13,34 @@ from vllm.config import SupportsMetricsInfo, VllmConfig
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_utils import PrefixCachingMetrics
 from vllm.v1.engine import FinishReason
+from vllm.v1.metrics.prometheus import unregister_vllm_metrics
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
-from vllm.v1.spec_decode.metrics import SpecDecodingMetrics
+from vllm.v1.spec_decode.metrics import SpecDecodingLogging, SpecDecodingProm
 
 logger = init_logger(__name__)
 
-_LOCAL_LOGGING_INTERVAL_SEC = 5.0
+StatLoggerFactory = Callable[[VllmConfig, int], "StatLoggerBase"]
 
 
 class StatLoggerBase(ABC):
+    """Interface for logging metrics.
+
+    API users may define custom loggers that implement this interface.
+    However, note that the `SchedulerStats` and `IterationStats` classes
+    are not considered stable interfaces and may change in future versions.
+    """
 
     @abstractmethod
-    def record(self, scheduler_stats: SchedulerStats,
+    def __init__(self, vllm_config: VllmConfig, engine_index: int = 0):
+        ...
+
+    @abstractmethod
+    def record(self, scheduler_stats: Optional[SchedulerStats],
                iteration_stats: Optional[IterationStats]):
+        ...
+
+    @abstractmethod
+    def log_engine_initialized(self):
         ...
 
     def log(self):  # noqa
@@ -32,14 +49,17 @@ class StatLoggerBase(ABC):
 
 class LoggingStatLogger(StatLoggerBase):
 
-    def __init__(self, engine_index: int = 0):
+    def __init__(self, vllm_config: VllmConfig, engine_index: int = 0):
         self.engine_index = engine_index
+        self.vllm_config = vllm_config
         self._reset(time.monotonic())
         self.last_scheduler_stats = SchedulerStats()
         # Prefix cache metrics. This cannot be reset.
         # TODO: Make the interval configurable.
         self.prefix_caching_metrics = PrefixCachingMetrics()
-        self.spec_decoding_metrics = SpecDecodingMetrics()
+        self.spec_decoding_logging = SpecDecodingLogging()
+        self.last_prompt_throughput: float = 0.0
+        self.last_generation_throughput: float = 0.0
 
     def _reset(self, now):
         self.last_log_time = now
@@ -58,20 +78,22 @@ class LoggingStatLogger(StatLoggerBase):
         # Compute summary metrics for tracked stats
         return float(np.sum(tracked_stats) / (now - self.last_log_time))
 
-    def record(self, scheduler_stats: SchedulerStats,
+    def record(self, scheduler_stats: Optional[SchedulerStats],
                iteration_stats: Optional[IterationStats]):
         """Log Stats to standard output."""
 
         if iteration_stats:
             self._track_iteration_stats(iteration_stats)
 
-        self.prefix_caching_metrics.observe(scheduler_stats.prefix_cache_stats)
+        if scheduler_stats is not None:
+            self.prefix_caching_metrics.observe(
+                scheduler_stats.prefix_cache_stats)
 
-        if scheduler_stats.spec_decoding_stats is not None:
-            self.spec_decoding_metrics.observe(
-                scheduler_stats.spec_decoding_stats)
+            if scheduler_stats.spec_decoding_stats is not None:
+                self.spec_decoding_logging.observe(
+                    scheduler_stats.spec_decoding_stats)
 
-        self.last_scheduler_stats = scheduler_stats
+            self.last_scheduler_stats = scheduler_stats
 
     def log(self):
         now = time.monotonic()
@@ -83,8 +105,17 @@ class LoggingStatLogger(StatLoggerBase):
 
         scheduler_stats = self.last_scheduler_stats
 
+        log_fn = logger.info
+        if not any(
+            (prompt_throughput, generation_throughput,
+             self.last_prompt_throughput, self.last_generation_throughput)):
+            # Avoid log noise on an idle production system
+            log_fn = logger.debug
+        self.last_generation_throughput = generation_throughput
+        self.last_prompt_throughput = prompt_throughput
+
         # Format and print output.
-        logger.info(
+        log_fn(
             "Engine %03d: "
             "Avg prompt throughput: %.1f tokens/s, "
             "Avg generation throughput: %.1f tokens/s, "
@@ -96,19 +127,30 @@ class LoggingStatLogger(StatLoggerBase):
             generation_throughput,
             scheduler_stats.num_running_reqs,
             scheduler_stats.num_waiting_reqs,
-            scheduler_stats.gpu_cache_usage * 100,
+            scheduler_stats.kv_cache_usage * 100,
             self.prefix_caching_metrics.hit_rate * 100,
         )
+        self.spec_decoding_logging.log(log_fn=log_fn)
 
-        if scheduler_stats.spec_decoding_stats is not None:
-            self.spec_decoding_metrics.log()
+    def log_engine_initialized(self):
+        if self.vllm_config.cache_config.num_gpu_blocks:
+            logger.info(
+                "Engine %03d: vllm cache_config_info with initialization "
+                "after num_gpu_blocks is: %d", self.engine_index,
+                self.vllm_config.cache_config.num_gpu_blocks)
 
 
 class PrometheusStatLogger(StatLoggerBase):
+    _gauge_cls = prometheus_client.Gauge
+    _counter_cls = prometheus_client.Counter
+    _histogram_cls = prometheus_client.Histogram
+    _spec_decoding_cls = SpecDecodingProm
 
     def __init__(self, vllm_config: VllmConfig, engine_index: int = 0):
-        self._unregister_vllm_metrics()
 
+        unregister_vllm_metrics()
+        self.vllm_config = vllm_config
+        self.engine_index = engine_index
         # Use this flag to hide metrics that were deprecated in
         # a previous release and which will be removed future
         self.show_hidden_metrics = \
@@ -122,61 +164,94 @@ class PrometheusStatLogger(StatLoggerBase):
 
         max_model_len = vllm_config.model_config.max_model_len
 
+        self.spec_decoding_prom = self._spec_decoding_cls(
+            vllm_config.speculative_config, labelnames, labelvalues)
+
         #
         # Scheduler state
         #
-        self.gauge_scheduler_running = prometheus_client.Gauge(
+        self.gauge_scheduler_running = self._gauge_cls(
             name="vllm:num_requests_running",
             documentation="Number of requests in model execution batches.",
+            multiprocess_mode="mostrecent",
             labelnames=labelnames).labels(*labelvalues)
 
-        self.gauge_scheduler_waiting = prometheus_client.Gauge(
+        self.gauge_scheduler_waiting = self._gauge_cls(
             name="vllm:num_requests_waiting",
             documentation="Number of requests waiting to be processed.",
+            multiprocess_mode="mostrecent",
             labelnames=labelnames).labels(*labelvalues)
 
         #
         # GPU cache
         #
-        self.gauge_gpu_cache_usage = prometheus_client.Gauge(
+        # Deprecated in 0.9 - Renamed as vllm:kv_cache_usage_perc
+        # TODO: in 0.10, only enable if show_hidden_metrics=True
+        self.gauge_gpu_cache_usage = self._gauge_cls(
             name="vllm:gpu_cache_usage_perc",
-            documentation="GPU KV-cache usage. 1 means 100 percent usage.",
+            documentation=(
+                "GPU KV-cache usage. 1 means 100 percent usage."
+                "DEPRECATED: Use vllm:kv_cache_usage_perc instead."),
+            multiprocess_mode="mostrecent",
             labelnames=labelnames).labels(*labelvalues)
 
-        self.counter_gpu_prefix_cache_queries = prometheus_client.Counter(
+        # Deprecated in 0.9 - Renamed as vllm:prefix_cache_queries
+        # TODO: in 0.10, only enable if show_hidden_metrics=True
+        self.counter_gpu_prefix_cache_queries = self._counter_cls(
             name="vllm:gpu_prefix_cache_queries",
             documentation=
-            "GPU prefix cache queries, in terms of number of queried blocks.",
+            ("GPU prefix cache queries, in terms of number of queried tokens."
+             "DEPRECATED: Use vllm:prefix_cache_queries instead."),
             labelnames=labelnames).labels(*labelvalues)
 
-        self.counter_gpu_prefix_cache_hits = prometheus_client.Counter(
+        # Deprecated in 0.9 - Renamed as vllm:prefix_cache_hits
+        # TODO: in 0.10, only enable if show_hidden_metrics=True
+        self.counter_gpu_prefix_cache_hits = self._counter_cls(
             name="vllm:gpu_prefix_cache_hits",
-            documentation=
-            "GPU prefix cache hits, in terms of number of cached blocks.",
+            documentation=(
+                "GPU prefix cache hits, in terms of number of cached tokens."
+                "DEPRECATED: Use vllm:prefix_cache_hits instead."),
+            labelnames=labelnames).labels(*labelvalues)
+
+        self.gauge_kv_cache_usage = self._gauge_cls(
+            name="vllm:kv_cache_usage_perc",
+            documentation="KV-cache usage. 1 means 100 percent usage.",
+            labelnames=labelnames).labels(*labelvalues)
+
+        self.counter_prefix_cache_queries = self._counter_cls(
+            name="vllm:prefix_cache_queries",
+            documentation=(
+                "Prefix cache queries, in terms of number of queried tokens."),
+            labelnames=labelnames).labels(*labelvalues)
+
+        self.counter_prefix_cache_hits = self._counter_cls(
+            name="vllm:prefix_cache_hits",
+            documentation=(
+                "Prefix cache hits, in terms of number of cached tokens."),
             labelnames=labelnames).labels(*labelvalues)
 
         #
         # Counters
         #
-        self.counter_num_preempted_reqs = prometheus_client.Counter(
-            name="vllm:num_preemptions_total",
+        self.counter_num_preempted_reqs = self._counter_cls(
+            name="vllm:num_preemptions",
             documentation="Cumulative number of preemption from the engine.",
             labelnames=labelnames).labels(*labelvalues)
 
-        self.counter_prompt_tokens = prometheus_client.Counter(
-            name="vllm:prompt_tokens_total",
+        self.counter_prompt_tokens = self._counter_cls(
+            name="vllm:prompt_tokens",
             documentation="Number of prefill tokens processed.",
             labelnames=labelnames).labels(*labelvalues)
 
-        self.counter_generation_tokens = prometheus_client.Counter(
-            name="vllm:generation_tokens_total",
+        self.counter_generation_tokens = self._counter_cls(
+            name="vllm:generation_tokens",
             documentation="Number of generation tokens processed.",
             labelnames=labelnames).labels(*labelvalues)
 
         self.counter_request_success: dict[FinishReason,
                                            prometheus_client.Counter] = {}
-        counter_request_success_base = prometheus_client.Counter(
-            name="vllm:request_success_total",
+        counter_request_success_base = self._counter_cls(
+            name="vllm:request_success",
             documentation="Count of successfully processed requests.",
             labelnames=labelnames + ["finished_reason"])
         for reason in FinishReason:
@@ -188,28 +263,34 @@ class PrometheusStatLogger(StatLoggerBase):
         # Histograms of counts
         #
         self.histogram_num_prompt_tokens_request = \
-            prometheus_client.Histogram(
+            self._histogram_cls(
                 name="vllm:request_prompt_tokens",
                 documentation="Number of prefill tokens processed.",
                 buckets=build_1_2_5_buckets(max_model_len),
                 labelnames=labelnames).labels(*labelvalues)
 
         self.histogram_num_generation_tokens_request = \
-            prometheus_client.Histogram(
+            self._histogram_cls(
                 name="vllm:request_generation_tokens",
                 documentation="Number of generation tokens processed.",
                 buckets=build_1_2_5_buckets(max_model_len),
                 labelnames=labelnames).labels(*labelvalues)
 
+        # TODO: This metric might be incorrect in case of using multiple
+        # api_server counts which uses prometheus mp.
+        # See: https://github.com/vllm-project/vllm/pull/18053
         self.histogram_iteration_tokens = \
-            prometheus_client.Histogram(
+            self._histogram_cls(
                 name="vllm:iteration_tokens_total",
                 documentation="Histogram of number of tokens per engine_step.",
-                buckets=build_cudagraph_buckets(vllm_config),
+                buckets=[
+                    1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192,
+                    16384
+                ],
                 labelnames=labelnames).labels(*labelvalues)
 
         self.histogram_max_num_generation_tokens_request = \
-            prometheus_client.Histogram(
+            self._histogram_cls(
                 name="vllm:request_max_num_generation_tokens",
                 documentation=
                 "Histogram of maximum number of requested generation tokens.",
@@ -217,14 +298,14 @@ class PrometheusStatLogger(StatLoggerBase):
                 labelnames=labelnames).labels(*labelvalues)
 
         self.histogram_n_request = \
-            prometheus_client.Histogram(
+            self._histogram_cls(
                 name="vllm:request_params_n",
                 documentation="Histogram of the n request parameter.",
                 buckets=[1, 2, 5, 10, 20],
                 labelnames=labelnames).labels(*labelvalues)
 
         self.histogram_max_tokens_request = \
-            prometheus_client.Histogram(
+            self._histogram_cls(
                 name="vllm:request_params_max_tokens",
                 documentation="Histogram of the max_tokens request parameter.",
                 buckets=build_1_2_5_buckets(max_model_len),
@@ -234,7 +315,7 @@ class PrometheusStatLogger(StatLoggerBase):
         # Histogram of timing intervals
         #
         self.histogram_time_to_first_token = \
-            prometheus_client.Histogram(
+            self._histogram_cls(
                 name="vllm:time_to_first_token_seconds",
                 documentation="Histogram of time to first token in seconds.",
                 buckets=[
@@ -245,7 +326,7 @@ class PrometheusStatLogger(StatLoggerBase):
                 labelnames=labelnames).labels(*labelvalues)
 
         self.histogram_time_per_output_token = \
-            prometheus_client.Histogram(
+            self._histogram_cls(
                 name="vllm:time_per_output_token_seconds",
                 documentation="Histogram of time per output token in seconds.",
                 buckets=[
@@ -259,34 +340,34 @@ class PrometheusStatLogger(StatLoggerBase):
             40.0, 50.0, 60.0, 120.0, 240.0, 480.0, 960.0, 1920.0, 7680.0
         ]
         self.histogram_e2e_time_request = \
-            prometheus_client.Histogram(
+            self._histogram_cls(
                 name="vllm:e2e_request_latency_seconds",
                 documentation="Histogram of e2e request latency in seconds.",
                 buckets=request_latency_buckets,
                 labelnames=labelnames).labels(*labelvalues)
         self.histogram_queue_time_request = \
-            prometheus_client.Histogram(
+            self._histogram_cls(
                 name="vllm:request_queue_time_seconds",
                 documentation=
                 "Histogram of time spent in WAITING phase for request.",
                 buckets=request_latency_buckets,
                 labelnames=labelnames).labels(*labelvalues)
         self.histogram_inference_time_request = \
-            prometheus_client.Histogram(
+            self._histogram_cls(
                 name="vllm:request_inference_time_seconds",
                 documentation=
                 "Histogram of time spent in RUNNING phase for request.",
                 buckets=request_latency_buckets,
                 labelnames=labelnames).labels(*labelvalues)
         self.histogram_prefill_time_request = \
-            prometheus_client.Histogram(
+            self._histogram_cls(
                 name="vllm:request_prefill_time_seconds",
                 documentation=
                 "Histogram of time spent in PREFILL phase for request.",
                 buckets=request_latency_buckets,
                 labelnames=labelnames).labels(*labelvalues)
         self.histogram_decode_time_request = \
-            prometheus_client.Histogram(
+            self._histogram_cls(
                 name="vllm:request_decode_time_seconds",
                 documentation=
                 "Histogram of time spent in DECODE phase for request.",
@@ -296,6 +377,9 @@ class PrometheusStatLogger(StatLoggerBase):
         #
         # LoRA metrics
         #
+
+        # TODO: This metric might be incorrect in case of using multiple
+        # api_server counts which uses prometheus mp.
         self.gauge_lora_info: Optional[prometheus_client.Gauge] = None
         if vllm_config.lora_config is not None:
             self.labelname_max_lora = "max_lora"
@@ -303,40 +387,21 @@ class PrometheusStatLogger(StatLoggerBase):
             self.labelname_running_lora_adapters = "running_lora_adapters"
             self.max_lora = vllm_config.lora_config.max_loras
             self.gauge_lora_info = \
-                prometheus_client.Gauge(
+                self._gauge_cls(
                     name="vllm:lora_requests_info",
                     documentation="Running stats on lora requests.",
+                    multiprocess_mode="sum",
                     labelnames=[
                         self.labelname_max_lora,
                         self.labelname_waiting_lora_adapters,
                         self.labelname_running_lora_adapters,
-                    ])
-
-        #
-        # Speculative Decoding metrics
-        # The acceptance rate can be calculated using a PromQL query:
-        #
-        #   rate(vllm:spec_decode_num_accepted_tokens_total[$interval]) /
-        #   rate(vllm:spec_decode_num_draft_tokens_total[$interval])
-        #
-        self.counter_spec_decode_num_draft_tokens = \
-            prometheus_client.Counter(
-                name="vllm:spec_decode_num_draft_tokens_total",
-                documentation="Number of draft tokens.",
-                labelnames=labelnames).labels(*labelvalues)
-        self.counter_spec_decode_num_accepted_tokens = \
-            prometheus_client.Counter(
-                name="vllm:spec_decode_num_accepted_tokens_total",
-                documentation="Number of accepted tokens.",
-                labelnames=labelnames).labels(*labelvalues)
-
-        #
-        # Cache config info metric
-        #
-        self.log_metrics_info("cache_config", vllm_config.cache_config)
+                    ],
+                )
 
     def log_metrics_info(self, type: str, config_obj: SupportsMetricsInfo):
+
         metrics_info = config_obj.metrics_info()
+        metrics_info["engine"] = self.engine_index
 
         name, documentation = None, None
         if type == "cache_config":
@@ -347,30 +412,37 @@ class PrometheusStatLogger(StatLoggerBase):
         # Info type metrics are syntactic sugar for a gauge permanently set to 1
         # Since prometheus multiprocessing mode does not support Info, emulate
         # info here with a gauge.
-        info_gauge = prometheus_client.Gauge(
+        info_gauge = self._gauge_cls(
             name=name,
             documentation=documentation,
-            labelnames=metrics_info.keys()).labels(**metrics_info)
+            multiprocess_mode="mostrecent",
+            labelnames=metrics_info.keys(),
+        ).labels(**metrics_info)
         info_gauge.set(1)
 
-    def record(self, scheduler_stats: SchedulerStats,
+    def record(self, scheduler_stats: Optional[SchedulerStats],
                iteration_stats: Optional[IterationStats]):
         """Log to prometheus."""
-        self.gauge_scheduler_running.set(scheduler_stats.num_running_reqs)
-        self.gauge_scheduler_waiting.set(scheduler_stats.num_waiting_reqs)
+        if scheduler_stats is not None:
+            self.gauge_scheduler_running.set(scheduler_stats.num_running_reqs)
+            self.gauge_scheduler_waiting.set(scheduler_stats.num_waiting_reqs)
 
-        self.gauge_gpu_cache_usage.set(scheduler_stats.gpu_cache_usage)
+            self.gauge_gpu_cache_usage.set(scheduler_stats.kv_cache_usage)
+            self.gauge_kv_cache_usage.set(scheduler_stats.kv_cache_usage)
 
-        self.counter_gpu_prefix_cache_queries.inc(
-            scheduler_stats.prefix_cache_stats.queries)
-        self.counter_gpu_prefix_cache_hits.inc(
-            scheduler_stats.prefix_cache_stats.hits)
+            self.counter_gpu_prefix_cache_queries.inc(
+                scheduler_stats.prefix_cache_stats.queries)
+            self.counter_gpu_prefix_cache_hits.inc(
+                scheduler_stats.prefix_cache_stats.hits)
 
-        if scheduler_stats.spec_decoding_stats is not None:
-            self.counter_spec_decode_num_draft_tokens.inc(
-                scheduler_stats.spec_decoding_stats.num_draft_tokens)
-            self.counter_spec_decode_num_accepted_tokens.inc(
-                scheduler_stats.spec_decoding_stats.num_accepted_tokens)
+            self.counter_prefix_cache_queries.inc(
+                scheduler_stats.prefix_cache_stats.queries)
+            self.counter_prefix_cache_hits.inc(
+                scheduler_stats.prefix_cache_stats.hits)
+
+            if scheduler_stats.spec_decoding_stats is not None:
+                self.spec_decoding_prom.observe(
+                    scheduler_stats.spec_decoding_stats)
 
         if iteration_stats is None:
             return
@@ -409,8 +481,9 @@ class PrometheusStatLogger(StatLoggerBase):
                 finished_request.num_prompt_tokens)
             self.histogram_num_generation_tokens_request.observe(
                 finished_request.num_generation_tokens)
-            self.histogram_max_tokens_request.observe(
-                finished_request.max_tokens_param)
+            if finished_request.max_tokens_param:
+                self.histogram_max_tokens_request.observe(
+                    finished_request.max_tokens_param)
 
         if self.gauge_lora_info is not None:
             running_lora_adapters = \
@@ -425,12 +498,8 @@ class PrometheusStatLogger(StatLoggerBase):
             self.gauge_lora_info.labels(**lora_info_labels)\
                                 .set_to_current_time()
 
-    @staticmethod
-    def _unregister_vllm_metrics():
-        # Unregister any existing vLLM collectors (for CI/CD
-        for collector in list(prometheus_client.REGISTRY._collector_to_names):
-            if hasattr(collector, "_name") and "vllm" in collector._name:
-                prometheus_client.REGISTRY.unregister(collector)
+    def log_engine_initialized(self):
+        self.log_metrics_info("cache_config", self.vllm_config.cache_config)
 
 
 def build_buckets(mantissa_lst: list[int], max_value: int) -> list[int]:
@@ -460,11 +529,29 @@ def build_1_2_5_buckets(max_value: int) -> list[int]:
     return build_buckets([1, 2, 5], max_value)
 
 
-def build_cudagraph_buckets(vllm_config: VllmConfig) -> list[int]:
-    if not vllm_config.model_config.enforce_eager:
-        buckets = vllm_config.compilation_config.\
-            cudagraph_capture_sizes.copy()
-        buckets.sort()
-        return buckets
+def setup_default_loggers(
+    vllm_config: VllmConfig,
+    log_stats: bool,
+    engine_num: int,
+    custom_stat_loggers: Optional[list[StatLoggerFactory]] = None,
+) -> list[list[StatLoggerBase]]:
+    """Setup logging and prometheus metrics."""
+    if not log_stats:
+        return []
+
+    factories: list[StatLoggerFactory]
+    if custom_stat_loggers is not None:
+        factories = custom_stat_loggers
     else:
-        return [1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8096]
+        factories = [PrometheusStatLogger]
+        if logger.isEnabledFor(logging.INFO):
+            factories.append(LoggingStatLogger)
+
+    stat_loggers: list[list[StatLoggerBase]] = []
+    for i in range(engine_num):
+        per_engine_stat_loggers: list[StatLoggerBase] = []
+        for logger_factory in factories:
+            per_engine_stat_loggers.append(logger_factory(vllm_config, i))
+        stat_loggers.append(per_engine_stat_loggers)
+
+    return stat_loggers

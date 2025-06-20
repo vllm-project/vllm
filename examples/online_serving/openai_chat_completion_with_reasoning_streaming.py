@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 An example shows how to generate chat completions from reasoning models
 like DeepSeekR1.
@@ -8,7 +9,7 @@ parser:
 
 ```bash
 vllm serve deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B \
-     --enable-reasoning --reasoning-parser deepseek_r1
+     --reasoning-parser deepseek_r1
 ```
 
 Unlike openai_chat_completion_with_reasoning.py, this example demonstrates the
@@ -43,9 +44,7 @@ def main():
 
     # ruff: noqa: E501
     # For granite: add: `extra_body={"chat_template_kwargs": {"thinking": True}}`
-    stream = client.chat.completions.create(model=model,
-                                            messages=messages,
-                                            stream=True)
+    stream = client.chat.completions.create(model=model, messages=messages, stream=True)
 
     print("client: Start streaming chat completions...")
     printed_reasoning_content = False

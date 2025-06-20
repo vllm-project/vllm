@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import dataclasses
 from collections import defaultdict
@@ -37,7 +38,7 @@ from vllm.attention.backends.utils import (PAD_SLOT_ID, compute_slot_mapping,
                                            is_block_tables_empty)
 from vllm.attention.layer import Attention
 from vllm.attention.ops.paged_attn import PagedAttention
-from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
 from vllm.utils import (async_tensor_h2d, get_kv_cache_torch_dtype,
                         make_tensor_with_pad)
@@ -47,6 +48,8 @@ logger = init_logger(__name__)
 if TYPE_CHECKING:
     from vllm.worker.model_runner import (ModelInputForGPUBuilder,
                                           ModelInputForGPUWithSamplingMetadata)
+
+FLASHINFER_KV_CACHE_LAYOUT: str = envs.VLLM_KV_CACHE_LAYOUT or "NHD"
 
 
 class FlashInferBackend(AttentionBackend):
@@ -79,6 +82,14 @@ class FlashInferBackend(AttentionBackend):
         head_size: int,
     ) -> Tuple[int, ...]:
         return (num_blocks, 2, block_size, num_kv_heads, head_size)
+
+    @staticmethod
+    def get_kv_cache_stride_order() -> Tuple[int, ...]:
+        cache_layout = FLASHINFER_KV_CACHE_LAYOUT
+        assert (cache_layout in ("NHD", "HND"))
+        stride_order = (0, 1, 2, 3, 4) if cache_layout == "NHD" else (0, 1, 3,
+                                                                      2, 4)
+        return stride_order
 
     @staticmethod
     def swap_blocks(
@@ -128,12 +139,10 @@ def get_per_layer_parameters(
     to use during `plan`.
     """
 
-    layers = vllm_config.compilation_config.static_forward_context
+    layers = get_layers_from_vllm_config(vllm_config, Attention)
     per_layer_params: Dict[str, PerLayerParameters] = {}
 
     for key, layer in layers.items():
-        assert isinstance(layer, Attention)
-
         impl = layer.impl
         assert isinstance(impl, FlashInferImpl)
 
@@ -187,7 +196,8 @@ class FlashInferState(AttentionState):
         # Global hyperparameters shared by all attention layers
         self.global_hyperparameters: Optional[PerLayerParameters] = None
 
-        self.vllm_config = get_current_vllm_config()
+        self.vllm_config = self.runner.vllm_config
+        self._kv_cache_layout = None
 
     def _get_workspace_buffer(self):
         if self._workspace_buffer is None:
@@ -197,10 +207,15 @@ class FlashInferState(AttentionState):
                 device=self.runner.device)
         return self._workspace_buffer
 
+    def get_kv_cache_layout(self):
+        if self._kv_cache_layout is None:
+            self._kv_cache_layout = FLASHINFER_KV_CACHE_LAYOUT
+        return self._kv_cache_layout
+
     def _get_prefill_wrapper(self):
         if self._prefill_wrapper is None:
             self._prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
-                self._get_workspace_buffer(), "NHD")
+                self._get_workspace_buffer(), self.get_kv_cache_layout())
         return self._prefill_wrapper
 
     def _get_decode_wrapper(self):
@@ -213,7 +228,7 @@ class FlashInferState(AttentionState):
                 num_qo_heads // num_kv_heads > 4)
             self._decode_wrapper = BatchDecodeWithPagedKVCacheWrapper(
                 self._get_workspace_buffer(),
-                "NHD",
+                self.get_kv_cache_layout(),
                 use_tensor_cores=use_tensor_cores)
         return self._decode_wrapper
 
@@ -274,7 +289,8 @@ class FlashInferState(AttentionState):
         self._graph_decode_wrapper = \
             CUDAGraphBatchDecodeWithPagedKVCacheWrapper(
             self._graph_decode_workspace_buffer, _indptr_buffer,
-            self._graph_indices_buffer, _last_page_len_buffer, "NHD",
+            self._graph_indices_buffer, _last_page_len_buffer,
+            self.get_kv_cache_layout(),
             use_tensor_cores)
         if self.runner.kv_cache_dtype.startswith("fp8"):
             kv_cache_dtype = FlashInferBackend.get_fp8_dtype_for_flashinfer(
@@ -350,9 +366,17 @@ class FlashInferState(AttentionState):
         # scheduled while CUDA graph mode is enabled. We don't run graph in that
         # case.
         if use_cuda_graph and is_decode:
-            batch_size = model_input.input_tokens.shape[0]
-            state = (self.runner.graph_runners[model_input.virtual_engine]
-                     [batch_size].attn_state)
+            if model_input.inputs_embeds is None:
+                batch_size = model_input.input_tokens.shape[0]
+                state = (
+                    self.runner.graph_runners[model_input.virtual_engine][(
+                        batch_size, False)].attn_state)
+            else:
+                batch_size = model_input.inputs_embeds.shape[0]
+                state = (
+                    self.runner.graph_runners[model_input.virtual_engine][(
+                        batch_size, True)].attn_state)
+
         model_input.attn_metadata.prefill_wrapper = state._get_prefill_wrapper(
         )
         model_input.attn_metadata.decode_wrapper = state._get_decode_wrapper()
@@ -613,7 +637,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # Global hyperparameters shared by all attention layers
         self.global_hyperparameters: Optional[PerLayerParameters] = None
 
-        self.vllm_config = get_current_vllm_config()
+        self.vllm_config = self.runner.vllm_config
 
     def prepare(self):
         self.slot_mapping: List[int] = []
@@ -910,8 +934,11 @@ class FlashInferImpl(AttentionImpl):
         blocksparse_params: Optional[Dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         attn_type: str = AttentionType.DECODER,
+        kv_sharing_target_layer_name: Optional[str] = None,
         use_irope: bool = False,
     ) -> None:
+        if kv_sharing_target_layer_name is not None:
+            raise NotImplementedError("KV sharing is not supported in V0.")
         if use_irope:
             logger.warning_once(
                 "Using irope in FlashInfer is not supported yet, it will fall"
@@ -928,7 +955,6 @@ class FlashInferImpl(AttentionImpl):
         self.kv_cache_dtype = kv_cache_dtype
         self.logits_soft_cap = logits_soft_cap
 
-        assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
         if attn_type != AttentionType.DECODER:
@@ -946,7 +972,13 @@ class FlashInferImpl(AttentionImpl):
         kv_cache: torch.Tensor,
         attn_metadata: FlashInferMetadata,
         output: Optional[torch.Tensor] = None,
+        output_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+
+        if output_scale is not None:
+            raise NotImplementedError(
+                "fused output quantization is not yet supported"
+                " for FlashInferImpl")
 
         # TODO: directly write to output tensor
         num_heads: int = self.num_heads
@@ -1005,6 +1037,7 @@ class FlashInferImpl(AttentionImpl):
 
         prefill_output: Optional[torch.Tensor] = None
         decode_output: Optional[torch.Tensor] = None
+        stride_order = FlashInferBackend.get_kv_cache_stride_order()
         if prefill_meta := attn_metadata.prefill_metadata:
             # We will use flash attention for prefill
             # when kv_cache is not provided.
@@ -1036,7 +1069,7 @@ class FlashInferImpl(AttentionImpl):
 
                 prefill_output = prefill_meta.prefill_wrapper.run(
                     query,
-                    kv_cache,
+                    kv_cache.permute(*stride_order),
                     k_scale=layer._k_scale_float,
                     v_scale=layer._v_scale_float,
                 )
@@ -1051,7 +1084,7 @@ class FlashInferImpl(AttentionImpl):
 
             decode_output = decode_meta.decode_wrapper.run(
                 decode_query,
-                kv_cache,
+                kv_cache.permute(*stride_order),
                 k_scale=layer._k_scale_float,
                 v_scale=layer._v_scale_float,
             )

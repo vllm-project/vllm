@@ -1,18 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 # Code copied from Microsoft/MoE by Jacob Platin (jacobplatin@microsoft.com)
 # but implemented by the Phi-Speech team
 #!/usr/bin/env python3
 import math
-from typing import Optional, Tuple, Union
+from typing import Optional, Union
 
 import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
 
-class Block(nn.Module):
+class BlockBase(nn.Module):
     """Block abstract module"""
 
     def __init__(self, input_size, output_size):
@@ -1586,7 +1587,7 @@ class AttModule(nn.Module):
         memory: Optional[Tensor] = None,
         pos_emb: Optional[Tensor] = None,
         att_mask: Optional[Tensor] = None,
-    ) -> Tuple[Tensor, Tensor, Optional[Tensor], Optional[Tensor]]:
+    ) -> tuple[Tensor, Tensor, Optional[Tensor], Optional[Tensor]]:
         """AttModule forward
 
         Args:
@@ -1602,7 +1603,7 @@ class AttModule(nn.Module):
         return x, memory, pos_emb, att_mask
 
 
-class AttBlock(Block, AttModule):
+class AttBlock(BlockBase, AttModule):
     """Attention Block module to support both Attention and Block module."""
 
     def memory_dims(self, max_len=False):
