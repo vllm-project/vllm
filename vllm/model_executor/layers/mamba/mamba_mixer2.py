@@ -189,11 +189,13 @@ def mamba_v2_sharded_weight_loader(
             # in the case where num_groups == 1 or num_groups divides tp size
             rank = 0 if duplicate_groups else tp_rank
             if duplicate_groups:
-                 rank = 0
-            elif n_groups % tp_size==0:
+                rank = 0
+            elif n_groups % tp_size == 0:
                 rank = tp_rank
             else:
-                assert(tp_size % n_groups == 0), "num groups must divide TP size if TP size does not divide n_groups and n_groups is not equal to 1."
+                assert (
+                    tp_size % n_groups == 0
+                ), "num groups must divide TP size if TP size does not divide n_groups and n_groups is not equal to 1."
                 rank = tp_rank // n_groups
             # - leftmost boundary index into loaded weight.
             loaded_skip = rank * shard_size
@@ -324,7 +326,7 @@ class MambaMixer2(CustomOp):
             self.n_groups * self.ssm_state_size,  # expected model size
             (self.n_groups - n_groups) *
             self.ssm_state_size,  # extra dims assigned
-            n_groups, # original n_groups to check for multi-groups duplication
+            n_groups,  # original n_groups to check for multi-groups duplication
             n_groups == 1,  # if there was only one group
         )
         intermediate_settings = (intermediate_size, 0, 0, False)
