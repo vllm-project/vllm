@@ -85,7 +85,7 @@ class TensorizerLoader(BaseModelLoader):
             self, model_config: ModelConfig) -> TensorizerConfig:
         model_class = get_model_architecture(model_config)[0]
         tensorizer_config = copy.copy(self.tensorizer_config)
-        tensorizer_config._model_cls = model_class
+        tensorizer_config.model_class = model_class
         tensorizer_config.hf_config = model_config.hf_config
         tensorizer_config.dtype = model_config.dtype
         return tensorizer_config
