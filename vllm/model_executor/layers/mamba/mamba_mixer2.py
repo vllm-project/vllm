@@ -152,7 +152,7 @@ def extra_groups_for_head_shards(ngroups: int, tp_size: int):
         return 0
 
     # for n_groups == 1 or tp_size % ngroups == 0, 
-    # this is exactly tp_size - n_groups
+    #  this is exactly tp_size - n_groups
     return tp_size - ngroups
 
 
