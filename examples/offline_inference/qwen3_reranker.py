@@ -20,7 +20,7 @@ model_name = "Qwen/Qwen3-Reranker-0.6B"
 # model = LLM(model="tomaarsen/Qwen3-Reranker-0.6B-seq-cls", task="score")
 
 # Offline conversion from official original version to sequence classification
-# model code please refer to: converting2seq_cls_models.py
+# model code please refer to: convert_model_to_seq_cls.py
 # The init parameters are as follows.
 # model = LLM(model="path_to/converted_model", task="score")
 
