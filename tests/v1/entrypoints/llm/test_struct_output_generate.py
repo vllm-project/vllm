@@ -216,96 +216,97 @@ def test_structured_output(
             parsed_json = json.loads(generated_text)
             assert isinstance(parsed_json, dict)
 
-    #
-    # Test 4: Generate SQL statement using EBNF grammar
-    #
-    sampling_params = SamplingParams(
-        temperature=0.8,
-        top_p=0.95,
-        max_tokens=1000,
-        guided_decoding=GuidedDecodingParams(grammar=sample_sql_ebnf))
-    outputs = llm.generate(
-        prompts=(
-            "Generate a sql statement that selects col_1 from "
-            "table_1 where it is equal to 1. Make the response as short as "
-            "possible."),
-        sampling_params=sampling_params,
-        use_tqdm=True,
-    )
-
-    assert outputs is not None
-    for output in outputs:
-        assert output is not None
-        assert isinstance(output, RequestOutput)
-        prompt = output.prompt
-
-        generated_text = output.outputs[0].text
-        assert generated_text is not None
-
-        # remove spaces for comparison b/c we removed them in the grammar
-        ground_truth = "SELECT col_1 from table_1 where col_1 = 1".replace(
-            " ", "")
-
-        assert generated_text.strip() == ground_truth
-
-        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
-
-    #
-    # Test 5: Generate SQL statement using Lark grammar
-    #
-    sampling_params = SamplingParams(
-        temperature=0.8,
-        top_p=0.95,
-        max_tokens=1000,
-        guided_decoding=GuidedDecodingParams(grammar=sample_sql_lark))
-    outputs = llm.generate(
-        prompts=(
-            "Generate a sql statement that selects col_1 from "
-            "table_1 where it is equal to 1. Make the response as short as "
-            "possible."),
-        sampling_params=sampling_params,
-        use_tqdm=True,
-    )
-
-    assert outputs is not None
-    for output in outputs:
-        assert output is not None
-        assert isinstance(output, RequestOutput)
-        prompt = output.prompt
-
-        generated_text = output.outputs[0].text
-        assert generated_text is not None
-
-        # use Lark to parse the output, and make sure it's a valid parse tree
-        from lark import Lark
-        parser = Lark(sample_sql_lark)
-        parser.parse(generated_text)
-
-        # remove spaces for comparison b/c we removed them in the grammar
-        ground_truth = "SELECT col_1 from table_1 where col_1 = 1".replace(
-            " ", "")
-
-        assert generated_text.strip() == ground_truth
-
-        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
-
-    #
-    # Test 6: Test invalid grammar input
-    #
-    sampling_params = SamplingParams(
-        temperature=0.8,
-        top_p=0.95,
-        max_tokens=1000,
-        guided_decoding=GuidedDecodingParams(grammar="not a grammar"))
-    with pytest.raises(ValueError, match="Failed to convert the grammar "):
-        llm.generate(
+    if guided_decoding_backend != "outlines":
+        #
+        # Test 4: Generate SQL statement using EBNF grammar
+        #
+        sampling_params = SamplingParams(
+            temperature=0.8,
+            top_p=0.95,
+            max_tokens=1000,
+            guided_decoding=GuidedDecodingParams(grammar=sample_sql_ebnf))
+        outputs = llm.generate(
             prompts=(
                 "Generate a sql statement that selects col_1 from "
-                "table_1 where it is equal to 1. Make the response as short "
-                "as possible."),
+                "table_1 where it is equal to 1. Make the response as short as "
+                "possible."),
             sampling_params=sampling_params,
             use_tqdm=True,
         )
+
+        assert outputs is not None
+        for output in outputs:
+            assert output is not None
+            assert isinstance(output, RequestOutput)
+            prompt = output.prompt
+
+            generated_text = output.outputs[0].text
+            assert generated_text is not None
+
+            # remove spaces for comparison b/c we removed them in the grammar
+            ground_truth = "SELECT col_1 from table_1 where col_1 = 1".replace(
+                " ", "")
+
+            assert generated_text.strip() == ground_truth
+
+            print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+
+        #
+        # Test 5: Generate SQL statement using Lark grammar
+        #
+        sampling_params = SamplingParams(
+            temperature=0.8,
+            top_p=0.95,
+            max_tokens=1000,
+            guided_decoding=GuidedDecodingParams(grammar=sample_sql_lark))
+        outputs = llm.generate(
+            prompts=(
+                "Generate a sql statement that selects col_1 from "
+                "table_1 where it is equal to 1. Make the response as short as "
+                "possible."),
+            sampling_params=sampling_params,
+            use_tqdm=True,
+        )
+
+        assert outputs is not None
+        for output in outputs:
+            assert output is not None
+            assert isinstance(output, RequestOutput)
+            prompt = output.prompt
+
+            generated_text = output.outputs[0].text
+            assert generated_text is not None
+
+            # use Lark to parse the output, and make sure it's a valid parse tree
+            from lark import Lark
+            parser = Lark(sample_sql_lark)
+            parser.parse(generated_text)
+
+            # remove spaces for comparison b/c we removed them in the grammar
+            ground_truth = "SELECT col_1 from table_1 where col_1 = 1".replace(
+                " ", "")
+
+            assert generated_text.strip() == ground_truth
+
+            print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+
+        #
+        # Test 6: Test invalid grammar input
+        #
+        sampling_params = SamplingParams(
+            temperature=0.8,
+            top_p=0.95,
+            max_tokens=1000,
+            guided_decoding=GuidedDecodingParams(grammar="not a grammar"))
+        with pytest.raises(ValueError, match="Failed to convert the grammar "):
+            llm.generate(
+                prompts=
+                ("Generate a sql statement that selects col_1 from "
+                 "table_1 where it is equal to 1. Make the response as short "
+                 "as possible."),
+                sampling_params=sampling_params,
+                use_tqdm=True,
+            )
 
     #
     # Test 7: Generate text based on a regex pattern
@@ -427,35 +428,36 @@ def test_structured_output(
         output_json = json.loads(generated_text)
         jsonschema.validate(instance=output_json, schema=json_schema)
 
-    #
-    # Test 11: Generate structured output using structural_tag format
-    #
-    structural_tag_config = {
-        "type":
-        "structural_tag",
-        "structures": [{
-            "begin": "<function=get_weather>",
-            "schema": {
-                "type": "object",
-                "properties": {
-                    "city": {
-                        "type": "string"
-                    }
+    if guided_decoding_backend != "outlines":
+        #
+        # Test 11: Generate structured output using structural_tag format
+        #
+        structural_tag_config = {
+            "type":
+            "structural_tag",
+            "structures": [{
+                "begin": "<function=get_weather>",
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "city": {
+                            "type": "string"
+                        }
+                    },
+                    "additionalProperties": False
                 },
-                "additionalProperties": False
-            },
-            "end": "</function>"
-        }],
-        "triggers": ["<function="]
-    }
+                "end": "</function>"
+            }],
+            "triggers": ["<function="]
+        }
 
-    sampling_params = SamplingParams(
-        temperature=0.0,
-        max_tokens=4096,
-        guided_decoding=GuidedDecodingParams(
-            structural_tag=json.dumps(structural_tag_config)))
+        sampling_params = SamplingParams(
+            temperature=0.0,
+            max_tokens=4096,
+            guided_decoding=GuidedDecodingParams(
+                structural_tag=json.dumps(structural_tag_config)))
 
-    prompt = """
+        prompt = """
 You have access to the following function to retrieve the weather in a city:
 
     {
@@ -475,7 +477,7 @@ where
 
 start_tag => `<function`
 parameters => a JSON dict with the function argument name
-              as key and function argument value as value.
+            as key and function argument value as value.
 end_tag => `</function>`
 
 Here is an example,
@@ -494,37 +496,37 @@ Given the previous instructions, what is the weather in New York City? \
 Make the response as short as possible.
 """
 
-    # Change this once other backends support structural_tag
-    outputs = llm.generate(prompts=prompt,
-                           sampling_params=sampling_params,
-                           use_tqdm=True)
-    assert outputs is not None
+        # Change this once other backends support structural_tag
+        outputs = llm.generate(prompts=prompt,
+                               sampling_params=sampling_params,
+                               use_tqdm=True)
+        assert outputs is not None
 
-    for output in outputs:
-        assert output is not None
-        assert isinstance(output, RequestOutput)
-        generated_text = output.outputs[0].text
-        assert generated_text is not None
+        for output in outputs:
+            assert output is not None
+            assert isinstance(output, RequestOutput)
+            generated_text = output.outputs[0].text
+            assert generated_text is not None
 
-        # Search for function call pattern in the response
-        function_call_pattern = r'<function=get_weather>(.*?)</function>'
-        matches = re.findall(function_call_pattern, generated_text)
+            # Search for function call pattern in the response
+            function_call_pattern = r'<function=get_weather>(.*?)</function>'
+            matches = re.findall(function_call_pattern, generated_text)
 
-        if not matches:
-            print(f"Warning: No function calls found in response: "
-                  f"{generated_text!r}")
-            continue
+            if not matches:
+                print(f"Warning: No function calls found in response: "
+                      f"{generated_text!r}")
+                continue
 
-        # Take the first function call if multiple are found
-        json_str = matches[0]
-        try:
-            json_content = json.loads(json_str)
-            assert "city" in json_content
-            assert isinstance(json_content["city"], str)
-            print(f"Found valid function call: {generated_text!r}")
-        except (json.JSONDecodeError, AssertionError) as e:
-            pytest.fail("Invalid function call format: "
-                        f"{generated_text!r}\nError: {str(e)}")
+            # Take the first function call if multiple are found
+            json_str = matches[0]
+            try:
+                json_content = json.loads(json_str)
+                assert "city" in json_content
+                assert isinstance(json_content["city"], str)
+                print(f"Found valid function call: {generated_text!r}")
+            except (json.JSONDecodeError, AssertionError) as e:
+                pytest.fail("Invalid function call format: "
+                            f"{generated_text!r}\nError: {str(e)}")
 
 
 @pytest.mark.skip_global_cleanup
