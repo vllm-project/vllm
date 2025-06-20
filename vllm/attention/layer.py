@@ -308,7 +308,7 @@ class MultiHeadAttention(nn.Module):
         backend = backend_name_to_enum(attn_backend.get_name())
         if current_platform.is_rocm():
             # currently, only torch_sdpa is supported on rocm
-            backend = _Backend.TORCH_SDPA
+            self.attn_backend = _Backend.TORCH_SDPA
         else:
             if backend in {_Backend.FLASH_ATTN, _Backend.FLASH_ATTN_VLLM_V1}:
                 backend = _Backend.XFORMERS
