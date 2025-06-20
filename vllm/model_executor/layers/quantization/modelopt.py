@@ -212,7 +212,7 @@ class ModelOptFp8MoEMethod:
         layer: torch.nn.Module,
         num_experts: int,
         hidden_size: int,
-        intermediate_size: int,
+        intermediate_size_per_partition: int,
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
@@ -227,7 +227,7 @@ class ModelOptFp8MoEMethod:
 
         w13_weight = ModelWeightParameter(
             data=torch.empty(
-                num_experts, 2 * intermediate_size, hidden_size, dtype=weight_dtype
+                num_experts, 2 * intermediate_size_per_partition, hidden_size, dtype=weight_dtype
             ),
             input_dim=2,
             output_dim=1,
@@ -237,7 +237,7 @@ class ModelOptFp8MoEMethod:
 
         w2_weight = ModelWeightParameter(
             data=torch.empty(
-                num_experts, hidden_size, intermediate_size, dtype=weight_dtype
+                num_experts, hidden_size, intermediate_size_per_partition, dtype=weight_dtype
             ),
             input_dim=2,
             output_dim=1,
