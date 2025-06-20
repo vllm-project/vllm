@@ -12,9 +12,10 @@ import torch_xla.debug.profiler as xp
 import torch_xla.runtime as xr
 
 import vllm.envs as envs
-from vllm.config import ParallelConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
+from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
@@ -115,7 +116,7 @@ class TPUWorker:
 
         # Initialize the distributed environment.
         self._init_tpu_worker_distributed_environment(
-            self.parallel_config, self.rank, self.distributed_init_method,
+            self.vllm_config, self.rank, self.distributed_init_method,
             self.local_rank)
 
         # Device initialization should happen after initializing
@@ -272,7 +273,7 @@ class TPUWorker:
 
     def _init_tpu_worker_distributed_environment(
         self,
-        parallel_config: ParallelConfig,
+        vllm_config: VllmConfig,
         rank: int,
         distributed_init_method: Optional[str] = None,
         local_rank: int = -1,
@@ -284,6 +285,7 @@ class TPUWorker:
         # the input objects on CPU. The all-reduce and all-gather ops on TPU
         # are invoked by `xm.all_reduce` and `xm.all_gather` which use their
         # own context.
+        parallel_config = vllm_config.parallel_config
         init_distributed_environment(
             world_size=parallel_config.world_size,
             rank=rank,
@@ -294,6 +296,8 @@ class TPUWorker:
         ensure_model_parallel_initialized(
             parallel_config.tensor_parallel_size,
             parallel_config.pipeline_parallel_size)
+
+        ensure_kv_transfer_initialized(vllm_config)
 
 
 try:
