@@ -82,7 +82,6 @@ class Mixer2RMSNormGated(CustomOp):
         x = x * nn.functional.silu(gate.to(torch.float32))
         if not self.use_rms_norm:
             return x.to(input_dtype)
-
         if self.n_groups == 1:
             if self.tp_size > 1:
                 # Compute local sum and then reduce to obtain global sum
