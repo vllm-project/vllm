@@ -122,6 +122,7 @@ def _schedule_new_request(*req_ids: str) -> SchedulerOutput:
                 mm_hashes=[],
                 mm_positions=[],
                 sampling_params=SamplingParams(),
+                pooling_params=None,
                 block_ids=([0], ),
                 num_computed_tokens=0,
                 lora_request=None,

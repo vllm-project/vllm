@@ -168,9 +168,11 @@ class InputProcessingContext(InputContext):
         try:
             output = hf_processor(**data, **merged_kwargs, return_tensors="pt")
             # this emulates output.to(dtype=self.model_config.dtype)
-            cast_output = json_map_leaves(maybe_cast_dtype, output)
             if isinstance(output, BatchFeature):
+                cast_output = json_map_leaves(maybe_cast_dtype, output.data)
                 return BatchFeature(cast_output)
+
+            cast_output = json_map_leaves(maybe_cast_dtype, output)
 
             logger.warning_once(
                 f"{type(hf_processor).__name__} did not return `BatchFeature`. "

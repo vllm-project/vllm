@@ -18,9 +18,9 @@ setuptools==78.1.0
 --find-links https://storage.googleapis.com/libtpu-releases/index.html
 --find-links https://storage.googleapis.com/jax-releases/jax_nightly_releases.html
 --find-links https://storage.googleapis.com/jax-releases/jaxlib_nightly_releases.html
-torch==2.8.0.dev20250605
-torchvision==0.23.0.dev20250605
-torch_xla[tpu, pallas] @ https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch_xla-2.8.0.dev20250605-cp39-cp39-linux_x86_64.whl ; python_version == "3.9"
-torch_xla[tpu, pallas] @ https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch_xla-2.8.0.dev20250605-cp310-cp310-linux_x86_64.whl ; python_version == "3.10"
-torch_xla[tpu, pallas] @ https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch_xla-2.8.0.dev20250605-cp311-cp311-linux_x86_64.whl ; python_version == "3.11"
+torch==2.8.0.dev20250618
+torchvision==0.23.0.dev20250618
+torch_xla[tpu, pallas] @ https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch_xla-2.8.0.dev20250618-cp39-cp39-linux_x86_64.whl ; python_version == "3.9"
+torch_xla[tpu, pallas] @ https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch_xla-2.8.0.dev20250618-cp310-cp310-linux_x86_64.whl ; python_version == "3.10"
+torch_xla[tpu, pallas] @ https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch_xla-2.8.0.dev20250618-cp311-cp311-linux_x86_64.whl ; python_version == "3.11"
 

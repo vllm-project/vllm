@@ -716,6 +716,9 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         intermediate_cache2 = _resize_cache(workspace2,
                                             (E, max_num_tokens, N // 2))
 
+        if self.use_fp8_w8a8:
+            intermediate_cache1.fill_(0)
+
         # MM1
         invoke_moe_batched_triton_kernel(A=hidden_states,
                                          B=w1,

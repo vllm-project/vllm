@@ -65,6 +65,21 @@ pull_request_rules:
       add:
         - multi-modality
 
+- name: label-qwen
+  description: Automatically apply qwen label
+  conditions:
+    - or:
+      - files~=^examples/.*qwen.*\.py
+      - files~=^tests/.*qwen.*\.py
+      - files~=^vllm/model_executor/models/.*qwen.*\.py
+      - files~=^vllm/reasoning/.*qwen.*\.py
+      - title~=(?i)Qwen
+      - body~=(?i)Qwen
+  actions:
+    label:
+      add:
+        - qwen
+
 - name: label-rocm
   description: Automatically apply rocm label
   conditions:

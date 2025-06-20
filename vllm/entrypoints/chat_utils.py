@@ -469,6 +469,9 @@ def resolve_chat_template_content_format(
     model_config: ModelConfig,
     trust_remote_code: Optional[bool] = None,
 ) -> _ChatTemplateContentFormat:
+    if given_format != "auto":
+        return given_format
+
     detected_format = _resolve_chat_template_content_format(
         chat_template,
         tools,
@@ -482,7 +485,7 @@ def resolve_chat_template_content_format(
         detected_format=detected_format,
     )
 
-    return detected_format if given_format == "auto" else given_format
+    return detected_format
 
 
 

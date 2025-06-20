@@ -39,9 +39,9 @@ This living user guide outlines a few known **important changes and limitations*
 For each item, our progress towards V1 support falls into one of the following states:
 
 - **🚀 Optimized**: Nearly fully optimized, with no further work currently planned.
-- **🟢 Functional**: Fully operational, with ongoing optimizations.  
-- **🚧 WIP**: Under active development.  
-- **🟡 Planned**: Scheduled for future implementation (some may have open PRs/RFCs).  
+- **🟢 Functional**: Fully operational, with ongoing optimizations.
+- **🚧 WIP**: Under active development.
+- **🟡 Planned**: Scheduled for future implementation (some may have open PRs/RFCs).
 - **🟠 Delayed**: Temporarily dropped in V1 but planned to be re-introduced later.
 - **🔴 Deprecated**: Not planned for V1 unless there is strong demand.
 
@@ -70,7 +70,7 @@ For each item, our progress towards V1 support falls into one of the following s
 |-----------------------------|------------------------------------------------------------------------------------|
 | **Decoder-only Models**     | <nobr>🚀 Optimized</nobr>                                                          |
 | **Encoder-Decoder Models**  | <nobr>🟠 Delayed</nobr>                                                            |
-| **Embedding Models**        | <nobr>🚧 WIP ([PR #16188](https://github.com/vllm-project/vllm/pull/16188))</nobr> |
+| **Embedding Models**        | <nobr>🟢 Functional</nobr>                                                         |
 | **Mamba Models**            | <nobr>🚧 WIP ([PR #19327](https://github.com/vllm-project/vllm/pull/19327))</nobr> |
 | **Multimodal Models**       | <nobr>🟢 Functional</nobr>                                                         |
 
@@ -80,11 +80,11 @@ vLLM V1 currently excludes model architectures with the `SupportsV0Only` protoco
 
     This corresponds to the V1 column in our [list of supported models][supported-models].
 
-See below for the status of models that are still not yet supported in V1.
+See below for the status of models that are not yet supported or have more features planned in V1.
 
 #### Embedding Models
 
-The initial support will be provided by [PR #16188](https://github.com/vllm-project/vllm/pull/16188).
+The initial basic support is now functional.
 
 Later, we will consider using [hidden states processor](https://github.com/vllm-project/vllm/issues/12249),
 which is based on [global logits processor](https://github.com/vllm-project/vllm/pull/13360)

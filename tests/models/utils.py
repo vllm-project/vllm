@@ -336,3 +336,10 @@ class EmbedModelInfo(NamedTuple):
     architecture: str = ""
     dtype: str = "auto"
     enable_test: bool = True
+
+
+class RerankModelInfo(NamedTuple):
+    name: str
+    architecture: str = ""
+    dtype: str = "auto"
+    enable_test: bool = True
