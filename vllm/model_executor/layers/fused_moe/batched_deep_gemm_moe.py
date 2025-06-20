@@ -18,9 +18,9 @@ has_deep_gemm = importlib.util.find_spec("deep_gemm") is not None
 def _silu_mul_fp8_quant_deep_gemm(
     # Pointers ------------------------------------------------------------
     input_ptr,  # 16-bit activations (E, T, 2*H)
-    y_q_ptr,  # fp88   quantized activations (E, T, H)
+    y_q_ptr,  # fp8 quantized activations (E, T, H)
     y_s_ptr,  # 16-bit scales (E, T, G)
-    counts_ptr,  # int32  num tokens per expert (E)
+    counts_ptr,  # int32 num tokens per expert (E)
 
     # Sizes ---------------------------------------------------------------
     H: tl.constexpr,  # hidden dimension (per output)
