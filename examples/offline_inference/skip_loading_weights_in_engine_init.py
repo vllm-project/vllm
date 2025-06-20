@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import asyncio
+
 from vllm import LLM, AsyncEngineArgs, AsyncLLMEngine, SamplingParams
 
 # Sample prompts.
@@ -17,22 +19,30 @@ async def aync_main():
     engine_args = AsyncEngineArgs(
         model="facebook/opt-125m",
         load_format="dummy",
+        enforce_eager=True,
     )
+    # Create an engine without loading real weights
     engine = AsyncLLMEngine.from_engine_args(engine_args)
-    engine.engine.vllm_config.load_config.load_format = "auto"
+    # Update load format from `dummy` to `auto`
+    await engine.collective_rpc("update_load_config", kwargs={"load_format": "auto"})
+    # Now load real weights inplace
     await engine.collective_rpc("load_model")
-    # start the generation
+
+    # Check outputs make sense
+    prompt = "What is LLM?"
     results_generator = engine.generate(
-        prompt="What is LLM?",
+        prompt=prompt,
         sampling_params=SamplingParams(temperature=0.0),
         request_id="0",
     )
-    # get the results
     final_output = None
     async for request_output in results_generator:
         final_output = request_output
     assert final_output is not None
-    print("Async engine output:", final_output.outputs[0].text)
+    print("\nLLM Outputs:\n" + "-" * 60)
+    print(f"Prompt:    {prompt!r}")
+    print(f"Output:    {final_output.outputs[0].text!r}")
+    print("-" * 60)
 
 
 def main():
@@ -40,17 +50,17 @@ def main():
     llm = LLM(
         model="facebook/opt-125m",
         load_format="dummy",
+        enforce_eager=True,
     )
 
-    # llm.llm_engine.model_executor.driver_worker.worker.\
-    #    model_runner.vllm_config.load_config.load_format = "auto"
+    # Update load format from `dummy` to `auto`
+    llm.collective_rpc("update_load_config", kwargs={"load_format": "auto"})
     # Now load real weights inplace
-    # llm.llm_engine.vllm_config.load_config.load_format = "auto"
     llm.collective_rpc("load_model")
 
-    # Check real weights are loaded
+    # Check outputs make sense
     outputs = llm.generate(prompts, sampling_params)
-    print("\nGenerated Outputs:\n" + "-" * 60)
+    print("\nLLM Outputs:\n" + "-" * 60)
     for output in outputs:
         prompt = output.prompt
         generated_text = output.outputs[0].text
@@ -61,4 +71,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-    # asyncio.run(aync_main())
+    asyncio.run(aync_main())
