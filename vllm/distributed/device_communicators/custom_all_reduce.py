@@ -284,8 +284,9 @@ class CustomAllreduce:
               hasattr(vllm_config.model_config, "dtype"):
             dtype = vllm_config.model_config.dtype
             if dtype not in [torch.float16, torch.bfloat16]:
-                logger.info("Custom quick allreduce disabled: only "
-                            f"supports float16 and float16, but get {dtype}")
+                logger.debug(
+                    "Custom quick allreduce disabled: only supports "
+                    "float16 and float16, but get %s.", dtype)
                 return
 
             if dtype == torch.bfloat16 and self.use_fp16_kernels:
