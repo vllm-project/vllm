@@ -22,7 +22,8 @@ from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.sched.interface import SchedulerInterface
 from vllm.v1.core.sched.output import (CachedRequestData, NewRequestData,
                                        SchedulerOutput)
-from vllm.v1.core.sched.request_queue import create_request_queue
+from vllm.v1.core.sched.request_queue import (SchedulingPolicy,
+                                              create_request_queue)
 from vllm.v1.core.sched.utils import check_stop
 from vllm.v1.engine import (EngineCoreEventType, EngineCoreOutput,
                             EngineCoreOutputs)
@@ -96,7 +97,13 @@ class Scheduler(SchedulerInterface):
         # req_id -> Request
         self.requests: dict[str, Request] = {}
         # Scheduling policy
-        self.policy = self.scheduler_config.policy
+        if self.scheduler_config.policy == "priority":
+            self.policy = SchedulingPolicy.PRIORITY
+        elif self.scheduler_config.policy == "fcfs":
+            self.policy = SchedulingPolicy.FCFS
+        else:
+            raise ValueError(
+                f"Unknown scheduling policy: {self.scheduler_config.policy}")
         # Priority queues for requests.
         self.waiting = create_request_queue(self.policy)
         self.running: list[Request] = []
@@ -250,7 +257,7 @@ class Scheduler(SchedulerInterface):
                 if new_blocks is None:
                     # The request cannot be scheduled.
                     # Preempt the lowest-priority request.
-                    if self.policy == "priority":
+                    if self.policy == SchedulingPolicy.PRIORITY:
                         preempted_req = max(
                             self.running,
                             key=lambda r: (r.priority, r.arrival_time),
