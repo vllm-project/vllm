@@ -380,6 +380,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 
             # Note : We may want to use FP8 dispatch even otherwise just to
             # reduce datamovement
+            assert act_quant_block_size is not None
             use_fp8_dispatch = (quant_dtype == current_platform.fp8_dtype()
                                 and act_quant_block_size[1]
                                 == DEEPEP_QUANT_BLOCK_SIZE)
