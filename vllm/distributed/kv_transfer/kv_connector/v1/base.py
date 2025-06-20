@@ -208,7 +208,7 @@ class KVConnectorBase_V1(ABC):
     @abstractmethod
     def get_num_new_matched_tokens(
         self,
-        request: "Request",
+        request: "RequestGenerationState",
         num_computed_tokens: int,
     ) -> tuple[int, bool]:
         """
@@ -216,7 +216,7 @@ class KVConnectorBase_V1(ABC):
         external KV cache beyond the num_computed_tokens.
         
         Args:
-            request (Request): the request object.
+            request (RequestGenerationState): the request generation state object.
             num_computed_tokens (int): the number of locally
                 computed tokens for this request
 
@@ -231,7 +231,7 @@ class KVConnectorBase_V1(ABC):
         pass
 
     @abstractmethod
-    def update_state_after_alloc(self, request: "Request",
+    def update_state_after_alloc(self, request: "RequestGenerationState",
                                  blocks: "KVCacheBlocks",
                                  num_external_tokens: int):
         """
@@ -244,7 +244,7 @@ class KVConnectorBase_V1(ABC):
         are allocated, after the load/transfer is complete.
 
         Args:
-            request (Request): the request object.
+            request (RequestGenerationState): the request generation state object.
             blocks (KVCacheBlocks): the blocks allocated for the request.
             num_external_tokens (int): the number of tokens that will be
                 loaded from the external KV cache.

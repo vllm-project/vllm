@@ -328,6 +328,12 @@ class Scheduler(SchedulerInterface):
 
                 request = self.waiting[0]
 
+                # Skip request if it's already finished (this can happen if a request
+                # was finished in a previous step but not removed from the waiting queue)
+                if request.is_finished():
+                    self.waiting.popleft()
+                    continue
+
                 # KVTransfer: skip request if still waiting for remote kvs.
                 if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
                     is_ready = self._update_waiting_for_remote_kv(request)
@@ -439,8 +445,10 @@ class Scheduler(SchedulerInterface):
                 # This information is used to determine if a load is
                 # needed for this request.
                 if self.connector is not None:
+                    # Get the RequestGenerationState for access to all_token_ids
+                    request_state = self.request_states[request.request_id]
                     self.connector.update_state_after_alloc(
-                        request,
+                        request_state,
                         new_computed_blocks + new_blocks,
                         num_external_computed_tokens,
                     )
@@ -828,7 +836,8 @@ class Scheduler(SchedulerInterface):
         prompt_logprobs_dict = model_runner_output.prompt_logprobs_dict
 
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
-        spec_decoding_stats = None
+        # Keep the spec_decoding_stats passed from _update_from_output
+        # spec_decoding_stats = None
 
         for req_id in model_runner_output.req_ids:
             idx = model_runner_output.req_id_to_index[req_id]
@@ -875,7 +884,8 @@ class Scheduler(SchedulerInterface):
                 #  remove it from running. This is safe since asyncio is not
                 #  preemptive so we know we are inbetween schedule() calls.
                 if not request_scheduler_state.is_finished():
-                    self.running.remove(request_scheduler_state)
+                    if request_scheduler_state in self.running:
+                        self.running.remove(request_scheduler_state)
                 request_scheduler_state.status = status
 
                 # NOTE: kv_transfer_params would be set by scheduler's _free_request if implemented

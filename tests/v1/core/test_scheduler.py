@@ -890,7 +890,9 @@ def _step_until_done(
             # We should be in the decode phase now.
             assert num_scheduled_tokens == 1
         assert len(output.kv_connector_metadata.requests) == 0
-        scheduler_update_from_output_sync(scheduler, output, model_runner_output)
+        # Create a new model runner output that only includes currently running requests
+        current_model_runner_output = make_output(scheduler)
+        scheduler_update_from_output_sync(scheduler, output, current_model_runner_output)
         # Check if all requests are finished by looking at scheduler state
         all_done = len(scheduler.running) == 0
         all_finished = all_done
@@ -1148,7 +1150,7 @@ def test_kv_connector_handles_preemption():
         num_requests=2,
         expected_num_scheduled_tokens=NUM_TOKENS - NUM_MATCHED_NEW_TOKENS)
     assert len(scheduler.running) == 2
-    _ = scheduler_update_from_output_sync(scheduler, output, MODEL_RUNNER_OUTPUT)
+    _ = scheduler_update_from_output_sync(scheduler, output, make_output(scheduler))
 
     # All can be scheduled - 2nd token.
     output = scheduler.schedule()
@@ -1158,7 +1160,7 @@ def test_kv_connector_handles_preemption():
         num_requests=0,
         expected_num_scheduled_tokens=1)
     assert len(scheduler.running) == 2
-    _ = scheduler_update_from_output_sync(scheduler, output, MODEL_RUNNER_OUTPUT)
+    _ = scheduler_update_from_output_sync(scheduler, output, make_output(scheduler))
 
     # This will generate a new block and cause a preemption - 3rd token.
     output = scheduler.schedule()
@@ -1169,7 +1171,7 @@ def test_kv_connector_handles_preemption():
         expected_num_scheduled_tokens=1)
     assert len(scheduler.running) == 1
     assert len(scheduler.waiting) == 1
-    _ = scheduler_update_from_output_sync(scheduler, output, MODEL_RUNNER_OUTPUT)
+    _ = scheduler_update_from_output_sync(scheduler, output, make_output(scheduler))
     assert len(scheduler.running) == 1
     assert len(scheduler.waiting) == 1
 
@@ -1182,7 +1184,7 @@ def test_kv_connector_handles_preemption():
         expected_num_scheduled_tokens=1)
     assert len(scheduler.waiting) == 1
     assert len(scheduler.running) == 1
-    _ = scheduler_update_from_output_sync(scheduler, output, MODEL_RUNNER_OUTPUT)
+    _ = scheduler_update_from_output_sync(scheduler, output, make_output(scheduler))
     assert len(scheduler.running) == 0
     assert len(scheduler.waiting) == 1
     # All memory should be freed since nothing is running.
@@ -1202,7 +1204,7 @@ def test_kv_connector_handles_preemption():
     )
     assert len(scheduler.running) == 1
     assert len(scheduler.waiting) == 0
-    _ = scheduler_update_from_output_sync(scheduler, output, MODEL_RUNNER_OUTPUT)
+    _ = scheduler_update_from_output_sync(scheduler, output, make_output(scheduler))
     assert len(scheduler.running) == 1
     assert len(scheduler.waiting) == 0
 
@@ -1214,7 +1216,7 @@ def test_kv_connector_handles_preemption():
         num_requests=0,
         expected_num_scheduled_tokens=1)
     assert len(scheduler.running) == 1
-    _ = scheduler_update_from_output_sync(scheduler, output, MODEL_RUNNER_OUTPUT)
+    _ = scheduler_update_from_output_sync(scheduler, output, make_output(scheduler))
     assert len(scheduler.running) == 0
     # All memory should be freed since nothing is running.
     assert scheduler.kv_cache_manager.block_pool.get_num_free_blocks() \

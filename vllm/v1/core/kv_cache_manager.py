@@ -288,9 +288,21 @@ class KVCacheManager:
         # Speculated tokens might be rejected in the future, so we do not
         # cache any speculated tokens. We only cache blocks with
         # generated (accepted) tokens.
-        self.coordinator.cache_blocks(
-            request_id, self.req_to_block_hashes[request_id],
-            num_computed_tokens + num_new_tokens - num_draft_tokens)
+        block_hashes = self.req_to_block_hashes[request_id]
+        num_tokens_to_cache = num_computed_tokens + num_new_tokens - num_draft_tokens
+        
+        # Only cache if we have block hashes (means get_computed_blocks was called)
+        # For running requests that don't have sufficient block hashes, skip caching
+        if block_hashes:
+            # Limit the number of tokens to cache to what we have hashes for
+            num_blocks_available = len(block_hashes)
+            max_tokens_to_cache = num_blocks_available * self.block_size
+            tokens_to_cache = min(num_tokens_to_cache, max_tokens_to_cache)
+            
+            if tokens_to_cache > 0:
+                self.coordinator.cache_blocks(
+                    request_id, block_hashes,
+                    tokens_to_cache)
 
         return KVCacheBlocks(new_blocks)
 
