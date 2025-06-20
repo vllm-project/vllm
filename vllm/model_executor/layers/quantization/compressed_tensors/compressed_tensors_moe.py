@@ -348,9 +348,11 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 topk_ids=topk_ids,
                 activation=activation,
                 apply_router_weight_on_input=apply_router_weight_on_input,
-                use_fp8_w8a8=True,
-                per_channel_quant=self.weight_quant.strategy ==
-                QuantizationStrategy.CHANNEL,
+                FusedMoEQuantConfig.make(
+                    use_fp8_w8a8=True,
+                    per_act_token_quant=self.weight_quant.strategy ==
+                    QuantizationStrategy.CHANNEL
+                ),
                 w1_scale=layer.w13_weight_scale,
                 w2_scale=layer.w2_weight_scale,
                 a1_scale=layer.w13_input_scale,
@@ -384,9 +386,11 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             inplace=True,
             activation=activation,
             apply_router_weight_on_input=apply_router_weight_on_input,
-            use_fp8_w8a8=True,
-            per_channel_quant=self.weight_quant.strategy ==
-            QuantizationStrategy.CHANNEL,
+            FusedMoEQuantConfig.make(
+                use_fp8_w8a8=True,
+                per_act_token_quant=self.weight_quant.strategy ==
+                QuantizationStrategy.CHANNEL
+            ),
             global_num_experts=global_num_experts,
             expert_map=expert_map,
             w1_scale=layer.w13_weight_scale,
@@ -742,8 +746,10 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
             inplace=True,
             activation=activation,
             apply_router_weight_on_input=apply_router_weight_on_input,
-            use_int8_w8a8=True,
-            per_channel_quant=True,
+            FusedMoEQuantConfig.make(
+                use_int8_w8a8=True,
+                per_act_token_quant=True,
+            ),
             global_num_experts=global_num_experts,
             expert_map=expert_map,
             w1_scale=layer.w13_weight_scale,
@@ -1247,8 +1253,11 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             topk_ids=topk_ids,
             inplace=True,
             activation=activation,
-            use_int4_w4a16=self.num_bits == 4,
-            use_int8_w8a16=self.num_bits == 8,
+            FusedMoEQuantConfig.make(
+                use_int4_w4a16=self.num_bits == 4,
+                use_int8_w8a16=self.num_bits == 8,
+                block_shape=[0, self.group_size],
+            )
             global_num_experts=global_num_experts,
             apply_router_weight_on_input=apply_router_weight_on_input,
             expert_map=expert_map,
@@ -1256,4 +1265,4 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             w2_scale=layer.w2_weight_scale,
             w1_zp=None,
             w2_zp=None,
-            block_shape=[0, self.group_size])
+        )

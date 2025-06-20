@@ -15,31 +15,11 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def __init__(
         self,
-        use_fp8_w8a8: bool = False,
-        use_int8_w8a8: bool = False,
-        use_int8_w8a16: bool = False,
-        use_int4_w4a16: bool = False,
-        per_act_token_quant: bool = False,
-        block_shape: Optional[list[int]] = None,
         allow_deep_gemm: bool = False,
+        quant_config: Optional[FusedMoEQuantConfig] = None,
     ):
-        super().__init__(
-            FusedMoEQuantConfig.make(
-                use_fp8_w8a8=use_fp8_w8a8,
-                use_int8_w8a8=use_int8_w8a8,
-                use_int8_w8a16=use_int8_w8a16,
-                use_int4_w4a16=use_int4_w4a16,
-                per_act_token_quant=per_act_token_quant,
-                block_shape=block_shape,
-            ))
-        self.triton_expert = TritonExperts(
-            use_fp8_w8a8=use_fp8_w8a8,
-            use_int8_w8a8=use_int8_w8a8,
-            use_int4_w4a16=use_int4_w4a16,
-            use_int8_w8a16=use_int8_w8a16,
-            per_act_token_quant=per_act_token_quant,
-            block_shape=block_shape,
-        )
+        super().__init__(quant_config)
+        self.triton_expert = TritonExperts(quant_config)
         self.allow_deep_gemm = (allow_deep_gemm and not per_act_token_quant
                                 and use_fp8_w8a8)
         self.deep_gemm_expert = DeepGemmExperts(

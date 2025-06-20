@@ -515,26 +515,13 @@ class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         max_num_tokens: int,
         world_size: int,
         dp_size: int,
-        use_fp8_w8a8: bool = False,
-        use_int8_w8a8: bool = False,
-        use_int8_w8a16: bool = False,
-        use_int4_w4a16: bool = False,
-        block_shape: Optional[list[int]] = None,
-        per_act_token_quant: bool = False,
+        quant_config: Optional[FusedMoEQuantConfig] = None,
     ):
-        super().__init__(
-            FusedMoEQuantConfig.make(
-                use_fp8_w8a8=use_fp8_w8a8,
-                use_int8_w8a8=use_int8_w8a8,
-                use_int8_w8a16=use_int8_w8a16,
-                use_int4_w4a16=use_int4_w4a16,
-                per_act_token_quant=per_act_token_quant,
-                block_shape=block_shape,
-            ))
-        assert not use_fp8_w8a8, "NYI"
-        assert not use_int8_w8a8, "NYI"
-        assert not use_int8_w8a16, "NYI"
-        assert not use_int4_w4a16, "NYI"
+        super().__init__(quant_config)
+        assert quant_config is None or (not quant_confg.use_fp8_w8a8 and
+                                        not quant_confg.use_int8_w8a8 and
+                                        not quant_confg.use_int8_w8a16 and
+                                        not quant_confg.use_int4_w4a16), "NYI"
         self.max_num_tokens = max_num_tokens
         self.world_size = world_size
         self.dp_size = dp_size
@@ -632,29 +619,12 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         max_num_tokens: int,
         world_size: int,
         dp_size: int,
-        use_fp8_w8a8: bool = False,
-        use_int8_w8a8: bool = False,
-        use_int8_w8a16: bool = False,
-        use_int4_w4a16: bool = False,
-        per_act_token_quant: bool = False,
-        block_shape: Optional[list[int]] = None,
+        quant_config: Optional[FusedMoEQuantConfig] = None,
     ):
-        super().__init__(
-            FusedMoEQuantConfig.make(
-                use_fp8_w8a8=use_fp8_w8a8,
-                use_int8_w8a8=use_int8_w8a8,
-                use_int8_w8a16=use_int8_w8a16,
-                use_int4_w4a16=use_int4_w4a16,
-                per_act_token_quant=per_act_token_quant,
-                block_shape=block_shape,
-            ))
-        assert not use_int8_w8a8, "NYI"
-        assert not use_int8_w8a16, "NYI"
-        assert not use_int4_w4a16, "NYI"
-        self.use_fp8_w8a8 = use_fp8_w8a8
-        self.use_int8_w8a8 = use_int8_w8a8
-        self.use_int4_w4a16 = use_int4_w4a16
-        self.use_int8_w8a16 = use_int8_w8a16
+        super().__init__(quant_config)
+        assert quant_config is None or (not quant_confg.use_int8_w8a8 and
+                                        not quant_confg.use_int8_w8a16 and
+                                        not quant_confg.use_int4_w4a16), "NYI"
         self.max_num_tokens = max_num_tokens
         self.world_size = world_size
         self.dp_size = dp_size
@@ -713,7 +683,7 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         expert_num_tokens: Optional[torch.Tensor],
     ):
         # Check constraints.
-        if self.use_int4_w4a16:
+        if self.quant_config.use_int4_w4a16:
             assert hidden_states.size(-1) // 2 == w1.size(2), (
                 "Hidden size mismatch")
         else:
@@ -735,16 +705,11 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         assert w1.size(0) == E
         assert w2.size(0) == E
 
-        config_dtype = get_config_dtype_str(use_fp8_w8a8=self.use_fp8_w8a8,
-                                            use_int8_w8a16=self.use_int8_w8a16,
-                                            use_int4_w4a16=self.use_int4_w4a16,
-                                            dtype=hidden_states.dtype)
-
         config = try_get_optimal_moe_config(
             w1.size(),
             w2.size(),
             top_k_num,
-            config_dtype,
+            quant_config.config_dtype_str,
             max_num_tokens,
             block_shape=self.block_shape,
         )
@@ -769,7 +734,7 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         intermediate_cache2 = _resize_cache(workspace2,
                                             (E, max_num_tokens, N // 2))
 
-        if self.use_fp8_w8a8:
+        if self.quant_config.use_fp8_w8a8:
             intermediate_cache1.fill_(0)
 
         # MM1
@@ -781,9 +746,9 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
                                          A_scale=a1q_scale,
                                          B_scale=w1_scale,
                                          B_zp=w1_zp,
-                                         use_fp8_w8a8=self.use_fp8_w8a8,
-                                         use_int8_w8a16=self.use_int8_w8a16,
-                                         use_int4_w4a16=self.use_int4_w4a16,
+                                         use_fp8_w8a8=self.quant_config.use_fp8_w8a8,
+                                         use_int8_w8a16=self.quant_config.use_int8_w8a16,
+                                         use_int4_w4a16=self.quant_config.use_int4_w4a16,
                                          config=config,
                                          block_shape=self.block_shape)
 
@@ -800,7 +765,7 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         qintermediate_cache2, a2q_scale = moe_kernel_quantize_input(
             A=intermediate_cache2,
             A_scale=a2_scale,
-            quant_dtype=torch.float8_e4m3fn if self.use_fp8_w8a8 else None,
+            quant_dtype=torch.float8_e4m3fn if self.quant_config.use_fp8_w8a8 else None,
             per_act_token_quant=self.per_act_token_quant,
             block_shape=self.block_shape)
 
@@ -815,8 +780,8 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
                                          A_scale=a2q_scale,
                                          B_scale=w2_scale,
                                          B_zp=w2_zp,
-                                         use_fp8_w8a8=self.use_fp8_w8a8,
-                                         use_int8_w8a16=self.use_int8_w8a16,
-                                         use_int4_w4a16=self.use_int4_w4a16,
+                                         use_fp8_w8a8=self.quant_config.use_fp8_w8a8,
+                                         use_int8_w8a16=self.quant_config.use_int8_w8a16,
+                                         use_int4_w4a16=self.quant_config.use_int4_w4a16,
                                          config=config,
                                          block_shape=self.block_shape)

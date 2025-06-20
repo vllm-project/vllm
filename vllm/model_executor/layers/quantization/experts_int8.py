@@ -140,7 +140,7 @@ class ExpertsInt8MoEMethod(FusedMoEMethodBase):
             topk_ids=topk_ids,
             inplace=True,
             activation=activation,
-            use_int8_w8a16=True,
+            FusedMoEQuantConfig.make(use_int8_w8a16=True),
             global_num_experts=global_num_experts,
             apply_router_weight_on_input=apply_router_weight_on_input,
             expert_map=expert_map,

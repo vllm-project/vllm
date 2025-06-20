@@ -60,9 +60,11 @@ def batched_moe(
         BatchedTritonExperts(max_num_tokens=max_num_tokens,
                              world_size=1,
                              dp_size=1,
-                             use_fp8_w8a8=qtype == torch.float8_e4m3fn,
-                             per_act_token_quant=per_act_token,
-                             block_shape=block_shape))
+                             FusedMoEQuantConfig.make(
+                                 use_fp8_w8a8=qtype == torch.float8_e4m3fn,
+                                 per_act_token_quant=per_act_token,
+                                 block_shape=block_shape),
+                             )
 
     return fused_experts(a,
                          w1,

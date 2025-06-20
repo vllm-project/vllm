@@ -216,8 +216,8 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
         use_batched_format: bool = False,
     ):
         super().__init__(
-            FusedMoEQuantConfig(
-                quant_dtype=torch.float8_e4m3fn,
+            FusedMoEQuantConfig.make(
+                use_fp8_w8a8=True,
                 per_act_token_quant=per_act_token_quant,
                 per_out_ch_quant=per_out_ch_quant,
                 block_shape=block_shape,

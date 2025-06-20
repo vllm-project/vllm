@@ -43,6 +43,28 @@ def get_quant_config_weight_quant(
     return _get_quant_config_quantization_args(quant_config, "weights")
 
 
+def get_config_dtype_str(
+    act_dtype: torch.dtype,
+    use_fp8_w8a8: bool,
+    use_int8_w8a8: bool,
+    use_int8_w8a16: bool,
+    use_int4_w4a16: bool,
+) -> Optional[str]:
+    if use_fp8_w8a8:
+        return "fp8_w8a8"
+    elif use_int8_w8a8:
+        return "int8_w8a8"
+    elif use_int8_w8a16:
+        return "int8_w8a16"
+    elif use_int4_w4a16:
+        return "int4_w4a16"
+    elif act_dtype == torch.float:
+        # avoiding cases where kernel fails when float32 MoE
+        # use fp16/bfloat16 configs
+        return "float32"
+    return None
+
+
 # TODO (bnell): use scalar_type instead of bools?
 def get_config_quant_dtype(
     use_fp8_w8a8: bool,
@@ -52,7 +74,7 @@ def get_config_quant_dtype(
 ) -> Optional[torch.dtype]:
     if use_fp8_w8a8:
         return torch.float8_e4m3fn
-    elif use_int8_w8a8:
+    elif use_int8_w8a8 or use_int8_w8a16:
         return torch.int8
     return None
 
@@ -61,6 +83,7 @@ def get_config_quant_dtype(
 class FusedMoEQuantConfig:
     # The post quantization activation type.
     quant_dtype: Optional[torch.dtype] = None
+    config_dtype_str: Optional[str] = None
     per_act_token_quant: bool = False
     per_out_ch_quant: bool = False
     block_shape: Optional[list[int]] = None
@@ -68,8 +91,25 @@ class FusedMoEQuantConfig:
     # TODO: add col major flag?
     # add detailed quant info for input, intermediates, weights, etc?
 
+    @property
+    def use_fp8_w8a8(self) -> bool:
+        return self.config_dtype_str == "fp8_w8a8"
+
+    @property
+    def use_int8_w8a8(self) -> bool:
+        return self.config_dtype_str == "int8_w8a8"
+
+    @property
+    def use_int8_w8a16(self) -> bool:
+        return self.config_dtype_str == "int8_w8a16"
+
+    @property
+    def use_int4_w4a16(self) -> bool:
+        return self.config_dtype_str == "int4_w4a16"
+
     @staticmethod
     def make(
+        act_dtype: Optional[torch.dtype] = None,
         use_fp8_w8a8: bool = False,
         use_int8_w8a8: bool = False,
         use_int8_w8a16: bool = False,
@@ -78,12 +118,40 @@ class FusedMoEQuantConfig:
         per_out_ch_quant: bool = False,
         block_shape: Optional[list[int]] = None,
     ) -> "FusedMoEQuantConfig":
-        quant_dtype = get_config_quant_dtype(use_fp8_w8a8=use_fp8_w8a8,
-                                             use_int8_w8a8=use_int8_w8a8,
-                                             use_int8_w8a16=use_int8_w8a16,
-                                             use_int4_w4a16=use_int4_w4a16)
+        """
+        - use_fp8_w8a8 (bool): If True, use fp8 arithmetic to compute the inner
+          products for w1 and w2. Defaults to False.
+        - use_int8_w8a8 (bool): If True, use int8 arithmetic to compute the inner
+          products for w1 and w2. Defaults to False.
+        - use_int8_w8a16 (bool): If True, use matmul of int8 weight and bf16/fp16
+          activation to compute the inner products for w1 and w2.
+          Defaults to False.
+        - use_int4_w4a16 (bool): If True, use matmul of int4 weight and bf16/fp16
+          activation to compute the inner products for w1 and w2.
+          Defaults to False.
+        - per_act_token_quant (bool): TODO
+          Defaults to False.
+        - per_out_ch_quant (bool): TODO
+          Defaults to False.
+        - block_shape: (Optional[list[int]]): Optional block size for block-wise
+          quantization.
+        """
+        quant_dtype = get_config_quant_dtype(
+            use_fp8_w8a8=use_fp8_w8a8,
+            use_int8_w8a8=use_int8_w8a8,
+            use_int8_w8a16=use_int8_w8a16,
+            use_int4_w4a16=use_int4_w4a16
+        )
+        config_dtype_str = get_config_dtype_str(
+            act_dtype if act_dtype is not None else torch.bfloat16,
+            use_fp8_w8a8=use_fp8_w8a8,
+            use_int8_w8a8=use_int8_w8a8,
+            use_int8_w8a16=use_int8_w8a16,
+            use_int4_w4a16=use_int4_w4a16
+        )
         return FusedMoEQuantConfig(
             quant_dtype,
+            config_dtype_str,
             per_act_token_quant,
             per_out_ch_quant,
             block_shape,

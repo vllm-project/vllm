@@ -13,30 +13,19 @@ from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
 
 class BatchedTritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
-    def __init__(self,
-                 max_num_tokens: int,
-                 world_size: int,
-                 dp_size: int,
-                 use_fp8_w8a8: bool = False,
-                 use_int8_w8a8: bool = False,
-                 use_int8_w8a16: bool = False,
-                 use_int4_w4a16: bool = False,
-                 block_shape: Optional[list[int]] = None,
-                 per_act_token_quant: bool = False,
-                 allow_deep_gemm: bool = False):
-        assert not use_int8_w8a8, "NYI"
-        assert not use_int8_w8a16, "NYI"
-        assert not use_int4_w4a16, "NYI"
+    def __init__(
+        self,
+        max_num_tokens: int,
+        world_size: int,
+        dp_size: int,
+        quant_config: Optional[FusedMoEQuantConfig] = None,
+        allow_deep_gemm: bool = False
+    ):
+    assert quant_config is None or (not quant_config.use_int8_w8a and
+                                    not quant_config.use_int8_w8a16 and
+                                    not quant_config.use_int4_w4a16), "NYI"
 
-        super().__init__(
-            FusedMoEQuantConfig.make(
-                use_fp8_w8a8=use_fp8_w8a8,
-                use_int8_w8a8=use_int8_w8a8,
-                use_int8_w8a16=use_int8_w8a16,
-                use_int4_w4a16=use_int4_w4a16,
-                block_shape=block_shape,
-                per_act_token_quant=per_act_token_quant,
-            ))
+        super().__init__(quant_config)
         self.max_num_tokens = max_num_tokens
         self.world_size = world_size
         self.dp_size = dp_size

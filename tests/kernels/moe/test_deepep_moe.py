@@ -159,18 +159,20 @@ def make_modular_kernel(pg: ProcessGroup, pgi: ProcessGroupInfo,
             max_num_tokens=MAX_TOKENS_PER_RANK,
             world_size=pgi.world_size,
             dp_size=dp_size,
-            use_fp8_w8a8=is_quantized,
-            use_int8_w8a8=False,
-            use_int8_w8a16=False,
-            use_int4_w4a16=False,
-            per_act_token_quant=False)
+            FusedMoEQuantConfig.make(
+                act_dtype=torch.bfloat16,
+                use_fp8_w8a8=is_quantized,
+            ),
+        )
     else:
         # TODO(bnell): block_shape?
-        fused_experts = TritonExperts(use_fp8_w8a8=is_quantized,
-                                      use_int8_w8a8=False,
-                                      use_int8_w8a16=False,
-                                      use_int4_w4a16=False,
-                                      per_act_token_quant=False)
+        fused_experts = TritonExperts(
+            FusedMoEQuantConfig.make(
+                act_dtype=torch.bfloat16,
+                use_fp8_w8a8=is_quantized,
+                per_act_token_quant=False,
+            ),
+        )
 
     mk = FusedMoEModularKernel(prepare_finalize=a2a,
                                fused_experts=fused_experts)

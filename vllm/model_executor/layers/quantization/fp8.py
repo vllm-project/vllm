@@ -470,8 +470,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         self.topk_indices_dtype = None
         self.fused_experts = functools.partial(  # type: ignore
             fused_experts,
-            use_fp8_w8a8=True,
-            block_shape=self.quant_config.weight_block_size,
+            FusedMoEQuantConfig.make(
+                use_fp8_w8a8=True,
+                block_shape=self.quant_config.weight_block_size
+            ),
             allow_deep_gemm=self.allow_deep_gemm)
 
     def create_weights(self, layer: Module, num_experts: int, hidden_size: int,
@@ -795,10 +797,13 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 max_num_tokens=max_num_tokens_per_rank,
                 world_size=moe.world_size,
                 dp_size=moe.dp_size,
-                use_fp8_w8a8=True,
-                block_shape=self.quant_config.weight_block_size,
-                per_act_token_quant=False,
                 allow_deep_gemm=self.allow_deep_gemm,
+                FusedMoEQuantConfig.make(
+                    moe.in_dtype,
+                    use_fp8_w8a8=True,
+                    block_shape=self.quant_config.weight_block_size,
+                    per_act_token_quant=False
+                ),
             )
         else:
             logger.debug(
@@ -806,9 +811,13 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 self.__class__.__name__, self.quant_config.weight_block_size,
                 False)
             return TritonOrDeepGemmExperts(
-                use_fp8_w8a8=True,
-                block_shape=self.quant_config.weight_block_size,
                 allow_deep_gemm=self.allow_deep_gemm,
+                FusedMoEQuantConfig.make(
+                    moe.in_dtype,
+                    use_fp8_w8a8=True,
+                    block_shape=self.quant_config.weight_block_size,
+                    per_act_token_quant=False,
+                ),
             )
 
     def apply(
@@ -854,7 +863,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
                 activation=activation,
-                use_fp8_w8a8=True,
+                FusedMoEQuantConfig.make(
+                    use_fp8_w8a8=True,
+                    block_shape=self.quant_config.weight_block_size,
+                ),
                 apply_router_weight_on_input=apply_router_weight_on_input,
                 w1_scale=(layer.w13_weight_scale_inv
                           if self.block_quant else layer.w13_weight_scale),
@@ -862,7 +874,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                           if self.block_quant else layer.w2_weight_scale),
                 a1_scale=layer.w13_input_scale,
                 a2_scale=layer.w2_input_scale,
-                block_shape=self.quant_config.weight_block_size)
+            )
         elif self.use_marlin:
             assert activation == "silu", (
                 f"{activation} not supported for Marlin MoE.")
