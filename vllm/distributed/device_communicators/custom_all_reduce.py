@@ -29,7 +29,7 @@ try:
     ops.qr_max_size()
     quick_ar = True
 except Exception:
-    # For CPUs
+    # For CPUs and CUDA
     quick_ar = False
 
 logger = init_logger(__name__)
@@ -105,22 +105,24 @@ class CustomAllreduce:
         is bind to a unique device, and all communicators in this group
         are in the same node.
         """
-        self._QR_SHOULD_INIT = True
         self._IS_CAPTURING = False
         self.disabled = True
-        self.qr_disabled = True
         self.cr_max_size = cr_max_size
-        self.qr_max_size = ops.qr_max_size()
+        self.qr_disabled = True
 
         if not custom_ar:
             # disable because of missing custom allreduce library
             # e.g. in a non-GPU environment
             logger.info("Custom allreduce is disabled because "
                         "of missing custom allreduce library")
-        if not quick_ar:
-            logger.info("Custom quick allreduce is disabled because "
-                        "of missing quick allreduce library")
-            self._QR_SHOULD_INIT = False
+
+        if quick_ar:
+            self._SHOULD_INIT_QR = True
+            self.qr_max_size = ops.qr_max_size()
+        else:
+            self._SHOULD_INIT_QR = False
+            logger.debug("Custom quick allreduce is disabled because "
+                         "of missing quick allreduce library")
 
         if not quick_ar and not custom_ar:
             return
@@ -153,12 +155,12 @@ class CustomAllreduce:
                 world_size, str(CustomAllreduce._SUPPORTED_WORLD_SIZES))
             return
 
-        if self._QR_SHOULD_INIT and \
+        if self._SHOULD_INIT_QR and \
             world_size not in CustomAllreduce._QR_SUPPORTED_WORLD_SIZES:
-            self._QR_SHOULD_INIT = False
             logger.warning(
                 "Custom quick allreduce is disabled due to an unsupported "
                 "world size: %d.", world_size)
+            self._SHOULD_INIT_QR = False
 
         if isinstance(device, int):
             device = torch.device(f"cuda:{device}")
@@ -201,7 +203,7 @@ class CustomAllreduce:
             # First, we only enable quickreduce for MI300 series,
             # If it's rocm then it must be MI300 series because cr is only
             # available on the mi300 series, qr must be available.
-            self._QR_SHOULD_INIT = False
+            self._SHOULD_INIT_QR = False
 
             # test P2P capability, this checks software/cudaruntime support
             # this is expensive to compute at the first time
@@ -256,8 +258,11 @@ class CustomAllreduce:
         Initialize a custom quick allreduce implementation for AMD
         based on quick reduce (https://github.com/mk1-project/quickreduce).
         """
-        if not self._QR_SHOULD_INIT:
+        if not self._SHOULD_INIT_QR:
             return
+        # On RocM, bfloat16 kernels are slower than fp16
+        # due to slower match operations
+        # If environment variable is not set to 1 we convert input to fp16
         self.use_fp16_kernels = envs.VLLM_ROCM_QR_CAST_BF16_TO_FP16
         regime_str = envs.VLLM_ROCM_QR_QUANT_REGIME
         if regime_str not in QuickReduceRegime.__members__:
@@ -279,15 +284,15 @@ class CustomAllreduce:
               hasattr(vllm_config.model_config, "dtype"):
             dtype = vllm_config.model_config.dtype
             if dtype not in [torch.float16, torch.bfloat16]:
-                self._QR_SHOULD_INIT = False
-            # On RocM bfloat16 kernels are slower than fp16
-            # due to slower match operations
-            # If environment variable is not set to 1 we convert input to fp16
-            if dtype == torch.bfloat16 and not self.use_fp16_kernels:
+                logger.info("Custom quick allreduce disabled: only "
+                            f"supports float16 and float16, but get {dtype}")
+                return
+
+            if dtype == torch.bfloat16 and self.use_fp16_kernels:
                 logger.info(
-                    "Custom quick allreduce: converting bf16 inputs to "
-                    "fp16 can improve performance"
-                    "set envs.VLLM_ROCM_QR_CAST_BF16_TO_FP16=1 to turn on.")
+                    "Custom quick allreduce: BF16 inputs will be converted "
+                    "to FP16 to improve performance. set"
+                    "envs.VLLM_ROCM_QR_CAST_BF16_TO_FP16=0 to turn off.")
 
         self.qr_quant_level = QuickReduceRegime[regime_str]
         self._qr_ptr = ops.init_custom_qr(self.rank, self.world_size)
@@ -435,6 +440,7 @@ class CustomAllreduce:
             self.free_shared_buffer(self.buffer_ptrs, rank=self.rank)
             self.disabled = True
         if not self.qr_disabled and self._qr_ptr:
+            # If not qr_disabled, self must have _qr_ptr.
             if ops is not None:
                 ops.qr_destroy(self._qr_ptr)
             self._qr_ptr = 0
