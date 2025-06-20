@@ -111,6 +111,9 @@ class OpenAIServingCompletion(OpenAIServing):
             return res
     
         res = await _process_prefix(request)
+        if isinstance(res, ErrorResponse):
+            return res
+        
         input_str_len = len(res.choices[0].text)
 
         async def _should_stop(final):
@@ -126,6 +129,10 @@ class OpenAIServingCompletion(OpenAIServing):
             while num_chunks < max_chunks and not should_stop:
                 num_chunks += 1
                 beams = await self.beam_validator.get_n_valid_beams(create_completion=self.create_completion, request=request, raw_request=raw_request)
+                if isinstance(beams, ErrorResponse):
+                    yield f"data: {beams.model_dump_json()}\n\n"
+                    break
+            
                 final = await self.beam_scorer.pick_best_beam(beams)
                 request.prompt = final.choices[0].text
                 should_stop = await _should_stop(final)

@@ -58,6 +58,9 @@ class BeamValidator:
         res = await asyncio.gather(*tasks)
         request.n = n
         beam_validator_res = self.validate(res)
+        if isinstance(beam_validator_res, ErrorResponse):
+            return beam_validator_res
+        
         filtered_res = [r for r, valid in zip(res, beam_validator_res) if valid]
         logger.debug("Filtered count: %d", len(filtered_res))
         if len(filtered_res) == 0:
@@ -68,6 +71,7 @@ class BeamValidator:
     def validate(self, responses: list[AsyncGenerator],
                  debug_infos_G: list[BeamDebugInfo] = None):
         error_responses = [r for r in responses if isinstance(r, ErrorResponse)]
+        print(f"error_responses: {error_responses}")
         if len(error_responses) > 0:
             combined_message = "; ".join(er.message for er in error_responses)
             return ErrorResponse(
