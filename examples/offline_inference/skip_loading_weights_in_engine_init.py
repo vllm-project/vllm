@@ -39,7 +39,7 @@ async def aync_main():
     async for request_output in results_generator:
         final_output = request_output
     assert final_output is not None
-    print("\nLLM Outputs:\n" + "-" * 60)
+    print("\nAsync engine Outputs:\n" + "-" * 60)
     print(f"Prompt:    {prompt!r}")
     print(f"Output:    {final_output.outputs[0].text!r}")
     print("-" * 60)
