@@ -3,7 +3,7 @@ from torch import nn
 
 from vllm.config import ModelConfig, VllmConfig
 from vllm.logger import init_logger
-from vllm.model_executor.model_loader.loader import BaseModelLoader
+from vllm.model_executor.model_loader import BaseModelLoader
 from vllm.model_executor.model_loader.utils import get_model_architecture
 
 logger = init_logger(__name__)
@@ -42,4 +42,10 @@ class TTModelLoader(BaseModelLoader):
 
     def download_model(self, model_config: ModelConfig) -> None:
         """Download a model so that it can be immediately loaded."""
+        raise NotImplementedError
+
+    def load_weights(self, model: nn.Module,
+                     model_config: ModelConfig) -> None:
+        """Load weights into a model. This standalone API allows 
+        inplace weights loading for an already-initialized model"""
         raise NotImplementedError
