@@ -105,10 +105,10 @@ class CustomChatCompletionContentPILImageParam(TypedDict, total=False):
 
     Example:
     {
-        "image": ImageAsset('cherry_blossom').pil_image
+        "image_pil": ImageAsset('cherry_blossom').pil_image
     }
     """
-    image: Required[PILImage]
+    image_pil: Required[PILImage]
 
 
 class CustomChatCompletionContentSimpleImageParam(TypedDict, total=False):
@@ -653,7 +653,7 @@ class BaseMultiModalContentParser(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def parse_pil_image(self, image: Image.Image) -> None:
+    def parse_image_pil(self, image_pil: Image.Image) -> None:
         raise NotImplementedError
 
     @abstractmethod
@@ -702,8 +702,8 @@ class MultiModalContentParser(BaseMultiModalContentParser):
 
         self._add_placeholder(placeholder)
 
-    def parse_pil_image(self, image: Image.Image) -> None:
-        placeholder = self._tracker.add("image", image)
+    def parse_image_pil(self, image_pil: Image.Image) -> None:
+        placeholder = self._tracker.add("image", image_pil)
         self._add_placeholder(placeholder)
 
     def parse_audio(self, audio_url: str) -> None:
@@ -762,9 +762,9 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         placeholder = self._tracker.add("image_embeds", future)
         self._add_placeholder(placeholder)
 
-    def parse_pil_image(self, image: Image.Image) -> None:
+    def parse_image_pil(self, image_pil: Image.Image) -> None:
         future: asyncio.Future[Image.Image] = asyncio.Future()
-        future.set_result(image)
+        future.set_result(image_pil)
 
         placeholder = self._tracker.add("image", future)
         self._add_placeholder(placeholder)
@@ -906,7 +906,7 @@ MM_PARSER_MAP: dict[
     lambda part: _ImageParser(part).get("image_url", {}).get("url", None),
     "image_embeds":
     lambda part: _ImageEmbedsParser(part).get("image_embeds", None),
-    "image": lambda part: _PILImageParser(part).get("image", None),
+    "image_pil": lambda part: _PILImageParser(part).get("image_pil", None),
     "audio_url":
     lambda part: _AudioParser(part).get("audio_url", {}).get("url", None),
     "input_audio":
@@ -976,7 +976,7 @@ def _parse_chat_message_content_mm_part(
 
 
 VALID_MESSAGE_CONTENT_MM_PART_TYPES = ("text", "refusal", "image_url",
-                                       "image_embeds", "image",
+                                       "image_embeds", "image_pil",
                                        "audio_url", "input_audio", "video_url")
 
 
@@ -1047,9 +1047,9 @@ def _parse_chat_message_content_part(
         else:
             return str_content
 
-    if part_type == "image":
+    if part_type == "image_pil":
         image_content = cast(Image.Image, content)
-        mm_parser.parse_pil_image(image_content)
+        mm_parser.parse_image_pil(image_content)
         return {'type': 'image'} if wrap_dicts else None
     if part_type == "image_url":
         str_content = cast(str, content)
