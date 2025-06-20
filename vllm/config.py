@@ -1400,7 +1400,9 @@ class ModelConfig:
 
     @property
     def is_cross_encoder(self) -> bool:
-        return self.registry.is_cross_encoder_model(self.architectures)
+        # Temporary solution, See #19675
+        return (self.registry.is_cross_encoder_model(self.architectures) or
+                "forsequenceclassification" in self.architectures[0].lower())
 
     @property
     def use_mla(self) -> bool:

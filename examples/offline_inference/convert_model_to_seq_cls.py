@@ -13,6 +13,7 @@ import transformers
 # python convert_model_to_seq_cls.py --model_name Qwen/Qwen3-Reranker-0.6B --classifier_from_tokens '["no", "yes"]' --method from_2_way_softmax --path ./Qwen3-Reranker-0.6B-seq-cls
 # for BAAI/bge-reranker-v2-gemma
 # python convert_model_to_seq_cls.py --model_name BAAI/bge-reranker-v2-gemma --classifier_from_tokens '["Yes"]' --method no_post_processing --path ./bge-reranker-v2-gemma-seq-cls
+# Caution: "Yes" and "yes" are two different tokens
 
 
 def from_2_way_softmax(
@@ -20,8 +21,6 @@ def from_2_way_softmax(
 ):
     # for Qwen3-Reranker
     # Adapted from https://huggingface.co/Qwen/Qwen3-Reranker-0.6B/discussions/3
-    assert len(classifier_from_tokens) == 2
-
     lm_head_weights = causal_lm.lm_head.weight
 
     a = tokenizer.convert_tokens_to_ids(classifier_from_tokens[0])
@@ -62,13 +61,22 @@ def converting(
 ):
     assert method in method_map
 
+    if method == "from_2_way_softmax":
+        assert len(classifier_from_tokens) == 2
+        num_labels = 1
+    else:
+        num_labels = len(classifier_from_tokens)
+
     tokenizer = transformers.AutoTokenizer.from_pretrained(model_name)
     causal_lm = transformers.AutoModelForCausalLM.from_pretrained(
         model_name, device_map=device
     )
 
     seq_cls_model = transformers.AutoModelForSequenceClassification.from_pretrained(
-        model_name, num_labels=1, ignore_mismatched_sizes=True, device_map=device
+        model_name,
+        num_labels=num_labels,
+        ignore_mismatched_sizes=True,
+        device_map=device,
     )
 
     method_map[method](
