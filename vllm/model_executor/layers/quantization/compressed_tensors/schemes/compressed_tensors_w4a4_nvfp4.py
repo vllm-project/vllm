@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-import os
 from typing import Callable, Optional
 
 import torch
 from torch.nn.parameter import Parameter
 
+import vllm.envs as envs
 from vllm._custom_ops import (cutlass_scaled_fp4_mm,
                               cutlass_scaled_mm_supports_fp4, scaled_fp4_quant)
 from vllm.logger import init_logger
@@ -21,8 +21,6 @@ logger = init_logger(__name__)
 
 __all__ = ["CompressedTensorsW4A4Fp4"]
 
-USE_NVFP4_CT_EMULATIONS = os.environ.get("USE_NVFP4_CT_EMULATIONS", '0')
-
 
 class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
 
@@ -31,7 +29,7 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        if USE_NVFP4_CT_EMULATIONS == "1":
+        if envs.VLLM_USE_NVFP4_CT_EMULATIONS:
             return 80
         return 100
 
@@ -136,7 +134,7 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
                       x: torch.Tensor,
                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
 
-        if USE_NVFP4_CT_EMULATIONS == "1":
+        if envs.VLLM_USE_NVFP4_CT_EMULATIONS:
             out = run_nvfp4_emulations(
                 x=x,
                 input_global_scale=layer.input_global_scale,

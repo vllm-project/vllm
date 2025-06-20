@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import os
 from contextlib import suppress
 from typing import Any, Literal, Optional, cast
 
@@ -14,6 +13,7 @@ from compressed_tensors.quantization import (QuantizationArgs,
                                              QuantizationType)
 from pydantic import BaseModel
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
@@ -376,7 +376,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         if is_activation_quantization_format(self.quant_format):
             if self._is_fp4a4_nvfp4(weight_quant, input_quant):
                 if CompressedTensorsW4A4Fp4.cutlass_fp4_supported(
-                ) or os.environ.get("USE_NVFP4_CT_EMULATIONS", "0") == "1":
+                ) or envs.VLLM_USE_NVFP4_CT_EMULATIONS:
                     return CompressedTensorsW4A4Fp4()
                 else:
                     logger.warning_once(
