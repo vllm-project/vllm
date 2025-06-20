@@ -1477,12 +1477,12 @@ class Tarsier2ForConditionalGeneration(Qwen2VLForConditionalGeneration):
     })
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        source = vllm_config.model_config.hf_config.text_config
-        destination = vllm_config.model_config.hf_config
-        vars(destination).update(vars(source))
-        vllm_config.model_config.hf_config.architectures = [
-            "Tarsier2ForConditionalGeneration"
-        ]
+        # Tarsier2 uses llava as model_type, which will create a Qwen2VLConfig
+        # as text_config, we need to reconstruct Qwen2VLConfig from LlavaConfig.
+        config = vllm_config.model_config.hf_config
+        qwen2vl_config = config.text_config
+        qwen2vl_config.architectures = config.architectures
+        vllm_config.model_config.hf_config = qwen2vl_config
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
     def load_weights(self, weights: Iterable[tuple[str,

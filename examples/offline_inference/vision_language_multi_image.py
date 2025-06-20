@@ -839,7 +839,12 @@ def load_tarsier2(question: str, image_urls: list[str]) -> ModelRequestData:
         hf_overrides={"architectures": ["Tarsier2ForConditionalGeneration"]},
     )
 
-    prompt = f"USER: {'<|image_pad|>' * len(image_urls)}\n{question}\n ASSISTANT:"
+    prompt = (
+        "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
+        f"<|im_start|>user\n<|vision_start|>{'<|image_pad|>' * len(image_urls)}"
+        f"<|vision_end|>{question}<|im_end|>\n"
+        "<|im_start|>assistant\n"
+    )
     image_data = [fetch_image(url) for url in image_urls]
 
     return ModelRequestData(
