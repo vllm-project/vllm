@@ -180,7 +180,8 @@ class EplbState:
 
     def step(self,
              model: MixtureOfExperts,
-             is_dummy: bool = False) -> tuple[float, float, float]:
+             is_dummy: bool = False,
+             is_profile: bool = False) -> tuple[float, float, float]:
         """
         Step the EPLB state.
 
@@ -189,6 +190,9 @@ class EplbState:
             is_dummy (bool): If `True`, this is a dummy step and the load
               metrics recorded in this forward pass will not count. Defaults
               to `False`.
+            is_profile (bool): If `True`, perform a dummy rearrangement
+              with maximum communication cost. This is used in `profile_run`
+              to reserve enough memory for the communication buffer.
 
         Returns:
             (avg_tokens, max_tokens, balancedness) (tuple[float, float, float]):
@@ -197,6 +201,10 @@ class EplbState:
             - `max_tokens`: The maximum load across ranks.
             - `balancedness`: The ratio of average load to maximum load.
         """
+
+        if is_profile:
+            self.rearrange(model, is_profile=True)
+            return 0.0, 0.0, 0.0
 
         if is_dummy:
             # Do not record load metrics for dummy steps
@@ -246,7 +254,9 @@ class EplbState:
 
         return avg_tokens, max_tokens, balancedness
 
-    def rearrange(self, model: MixtureOfExperts) -> None:
+    def rearrange(self,
+                  model: MixtureOfExperts,
+                  is_profile: bool = False) -> None:
         """
         Rearrange the experts according to the current load.
         """
@@ -259,7 +269,8 @@ class EplbState:
         if is_main_rank:
             torch.cuda.synchronize()
             time_start = time.perf_counter()
-            logger.info("Rearranging experts...")
+            logger.info("Rearranging experts %s...",
+                        "(profile)" if is_profile else "")
 
         # This mapping is only used here, so we do not store it in the state
         physical_expert_start = ep_rank * model.num_local_physical_experts
@@ -316,17 +327,20 @@ class EplbState:
             new_physical_to_logical_map,
             model.expert_weights,
             ep_group,
+            is_profile,
         )
 
-        self.physical_to_logical_map.copy_(new_physical_to_logical_map)
-        self.logical_to_physical_map.copy_(new_logical_to_physical_map)
-        self.logical_replica_count.copy_(new_logical_replica_count)
+        if not is_profile:
+            self.physical_to_logical_map.copy_(new_physical_to_logical_map)
+            self.logical_to_physical_map.copy_(new_logical_to_physical_map)
+            self.logical_replica_count.copy_(new_logical_replica_count)
 
         if is_main_rank:
             assert time_start is not None
             torch.cuda.synchronize()
             time_end = time.perf_counter()
             logger.info(
-                "Rearranged experts in %.2f seconds.",
+                "Rearranged experts %s in %.2f seconds.",
+                "(profile)" if is_profile else "",
                 time_end - time_start,
             )

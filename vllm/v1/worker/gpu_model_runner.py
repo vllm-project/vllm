@@ -1182,7 +1182,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             for k, v in self.intermediate_tensors.items()
         })
 
-    def eplb_step(self, is_dummy: bool = False) -> None:
+    def eplb_step(self,
+                  is_dummy: bool = False,
+                  is_profile: bool = False) -> None:
         """
         Step for the EPLB (Expert Parallelism Load Balancing) state.
         """
@@ -1191,7 +1193,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         assert is_mixture_of_experts(self.model)
         avg_tokens, max_tokens, balancedness = \
-            self.eplb_state.step(self.model, is_dummy)
+            self.eplb_state.step(self.model, is_dummy, is_profile)
 
         if get_ep_group().is_first_rank:
             logger.debug(
@@ -1842,6 +1844,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         num_tokens: int,
         capture_attn_cudagraph: bool = False,
         skip_eplb: bool = False,
+        is_profile: bool = False,
     ) -> torch.Tensor:
 
         # Padding for DP
@@ -1940,7 +1943,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # This is necessary to avoid blocking DP
         if not skip_eplb:
-            self.eplb_step(is_dummy=True)
+            self.eplb_step(is_dummy=True, is_profile=is_profile)
 
         logit_indices = np.cumsum(num_scheduled_tokens) - 1
         return hidden_states[logit_indices]
@@ -2092,7 +2095,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Cache the dummy encoder outputs.
             self.encoder_cache["tmp"] = dict(enumerate(dummy_encoder_outputs))
 
-        hidden_states = self._dummy_run(self.max_num_tokens)
+        # Do not skip EPLB in profile run
+        hidden_states = self._dummy_run(self.max_num_tokens, is_profile=True)
         if get_pp_group().is_last_rank:
             sampler_output = self._dummy_sampler_run(hidden_states)
         else:
