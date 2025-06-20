@@ -92,6 +92,7 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         self, a: torch.Tensor, aq: torch.Tensor, M: int, N: int, K: int,
         topk: int, global_num_experts: int, local_num_experts: int
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
+        assert self.block_shape is not None
         # We use global_num_experts due to how moe_align_block_size handles
         # expert_maps.
         num_experts = global_num_experts
@@ -124,6 +125,7 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         expert_num_tokens: Optional[torch.Tensor],
     ):
         import deep_gemm as dg
+        assert self.block_shape is not None
 
         a1q = hidden_states
         _, N, K = w1.size()

@@ -373,6 +373,8 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 global_num_experts=global_num_experts,
                 expert_map=expert_map)
 
+        assert self.fused_experts_func is not None
+
         return self.fused_experts_func(
             hidden_states=x,
             w1=layer.w13_weight,

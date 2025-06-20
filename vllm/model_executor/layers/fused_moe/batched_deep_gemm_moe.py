@@ -103,6 +103,7 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
     ):
         import deep_gemm as dg
         assert hidden_states.ndim == 3
+        assert self.block_shape is not None
 
         a1q = hidden_states
         _, N, K = w1.size()

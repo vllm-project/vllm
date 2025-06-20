@@ -341,7 +341,7 @@ class FusedMoEConfig:
 
         if quant_config is not None and isinstance(quant_config,
                                                    QuantizationConfig):
-            block_shape = quant_config.weight_block_size
+            block_shape = quant_config.get("weight_block_size", None)
             per_act_token_quant = False
             per_out_ch_quant = False
             quant_dtype: Optional[torch.dtype] = None
