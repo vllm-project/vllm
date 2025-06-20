@@ -165,8 +165,8 @@ class TensorizerConfig(MutableMapping):
     deserialization_kwargs: Optional[dict[str, Any]] = None
     _extra_serialization_attrs: Optional[dict[str, Any]] = field(init=False,
                                                                  default=None)
-    _model_cls: Optional[type[torch.nn.Module]] = field(init=False,
-                                                        default=None)
+    model_class: Optional[type[torch.nn.Module]] = field(init=False,
+                                                         default=None)
     hf_config: Optional[PretrainedConfig] = field(init=False, default=None)
     dtype: Optional[Union[str, torch.dtype]] = field(init=False, default=None)
     _is_sharded: bool = field(init=False, default=False)
@@ -491,11 +491,11 @@ def init_tensorizer_model(tensorizer_config: TensorizerConfig,
     assert tensorizer_config.hf_config is not None
     model_args = tensorizer_config.hf_config
     model_args.torch_dtype = tensorizer_config.dtype
-    assert tensorizer_config._model_cls is not None
+    assert tensorizer_config.model_class is not None
     # TODO: Do we need to consider old-style model class?
     with meta_tensor_mode(), set_current_vllm_config(vllm_config,
                                                      check_compile=True):
-        return tensorizer_config._model_cls(vllm_config=vllm_config)
+        return tensorizer_config.model_class(vllm_config=vllm_config)
 
 
 def deserialize_tensorizer_model(model: nn.Module,
