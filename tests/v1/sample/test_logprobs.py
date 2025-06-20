@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
 from collections.abc import Generator
@@ -41,7 +42,7 @@ def vllm_model(vllm_runner, request) -> Generator[VllmRunner, None, None]:
             #TODO: enable this once we support it for
             # prompt logprobs.
             enable_prefix_caching=request.param,
-            gpu_memory_utilization=0.5,
+            gpu_memory_utilization=0.4,  # up to 2 alive concurrently
     ) as vllm_model:
         yield vllm_model
 
@@ -342,10 +343,13 @@ def test_max_logprobs(monkeypatch: pytest.MonkeyPatch):
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
 
-        runner = VllmRunner("facebook/opt-125m",
-                            max_logprobs=1,
-                            enable_prefix_caching=False,
-                            max_model_len=256)
+        runner = VllmRunner(
+            "facebook/opt-125m",
+            max_logprobs=1,
+            enable_prefix_caching=False,
+            # 2 other llms alive during whole session
+            gpu_memory_utilization=0.15,
+            max_model_len=256)
         vllm_sampling_params = SamplingParams(logprobs=1)
         # should pass
         runner.generate(["Hello world"], sampling_params=vllm_sampling_params)

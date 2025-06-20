@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import List, Optional, Tuple
+from typing import Optional
 
 import numpy
 import torch
@@ -33,7 +34,7 @@ USE_FP32_REDUCE_DEFAULT = True
 #  without runtime zero-point. We support common cases, i.e. AWQ and GPTQ.
 #  TODO: we may want to move this into the C++ so its closer to the actual impl
 def query_marlin_supported_quant_types(
-    has_zp: bool,
+    has_zp: Optional[bool] = None,
     include_fp_type: bool = True,
     device_capability: Optional[int] = None,
 ):
@@ -45,6 +46,16 @@ def query_marlin_supported_quant_types(
     if device_capability < 80:
         return []
 
+    # - has_zp is True: return quant_types that has zero points
+    # - has_zp is False: return quant_types that has not zero points
+    # - has_zp is None: both
+    if has_zp is None:
+        types0 = query_marlin_supported_quant_types(False, include_fp_type,
+                                                    device_capability)
+        types1 = query_marlin_supported_quant_types(True, include_fp_type,
+                                                    device_capability)
+        return types0 + types1
+
     if has_zp:
         # AWQ style, unsigned + runtime zero-point
         return [scalar_types.uint4]
@@ -52,7 +63,7 @@ def query_marlin_supported_quant_types(
         # GPTQ style, unsigned + symmetric bias
         res = [scalar_types.uint4b8, scalar_types.uint8b128]
         if include_fp_type:
-            res += [scalar_types.float8_e4m3fn]
+            res += [scalar_types.float8_e4m3fn, scalar_types.float4_e2m1f]
         return res
 
 
@@ -60,7 +71,7 @@ def _check_marlin_supported(
         quant_type: ScalarType,
         group_size: Optional[int],
         has_zp: bool,
-        device_capability: Optional[int] = None) -> Tuple[bool, Optional[str]]:
+        device_capability: Optional[int] = None) -> tuple[bool, Optional[str]]:
 
     if device_capability is None:
         capability_tuple = current_platform.get_device_capability()
@@ -133,7 +144,7 @@ def verify_marlin_supports_shape(output_size_per_partition: int,
 def check_marlin_supports_shape(output_size_per_partition: int,
                                 input_size_per_partition: int,
                                 input_size: int, group_size: int) \
-                                    -> Tuple[bool, Optional[str]]:
+                                    -> tuple[bool, Optional[str]]:
     try:
         verify_marlin_supports_shape(output_size_per_partition,
                                      input_size_per_partition, input_size,
@@ -161,13 +172,19 @@ def check_moe_marlin_supports_layer(layer: LinearBase, group_size: int) \
                                     -> bool:
     hidden_size = layer.hidden_size
     intermediate_size_per_partition = layer.intermediate_size_per_partition
+    # apply_router_weight_on_input is not supported for moe marlin
+    supports_router_weight = not layer.apply_router_weight_on_input
+    # moe marlin requires the activation to be silu
+    supports_activation = layer.activation == "silu"
 
     # gate-up: (n, k) = (intermediate_size_per_partition * 2, hidden_size)
     # down: (n, k) = (hidden_size, intermediate_size_per_partition)
     # moe marlin requires n % 128 == 0 and k % 64 == 0
-    return hidden_size % 128 == 0 and \
-        intermediate_size_per_partition % max(64, group_size) == 0 and \
-        group_size in [-1, 32, 64, 128]
+    supports_shape = hidden_size % 128 == 0 and \
+        intermediate_size_per_partition % max(64, group_size) == 0
+    supports_group_size = group_size in [-1, 32, 64, 128]
+    return supports_shape and supports_group_size and \
+        supports_router_weight and supports_activation
 
 
 def marlin_make_workspace(output_size_per_partition: int,
@@ -215,16 +232,16 @@ def marlin_make_empty_zp(device: torch.device) -> torch.Tensor:
 
 
 def marlin_sort_g_idx(
-        g_idx: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        g_idx: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     g_idx_sort_indices = torch.argsort(g_idx).to(torch.int)
     return g_idx[g_idx_sort_indices], g_idx_sort_indices
 
 
 def get_scale_perms():
-    scale_perm: List[int] = []
+    scale_perm: list[int] = []
     for i in range(8):
         scale_perm.extend([i + 8 * j for j in range(8)])
-    scale_perm_single: List[int] = []
+    scale_perm_single: list[int] = []
     for i in range(4):
         scale_perm_single.extend(
             [2 * i + j for j in [0, 1, 8, 9, 16, 17, 24, 25]])
@@ -394,6 +411,7 @@ def apply_gptq_marlin_linear(
                                   None,
                                   weight,
                                   weight_scale,
+                                  None,
                                   weight_zp,
                                   g_idx,
                                   g_idx_sort_indices,
@@ -439,6 +457,7 @@ def apply_awq_marlin_linear(
                                   None,
                                   weight,
                                   weight_scale,
+                                  None,
                                   weight_zp,
                                   g_idx,
                                   g_idx_sort_indices,

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from typing import List, Optional
 
@@ -294,8 +295,10 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
                     inputs_embeds=None,
                     positions=model_input.input_positions,
                     intermediate_tensors=intermediate_tensors,
-                    **MultiModalKwargs.as_kwargs(multi_modal_kwargs,
-                                                 device=self.device),
+                    **MultiModalKwargs.as_kwargs(
+                        multi_modal_kwargs,
+                        device=self.device,
+                    ),
                     **model_execute_kwargs,
                 )
 

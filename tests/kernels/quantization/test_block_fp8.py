@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Adapted from https://github.com/sgl-project/sglang/pull/2575
 import itertools
@@ -11,7 +12,7 @@ from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import fused_moe
 from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
-    deep_gemm_moe_fp8)
+    _valid_deep_gemm_shape, deep_gemm_moe_fp8)
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_align_block_size)
@@ -30,18 +31,22 @@ if current_platform.get_device_capability() < (9, 0):
     pytest.skip("FP8 Triton requires CUDA 9.0 or higher",
                 allow_module_level=True)
 
+vllm_config = VllmConfig()
+vllm_config.scheduler_config.max_num_seqs = 128
+vllm_config.scheduler_config.max_model_len = 8192
+
 # Test configurations
 DTYPES = [torch.bfloat16]  # [torch.half, torch.bfloat16, torch.float32]
-NUM_TOKENS = [7, 83, 2048]
+NUM_TOKENS = [7, 2050]
 D = [512, 4096, 5120, 13824]
-GROUP_SIZE = [64, 128, 256, 512]
-M = [1, 7, 8, 83, 84, 512, 2048, 4096]
-N = [128, 512, 1024, 4096, 7168, 7748, 13824]
-K = [256, 4096, 5120, 3884, 13824, 16384]
+GROUP_SIZE = [64, 128, 512]
+M = [1, 7, 8, 83, 84, 4096]
+N = [128, 512, 7168, 7748, 13824]
+K = [256, 3884, 4096, 13824, 16384]
 # Deepseek-V3's intermediate size 18432, so N is 18432*2/8=4608 at TP8
 # and its hidden size is 7168.
-M_moe = [1, 2, 7, 83, 128, 512, 2048]
-M_moe_dg = [128, 192, 512, 1335, 2048]
+M_moe = [1, 2, 7, 83, 128, 2048]
+M_moe_dg = [128, 192, 1335, 2048]
 N_moe = [128, 256, 1024, 4608]  # [13824]
 K_moe = [256, 512, 7168]  # [13824]
 BLOCK_SIZE = [[128, 128]]
@@ -210,7 +215,6 @@ def test_w8a8_block_fp8_fused_moe(M, N, K, E, topk, block_size, dtype, seed):
     score = torch.randn((M, E), dtype=dtype)
 
     # Set the context to avoid lots of warning spam.
-    vllm_config = VllmConfig()
     with set_current_vllm_config(vllm_config):
         out = fused_moe(
             a,
@@ -258,6 +262,7 @@ def per_block_cast_to_fp8(
 @pytest.mark.parametrize(
     "M,N,K,block_size,out_dtype,seed",
     itertools.product(M, N, K, BLOCK_SIZE, OUT_DTYPES, SEEDS))
+@pytest.mark.skipif(not dg_available, reason="DeepGemm kernels not available.")
 @torch.inference_mode()
 def test_w8a8_block_fp8_deep_gemm_matmul(M, N, K, block_size, out_dtype, seed):
     # only aligned sizes
@@ -381,15 +386,11 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed):
     block_size = [block_m, block_m]
     dtype = torch.bfloat16
 
-    # only aligned sizes
-    if (N % block_m != 0 or K % block_m != 0 or topk > E):
-        pytest.skip(
-            f"Skipping test; bad size m={M}, n={N}, k={K}, topk={topk}, E={E}")
+    if topk > E:
+        pytest.skip(f"Skipping test: topk={topk} > E={E}")
 
-    if N <= 512:
-        pytest.skip("Skipping N <= 512 until performance issues solved.")
-
-    vllm_config = VllmConfig()
+    if not _valid_deep_gemm_shape(M, N, K):
+        pytest.skip(f"Skipping test: invalid size m={M}, n={N}, k={K}")
 
     torch.manual_seed(seed)
     fp8_info = torch.finfo(torch.float8_e4m3fn)

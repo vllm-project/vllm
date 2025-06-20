@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional, Tuple
+from typing import Optional
 
 import torch
 
@@ -20,7 +21,7 @@ class AiterScaledMMLinearKernel(CutlassScaledMMLinearKernel):
 
     @classmethod
     def can_implement(
-            cls, c: ScaledMMLinearLayerConfig) -> Tuple[bool, Optional[str]]:
+            cls, c: ScaledMMLinearLayerConfig) -> tuple[bool, Optional[str]]:
         if not current_platform.is_rocm():
             return (
                 False,

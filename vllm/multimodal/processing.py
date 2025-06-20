@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
-import re
 import sys
 from abc import ABC, abstractmethod
 from collections import defaultdict
@@ -12,8 +12,8 @@ from functools import lru_cache
 from typing import (TYPE_CHECKING, Generic, NamedTuple, Optional, Protocol,
                     TypeVar, Union, cast)
 
+import regex as re
 import torch
-from transformers import BatchFeature, PretrainedConfig, ProcessorMixin
 from typing_extensions import assert_never
 
 from vllm.inputs import InputProcessingContext
@@ -31,6 +31,10 @@ from .parse import (DictEmbeddingItems, EmbeddingItems, MultiModalDataItems,
                     MultiModalDataParser)
 
 if TYPE_CHECKING:
+    from transformers.configuration_utils import PretrainedConfig
+    from transformers.feature_extraction_utils import BatchFeature
+    from transformers.processing_utils import ProcessorMixin
+
     from .profiling import BaseDummyInputsBuilder
 
 logger = init_logger(__name__)
@@ -111,13 +115,14 @@ class PromptUpdateDetails(Generic[_S]):
 
     is_embed: Optional[Callable[["_BoundPromptSequence"], torch.Tensor]] = None
     """
-    Given {attr}`full`, return a boolean mask of shape `(len(full),)`
-    indicating which positions of `full` to assign embeddings to.
+    Given [`full`][vllm.multimodal.processing.PromptUpdateDetails.full],
+    return a boolean mask of shape `(len(full),)` indicating which positions
+    of `full` to assign embeddings to.
 
     `None` (default) means to assign embeddings to all positions of `full`.
 
     The embeddings are obtained by calling
-    {class}`SupportsMultiModal.get_multimodal_embeddings`.
+    [`SupportsMultiModal.get_multimodal_embeddings`][vllm.model_executor.models.interfaces.SupportsMultiModal.get_multimodal_embeddings].
     """
 
     @staticmethod
@@ -156,13 +161,15 @@ PromptUpdateInfo = Union[PromptSeq, PromptUpdateDetails]
 The token sequence or text that are part of the update.
 
 If only part of the content corresponds to feature placeholders, you can
-use {class}`PromptUpdateDetails` to specify which part.
+use [`PromptUpdateDetails`][vllm.multimodal.processing.PromptUpdateDetails] to
+specify which part.
 """
 
 PromptUpdateContent = Union[Callable[[int], PromptUpdateInfo],
                             PromptUpdateInfo]
 """
-Given the index of the processed item within {attr}`modality`,
+Given the index of the processed item within
+[`modality`][vllm.multimodal.processing.PromptUpdate.modality],
 output the corresponding token sequence (or text).
 
 For convenience, you can directly pass in the token sequence (or text)
@@ -257,8 +264,10 @@ class PromptInsertion(PromptUpdate):
 
     insertion: PromptUpdateContent = field(repr=False)
     """
-    Given the index of the processed item within {attr}`modality`,
-    output the token sequence (or text) to insert right after {attr}`target`.
+    Given the index of the processed item within
+    [`modality`][vllm.multimodal.processing.PromptUpdate.modality],
+    output the token sequence (or text) to insert right after
+    [`target`][vllm.multimodal.processing.PromptUpdate.target].
 
     For convenience, you can directly pass in the token sequence (or text)
     instead of a function if it does not depend on the input.
@@ -329,8 +338,10 @@ class PromptReplacement(PromptUpdate):
 
     replacement: PromptUpdateContent = field(repr=False)
     """
-    Given the index of the processed item within {attr}`modality`,
-    output the token sequence (or text) to replace {attr}`target`.
+    Given the index of the processed item within
+    [`modality`][vllm.multimodal.processing.PromptUpdate.modality],
+    output the token sequence (or text) to replace
+    [`target`][vllm.multimodal.processing.PromptUpdate.target].
 
     For convenience, you can directly pass in the token sequence (or text)
     instead of a function if it does not depend on the input.
@@ -384,14 +395,16 @@ _M = TypeVar("_M", bound=Union[_HasModalityAttr, _HasModalityProp])
 
 
 def full_groupby_modality(values: Iterable[_M]) -> ItemsView[str, list[_M]]:
-    """Convenience function to apply {func}`full_groupby` based on modality."""
+    """Convenience function to apply [`full_groupby`][vllm.utils.full_groupby]
+    based on modality."""
     return full_groupby(values, key=lambda x: x.modality)
 
 
 @dataclass
 class _BoundPromptSequence:
     """
-    A {data}`_PromptSeq` bound to a tokenizer to automatically
+    A [`_PromptSeq`][vllm.multimodal.processing.PromptSeq] bound
+    to a tokenizer to automatically
     convert between token sequence and text representations.
     """
     tokenizer: AnyTokenizer = field(repr=False)
@@ -443,9 +456,11 @@ class _BoundPromptContent:
 @dataclass
 class BoundPromptUpdate:
     """
-    A {class}`PromptUpdate` bound to a tokenizer to automatically convert
-    {attr}`target` and the result of {meth}`get_content` between
-    token sequence and text representations.
+    A [`PromptUpdate`][vllm.multimodal.processing.PromptUpdate] bound
+    to a tokenizer to automatically convert
+    [`target`][vllm.multimodal.processing.PromptUpdate.target] and the result of
+    [`get_content`][vllm.multimodal.processing.BoundPromptUpdate.get_content]
+    between token sequence and text representations.
     """
     _origin: PromptUpdate
     tokenizer: AnyTokenizer = field(repr=False)
@@ -479,7 +494,8 @@ class BoundPromptUpdate:
 
     def get_content(self, item_idx: int) -> _BoundPromptContent:
         """
-        Given the index of the processed item within {attr}`modality`,
+        Given the index of the processed item within
+        [`modality`][vllm.multimodal.processing.PromptUpdate.modality],
         output the token sequence (or text) to update.
         """
         content = self.content
@@ -1016,7 +1032,8 @@ class ProcessingCache:
     ) -> None:
         """
         Put a processed multi-modal item into the cache
-        according to its dependencies (see {meth}`get`).
+        according to its dependencies
+        (see [`get`][vllm.multimodal.processing.ProcessingCache.get]).
         """
         cache_key = MultiModalHasher.hash_kwargs(model_id=model_id,
                                                  **{modality: input_item},
@@ -1025,6 +1042,11 @@ class ProcessingCache:
 
     def put_item(self, item: ProcessingCacheItem) -> None:
         self._cache[item.key] = item.value
+
+    def reset(self) -> bool:
+        self._cache.clear()
+
+        return True
 
 
 class BaseProcessingInfo:
@@ -1042,10 +1064,10 @@ class BaseProcessingInfo:
     def get_tokenizer(self) -> AnyTokenizer:
         return self.ctx.tokenizer
 
-    def get_hf_config(self) -> PretrainedConfig:
+    def get_hf_config(self) -> "PretrainedConfig":
         return self.ctx.get_hf_config()
 
-    def get_hf_processor(self, **kwargs: object) -> ProcessorMixin:
+    def get_hf_processor(self, **kwargs: object) -> "ProcessorMixin":
         """
         Subclasses can override this method to handle
         specific kwargs from model config or user inputs.
@@ -1083,7 +1105,8 @@ _I = TypeVar("_I", bound=BaseProcessingInfo)
 
 MultiModalHashes = dict[str, list[str]]
 """
-A collection of hashes with a similar structure as {class}`MultiModalKwargs`.
+A collection of hashes with a similar structure as
+[`MultiModalKwargs`][vllm.multimodal.inputs.MultiModalKwargs].
 """
 
 
@@ -1091,7 +1114,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
     """
     Abstract base class to process multi-modal inputs to be used in vLLM.
 
-    Not to be confused with {class}`transformers.ProcessorMixin`.
+    Not to be confused with `transformers.ProcessorMixin`.
     """
 
     def __init__(self,
@@ -1118,10 +1141,12 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
     def _get_data_parser(self) -> MultiModalDataParser:
         """
         Construct a parser to preprocess multi-modal data items
-        before passing them to {meth}`_get_hf_mm_data`.
+        before passing them to
+        [`_get_hf_mm_data`][vllm.multimodal.processing.BaseMultiModalProcessor._get_hf_mm_data].
 
         You can support additional modalities by creating a subclass
-        of {class}`MultiModalDataParser` that has additional subparsers.
+        of [`MultiModalDataParser`][vllm.multimodal.parse.MultiModalDataParser]
+        that has additional subparsers.
         """
         return MultiModalDataParser()
 
@@ -1130,8 +1155,11 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         mm_data: MultiModalDataDict,
     ) -> MultiModalDataItems:
         """
-        Normalize {class}`MultiModalDataDict` to {class}`MultiModalDataItems`
-        before passing them to {meth}`_get_hf_mm_data`.
+        Normalize
+        [`MultiModalDataDict`][vllm.multimodal.inputs.MultiModalDataDict]
+        to [`MultiModalDataItems`][vllm.multimodal.parse.MultiModalDataItems]
+        before passing them to
+        [`_get_hf_mm_data`][vllm.multimodal.processing.BaseMultiModalProcessor._get_hf_mm_data].
         """
         mm_items = self.data_parser.parse_mm_data(mm_data)
         supported_mm_limits = self.info.get_supported_mm_limits()
@@ -1160,7 +1188,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
     @abstractmethod
     def _get_mm_fields_config(
         self,
-        hf_inputs: BatchFeature,
+        hf_inputs: "BatchFeature",
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
         """Given the HF-processed data, output the metadata of each field."""
@@ -1183,7 +1211,8 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         inputs.
 
         Moreover, this information is critical to determine the token positions
-        in order to construct  {class}`~vllm-multimodal.input.PlaceholderRange`
+        in order to construct
+        [`PlaceholderRange`][vllm.multimodal.inputs.PlaceholderRange]
         for each multi-modal item.
         """
         raise NotImplementedError
@@ -1217,7 +1246,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         # This refers to the data to be passed to HF processor.
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
+    ) -> "BatchFeature":
         """
         Call the HF processor on the prompt text and
         associated multi-modal data.
@@ -1307,7 +1336,9 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         Most HF processors accept prompt text but not prompt tokens.
         If the HF processor adds or removes tokens that are not related to
         multi-modal data, you should override this method so it is consistent
-        with the output of {meth}`_apply_hf_processor_text_only` on the
+        with the output of
+        [`_apply_hf_processor_text_only`][vllm.multimodal.processing.BaseMultiModalProcessor._apply_hf_processor_text_only]
+        on the
         corresponding text.
         """
         return prompt_tokens
@@ -1322,7 +1353,8 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
         Since HF processor requires that text and multi-modal items
         correspond to each other, we generate dummy text using
-        {class}`DummyInputsBuilder` to go along with the multi-modal data.
+        [`DummyInputsBuilder`][vllm.multimodal.profiling.BaseDummyInputsBuilder]
+        to go along with the multi-modal data.
         """
         mm_counts = mm_items.get_all_counts()
 
