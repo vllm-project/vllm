@@ -67,6 +67,15 @@ class BeamValidator:
 
     def validate(self, responses: list[AsyncGenerator],
                  debug_infos_G: list[BeamDebugInfo] = None):
+        error_responses = [r for r in responses if isinstance(r, ErrorResponse)]
+        if len(error_responses) > 0:
+            combined_message = "; ".join(er.message for er in error_responses)
+            return ErrorResponse(
+                message=combined_message,
+                type=error_responses[0].type,
+                code=error_responses[0].code
+            )
+
         # TODO(@tanuj) - share this with the beam scorer
         heads = [response.choices[0].additional_heads[0] for response in responses]
         heads_tensor = torch.tensor(heads, dtype=torch.float)
