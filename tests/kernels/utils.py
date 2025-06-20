@@ -1076,9 +1076,6 @@ def torch_experts(
             or (expert_map is not None
                 and global_num_experts == expert_map.shape[0]))
 
-    assert (quant_dtype is None
-            or (w1_scale is not None and w2_scale is not None))
-
     M, K = a.shape
     topk = topk_ids.shape[1]
 
@@ -1103,6 +1100,8 @@ def torch_experts(
                 tmp2 = SiluAndMul()(tmp1)
                 out[mask] = tmp2 @ w2[i].transpose(0, 1)
             elif block_shape is not None:
+                assert (a_scale is not None and w1_scale is not None
+                        and w2_scale is not None)
                 tmp1 = native_w8a8_block_matmul(a[mask], w1[i], a_scale[mask],
                                                 w1_scale[i], block_shape,
                                                 out.dtype)

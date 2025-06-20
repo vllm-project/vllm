@@ -11,7 +11,7 @@ import triton.language as tl
 from tests.kernels.moe.utils import (batched_moe,
                                      make_quantized_test_activations,
                                      make_test_weights, triton_moe)
-from tests.kernels.quant_utils import native_w8a8_block_matmul
+from tests.kernels.quant_utils import native_batched_masked_quant_matmul
 from tests.kernels.utils import torch_experts
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
@@ -66,43 +66,6 @@ class BatchedMMTensors:
                                           dtype=torch.int32)
 
         return BatchedMMTensors(A, B, C, num_expert_tokens)
-
-
-def ref_impl(
-    A: torch.Tensor,
-    B: torch.Tensor,
-    C: torch.Tensor,
-    num_expert_tokens: torch.Tensor,
-    A_scale: Optional[torch.Tensor],
-    B_scale: Optional[torch.Tensor],
-    block_shape: Optional[list[int]],
-) -> torch.Tensor:
-    assert (A.dtype.itemsize > 1
-            or (A_scale is not None and B_scale is not None))
-
-    num_expert_tokens_cpu = num_expert_tokens.clone()
-    num_expert_tokens_cpu = num_expert_tokens_cpu.to(device="cpu")
-    num_experts = num_expert_tokens.size(0)
-
-    f32 = torch.float32
-    bf16 = torch.bfloat16
-
-    for e in range(num_experts):
-        num_tokens = num_expert_tokens_cpu[e]
-        if A.dtype.itemsize == 1 and block_shape is not None:
-            tmp = native_w8a8_block_matmul(A[e], B[e], A_scale[e], B_scale[e],
-                                           block_shape, C.dtype)
-            C[e, :num_tokens, :] = tmp[:num_tokens, :]
-        elif A.dtype.itemsize == 1 and block_shape is None:
-            C[e, :num_tokens, :] = (
-                (A[e, :num_tokens, :].to(f32) * A_scale[e]).to(bf16)
-                @ (B[e].transpose(0, 1).to(f32) * B_scale[e]).to(bf16))
-        else:
-            assert A_scale is None
-            assert B_scale is None
-            C[e, :num_tokens, :] = A[e, :num_tokens, :] @ B[e].transpose(0, 1)
-
-    return C
 
 
 @pytest.mark.parametrize("num_experts", [8, 16, 32])
@@ -193,7 +156,7 @@ def test_batched_mm(num_experts: int, max_tokens_per_expert: int, K: int,
         block_shape=block_shape,
     )
 
-    ref_output = ref_impl(
+    ref_output = native_batched_masked_quant_matmul(
         A,
         B,
         ref_output,
@@ -203,8 +166,10 @@ def test_batched_mm(num_experts: int, max_tokens_per_expert: int, K: int,
         None,
     )
 
-    q_ref_output = ref_impl(A_q, B_q, q_ref_output, num_expert_tokens, A_scale,
-                            B_scale, block_shape)
+    q_ref_output = native_batched_masked_quant_matmul(A_q, B_q, q_ref_output,
+                                                      num_expert_tokens,
+                                                      A_scale, B_scale,
+                                                      block_shape)
 
     rtol, atol = {
         torch.float16: (6e-2, 6e-2),
