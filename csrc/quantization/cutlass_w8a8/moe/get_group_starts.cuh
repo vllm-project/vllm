@@ -78,7 +78,7 @@ __global__ void __get_group_gemm_starts_blockscale_fp8(
 
   layout_sfa_base_as_int[expert_id] = ScaleConfig::tile_atom_to_shape_SFA(
     cute::make_shape(
-      static_cast<int>(m), static_cast<int>(k), static_cast<int>(n), 1));
+      static_cast<int>(m), static_cast<int>(n), static_cast<int>(k), 1));
   layout_sfb_base_as_int[expert_id] = ScaleConfig::tile_atom_to_shape_SFB(
      cute::make_shape(
       static_cast<int>(m), static_cast<int>(n), static_cast<int>(k), 1));

@@ -644,16 +644,17 @@ def test_cutlass_fp8_group_gemm(num_experts: int, per_act_token: bool,
         print("*")
         torch.testing.assert_close(c, baseline, rtol=1e-2, atol=5e-4)
 
-@pytest.mark.parametrize("num_experts", [40])
+@pytest.mark.parametrize("num_experts", [8, 40])
 @pytest.mark.parametrize("per_act_token", [True, False])
-@pytest.mark.parametrize("block_size_n", [128])
-@pytest.mark.parametrize("block_size_k", [128])
 @pytest.mark.skipif(
     (lambda x: x is None or not ops.cutlass_group_gemm_supported(x.to_int()))(
         current_platform.get_device_capability()),
     reason="Grouped gemm is not supported on this GPU type.")
-def test_cutlass_fp8_blockwise_group_gemm(num_experts: int, per_act_token: bool,
-                                block_size_n: bool, block_size_k: bool):
+def test_cutlass_fp8_blockwise_group_gemm(num_experts: int,
+                                          per_act_token: bool):
+
+    block_size_n = 128
+    block_size_k = 128
 
     # Device and dtype setup
     device = "cuda"
@@ -726,7 +727,7 @@ def test_cutlass_fp8_blockwise_group_gemm(num_experts: int, per_act_token: bool,
             scale_a = one_scale_a.repeat_interleave(
                 m_g, dim=0).repeat_interleave(k_b_scales, dim=1)
 
-        print("ground_scale_a:", ground_scale_a)
+        # print("ground_scale_a:", ground_scale_a)
 
         # Compute baseline result for this group
         baseline_g = baseline_scaled_mm(a_g, b_g, ground_scale_a,
@@ -781,19 +782,6 @@ def test_cutlass_fp8_blockwise_group_gemm(num_experts: int, per_act_token: bool,
                            device="cuda",
                            dtype=torch.int64)
 
-    print("a_scales_tensors_stacked 1:", a_scales_tensors_stacked)
-
-    # a_scales_tensors_stacked[0, 0] = 1
-    # a_scales_tensors_stacked[0, 1] = 2
-    # a_scales_tensors_stacked[1, 0] = 1
-    # a_scales_tensors_stacked[1, 1] = 2
-    # a_scales_tensors_stacked[2, 0] = 3
-    # a_scales_tensors_stacked[2, 1] = 4
-    # a_scales_tensors_stacked[3, 0] = 3
-    # a_scales_tensors_stacked[3, 1] = 4
-
-    print("a_scales_tensors_stacked 2:", a_scales_tensors_stacked)
-
     ops.cutlass_moe_blockwise_mm(out_tensors_stacked, a_tensors_stacked,
                        b_tensors_stacked, a_scales_tensors_stacked.contiguous(),
                        b_scales_tensors_stacked, expert_offsets[:-1],
@@ -804,8 +792,8 @@ def test_cutlass_fp8_blockwise_group_gemm(num_experts: int, per_act_token: bool,
     for g in range(num_experts):
         baseline = baseline_tensors[g]
         c = out_tensors_stacked[expert_offsets[g]:expert_offsets[g + 1]]
-        # print("results:")
-        # print("baseline:", baseline)
-        # print("c:", c)
-        # print("*")
+        print("results:")
+        print("baseline:", baseline)
+        print("c:", c)
+        print("*")
         torch.testing.assert_close(c, baseline, rtol=1e-2, atol=5e-4)
