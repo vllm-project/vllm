@@ -49,4 +49,4 @@ def test_awq_gemm_opcheck(monkeypatch: pytest.MonkeyPatch, dtype_str: str):
                            dtype=torch.bfloat16 if dtype_str == "bf16" else torch.float16)
         split_k_iters = 8
         opcheck(torch.ops._C.awq_gemm,
-                (input, qweight, qzeros, scales, split_k_iters, dtype_str))
+                (input, qweight, scales, qzeros, split_k_iters, dtype_str))
