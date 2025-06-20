@@ -198,8 +198,8 @@ class SamplingParams(
             processor which only retains scores for the given token ids.
             Defaults to None.
         extra_args: Arbitrary additional args, that can be used by custom
-            sampling implementations. Not used by any in-tree sampling
-            implementations.
+            sampling implementations, plugins, etc. Not used by any in-tree
+            sampling implementations.
     """
 
     n: int = 1
