@@ -563,9 +563,7 @@ class VllmBackend:
 
         self._called = True
 
-        if not self.compilation_config.use_cudagraph or \
-            not self.compilation_config.cudagraph_copy_inputs:
-            return self.split_gm
+        
 
         # if we need to copy input buffers for cudagraph
         from torch._guards import detect_fake_mode
@@ -584,6 +582,18 @@ class VllmBackend:
             if isinstance(x, torch._subclasses.fake_tensor.FakeTensor) and \
                 any(is_symbolic(d) for d in x.size())
         ]
+
+        if self.compilation_config.full_cuda_graph:
+            assert self.compilation_config.use_cudagraph, \
+                "full_cuda_graph mode requires use_cudagraph to be True"
+            fullgraph_wrapper = resolve_obj_by_qualname(
+                current_platform.get_fullgraph_wrapper_cls())
+            self.split_gm = fullgraph_wrapper(self.split_gm, self.vllm_config,
+                                              self.graph_pool, self.sym_tensor_indices)
+
+        if not self.compilation_config.use_cudagraph or \
+            not self.compilation_config.cudagraph_copy_inputs:
+            return self.split_gm
 
         # compiler managed cudagraph input buffers
         # we assume the first run with symbolic shapes

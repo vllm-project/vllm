@@ -3981,6 +3981,14 @@ class CompilationConfig:
     splitting certain operations such as attention into subgraphs. Thus this
     flag cannot be used together with splitting_ops. This may provide
     performance benefits for smaller models."""
+    separate_attention_routine: bool = False
+    """
+    Enable a distinct attention calls routine under an attention backend for full
+    cuda graph capturing. This is because some attention backends like FlashMLA,
+    FlashInfer, FA2, etc. implement different branches for mix prefill-decode and
+    pure decode cases. This flag enables us to potentially capture the cudagraph
+    separately for each branch.
+    """
 
     pass_config: PassConfig = field(default_factory=PassConfig)
     """Custom inductor passes, see PassConfig for more details"""
@@ -4179,13 +4187,15 @@ class CompilationConfig:
 
     def set_splitting_ops_for_v1(self):
         # NOTE: this function needs to be called
-        if self.splitting_ops and self.full_cuda_graph:
-            raise ValueError("full_cuda_graph cannot be used together with "
-                             "splitting_ops, as Full CUDA graph will override "
-                             f"the splitting_ops: {self.splitting_ops}")
-
+        # NOTE: When full_cuda_graph is True, instead of setting an empty list
+        # and capture the full cudagraph inside the flattened fx graph,
+        # we keep the piecewise fx graph structure but capture the full cudagraph
+        # outside the fx graph. This reduces some cpu overhead when the runtime
+        # batch_size is not cudagraph captured.
+        if self.separate_attention_routine:
+            assert self.full_cuda_graph, "separate_attention_routine requires full_cuda_graph to be True"
         if not self.splitting_ops:
-            self.splitting_ops = [] if self.full_cuda_graph else [
+            self.splitting_ops = [
                 "vllm.unified_attention",
                 "vllm.unified_attention_with_output",
             ]

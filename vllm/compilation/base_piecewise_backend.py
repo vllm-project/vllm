@@ -70,3 +70,46 @@ class AbstractPiecewiseBackend(Protocol):
             or a replayed static graph.
         """
         raise NotImplementedError
+
+
+class AbstractFullgraphWrapper(Protocol):
+    """
+    FullgraphWrapper interface that allows platforms to wrap the piecewise graph
+    to be viewed or captured as a full graph.
+    """
+
+    def __init__(self, graph: fx.GraphModule, vllm_config: VllmConfig,
+                 graph_pool: Any, sym_shape_indices: list[int], **kwargs):
+        """
+        Initializes the FullgraphWrapper class with compilation and 
+        execution-related configurations.
+
+        Args:
+            graph (fx.GraphModule): The graph represented in fx.
+            vllm_config (VllmConfig): Global configuration for vLLM.
+            graph_pool (Any): 
+                Graph memory pool handle, e.g., 
+                    `torch.cuda.graph_pool_handle()`.
+            sym_shape_indices (list[int]): 
+                Indices of symbolic shape.
+
+        Keyword Args:
+            kwargs: Additional keyword arguments reserved for future 
+                extensions or custom platforms.
+        
+        """
+        raise NotImplementedError
+    
+    def __call__(self, *args) -> Any:
+        """
+        Executes the wrapped graph for given input args.
+
+        Args:
+            *args: Variable length input arguments to be passed into the 
+                graph. The symbolic shape is expected to be in position 
+                `sym_shape_indices[0]`.
+
+        Returns:
+            Any: Output of the executed wrapped graph.
+        """
+        raise NotImplementedError

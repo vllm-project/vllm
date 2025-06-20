@@ -94,7 +94,11 @@ class ForwardContext:
     virtual_engine: int  # set dynamically for each forward pass
     # set dynamically for each forward pass
     dp_metadata: Optional[DPMetadata] = None
-    skip_cuda_graphs: bool = False
+    # determine whether to use a full cudagraph for attention or piecewise 
+    # cudagraphs that skip the attention part. By default true, we use piecewise 
+    # cudagraphs.
+    skip_attention_cuda_graphs: bool = True,
+    is_pure_decoding: bool = False
 
 
 _forward_context: Optional[ForwardContext] = None
@@ -115,7 +119,8 @@ def set_forward_context(
     virtual_engine: int = 0,
     num_tokens: Optional[int] = None,
     num_tokens_across_dp: Optional[torch.Tensor] = None,
-    skip_cuda_graphs: bool = False,
+    skip_attention_cuda_graphs: bool = True,
+    is_pure_decoding: bool = False,
 ):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
@@ -140,7 +145,8 @@ def set_forward_context(
         virtual_engine=virtual_engine,
         attn_metadata=attn_metadata,
         dp_metadata=dp_metadata,
-        skip_cuda_graphs=skip_cuda_graphs,
+        skip_attention_cuda_graphs=skip_attention_cuda_graphs,
+        is_pure_decoding=is_pure_decoding,
     )
 
     try:

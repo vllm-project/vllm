@@ -501,7 +501,11 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self._plan(attn_metadata)
 
         return attn_metadata
-
+    
+    def can_run_in_cudagraph(
+            self, common_attn_metadata: CommonAttentionMetadata) -> bool:
+        return common_attn_metadata.max_query_len == 1
+    
     def use_cascade_attention(self, *args, **kwargs) -> bool:
         if self.kv_cache_spec.dtype != self.runner.model_config.dtype:
             # TODO: The cascade wrapper currently does not support setting
