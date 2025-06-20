@@ -135,7 +135,8 @@ If you are testing with multi-nodes, adjust `--nproc-per-node` and `--nnodes` ac
 NCCL_DEBUG=TRACE torchrun --nnodes 2 \
     --nproc-per-node=2 \
     --rdzv_backend=c10d \
-    --rdzv_endpoint=$MASTER_ADDR test.py
+    --rdzv_endpoint=$MASTER_ADDR \
+    test.py
 ```
 
 If the script runs successfully, you should see the message `sanity check is successful!`.
