@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import importlib.util
 import logging
-
+from typing import List
 import torch
 
 from vllm.platforms import current_platform
@@ -20,7 +20,7 @@ def prepare_block_fp8_matmul_inputs(
     B: torch.Tensor,
     As: torch.Tensor,
     Bs: torch.Tensor,
-    block_size: list[int],
+    block_size: List[int],
     output_dtype: torch.dtype = torch.float16,
 ) -> tuple[int, int, int, torch.Tensor]:
     assert len(block_size) == 2
@@ -51,7 +51,7 @@ def w8a8_block_fp8_matmul_deepgemm(
     B: torch.Tensor,
     As: torch.Tensor,
     Bs: torch.Tensor,
-    block_size: list[int],
+    block_size: List[int],
     output_dtype: torch.dtype,
 ) -> torch.Tensor:
     M, N, K, C = prepare_block_fp8_matmul_inputs(A, B, As, Bs, block_size,
@@ -67,7 +67,7 @@ def w8a8_block_fp8_matmul_deepgemm_fake(
     B: torch.Tensor,
     As: torch.Tensor,
     Bs: torch.Tensor,
-    block_size: list[int],
+    block_size: List[int],
     output_dtype: torch.dtype,
 ) -> torch.Tensor:
     M, N, K, C = prepare_block_fp8_matmul_inputs(A, B, As, Bs, block_size,

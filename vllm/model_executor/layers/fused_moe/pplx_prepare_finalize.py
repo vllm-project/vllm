@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional
+from typing import Optional, List
 
 import pplx_kernels as pplx
 import torch
@@ -21,7 +21,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                  rank: int,
                  dp_size: int,
                  quant_dtype: Optional[torch.dtype] = None,
-                 block_shape: Optional[list[int]] = None,
+                 block_shape: Optional[List[int]] = None,
                  per_act_token: bool = False):
         super().__init__()
         assert max_num_tokens > 0

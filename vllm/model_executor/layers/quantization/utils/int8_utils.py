@@ -6,7 +6,7 @@ import functools
 import json
 import logging
 import os
-from typing import Any, Optional
+from typing import Any, Optional, List
 
 import torch
 
@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 def apply_w8a8_block_int8_linear(
     input: torch.Tensor,
     weight: torch.Tensor,
-    block_size: list[int],
+    block_size: List[int],
     weight_scale: torch.Tensor,
     input_scale: Optional[torch.Tensor] = None,
     bias: Optional[torch.Tensor] = None,
@@ -59,7 +59,7 @@ def input_to_int8(
 def block_dequant(
     x_q_block: torch.Tensor,
     x_s: torch.Tensor,
-    block_size: list[int],
+    block_size: List[int],
 ) -> torch.Tensor:
     """This function conducts block-wise dequantization.
     The inputs are block-wise quantization tensor `x_q_block`,
@@ -400,7 +400,7 @@ def w8a8_block_int8_matmul(
     B: torch.Tensor,
     As: torch.Tensor,
     Bs: torch.Tensor,
-    block_size: list[int],
+    block_size: List[int],
     output_dtype: torch.dtype = torch.float16,
 ) -> torch.Tensor:
     """This function performs matrix multiplication with block-wise

@@ -252,6 +252,7 @@ def marlin_permute_scales(s: torch.Tensor, size_k: int, size_n: int,
                           group_size: int) -> torch.Tensor:
 
     scale_perm, scale_perm_single = get_scale_perms()
+    breakpoint()
     if group_size < size_k and group_size != -1:
         s = s.reshape((-1, len(scale_perm)))[:, scale_perm]
     else:

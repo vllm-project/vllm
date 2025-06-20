@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-from typing import Optional
+from typing import Optional, List
 
 import deep_ep
 import torch
@@ -22,7 +22,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                  dp_size: int,
                  rank_expert_offset: int,
                  quant_dtype: Optional[torch.dtype] = None,
-                 block_shape: Optional[list[int]] = None):
+                 block_shape: Optional[List[int]] = None):
         super().__init__()
         self.buffer = buffer
         self.world_size = world_size

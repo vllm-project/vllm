@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional
+from typing import Optional, List
 
 import torch
 
@@ -17,7 +17,7 @@ class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
         self,
         quant_dtype: Optional[torch.dtype] = None,
         per_channel_quant: bool = False,
-        block_shape: Optional[list[int]] = None,
+        block_shape: Optional[List[int]] = None,
     ):
         super().__init__()
         self.per_channel_quant = per_channel_quant

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from math import prod
-from typing import Optional
+from typing import Optional, List
 
 import torch
 
@@ -27,7 +27,7 @@ def _fp8_quantize(
     A: torch.Tensor,
     A_scale: Optional[torch.Tensor],
     per_act_token: bool,
-    block_shape: Optional[list[int]] = None,
+    block_shape: Optional[List[int]] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Perform fp8 quantization on the inputs.  If a block_shape
@@ -49,7 +49,7 @@ def _int8_quantize(
     A: torch.Tensor,
     A_scale: Optional[torch.Tensor],
     per_act_token: bool,
-    block_shape: Optional[list[int]] = None,
+    block_shape: Optional[List[int]] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Perform int8 quantization on the inputs.  If a block_shape
@@ -77,7 +77,7 @@ def moe_kernel_quantize_input(
     A_scale: Optional[torch.Tensor],
     qtype: Optional[torch.dtype],
     per_channel_quant: bool,
-    block_shape: Optional[list[int]] = None,
+    block_shape: Optional[List[int]] = None,
 ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
     if qtype == torch.float8_e4m3fn:
         return _fp8_quantize(A, A_scale, per_channel_quant, block_shape)

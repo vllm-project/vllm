@@ -66,6 +66,7 @@ class MarlinLinearKernel(MPLinearKernel):
         def transform_w_q(x):
             assert isinstance(x, BasevLLMParameter)
             permute_param_layout_(x, input_dim=0, output_dim=1, packed_dim=0)
+            breakpoint()
             x.data = ops.gptq_marlin_repack(x.data.contiguous(),
                                             perm=layer.g_idx_sort_indices,
                                             size_k=c.partition_weight_shape[0],
@@ -104,6 +105,7 @@ class MarlinLinearKernel(MPLinearKernel):
                     num_bits=c.weight_type.size_bits))
         else:
             setattr(layer, self.w_zp_name, marlin_make_empty_g_idx(device))
+        breakpoint()
         self._transform_param(layer, self.w_q_name, transform_w_q)
         self._transform_param(layer, self.w_s_name, transform_w_s)
 

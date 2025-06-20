@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Fused batched MoE kernel."""
-from typing import Optional
+from typing import Optional, List
 
 import torch
 import triton
@@ -325,7 +325,7 @@ def invoke_moe_batched_triton_kernel(
         use_int8_w8a16: bool,
         use_int4_w4a16: bool,
         config: dict[str, int],
-        block_shape: Optional[list[int]] = None):
+        block_shape: Optional[List[int]] = None):
 
     assert not use_int4_w4a16
     max_num_tokens = A.size(1)
@@ -496,7 +496,7 @@ class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         use_int8_w8a8: bool = False,
         use_int8_w8a16: bool = False,
         use_int4_w4a16: bool = False,
-        block_shape: Optional[list[int]] = None,
+        block_shape: Optional[List[int]] = None,
         block_m: Optional[int] = None,
     ):
         super().__init__()
@@ -596,7 +596,7 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         use_int8_w8a16: bool = False,
         use_int4_w4a16: bool = False,
         per_channel_quant: bool = False,
-        block_shape: Optional[list[int]] = None,
+        block_shape: Optional[List[int]] = None,
         world_size: int = 1,
         dp_size: int = 1,
     ):

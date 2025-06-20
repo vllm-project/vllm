@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-from typing import Optional, Union
+from typing import Optional, Union, List
 
 import deep_ep
 import torch
@@ -43,7 +43,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                  dp_size: int,
                  max_tokens_per_rank: int,
                  quant_dtype: Optional[torch.dtype] = None,
-                 block_shape: Optional[list[int]] = None,
+                 block_shape: Optional[List[int]] = None,
                  use_fp8_dispatch: bool = False):
         super().__init__()
 

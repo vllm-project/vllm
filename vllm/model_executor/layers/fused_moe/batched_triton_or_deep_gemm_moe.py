@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-from typing import Optional
+from typing import Optional, List
 
 import torch
 
@@ -21,7 +21,7 @@ class BatchedTritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
                  use_int8_w8a16: bool = False,
                  use_int4_w4a16: bool = False,
                  per_channel_quant: bool = False,
-                 block_shape: Optional[list[int]] = None,
+                 block_shape: Optional[List[int]] = None,
                  allow_deep_gemm: bool = False):
         super().__init__()
         assert not use_int8_w8a8, "NYI"
