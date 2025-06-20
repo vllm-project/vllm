@@ -16,7 +16,6 @@ from vllm.model_executor.layers.fused_moe.utils import (
     moe_kernel_quantize_input)
 from vllm.utils import round_up
 
-from tests.kernels.quant_utils import native_w8a8_block_matmul
 
 def triton_moe(
     a: torch.Tensor,

@@ -81,6 +81,7 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         # workspaces so we can be pessimistic here and allocate for DeepGemm
         # even if we fall back to triton later, e.g. if expert maps are set.
         if self.allow_deep_gemm and _valid_deep_gemm_shape(M, N, K):
+            assert self.deep_gemm_expert is not None
             return self.deep_gemm_expert.workspace_shapes(
                 a, aq, M, N, K, topk, global_num_experts, local_num_experts)
         else:

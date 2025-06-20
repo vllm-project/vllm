@@ -112,6 +112,7 @@ class BatchedTritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
             return self.batched_deep_gemm_experts.workspace_shapes(
                 a, aq, M, N, K, topk, global_num_experts, local_num_experts)
         else:
+            assert self.batched_triton_experts is not None
             return self.batched_triton_experts.workspace_shapes(
                 a, aq, M, N, K, topk, global_num_experts, local_num_experts)
 
@@ -135,9 +136,6 @@ class BatchedTritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         workspace2: torch.Tensor,
         expert_num_tokens: Optional[torch.Tensor],
     ):
-        use_batched_deep_gemm_experts = (self.allow_deep_gemm
-                                         and self.batched_deep_gemm_experts
-                                         is not None)
         experts = (self.batched_deep_gemm_experts
                    if self.allow_deep_gemm else self.batched_triton_experts)
         assert experts is not None

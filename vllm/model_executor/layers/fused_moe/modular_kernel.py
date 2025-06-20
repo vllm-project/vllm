@@ -84,8 +84,6 @@ def _moe_problem_size(
     return E, M, N, K, topk
 
 
-# TODO: pass FusedMoEParallelConfig in as ctor parameter?
-
 class FusedMoEActivationFormat(Enum):
     """
     The standard activation format (num_tokens, hidden dim).
@@ -201,31 +199,6 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
     An abstract base class for the [Permute-Experts-Unpermute] step described
     above.
     """
-
-    def __init__(
-        self,
-        quant_config: Optional[FusedMoEQuantConfig],
-    ):
-        if quant_config is not None:
-            self.quant_config = quant_config
-        else:
-            self.quant_config = FusedMoEQuantConfig()
-
-    @property
-    def quant_dtype(self) -> Optional[torch.dtype]:
-        return self.quant_config.quant_dtype
-
-    @property
-    def block_shape(self) -> Optional[list[int]]:
-        return self.quant_config.block_shape
-
-    @property
-    def per_act_token_quant(self) -> bool:
-        return self.quant_config.per_act_token_quant
-
-    @property
-    def per_out_ch_quant(self) -> bool:
-        return self.quant_config.per_out_ch_quant
 
     def __init__(
         self,

@@ -12,7 +12,6 @@ from compressed_tensors.quantization import (ActivationOrdering,
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
-from vllm.distributed import get_ep_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     CutlassExpertsFp8, FusedMoE, FusedMoEActivationFormat, FusedMoEConfig,
@@ -573,7 +572,6 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         else:
             self.fused_experts_func = fused_experts
 
-    # XXXXXXXXXX
     def select_gemm_impl(self, prepare_finalize):
         from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
             BatchedTritonExperts)
@@ -582,18 +580,17 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
 
         logger.debug("BatchedTritonExperts(%s)", self.__classname__.__name__)
 
-        all2all_manager = get_ep_group().device_communicator.all2all_manager
-        assert all2all_manager is not None
+        use_batched_format = (prepare_finalize.activation_format ==
+                              FusedMoEActivationFormat.BatchedExperts)
+
+        assert use_batched_format
 
         max_num_tokens_per_rank = prepare_finalize.max_num_tokens_per_rank()
-        use_batched_experts = max_num_tokens_per_rank is not None
-
-        assert use_batched_experts
 
         return BatchedTritonExperts(
             max_num_tokens=max_num_tokens_per_rank,
-            world_size=all2all_manager.world_size,
-            dp_size=all2all_manager.tp_group.world_size,
+            world_size=moe.world_size,
+            dp_size=moe.dp_size,
             use_fp8_w8a8=True,
             block_shape=self.quant_config.weight_block_size,
             per_act_token_quant=(

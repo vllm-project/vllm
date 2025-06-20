@@ -112,7 +112,6 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 "apply_router_weight_on_input is only implemented for topk=1")
             a1 = a1 * topk_weights.to(a1.dtype)
 
-
         repeat_cols = 4
         repeat_rows = 1 if quant_config.per_act_token_quant else a1.size(0)
         a1q, a1q_scale = moe_kernel_quantize_input(
@@ -156,7 +155,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         num_dp = self.world_size // self.dp_size
         #print(f"EXPERT_X {(num_local_experts, self.max_num_tokens * num_dp, hidden_dim)}, {a1q.dtype}, {device}")
-        expert_x = torch.zeros(
+        expert_x = torch.empty(
             (num_local_experts, self.max_num_tokens * num_dp, hidden_dim),
             dtype=a1q.dtype,
             device=device,
@@ -167,7 +166,6 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             float32_size = torch.float32.itemsize
             block_size = (quant_config.block_shape[1] if quant_config.
                           block_shape is not None else 1) * float32_size
-
 
             expert_x_scale_shape = (
                 num_local_experts,

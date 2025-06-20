@@ -732,6 +732,7 @@ class FusedMoE(torch.nn.Module):
             num_local_experts=self.local_num_experts,
             moe_parallel_config=self.moe_parallel_config,
             in_dtype=model_dtype,
+            max_num_tokens=envs.VLLM_MOE_DP_CHUNK_SIZE,
             quant_config=quant_config,
         )
         self.moe_config = moe

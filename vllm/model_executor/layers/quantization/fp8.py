@@ -817,7 +817,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             return TritonOrDeepGemmExperts(
                 use_fp8_w8a8=True,
                 block_shape=self.quant_config.weight_block_size,
-                per_act_token=False,  #?
                 allow_deep_gemm=self.allow_deep_gemm,
             )
 
