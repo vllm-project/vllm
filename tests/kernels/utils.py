@@ -1080,7 +1080,6 @@ def torch_experts(
             or (w1_scale is not None and w2_scale is not None))
 
     M, K = a.shape
-    #N = w1.shape[1]
     topk = topk_ids.shape[1]
 
     a = a.view(M, -1, K).repeat(1, topk, 1).reshape(-1, K)
