@@ -65,7 +65,7 @@ class TorchSDPABackend(AttentionBackend):
         dst_kv_cache: torch.Tensor,
         src_to_dst: torch.Tensor,
     ) -> None:
-        PagedAttention.swap_blocks(src_kv_cache, dst_kv_cache, src_to_dst)
+        raise NotImplementedError("Swap is not supported in TorchSDPABackend.")
 
     @staticmethod
     def copy_blocks(
