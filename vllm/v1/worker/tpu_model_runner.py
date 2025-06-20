@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import bisect
+import dataclasses
 import gc
 import time
 from typing import TYPE_CHECKING, Optional, cast
@@ -967,6 +968,9 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         self._verify_num_xla_graphs("execute_model")
 
         return model_runner_output
+
+    def update_load_config(self, **kwargs) -> None:
+        self.load_config = dataclasses.replace(self.load_config, **kwargs)
 
     def load_model(self) -> None:
         self.device = self.device_config.device

@@ -184,6 +184,9 @@ class Worker(WorkerBase):
         with context:
             self.model_runner.load_model()
 
+    def update_load_config(self, **kwargs) -> None:
+        self.model_runner.update_load_config(**kwargs)
+
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
         """Profiles the peak memory usage of the model to determine how much 

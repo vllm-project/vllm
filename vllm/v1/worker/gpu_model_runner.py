@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import copy
+import dataclasses
 import gc
 import time
 import weakref
@@ -1686,6 +1687,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             else:
                 draft_token_ids.append(drafter_output.tolist())
         return draft_token_ids
+
+    def update_load_config(self, **kwargs) -> None:
+        self.load_config = dataclasses.replace(self.load_config, **kwargs)
 
     def load_model(self) -> None:
         logger.info("Starting to load model %s...", self.model_config.model)
