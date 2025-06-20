@@ -7,8 +7,15 @@ import heapq
 from abc import ABC, abstractmethod
 from collections import deque
 from collections.abc import Iterable, Iterator
+from enum import Enum
 
 from vllm.v1.request import Request
+
+
+class SchedulingPolicy(Enum):
+    """Enum for scheduling policies."""
+    FCFS = "fcfs"
+    PRIORITY = "priority"
 
 
 class RequestQueue(ABC):
@@ -207,9 +214,11 @@ class PriorityRequestQueue(RequestQueue):
         return reversed(list(self))
 
 
-def create_request_queue(policy: str) -> RequestQueue:
+def create_request_queue(policy: SchedulingPolicy) -> RequestQueue:
     """Create request queue based on scheduling policy."""
-    if policy == "priority":
+    if policy == SchedulingPolicy.PRIORITY:
         return PriorityRequestQueue()
-    else:
+    elif policy == SchedulingPolicy.FCFS:
         return FCFSRequestQueue()
+    else:
+        raise ValueError(f"Unknown scheduling policy: {policy}")
