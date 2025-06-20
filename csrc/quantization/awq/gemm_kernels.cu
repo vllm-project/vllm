@@ -166,7 +166,35 @@ __global__ void __launch_bounds__(64)
               "f"(((float*)(C_warp + j_0_4 * 8))[0]), "f"(((float*)(C_warp + j_0_4 * 8))[1]),
               "f"(((float*)(C_warp + j_0_4 * 8))[2]), "f"(((float*)(C_warp + j_0_4 * 8))[3]));
         
-        // ... second MMA for the other half of the N dimension ...
+        {
+            unsigned int B_addr;
+            // Pointing to the base address of B tile in shared memory, with an offset of 8 half elements (=16 bytes)
+            void* B_s_ptr = (void*)((half*)&B_shared[k_0_1 * 16 + j_0_4 * 32 * (32 + 8)] + 8);
+             __asm__ __volatile__(
+                "{ .reg .u64 addr; cvta.to.shared.u64 addr, %1; cvt.u32.u64 %0, addr; }\n"
+                : "=r"(B_addr) : "l"(B_s_ptr));
+            B_addr += (threadIdx.x % 16) * 4 + (threadIdx.x / 16) * 8 * (N + 8) * sizeof(half);
+
+            __asm__ __volatile__(
+                "ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%0, %1}, [%2];\n"
+                 : "=r"(B_shared_warp[0]), "=r"(B_shared_warp[1])
+                 : "r"(B_addr));
+        }
+        
+        // Execute the second MMA instruction
+        __asm__ __volatile__(
+            "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
+            "{%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%10, %11, %12, %13};\n"
+            // Accumulate results to the second half of C_warp (offset by 4 floats)
+            : "=f"(((float*)(C_warp + j_0_4 * 8 + 4))[0]), "=f"(((float*)(C_warp + j_0_4 * 8 + 4))[1]),
+              "=f"(((float*)(C_warp + j_0_4 * 8 + 4))[2]), "=f"(((float*)(C_warp + j_0_4 * 8 + 4))[3])
+            // A operands are the same as in the first MMA
+            : "r"(A_shared_warp[0]), "r"(A_shared_warp[1]), "r"(A_shared_warp[2]), "r"(A_shared_warp[3]),
+              // B operands are newly loaded tiles
+              "r"(B_shared_warp[0]), "r"(B_shared_warp[1]),
+              // C operands are the second half of the accumulator
+              "f"(((float*)(C_warp + j_0_4 * 8 + 4))[0]), "f"(((float*)(C_warp + j_0_4 * 8 + 4))[1]),
+              "f"(((float*)(C_warp + j_0_4 * 8 + 4))[2]), "f"(((float*)(C_warp + j_0_4 * 8 + 4))[3]));
 #endif
       }
     }
