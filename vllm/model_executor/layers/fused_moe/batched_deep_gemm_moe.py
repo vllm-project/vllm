@@ -105,7 +105,7 @@ def silu_mul_fp8_quant_deep_gemm(
     y: torch.Tensor,  # (E, T, 2*H) float32
     tokens_per_expert: torch.Tensor,  # (E,) number of valid tokens per expert
     group_size: int = 128,
-    eps: float = 1e-6,
+    eps: float = 1e-10,
 ):
     """Quantize silu(y[..., :H]) * y[..., H:] to FP8 with group per-token scales
 
@@ -152,7 +152,7 @@ def silu_mul_fp8_quant_deep_gemm(
 
     f_info = torch.finfo(fp8_dtype)
     fp8_max = f_info.max
-    fp8_min = -f_info.max
+    fp8_min = f_info.min
 
     _silu_mul_fp8_quant_deep_gemm[grid](
         y,
