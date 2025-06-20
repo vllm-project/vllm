@@ -759,11 +759,11 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
     ) -> Qwen2VLProcessor:
         return self.ctx.get_hf_processor(
             Qwen2VLProcessor,
-            image_processor=self.get_image_processor(
-                min_pixels=min_pixels,
-                max_pixels=max_pixels,
-                size=size,
-                use_fast=kwargs.get("use_fast")),
+            image_processor=self.get_image_processor(min_pixels=min_pixels,
+                                                     max_pixels=max_pixels,
+                                                     size=size,
+                                                     use_fast=kwargs.get(
+                                                         "use_fast", True)),
             **kwargs,
         )
 
@@ -808,6 +808,7 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         size: Optional[dict[str, int]] = None,
         **kwargs: object,
     ) -> Qwen2VLImageProcessor:
+        kwargs["use_fast"] = kwargs.get("use_fast", True)
         return cached_image_processor_from_config(
             self.ctx.model_config,
             **self._get_image_processor_kwargs(min_pixels=min_pixels,
@@ -1257,11 +1258,12 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def get_multimodal_embeddings(
-            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
+    def get_multimodal_embeddings(self,
+                                  **kwargs: object) -> MultiModalEmbeddings:
 
         modalities = self._parse_and_validate_multimodal_inputs(**kwargs)
         if not modalities:
+            return []
             return None
 
         # The result multimodal_embeddings is tuple of tensors, with each
@@ -1288,7 +1290,8 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
-        if multimodal_embeddings is not None:
+        if multimodal_embeddings is not None \
+            and len(multimodal_embeddings) != 0:
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids, inputs_embeds, multimodal_embeddings,
                 [self.config.image_token_id, self.config.video_token_id])

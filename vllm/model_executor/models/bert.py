@@ -414,15 +414,10 @@ class BertEmbeddingModel(nn.Module, SupportsV0Only, SupportsQuant):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        hidden_states = self.model(input_ids=input_ids,
-                                   position_ids=positions,
-                                   inputs_embeds=inputs_embeds,
-                                   intermediate_tensors=intermediate_tensors)
-
-        # convert the embedding output to float32,
-        # otherwise precision will be lost significantly
-        hidden_states = hidden_states.to(torch.float32)
-        return hidden_states
+        return self.model(input_ids=input_ids,
+                          position_ids=positions,
+                          inputs_embeds=inputs_embeds,
+                          intermediate_tensors=intermediate_tensors)
 
     def pooler(
         self,
@@ -451,8 +446,8 @@ class BertEmbeddingModel(nn.Module, SupportsV0Only, SupportsQuant):
                                                 softmax=False)
 
 
-class BertForSequenceClassification(nn.Module, SupportsCrossEncoding,
-                                    SupportsQuant):
+class BertForSequenceClassification(nn.Module, SupportsV0Only,
+                                    SupportsCrossEncoding, SupportsQuant):
     """A model that uses Bert to provide embedding functionalities.
 
    This class encapsulates the BertModel and provides an interface for
