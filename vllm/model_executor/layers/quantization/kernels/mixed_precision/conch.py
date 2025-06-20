@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from importlib.util import find_spec
 from typing import Final, Optional
 
 import torch
-from conch.ops.quantization.gemm import mixed_precision_gemm
 
 from vllm.model_executor.parameter import (BasevLLMParameter,
                                            permute_param_layout_)
@@ -39,6 +39,12 @@ class ConchLinearKernel(MPLinearKernel):
                         f"{_CONCH_SUPPORTED_GROUP_SIZES}"
             return False, error_msg
 
+        if find_spec("conch") is None:
+            error_msg = "conch-triton-kernels is not installed, please "\
+                        "install it via `pip install conch-triton-kernels` "\
+                        "and try again!"
+            return False, error_msg
+
         return True, None
 
     # note assumes that
@@ -65,6 +71,8 @@ class ConchLinearKernel(MPLinearKernel):
                       layer: torch.nn.Module,
                       x: torch.Tensor,
                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+        from conch.ops.quantization.gemm import mixed_precision_gemm
+
         w_q, w_s, w_zp, _ = self._get_weight_params(layer)
 
         output = mixed_precision_gemm(

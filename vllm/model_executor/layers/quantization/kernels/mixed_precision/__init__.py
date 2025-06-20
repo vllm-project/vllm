@@ -26,8 +26,8 @@ _POSSIBLE_KERNELS: list[type[MPLinearKernel]] = [
     AllSparkLinearKernel,
     MarlinLinearKernel,
     BitBLASLinearKernel,
-    ExllamaLinearKernel,
     ConchLinearKernel,
+    ExllamaLinearKernel,
 ]
 
 
