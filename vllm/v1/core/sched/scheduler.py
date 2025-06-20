@@ -218,16 +218,10 @@ class Scheduler(SchedulerInterface):
             encoder_inputs_to_schedule = None
             new_encoder_budget = encoder_budget
             if request.has_encoder_inputs:
-                (
-                    encoder_inputs_to_schedule,
-                    num_new_tokens,
-                    new_encoder_budget,
-                ) = self._try_schedule_encoder_inputs(
-                    request,
-                    request.num_computed_tokens,
-                    num_new_tokens,
-                    encoder_budget,
-                )
+                (encoder_inputs_to_schedule, num_new_tokens,
+                 new_encoder_budget) = self._try_schedule_encoder_inputs(
+                     request, request.num_computed_tokens, num_new_tokens,
+                     encoder_budget)
 
             if num_new_tokens == 0:
                 # The request cannot be scheduled because one of the following
@@ -245,17 +239,14 @@ class Scheduler(SchedulerInterface):
 
             num_draft_tokens = max(
                 num_new_tokens + request.num_computed_tokens -
-                request.num_tokens,
-                0,
-            )
+                request.num_tokens, 0)
 
             while True:
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
                     num_new_tokens,
                     num_draft_tokens=num_draft_tokens,
-                    num_lookahead_tokens=self.num_lookahead_tokens,
-                )
+                    num_lookahead_tokens=self.num_lookahead_tokens)
                 if new_blocks is None:
                     # The request cannot be scheduled.
                     # Preempt the lowest-priority request.
@@ -351,10 +342,9 @@ class Scheduler(SchedulerInterface):
                     else:
                         logger.debug(
                             "%s is still in WAITING_FOR_REMOTE_KVS state.",
-                            request.request_id,
-                        )
-                        skipped_waiting_requests.prepend_request(
-                            self.waiting.pop_request())
+                            request.request_id)
+                        self.waiting.pop_request()
+                        skipped_waiting_requests.prepend_request(request)
                         continue
 
                 # Skip request if the structured output request is still waiting
@@ -364,8 +354,8 @@ class Scheduler(SchedulerInterface):
                     if structured_output_req and structured_output_req.grammar:
                         request.status = RequestStatus.WAITING
                     else:
-                        skipped_waiting_requests.prepend_request(
-                            self.waiting.pop_request())
+                        self.waiting.pop_request()
+                        skipped_waiting_requests.prepend_request(request)
                         continue
 
                 # Check that adding the request still respects the max_loras
@@ -374,8 +364,8 @@ class Scheduler(SchedulerInterface):
                     (len(scheduled_loras) == self.lora_config.max_loras and
                      request.lora_request.lora_int_id not in scheduled_loras)):
                     # Scheduling would exceed max_loras, skip.
-                    skipped_waiting_requests.prepend_request(
-                        self.waiting.pop_request())
+                    self.waiting.pop_request()
+                    skipped_waiting_requests.prepend_request(request)
                     continue
 
                 num_external_computed_tokens = 0
@@ -530,8 +520,8 @@ class Scheduler(SchedulerInterface):
         # Since some requests in the RUNNING queue may not be scheduled in
         # this step, the total number of scheduled requests can be smaller than
         # len(self.running).
-        assert len(scheduled_new_reqs) + len(scheduled_resumed_reqs) + len(
-            scheduled_running_reqs) <= len(self.running)
+        assert (len(scheduled_new_reqs) + len(scheduled_resumed_reqs) +
+                len(scheduled_running_reqs) <= len(self.running))
 
         # Get the longest common prefix among all requests in the running queue.
         # This can be potentially used for cascade attention.

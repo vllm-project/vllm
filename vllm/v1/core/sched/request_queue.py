@@ -74,9 +74,6 @@ class RequestQueue(ABC):
 class FCFSRequestQueue(deque[Request], RequestQueue):
     """A first-come-first-served queue that supports deque operations."""
 
-    def __init__(self) -> None:
-        super().__init__()
-
     def add_request(self, request: Request) -> None:
         """Add a request to the queue according to FCFS policy."""
         self.append(request)
