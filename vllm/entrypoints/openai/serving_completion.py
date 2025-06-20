@@ -44,14 +44,16 @@ logger = init_logger(__name__)
 
 class OpenAIServingCompletion(OpenAIServing):
 
-    def __init__(self,
-                 engine_client: EngineClient,
-                 model_config: ModelConfig,
-                 models: OpenAIServingModels,
-                 *,
-                 request_logger: Optional[RequestLogger],
-                 return_tokens_as_token_ids: bool = False,
-                 enforce_include_usage: bool = False):
+    def __init__(
+        self,
+        engine_client: EngineClient,
+        model_config: ModelConfig,
+        models: OpenAIServingModels,
+        *,
+        request_logger: Optional[RequestLogger],
+        return_tokens_as_token_ids: bool = False,
+        enforce_include_usage: bool = False,
+    ):
         super().__init__(engine_client=engine_client,
                          model_config=model_config,
                          models=models,
@@ -281,12 +283,17 @@ class OpenAIServingCompletion(OpenAIServing):
         return response
 
     async def completion_stream_generator(
-            self, request: CompletionRequest,
-            result_generator: AsyncIterator[tuple[int, RequestOutput]],
-            request_id: str, created_time: int, model_name: str,
-            num_prompts: int, tokenizer: AnyTokenizer,
-            request_metadata: RequestResponseMetadata,
-            enforce_include_usage: bool) -> AsyncGenerator[str, None]:
+        self,
+        request: CompletionRequest,
+        result_generator: AsyncIterator[tuple[int, RequestOutput]],
+        request_id: str,
+        created_time: int,
+        model_name: str,
+        num_prompts: int,
+        tokenizer: AnyTokenizer,
+        request_metadata: RequestResponseMetadata,
+        enforce_include_usage: bool,
+    ) -> AsyncGenerator[str, None]:
         num_choices = 1 if request.n is None else request.n
         previous_text_lens = [0] * num_choices * num_prompts
         previous_num_tokens = [0] * num_choices * num_prompts
