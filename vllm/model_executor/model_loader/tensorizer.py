@@ -167,9 +167,8 @@ class TensorizerConfig(MutableMapping):
                                                                  default=None)
     _model_cls: Optional[type[torch.nn.Module]] = field(init=False,
                                                         default=None)
-    _hf_config: Optional[PretrainedConfig] = field(init=False, default=None)
-    _model_cls_dtype: Optional[Union[str, torch.dtype]] = field(init=False,
-                                                                default=None)
+    hf_config: Optional[PretrainedConfig] = field(init=False, default=None)
+    dtype: Optional[Union[str, torch.dtype]] = field(init=False, default=None)
     _is_sharded: bool = field(init=False, default=False)
     _fields: ClassVar[tuple[str, ...]]
     _keys: ClassVar[frozenset[str]]
@@ -489,9 +488,9 @@ def _resize_lora_embeddings(model: nn.Module):
 
 def init_tensorizer_model(tensorizer_config: TensorizerConfig,
                           vllm_config: VllmConfig) -> nn.Module:
-    assert tensorizer_config._hf_config is not None
-    model_args = tensorizer_config._hf_config
-    model_args.torch_dtype = tensorizer_config._model_cls_dtype
+    assert tensorizer_config.hf_config is not None
+    model_args = tensorizer_config.hf_config
+    model_args.torch_dtype = tensorizer_config.dtype
     assert tensorizer_config._model_cls is not None
     # TODO: Do we need to consider old-style model class?
     with meta_tensor_mode(), set_current_vllm_config(vllm_config,
@@ -515,7 +514,7 @@ def deserialize_tensorizer_model(model: nn.Module,
             mode="rb",
             **tensorizer_args.stream_kwargs) as stream, TensorDeserializer(
                 stream,
-                dtype=tensorizer_config._model_cls_dtype,
+                dtype=tensorizer_config.dtype,
                 device=torch.device("cuda", torch.cuda.current_device()),
                 **tensorizer_args.deserialization_kwargs) as deserializer:
         deserializer.load_into_module(model)
