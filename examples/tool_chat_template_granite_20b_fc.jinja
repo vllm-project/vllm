@@ -1,0 +1,130 @@
+{%- macro json_to_python_type(json_spec) %}
+    {%- set basic_type_map = {
+    "string": "str",
+    "number": "float",
+    "integer": "int",
+    "boolean": "bool"
+} %}
+
+    {%- if basic_type_map[json_spec.type] is defined %}
+        {{- basic_type_map[json_spec.type] }}
+    {%- elif json_spec.type == "array" %}
+        {{- "list[" +  json_to_python_type(json_spec|items) + "]" }}
+    {%- elif json_spec.type == "object" %}
+        {%- if json_spec.additionalProperties is defined %}
+            {{- "dict[str, " + json_to_python_type(json_spec.additionalProperties) + ']' }}
+        {%- else %}
+            {{- "dict" }}
+        {%- endif %}
+    {%- elif json_spec.type is iterable %}
+        {{- "Union[" }}
+        {%- for t in json_spec.type %}
+            {{- json_to_python_type({"type": t}) }}
+            {%- if not loop.last %}
+                {{- "," }}
+            {%- endif %}
+        {%- endfor %}
+        {{- "]" }}
+    {%- else %}
+        {{- "Any" }}
+    {%- endif %}
+{%- endmacro %}
+
+{%- if not full_function_description is defined %}
+    {%- set full_function_description = false %}
+{%- endif %}
+
+{%- macro full_description(tool) %}
+    {{- tool.name + '(' }}
+    {%- if tool.parameters is defined %}
+        {%- for param_name, param_fields in tool.parameters.properties|items %}
+            {{- param_name + ": " + json_to_python_type(param_fields) }}
+            {%- if not loop.last %}
+                {{- ", " }}
+            {%- endif %}
+        {%- endfor %}
+    {%- endif %}
+    {{- ")" }}
+    {%- if tool.return is defined %}
+        {{- " -> " + json_to_python_type(tool.return) }}
+    {%- endif %}
+    {{- " - " + tool.description + "\n\n" }}
+    {%- if tool.parameters is defined %}
+        {%- for param_name, param_fields in tool.parameters.properties|items %}
+            {%- if loop.first %}
+                {{- "    Args:\n" }}
+            {%- endif %}
+            {{- "        " + param_name + "(" + json_to_python_type(param_fields) + "): " + param_fields.description|trim }}
+        {%- endfor %}
+    {%- endif %}
+    {%- if tool.return is defined and tool.return.description is defined %}
+        {{- "\n    Returns:\n        " + tool.return.description }}
+    {%- endif %}
+    {{- '"' }}
+{%- endmacro %}
+
+{%- macro simple_description(tool) %}
+    {{- tool.description }}
+{%- endmacro %}
+
+{%- macro function_description(tool) %}
+    {%- if full_function_description %}
+        {{- full_description(tool) }}
+    {%- else %}
+        {{- simple_description(tool) }}
+    {%- endif %}
+{%- endmacro %}
+
+{%- if messages[0]["role"] == "system" %}
+    {%- set sys_prompt = messages[0]["content"] %}
+    {%- set loop_messages = messages[1:] %}
+{%- else %}
+    {%- set loop_messages = messages %}
+    {% set sys_prompt = 'You are a helpful assistant with access to the following function calls. Your task is to understand the given conversation with function calls and responses and generate natural language response as the ASSISTANT to continue the conversation. You may use the following function calls to understand how to respond to the user query.' %}
+{%- endif %}
+
+{{ 'SYSTEM: ' + sys_prompt }}
+{% if tools is iterable and tools | length > 0 %}
+<|function_call_library|>
+    {%- for tool in tools %}
+        {%- if tool.function is defined %}
+            {%- set tool = tool.function %}
+        {%- endif %}
+        {{- '{"name": "' + tool.name + '", ' }}
+        {{- '"description": "' + function_description(tool) }}
+        {{- ', "parameters": ' }}
+        {%- if not tool.parameters is defined or tool.parameters.properties | length == 0 %}
+            {{- "{}" }}
+        {%- else %}
+            {{- tool.parameters|tojson }}
+        {%- endif %}
+        {{- "}" }}
+        {%- if not loop.last %}
+            {{- "\n" }}
+        {%- endif %}
+    {%- endfor %}
+If none of the functions are relevant or the given question lacks the parameters required by the function, please output \"<function_call> {\"name\": \"no_function\", \"arguments\": {}}\".
+{%- endif %}
+
+
+
+{% for message in messages %}
+    {% if message['role'] == 'user' %}
+        {{- '\nUSER: ' + message['content'] }}
+    {% elif message['role'] == 'assistant' and message.tool_calls is defined %}
+        {{- '\nASSISTANT:'  }}
+        {% for tc in message.tool_calls %}
+            {{- '<function_call> ' + {'name': tc.function.name, 'arguments': tc.function.arguments}|tojson  }}
+        {% endfor %}
+        {{- '<|endoftext|>'  }}
+    {% elif message['role'] == 'assistant' %}
+        {{- '\nASSISTANT: ' + message['content'] + ' <|endoftext|>'  }}
+    {% elif message['role'] == 'tool' %}
+        {{- '<function_response> ' + message['content'] }}
+    {%- else %}
+        {{- raise_exception("Unexpected combination of role and message content") }}
+    {% endif %}
+    {% if loop.last and add_generation_prompt %}
+        {{- '\nASSISTANT: ' }}
+    {% endif %}
+{% endfor %}
