@@ -143,6 +143,24 @@ class DeepEPAll2AllManagerBase(All2AllManagerBase):
         device = self.dp_group.device
         props = torch.cuda.get_device_properties(device)
         self.num_sms = props.multi_processor_count
+        print(f"Setting num sms to {self.num_sms}")
+        print(f"Setting num sms to {self.num_sms}")
+        print(f"Setting num sms to {self.num_sms}")
+        print(f"Setting num sms to {self.num_sms}")
+        print(f"Setting num sms to {self.num_sms}")
+        print(f"Setting num sms to {self.num_sms}")
+        print(f"Setting num sms to {self.num_sms}")
+        print(f"Setting num sms to {self.num_sms}")
+        print(f"Setting num sms to {self.num_sms}")
+        print(f"Setting num sms to {self.num_sms}")
+        print(f"Setting num sms to {self.num_sms}")
+        print(f"Setting num sms to {self.num_sms}")
+        print(f"Setting num sms to {self.num_sms}")
+        print(f"Setting num sms to {self.num_sms}")
+        print(f"Setting num sms to {self.num_sms}")
+        print(f"Setting num sms to {self.num_sms}")
+        print(f"Setting num sms to {self.num_sms}")
+        print(f"Setting num sms to {self.num_sms}")
 
     def get_handle(self, kwargs):
         raise NotImplementedError
