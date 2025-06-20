@@ -94,9 +94,6 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                 block_shape=moe.block_shape,
             )
 
-            logger.debug("All2All %s, %s = %s/%s", moe.quant_dtype,
-                         moe.block_shape, hidden_dim_bytes, hidden_scale_bytes)
-
             all_to_all_args = dict(
                 max_num_tokens=moe.max_num_tokens,
                 num_experts=moe.num_experts,
@@ -660,8 +657,6 @@ class FusedMoE(torch.nn.Module):
             # TODO (bnell): This is a hack to get test_mixtral_moe to work
             # since model_config is not set in the pytest test.
             model_dtype = params_dtype
-
-        logger.debug("MODEL DTYPE %s", model_dtype)
 
         moe = FusedMoEConfig.make(
             num_experts=self.global_num_experts,
