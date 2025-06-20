@@ -258,6 +258,7 @@ def is_init_field(cls: ConfigType, name: str) -> bool:
 TokenizerMode = Literal["auto", "slow", "mistral", "custom"]
 ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
 MMEncoderTPMode = Literal["weights", "data"]
+MMCacheType = Literal["shm", "lru"]
 
 
 class LogprobsMode(enum.Enum):
@@ -446,6 +447,9 @@ class ModelConfig:
     `mm_processor_cache_gb * (api_server_count + data_parallel_size)`.
 
     Set to `0` to disable this cache completely (not recommended)."""
+    mm_processor_cache_type: MMCacheType = "lru"
+    """Type of cache to use for the multi-modal preprocessor/mapper. If `shm`,
+    use shared memory FIFO cache. If `lru`, use mirrored LRU cache."""
     mm_encoder_tp_mode: MMEncoderTPMode = "weights"
     """Indicates how to optimize multi-modal encoder inference using
     tensor parallelism (TP).
@@ -884,6 +888,7 @@ class ModelConfig:
                 media_io_kwargs=self.media_io_kwargs,
                 mm_processor_kwargs=self.mm_processor_kwargs,
                 mm_processor_cache_gb=self.mm_processor_cache_gb,
+                mm_processor_cache_type=self.mm_processor_cache_type,
                 mm_encoder_tp_mode=self.mm_encoder_tp_mode,
                 interleave_mm_strings=self.interleave_mm_strings,
                 skip_mm_profiling=self.skip_mm_profiling,
@@ -2562,6 +2567,10 @@ class MultiModalConfig:
 
     Set to `0` to disable this cache completely (not recommended).
     """
+
+    mm_processor_cache_type: MMCacheType = "lru"
+    """Type of cache to use for the multi-modal preprocessor/mapper. If `shm`,
+    use shared memory FIFO cache. If `lru`, use mirrored LRU cache."""
 
     mm_encoder_tp_mode: MMEncoderTPMode = "weights"
     """

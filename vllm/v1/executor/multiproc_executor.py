@@ -12,10 +12,11 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import Enum, auto
 from functools import partial
+from multiprocessing import Lock
 from multiprocessing.connection import Connection
 from multiprocessing.process import BaseProcess
 from threading import Thread
-from typing import Any, Callable, Optional, Union, cast
+from typing import TYPE_CHECKING, Any, Callable, Optional, Union, cast
 
 import cloudpickle
 
@@ -29,12 +30,18 @@ from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.executor.multiproc_worker_utils import (
     set_multiprocessing_worker_envs)
 from vllm.logger import init_logger
+from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.cache import receiver_cache_from_config
 from vllm.utils import (decorate_logs, get_distributed_init_method,
                         get_loopback_ip, get_mp_context, get_open_port,
                         set_process_title)
 from vllm.v1.executor.abstract import Executor, FailureCallback
+from vllm.v1.executor.utils import get_and_update_mm_cache
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 from vllm.worker.worker_base import WorkerWrapperBase
+
+if TYPE_CHECKING:
+    from multiprocessing.synchronize import Lock as LockType
 
 logger = init_logger(__name__)
 
@@ -78,6 +85,7 @@ class MultiprocExecutor(Executor):
         scheduler_output_handle = self.rpc_broadcast_mq.export_handle()
 
         # Create workers
+        shared_worker_lock = Lock()
         unready_workers: list[UnreadyWorkerProcHandle] = []
         success = False
         try:
@@ -89,6 +97,7 @@ class MultiprocExecutor(Executor):
                         rank=rank,
                         distributed_init_method=distributed_init_method,
                         input_shm_handle=scheduler_output_handle,
+                        shared_worker_lock=shared_worker_lock,
                     ))
 
             # Workers must be created before wait_for_ready to avoid
@@ -366,6 +375,7 @@ class WorkerProc:
         rank: int,
         distributed_init_method: str,
         input_shm_handle: Handle,
+        shared_worker_lock: LockType,
     ):
         self.rank = rank
         wrapper = WorkerWrapperBase(vllm_config=vllm_config, rpc_rank=rank)
@@ -403,17 +413,21 @@ class WorkerProc:
         # Initializes a message queue for sending the model output
         self.worker_response_mq = MessageQueue(1, 1)
 
+        self.receiver_cache = receiver_cache_from_config(
+            vllm_config, MULTIMODAL_REGISTRY, True, shared_worker_lock)
+
         # Initialize device and loads weights
         self.worker.init_device()
         self.worker.load_model()
 
     @staticmethod
     def make_worker_process(
-            vllm_config: VllmConfig,
-            local_rank: int,
-            rank: int,
-            distributed_init_method: str,
-            input_shm_handle,  # Receive SchedulerOutput
+        vllm_config: VllmConfig,
+        local_rank: int,
+        rank: int,
+        distributed_init_method: str,
+        input_shm_handle,  # Receive SchedulerOutput
+        shared_worker_lock: LockType,
     ) -> UnreadyWorkerProcHandle:
         context = get_mp_context()
         # (reader, writer)
@@ -430,6 +444,7 @@ class WorkerProc:
             "input_shm_handle": input_shm_handle,
             "ready_pipe": (reader, writer),
             "death_pipe": death_reader,
+            "shared_worker_lock": shared_worker_lock,
         }
         # Run EngineCore busy loop in background process.
         proc = context.Process(target=WorkerProc.worker_main,
@@ -588,7 +603,8 @@ class WorkerProc:
         """Main busy loop for Multiprocessing Workers"""
         while True:
             method, args, kwargs, output_rank = self.rpc_broadcast_mq.dequeue()
-
+            if self.receiver_cache is not None:
+                get_and_update_mm_cache(self.receiver_cache, args)
             try:
                 if isinstance(method, str):
                     func = getattr(self.worker, method)
