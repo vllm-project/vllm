@@ -1419,11 +1419,15 @@ class Tarsier2ImageProcessor(Qwen2VLImageProcessor):
         size: Optional[dict[str, int]] = None,
         **kwargs,
     ) -> None:
-        size = {
-            "shortest_edge": size["min_pixels"],
-            "longest_edge": size["max_pixels"]
-        }
-        super().__init__(size=size, **kwargs)
+        if size is not None and "min_pixels" in size and "max_pixels" in size:
+            # Remap if Tarsier2-specific format is provided
+            remapped_size = {
+                "shortest_edge": size["min_pixels"],
+                "longest_edge": size["max_pixels"]
+            }
+            super().__init__(size=remapped_size, **kwargs)
+        else:
+            super().__init__(size=size, **kwargs)
 
 
 class Tarsier2Processor(Qwen2VLProcessor):
