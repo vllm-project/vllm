@@ -16,7 +16,7 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && echo 'tzdata tzdata/Zones/America select Los_Angeles' | debconf-set-selections \
     && apt-get update -y \
     && apt-get install -y --no-install-recommends ccache software-properties-common git curl sudo \
-       python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv cmake ninja-build \
+       python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv cmake ninja-build uv \
     && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
     && update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION} \
     && ln -sf /usr/bin/python${PYTHON_VERSION}-config /usr/bin/python3-config \
@@ -24,10 +24,6 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && python3 --version && python3 -m pip --version \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
-
-# Install uv for faster pip installs
-RUN --mount=type=cache,target=/root/.cache/uv \
-    python3 -m pip install uv
 
 # This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
 # Reference: https://github.com/astral-sh/uv/pull/1694
@@ -73,6 +69,7 @@ ENV VLLM_FA_CMAKE_GPU_ARCHES=${vllm_fa_cmake_gpu_arches}
 FROM base AS build
 ARG TARGETPLATFORM
 ARG CUDA_VERSION
+ARG PYTHON_VERSION
 
 # install build dependencies
 COPY requirements/build.txt requirements/build.txt
@@ -187,7 +184,7 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && apt-get update -y \
     && apt-get install -y --no-install-recommends ccache software-properties-common git curl wget sudo vim python3-pip \
        ffmpeg libsm6 libxext6 libgl1 libibverbs-dev \
-       python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv \
+       python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv uv \
     && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
     && update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION} \
     && ln -sf /usr/bin/python${PYTHON_VERSION}-config /usr/bin/python3-config \
@@ -195,10 +192,6 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && python3 --version && python3 -m pip --version \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
-
-# Install uv for faster pip installs
-RUN --mount=type=cache,target=/root/.cache/uv \
-    python3 -m pip install uv
 
 # This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
 # Reference: https://github.com/astral-sh/uv/pull/1694
