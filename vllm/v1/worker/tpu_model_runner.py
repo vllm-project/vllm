@@ -523,8 +523,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
 
         return kv_cache_spec
 
-    def _prepare_inputs(self,
-                        scheduler_output: "SchedulerOutput",
+    def _prepare_inputs(self, scheduler_output: "SchedulerOutput",
                         start_index: int):
         assert scheduler_output.total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
@@ -553,7 +552,8 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             else:
                 end_index = num_reqs
         else:
-            if len(num_scheduled_tokens_per_req) > self.num_reqs_most_model_len:
+            if len(num_scheduled_tokens_per_req
+                   ) > self.num_reqs_most_model_len:
                 num_scheduled_tokens_per_req = \
                     num_scheduled_tokens_per_req[:self.num_reqs_most_model_len]
                 end_index = start_index + self.num_reqs_most_model_len
@@ -581,11 +581,9 @@ class TPUModelRunner(LoRAModelRunnerMixin):
 
         # Get positions.
         positions_np = self.positions_np[:total_num_scheduled_tokens]
-        np.add(
-            self.input_batch.num_computed_tokens_cpu[req_indices],
-            arange,
-            out=positions_np
-        )
+        np.add(self.input_batch.num_computed_tokens_cpu[req_indices],
+               arange,
+               out=positions_np)
 
         # Get token indices.
         # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
@@ -651,22 +649,25 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             slot_mapping_cpu[:padded_total_num_scheduled_tokens].to(
                 self.device))
         if use_max_model_len:
-            block_tables = self.block_table_cpu[
-                :self.num_reqs_max_model_len, :self.max_num_blocks_per_req]
+            block_tables = self.block_table_cpu[:self.num_reqs_max_model_len, :
+                                                self.max_num_blocks_per_req]
             block_tables[:num_reqs, :self.max_num_blocks_per_req] = (
                 self.input_batch.block_table[0].get_cpu_tensor()[:num_reqs])
-            query_start_loc = self.query_start_loc_cpu[
-                :self.num_reqs_max_model_len + 1].to(self.device)
+            query_start_loc = self.query_start_loc_cpu[:self.
+                                                       num_reqs_max_model_len +
+                                                       1].to(self.device)
             seq_lens = self.seq_lens_cpu[:self.num_reqs_max_model_len].to(
                 self.device)
         else:
-            block_tables = self.block_table_cpu[
-                :self.num_reqs_most_model_len, :self.num_blocks_per_most_len_req]
+            block_tables = self.block_table_cpu[:self.
+                                                num_reqs_most_model_len, :self.
+                                                num_blocks_per_most_len_req]
             block_tables[:num_reqs, :self.num_blocks_per_most_len_req] = (
                 self.input_batch.block_table[0].get_cpu_tensor()
                 [:num_reqs, :self.num_blocks_per_most_len_req])
-            query_start_loc = self.query_start_loc_cpu[
-                :self.num_reqs_most_model_len + 1].to(self.device)
+            query_start_loc = self.query_start_loc_cpu[:self.
+                                                       num_reqs_most_model_len +
+                                                       1].to(self.device)
             seq_lens = self.seq_lens_cpu[:self.num_reqs_most_model_len].to(
                 self.device)
         block_tables = block_tables.to(self.device)
@@ -720,7 +721,8 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             layer_name: attn_metadata
             for layer_name in layer_names
         }
-        return per_layer_attn_metadata, logits_indices, padded_num_reqs, num_reqs, end_index
+        return per_layer_attn_metadata, logits_indices, padded_num_reqs,\
+            num_reqs, end_index
 
     def _scatter_placeholders(
         self,
@@ -896,13 +898,13 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             mm_embeds = []
         xm.mark_step()
         # Prepare inputs, the requests might be splitted into multiple
-        # executions, combine the result of each execution. 
+        # executions, combine the result of each execution.
         start_index = 0
         combined_selected_tokens = []
         combined_logprobs = []
         while start_index < self.input_batch.num_reqs:
-            attn_metadata, logits_indices, padded_num_reqs, num_reqs, end_index \
-                = self._prepare_inputs(scheduler_output, start_index)
+            attn_metadata, logits_indices, padded_num_reqs, num_reqs,\
+                end_index = self._prepare_inputs(scheduler_output, start_index)
             input_ids, inputs_embeds = self._get_model_inputs(
                 self.input_ids, mm_embeds)
             xm.mark_step()
@@ -923,16 +925,17 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                 from_input_batch(self.input_batch, padded_num_reqs, self.device)
             if scheduler_output.grammar_bitmask is not None:
                 require_struct_decoding, grammar_bitmask_padded, arange = \
-                    self.prepare_structured_decoding_input(logits, scheduler_output)
+                    self.prepare_structured_decoding_input(logits,
+                                                           scheduler_output)
                 logits = self.structured_decode(require_struct_decoding,
                                                 grammar_bitmask_padded, logits,
                                                 arange)
             selected_token_ids = self.sample_from_logits_func(
                 logits, tpu_sampling_metadata)
             # NOTE (NickLucche) Use the original logits (before any penalties or
-            # temperature scaling) for the top-k logprobs. We can't enforce it due
-            # to recompilations outside torch.compiled code, so just make sure
-            # `sample_from_logits` does not modify the logits in-place.
+            # temperature scaling) for the top-k logprobs. We can't enforce it
+            # due to recompilations outside torch.compiled code, so just make
+            # sure `sample_from_logits` does not modify the logits in-place.
             logprobs = self.gather_logprobs(logits, selected_token_ids) \
                 if tpu_sampling_metadata.logprobs else None
 
@@ -948,10 +951,11 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         if tpu_sampling_metadata.logprobs:
             logprobs = LogprobsTensors(
                 torch.cat([lp.logprobs for lp in combined_logprobs], dim=0),
-                torch.cat([
-                    lp.logprob_token_ids for lp in combined_logprobs], dim=0),
-                torch.cat([lp.selected_token_ranks for lp in combined_logprobs],
-                          dim=0))
+                torch.cat([lp.logprob_token_ids for lp in combined_logprobs],
+                          dim=0),
+                torch.cat(
+                    [lp.selected_token_ranks for lp in combined_logprobs],
+                    dim=0))
             logprobs_lists = logprobs.tolist()
         else:
             logprobs_lists = None
@@ -1087,9 +1091,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         self.sampler = TPUSampler()
 
     @torch.no_grad()
-    def _dummy_run(self,
-                   num_tokens: int,
-                   num_reqs: int,
+    def _dummy_run(self, num_tokens: int, num_reqs: int,
                    num_blocks: int) -> None:
         if self.is_multimodal_model:
             input_ids = None
