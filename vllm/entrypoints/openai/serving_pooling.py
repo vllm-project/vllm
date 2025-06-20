@@ -9,6 +9,7 @@ from typing import Final, Literal, Optional, Union, cast
 
 import jinja2
 import numpy as np
+import torch
 from fastapi import Request
 from typing_extensions import assert_never
 
@@ -39,7 +40,8 @@ def _get_data(
     elif encoding_format == "base64":
         # Force to use float32 for base64 encoding
         # to match the OpenAI python client behavior
-        pooling_bytes = np.array(output.data, dtype="float32").tobytes()
+        pt_float32 = output.data.to(dtype=torch.float32)
+        pooling_bytes = np.array(pt_float32, dtype="float32").tobytes()
         return base64.b64encode(pooling_bytes).decode("utf-8")
 
     assert_never(encoding_format)
