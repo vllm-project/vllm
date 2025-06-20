@@ -263,12 +263,15 @@ class MultiModalProfiler(Generic[_I]):
                                       for k in max_tokens_per_item.keys()
                                       & mm_counts.keys())
             if total_mm_tokens > seq_len:
-                raise ValueError(
-                    "Pre-commputed total number of multimodal tokens "
-                    f"({total_mm_tokens}) cannot be greater than the sequence "
-                    f"length ({seq_len}). This is likely due to incorrect "
-                    "implementation of `get_max_tokens_per_item` in the model "
-                    "definition.")
+                logger.warning_once(
+                    "The sequence length (%d) is smaller than the pre-defined"
+                    " wosrt-case total number of multimodal tokens (%d). "
+                    "This may cause certain multi-modal inputs to fail during "
+                    "inference. To avoid this, you should increase "
+                    "`max_model_len` or reduce `mm_counts`.",
+                    seq_len,
+                    total_mm_tokens,
+                )
             return max_tokens_per_item
 
         mm_inputs = self._get_dummy_mm_inputs(seq_len, mm_counts)
