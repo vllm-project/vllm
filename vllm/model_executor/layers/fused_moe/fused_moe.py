@@ -4,7 +4,7 @@
 import functools
 import json
 import os
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Union
 
 import torch
 
@@ -1431,7 +1431,8 @@ def fused_moe(
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
     block_shape: Optional[list[int]] = None,
-) -> torch.Tensor:
+    return_topk_ids: bool = False,
+) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
     """
     This function computes a Mixture of Experts (MoE) layer using two sets of
     weights, w1 and w2, and top-k gating mechanism.
@@ -1477,6 +1478,7 @@ def fused_moe(
         a2.
     - block_shape: (Optional[list[int]]): Optional block size for block-wise
         quantization.
+    - return_topk_ids (bool): If True, return the top-k expert IDs
 
     Returns:
     - torch.Tensor: The output tensor after applying the MoE layer.
@@ -1494,27 +1496,32 @@ def fused_moe(
         topk_weights, topk_ids = custom_routing_function(
             hidden_states, gating_output, topk, renormalize)
 
-    return fused_experts(hidden_states,
-                         w1,
-                         w2,
-                         topk_weights,
-                         topk_ids,
-                         inplace=inplace,
-                         activation=activation,
-                         use_fp8_w8a8=use_fp8_w8a8,
-                         use_int8_w8a8=use_int8_w8a8,
-                         use_int8_w8a16=use_int8_w8a16,
-                         use_int4_w4a16=use_int4_w4a16,
-                         per_channel_quant=per_channel_quant,
-                         global_num_experts=global_num_experts,
-                         expert_map=expert_map,
-                         w1_scale=w1_scale,
-                         w2_scale=w2_scale,
-                         w1_zp=w1_zp,
-                         w2_zp=w2_zp,
-                         a1_scale=a1_scale,
-                         a2_scale=a2_scale,
-                         block_shape=block_shape)
+    result = fused_experts(hidden_states,
+                           w1,
+                           w2,
+                           topk_weights,
+                           topk_ids,
+                           inplace=inplace,
+                           activation=activation,
+                           use_fp8_w8a8=use_fp8_w8a8,
+                           use_int8_w8a8=use_int8_w8a8,
+                           use_int8_w8a16=use_int8_w8a16,
+                           use_int4_w4a16=use_int4_w4a16,
+                           per_channel_quant=per_channel_quant,
+                           global_num_experts=global_num_experts,
+                           expert_map=expert_map,
+                           w1_scale=w1_scale,
+                           w2_scale=w2_scale,
+                           w1_zp=w1_zp,
+                           w2_zp=w2_zp,
+                           a1_scale=a1_scale,
+                           a2_scale=a2_scale,
+                           block_shape=block_shape)
+
+    if return_topk_ids:
+        return result, topk_ids
+    else:
+        return result
 
 
 class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):

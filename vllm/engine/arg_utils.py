@@ -307,6 +307,10 @@ class EngineArgs:
     data_parallel_rpc_port: Optional[int] = None
     data_parallel_backend: str = ParallelConfig.data_parallel_backend
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
+    enable_eplb: bool = ParallelConfig.enable_eplb
+    num_extra_experts: int = ParallelConfig.num_extra_experts
+    eplb_window_size: int = ParallelConfig.eplb_window_size
+    eplb_step_interval: int = ParallelConfig.eplb_step_interval
     max_parallel_loading_workers: Optional[
         int] = ParallelConfig.max_parallel_loading_workers
     block_size: Optional[BlockSize] = CacheConfig.block_size
@@ -653,6 +657,14 @@ class EngineArgs:
         parallel_group.add_argument(
             "--enable-expert-parallel",
             **parallel_kwargs["enable_expert_parallel"])
+        parallel_group.add_argument("--enable-eplb",
+                                    **parallel_kwargs["enable_eplb"])
+        parallel_group.add_argument("--num-extra-experts",
+                                    **parallel_kwargs["num_extra_experts"])
+        parallel_group.add_argument("--eplb-window-size",
+                                    **parallel_kwargs["eplb_window_size"])
+        parallel_group.add_argument("--eplb-step-interval",
+                                    **parallel_kwargs["eplb_step_interval"])
         parallel_group.add_argument(
             "--max-parallel-loading-workers",
             **parallel_kwargs["max_parallel_loading_workers"])
@@ -1122,6 +1134,10 @@ class EngineArgs:
             data_parallel_rpc_port=data_parallel_rpc_port,
             data_parallel_backend=data_parallel_backend,
             enable_expert_parallel=self.enable_expert_parallel,
+            enable_eplb=self.enable_eplb,
+            num_extra_experts=self.num_extra_experts,
+            eplb_window_size=self.eplb_window_size,
+            eplb_step_interval=self.eplb_step_interval,
             max_parallel_loading_workers=self.max_parallel_loading_workers,
             disable_custom_all_reduce=self.disable_custom_all_reduce,
             ray_workers_use_nsight=self.ray_workers_use_nsight,
