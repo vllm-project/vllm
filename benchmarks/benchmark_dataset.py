@@ -833,13 +833,12 @@ class VisionArenaDataset(HuggingFaceDataset):
 
 
 # -----------------------------------------------------------------------------
-# UnSloth Vision Dataset Implementation
+# Unsloth Vision Dataset Implementation
 # -----------------------------------------------------------------------------
 
-
-class UnSlothVisionDataset(HuggingFaceDataset):
+class UnslothVisionDataset(HuggingFaceDataset):
     """
-    UnSloth Vision Dataset.
+    Unsloth Vision Dataset.
     """
 
     DEFAULT_OUTPUT_LEN = 256
