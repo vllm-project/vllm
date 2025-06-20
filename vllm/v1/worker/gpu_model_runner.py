@@ -1538,12 +1538,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             spec_token_ids=spec_token_ids,
             logprobs=logprobs_lists,
             prompt_logprobs_dict=prompt_logprobs_dict,
-<<<<<<< HEAD
             additional_head_outputs=additional_head_outputs,
-=======
             finished_sending=finished_sending,
             finished_recving=finished_recving,
->>>>>>> b6553be1bc75f046b00046a4ad7576364d03c835
         )
 
     def kv_connector_no_forward(

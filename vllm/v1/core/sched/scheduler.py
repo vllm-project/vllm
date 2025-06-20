@@ -823,16 +823,11 @@ class Scheduler(SchedulerInterface):
                         new_prompt_logprobs_tensors=prompt_logprobs_tensors,
                         stop_reason=request.stop_reason,
                         events=request.take_events(),
-<<<<<<< HEAD
                         new_additional_head_outputs=
                         additional_head_outputs_per_request,
-                    ))
-=======
                         kv_transfer_params=kv_transfer_params,
                         num_cached_tokens=request.num_cached_tokens,
                     ))
-
->>>>>>> b6553be1bc75f046b00046a4ad7576364d03c835
             else:
                 # Invariant: EngineCore returns no partial prefill outputs.
                 assert not prompt_logprobs_tensors

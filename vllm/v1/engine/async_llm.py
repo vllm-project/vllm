@@ -21,12 +21,9 @@ from vllm.outputs import RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
-<<<<<<< HEAD
 from vllm.streaming_params import StreamingParams
-=======
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
->>>>>>> b6553be1bc75f046b00046a4ad7576364d03c835
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
