@@ -12,6 +12,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import Enum, auto
 from functools import partial
+from multiprocessing import Lock
 from multiprocessing.connection import Connection
 from multiprocessing.process import BaseProcess
 from threading import Thread
@@ -25,10 +26,15 @@ from vllm.distributed import (destroy_distributed_environment,
                               destroy_model_parallel)
 from vllm.distributed.device_communicators.shm_broadcast import (Handle,
                                                                  MessageQueue)
+from vllm.distributed.device_communicators.shm_object_storage import (
+    MsgpackSerde, ShmObjectStorageHandle, SingleWriterShmObjectStorage,
+    SingleWriterShmRingBuffer)
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
+from vllm.executor.mm_utils import get_and_update_mm_cache
 from vllm.executor.multiproc_worker_utils import (
     set_multiprocessing_worker_envs)
 from vllm.logger import init_logger
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.utils import (decorate_logs, get_distributed_init_method,
                         get_loopback_ip, get_mp_context, get_open_port,
                         set_process_title)
@@ -77,6 +83,24 @@ class MultiprocExecutor(Executor):
                                              max_chunk_bytes=max_chunk_bytes)
         scheduler_output_handle = self.rpc_broadcast_mq.export_handle()
 
+        # Initialize shared memory ring buffer for multimodal inputs if needed
+        if MULTIMODAL_REGISTRY.enable_mm_input_shm_cache(self.model_config):
+            ring_buffer = SingleWriterShmRingBuffer(
+                data_buffer_size=envs.VLLM_OBJECT_STORAGE_SHM_BUFFER_SIZE_MB *
+                1024 * 1024,
+                name=envs.VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME,
+            )
+            object_storage_handle = ShmObjectStorageHandle(
+                max_object_size=envs.VLLM_OBJECT_STORAGE_MAX_OBJECT_SIZE_MB *
+                1024 * 1024,
+                n_readers=self.world_size,
+                ring_buffer_handle=ring_buffer.handle(),
+                serde_class=MsgpackSerde,
+                reader_lock=Lock(),
+            )
+        else:
+            object_storage_handle = None
+
         # Create workers
         unready_workers: list[UnreadyWorkerProcHandle] = []
         success = False
@@ -89,6 +113,7 @@ class MultiprocExecutor(Executor):
                         rank=rank,
                         distributed_init_method=distributed_init_method,
                         input_shm_handle=scheduler_output_handle,
+                        object_storage_handle=object_storage_handle,
                     ))
 
             # Workers must be created before wait_for_ready to avoid
@@ -360,6 +385,7 @@ class WorkerProc:
         rank: int,
         distributed_init_method: str,
         input_shm_handle: Handle,
+        object_storage_handle: ShmObjectStorageHandle,
     ):
         self.rank = rank
         wrapper = WorkerWrapperBase(vllm_config=vllm_config, rpc_rank=rank)
@@ -393,6 +419,10 @@ class WorkerProc:
         # Initialize MessageQueue for receiving SchedulerOutput
         self.rpc_broadcast_mq = MessageQueue.create_from_handle(
             input_shm_handle, self.worker.rank)
+        # Initialize the object storage for multimodal inputs if needed
+        if object_storage_handle is not None:
+            self.object_storage = SingleWriterShmObjectStorage\
+                .create_from_handle(object_storage_handle)
 
         # Initializes a message queue for sending the model output
         self.worker_response_mq = MessageQueue(1, 1)
@@ -403,11 +433,12 @@ class WorkerProc:
 
     @staticmethod
     def make_worker_process(
-            vllm_config: VllmConfig,
-            local_rank: int,
-            rank: int,
-            distributed_init_method: str,
-            input_shm_handle,  # Receive SchedulerOutput
+        vllm_config: VllmConfig,
+        local_rank: int,
+        rank: int,
+        distributed_init_method: str,
+        input_shm_handle,  # Receive SchedulerOutput
+        object_storage_handle: Optional[ShmObjectStorageHandle],
     ) -> UnreadyWorkerProcHandle:
         context = get_mp_context()
         # (reader, writer)
@@ -422,6 +453,7 @@ class WorkerProc:
             "rank": rank,
             "distributed_init_method": distributed_init_method,
             "input_shm_handle": input_shm_handle,
+            "object_storage_handle": object_storage_handle,
             "ready_pipe": (reader, writer),
             "death_pipe": death_reader,
         }
@@ -480,6 +512,7 @@ class WorkerProc:
     def shutdown(self):
         self.rpc_broadcast_mq = None
         self.worker_response_mq = None
+        self.object_storage = None
         destroy_model_parallel()
         destroy_distributed_environment()
 
@@ -582,6 +615,8 @@ class WorkerProc:
         """Main busy loop for Multiprocessing Workers"""
         while True:
             method, args, kwargs, output_rank = self.rpc_broadcast_mq.dequeue()
+            if hasattr(self, 'object_storage'):
+                get_and_update_mm_cache(self.object_storage, args)
 
             try:
                 if isinstance(method, str):

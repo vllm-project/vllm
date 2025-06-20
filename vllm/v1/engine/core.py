@@ -126,7 +126,7 @@ class EngineCore:
         )
 
         self.mm_input_cache_server = MultiModalInputCacheServer(
-            vllm_config.model_config, MULTIMODAL_REGISTRY)
+            vllm_config, MULTIMODAL_REGISTRY)
 
         # Setup batch queue for pipeline parallelism.
         # Batch queue for scheduled batches. This enables us to asynchronously

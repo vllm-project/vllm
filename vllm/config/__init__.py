@@ -246,6 +246,7 @@ TokenizerMode = Literal["auto", "slow", "mistral", "custom"]
 ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
 LogprobsMode = Literal["raw_logprobs", "raw_logits", "processed_logprobs",
                        "processed_logits"]
+MMCacheType = Literal["shm", "lru"]
 
 
 @config
@@ -422,6 +423,9 @@ class ModelConfig:
     `mm_processor_cache_gb * (api_server_count + data_parallel_size)`.
 
     Set to `0` to disable this cache completely (not recommended)."""
+    mm_processor_cache_type: MMCacheType = "lru"
+    """Type of cache to use for the multi-modal preprocessor/mapper. If `shm`,
+    use shared memory FIFO cache. If `lru`, use mirrored LRU cache."""
     override_neuron_config: dict[str, Any] = field(default_factory=dict)
     """Initialize non-default neuron config or override default neuron config
     that are specific to Neuron devices, this argument will be used to
@@ -837,6 +841,7 @@ class ModelConfig:
                 media_io_kwargs=self.media_io_kwargs,
                 mm_processor_kwargs=self.mm_processor_kwargs,
                 mm_processor_cache_gb=self.mm_processor_cache_gb,
+                mm_processor_cache_type=self.mm_processor_cache_type,
                 interleave_mm_strings=self.interleave_mm_strings)
 
         return None
@@ -2510,6 +2515,9 @@ class MultiModalConfig:
     """
     Enable fully interleaved support for multimodal prompts.
     """
+    mm_processor_cache_type: MMCacheType = "lru"
+    """Type of cache to use for the multi-modal preprocessor/mapper. If `shm`,
+    use shared memory FIFO cache. If `lru`, use mirrored LRU cache."""
 
     def compute_hash(self) -> str:
         """
