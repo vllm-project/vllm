@@ -534,7 +534,7 @@ def validate_args(args):
         if args.dataset_path in (
             VisionArenaDataset.SUPPORTED_DATASET_PATHS.keys()
             | ConversationDataset.SUPPORTED_DATASET_PATHS
-            | UnslothVisionDataset.SUPPORTED_DATASET_PATHS
+            | UnslothVisionDataset.SUPPORTED_DATASET_PATHS.keys()
         ):
             assert args.backend == "vllm-chat", (
                 f"{args.dataset_path} needs to use vllm-chat as the backend."
