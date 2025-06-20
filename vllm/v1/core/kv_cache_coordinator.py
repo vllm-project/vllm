@@ -96,10 +96,29 @@ class KVCacheCoordinator(ABC):
             manager.allocate_new_blocks(request_id, num_tokens)
             for manager in self.single_type_managers)
 
-    def cache_blocks(self, request_id: str, block_hashes: list[BlockHash],
+    def cache_blocks(self, request: "RequestGenerationState", block_hashes: list[BlockHash],
                      num_computed_tokens: int) -> None:
         """
         Cache the blocks for the request.
+
+        Args:
+            request: The request.
+            block_hashes: The block hashes of the request.
+            num_computed_tokens: The total number of tokens that need to be cached 
+                (including tokens that are already cached).
+        """
+        for manager in self.single_type_managers:
+            manager.cache_blocks(request, block_hashes, num_computed_tokens)
+
+    # TODO(lucas): find something less hacky for this
+    def cache_blocks_by_id(self, request_id: str, block_hashes: list[BlockHash],
+                           num_computed_tokens: int) -> None:
+        """
+        Cache the blocks for the request using only request_id and pre-computed hashes.
+        
+        This method is used when we don't have access to the full RequestGenerationState
+        but still want to cache blocks that have become full. It only works with
+        pre-computed block hashes and doesn't compute new ones.
 
         Args:
             request_id: The request ID.
@@ -108,7 +127,7 @@ class KVCacheCoordinator(ABC):
                 (including tokens that are already cached).
         """
         for manager in self.single_type_managers:
-            manager.cache_blocks(request_id, block_hashes, num_computed_tokens)
+            manager.cache_blocks_by_id(request_id, block_hashes, num_computed_tokens)
 
     def free(self, request_id: str) -> None:
         """

@@ -434,7 +434,6 @@ class Scheduler(SchedulerInterface):
                     new_computed_blocks,
                     num_draft_tokens=0,
                     num_lookahead_tokens=self.num_lookahead_tokens,
-                    delay_cache_blocks=load_kv_async,
                 )
                 if new_blocks is None:
                     # The request cannot be scheduled.
@@ -874,7 +873,28 @@ class Scheduler(SchedulerInterface):
 
             # Check min with `num_computed_tokens` to guard against the case
             #  where we get preempted before we can cache the blocks.
-            # NOTE: Caching now happens in allocate_slots, not here
+            # Cache generated tokens only when new full uncached blocks have been generated
+            if self.kv_cache_manager.enable_caching and not stopped:
+                # Calculate the number of tokens that should be cached
+                # Only cache tokens that form complete blocks
+                current_tokens = request_state.num_tokens
+                block_size = self.kv_cache_manager.block_size
+                num_full_blocks_now = current_tokens // block_size
+                
+                # Get the number of blocks that were already cached
+                num_cached_blocks = self.kv_cache_manager.coordinator.single_type_managers[0].num_cached_block.get(
+                    request_state.request_id, 0)
+                
+                # Only cache if we have new full blocks that haven't been cached yet
+                if num_full_blocks_now > num_cached_blocks:
+                    # Get block hashes for this request
+                    block_hashes = self.kv_cache_manager.req_to_block_hashes.get(request_state.request_id, [])
+                    
+                    # Cache up to the number of full blocks we have
+                    tokens_to_cache = min(current_tokens, num_full_blocks_now * block_size)
+                    if tokens_to_cache > num_cached_blocks * block_size:
+                        self.kv_cache_manager.cache_blocks(
+                            request_state, block_hashes, tokens_to_cache)
 
             if stopped:
                 assert status is not None
@@ -1135,7 +1155,7 @@ class Scheduler(SchedulerInterface):
         
         # Cache the blocks - note that we need block_hashes for this
         block_hashes = self.kv_cache_manager.req_to_block_hashes[request.request_id]
-        self.kv_cache_manager.cache_blocks(request.request_id, block_hashes, num_computed_tokens)
+        self.kv_cache_manager.cache_blocks(request_state, block_hashes, num_computed_tokens)
 
         # Update the request state for scheduling.
         request.num_computed_tokens = num_computed_tokens

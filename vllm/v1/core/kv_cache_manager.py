@@ -191,26 +191,21 @@ class KVCacheManager:
         new_computed_blocks: Optional[KVCacheBlocks] = None,
         num_draft_tokens: int = 0,
         num_lookahead_tokens: int = 0,
-        delay_cache_blocks: bool = False,
     ) -> Optional[KVCacheBlocks]:
         """
 
         Args:
             request_id: The id of the request to allocate slots for.
-            num_new_tokens: The number of tokens to allocate, including external
-                tokens. Note that this does not include tokens that have
-                already been computed locally (i.e. new_computed_blocks).
-            num_new_computed_tokens: The number of new computed tokens just
-                hitting the prefix caching, excluding external tokens.
+            num_computed_tokens: The number of computed tokens for the request.
+            num_new_tokens: The number of new tokens to allocate slots for.
+            num_new_computed_tokens: The number of new computed tokens hitting 
+                the prefix caching, excluding external tokens.
             new_computed_blocks: The cached blocks for the above new computed 
                 tokens.
             num_draft_tokens: The number of speculative draft tokens.
             num_lookahead_tokens: The number of speculative tokens to allocate.
                 This is used by spec decode proposers with kv-cache such 
                 as eagle.
-            delay_cache_blocks: Whether to skip caching the blocks. This is
-                used by P/D when allocating blocks used in a KV transfer
-                which will complete in a future step.
 
         Blocks layout:
         ```
@@ -280,31 +275,53 @@ class KVCacheManager:
         new_blocks = self.coordinator.allocate_new_blocks(
             request_id, num_tokens_need_slot)
 
-        # P/D: delay caching blocks if we have to recv from
-        # remote. Update state for locally cached blocks.
-        if not self.enable_caching or delay_cache_blocks:
-            return KVCacheBlocks(new_blocks)
-
-        # Speculated tokens might be rejected in the future, so we do not
-        # cache any speculated tokens. We only cache blocks with
-        # generated (accepted) tokens.
-        block_hashes = self.req_to_block_hashes[request_id]
-        num_tokens_to_cache = num_computed_tokens + num_new_tokens - num_draft_tokens
-        
-        # Only cache if we have block hashes (means get_computed_blocks was called)
-        # For running requests that don't have sufficient block hashes, skip caching
-        if block_hashes:
-            # Limit the number of tokens to cache to what we have hashes for
-            num_blocks_available = len(block_hashes)
-            max_tokens_to_cache = num_blocks_available * self.block_size
-            tokens_to_cache = min(num_tokens_to_cache, max_tokens_to_cache)
-            
-            if tokens_to_cache > 0:
-                self.coordinator.cache_blocks(
-                    request_id, block_hashes,
-                    tokens_to_cache)
+        # Cache blocks that are now full after allocation
+        # This implements the behavior described in the docs:
+        # "If an allocated block is already full of tokens, we immediately add it to the Cache Block"
+        if self.enable_caching:
+            self._cache_full_blocks_after_allocation(
+                request_id, num_computed_tokens + num_new_tokens - num_draft_tokens)
 
         return KVCacheBlocks(new_blocks)
+
+    
+    # TODO(lucas): find something less hacky for this
+    def _cache_full_blocks_after_allocation(self, request_id: str, num_tokens: int) -> None:
+        """Cache blocks that become full after allocation, using only available block hashes.
+        
+        This is called from allocate_slots to cache blocks immediately when they become full,
+        as described in the documentation. It only uses pre-computed block hashes and doesn't
+        depend on all_token_ids.
+        
+        Args:
+            request_id: The request ID.
+            num_tokens: The total number of tokens (excluding speculative tokens).
+        """
+        if not self.enable_caching:
+            return
+            
+        block_hashes = self.req_to_block_hashes.get(request_id, [])
+        if not block_hashes:
+            # No block hashes available, cannot cache
+            return
+            
+        # Calculate how many full blocks we can cache based on available hashes
+        num_full_blocks = num_tokens // self.block_size
+        num_hashable_blocks = len(block_hashes)
+        
+        # Only cache up to the number of blocks we have hashes for
+        blocks_to_cache = min(num_full_blocks, num_hashable_blocks)
+        
+        if blocks_to_cache > 0:
+            # Get the current number of cached blocks for this request
+            num_cached_blocks = self.coordinator.single_type_managers[0].num_cached_block.get(request_id, 0)
+            
+            # Only cache if we have new full blocks that haven't been cached yet
+            if blocks_to_cache > num_cached_blocks:
+                tokens_to_cache = blocks_to_cache * self.block_size
+                # Use the new cache_blocks_by_id method that works with just request_id
+                self.coordinator.cache_blocks_by_id(
+                    request_id, block_hashes, tokens_to_cache)
 
     def free(self, request_id: str) -> None:
         """Free the blocks allocated for the request.
@@ -396,10 +413,10 @@ class KVCacheManager:
         return KVCacheBlocks(
             self.coordinator.get_blocks(request_id)).get_block_ids()
 
-    def cache_blocks(self, request_id: str, block_hashes: list[BlockHash],
+    def cache_blocks(self, request: "RequestGenerationState", block_hashes: list[BlockHash],
                      num_computed_tokens: int) -> None:
         """Cache the blocks for the request."""
-        self.coordinator.cache_blocks(request_id, block_hashes,
+        self.coordinator.cache_blocks(request, block_hashes,
                                       num_computed_tokens)
 
     def create_empty_block_list(self) -> KVCacheBlocks:

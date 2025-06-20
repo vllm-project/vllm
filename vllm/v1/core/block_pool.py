@@ -95,7 +95,7 @@ class BlockPool:
 
     def cache_full_blocks(
         self,
-        request_id: str,
+        request: "RequestGenerationState",
         blocks: list[KVCacheBlock],
         block_hashes: list[BlockHash],
         num_cached_blocks: int,
@@ -112,7 +112,7 @@ class BlockPool:
         and caching them in the `cached_block_hash_to_block`.
 
         Args:
-            request_id: The request ID to cache the blocks.
+            request: The request to cache the blocks.
             blocks: All blocks in the request.
             block_hashes: Block hashes of the blocks in the request. Note that
             this list may be shorter than the blocks list. In this case the
@@ -153,13 +153,107 @@ class BlockPool:
                 # In this case we simply reuse the block hash.
                 block_hash = new_block_hashes[i]
             else:
-                # We cannot compute block hash without request object
-                # This branch should not be reached with the new API
-                raise NotImplementedError(
-                    "Cannot compute block hash without request object. "
-                    "Block hashes must be pre-computed."
-                )
+                # Otherwise compute the block hash and cache it in the request
+                # in case it will be preempted in the future.
+                blk_idx = num_cached_blocks + i
+                start_token_idx = blk_idx * block_size
+                end_token_idx = (blk_idx + 1) * block_size
+                block_tokens = request.all_token_ids[
+                    start_token_idx:end_token_idx]
+                assert len(block_tokens) == block_size, (
+                    f"Expected {block_size} tokens, got "
+                    f"{len(block_tokens)} at {blk_idx}th block for request "
+                    f"{request.request_id}({request})")
 
+                # Generate extra keys for multi-modal inputs. Note that since
+                # we reach to this branch only when the block is completed with
+                # generated tokens, we only need to consider the last mm input.
+                extra_keys, _ = generate_block_hash_extra_keys(
+                    request, start_token_idx, end_token_idx, -1)
+
+                # Compute the hash of the current block.
+                block_hash = hash_block_tokens(hash_fn, prev_block_hash_value,
+                                               block_tokens, extra_keys)
+                block_hashes.append(block_hash)
+
+            # Update and added the full block to the cache.
+            block_hash_with_group_id = BlockHashWithGroupId(
+                block_hash, kv_cache_group_id)
+            blk.block_hash = block_hash_with_group_id
+            self.cached_block_hash_to_block[block_hash_with_group_id][
+                blk.block_id] = blk
+            if new_hashes is not None:
+                new_hashes.append(block_hash.hash_value)
+            prev_block_hash_value = block_hash.hash_value
+
+        if self.enable_kv_cache_events:
+            self.kv_event_queue.append(
+                BlockStored(
+                    block_hashes=new_hashes,
+                    parent_block_hash=parent_block_hash,
+                    token_ids=request.all_token_ids[num_cached_blocks *
+                                                    block_size:num_full_blocks * block_size],
+                    block_size=block_size,
+                    lora_id=request.lora_request.id
+                    if request.lora_request else None,
+                ))
+
+    # TODO(lucas): find something less hacky for this
+    def cache_full_blocks_by_id(
+        self,
+        request_id: str,
+        blocks: list[KVCacheBlock],
+        block_hashes: list[BlockHash],
+        num_cached_blocks: int,
+        num_full_blocks: int,
+        block_size: int,
+        kv_cache_group_id: int,
+        hash_fn: Callable,
+    ) -> None:
+        """Cache a list of full blocks for prefix caching using only pre-computed hashes.
+        
+        This method is used when we don't have access to the full RequestGenerationState
+        but still want to cache blocks that have become full. It only works with
+        pre-computed block hashes and doesn't compute new ones.
+
+        Args:
+            request_id: The request ID to cache the blocks.
+            blocks: All blocks in the request.
+            block_hashes: Block hashes of the blocks in the request. This method
+                will only cache blocks up to the number of available hashes.
+            num_cached_blocks: The number of blocks that are already cached.
+            num_full_blocks: The number of blocks that are full and should
+                be cached after this function.
+            block_size: Number of tokens in each block.
+            kv_cache_group_id: The id of the KV cache group.
+            hash_fn: The hash function to use for block hashes.
+        """
+        if num_cached_blocks == num_full_blocks:
+            return
+            
+        # Only cache blocks up to the number of available hashes
+        max_cacheable_blocks = min(num_full_blocks, len(block_hashes))
+        if max_cacheable_blocks <= num_cached_blocks:
+            return
+            
+        new_full_blocks = blocks[num_cached_blocks:max_cacheable_blocks]
+        new_block_hashes = block_hashes[num_cached_blocks:max_cacheable_blocks]
+
+        # Update the new blocks with the block hashes through the chain.
+        if num_cached_blocks == 0:
+            prev_block_hash_value = None
+        else:
+            prev_block = blocks[num_cached_blocks - 1]
+            assert prev_block.block_hash is not None
+            prev_block_hash_value = prev_block.block_hash.get_hash_value()
+
+        parent_block_hash = prev_block_hash_value
+        new_hashes: Optional[list[int]] = ([] if self.enable_kv_cache_events
+                                           else None)
+        for i, (blk, block_hash) in enumerate(zip(new_full_blocks, new_block_hashes)):
+            assert blk.block_hash is None
+
+            # Use the pre-computed block hash
             # Update and added the full block to the cache.
             block_hash_with_group_id = BlockHashWithGroupId(
                 block_hash, kv_cache_group_id)
