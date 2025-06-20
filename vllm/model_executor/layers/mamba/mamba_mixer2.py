@@ -195,7 +195,8 @@ def mamba_v2_sharded_weight_loader(
             else:
                 assert (
                     tp_size % n_groups == 0
-                ), "num groups must divide TP size if TP size does not divide n_groups and n_groups is not equal to 1."
+                ), "num groups must divide TP size if TP size does not divide n_groups"
+                " and n_groups is not equal to 1."
                 rank = tp_rank // n_groups
             # - leftmost boundary index into loaded weight.
             loaded_skip = rank * shard_size
