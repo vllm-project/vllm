@@ -256,9 +256,12 @@ class MultiModalProfiler(Generic[_I]):
         max_tokens_per_item = self.processing_info.get_max_tokens_per_item(
             seq_len=seq_len, mm_counts=mm_counts)
         if max_tokens_per_item is not None:
-            total_mm_tokens = sum(max_tokens_per_item[k] * mm_counts[k]
-                                  for k in max_tokens_per_item.keys()
-                                  & mm_counts.keys())
+            if mm_counts is None:
+                total_mm_tokens = sum(max_tokens_per_item.values())
+            else:
+                total_mm_tokens = sum(max_tokens_per_item[k] * mm_counts[k]
+                                      for k in max_tokens_per_item.keys()
+                                      & mm_counts.keys())
             if total_mm_tokens > seq_len:
                 raise ValueError(
                     "Pre-commputed total number of multimodal tokens cannot be "
