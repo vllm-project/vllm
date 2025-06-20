@@ -22,8 +22,16 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     MARLIN_SUPPORTED_GROUP_SIZES,
     query_marlin_supported_quant_types,
 )
+from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
+    FP4_MARLIN_SUPPORTED_GROUP_SIZES,
+    rand_marlin_weight_fp4_like,
+)
+from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
+    marlin_quant_fp8_torch,
+)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
     MarlinWorkspace,
+    awq_marlin_quantize,
     marlin_quantize,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils_test_24 import (
@@ -35,7 +43,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     quantize_weights,
     sort_weights,
 )
-from vllm.scalar_type import ScalarType
+from vllm.scalar_type import ScalarType, scalar_types
 from vllm.utils import FlexibleArgumentParser
 
 DEFAULT_MODELS = ["meta-llama/Llama-2-7b-hf/TP1"]
@@ -67,36 +75,79 @@ def bench_run(
     a = torch.randn(size_m, size_k).to(torch.half).cuda()
     b = torch.rand(size_k, size_n).to(torch.half).cuda()
 
-    a_tmp = torch.zeros(size_m, size_k).to(torch.half).cuda()
+    has_zp = quant_type in [scalar_types.uint4, scalar_types.uint8]
+
+    if act_order:
+        if group_size == -1:
+            return
+        if group_size == size_k:
+            return
+        if has_zp:
+            return
+
+    if size_k % group_size != 0:
+        return
 
     # Marlin quant
-    (
-        marlin_w_ref,
-        marlin_q_w,
-        marlin_s,
-        marlin_g_idx,
-        marlin_sort_indices,
-        marlin_rand_perm,
-    ) = marlin_quantize(b, quant_type, group_size, act_order)
+    marlin_g_idx = None
+    marlin_sort_indices = None
+    marlin_zp = None
+    marlin_s2 = None
+    if quant_type == scalar_types.float4_e2m1f:
+        if group_size != 16 or act_order:
+            return
+        marlin_w_ref, marlin_q_w, marlin_s, marlin_s2 = rand_marlin_weight_fp4_like(
+            b.T, group_size
+        )
+    elif quant_type == scalar_types.float8_e4m3fn:
+        if group_size not in [-1, 128]:
+            return
+        if act_order:
+            return
+        marlin_w_ref, marlin_q_w, marlin_s = marlin_quant_fp8_torch(b.T, group_size)
+    elif has_zp:
+        if group_size == 16:
+            return
+        marlin_w_ref, marlin_q_w, marlin_s, marlin_zp = awq_marlin_quantize(
+            b, quant_type, group_size
+        )
+    else:
+        if group_size == 16:
+            return
+        marlin_w_ref, marlin_q_w, marlin_s, marlin_g_idx, marlin_sort_indices, _ = (
+            marlin_quantize(b, quant_type, group_size, act_order)
+        )
 
     # Marlin_24 quant
-    (marlin_24_w_ref, marlin_24_q_w_comp, marlin_24_meta, marlin_24_s) = (
-        marlin_24_quantize(b, quant_type, group_size)
-    )
-
-    marlin_zp = torch.empty(0, dtype=torch.int, device=b.device)
+    marlin_24_w_ref = None
+    marlin_24_q_w_comp = None
+    marlin_24_meta = None
+    marlin_24_s = None
+    if (
+        quant_type in GPTQ_MARLIN_24_SUPPORTED_QUANT_TYPES
+        and group_size in GPTQ_MARLIN_24_SUPPORTED_GROUP_SIZES
+    ):
+        (marlin_24_w_ref, marlin_24_q_w_comp, marlin_24_meta, marlin_24_s) = (
+            marlin_24_quantize(b, quant_type, group_size)
+        )
 
     # GPTQ quant
-    (w_ref, q_w, s, g_idx, rand_perm) = gptq_quantize_weights(
-        b, quant_type, group_size, act_order
-    )
-    q_w_gptq = gptq_pack(q_w, quant_type.size_bits, size_k, size_n)
+    q_w_gptq = None
+    repack_sort_indices = None
+    if (
+        quant_type in GPTQ_MARLIN_24_SUPPORTED_QUANT_TYPES
+        and group_size in MARLIN_SUPPORTED_GROUP_SIZES
+    ):
+        (w_ref, q_w, s, g_idx, rand_perm) = gptq_quantize_weights(
+            b, quant_type, group_size, act_order
+        )
+        q_w_gptq = gptq_pack(q_w, quant_type.size_bits, size_k, size_n)
 
-    # For act_order, sort the "weights" and "g_idx"
-    # so that group ids are increasing
-    repack_sort_indices = torch.empty(0, dtype=torch.int, device=b.device)
-    if act_order:
-        (q_w, g_idx, repack_sort_indices) = sort_weights(q_w, g_idx)
+        # For act_order, sort the "weights" and "g_idx"
+        # so that group ids are increasing
+        repack_sort_indices = torch.empty(0, dtype=torch.int, device=b.device)
+        if act_order:
+            (q_w, g_idx, repack_sort_indices) = sort_weights(q_w, g_idx)
 
     # Prepare
     marlin_workspace = MarlinWorkspace(
@@ -106,7 +157,6 @@ def bench_run(
     marlin_24_workspace = MarlinWorkspace(
         size_n, GPTQ_MARLIN_24_MIN_THREAD_N, GPTQ_MARLIN_24_MAX_PARALLEL
     )
-    marlin_zp = torch.zeros_like(marlin_s, dtype=torch.int)
 
     # AllSpark W8A16 quant
     as_supported_case = (
@@ -123,7 +173,6 @@ def bench_run(
         supported_arch = sm_version >= 80 and sm_version < 90
         as_supported_case = as_supported_case and supported_arch
         if supported_arch:
-            has_zp = False
             w_ref, qw, s, zp = quantize_weights(b, quant_type, group_size, has_zp)
             qw = qw.to(torch.uint8)
 
@@ -140,15 +189,14 @@ def bench_run(
         "size_n": size_n,
         "size_k": size_k,
         "a": a,
-        "a_tmp": a_tmp,
         # Marlin params
         "marlin_w_ref": marlin_w_ref,
         "marlin_q_w": marlin_q_w,
         "marlin_s": marlin_s,
+        "marlin_s2": marlin_s2,
         "marlin_zp": marlin_zp,
         "marlin_g_idx": marlin_g_idx,
         "marlin_sort_indices": marlin_sort_indices,
-        "marlin_rand_perm": marlin_rand_perm,
         "marlin_workspace": marlin_workspace,
         "is_k_full": is_k_full,
         # Marlin_24 params
@@ -177,7 +225,7 @@ def bench_run(
     min_run_time = 1
 
     # Warmup pytorch
-    for i in range(5):
+    for _ in range(5):
         torch.matmul(a, marlin_w_ref)
 
     results.append(
@@ -190,9 +238,10 @@ def bench_run(
         ).blocked_autorange(min_run_time=min_run_time)
     )
 
+    print(f"gptq_marlin_gemm_fp16 {quant_type=}")
     results.append(
         benchmark.Timer(
-            stmt="output = gptq_marlin_gemm(a, marlin_q_w, marlin_s, marlin_zp, marlin_g_idx, marlin_sort_indices, marlin_workspace.scratch, quant_type, size_m, size_n, size_k, is_k_full, False, False, False)",  # noqa: E501
+            stmt="output = gptq_marlin_gemm(a, None, marlin_q_w, marlin_s, marlin_s2, marlin_zp, marlin_g_idx, marlin_sort_indices, marlin_workspace.scratch, quant_type, size_m, size_n, size_k, is_k_full, False, False, False)",  # noqa: E501
             globals=globals,
             label=label,
             sub_label=sub_label,
@@ -202,7 +251,7 @@ def bench_run(
 
     results.append(
         benchmark.Timer(
-            stmt="output = gptq_marlin_gemm(a, marlin_q_w, marlin_s, marlin_zp, marlin_g_idx, marlin_sort_indices, marlin_workspace.scratch, quant_type, size_m, size_n, size_k, is_k_full, False, True, False)",  # noqa: E501
+            stmt="output = gptq_marlin_gemm(a, None, marlin_q_w, marlin_s, marlin_s2, marlin_zp, marlin_g_idx, marlin_sort_indices, marlin_workspace.scratch, quant_type, size_m, size_n, size_k, is_k_full, False, True, False)",  # noqa: E501
             globals=globals,
             label=label,
             sub_label=sub_label,
@@ -250,7 +299,8 @@ def main(args):
     print("Benchmarking models:")
     for i, model in enumerate(args.models):
         print(f"[{i}]  {model}")
-
+    print(query_marlin_supported_quant_types(False, False))  # test_gptq_marlin_repack
+    print(query_marlin_supported_quant_types(True))  # test_awq_marlin_repack
     results: list[benchmark.Measurement] = []
 
     for model in args.models:
@@ -278,14 +328,17 @@ def main(args):
                     ):
                         continue
 
-                    for quant_type in query_marlin_supported_quant_types(False):
+                    for quant_type in query_marlin_supported_quant_types():
                         if (
                             len(args.limit_num_bits) > 0
                             and quant_type.size_bits not in args.limit_num_bits
                         ):
                             continue
 
-                        for group_size in MARLIN_SUPPORTED_GROUP_SIZES:
+                        for group_size in (
+                            MARLIN_SUPPORTED_GROUP_SIZES
+                            + FP4_MARLIN_SUPPORTED_GROUP_SIZES
+                        ):
                             if (
                                 len(args.limit_group_size) > 0
                                 and group_size not in args.limit_group_size
