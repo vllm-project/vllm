@@ -84,9 +84,9 @@ def _silu_mul_fp8_quant_deep_gemm(
         y2 = tl.load(input_ptr + base_i_offset + H * stride_i_h +
                      cols * stride_i_h,
                      mask=mask,
-                     other=0.0).to(tl.float32)
+                     other=0.0)
 
-        x = x * (1.0 / (1.0 + tl.exp(-x)))
+        x = (x * (1.0 / (1.0 + tl.exp(-x)))).to(input_ptr.dtype.element_ty)
         y = x * y2
 
         _absmax = tl.maximum(tl.max(tl.abs(y)), eps)
