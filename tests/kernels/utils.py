@@ -1075,6 +1075,10 @@ def torch_experts(
             or (global_num_experts == w1.shape[0] and expert_map is None)
             or (expert_map is not None
                 and global_num_experts == expert_map.shape[0]))
+
+    assert (quant_dtype is None
+            or (w1_scale is not None and w2_scale is not None))
+
     M, K = a.shape
     #N = w1.shape[1]
     topk = topk_ids.shape[1]

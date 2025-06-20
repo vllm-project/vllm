@@ -86,17 +86,13 @@ def _moe_problem_size(
 
 class FusedMoEActivationFormat(Enum):
     """
-    Add comment
+    The standard activation format (num_tokens, hidden dim).
     """
     Standard = "standard",
     """
-    Add comment
+    The batched experts format (num experts, max tokens per expert, hidden dim)
     """
-    TopkReplicated = "topk_replicated",
-    """
-    Add comment
-    """
-    BatchedExperts = "standard",
+    BatchedExperts = "batched_experts",
 
 
 # TODO: pass FusedMoEParallelConfig in as ctor parameter?
@@ -171,7 +167,8 @@ class FusedMoEPrepareAndFinalize(ABC):
     @abstractmethod
     def activation_format(self) -> FusedMoEActivationFormat:
         """
-        Add comment
+        A property indicating the output format of the activations for the
+        'prepare' method.
         """
         raise NotImplementedError
 
@@ -217,7 +214,8 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
     def activation_formats(
             self) -> tuple[FusedMoEActivationFormat, FusedMoEActivationFormat]:
         """
-        Add comment
+        A property which is a tuple of the input and output activation formats
+        for the 'apply' method.
         """
         raise NotImplementedError
 
