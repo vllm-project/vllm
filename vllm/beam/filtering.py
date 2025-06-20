@@ -7,6 +7,7 @@ import torch
 from vllm.entrypoints.openai.protocol import CompletionRequest, CompletionResponse, \
     ErrorResponse
 from vllm.logger import init_logger
+from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
 
@@ -47,10 +48,16 @@ class BeamValidator:
         # TODO(@tanuj): accept max tokens as a parameter
         request.max_tokens = _CHUNK_SIZE
         request.echo = True
+        original_request_id = None
+        if raw_request is not None:
+            original_request_id = raw_request.headers.get("X-Request-Id", None)
+        
         tasks = []
         # TODO(@tanuj): deep copy request and raw_request?
         for _ in range(n):
             request = request
+            if original_request_id is not None:
+                raw_request.headers.update({"X-Request-Id": f"original_request_id-beam_{n}"})
             tasks.append(create_completion(
                 request,
                 raw_request=raw_request,
