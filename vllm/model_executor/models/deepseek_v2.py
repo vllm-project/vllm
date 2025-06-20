@@ -102,6 +102,7 @@ class DeepseekV2MoE(nn.Module):
         config: PretrainedConfig,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
+        enable_eplb: bool = False,
     ):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
@@ -132,7 +133,7 @@ class DeepseekV2MoE(nn.Module):
         # Currently, `n_redundant_experts` equals to `n_extra_experts`.
         vllm_config = get_current_vllm_config()
         parallel_config = vllm_config.parallel_config
-        self.enable_eplb = parallel_config.enable_eplb
+        self.enable_eplb = enable_eplb
 
         self.n_extra_experts = parallel_config.num_extra_experts
         self.n_physical_experts = self.n_routed_experts + self.n_extra_experts
@@ -531,6 +532,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         model_config: ModelConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        enable_eplb: bool = False,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -571,6 +573,7 @@ class DeepseekV2DecoderLayer(nn.Module):
                 config=config,
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
+                enable_eplb=enable_eplb,
             )
         else:
             self.mlp = DeepseekV2MLP(
@@ -643,6 +646,7 @@ class DeepseekV2Model(nn.Module):
         model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
+        enable_eplb = vllm_config.parallel_config.enable_eplb
         self.config = config
 
         self.vocab_size = config.vocab_size
@@ -664,6 +668,7 @@ class DeepseekV2Model(nn.Module):
                 model_config=model_config,
                 cache_config=cache_config,
                 quant_config=quant_config,
+                enable_eplb=enable_eplb,
             ),
             prefix=f"{prefix}.layers")
 
@@ -731,14 +736,12 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
         self.expert_weights = []
 
         # Set MoE hyperparameters
-        # TODO(bowen): Add support for MTP layers
         self.num_moe_layers = (config.num_hidden_layers -
                                config.first_k_dense_replace)
         self.num_expert_groups = config.n_group
 
         self.moe_layers: list[FusedMoE] = []
         for layer in self.model.layers:
-            # TODO(bowen): Add support for MTP layers
             assert isinstance(layer, DeepseekV2DecoderLayer)
             if isinstance(layer.mlp, DeepseekV2MoE):
                 self.moe_layers.append(layer.mlp.experts)
@@ -767,8 +770,6 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
                 logical_to_physical_map=logical_to_physical_map,
                 logical_replica_count=logical_replica_count,
             )
-
-        # TODO(bowen): Add support for MTP layers
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
