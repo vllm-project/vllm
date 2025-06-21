@@ -22,6 +22,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Inference-only dots1 model."""
 from collections.abc import Iterable
 from typing import Any, Optional, Union
 
@@ -31,12 +32,12 @@ from transformers import PretrainedConfig
 
 from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
+from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.distributed import (get_pp_group,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.fused_moe import fused_moe, fused_topk
+from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                QKVParallelLinear,
@@ -45,35 +46,17 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.interfaces import SupportsPP
-from vllm.model_executor.models.utils import (
-    extract_layer_index, is_pp_missing_parameter,
-    make_empty_intermediate_tensors_factory, make_layers, maybe_prefix)
+from vllm.model_executor.model_loader.weight_utils import (
+    default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
-
-class Dots1RMSNorm(nn.Module):
-
-    def __init__(self, hidden_size, eps=1e-6):
-        """
-        Dots1RMSNorm is equivalent to T5LayerNorm
-        """
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(hidden_size))
-        self.variance_epsilon = eps
-
-    def forward(self, hidden_states):
-        input_dtype = hidden_states.dtype
-        hidden_states = hidden_states.to(torch.float32)
-        variance = hidden_states.pow(2).mean(-1, keepdim=True)
-        hidden_states = hidden_states * torch.rsqrt(variance +
-                                                    self.variance_epsilon)
-        return self.weight * hidden_states.to(input_dtype)
+from .interfaces import SupportsPP
+from .utils import (PPMissingLayer, is_pp_missing_parameter,
+                    make_empty_intermediate_tensors_factory, make_layers,
+                    maybe_prefix)
 
 
 class Dots1MLP(nn.Module):
@@ -91,14 +74,14 @@ class Dots1MLP(nn.Module):
         self.gate_up_proj = MergedColumnParallelLinear(
             hidden_size, [intermediate_size] * 2,
             bias=False,
-            quant_config=quant_config)
-        self.down_proj = RowParallelLinear(
-            intermediate_size,
-            hidden_size,
-            bias=False,
             quant_config=quant_config,
-            reduce_results=reduce_results,
-        )
+            prefix=f"{prefix}.gate_up_proj")
+        self.down_proj = RowParallelLinear(intermediate_size,
+                                           hidden_size,
+                                           bias=False,
+                                           quant_config=quant_config,
+                                           reduce_results=reduce_results,
+                                           prefix=f"{prefix}.down_proj")
         if hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {hidden_act}. "
                              "Only silu is supported for now.")
@@ -111,32 +94,6 @@ class Dots1MLP(nn.Module):
         return x
 
 
-def custom_fused_topk(hidden_states, gating_output, topk, renormalize,
-                      routed_scaling_factor):
-    topk_weight, topk_idx = fused_topk(hidden_states, gating_output, topk,
-                                       renormalize)
-    topk_weight = topk_weight * routed_scaling_factor
-    return topk_weight, topk_idx
-
-
-def noaux_tc_topk(
-    hidden_states: torch.Tensor,
-    gating_output: torch.Tensor,
-    topk: int,
-    renormalize: bool,
-    e_score_correction_bias: torch.Tensor,
-    routed_scaling_factor: float,
-):
-    logit_scores = gating_output.sigmoid()
-    scores_for_choice = logit_scores.view(
-        hidden_states.shape[0], -1) + e_score_correction_bias.unsqueeze(0)
-    _, topk_idx = torch.topk(scores_for_choice, k=topk, dim=-1, sorted=False)
-    topk_weight = logit_scores.gather(1, topk_idx)
-    topk_weight = topk_weight / topk_weight.sum(dim=-1, keepdim=True)
-    topk_weight = topk_weight * routed_scaling_factor
-    return topk_weight, topk_idx
-
-
 class Dots1MoE(nn.Module):
 
     def __init__(
@@ -146,34 +103,39 @@ class Dots1MoE(nn.Module):
         prefix: str = "",
     ):
         super().__init__()
-        self.config = config
-        self.rank = get_tensor_model_parallel_rank()
         self.tp_size = get_tensor_model_parallel_world_size()
-        self.n_routed_experts = config.n_routed_experts
-        self.top_k = config.num_experts_per_tok
-        if self.tp_size > self.n_routed_experts:
-            raise ValueError(
-                f"Tensor parallel size {self.tp_size} is greater than "
-                f"the number of experts {self.n_routed_experts}.")
+        self.routed_scaling_factor = config.routed_scaling_factor
+        self.n_shared_experts = config.n_shared_experts
 
-        self.experts = nn.ModuleList([
-            Dots1MLP(
-                hidden_size=config.hidden_size,
-                intermediate_size=config.moe_intermediate_size,
-                hidden_act=config.hidden_act,
-                quant_config=quant_config,
-                reduce_results=False,
-            ) for idx in range(self.n_routed_experts)
-        ])
-        self.pack_params()
+        if config.hidden_act != "silu":
+            raise ValueError(f"Unsupported activation: {config.hidden_act}. "
+                             "Only silu is supported for now.")
 
-        self.gate = ReplicatedLinear(
-            config.hidden_size,
-            self.n_routed_experts,
-            bias=False,
-            quant_config=None,
-            params_dtype=torch.float32,
-        )
+        self.gate = ReplicatedLinear(config.hidden_size,
+                                     config.n_routed_experts,
+                                     bias=False,
+                                     quant_config=None,
+                                     prefix=f"{prefix}.gate")
+        if config.topk_method == "noaux_tc":
+            self.gate.e_score_correction_bias = (nn.Parameter(
+                torch.empty(config.n_routed_experts)))
+        else:
+            self.gate.e_score_correction_bias = None
+
+        self.experts = FusedMoE(
+            num_experts=config.n_routed_experts,
+            top_k=config.num_experts_per_tok,
+            hidden_size=config.hidden_size,
+            intermediate_size=config.moe_intermediate_size,
+            reduce_results=False,
+            renormalize=config.norm_topk_prob,
+            quant_config=quant_config,
+            use_grouped_topk=True,
+            num_expert_group=config.n_group,
+            topk_group=config.topk_group,
+            prefix=f"{prefix}.experts",
+            scoring_func=config.scoring_func,
+            e_score_correction_bias=self.gate.e_score_correction_bias)
 
         if config.n_shared_experts is not None:
             intermediate_size = (config.moe_intermediate_size *
@@ -184,65 +146,31 @@ class Dots1MoE(nn.Module):
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
                 reduce_results=False,
+                prefix=f"{prefix}.shared_experts",
             )
-
-        self.routed_scaling_factor = config.routed_scaling_factor
-
-        if config.scoring_func == "noaux_tc":
-            self.gate.e_score_correction_bias = nn.Parameter(
-                torch.empty(self.n_routed_experts))
-            self.custom_topk = lambda x, y, z, w: noaux_tc_topk(
-                x,
-                y,
-                z,
-                w,
-                self.gate.e_score_correction_bias,
-                self.routed_scaling_factor,
-            )
-        else:
-            self.custom_topk = lambda x, y, z, w: custom_fused_topk(
-                x, y, z, w, self.routed_scaling_factor)
-
-    def pack_params(self):
-        w1 = []
-        w2 = []
-        for expert in self.experts:
-            w1.append(expert.gate_up_proj.weight)
-            w2.append(expert.down_proj.weight)
-        self.w1 = torch._utils._flatten_dense_tensors(w1)
-        w1s = torch._utils._unflatten_dense_tensors(self.w1, w1)
-        for data, param in zip(w1s, w1):
-            param.data = data
-        self.w1 = self.w1.view(len(w1), *w1s[0].shape)
-
-        self.w2 = torch._utils._flatten_dense_tensors(w2)
-        w2s = torch._utils._unflatten_dense_tensors(self.w2, w2)
-        for data, param in zip(w2s, w2):
-            param.data = data
-
-        self.w2 = self.w2.view(len(w2), *w2s[0].shape)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
-        if self.config.n_shared_experts is not None:
+        if self.n_shared_experts is not None:
             shared_output = self.shared_experts(hidden_states)
-        router_logits, _ = self.gate(hidden_states.type(torch.float32))
-        final_hidden_states = fused_moe(
-            hidden_states,
-            self.w1,
-            self.w2,
-            router_logits,
-            self.top_k,
-            renormalize=self.config.norm_topk_prob,
-            inplace=True,
-            custom_routing_function=self.custom_topk,
-        )
-
-        if self.config.n_shared_experts is not None:
-            final_hidden_states = final_hidden_states + shared_output
-        final_hidden_states = tensor_model_parallel_all_reduce(
-            final_hidden_states)
+        router_logits, _ = self.gate(hidden_states)
+        if hidden_states.dtype != torch.float16:
+            final_hidden_states = self.experts(
+                hidden_states=hidden_states,
+                router_logits=router_logits) * self.routed_scaling_factor
+        else:
+            final_hidden_states = self.experts(hidden_states=hidden_states,
+                                               router_logits=router_logits)
+        if shared_output is not None:
+            if hidden_states.dtype != torch.float16:
+                final_hidden_states = final_hidden_states + shared_output
+            else:
+                final_hidden_states = final_hidden_states + shared_output \
+                    * (1. / self.routed_scaling_factor)
+        if self.tp_size > 1:
+            final_hidden_states = tensor_model_parallel_all_reduce(
+                final_hidden_states)
 
         return final_hidden_states.view(num_tokens, hidden_dim)
 
@@ -319,8 +247,8 @@ class Dots1Attention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
         )
-        self.q_norm = Dots1RMSNorm(self.head_dim, eps=config.rms_norm_eps)
-        self.k_norm = Dots1RMSNorm(self.head_dim, eps=config.rms_norm_eps)
+        self.q_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
+        self.k_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
 
     def forward(self, positions: torch.Tensor,
                 hidden_states: torch.Tensor) -> torch.Tensor:
@@ -341,17 +269,20 @@ class Dots1DecoderLayer(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
+        prefix: str,
+        model_config: ModelConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
     ) -> None:
         super().__init__()
-        layer_idx = extract_layer_index(prefix)
         self.hidden_size = config.hidden_size
         rope_theta = getattr(config, "rope_theta", 10000)
         rope_scaling = getattr(config, "rope_scaling", None)
         max_position_embeddings = getattr(config, "max_position_embeddings",
                                           8192)
+        layer_idx = int(prefix.split(sep='.')[-1])
+        self.layer_idx = layer_idx
+
         self.self_attn = Dots1Attention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
@@ -382,6 +313,7 @@ class Dots1DecoderLayer(nn.Module):
                                        eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size,
                                                 eps=config.rms_norm_eps)
+        self.routed_scaling_factor = config.routed_scaling_factor
 
     def forward(
         self,
@@ -397,9 +329,20 @@ class Dots1DecoderLayer(nn.Module):
                 hidden_states, residual)
         hidden_states = self.self_attn(positions=positions,
                                        hidden_states=hidden_states)
+
+        if hidden_states.dtype == torch.float16:
+            hidden_states *= 1. / self.routed_scaling_factor
+            if self.layer_idx == 0:
+                residual *= 1. / self.routed_scaling_factor
+
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
+
+        if isinstance(self.mlp,
+                      Dots1MLP) and hidden_states.dtype == torch.float16:
+            hidden_states *= 1. / self.routed_scaling_factor
+
         return hidden_states, residual
 
 
@@ -411,24 +354,37 @@ class Dots1Model(nn.Module):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
+        model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
+        self.config = config
 
-        self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
-        self.embed_tokens = VocabParallelEmbedding(
-            config.vocab_size,
-            config.hidden_size,
-        )
+        if get_pp_group().is_first_rank:
+            self.embed_tokens = VocabParallelEmbedding(
+                config.vocab_size,
+                config.hidden_size,
+                quant_config=quant_config,
+                prefix=f"{prefix}.embed_tokens")
+        else:
+            self.embed_tokens = PPMissingLayer()
+
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: Dots1DecoderLayer(
-                config, cache_config, quant_config=quant_config, prefix=prefix
+                config,
+                prefix,
+                model_config=model_config,
+                cache_config=cache_config,
+                quant_config=quant_config,
             ),
-            prefix=f"{prefix}.layers",
-        )
-        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+            prefix=f"{prefix}.layers")
+
+        if get_pp_group().is_last_rank:
+            self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        else:
+            self.norm = PPMissingLayer()
         self.make_empty_intermediate_tensors = (
             make_empty_intermediate_tensors_factory(
                 ["hidden_states", "residual"], config.hidden_size))
@@ -450,10 +406,10 @@ class Dots1Model(nn.Module):
                 hidden_states = self.get_input_embeddings(input_ids)
             residual = None
         else:
+            assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
-        for i in range(self.start_layer, self.end_layer):
-            layer = self.layers[i]
+        for layer in self.layers[self.start_layer:self.end_layer]:
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
@@ -479,13 +435,13 @@ class Dots1ForCausalLM(nn.Module, SupportsPP):
         self.quant_config = quant_config
         self.model = Dots1Model(vllm_config=vllm_config,
                                 prefix=maybe_prefix(prefix, "model"))
-        self.lm_head = ParallelLMHead(config.vocab_size,
-                                      config.hidden_size,
-                                      quant_config=quant_config)
-        if self.config.tie_word_embeddings:
-            self.lm_head.weight = self.model.embed_tokens.weight
+        if get_pp_group().is_last_rank:
+            self.lm_head = ParallelLMHead(config.vocab_size,
+                                          config.hidden_size,
+                                          quant_config=quant_config)
+        else:
+            self.lm_head = PPMissingLayer()
         self.logits_processor = LogitsProcessor(config.vocab_size)
-        self.sampler = get_sampler()
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 
@@ -516,13 +472,19 @@ class Dots1ForCausalLM(nn.Module, SupportsPP):
                                        sampling_metadata)
         return logits
 
-    def sample(
-        self,
-        logits: Optional[torch.Tensor],
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(logits, sampling_metadata)
-        return next_tokens
+    def make_empty_intermediate_tensors(
+            self, batch_size: int, dtype: torch.dtype,
+            device: torch.device) -> IntermediateTensors:
+        return IntermediateTensors({
+            "hidden_states":
+            torch.zeros((batch_size, self.config.hidden_size),
+                        dtype=dtype,
+                        device=device),
+            "residual":
+            torch.zeros((batch_size, self.config.hidden_size),
+                        dtype=dtype,
+                        device=device),
+        })
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
@@ -534,19 +496,28 @@ class Dots1ForCausalLM(nn.Module, SupportsPP):
             ("gate_up_proj", "up_proj", 1),
         ]
 
+        expert_params_mapping = FusedMoE.make_expert_params_mapping(
+            ckpt_gate_proj_name="gate_proj",
+            ckpt_down_proj_name="down_proj",
+            ckpt_up_proj_name="up_proj",
+            num_experts=self.config.n_routed_experts)
+
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
-            for param_name, weight_name, shard_id in stacked_params_mapping:
+            spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)
+            if spec_layer is not None:
+                continue
+
+            for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
+                    continue
+                if (("mlp.experts." in name) and name not in params_dict):
                     continue
                 name = name.replace(weight_name, param_name)
                 if name.endswith(".bias") and name not in params_dict:
-                    continue
-                if ("mlp.experts." in name or "mlp.shared_experts."
-                        in name) and name not in params_dict:
                     continue
                 if is_pp_missing_parameter(name, self):
                     continue
@@ -555,16 +526,46 @@ class Dots1ForCausalLM(nn.Module, SupportsPP):
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                if ("mlp.experts." in name or "mlp.shared_experts."
-                        in name) and name not in params_dict:
-                    continue
-                if is_pp_missing_parameter(name, self):
-                    continue
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
-                weight_loader(param, loaded_weight)
+                for mapping in expert_params_mapping:
+                    param_name, weight_name, expert_id, shard_id = mapping
+                    if weight_name not in name:
+                        continue
+                    name = name.replace(weight_name, param_name)
+
+                    if is_pp_missing_parameter(name, self):
+                        continue
+
+                    param = params_dict[name]
+                    weight_loader = param.weight_loader
+                    weight_loader(param,
+                                  loaded_weight,
+                                  name,
+                                  shard_id=shard_id,
+                                  expert_id=expert_id)
+                    break
+                else:
+                    if name.endswith(".bias") and name not in params_dict:
+                        continue
+                    name = maybe_remap_kv_scale_name(name, params_dict)
+                    if name is None:
+                        continue
+                    if is_pp_missing_parameter(name, self):
+                        continue
+                    param = params_dict[name]
+                    weight_loader = getattr(param, "weight_loader",
+                                            default_weight_loader)
+                    weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
+
+
+def get_spec_layer_idx_from_weight_name(config: PretrainedConfig,
+                                        weight_name: str) -> Optional[int]:
+    if hasattr(config,
+               "num_nextn_predict_layers") and (config.num_nextn_predict_layers
+                                                > 0):
+        layer_idx = config.num_hidden_layers
+        for i in range(config.num_nextn_predict_layers):
+            if weight_name.startswith(f"model.layers.{layer_idx+i}."):
+                return layer_idx + i
+    return None
