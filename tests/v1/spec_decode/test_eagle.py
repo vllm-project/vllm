@@ -115,9 +115,14 @@ def test_prepare_inputs():
 
 
 @pytest.mark.parametrize("method,proposer_helper", [
-    ("eagle", lambda k: _create_proposer("eagle", llama3_model_dir, llama3_eagle_dir, k)),
-    ("eagle", lambda k: _create_proposer("eagle", llama4_model_dir, llama4_eagle_dir, k)),
-    ("eagle3", lambda k: _create_proposer("eagle3", llama3_model_dir, llama3_eagle3_dir, k)),
+    ("eagle",
+     lambda k: _create_proposer("eagle", llama3_model_dir, llama3_eagle_dir, k)
+     ),
+    ("eagle",
+     lambda k: _create_proposer("eagle", llama4_model_dir, llama4_eagle_dir, k)
+     ),
+    ("eagle3", lambda k: _create_proposer("eagle3", llama3_model_dir,
+                                          llama3_eagle3_dir, k)),
 ])
 @pytest.mark.parametrize("pp_size", [1, 2])
 @pytest.mark.parametrize("use_distinct_embed_tokens", [True, False])
@@ -197,10 +202,9 @@ def test_load_model(mock_get_model, mock_get_layers, mock_get_pp_group, method,
 
 
 @pytest.mark.parametrize("num_speculative_tokens", [1, 3, 8])
-@pytest.mark.parametrize("model_and_draft_model", [
-    (llama3_model_dir, llama3_eagle_dir), 
-    (llama4_model_dir, llama4_eagle_dir)
-])
+@pytest.mark.parametrize("model_and_draft_model",
+                         [(llama3_model_dir, llama3_eagle_dir),
+                          (llama4_model_dir, llama4_eagle_dir)])
 def test_propose(num_speculative_tokens, model_and_draft_model):
     model_dir = model_and_draft_model[0]
     draft_model_dir = model_and_draft_model[1]
@@ -215,7 +219,8 @@ def test_propose(num_speculative_tokens, model_and_draft_model):
     vocab_size = 100
 
     # Create proposer first so we can use its actual hidden_size
-    proposer = _create_proposer("eagle", model_dir, draft_model_dir, num_speculative_tokens)
+    proposer = _create_proposer("eagle", model_dir, draft_model_dir, 
+                                num_speculative_tokens)
     # Get the hidden_size from the proposer to ensure consistency
     hidden_size = proposer.hidden_size
 
