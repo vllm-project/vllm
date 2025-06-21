@@ -6,8 +6,9 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.utils import (
-    _resize_cache, per_token_group_quant_fp8)
+from vllm.model_executor.layers.fused_moe.masked_kernels import (
+    masked_per_token_group_quant_fp8)
+from vllm.model_executor.layers.fused_moe.utils import _resize_cache
 
 logger = init_logger(__name__)
 
@@ -109,19 +110,16 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
                                                  masked_m=expert_num_tokens,
                                                  expected_m=expected_m)
 
-        # TODO (varun) [Optimization]: Use a batched version of activation.
-        # Similarly for the quant below.
-        self.activation(activation, workspace2, workspace1.view(-1, N))
+        self.masked_activation(activation, workspace2, workspace1,
+                               expert_num_tokens)
 
-        w2_hidden_size = workspace2.size(-1)
-        workspace2 = workspace2.view(-1, w2_hidden_size)
-
-        a2q_scale: Optional[torch.Tensor] = None
-        a2q, a2q_scale = per_token_group_quant_fp8(workspace2,
-                                                   self.block_shape[1],
-                                                   column_major_scales=False)
-        a2q = a2q.view(E, max_num_tokens, -1)
-        a2q_scale = a2q_scale.view(E, max_num_tokens, -1)
+        # TODO (varun) : Pass in an output tensor derived from workspace
+        # as a memory optimization.
+        a2q, a2q_scale = masked_per_token_group_quant_fp8(
+            x=workspace2,
+            valid_tokens_array=expert_num_tokens,
+            group_size=self.block_shape[1],
+            column_major_scales=False)
 
         dg.m_grouped_gemm_fp8_fp8_bf16_nt_masked((a2q, a2q_scale),
                                                  (w2, w2_scale),

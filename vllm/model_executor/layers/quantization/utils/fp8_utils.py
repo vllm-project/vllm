@@ -245,7 +245,8 @@ def block_quant_to_tensor_quant(
 
 
 @triton.jit
-def _per_token_group_quant_fp8(
+def _do_per_token_group_quant_fp8(
+    g_id,  # group id
     # Pointers to inputs and output
     y_ptr,
     y_q_ptr,
@@ -268,8 +269,7 @@ def _per_token_group_quant_fp8(
     """
     groups_per_row = y_num_columns // group_size
 
-    # Map the program id to the row of X and Y it should compute.
-    g_id = tl.program_id(0)
+    # Map the group ID to the row of X and Y it should compute.
     row = g_id // groups_per_row
     row_g_id = g_id % groups_per_row
 
@@ -296,7 +296,47 @@ def _per_token_group_quant_fp8(
 
 
 @triton.jit
-def _per_token_group_quant_fp8_colmajor(
+def _per_token_group_quant_fp8(
+        # Pointers to inputs and output
+        y_ptr,
+        y_q_ptr,
+        y_s_ptr,
+        group_size,
+        # Num columns of y
+        y_num_columns,
+        y_row_stride,
+        # Avoid to divide zero
+        eps,
+        # Information for float8
+        fp8_min,
+        fp8_max,
+        # Meta-parameters
+        BLOCK: tl.constexpr):
+
+    # group ID
+    g_id = tl.program_id(axis=0)
+    _do_per_token_group_quant_fp8(
+        g_id,
+        # Pointers to inputs and output
+        y_ptr,
+        y_q_ptr,
+        y_s_ptr,
+        group_size,
+        # Num columns of y
+        y_num_columns,
+        y_row_stride,
+        # Avoid to divide zero
+        eps,
+        # Information for float8
+        fp8_min,
+        fp8_max,
+        # Meta-parameters
+        BLOCK)
+
+
+@triton.jit
+def _do_per_token_group_quant_fp8_colmajor(
+    g_id,  # group_id
     # Pointers to inputs and output
     y_ptr,
     y_q_ptr,
@@ -321,8 +361,7 @@ def _per_token_group_quant_fp8_colmajor(
     """
     groups_per_row = y_num_columns // group_size
 
-    # Map the program id to the row of X and Y it should compute.
-    g_id = tl.program_id(0)
+    # Map the group id to the row of X and Y it should compute.
     row = g_id // groups_per_row
     row_g_id = g_id % groups_per_row
 
@@ -355,6 +394,48 @@ def _per_token_group_quant_fp8_colmajor(
 
     tl.store(y_q_ptr + cols, y_q, mask=mask)
     tl.store(y_s_ptr, y_s)
+
+
+@triton.jit
+def _per_token_group_quant_fp8_colmajor(
+        # Pointers to inputs and output
+        y_ptr,
+        y_q_ptr,
+        y_s_ptr,
+        group_size,
+        # Num columns of y
+        y_num_columns,
+        y_row_stride,
+        # Stride from one column to the next of y_s
+        y_s_col_stride,
+        # Avoid to divide zero
+        eps,
+        # Information for float8
+        fp8_min,
+        fp8_max,
+        # Meta-parameters
+        BLOCK: tl.constexpr):
+
+    g_id = tl.program_id(axis=0)
+    _do_per_token_group_quant_fp8_colmajor(
+        g_id,
+        # Pointers to inputs and output
+        y_ptr,
+        y_q_ptr,
+        y_s_ptr,
+        group_size,
+        # Num columns of y
+        y_num_columns,
+        y_row_stride,
+        # Stride from one column to the next of y_s
+        y_s_col_stride,
+        # Avoid to divide zero
+        eps,
+        # Information for float8
+        fp8_min,
+        fp8_max,
+        # Meta-parameters
+        BLOCK)
 
 
 def per_token_group_quant_fp8(

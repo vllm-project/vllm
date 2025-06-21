@@ -15,6 +15,20 @@ __device__ __forceinline__ scalar_t compute(const scalar_t& x,
                                             const scalar_t& y) {
   return act_first ? ACT_FN(x) * y : x * ACT_FN(y);
 }
+
+template <typename scalar_t, scalar_t (*ACT_FN)(const scalar_t&),
+          bool act_first>
+__device__ void _act_and_mul_kernel(
+    scalar_t* __restrict__ out,          // [..., d]
+    const scalar_t* __restrict__ input,  // [..., 2, d]
+    const int d, const int64_t token_idx) {
+  for (int64_t idx = threadIdx.x; idx < d; idx += blockDim.x) {
+    const scalar_t x = VLLM_LDG(&input[token_idx * 2 * d + idx]);
+    const scalar_t y = VLLM_LDG(&input[token_idx * 2 * d + d + idx]);
+    out[token_idx * d + idx] = compute<scalar_t, ACT_FN, act_first>(x, y);
+  }
+}
+
 // Activation and gating kernel template.
 
 template <typename scalar_t, scalar_t (*ACT_FN)(const scalar_t&),
@@ -24,11 +38,7 @@ __global__ void act_and_mul_kernel(
     const scalar_t* __restrict__ input,  // [..., 2, d]
     const int d) {
   const int64_t token_idx = blockIdx.x;
-  for (int64_t idx = threadIdx.x; idx < d; idx += blockDim.x) {
-    const scalar_t x = VLLM_LDG(&input[token_idx * 2 * d + idx]);
-    const scalar_t y = VLLM_LDG(&input[token_idx * 2 * d + d + idx]);
-    out[token_idx * d + idx] = compute<scalar_t, ACT_FN, act_first>(x, y);
-  }
+  _act_and_mul_kernel<scalar_t, ACT_FN, act_first>(out, input, d, token_idx);
 }
 
 template <typename T>
@@ -222,4 +232,73 @@ void gelu_quick(torch::Tensor& out,    // [..., d]
                 torch::Tensor& input)  // [..., d]
 {
   LAUNCH_ACTIVATION_KERNEL(vllm::gelu_quick_kernel);
+}
+
+namespace vllm {
+// Batched act_and_mul kernel template
+template <typename scalar_t, scalar_t (*ACT_FN)(const scalar_t&),
+          bool act_first>
+__global__ void batched_act_and_mul_kernel(
+    scalar_t* out,                      // [B, max_tokens, d]
+    const scalar_t* input,              // [B, max_tokens, 2, d]
+    const int32_t* valid_tokens_array,  // [B]
+    const int d, const int max_num_tokens) {
+  const int64_t batch_idx = blockIdx.x;
+  const int64_t num_tokens = valid_tokens_array[batch_idx];
+  if (num_tokens == 0) {
+    return;
+  }
+
+  int const col_offset = blockIdx.y * blockDim.x;
+  scalar_t* __restrict__ b_out =
+      &out[batch_idx * max_num_tokens * d + col_offset];
+  const scalar_t* __restrict__ b_in =
+      &input[batch_idx * max_num_tokens * d * 2 + col_offset];
+
+  int token_idx = 0;
+  const int tidx = threadIdx.x;
+  while (token_idx < num_tokens) {
+    if (col_offset + tidx < d) {
+      const scalar_t x = VLLM_LDG(&b_in[tidx]);
+      const scalar_t y = VLLM_LDG(&b_in[tidx + d]);
+      b_out[tidx] = compute<scalar_t, ACT_FN, act_first>(x, y);
+    }
+
+    b_out += d;
+    b_in += (2 * d);
+
+    ++token_idx;
+  }
+}
+}  // namespace vllm
+
+// Launch batched activation and gating kernel.
+// Use ACT_FIRST (bool) indicating whether to apply the activation function
+// first.
+#define LAUNCH_BATCHED_ACTIVATION_GATE_KERNEL(KERNEL, ACT_FIRST)            \
+  int64_t const batch_size = input.size(0);                                 \
+  int64_t const max_num_tokens = input.size(1);                             \
+  int const d = input.size(2) / 2;                                          \
+  int const block_size = std::min(d, 1024);                                 \
+  int const blocks_per_row = ((d - 1) / block_size) + 1;                    \
+  dim3 grid(batch_size, blocks_per_row);                                    \
+  dim3 block(block_size);                                                   \
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));         \
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();             \
+  VLLM_DISPATCH_FLOATING_TYPES(                                             \
+      input.scalar_type(), "batched_act_and_mul_kernel", [&] {              \
+        vllm::batched_act_and_mul_kernel<scalar_t, KERNEL<scalar_t>,        \
+                                         ACT_FIRST>                         \
+            <<<grid, block, 0, stream>>>(                                   \
+                out.data_ptr<scalar_t>(), input.data_ptr<scalar_t>(),       \
+                valid_tokens_array.data_ptr<int32_t>(), d, max_num_tokens); \
+      });
+
+void batched_silu_and_mul(torch::Tensor& out,    // [B, max_tokens, d]
+                          torch::Tensor& input,  // [B, max_tokens, 2, d]
+                          torch::Tensor& valid_tokens_array)  // [B]
+{
+  TORCH_CHECK(out.is_contiguous() && input.is_contiguous());
+  TORCH_CHECK(valid_tokens_array.dtype() == torch::kInt32);
+  LAUNCH_BATCHED_ACTIVATION_GATE_KERNEL(vllm::silu_kernel, true);
 }

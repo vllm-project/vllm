@@ -111,6 +111,11 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "silu_and_mul_quant(Tensor! result, Tensor input, Tensor scale) -> ()");
   ops.impl("silu_and_mul_quant", torch::kCUDA, &silu_and_mul_quant);
 
+  ops.def(
+      "batched_silu_and_mul(Tensor! result, Tensor input, Tensor "
+      "valid_tokens_array) -> ()");
+  ops.impl("batched_silu_and_mul", torch::kCUDA, &batched_silu_and_mul);
+
   ops.def("mul_and_silu(Tensor! out, Tensor input) -> ()");
   ops.impl("mul_and_silu", torch::kCUDA, &mul_and_silu);
 

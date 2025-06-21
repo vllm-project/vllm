@@ -734,10 +734,8 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
                                          config=config,
                                          block_shape=self.block_shape)
 
-        # TODO: would be nice to use expert_num_tokens here to reduce
-        # garbage compute
-        self.activation(activation, intermediate_cache2.view(-1, N // 2),
-                        intermediate_cache1.view(-1, N))
+        self.masked_activation(activation, intermediate_cache2,
+                               intermediate_cache1, expert_num_tokens)
 
         ic2_hidden_size = intermediate_cache2.size(-1)
         intermediate_cache2 = intermediate_cache2.view(-1, ic2_hidden_size)
