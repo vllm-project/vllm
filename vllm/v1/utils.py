@@ -142,6 +142,10 @@ class EngineZmqAddresses:
     coordinator_input: Optional[str] = None
     # ZMQ output socket address of DP coordinator if applicable
     coordinator_output: Optional[str] = None
+    # ZMQ socket for front-end to connect to DP coordinator.
+    # Not used by engine, just relayed to front-end in handshake response.
+    # Only required for external DP LB case.
+    frontend_stats_publish_address: Optional[str] = None
 
 
 @dataclass
@@ -236,6 +240,7 @@ class CoreEngineProcManager:
         handshake_address: str,
         executor_class: type[Executor],
         log_stats: bool,
+        client_handshake_address: Optional[str] = None,
     ):
         context = get_mp_context()
         common_kwargs = {
@@ -245,6 +250,10 @@ class CoreEngineProcManager:
             "executor_class": executor_class,
             "log_stats": log_stats,
         }
+
+        if client_handshake_address:
+            common_kwargs[
+                "client_handshake_address"] = client_handshake_address
 
         self.processes: list[BaseProcess] = []
         for index in range(local_engine_count):
@@ -460,7 +469,6 @@ def wait_for_engine_startup(
     proc_manager: Optional[CoreEngineProcManager],
     coord_process: Optional[Process],
 ):
-
     # Wait for engine core process(es) to send ready messages.
     local_count = parallel_config.data_parallel_size_local
     remote_count = len(core_engines) - local_count
@@ -536,6 +544,14 @@ def wait_for_engine_startup(
             num_gpu_blocks = cache_config.num_gpu_blocks or 0
             num_gpu_blocks += msg["num_gpu_blocks"]
             cache_config.num_gpu_blocks = num_gpu_blocks
+
+            # In external DP LB mode, the coordinator address that the
+            # front-end procs connect to is obtained from rank 0 via
+            # one of the engine handshakes, and passed to the local
+            # front-end process in the response from the other.
+            if addresses.frontend_stats_publish_address is None:
+                addresses.frontend_stats_publish_address = msg.get(
+                    "dp_stats_address")
 
             start_pending[0 if local else 1] -= 1
             engine.state = CoreEngineState.READY
