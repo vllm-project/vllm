@@ -248,6 +248,9 @@ class TPUWorker:
     def load_model(self) -> None:
         self.model_runner.load_model()
 
+    def update_load_config(self, **kwargs) -> None:
+        self.model_runner.update_load_config(**kwargs)
+
     def compile_or_warm_up_model(self) -> None:
         if not self.model_config.enforce_eager:
             self.model_runner.capture_model()
