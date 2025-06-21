@@ -729,6 +729,19 @@ class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
             self.activation(activation, tmp, input)
             output[expert, :num, :] = tmp @ w2[expert].transpose(0, 1)
 
+def maybe_fix_scales(scales: Optional[torch.Tensor], num_experts: int) -> Optional[torch.Tensor]:
+    if scales is not None:
+        if scales.numel() == 1:
+            scales = scales.view(1)
+            scales = torch.repeat_interleave(
+                scales,
+                num_experts,
+                dim=0
+            ).view(num_experts, 1, 1)
+        else:
+            scales = scales.view(num_experts, -1, scales.size(-1))
+
+    return scales
 
 def batched_moe_kernel_quantize_input(
     A: torch.Tensor,
@@ -757,13 +770,7 @@ def batched_moe_kernel_quantize_input(
         #     num = expert_num_tokens[e]
         #     A_q_scale[e, num:].fill_(0)
 
-        if A_q_scale is not None:
-            if A_q_scale.numel() == 1:
-                A_q_scale = A_q_scale.view(1)
-                A_q_scale = torch.repeat_interleave(A_q_scale, E,
-                                                    dim=0).view(E, 1, 1)
-            else:
-                A_q_scale = A_q_scale.view(E, -1, A_q_scale.size(-1))
+        A_q_scale = maybe_fix_scales(A_q_scale, E)
 
         #print(f"A2Q_SCALE {A_q_scale.shape}\n{A_q_scale}")
         #A_q_scale.fill_(0.0001)
@@ -960,6 +967,8 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
             intermediate_cache1.fill_(0)
 
         #print(f"A1_SCALES {a1q_scale.shape}")
+        a1q_scale = maybe_fix_scales(a1q_scale, E)
+        a2_scale = maybe_fix_scales(a2_scale, E)
 
         # MM1
         invoke_moe_batched_triton_kernel(

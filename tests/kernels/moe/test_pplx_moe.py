@@ -28,6 +28,7 @@ from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
 from vllm.model_executor.layers.fused_moe.fused_moe import get_default_config
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEModularKernel)
+from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.platforms import current_platform
 from vllm.utils import round_up
 
@@ -198,6 +199,7 @@ def pplx_prepare_finalize(
     pgi: ProcessGroupInfo,
     dp_size: int,
     a: torch.Tensor,
+    a_scale: Optional[torch.Tensor],
     topk_weight: torch.Tensor,
     topk_ids: torch.Tensor,
     num_experts: int,
@@ -289,6 +291,7 @@ def _pplx_prepare_finalize(
     pgi: ProcessGroupInfo,
     dp_size: int,
     a: torch.Tensor,
+    a_scale: Optional[torch.Tensor],
     score: torch.Tensor,
     topk: torch.Tensor,
     num_experts: int,
@@ -316,7 +319,7 @@ def _pplx_prepare_finalize(
                     topk_weight.view(-1, topk, 1).to(device)).sum(dim=1).to(
                         a.dtype)
 
-    pplx_output = pplx_prepare_finalize(pgi, dp_size, a, topk_weight, topk_ids,
+    pplx_output = pplx_prepare_finalize(pgi, dp_size, a, a_scale, topk_weight, topk_ids,
                                         num_experts, group_name)
 
     torch_output = chunk_by_rank(torch_output, pgi.rank,
@@ -335,8 +338,10 @@ def _pplx_prepare_finalize(
 @pytest.mark.parametrize("mnk", PPLX_PREPARE_COMBOS)
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
-@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.float8_e4m3fn, torch.bfloat16])
 @pytest.mark.parametrize("world_dp_size", [[2, 1]])
+@pytest.mark.parametrize("per_act_token_quant", [False])
+@pytest.mark.parametrize("block_shape", [None, [128, 128]])
 @pytest.mark.parametrize("use_internode", [False])
 @requires_pplx
 def test_pplx_prepare_finalize(
@@ -345,16 +350,31 @@ def test_pplx_prepare_finalize(
     topk: int,
     dtype: torch.dtype,
     world_dp_size: tuple[int, int],
+    per_act_token_quant: bool,
+    block_shape: Optional[list[int]],
     use_internode: bool,
 ):
+    if dtype == torch.float8_e4m3fn:
+        use_fp8_w8a8 = True
+        act_dtype = torch.bfloat16
+    else:
+        use_fp8_w8a8 = False
+        act_dtype = dtype
+
+    if not use_fp8_w8a8 and per_act_token_quant and block_shape is not None:
+        pytest.skip("Skip quantization test for non-quantized type")
+
     current_platform.seed_everything(7)
     m, n, k = mnk
     world_size, dp_size = world_dp_size
     device = "cuda"
-    a = torch.randn((m, k), device=device, dtype=dtype) / 10
-    score = torch.randn((m, e), device=device, dtype=dtype)
 
-    parallel_launch(world_size, _pplx_prepare_finalize, dp_size, a, score,
+    a = torch.randn((m, k), device=device, dtype=act_dtype) / 10
+    score = torch.randn((m, e), device=device, dtype=act_dtype)
+
+    a, a_scale = moe_kernel_quantize_input(a, None, dtype, False, block_shape)
+
+    parallel_launch(world_size, _pplx_prepare_finalize, dp_size, a, a_scale, score,
                     topk, e, use_internode)
 
 

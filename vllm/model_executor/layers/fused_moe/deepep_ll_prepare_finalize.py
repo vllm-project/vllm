@@ -27,7 +27,7 @@ def dequant_fp8(expert_x_fp8: torch.Tensor,
     expert_x_fp32 = expert_x_fp8.to(torch.float32).view(
         num_experts, -1, DEEPEP_QUANT_BLOCK_SIZE)
     expert_x_scales = expert_x_scales.view(num_experts, -1, 1)
-    return (expert_x_fp32 * expert_x_scales).view(expert_x_fp8.size())
+    return (expert_x_fp32 * expert_x_scales).view(expert_x_fp8.shape)
 
 
 class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
@@ -39,12 +39,8 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     # specific hidden sizes.
     SUPPORTED_HIDDEN_SIZES = [2048, 2560, 4096, 5120, 7168]
 
-    def __init__(self,
-                 buffer: deep_ep.Buffer,
-                 max_tokens_per_rank: int,
-                 world_size: int,
-                 dp_size: int,
-                 use_fp8_dispatch: bool = False):
+    def __init__(self, buffer: deep_ep.Buffer, max_tokens_per_rank: int,
+                 world_size: int, dp_size: int, use_fp8_dispatch: bool):
         super().__init__()
 
         self.buffer = buffer
