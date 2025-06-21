@@ -9,6 +9,9 @@ import pytest
 
 from vllm import LLM, SamplingParams
 
+TP8_REQUIRED_MODELS = [
+    "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
+]
 
 @pytest.fixture
 def test_prompts():
@@ -51,14 +54,6 @@ def sampling_config():
 @pytest.fixture
 def model_name():
     return "meta-llama/Llama-3.1-8B-Instruct"
-
-
-def eagle_model_name():
-    return "yuhuili/EAGLE-LLaMA3.1-Instruct-8B"
-
-
-def eagle3_model_name():
-    return "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B"
 
 
 def test_ngram_correctness(
@@ -105,13 +100,23 @@ def test_ngram_correctness(
         del spec_llm
 
 
-@pytest.mark.parametrize("use_eagle3", [False, True], ids=["eagle", "eagle3"])
+@pytest.mark.parametrize("method_model_and_draft_model", 
+        [(
+            "eagle", "meta-llama/Llama-3.1-8B-Instruct", 
+            "yuhuili/EAGLE-LLaMA3.1-Instruct-8B"
+        ),(
+            "eagle", "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
+            "ronaldbxu/EAGLE-Llama-4-Maverick-17B-128E-Instruct"
+        ),(
+            "eagle3","meta-llama/Llama-3.1-8B-Instruct", 
+            "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B"
+        )], 
+        ids=["llama3_eagle", "llama4_eagle", "llama3_eagle3"])
 def test_eagle_correctness(
     monkeypatch: pytest.MonkeyPatch,
     test_prompts: list[list[dict[str, Any]]],
     sampling_config: SamplingParams,
-    model_name: str,
-    use_eagle3: bool,
+    method_model_and_draft_model: tuple[str, str],
 ):
     '''
     Compare the outputs of a original LLM and a speculative LLM
@@ -120,17 +125,28 @@ def test_eagle_correctness(
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
 
-        ref_llm = LLM(model=model_name, max_model_len=2048)
+        model_name = method_model_and_draft_model[1]
+
+        tp = 1
+
+        if model_name in TP8_REQUIRED_MODELS:
+            tp = 8
+
+        ref_llm = LLM(model=model_name, 
+                      tensor_parallel_size=tp,
+                      max_model_len=2048)
         ref_outputs = ref_llm.chat(test_prompts, sampling_config)
         del ref_llm
 
-        spec_model_name = eagle3_model_name(
-        ) if use_eagle3 else eagle_model_name()
+        method = method_model_and_draft_model[0]
+        spec_model_name = method_model_and_draft_model[2]
+
         spec_llm = LLM(
             model=model_name,
             trust_remote_code=True,
+            tensor_parallel_size=tp,
             speculative_config={
-                "method": "eagle3" if use_eagle3 else "eagle",
+                "method": method,
                 "model": spec_model_name,
                 "num_speculative_tokens": 3,
                 "max_model_len": 2048,

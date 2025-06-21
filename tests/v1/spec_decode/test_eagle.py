@@ -12,12 +12,15 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, ModelConfig,
 from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.v1.spec_decode.eagle import EagleProposer
 
-model_dir = "meta-llama/Llama-3.1-8B-Instruct"
-eagle_dir = "yuhuili/EAGLE-LLaMA3.1-Instruct-8B"
-eagle3_dir = "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B"
+llama3_model_dir = "meta-llama/Llama-3.1-8B-Instruct"
+llama3_eagle_dir = "yuhuili/EAGLE-LLaMA3.1-Instruct-8B"
+llama3_eagle3_dir = "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B"
+
+llama4_model_dir = "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8"
+llama4_eagle_dir = "ronaldbxu/EAGLE-Llama-4-Maverick-17B-128E-Instruct"
 
 
-def _create_proposer(method: str, k: int) -> EagleProposer:
+def _create_proposer(method: str, model_dir: str, draft_model_dir: str, k: int) -> EagleProposer:
     model_config = ModelConfig(model=model_dir,
                                task="generate",
                                max_model_len=100,
@@ -26,9 +29,6 @@ def _create_proposer(method: str, k: int) -> EagleProposer:
                                dtype="auto",
                                seed=None,
                                trust_remote_code=False)
-
-    # Choose model directory based on method
-    draft_model_dir = eagle_dir if method == "eagle" else eagle3_dir
 
     speculative_config = SpeculativeConfig(
         target_model_config=model_config,
@@ -115,8 +115,9 @@ def test_prepare_inputs():
 
 
 @pytest.mark.parametrize("method,proposer_helper", [
-    ("eagle", lambda k: _create_proposer("eagle", k)),
-    ("eagle3", lambda k: _create_proposer("eagle3", k)),
+    ("eagle", lambda k: _create_proposer("eagle", llama3_model_dir, llama3_eagle_dir, k)),
+    ("eagle", lambda k: _create_proposer("eagle", llama4_model_dir, llama4_eagle_dir, k)),
+    ("eagle3", lambda k: _create_proposer("eagle3", llama3_model_dir, llama3_eagle3_dir, k)),
 ])
 @pytest.mark.parametrize("pp_size", [1, 2])
 @pytest.mark.parametrize("use_distinct_embed_tokens", [True, False])
@@ -196,7 +197,13 @@ def test_load_model(mock_get_model, mock_get_layers, mock_get_pp_group, method,
 
 
 @pytest.mark.parametrize("num_speculative_tokens", [1, 3, 8])
-def test_propose(num_speculative_tokens):
+@pytest.mark.parametrize("model_and_draft_model", [
+    (llama3_model_dir, llama3_eagle_dir), 
+    (llama4_model_dir, llama4_eagle_dir)
+])
+def test_propose(num_speculative_tokens, model_and_draft_model):
+    model_dir = model_and_draft_model[0]
+    draft_model_dir = model_and_draft_model[1]
     # Use GPU device
     device = torch.device('cuda')
 
@@ -208,7 +215,7 @@ def test_propose(num_speculative_tokens):
     vocab_size = 100
 
     # Create proposer first so we can use its actual hidden_size
-    proposer = _create_proposer("eagle", num_speculative_tokens)
+    proposer = _create_proposer("eagle", model_dir, draft_model_dir, num_speculative_tokens)
     # Get the hidden_size from the proposer to ensure consistency
     hidden_size = proposer.hidden_size
 
