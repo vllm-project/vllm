@@ -77,13 +77,8 @@ def bench_run(
 
     has_zp = quant_type in [scalar_types.uint4, scalar_types.uint8]
 
-    if act_order:
-        if group_size == -1:
-            return
-        if group_size == size_k:
-            return
-        if has_zp:
-            return
+    if act_order and (group_size == -1 or group_size == size_k or has_zp):
+        return
 
     if size_k % group_size != 0:
         return
@@ -100,20 +95,16 @@ def bench_run(
             b.T, group_size
         )
     elif quant_type == scalar_types.float8_e4m3fn:
-        if group_size not in [-1, 128]:
-            return
-        if act_order:
+        if group_size not in [-1, 128] or act_order:
             return
         marlin_w_ref, marlin_q_w, marlin_s = marlin_quant_fp8_torch(b.T, group_size)
+    elif group_size == 16:
+        return
     elif has_zp:
-        if group_size == 16:
-            return
         marlin_w_ref, marlin_q_w, marlin_s, marlin_zp = awq_marlin_quantize(
             b, quant_type, group_size
         )
     else:
-        if group_size == 16:
-            return
         marlin_w_ref, marlin_q_w, marlin_s, marlin_g_idx, marlin_sort_indices, _ = (
             marlin_quantize(b, quant_type, group_size, act_order)
         )
