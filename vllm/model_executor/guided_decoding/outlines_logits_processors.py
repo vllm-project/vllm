@@ -177,7 +177,7 @@ class OutlinesVocabulary:
 
 
 re_llama_byte_token = re.compile(r"^<0x[0-9A-F]{2}>$")
-re_replacement_seq = re.compile(r"^.{0,2}�+.?{0,2}")
+re_replacement_seq = re.compile(r"^.{0,2}�+.{0,2}$")
 
 
 def _reduced_vocabulary(tokenizer: AnyTokenizer,
