@@ -33,6 +33,9 @@ async def handle_request():
         prefill_request = original_request_data.copy()
         # change max_tokens = 1 to let it only do prefill
         prefill_request["max_tokens"] = 1
+        # Prevent min_tokens > max_tokens error
+        # by setting min_tokens = 1 when max_tokens = 1
+        prefill_request["min_tokens"] = 1
 
         # finish prefill
         async for _ in forward_request(
