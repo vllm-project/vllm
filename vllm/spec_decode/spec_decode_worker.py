@@ -426,6 +426,13 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         scorer cache is divided evenly between the proposer and scorer model KV,
         such that the number of blocks is equal in both KV caches.
         """
+
+        # Account for memory usage of the draft model, if it exists.
+        if hasattr(self.proposer_worker, "model_runner") and \
+            hasattr(self.proposer_worker.model_runner, "model_memory_usage"):
+            self.scorer_worker.model_runner.model_memory_usage += (
+                self.proposer_worker.model_runner.model_memory_usage)
+
         num_gpu_blocks, num_cpu_blocks = (
             self.scorer_worker.determine_num_available_blocks())
 
