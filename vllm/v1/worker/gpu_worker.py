@@ -233,7 +233,20 @@ class Worker(WorkerBase):
                     GiB(available_kv_cache_memory))
         gc.collect()
 
-        return int(available_kv_cache_memory)
+        available_kv_cache_memory = int(available_kv_cache_memory)
+        logger.info(
+            "Determined amount of memory available to KV cache: %d bytes",
+            available_kv_cache_memory)
+
+        vllm_avail_kv_cache_override = os.getenv(
+            "VLLM_AVAIL_KV_CACHE_OVERRIDE", None)
+        if vllm_avail_kv_cache_override:
+            available_kv_cache_memory = int(vllm_avail_kv_cache_override)
+            logger.warning(
+                "Overriding amount of memory available to KV cache: %d bytes",
+                available_kv_cache_memory)
+
+        return available_kv_cache_memory
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         return self.model_runner.get_kv_cache_spec()
