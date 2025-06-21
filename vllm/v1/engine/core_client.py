@@ -156,6 +156,8 @@ class EngineCoreClient(ABC):
         raise NotImplementedError
 
     def dp_engines_running(self) -> bool:
+        """Returns True id data parallel engines are collectively in a
+        running state."""
         raise NotImplementedError
 
     async def get_output_async(self) -> EngineCoreOutputs:
