@@ -25,16 +25,11 @@ vLLM also supports model implementations that are available in Transformers. Thi
 
 To check if the modeling backend is Transformers, you can simply do this:
 
-<details>
-<summary>Code</summary>
-
 ```python
 from vllm import LLM
 llm = LLM(model=..., task="generate")  # Name or path of your model
 llm.apply_model(lambda model: print(type(model)))
 ```
-
-</details>
 
 If it is `TransformersForCausalLM` then it means it's based on Transformers!
 
@@ -265,20 +260,12 @@ Here are some tips for loading/downloading models from Hugging Face using a prox
 
 - Set the proxy globally for your session (or set it in the profile file):
 
-<details>
-<summary>Commands</summary>
-
 ```shell
 export http_proxy=http://your.proxy.server:port
 export https_proxy=http://your.proxy.server:port
 ```
 
-</details>
-
 - Set the proxy for just the current command:
-
-<details>
-<summary>Commands</summary>
 
 ```shell
 https_proxy=http://your.proxy.server:port huggingface-cli download <model_name>
@@ -287,12 +274,7 @@ https_proxy=http://your.proxy.server:port huggingface-cli download <model_name>
 https_proxy=http://your.proxy.server:port  vllm serve <model_name> --disable-log-requests
 ```
 
-</details>
-
 - Set the proxy in Python interpreter:
-
-<details>
-<summary>Code</summary>
 
 ```python
 import os
@@ -300,8 +282,6 @@ import os
 os.environ['http_proxy'] = 'http://your.proxy.server:port'
 os.environ['https_proxy'] = 'http://your.proxy.server:port'
 ```
-
-</details>
 
 ### ModelScope
 

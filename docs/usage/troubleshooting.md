@@ -248,16 +248,11 @@ If it raises errors from `torch/_inductor` directory, usually it means you have 
 
 If you see an error like:
 
-<details>
-<summary>Logs</summary>
-
 ```text
   File "vllm/model_executor/models/registry.py", line xxx, in _raise_for_unsupported
     raise ValueError(
 ValueError: Model architectures ['<arch>'] failed to be inspected. Please check the logs for more details.
 ```
-
-</details>
 
 It means that vLLM failed to import the model file.
 Usually, it is related to missing dependencies or outdated binaries in the vLLM build.
@@ -267,9 +262,6 @@ Please read the logs carefully to determine the root cause of the error.
 
 If you see an error like:
 
-<details>
-<summary>Logs</summary>
-
 ```text
 Traceback (most recent call last):
 ...
@@ -278,20 +270,13 @@ Traceback (most recent call last):
 TypeError: 'NoneType' object is not iterable
 ```
 
-</details>
-
 or:
-
-<details>
-<summary>Logs</summary>
 
 ```text
   File "vllm/model_executor/models/registry.py", line xxx, in _raise_for_unsupported
     raise ValueError(
 ValueError: Model architectures ['<arch>'] are not supported for now. Supported architectures: [...]
 ```
-
-</details>
 
 But you are sure that the model is in the [list of supported models][supported-models], there may be some issue with vLLM's model resolution. In that case, please follow [these steps](../configuration/model_resolution.md) to explicitly specify the vLLM implementation for the model.
 

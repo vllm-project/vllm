@@ -31,16 +31,11 @@ Currently, there are no pre-built ROCm wheels.
 
     Alternatively, you can install PyTorch using PyTorch wheels. You can check PyTorch installation guide in PyTorch [Getting Started](https://pytorch.org/get-started/locally/). Example:
 
-    <details>
-    <summary>Commands</summary>
-
     ```console
     # Install PyTorch
     $ pip uninstall torch -y
     $ pip install --no-cache-dir --pre torch --index-url https://download.pytorch.org/whl/nightly/rocm6.3
     ```
-
-    </details>
 
 1. Install [Triton flash attention for ROCm](https://github.com/ROCm/triton)
 
@@ -186,16 +181,11 @@ It is important that the user kicks off the docker build using buildkit. Either 
 
 To build vllm on ROCm 6.3 for MI200 and MI300 series, you can use the default:
 
-<details>
-<summary>Command</summary>
-
 ```console
 DOCKER_BUILDKIT=1 docker build \
     -f docker/Dockerfile.rocm_base \
     -t rocm/vllm-dev:base .
 ```
-
-</details>
 
 #### Build an image with vLLM
 

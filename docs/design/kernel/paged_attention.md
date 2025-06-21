@@ -180,16 +180,11 @@ tokens are processed by the entire thread group after the kernel run.
 In this context, "handle" refers to performing the dot multiplication
 between query data and key data.
 
-<details>
-<summary>Code</summary>
-
 ```cpp
 const scalar_t* k_ptr = k_cache + physical_block_number * kv_block_stride
                     + kv_head_idx * kv_head_stride
                     + physical_block_offset * x;
 ```
-
-</details>
 
 Unlike to `q_ptr`, `k_ptr` in each thread will point to different
 key token at different iterations. As shown above, that `k_ptr`

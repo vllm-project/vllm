@@ -110,16 +110,11 @@ to perform most of the heavy lifting which includes PyTorch model initialization
 To configure NxD Inference features through the vLLM entrypoint, use the `override_neuron_config` setting. Provide the configs you want to override
 as a dictionary (or JSON object when starting vLLM from the CLI). For example, to disable auto bucketing, include
 
-<details>
-<summary>Config</summary>
-
 ```console
 override_neuron_config={
     "enable_bucketing":False,
 }
 ```
-
-</details>
 
 or when launching vLLM from the CLI, pass
 

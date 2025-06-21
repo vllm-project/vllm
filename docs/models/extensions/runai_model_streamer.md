@@ -49,30 +49,20 @@ You can tune parameters using `--model-loader-extra-config`:
 You can tune `concurrency` that controls the level of concurrency and number of OS threads reading tensors from the file to the CPU buffer.
 For reading from S3, it will be the number of client instances the host is opening to the S3 server.
 
-<details>
-<summary>Command</summary>
-
 ```console
 vllm serve /home/meta-llama/Llama-3.2-3B-Instruct \
     --load-format runai_streamer \
     --model-loader-extra-config '{"concurrency":16}'
 ```
 
-</details>
-
 You can control the size of the CPU Memory buffer to which tensors are read from the file, and limit this size.
 You can read further about CPU buffer memory limiting [here](https://github.com/run-ai/runai-model-streamer/blob/master/docs/src/env-vars.md#runai_streamer_memory_limit).
-
-<details>
-<summary>Command</summary>
 
 ```console
 vllm serve /home/meta-llama/Llama-3.2-3B-Instruct \
     --load-format runai_streamer \
     --model-loader-extra-config '{"memory_limit":5368709120}'
 ```
-
-</details>
 
 !!! note
     For further instructions about tunable parameters and additional parameters configurable through environment variables, read the [Environment Variables Documentation](https://github.com/run-ai/runai-model-streamer/blob/master/docs/src/env-vars.md).
@@ -87,31 +77,21 @@ vllm serve /path/to/sharded/model --load-format runai_streamer_sharded
 
 The sharded loader expects model files to follow the same naming pattern as the regular sharded state loader: `model-rank-{rank}-part-{part}.safetensors`. You can customize this pattern using the `pattern` parameter in `--model-loader-extra-config`:
 
-<details>
-<summary>Command</summary>
-
 ```console
 vllm serve /path/to/sharded/model \
     --load-format runai_streamer_sharded \
     --model-loader-extra-config '{"pattern":"custom-model-rank-{rank}-part-{part}.safetensors"}'
 ```
 
-</details>
-
 To create sharded model files, you can use the script provided in <gh-file:examples/offline_inference/save_sharded_state.py>. This script demonstrates how to save a model in the sharded format that is compatible with the Run:ai Model Streamer sharded loader.
 
 The sharded loader supports all the same tunable parameters as the regular Run:ai Model Streamer, including `concurrency` and `memory_limit`. These can be configured in the same way:
-
-<details>
-<summary>Command</summary>
 
 ```console
 vllm serve /path/to/sharded/model \
     --load-format runai_streamer_sharded \
     --model-loader-extra-config '{"concurrency":16, "memory_limit":5368709120}'
 ```
-
-</details>
 
 !!! note
     The sharded loader is particularly efficient for tensor or pipeline parallel models where each worker only needs to read its own shard rather than the entire checkpoint.

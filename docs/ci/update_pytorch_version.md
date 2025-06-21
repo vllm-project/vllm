@@ -91,16 +91,11 @@ source to unblock the update process.
 ### FlashInfer
 Here is how to build and install it from source with torch2.7.0+cu128 in vLLM [Dockerfile](https://github.com/vllm-project/vllm/blob/27bebcd89792d5c4b08af7a65095759526f2f9e1/docker/Dockerfile#L259-L271):
 
-<details>
-<summary>Commands</summary>
-
 ```bash
 export TORCH_CUDA_ARCH_LIST='7.5 8.0 8.9 9.0 10.0+PTX'
 export FLASHINFER_ENABLE_SM90=1
 uv pip install --system --no-build-isolation "git+https://github.com/flashinfer-ai/flashinfer@v0.2.6.post1"
 ```
-
-</details>
 
 One caveat is that building FlashInfer from source adds approximately 30
 minutes to the vLLM build time. Therefore, it's preferable to cache the wheel in a

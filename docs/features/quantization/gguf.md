@@ -20,12 +20,17 @@ vllm serve ./tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf \
 
 You can also add `--tensor-parallel-size 2` to enable tensor parallelism inference with 2 GPUs:
 
+<details>
+<summary>Command</summary>
+
 ```console
 # We recommend using the tokenizer from base model to avoid long-time and buggy tokenizer conversion.
 vllm serve ./tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf \
    --tokenizer TinyLlama/TinyLlama-1.1B-Chat-v1.0 \
    --tensor-parallel-size 2
 ```
+
+</details>
 
 !!! warning
     We recommend using the tokenizer from base model instead of GGUF model. Because the tokenizer conversion from GGUF is time-consuming and unstable, especially for some models with large vocab size.

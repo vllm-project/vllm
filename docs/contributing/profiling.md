@@ -191,12 +191,7 @@ with vllm.utils.cprofile_context("another_function.prof"):
 There are multiple tools available that can help analyze the profile results.
 One example is [snakeviz](https://jiffyclub.github.io/snakeviz/).
 
-<details>
-<summary>Command</summary>
-
 ```bash
 pip install snakeviz
 snakeviz expensive_function.prof
 ```
-
-</details>

@@ -26,16 +26,11 @@ Multiprocessing will be used by default when not running in a Ray placement grou
 
 To run multi-GPU inference with the `LLM` class, set the `tensor_parallel_size` argument to the number of GPUs you want to use. For example, to run inference on 4 GPUs:
 
-<details>
-<summary>Code</summary>
-
 ```python
 from vllm import LLM
 llm = LLM("facebook/opt-13b", tensor_parallel_size=4)
 output = llm.generate("San Francisco is a")
 ```
-
-</details>
 
 To run multi-GPU serving, pass in the `--tensor-parallel-size` argument when starting the server. For example, to run API server on 4 GPUs:
 
@@ -46,16 +41,11 @@ To run multi-GPU serving, pass in the `--tensor-parallel-size` argument when sta
 
 You can also additionally specify `--pipeline-parallel-size` to enable pipeline parallelism. For example, to run API server on 8 GPUs with pipeline parallelism and tensor parallelism:
 
-<details>
-<summary>Command</summary>
-
 ```console
  vllm serve gpt2 \
      --tensor-parallel-size 4 \
      --pipeline-parallel-size 2
 ```
-
-</details>
 
 ## Running vLLM on multiple nodes
 
@@ -107,16 +97,11 @@ Then, on any node, use `docker exec -it node /bin/bash` to enter the container, 
 
 After that, on any node, use `docker exec -it node /bin/bash` to enter the container again. **In the container**, you can use vLLM as usual, just as you have all the GPUs on one node: vLLM will be able to leverage GPU resources of all nodes in the Ray cluster, and therefore, only run the `vllm` command on this node but not other nodes. The common practice is to set the tensor parallel size to the number of GPUs in each node, and the pipeline parallel size to the number of nodes. For example, if you have 16 GPUs in 2 nodes (8 GPUs per node), you can set the tensor parallel size to 8 and the pipeline parallel size to 2:
 
-<details>
-<summary>Command</summary>
-
 ```console
  vllm serve /path/to/the/model/in/the/container \
      --tensor-parallel-size 8 \
      --pipeline-parallel-size 2
 ```
-
-</details>
 
 You can also use tensor parallel without pipeline parallel, just set the tensor parallel size to the number of GPUs in the cluster. For example, if you have 16 GPUs in 2 nodes (8 GPUs per node), you can set the tensor parallel size to 16:
 

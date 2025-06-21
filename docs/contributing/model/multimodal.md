@@ -135,15 +135,10 @@ to return the maximum number of input items for each modality supported by the m
 
 For example, if the model supports any number of images but only one video per prompt:
 
-<details>
-<summary>Code</summary>
-
 ```python
 def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
     return {"image": None, "video": 1}
 ```
-
-</details>
 
 ## 3. Specify dummy inputs
 
@@ -502,15 +497,10 @@ Assuming that the memory usage increases with the number of tokens, the dummy in
     Fuyu does not expect image placeholders in the inputs to HF processor, so
     the dummy prompt text is empty regardless of the number of images.
 
-    <details>
-    <summary>Code</summary>
-
     ```python
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         return ""
     ```
-
-    </details>
 
     For the multimodal image profiling data, the logic is very similar to LLaVA:
 

@@ -138,16 +138,11 @@ python examples/offline_inference/basic/basic.py # run vLLM
 
 - When using the online serving, it is recommended to reserve 1-2 CPU cores for the serving framework to avoid CPU oversubscription. For example, on a platform with 32 physical CPU cores, reserving CPU 30 and 31 for the framework and using CPU 0-29 for OpenMP:
 
-<details>
-<summary>Commands</summary>
-
 ```console
 export VLLM_CPU_KVCACHE_SPACE=40
 export VLLM_CPU_OMP_THREADS_BIND=0-29
 vllm serve facebook/opt-125m
 ```
-
-</details>
 
  or using default auto thread binding:
 
@@ -156,8 +151,6 @@ export VLLM_CPU_KVCACHE_SPACE=40
 export VLLM_CPU_NUM_OF_RESERVED_CPU=2
 vllm serve facebook/opt-125m
 ```
-
-</details>
 
 - If using vLLM CPU backend on a machine with hyper-threading, it is recommended to bind only one OpenMP thread on each physical CPU core using `VLLM_CPU_OMP_THREADS_BIND` or using auto thread binding feature by default. On a hyper-threading enabled platform with 16 logical CPU cores / 8 physical CPU cores:
 

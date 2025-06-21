@@ -113,16 +113,11 @@ Currently, there are no pre-built TPU wheels.
 
 Install Miniconda:
 
-<details>
-<summary>Commands</summary>
-
 ```bash
 wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
 bash Miniconda3-latest-Linux-x86_64.sh
 source ~/.bashrc
 ```
-
-</details>
 
 Create and activate a Conda environment for vLLM:
 

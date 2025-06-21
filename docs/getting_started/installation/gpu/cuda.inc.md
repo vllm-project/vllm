@@ -62,31 +62,21 @@ LLM inference is a fast-evolving field, and the latest code may contain bug fixe
 
 ##### Install the latest code using `pip`
 
-<details>
-<summary>Command</summary>
-
 ```console
 pip install -U vllm \
     --pre \
     --extra-index-url https://wheels.vllm.ai/nightly
 ```
 
-</details>
-
 `--pre` is required for `pip` to consider pre-released versions.
 
 Another way to install the latest code is to use `uv`:
-
-<details>
-<summary>Command</summary>
 
 ```console
 uv pip install -U vllm \
     --torch-backend=auto \
     --extra-index-url https://wheels.vllm.ai/nightly
 ```
-
-</details>
 
 ##### Install specific revisions using `pip`
 
@@ -124,16 +114,11 @@ The `uv` approach works for vLLM `v0.6.6` and later and offers an easy-to-rememb
 
 If you only need to change Python code, you can build and install vLLM without compilation. Using `pip`'s [`--editable` flag](https://pip.pypa.io/en/stable/topics/local-project-installs/#editable-installs), changes you make to the code will be reflected when you run vLLM:
 
-<details>
-<summary>Commands</summary>
-
 ```console
 git clone https://github.com/vllm-project/vllm.git
 cd vllm
 VLLM_USE_PRECOMPILED=1 pip install --editable .
 ```
-
-</details>
 
 This command will do the following:
 
@@ -148,16 +133,11 @@ This command will do the following:
 
 In case you see an error about wheel not found when running the above command, it might be because the commit you based on in the main branch was just merged and the wheel is being built. In this case, you can wait for around an hour to try again, or manually assign the previous commit in the installation using the `VLLM_PRECOMPILED_WHEEL_LOCATION` environment variable.
 
-<details>
-<summary>Commands</summary>
-
 ```console
 export VLLM_COMMIT=72d9c316d3f6ede485146fe5aabd4e61dbc59069 # use full commit hash from the main branch
 export VLLM_PRECOMPILED_WHEEL_LOCATION=https://wheels.vllm.ai/${VLLM_COMMIT}/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl
 pip install --editable .
 ```
-
-</details>
 
 You can find more information about vLLM's wheels in [install-the-latest-code][install-the-latest-code].
 
@@ -169,16 +149,11 @@ You can find more information about vLLM's wheels in [install-the-latest-code][i
 
 If you want to modify C++ or CUDA code, you'll need to build vLLM from source. This can take several minutes:
 
-<details>
-<summary>Commands</summary>
-
 ```console
 git clone https://github.com/vllm-project/vllm.git
 cd vllm
 pip install -e .
 ```
-
-</details>
 
 !!! tip
     Building from source requires a lot of compilation. If you are building from source repeatedly, it's more efficient to cache the compilation results.
@@ -218,16 +193,11 @@ pip install --no-build-isolation -e .
 Currently, before starting the build process, vLLM fetches cutlass code from GitHub. However, there may be scenarios where you want to use a local version of cutlass instead.
 To achieve this, you can set the environment variable VLLM_CUTLASS_SRC_DIR to point to your local cutlass directory.
 
-<details>
-<summary>Commands</summary>
-
 ```console
 git clone https://github.com/vllm-project/vllm.git
 cd vllm
 VLLM_CUTLASS_SRC_DIR=/path/to/cutlass pip install -e .
 ```
-
-</details>
 
 ##### Troubleshooting
 

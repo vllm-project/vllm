@@ -173,16 +173,11 @@ run: |
 
 Start the serving the Llama-3 8B model on multiple replicas:
 
-<details>
-<summary>Command</summary>
-
 ```console
 HF_TOKEN="your-huggingface-token" \
   sky serve up -n vllm serving.yaml \
   --env HF_TOKEN
 ```
-
-</details>
 
 Wait until the service is ready:
 
