@@ -252,14 +252,14 @@ class ModelOptFp8MoEMethod:
             w13_weight_scale = PerTensorScaleParameter(
                 data=torch.full(
                     (num_experts, 2),
-                    torch.finfo(torch.float32).min,
+                    1.0,  # Initialize to reasonable default instead of -inf
                     dtype=torch.float32,
                 ),
                 weight_loader=weight_loader,
             )
             w2_weight_scale = PerTensorScaleParameter(
                 data=torch.full(
-                    (num_experts,), torch.finfo(torch.float32).min, dtype=torch.float32
+                    (num_experts,), 1.0, dtype=torch.float32  # Initialize to reasonable default instead of -inf
                 ),
                 weight_loader=weight_loader,
             )
