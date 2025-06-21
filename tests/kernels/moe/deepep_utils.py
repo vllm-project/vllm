@@ -138,9 +138,7 @@ def make_deepep_ht_a2a(pg: ProcessGroup,
                                       rank=pgi.rank,
                                       dp_size=dp_size,
                                       rank_expert_offset=pgi.rank *
-                                      ht_args.num_local_experts,
-                                      quant_dtype=q_dtype,
-                                      block_shape=block_shape)
+                                      ht_args.num_local_experts)
 
 
 def make_deepep_ll_a2a(pg: ProcessGroup,
@@ -168,8 +166,6 @@ def make_deepep_ll_a2a(pg: ProcessGroup,
         world_size=pgi.world_size,
         dp_size=dp_size,
         max_tokens_per_rank=deepep_ll_args.max_tokens_per_rank,
-        quant_dtype=q_dtype,
-        block_shape=block_shape,
         use_fp8_dispatch=deepep_ll_args.use_fp8_dispatch,
     )
 

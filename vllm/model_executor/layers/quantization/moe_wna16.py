@@ -322,8 +322,11 @@ class MoeWNA16Method(FusedMoEMethodBase):
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             inplace=True,
-            use_int4_w4a16=weight_bits == 4,
-            use_int8_w8a16=weight_bits == 8,
+            FusedMoEQuantConfig.make(
+                use_int4_w4a16=weight_bits == 4,
+                use_int8_w8a16=weight_bits == 8,
+                block_shape=[0, layer.group_size],
+            ),
             global_num_experts=global_num_experts,
             apply_router_weight_on_input=apply_router_weight_on_input,
             expert_map=expert_map,
@@ -331,7 +334,7 @@ class MoeWNA16Method(FusedMoEMethodBase):
             w2_scale=layer.w2_scales,
             w1_zp=layer.w13_qzeros if has_zp else None,
             w2_zp=layer.w2_qzeros if has_zp else None,
-            block_shape=[0, layer.group_size])
+        )
 
     @staticmethod
     def get_weight_loader(layer, weight_loader):

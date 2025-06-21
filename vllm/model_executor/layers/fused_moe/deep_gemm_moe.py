@@ -8,6 +8,7 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import (
     _moe_permute)
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
@@ -48,7 +49,7 @@ def _valid_deep_gemm(hidden_states: torch.Tensor, w1: torch.Tensor,
     M = hidden_states.size(0)
     _, K, N = w2.size()
     if not _valid_deep_gemm_shape(M, N, K):
-        logger.debug("DeepGemm disabled: unalinged problem size.")
+        logger.debug("DeepGemm disabled: unaligned problem size.")
         return False
 
     if (w1.dtype != torch.float8_e4m3fn or w2.dtype != torch.float8_e4m3fn):
@@ -67,16 +68,31 @@ def _valid_deep_gemm(hidden_states: torch.Tensor, w1: torch.Tensor,
 class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def __init__(self):
-        super().__init__()
-        self.block_shape = deep_gemm_block_shape()
+        super().__init__(
+            FusedMoEQuantConfig(
+                quant_dtype=torch.float8_e4m3fn,
+                per_act_token_quant=False,
+                block_shape=deep_gemm_block_shape(),
+            ))
+
+    @property
+    def activation_formats(
+        self
+    ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
+        return (mk.FusedMoEActivationFormat.Standard,
+                mk.FusedMoEActivationFormat.Standard)
 
     def supports_chunking(self) -> bool:
+        return True
+
+    def supports_expert_map(self) -> bool:
         return True
 
     def workspace_shapes(
         self, a: torch.Tensor, aq: torch.Tensor, M: int, N: int, K: int,
         topk: int, global_num_experts: int, local_num_experts: int
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
+        assert self.block_shape is not None
         # We use global_num_experts due to how moe_align_block_size handles
         # expert_maps.
         num_experts = global_num_experts
@@ -109,6 +125,7 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         expert_num_tokens: Optional[torch.Tensor],
     ):
         import deep_gemm as dg
+        assert self.block_shape is not None
 
         a1q = hidden_states
         _, N, K = w1.size()
@@ -215,8 +232,7 @@ def deep_gemm_moe_fp8(
     - torch.Tensor: The bfloat16 output tensor after applying the MoE layer.
     """
     fn = mk.FusedMoEModularKernel(
-        MoEPrepareAndFinalizeNoEP(quant_dtype=torch.float8_e4m3fn,
-                                  block_shape=deep_gemm_block_shape()),
+        MoEPrepareAndFinalizeNoEP(),
         DeepGemmExperts(),
     )
     return fn(
