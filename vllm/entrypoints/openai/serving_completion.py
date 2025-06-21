@@ -128,7 +128,7 @@ class OpenAIServingCompletion(OpenAIServing):
             # TODO(@tanuj): calc created tokens
             while num_chunks < max_chunks and not should_stop:
                 num_chunks += 1
-                beams = await self.beam_validator.get_n_valid_beams(create_completion=self.create_completion, request=request, raw_request=raw_request)
+                beams = await self.beam_validator.get_n_valid_beams(create_completion=self.create_completion, request=request, raw_request=raw_request, chunk_num=num_chunks)
                 if isinstance(beams, ErrorResponse):
                     yield f"data: {beams.model_dump_json()}\n\n"
                     break

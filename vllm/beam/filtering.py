@@ -4,6 +4,8 @@ from typing import Callable, Optional, Union
 from urllib.request import Request
 from vllm.beam.debug import BeamDebugInfo
 import torch
+from starlette.datastructures import MutableHeaders
+
 from vllm.entrypoints.openai.protocol import CompletionRequest, CompletionResponse, \
     ErrorResponse
 from vllm.logger import init_logger
@@ -40,6 +42,7 @@ class BeamValidator:
 
     async def get_n_valid_beams(self, create_completion: Callable,
                                 request: CompletionRequest,
+                                chunk_num: int,
                                 raw_request: Optional[Request] = None) -> list[
         Union[AsyncGenerator[str, None], CompletionResponse, ErrorResponse]]:
         request.stream = False
@@ -55,9 +58,12 @@ class BeamValidator:
         tasks = []
         # TODO(@tanuj): deep copy request and raw_request?
         for _ in range(n):
-            request = request
             if original_request_id is not None:
-                raw_request.headers.update({"X-Request-Id": f"original_request_id-beam_{n}"})
+                mh = MutableHeaders(scope=raw_request.scope)
+                del mh["x-request-id"]
+                if hasattr(raw_request, "_headers"):
+                    delattr(raw_request, "_headers")
+
             tasks.append(create_completion(
                 request,
                 raw_request=raw_request,
