@@ -1632,6 +1632,7 @@ class TokenizerPoolConfig:
 
 class LoadFormat(str, enum.Enum):
     AUTO = "auto"
+    PREFETCH_AUTO = "prefetch_auto"
     PT = "pt"
     SAFETENSORS = "safetensors"
     NPCACHE = "npcache"
@@ -1656,6 +1657,10 @@ class LoadConfig:
     """The format of the model weights to load:\n
     - "auto" will try to load the weights in the safetensors format and fall
     back to the pytorch bin format if safetensors format is not available.\n
+    - "prefetch_auto" like "auto" but performs concurrent mmap with
+    MAP_POPULATE to prefetch weight files into the page cache.
+    This helps maximize storage bandwidth and improve model loading
+    performance, especially on systems with high disk I/O capacity.
     - "pt" will load the weights in the pytorch bin format.\n
     - "safetensors" will load the weights in the safetensors format.\n
     - "npcache" will load the weights in pytorch format and store a numpy cache

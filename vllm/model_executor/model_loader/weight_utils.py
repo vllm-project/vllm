@@ -7,6 +7,9 @@ import hashlib
 import json
 import os
 import tempfile
+import mmap
+import concurrent.futures
+
 import time
 from collections import defaultdict
 from collections.abc import Generator
@@ -471,6 +474,37 @@ def safetensors_weights_iterator(
                 param = f.get_tensor(name)
                 yield name, param
 
+def prefetch_weight_files(hf_weights_files: list[str]) -> None:
+    """Prefetch and mmap weight files in parallel for the current distributed rank."""
+    world_size = 1
+    rank = 0
+    if torch.distributed.is_initialized():
+        world_size = torch.distributed.get_world_size()
+        rank = torch.distributed.get_rank()
+
+    local_files = hf_weights_files[rank::world_size]
+    mmap_files_concurrently(local_files)
+
+def mmap_files_concurrently(hf_weights_files: list[str]) -> None:
+    if len(hf_weights_files) == 0:
+        return
+    max_workers = min(32, len(hf_weights_files))
+    start_time = time.time()
+    logger.info(f"Mmaping {len(hf_weights_files)} files concurrently")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        list(executor.map(_mmap_single_file, hf_weights_files))
+    logger.info(f"Mmaped {len(hf_weights_files)} files, elapsed time: {time.time() - start_time:.2f}s")
+
+def _mmap_single_file(st_file: str) -> None:
+    with open(st_file, "rb") as f:
+        file_size = os.path.getsize(st_file)
+        mm = mmap.mmap(
+            fileno=f.fileno(),
+            length=file_size,
+            prot=mmap.PROT_READ,
+            flags=mmap.MAP_SHARED | mmap.MAP_POPULATE
+        )
+        mm.close()
 
 def runai_safetensors_weights_iterator(
     hf_weights_files: list[str],
