@@ -27,9 +27,6 @@ You can load an external model [using a plugin][plugin-system] without modifying
 
 To register the model, use the following code:
 
-<details>
-<summary>Code</summary>
-
 ```python
 # The entrypoint of your plugin
 def register():
@@ -39,12 +36,7 @@ def register():
     ModelRegistry.register_model("YourModelForCausalLM", YourModelForCausalLM)
 ```
 
-</details>
-
 If your model imports modules that initialize CUDA, consider lazy-importing it to avoid errors like `RuntimeError: Cannot re-initialize CUDA in forked subprocess`:
-
-<details>
-<summary>Code</summary>
 
 ```python
 # The entrypoint of your plugin
@@ -56,8 +48,6 @@ def register():
         "your_code:YourModelForCausalLM"
     )
 ```
-
-</details>
 
 !!! important
     If your model is a multimodal model, ensure the model class implements the [SupportsMultiModal][vllm.model_executor.models.interfaces.SupportsMultiModal] interface.

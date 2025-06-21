@@ -224,16 +224,11 @@ for output in outputs:
 
 Or, you can use `lm_eval` to evaluate accuracy:
 
-<details>
-<summary>Command</summary>
-
 ```console
 $ lm_eval --model vllm \
   --model_args pretrained=Llama-2-70b-chat-hf-w-fp8-a-fp8-kvcache-fp8-pertensor-autosmoothquant,kv_cache_dtype='fp8',quantization='quark' \
   --tasks gsm8k
 ```
-
-</details>
 
 ## Quark Quantization Script
 In addition to the example of Python API above, Quark also offers a
@@ -241,9 +236,6 @@ In addition to the example of Python API above, Quark also offers a
 to quantize large language models more conveniently. It supports quantizing models with variety
 of different quantization schemes and optimization algorithms. It can export the quantized model
 and run evaluation tasks on the fly. With the script, the example above can be:
-
-<details>
-<summary>Code</summary>
 
 ```console
 python3 quantize_quark.py --model_dir meta-llama/Llama-2-70b-chat-hf \
@@ -255,5 +247,3 @@ python3 quantize_quark.py --model_dir meta-llama/Llama-2-70b-chat-hf \
                           --model_export hf_format \
                           --tasks gsm8k
 ```
-
-</details>

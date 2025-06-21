@@ -23,9 +23,6 @@ The [generate][vllm.LLM.generate] method is available to all generative models i
 It is similar to [its counterpart in HF Transformers](https://huggingface.co/docs/transformers/main/en/main_classes/text_generation#transformers.GenerationMixin.generate),
 except that tokenization and detokenization are also performed automatically.
 
-<details>
-<summary>Code</summary>
-
 ```python
 from vllm import LLM
 
@@ -38,13 +35,8 @@ for output in outputs:
     print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 ```
 
-</details>
-
 You can optionally control the language generation by passing [SamplingParams][vllm.SamplingParams].
 For example, you can use greedy sampling by setting `temperature=0`:
-
-<details>
-<summary>Code</summary>
 
 ```python
 from vllm import LLM, SamplingParams
@@ -59,8 +51,6 @@ for output in outputs:
     print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 ```
 
-</details>
-
 !!! important
     By default, vLLM will use sampling parameters recommended by model creator by applying the `generation_config.json` from the huggingface model repository if it exists. In most cases, this will provide you with the best results by default if [SamplingParams][vllm.SamplingParams] is not specified.
 
@@ -71,9 +61,6 @@ A code example can be found here: <gh-file:examples/offline_inference/basic/basi
 
 The [beam_search][vllm.LLM.beam_search] method implements [beam search](https://huggingface.co/docs/transformers/en/generation_strategies#beam-search) on top of [generate][vllm.LLM.generate].
 For example, to search using 5 beams and output at most 50 tokens:
-
-<details>
-<summary>Code</summary>
 
 ```python
 from vllm import LLM
@@ -87,8 +74,6 @@ for output in outputs:
     generated_text = output.sequences[0].text
     print(f"Generated text: {generated_text!r}")
 ```
-
-</details>
 
 ### `LLM.chat`
 
@@ -140,9 +125,6 @@ A code example can be found here: <gh-file:examples/offline_inference/basic/chat
 If the model doesn't have a chat template or you want to specify another one,
 you can explicitly pass a chat template:
 
-<details>
-<summary>Code</summary>
-
 ```python
 from vllm.entrypoints.chat_utils import load_chat_template
 
@@ -152,8 +134,6 @@ print("Loaded chat template:", custom_template)
 
 outputs = llm.chat(conversation, chat_template=custom_template)
 ```
-
-</details>
 
 ## Online Serving
 

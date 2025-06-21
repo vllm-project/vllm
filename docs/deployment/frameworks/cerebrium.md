@@ -24,9 +24,6 @@ cerebrium init vllm-project
 
 Next, to install the required packages, add the following to your cerebrium.toml:
 
-<details>
-<summary>Config</summary>
-
 ```toml
 [cerebrium.deployment]
 docker_base_image_url = "nvidia/cuda:12.1.1-runtime-ubuntu22.04"
@@ -34,8 +31,6 @@ docker_base_image_url = "nvidia/cuda:12.1.1-runtime-ubuntu22.04"
 [cerebrium.dependencies.pip]
 vllm = "latest"
 ```
-
-</details>
 
 Next, let us add our code to handle inference for the LLM of your choice (`mistralai/Mistral-7B-Instruct-v0.1` for this example), add the following code to your `main.py`:
 

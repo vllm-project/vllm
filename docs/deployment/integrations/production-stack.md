@@ -82,9 +82,6 @@ curl -o- http://localhost:30080/models
 
 To send an actual chatting request, you can issue a curl request to the OpenAI `/completion` endpoint:
 
-<details>
-<summary>Command</summary>
-
 ```bash
 curl -X POST http://localhost:30080/completions \
   -H "Content-Type: application/json" \
@@ -94,8 +91,6 @@ curl -X POST http://localhost:30080/completions \
     "max_tokens": 10
   }'
 ```
-
-</details>
 
 <details>
 <summary>Expected output</summary>

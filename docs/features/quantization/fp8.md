@@ -39,9 +39,6 @@ The quantization process involves three main steps:
 
 Load your model and tokenizer using the standard `transformers` AutoModel classes:
 
-<details>
-<summary>Code</summary>
-
 ```python
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
@@ -51,8 +48,6 @@ model = AutoModelForCausalLM.from_pretrained(
 )
 tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
 ```
-
-</details>
 
 ### 2. Applying Quantization
 
@@ -95,9 +90,6 @@ pip install vllm lm-eval==0.4.4
 
 Load and run the model in `vllm`:
 
-<details>
-<summary>Code</summary>
-
 ```python
 from vllm import LLM
 model = LLM("./Meta-Llama-3-8B-Instruct-FP8-Dynamic")
@@ -105,15 +97,10 @@ result = model.generate("Hello my name is")
 print(result[0].outputs[0].text)
 ```
 
-</details>
-
 Evaluate accuracy with `lm_eval` (for example on 250 samples of `gsm8k`):
 
 !!! note
     Quantized models can be sensitive to the presence of the `bos` token. `lm_eval` does not add a `bos` token by default, so make sure to include the `add_bos_token=True` argument when running your evaluations.
-
-<details>
-<summary>Commands</summary>
 
 ```console
 $ MODEL=$PWD/Meta-Llama-3-8B-Instruct-FP8-Dynamic
@@ -123,12 +110,7 @@ $ lm_eval \
   --tasks gsm8k  --num_fewshot 5 --batch_size auto --limit 250
 ```
 
-</details>
-
 Here's an example of the resulting scores:
-
-<details>
-<summary>Result</summary>
 
 ```text
 |Tasks|Version|     Filter     |n-shot|  Metric   |   |Value|   |Stderr|
@@ -136,8 +118,6 @@ Here's an example of the resulting scores:
 |gsm8k|      3|flexible-extract|     5|exact_match|↑  |0.768|±  |0.0268|
 |     |       |strict-match    |     5|exact_match|↑  |0.768|±  |0.0268|
 ```
-
-</details>
 
 ## Troubleshooting and Support
 
@@ -149,9 +129,6 @@ Dynamic quantization of an original precision BF16/FP16 model to FP8 can be achi
 
 In this mode, all Linear modules (except for the final `lm_head`) have their weights quantized down to FP8_E4M3 precision with a per-tensor scale. Activations have their minimum and maximum values calculated during each forward pass to provide a dynamic per-tensor scale for high accuracy. As a result, latency improvements are limited in this mode.
 
-<details>
-<summary>Code</summary>
-
 ```python
 from vllm import LLM
 model = LLM("facebook/opt-125m", quantization="fp8")
@@ -159,8 +136,6 @@ model = LLM("facebook/opt-125m", quantization="fp8")
 result = model.generate("Hello, my name is")
 print(result[0].outputs[0].text)
 ```
-
-</details>
 
 !!! warning
     Currently, we load the model at original precision before quantizing down to 8-bits, so you need enough memory to load the whole model.

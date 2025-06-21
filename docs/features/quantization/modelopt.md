@@ -40,9 +40,6 @@ model = mtq.quantize(model, config, forward_loop)
 
 After the model is quantized, you can export it to a quantized checkpoint using the export API:
 
-<details>
-<summary>Code</summary>
-
 ```python
 import torch
 from modelopt.torch.export import export_hf_checkpoint
@@ -53,8 +50,6 @@ with torch.inference_mode():
         export_dir,  # The directory where the exported files will be stored.
     )
 ```
-
-</details>
 
 The quantized checkpoint can then be deployed with vLLM. As an example, the following code shows how to deploy `nvidia/Llama-3.1-8B-Instruct-FP8`, which is the FP8 quantized checkpoint derived from `meta-llama/Llama-3.1-8B-Instruct`, using vLLM:
 

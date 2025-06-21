@@ -160,9 +160,6 @@ If the test script hangs or crashes, usually it means the hardware/drivers are b
 
 If you have seen a warning in your logs like this:
 
-<details>
-<summary>Logs</summary>
-
 ```console
 WARNING 12-11 14:50:37 multiproc_worker_utils.py:281] CUDA was previously
     initialized. We must use the `spawn` multiprocessing start method. Setting
@@ -170,8 +167,6 @@ WARNING 12-11 14:50:37 multiproc_worker_utils.py:281] CUDA was previously
     https://docs.vllm.ai/en/latest/usage/troubleshooting.html#python-multiprocessing
     for more information.
 ```
-
-</details>
 
 or an error from Python that looks like this:
 

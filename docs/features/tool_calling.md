@@ -6,17 +6,12 @@ vLLM currently supports named function calling, as well as the `auto`, `required
 
 Start the server with tool calling enabled. This example uses Meta's Llama 3.1 8B model, so we need to use the llama3 tool calling chat template from the vLLM examples directory:
 
-<details>
-<summary>Command</summary>
-
 ```bash
 vllm serve meta-llama/Llama-3.1-8B-Instruct \
     --enable-auto-tool-choice \
     --tool-call-parser llama3_json \
     --chat-template examples/tool_chat_template_llama3.1_json.jinja
 ```
-
-</details>
 
 Next, make a request to the model that should result in it using the available tools:
 
@@ -64,16 +59,13 @@ print(f"Result: {get_weather(**json.loads(tool_call.arguments))}")
 
 </details>
 
-<details>
-<summary>Example output</summary>
+Example output:
 
 ```text
 Function called: get_weather
 Arguments: {"location": "San Francisco, CA", "unit": "fahrenheit"}
 Result: Getting the weather for San Francisco, CA in fahrenheit...
 ```
-
-</details>
 
 This example demonstrates:
 
@@ -365,14 +357,9 @@ class ExampleToolParser(ToolParser):
 
 Then you can use this plugin in the command line like this.
 
-<details>
-<summary>Command</summary>
-
 ```console
     --enable-auto-tool-choice \
     --tool-parser-plugin <absolute path of the plugin file>
     --tool-call-parser example \
     --chat-template <your chat template> \
 ```
-
-</details>

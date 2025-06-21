@@ -47,17 +47,12 @@ Currently, there are no pre-built Neuron wheels.
 
 To build and install vLLM from source, run:
 
-<details>
-<summary>Commands</summary>
-
 ```console
 git clone https://github.com/vllm-project/vllm.git
 cd vllm
 pip install -U -r requirements/neuron.txt
 VLLM_TARGET_DEVICE="neuron" pip install -e .
 ```
-
-</details>
 
 AWS Neuron maintains a [Github fork of vLLM](https://github.com/aws-neuron/upstreaming-to-vllm/tree/neuron-2.23-vllm-v0.7.2) at
 <https://github.com/aws-neuron/upstreaming-to-vllm/tree/neuron-2.23-vllm-v0.7.2>, which contains several features in addition to what's
@@ -71,17 +66,12 @@ Refer to [vLLM User Guide for NxD Inference](https://awsdocs-neuron.readthedocs-
 
 To install the AWS Neuron fork, run the following:
 
-<details>
-<summary>Commands</summary>
-
 ```console
 git clone -b neuron-2.23-vllm-v0.7.2 https://github.com/aws-neuron/upstreaming-to-vllm.git
 cd upstreaming-to-vllm
 pip install -r requirements/neuron.txt
 VLLM_TARGET_DEVICE="neuron" pip install -e .
 ```
-
-</details>
 
 Note that the AWS Neuron fork is only intended to support Neuron hardware; compatibility with other hardwares is not tested.
 

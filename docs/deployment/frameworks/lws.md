@@ -128,9 +128,6 @@ kubectl get pods
 
 Should get an output similar to this:
 
-<details>
-<summary>Output</summary>
-
 ```bash
 NAME       READY   STATUS    RESTARTS   AGE
 vllm-0     1/1     Running   0          2s
@@ -138,8 +135,6 @@ vllm-0-1   1/1     Running   0          2s
 vllm-1     1/1     Running   0          2s
 vllm-1-1   1/1     Running   0          2s
 ```
-
-</details>
 
 Verify that the distributed tensor-parallel inference works:
 
@@ -172,9 +167,6 @@ Forwarding from [::1]:8080 -> 8080
 
 Open another terminal and send a request
 
-<details>
-<summary>Command</summary>
-
 ```text
 curl http://localhost:8080/v1/completions \
 -H "Content-Type: application/json" \
@@ -185,8 +177,6 @@ curl http://localhost:8080/v1/completions \
     "temperature": 0
 }'
 ```
-
-</details>
 
 The output should be similar to the following
 

@@ -86,9 +86,6 @@ Check the output of the command. There will be a shareable gradio link (like the
 
 **Optional**: Serve the 70B model instead of the default 8B and use more GPU:
 
-<details>
-<summary>Command</summary>
-
 ```console
 HF_TOKEN="your-huggingface-token" \
   sky launch serving.yaml \
@@ -96,8 +93,6 @@ HF_TOKEN="your-huggingface-token" \
   --env HF_TOKEN \
   --env MODEL_NAME=meta-llama/Meta-Llama-3-70B-Instruct
 ```
-
-</details>
 
 ## Scale up to multiple replicas
 
@@ -185,8 +180,7 @@ Wait until the service is ready:
 watch -n10 sky serve status vllm
 ```
 
-<details>
-<summary>Example outputs:</summary>
+Example outputs:
 
 ```console
 Services
@@ -198,8 +192,6 @@ SERVICE_NAME  ID  VERSION  IP            LAUNCHED     RESOURCES                S
 vllm          1   1        xx.yy.zz.121  18 mins ago  1x GCP([Spot]{'L4': 1})  READY   us-east4
 vllm          2   1        xx.yy.zz.245  18 mins ago  1x GCP([Spot]{'L4': 1})  READY   us-east4
 ```
-
-</details>
 
 After the service is READY, you can find a single endpoint for the service and access the service with the endpoint:
 
@@ -230,9 +222,6 @@ curl -L http://$ENDPOINT/v1/chat/completions \
 
 To enable autoscaling, you could replace the `replicas` with the following configs in `service`:
 
-<details>
-<summary>Config</summary>
-
 ```yaml
 service:
   replica_policy:
@@ -240,8 +229,6 @@ service:
     max_replicas: 4
     target_qps_per_replica: 2
 ```
-
-</details>
 
 This will scale the service up to when the QPS exceeds 2 for each replica.
 

@@ -29,9 +29,6 @@ vllm serve s3://core-llm/Llama-3-8b \
 
 To run model from a S3 compatible object store run:
 
-<details>
-<summary>Commands</summary>
-
 ```console
 RUNAI_STREAMER_S3_USE_VIRTUAL_ADDRESSING=0 \
 AWS_EC2_METADATA_DISABLED=true \
@@ -39,8 +36,6 @@ AWS_ENDPOINT_URL=https://storage.googleapis.com \
 vllm serve s3://core-llm/Llama-3-8b \
     --load-format runai_streamer
 ```
-
-</details>
 
 ## Tunable parameters
 

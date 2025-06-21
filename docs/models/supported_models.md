@@ -155,9 +155,6 @@ The [Transformers backend][transformers-backend] enables you to run models direc
 !!! tip
     The easiest way to check if your model is really supported at runtime is to run the program below:
 
-    <details>
-    <summary>Code</summary>
-
     ```python
     from vllm import LLM
 
@@ -172,8 +169,6 @@ The [Transformers backend][transformers-backend] enables you to run models direc
     print(output)
     ```
 
-    </details>
-
     If vLLM successfully returns text (for generative models) or hidden states (for pooling models), it indicates that your model is supported.
 
 Otherwise, please refer to [Adding a New Model][new-model] for instructions on how to implement your model in vLLM.
@@ -182,9 +177,6 @@ Alternatively, you can [open an issue on GitHub](https://github.com/vllm-project
 #### Download a model
 
 If you prefer, you can use the Hugging Face CLI to [download a model](https://huggingface.co/docs/huggingface_hub/guides/cli#huggingface-cli-download) or specific files from a model repository:
-
-<details>
-<summary>Commands</summary>
 
 ```console
 # Download a model
@@ -197,14 +189,9 @@ huggingface-cli download HuggingFaceH4/zephyr-7b-beta --cache-dir ./path/to/cach
 huggingface-cli download HuggingFaceH4/zephyr-7b-beta eval_results.json
 ```
 
-</details>
-
 #### List the downloaded models
 
 Use the Hugging Face CLI to [manage models](https://huggingface.co/docs/huggingface_hub/guides/manage-cache#scan-your-cache) stored in local cache:
-
-<details>
-<summary>Commands</summary>
 
 ```console
 # List cached models
@@ -216,8 +203,6 @@ huggingface-cli scan-cache -v
 # Specify a custom cache directory
 huggingface-cli scan-cache --dir ~/.cache/huggingface/hub
 ```
-
-</details>
 
 #### Delete a cached model
 
@@ -293,9 +278,6 @@ export VLLM_USE_MODELSCOPE=True
 
 And use with `trust_remote_code=True`.
 
-<details>
-<summary>Code</summary>
-
 ```python
 from vllm import LLM
 
@@ -309,8 +291,6 @@ print(output)
 output = llm.encode("Hello, my name is")
 print(output)
 ```
-
-</details>
 
 [](){ #feature-status-legend }
 
@@ -528,9 +508,6 @@ See [this page][multimodal-inputs] on how to pass multi-modal inputs to the mode
 
     Offline inference:
 
-    <details>
-    <summary>Code</summary>
-
     ```python
     from vllm import LLM
 
@@ -539,8 +516,6 @@ See [this page][multimodal-inputs] on how to pass multi-modal inputs to the mode
         limit_mm_per_prompt={"image": 4},
     )
     ```
-
-    </details>
 
     Online serving:
 

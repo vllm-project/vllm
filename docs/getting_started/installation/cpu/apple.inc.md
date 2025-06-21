@@ -25,17 +25,12 @@ Currently the CPU implementation for macOS supports FP32 and FP16 datatypes.
 
 After installation of XCode and the Command Line Tools, which include Apple Clang, execute the following commands to build and install vLLM from the source.
 
-<details>
-<summary>Command</summary>
-
 ```console
 git clone https://github.com/vllm-project/vllm.git
 cd vllm
 pip install -r requirements/cpu.txt
 pip install -e . 
 ```
-
-</details>
 
 !!! note
     On macOS the `VLLM_TARGET_DEVICE` is automatically set to `cpu`, which currently is the only supported device.
@@ -44,9 +39,6 @@ pip install -e .
 
 If the build has error like the following snippet where standard C++ headers cannot be found, try to remove and reinstall your
 [Command Line Tools for Xcode](https://developer.apple.com/download/all/).
-
-<details>
-<summary>Error</summary>
 
 ```text
 [...] fatal error: 'map' file not found
@@ -60,8 +52,6 @@ If the build has error like the following snippet where standard C++ headers can
             |          ^~~~~~~~~
       1 error generated.
 ```
-
-</details>
 
 # --8<-- [end:build-wheel-from-source]
 # --8<-- [start:set-up-using-docker]

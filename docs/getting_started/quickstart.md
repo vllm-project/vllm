@@ -35,17 +35,12 @@ uv run --with vllm vllm --help
 
 You can also use [conda](https://docs.conda.io/projects/conda/en/latest/user-guide/getting-started.html) to create and manage Python environments. You can install `uv` to the conda environment through `pip` if you want to manage it within the environment.
 
-<details>
-<summary>Commands</summary>
-
 ```console
 conda create -n myenv python=3.12 -y
 conda activate myenv
 pip install --upgrade uv
 uv pip install vllm --torch-backend=auto
 ```
-
-</details>
 
 !!! note
     For more detail and non-CUDA platforms, please refer [here][installation-index] for specific instructions on how to install vLLM.
@@ -72,9 +67,6 @@ The next section defines a list of input prompts and sampling parameters for tex
 
     However, if vLLM's default sampling parameters are preferred, please set `generation_config="vllm"` when creating the [LLM][vllm.LLM] instance.
 
-<details>
-<summary>Code</summary>
-
 ```python
 prompts = [
     "Hello, my name is",
@@ -84,8 +76,6 @@ prompts = [
 ]
 sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 ```
-
-</details>
 
 The [LLM][vllm.LLM] class initializes vLLM's engine and the [OPT-125M model](https://arxiv.org/abs/2205.01068) for offline inference. The list of supported models can be found [here][supported-models].
 
@@ -102,9 +92,6 @@ llm = LLM(model="facebook/opt-125m")
 
 Now, the fun part! The outputs are generated using `llm.generate`. It adds the input prompts to the vLLM engine's waiting queue and executes the vLLM engine to generate the outputs with high throughput. The outputs are returned as a list of `RequestOutput` objects, which include all of the output tokens.
 
-<details>
-<summary>Code</summary>
-
 ```python
 outputs = llm.generate(prompts, sampling_params)
 
@@ -113,8 +100,6 @@ for output in outputs:
     generated_text = output.outputs[0].text
     print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 ```
-
-</details>
 
 [](){ #quickstart-online }
 
@@ -149,9 +134,6 @@ You can pass in the argument `--api-key` or environment variable `VLLM_API_KEY` 
 
 Once your server is started, you can query the model with input prompts:
 
-<details>
-<summary>Command</summary>
-
 ```console
 curl http://localhost:8000/v1/completions \
     -H "Content-Type: application/json" \
@@ -162,8 +144,6 @@ curl http://localhost:8000/v1/completions \
         "temperature": 0
     }'
 ```
-
-</details>
 
 Since this server is compatible with OpenAI API, you can use it as a drop-in replacement for any applications using OpenAI API. For example, another way to query the server is via the `openai` Python package:
 
@@ -195,9 +175,6 @@ vLLM is designed to also support the OpenAI Chat Completions API. The chat inter
 
 You can use the [create chat completion](https://platform.openai.com/docs/api-reference/chat/completions/create) endpoint to interact with the model:
 
-<details>
-<summary>Command</summary>
-
 ```console
 curl http://localhost:8000/v1/chat/completions \
     -H "Content-Type: application/json" \
@@ -209,8 +186,6 @@ curl http://localhost:8000/v1/chat/completions \
         ]
     }'
 ```
-
-</details>
 
 Alternatively, you can use the `openai` Python package:
 

@@ -37,9 +37,6 @@ The quantization process involves four main steps:
 
 Load your model and tokenizer using the standard `transformers` AutoModel classes:
 
-<details>
-<summary>Code</summary>
-
 ```python
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
@@ -49,8 +46,6 @@ model = AutoModelForCausalLM.from_pretrained(
 )
 tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
 ```
-
-</details>
 
 ### 2. Preparing Calibration Data
 
@@ -127,9 +122,6 @@ model = LLM("./Meta-Llama-3-8B-Instruct-W4A16-G128")
 
 To evaluate accuracy, you can use `lm_eval`:
 
-<details>
-<summary>Commands</summary>
-
 ```console
 $ lm_eval --model vllm \
   --model_args pretrained="./Meta-Llama-3-8B-Instruct-W4A16-G128",add_bos_token=true \
@@ -138,8 +130,6 @@ $ lm_eval --model vllm \
   --limit 250 \
   --batch_size 'auto'
 ```
-
-</details>
 
 !!! note
     Quantized models can be sensitive to the presence of the `bos` token. Make sure to include the `add_bos_token=True` argument when running evaluations.

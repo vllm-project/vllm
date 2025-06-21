@@ -45,9 +45,6 @@ See [configuration][configuration] for a list of options when initializing the m
 The [encode][vllm.LLM.encode] method is available to all pooling models in vLLM.
 It returns the extracted hidden states directly, which is useful for reward models.
 
-<details>
-<summary>Code</summary>
-
 ```python
 from vllm import LLM
 
@@ -58,15 +55,10 @@ data = output.outputs.data
 print(f"Data: {data!r}")
 ```
 
-</details>
-
 ### `LLM.embed`
 
 The [embed][vllm.LLM.embed] method outputs an embedding vector for each prompt.
 It is primarily designed for embedding models.
-
-<details>
-<summary>Code</summary>
 
 ```python
 from vllm import LLM
@@ -78,17 +70,12 @@ embeds = output.outputs.embedding
 print(f"Embeddings: {embeds!r} (size={len(embeds)})")
 ```
 
-</details>
-
 A code example can be found here: <gh-file:examples/offline_inference/basic/embed.py>
 
 ### `LLM.classify`
 
 The [classify][vllm.LLM.classify] method outputs a probability vector for each prompt.
 It is primarily designed for classification models.
-
-<details>
-<summary>Code</summary>
 
 ```python
 from vllm import LLM
@@ -99,8 +86,6 @@ llm = LLM(model="jason9693/Qwen2.5-1.5B-apeach", task="classify")
 probs = output.outputs.probs
 print(f"Class Probabilities: {probs!r} (size={len(probs)})")
 ```
-
-</details>
 
 A code example can be found here: <gh-file:examples/offline_inference/basic/classify.py>
 
@@ -113,9 +98,6 @@ It is designed for embedding models and cross encoder models. Embedding models u
     vLLM can only perform the model inference component (e.g. embedding, reranking) of RAG.
     To handle RAG at a higher level, you should use integration frameworks such as [LangChain](https://github.com/langchain-ai/langchain).
 
-<details>
-<summary>Code</summary>
-
 ```python
 from vllm import LLM
 
@@ -126,8 +108,6 @@ llm = LLM(model="BAAI/bge-reranker-v2-m3", task="score")
 score = output.outputs.score
 print(f"Score: {score}")
 ```
-
-</details>
 
 A code example can be found here: <gh-file:examples/offline_inference/basic/score.py>
 
@@ -169,9 +149,6 @@ vllm serve Snowflake/snowflake-arctic-embed-m-v1.5 --hf_overrides '{"matryoshka_
 
 You can change the output dimensions of embedding models that support Matryoshka Embeddings by using the dimensions parameter in [PoolingParams][vllm.PoolingParams].
 
-<details>
-<summary>Code</summary>
-
 ```python
 from vllm import LLM, PoolingParams
 
@@ -182,8 +159,6 @@ outputs = model.embed(["Follow the white rabbit."],
                       pooling_params=PoolingParams(dimensions=32))
 print(outputs[0].outputs)
 ```
-
-</details>
 
 A code example can be found here: <gh-file:examples/offline_inference/embed_matryoshka_fy.py>
 
@@ -197,9 +172,6 @@ vllm serve jinaai/jina-embeddings-v3 --trust-remote-code
 
 You can change the output dimensions of embedding models that support Matryoshka Embeddings by using the dimensions parameter.
 
-<details>
-<summary>Command</summary>
-
 ```text
 curl http://127.0.0.1:8000/v1/embeddings \
   -H 'accept: application/json' \
@@ -212,10 +184,7 @@ curl http://127.0.0.1:8000/v1/embeddings \
   }'
 ```
 
-</details>
-
-<details>
-<summary>Expected output</summary>
+Expected output:
 
 ```json
 {"id":"embd-5c21fc9a5c9d4384a1b021daccaf9f64","object":"list","created":1745476417,"model":"jinaai/jina-embeddings-v3","data":[{"index":0,"object":"embedding","embedding":[-0.3828125,-0.1357421875,0.03759765625,0.125,0.21875,0.09521484375,-0.003662109375,0.1591796875,-0.130859375,-0.0869140625,-0.1982421875,0.1689453125,-0.220703125,0.1728515625,-0.2275390625,-0.0712890625,-0.162109375,-0.283203125,-0.055419921875,-0.0693359375,0.031982421875,-0.04052734375,-0.2734375,0.1826171875,-0.091796875,0.220703125,0.37890625,-0.0888671875,-0.12890625,-0.021484375,-0.0091552734375,0.23046875]}],"usage":{"prompt_tokens":8,"total_tokens":8,"completion_tokens":0,"prompt_tokens_details":null}}

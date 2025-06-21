@@ -17,9 +17,6 @@ The argument names must be the long form of those outlined [above][serve-args].
 
 For example:
 
-<details>
-<summary>Config</summary>
-
 ```yaml
 # config.yaml
 
@@ -28,8 +25,6 @@ host: "127.0.0.1"
 port: 6379
 uvicorn-log-level: "info"
 ```
-
-</details>
 
 To use the above config file:
 

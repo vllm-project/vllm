@@ -147,9 +147,6 @@ The above script will create a folder in your current directory containing your 
 
 When running the model you must specify `kv_cache_dtype="fp8"` in order to enable the kv cache quantization and use the scales.
 
-<details>
-<summary>Code</summary>
-
 ```python
 from vllm import LLM, SamplingParams
 
@@ -159,5 +156,3 @@ prompt = "London is the capital of"
 out = llm.generate(prompt, sampling_params)[0].outputs[0].text
 print(out)
 ```
-
-</details>

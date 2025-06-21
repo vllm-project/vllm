@@ -8,17 +8,12 @@ Tensor parallelism (`tensor_parallel_size` option) can be used to split the mode
 
 The following code splits the model across 2 GPUs.
 
-<details>
-<summary>Code</summary>
-
 ```python
 from vllm import LLM
 
 llm = LLM(model="ibm-granite/granite-3.1-8b-instruct",
           tensor_parallel_size=2)
 ```
-
-</details>
 
 !!! warning
     To ensure that vLLM initializes CUDA correctly, you should avoid calling related functions (e.g. [torch.cuda.set_device][])
@@ -45,9 +40,6 @@ Dynamic quantization is also supported via the `quantization` option -- see [her
 You can further reduce memory usage by limiting the context length of the model (`max_model_len` option)
 and the maximum batch size (`max_num_seqs` option).
 
-<details>
-<summary>Command</summary>
-
 ```python
 from vllm import LLM
 
@@ -55,8 +47,6 @@ llm = LLM(model="adept/fuyu-8b",
           max_model_len=2048,
           max_num_seqs=2)
 ```
-
-</details>
 
 ## Reduce CUDA Graphs
 
@@ -88,17 +78,12 @@ llm = LLM(
 
 You can disable graph capturing completely via the `enforce_eager` flag:
 
-<details>
-<summary>Code</summary>
-
 ```python
 from vllm import LLM
 
 llm = LLM(model="meta-llama/Llama-3.1-8B-Instruct",
           enforce_eager=True)
 ```
-
-</details>
 
 ## Adjust cache size
 
@@ -111,9 +96,6 @@ If you run out of CPU RAM, try the following options:
 
 You can allow a smaller number of multi-modal items per prompt to reduce the memory footprint of the model:
 
-<details>
-<summary>Code</summary>
-
 ```python
 from vllm import LLM
 
@@ -122,13 +104,8 @@ llm = LLM(model="Qwen/Qwen2.5-VL-3B-Instruct",
           limit_mm_per_prompt={"image": 3, "video": 1})
 ```
 
-</details>
-
 You can go a step further and disable unused modalities completely by setting its limit to zero.
 For example, if your application only accepts image input, there is no need to allocate any memory for videos.
-
-<details>
-<summary>Code</summary>
 
 ```python
 from vllm import LLM
@@ -138,12 +115,7 @@ llm = LLM(model="Qwen/Qwen2.5-VL-3B-Instruct",
           limit_mm_per_prompt={"video": 0})
 ```
 
-</details>
-
 You can even run a multi-modal model for text-only inference:
-
-<details>
-<summary>Code</summary>
 
 ```python
 from vllm import LLM
@@ -152,8 +124,6 @@ from vllm import LLM
 llm = LLM(model="google/gemma-3-27b-it",
           limit_mm_per_prompt={"image": 0})
 ```
-
-</details>
 
 ## Multi-modal processor arguments
 

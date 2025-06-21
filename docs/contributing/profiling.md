@@ -46,9 +46,6 @@ Nsight systems is an advanced tool that exposes more profiling details, such as 
 [Install nsight-systems](https://docs.nvidia.com/nsight-systems/InstallationGuide/index.html) using your package manager.
 The following block is an example for Ubuntu.
 
-<details>
-<summary>Command</summary>
-
 ```bash
 apt update
 apt install -y --no-install-recommends gnupg
@@ -57,8 +54,6 @@ apt-key adv --fetch-keys http://developer.download.nvidia.com/compute/cuda/repos
 apt update
 apt install nsight-systems-cli
 ```
-
-</details>
 
 ### Example commands and usage
 
@@ -76,9 +71,6 @@ nsys profile -o report.nsys-rep --trace-fork-before-exec=true --cuda-graph-trace
 
 To profile the server, you will want to prepend your `vllm serve` command with `nsys profile` just like for offline inference, however you must specify `--delay XX --duration YY` parameters according to the needs of your benchmark. After the duration time has been used up, the server will be killed.
 
-<details>
-<summary>Command</summary>
-
 ```bash
 # server
 nsys profile -o report.nsys-rep --trace-fork-before-exec=true --cuda-graph-trace=node --delay 30 --duration 60 vllm serve meta-llama/Llama-3.1-8B-Instruct
@@ -86,8 +78,6 @@ nsys profile -o report.nsys-rep --trace-fork-before-exec=true --cuda-graph-trace
 # client
 python benchmarks/benchmark_serving.py --backend vllm --model meta-llama/Llama-3.1-8B-Instruct --num-prompts 1 --dataset-name random --random-input 1024 --random-output 512
 ```
-
-</details>
 
 In practice, you should set the `--duration` argument to a large value. Whenever you want the server to stop profiling, run:
 
@@ -151,9 +141,6 @@ The first helper is a Python decorator that can be used to profile a function.
 If a filename is specified, the profile will be saved to that file. If no filename is
 specified, profile data will be printed to stdout.
 
-<details>
-<summary>Code</summary>
-
 ```python
 import vllm.utils
 
@@ -163,15 +150,10 @@ def expensive_function():
     pass
 ```
 
-</details>
-
 ### Example Usage - context manager
 
 The second helper is a context manager that can be used to profile a block of
 code. Similar to the decorator, the filename is optional.
-
-<details>
-<summary>Code</summary>
 
 ```python
 import vllm.utils
@@ -183,8 +165,6 @@ def another_function():
 with vllm.utils.cprofile_context("another_function.prof"):
     another_function()
 ```
-
-</details>
 
 ### Analyzing Profile Results
 

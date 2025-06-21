@@ -258,16 +258,11 @@ print("Age:", message.parsed.age)
 
 </details>
 
-<details>
-<summary>Output</summary>
-
 ```console
 ParsedChatCompletionMessage[Testing](content='{"name": "Cameron", "age": 28}', refusal=None, role='assistant', audio=None, function_call=None, tool_calls=[], parsed=Testing(name='Cameron', age=28))
 Name: Cameron
 Age: 28
 ```
-
-</details>
 
 Here is a more complex example using nested Pydantic models to handle a step-by-step math solution:
 

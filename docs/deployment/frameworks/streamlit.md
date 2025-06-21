@@ -29,9 +29,6 @@ pip install streamlit openai
 
 - Start the streamlit web UI and start to chat:
 
-<details>
-<summary>Commands</summary>
-
 ```console
 streamlit run streamlit_openai_chatbot_webserver.py
 
@@ -42,7 +39,5 @@ VLLM_API_BASE="http://vllm-server-host:vllm-server-port/v1" \
 # start with debug mode to view more details
 streamlit run streamlit_openai_chatbot_webserver.py --logger.level=debug
 ```
-
-</details>
 
 ![](../../assets/deployment/streamlit-chat.png)

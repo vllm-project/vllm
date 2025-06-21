@@ -121,9 +121,6 @@ EOF
 
 We can verify that the vLLM server has started successfully via the logs (this might take a couple of minutes to download the model):
 
-<details>
-<summary>Logs</summary>
-
 ```console
 kubectl logs -l app.kubernetes.io/name=vllm
 ...
@@ -132,8 +129,6 @@ INFO:     Waiting for application startup.
 INFO:     Application startup complete.
 INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
 ```
-
-</details>
 
 ## Deployment with GPUs
 
@@ -166,9 +161,6 @@ INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
 
       Secret is optional and only required for accessing gated models, you can skip this step if you are not using gated models
 
-      <details>
-      <summary>Config</summary>
-
       ```yaml
       apiVersion: v1
       kind: Secret
@@ -179,8 +171,6 @@ INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
       stringData:
         token: "REPLACE_WITH_TOKEN"
       ```
-
-      </details>
   
       Next to create the deployment file for vLLM to run the model server. The following example deploys the `Mistral-7B-Instruct-v0.3` model.
 
@@ -374,20 +364,12 @@ INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
 
       Apply the deployment and service configurations using `kubectl apply -f <filename>`:
 
-      <details>
-      <summary>Command</summary>
-
       ```console
       kubectl apply -f deployment.yaml
       kubectl apply -f service.yaml
       ```
 
-      </details>
-
       To test the deployment, run the following `curl` command:
-
-      <details>
-      <summary>Command</summary>
 
       ```console
       curl http://mistral-7b.default.svc.cluster.local/v1/completions \
@@ -399,8 +381,6 @@ INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
               "temperature": 0
             }'
       ```
-
-      </details>
 
       If the service is correctly deployed, you should receive a response from the vLLM model.
 

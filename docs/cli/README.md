@@ -46,9 +46,6 @@ vllm serve --help=max
 
 Generate chat completions via the running API server.
 
-<details>
-<summary>Examples</summary>
-
 ```bash
 # Directly connect to localhost API without arguments
 vllm chat
@@ -60,14 +57,9 @@ vllm chat --url http://{vllm-serve-host}:{vllm-serve-port}/v1
 vllm chat --quick "hi"
 ```
 
-</details>
-
 ## complete
 
 Generate text completions based on the given prompt via the running API server.
-
-<details>
-<summary>Examples</summary>
 
 ```bash
 # Directly connect to localhost API without arguments
@@ -98,9 +90,6 @@ vllm bench {latency, serve, throughput}
 
 Benchmark the latency of a single batch of requests.
 
-<details>
-<summary>Example</summary>
-
 ```bash
 vllm bench latency \
     --model meta-llama/Llama-3.2-1B-Instruct \
@@ -110,14 +99,9 @@ vllm bench latency \
     --load-format dummy
 ```
 
-</details>
-
 ### serve
 
 Benchmark the online serving throughput.
-
-<details>
-<summary>Example</summary>
 
 ```bash
 vllm bench serve \
@@ -129,14 +113,9 @@ vllm bench serve \
     --num-prompts  5
 ```
 
-</details>
-
 ### throughput
 
 Benchmark offline inference throughput.
-
-<details>
-<summary>Example</summary>
 
 ```bash
 vllm bench throughput \
@@ -146,8 +125,6 @@ vllm bench throughput \
     --enforce-eager \
     --load-format dummy
 ```
-
-</details>
 
 ## collect-env
 

@@ -17,17 +17,12 @@ export vllm_root=`pwd`
 
 Create a file named `Dockerfile.nginx`:
 
-<details>
-<summary>Dockerfile</summary>
-
 ```console
 FROM nginx:latest
 RUN rm /etc/nginx/conf.d/default.conf
 EXPOSE 80
 CMD ["nginx", "-g", "daemon off;"]
 ```
-
-</details>
 
 Build the container:
 
@@ -75,9 +70,6 @@ docker build -f docker/Dockerfile . --tag vllm
 
 If you are behind proxy, you can pass the proxy settings to the docker build command as shown below:
 
-<details>
-<summary>Command</summary>
-
 ```console
 cd $vllm_root
 docker build \
@@ -86,8 +78,6 @@ docker build \
     --build-arg http_proxy=$http_proxy \
     --build-arg https_proxy=$https_proxy
 ```
-
-</details>
 
 [](){ #nginxloadbalancer-nginx-docker-network }
 
@@ -145,9 +135,6 @@ docker run \
 
 ## Launch Nginx
 
-<details>
-<summary>Command</summary>
-
 ```console
 docker run \
     -itd \
@@ -156,8 +143,6 @@ docker run \
     -v ./nginx_conf/:/etc/nginx/conf.d/ \
     --name nginx-lb nginx-lb:latest
 ```
-
-</details>
 
 [](){ #nginxloadbalancer-nginx-verify-nginx }
 
