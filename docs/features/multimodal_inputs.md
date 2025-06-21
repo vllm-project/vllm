@@ -295,7 +295,7 @@ Full example: <gh-file:examples/online_serving/openai_chat_completion_client_for
     By default, the timeout for fetching images through HTTP URL is `5` seconds.
     You can override this by setting the environment variable:
 
-    ```console
+    ```bash
     export VLLM_IMAGE_FETCH_TIMEOUT=<timeout>
     ```
 
@@ -356,7 +356,7 @@ Full example: <gh-file:examples/online_serving/openai_chat_completion_client_for
     By default, the timeout for fetching videos through HTTP URL is `30` seconds.
     You can override this by setting the environment variable:
 
-    ```console
+    ```bash
     export VLLM_VIDEO_FETCH_TIMEOUT=<timeout>
     ```
 
@@ -458,7 +458,7 @@ Full example: <gh-file:examples/online_serving/openai_chat_completion_client_for
     By default, the timeout for fetching audios through HTTP URL is `10` seconds.
     You can override this by setting the environment variable:
 
-    ```console
+    ```bash
     export VLLM_AUDIO_FETCH_TIMEOUT=<timeout>
     ```
 
@@ -490,7 +490,7 @@ client = OpenAI(
 model = "llava-hf/llava-1.5-7b-hf"
 embeds =  {
     "type": "image_embeds",
-    "image_embeds": f"{base64_image_embedding}" 
+    "image_embeds": f"{base64_image_embedding}"
 }
 
 # Pass additional parameters (available to Qwen2-VL and MiniCPM-V)

@@ -15,7 +15,7 @@ Here are the integrations:
 
 - Setup vLLM and langchain environment
 
-```console
+```bash
 pip install -U vllm \
             langchain_milvus langchain_openai \
             langchain_community beautifulsoup4 \
@@ -26,14 +26,14 @@ pip install -U vllm \
 
 - Start the vLLM server with the supported embedding model, e.g.
 
-```console
+```bash
 # Start embedding service (port 8000)
 vllm serve ssmits/Qwen2-7B-Instruct-embed-base
 ```
 
 - Start the vLLM server with the supported chat completion model, e.g.
 
-```console
+```bash
 # Start chat service (port 8001)
 vllm serve qwen/Qwen1.5-0.5B-Chat --port 8001
 ```
@@ -52,7 +52,7 @@ python retrieval_augmented_generation_with_langchain.py
 
 - Setup vLLM and llamaindex environment
 
-```console
+```bash
 pip install vllm \
             llama-index llama-index-readers-web \
             llama-index-llms-openai-like    \
@@ -64,14 +64,14 @@ pip install vllm \
 
 - Start the vLLM server with the supported embedding model, e.g.
 
-```console
+```bash
 # Start embedding service (port 8000)
 vllm serve ssmits/Qwen2-7B-Instruct-embed-base
 ```
 
 - Start the vLLM server with the supported chat completion model, e.g.
 
-```console
+```bash
 # Start chat service (port 8001)
 vllm serve qwen/Qwen1.5-0.5B-Chat --port 8001
 ```

@@ -68,7 +68,7 @@ For more information about using TPUs with GKE, see:
 
 Create a TPU v5e with 4 TPU chips:
 
-```console
+```bash
 gcloud alpha compute tpus queued-resources create QUEUED_RESOURCE_ID \
   --node-id TPU_NAME \
   --project PROJECT_ID \
@@ -156,13 +156,13 @@ See [deployment-docker-pre-built-image][deployment-docker-pre-built-image] for i
 
 You can use <gh-file:docker/Dockerfile.tpu> to build a Docker image with TPU support.
 
-```console
+```bash
 docker build -f docker/Dockerfile.tpu -t vllm-tpu .
 ```
 
 Run the Docker image with the following command:
 
-```console
+```bash
 # Make sure to add `--privileged --net host --shm-size=16G`.
 docker run --privileged --net host --shm-size=16G -it vllm-tpu
 ```
@@ -185,6 +185,6 @@ docker run --privileged --net host --shm-size=16G -it vllm-tpu
 
     Install OpenBLAS with the following command:
 
-    ```console
+    ```bash
     sudo apt-get install --no-install-recommends --yes libopenblas-base libopenmpi-dev libomp-dev
     ```

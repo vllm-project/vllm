@@ -15,7 +15,7 @@ vLLM can be **run and scaled to multiple service replicas on clouds and Kubernet
 - Check that you have installed SkyPilot ([docs](https://skypilot.readthedocs.io/en/latest/getting-started/installation.html)).
 - Check that `sky check` shows clouds or Kubernetes are enabled.
 
-```console
+```bash
 pip install skypilot-nightly
 sky check
 ```
@@ -69,7 +69,7 @@ run: |
 
 Start the serving the Llama-3 8B model on any of the candidate GPUs listed (L4, A10g, ...):
 
-```console
+```bash
 HF_TOKEN="your-huggingface-token" sky launch serving.yaml --env HF_TOKEN
 ```
 
@@ -81,7 +81,7 @@ Check the output of the command. There will be a shareable gradio link (like the
 
 **Optional**: Serve the 70B model instead of the default 8B and use more GPU:
 
-```console
+```bash
 HF_TOKEN="your-huggingface-token" \
   sky launch serving.yaml \
   --gpus A100:8 \
@@ -158,7 +158,7 @@ run: |
 
 Start the serving the Llama-3 8B model on multiple replicas:
 
-```console
+```bash
 HF_TOKEN="your-huggingface-token" \
   sky serve up -n vllm serving.yaml \
   --env HF_TOKEN
@@ -166,7 +166,7 @@ HF_TOKEN="your-huggingface-token" \
 
 Wait until the service is ready:
 
-```console
+```bash
 watch -n10 sky serve status vllm
 ```
 
@@ -188,7 +188,7 @@ vllm          2   1        xx.yy.zz.245  18 mins ago  1x GCP([Spot]{'L4': 1})  R
 
 After the service is READY, you can find a single endpoint for the service and access the service with the endpoint:
 
-```console
+```bash
 ENDPOINT=$(sky serve status --endpoint 8081 vllm)
 curl -L http://$ENDPOINT/v1/chat/completions \
   -H "Content-Type: application/json" \
@@ -274,13 +274,13 @@ run: |
 
 To update the service with the new config:
 
-```console
+```bash
 HF_TOKEN="your-huggingface-token" sky serve update vllm serving.yaml --env HF_TOKEN
 ```
 
 To stop the service:
 
-```console
+```bash
 sky serve down vllm
 ```
 
@@ -323,7 +323,7 @@ run: |
 
 1. Start the chat web UI:
 
-    ```console
+    ```bash
     sky launch \
       -c gui ./gui.yaml \
       --env ENDPOINT=$(sky serve status --endpoint vllm)

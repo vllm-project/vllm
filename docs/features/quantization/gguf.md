@@ -11,7 +11,7 @@ title: GGUF
 
 To run a GGUF model with vLLM, you can download and use the local GGUF model from [TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF](https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF) with the following command:
 
-```console
+```bash
 wget https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf
 # We recommend using the tokenizer from base model to avoid long-time and buggy tokenizer conversion.
 vllm serve ./tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf \
@@ -20,7 +20,7 @@ vllm serve ./tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf \
 
 You can also add `--tensor-parallel-size 2` to enable tensor parallelism inference with 2 GPUs:
 
-```console
+```bash
 # We recommend using the tokenizer from base model to avoid long-time and buggy tokenizer conversion.
 vllm serve ./tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf \
    --tokenizer TinyLlama/TinyLlama-1.1B-Chat-v1.0 \
@@ -32,7 +32,7 @@ vllm serve ./tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf \
 
 GGUF assumes that huggingface can convert the metadata to a config file. In case huggingface doesn't support your model you can manually create a config and pass it as hf-config-path
 
-```console
+```bash
 # If you model is not supported by huggingface you can manually provide a huggingface compatible config path
 vllm serve ./tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf \
    --tokenizer TinyLlama/TinyLlama-1.1B-Chat-v1.0 \

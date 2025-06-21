@@ -25,7 +25,7 @@ Currently, there are no pre-built XPU wheels.
 - First, install required driver and Intel OneAPI 2025.0 or later.
 - Second, install Python packages for vLLM XPU backend building:
 
-```console
+```bash
 git clone https://github.com/vllm-project/vllm.git
 cd vllm
 pip install --upgrade pip
@@ -34,7 +34,7 @@ pip install -v -r requirements/xpu.txt
 
 - Then, build and install vLLM XPU backend:
 
-```console
+```bash
 VLLM_TARGET_DEVICE=xpu python setup.py install
 ```
 
@@ -53,9 +53,9 @@ Currently, there are no pre-built XPU images.
 # --8<-- [end:pre-built-images]
 # --8<-- [start:build-image-from-source]
 
-```console
-$ docker build -f docker/Dockerfile.xpu -t vllm-xpu-env --shm-size=4g .
-$ docker run -it \
+```bash
+docker build -f docker/Dockerfile.xpu -t vllm-xpu-env --shm-size=4g .
+docker run -it \
              --rm \
              --network=host \
              --device /dev/dri \
@@ -68,7 +68,7 @@ $ docker run -it \
 
 XPU platform supports **tensor parallel** inference/serving and also supports **pipeline parallel** as a beta feature for online serving. We require Ray as the distributed runtime backend. For example, a reference execution like following:
 
-```console
+```bash
 python -m vllm.entrypoints.openai.api_server \
      --model=facebook/opt-13b \
      --dtype=bfloat16 \
