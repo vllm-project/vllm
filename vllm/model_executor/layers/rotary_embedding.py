@@ -26,6 +26,7 @@
 import math
 from typing import Any, Optional, Union
 
+import numpy as np
 import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
@@ -1467,6 +1468,18 @@ class MRotaryEmbedding(RotaryEmbedding):
             mrope_position_delta + context_len,
             mrope_position_delta + seq_len,
         ).expand(3, -1)
+
+    # Faster version of `get_next_input_positions_tensor`
+    @staticmethod
+    def mrope_assign_next_input_positions(out: np.ndarray, out_offset: int,
+                                          mrope_position_delta: int,
+                                          context_len: int,
+                                          num_new_tokens: int):
+
+        for dim in range(3):
+            for idx in range(num_new_tokens):
+                out[dim, out_offset +
+                    idx] = mrope_position_delta + context_len + idx
 
     @classmethod
     def omni_get_updates_use_audio_in_video(
