@@ -144,7 +144,7 @@ class NemotronHMambaDecoderLayer(nn.Module):
             hidden_size=config.hidden_size,
             ssm_state_size=config.ssm_state_size,
             conv_kernel_size=config.conv_kernel,
-            intermediate_size=config.expand * config.hidden_size,
+            intermediate_size=config.mamba_head_dim * config.mamba_num_heads,
             use_conv_bias=config.use_conv_bias,
             use_bias=config.use_bias,
             n_groups=config.n_groups,
@@ -202,7 +202,10 @@ class NemotronHAttention(nn.Module):
             # the KV heads across multiple tensor parallel GPUs.
             assert tp_size % self.total_num_kv_heads == 0
         self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
-        self.head_dim = config.hidden_size // self.total_num_heads
+        if config.attention_head_dim is not None:
+            self.head_dim = config.attention_head_dim
+        else:
+            self.head_dim = config.hidden_size // self.total_num_heads
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
@@ -523,11 +526,11 @@ class NemotronHForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
     def _get_mamba_cache_shape(
             self) -> tuple[tuple[int, int], tuple[int, int]]:
         world_size = get_tensor_model_parallel_world_size()
-        hidden_size = self.config.hidden_size
 
         conv_state_shape, temporal_state_shape = None, None
 
-        intermediate_size = self.config.expand * hidden_size
+        intermediate_size = (self.config.mamba_head_dim *
+                             self.config.mamba_num_heads)
 
         # if n_groups is not divisible by world_size, need to extend the shards
         # to ensure all groups needed by a head is sharded along with it
