@@ -23,9 +23,42 @@ ARM CPU backend currently supports Float32, FP16 and BFloat16 datatypes.
 # --8<-- [end:pre-built-wheels]
 # --8<-- [start:build-wheel-from-source]
 
---8<-- "docs/getting_started/installation/cpu/cpu/build.inc.md"
+First, install recommended compiler. We recommend to use `gcc/g++ >= 12.3.0` as the default compiler to avoid potential problems. For example, on Ubuntu 22.4, you can run:
 
-Testing has been conducted on AWS Graviton3 instances for compatibility.
+```console
+sudo apt-get update  -y
+sudo apt-get install -y gcc-12 g++-12 libnuma-dev python3-dev
+sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 10 --slave /usr/bin/g++ g++ /usr/bin/g++-12
+```
+
+Second, clone vLLM project:
+
+```console
+git clone https://github.com/vllm-project/vllm.git vllm_source
+cd vllm_source
+```
+
+Third, install Python packages for vLLM CPU backend building:
+
+```console
+pip install --upgrade pip
+pip install "cmake>=3.26.1" wheel packaging ninja "setuptools-scm>=8" numpy
+pip install -v -r requirements/cpu.txt --extra-index-url https://download.pytorch.org/whl/cpu
+```
+
+Finally, build and install vLLM CPU backend:
+
+```console
+VLLM_TARGET_DEVICE=cpu python setup.py install
+```
+
+If you want to develop vllm, install it in editable mode instead.
+
+```console
+VLLM_TARGET_DEVICE=cpu python setup.py develop
+```
+!!! note
+    - Testing has been conducted on AWS Graviton3 instances for compatibility.
 
 # --8<-- [end:build-wheel-from-source]
 # --8<-- [start:set-up-using-docker]
