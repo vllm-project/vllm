@@ -27,6 +27,7 @@ class Sampler(nn.Module):
         self,
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
+        predict_bonus_token: bool = False,
     ) -> SamplerOutput:
         # NOTE(woosuk): Use the original logits (before any penalties or
         # temperature scaling) for the top-k logprobs.
@@ -40,14 +41,9 @@ class Sampler(nn.Module):
 
         # Use float32 for the logits.
         logits = logits.to(torch.float32)
-        # Apply allowed token ids.
-        logits = self.apply_allowed_token_ids(logits, sampling_metadata)
-        # Apply bad words exclusion.
-        logits = self.apply_bad_words(logits, sampling_metadata)
-        # Apply logits bias.
-        logits = self.apply_logits_bias(logits, sampling_metadata)
-        # Apply penalties (e.g., min_tokens, freq_penalties).
-        logits = self.apply_penalties(logits, sampling_metadata)
+
+        logits = self.apply_logits_processors(logits, sampling_metadata,
+                                              predict_bonus_token)
         # Sample the next token.
         sampled = self.sample(logits, sampling_metadata)
         # Convert sampled token ids to int64 (long) type to ensure compatibility
@@ -182,14 +178,54 @@ class Sampler(nn.Module):
 
         return LogprobsTensors(indices, logprobs, token_ranks)
 
+    def _combine_outputs_with_spec_tokens(
+        self,
+        output_token_ids: list[list[int]],
+        spec_token_ids: list[list[int]],
+    ):
+        return [[*out, *spec] if spec else out
+                for out, spec in zip(output_token_ids, spec_token_ids)]
+
+    def apply_logits_processors(
+        self,
+        logits: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+        predict_bonus_token: bool,
+    ):
+
+        any_penalties_or_bad_words = (sampling_metadata.bad_words_token_ids
+                                      or sampling_metadata.min_tokens
+                                      or not sampling_metadata.no_penalties)
+
+        output_token_ids = sampling_metadata.output_token_ids
+        if predict_bonus_token and any_penalties_or_bad_words:
+            # Speculative decoding is enabled
+            # Combine base outputs with spec tokens.
+            output_token_ids = self._combine_outputs_with_spec_tokens(
+                sampling_metadata.output_token_ids,
+                sampling_metadata.last_spec_token_ids,
+            )
+
+        # Apply allowed token ids.
+        logits = self.apply_allowed_token_ids(logits, sampling_metadata)
+        # Apply bad words exclusion.
+        logits = self.apply_bad_words(logits, sampling_metadata,
+                                      output_token_ids)
+        # Apply logits bias.
+        logits = self.apply_logits_bias(logits, sampling_metadata)
+        # Apply penalties (e.g., min_tokens, freq_penalties).
+        logits = self.apply_penalties(logits, sampling_metadata,
+                                      output_token_ids)
+        return logits
+
     def apply_penalties(
         self,
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
+        output_token_ids: list[list[int]],
     ) -> torch.Tensor:
         if sampling_metadata.min_tokens:
-            apply_min_token_penalties(logits,
-                                      sampling_metadata.output_token_ids,
+            apply_min_token_penalties(logits, output_token_ids,
                                       sampling_metadata.min_tokens)
         if not sampling_metadata.no_penalties:
             assert sampling_metadata.prompt_token_ids is not None
@@ -199,7 +235,7 @@ class Sampler(nn.Module):
                 sampling_metadata.presence_penalties,
                 sampling_metadata.frequency_penalties,
                 sampling_metadata.repetition_penalties,
-                sampling_metadata.output_token_ids,
+                output_token_ids,
             )
         return logits
 
@@ -276,11 +312,12 @@ class Sampler(nn.Module):
         self,
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
+        output_token_ids: list[list[int]],
     ) -> torch.Tensor:
         if sampling_metadata.bad_words_token_ids:
             apply_bad_words(
                 logits,
                 sampling_metadata.bad_words_token_ids,
-                sampling_metadata.output_token_ids,
+                output_token_ids,
             )
         return logits

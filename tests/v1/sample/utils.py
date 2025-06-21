@@ -5,6 +5,7 @@ from enum import Enum
 from typing import Optional
 
 import regex as re
+import torch
 
 from vllm import CompletionOutput
 
@@ -134,3 +135,23 @@ def compute_correct_cumulative_logprob(
     logprobs = completion_output.logprobs
     assert logprobs is not None
     return sum([lp[tok_id].logprob for tok_id, lp in zip(token_ids, logprobs)])
+
+
+def create_allowed_token_ids(
+    batch_size: int,
+    vocab_size: int,
+    num_allowed_token_ids: int,
+    device: torch.device,
+) -> Optional[torch.Tensor]:
+    mask: Optional[torch.Tensor] = None
+    for i in range(batch_size):
+        if i % 2 == 1:
+            continue
+        if mask is None:
+            mask = torch.zeros((batch_size, vocab_size),
+                               dtype=torch.bool,
+                               device=device)
+        start = min(i, vocab_size - 1)
+        end = min(i + num_allowed_token_ids, vocab_size - 1)
+        mask[i, start:end] = True
+    return mask

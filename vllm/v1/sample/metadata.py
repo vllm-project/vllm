@@ -30,6 +30,7 @@ class SamplingMetadata:
     repetition_penalties: torch.Tensor
 
     output_token_ids: list[list[int]]
+    last_spec_token_ids: list[list[int]]
 
     # req_index -> (min_tokens, stop_token_ids)
     min_tokens: dict[int, tuple[int, set[int]]]
