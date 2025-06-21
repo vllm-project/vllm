@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import torch
 import time
 from collections import defaultdict, deque
 from collections.abc import Iterable

@@ -457,6 +457,55 @@ class GroupCoordinator:
                                                     group=self.cpu_group)
             return recv[0]
 
+    def broadcast_object_async(self,
+                               obj: Optional[Any] = None,
+                               src: int = 0) -> torch.futures.Future:
+        """Broadcast the input object.
+        NOTE: `src` is the local rank of the source rank.
+        """
+        assert src < self.world_size, f"Invalid src rank ({src}), world size is {self.world_size}"
+        assert self.world_size > 1, \
+            "call broadcast_object_async when world size > 1"
+
+        assert self.mq_broadcaster is None, \
+            "Message queue broadcaster only supports sync broadcast"
+        if self.rank_in_group == src:
+            object_tensor = torch.frombuffer(pickle.dumps(obj),
+                                             dtype=torch.uint8).to(self.device)
+            size_tensor = torch.tensor([object_tensor.numel()],
+                                       dtype=torch.long,
+                                       device=self.device)
+            work = torch.distributed.broadcast(size_tensor,
+                                               src=self.ranks[src],
+                                               group=self.device_group,
+                                               async_op=True)
+            assert work is not None
+            work.get_future().then(lambda x: torch.distributed.broadcast(
+                object_tensor, src=self.ranks[src], group=self.device_group))
+            future = torch.futures.Future()
+            future.set_result(obj)
+            return future
+        else:
+
+            def broadcast_object_tensor(size_tensor: torch.Tensor) -> Any:
+                # Tensor to receive serialized objects into.
+                object_tensor = torch.empty(size_tensor.item(),
+                                            dtype=torch.uint8,
+                                            device=self.device)
+                torch.distributed.broadcast(object_tensor,
+                                            src=self.ranks[src],
+                                            group=self.device_group)
+                return pickle.loads(object_tensor.cpu().numpy().tobytes())
+
+            size_tensor = torch.empty(1, dtype=torch.long, device=self.device)
+            work = torch.distributed.broadcast(size_tensor,
+                                               src=self.ranks[src],
+                                               group=self.device_group,
+                                               async_op=True)
+            assert work is not None
+            return work.get_future().then(
+                lambda x: broadcast_object_tensor(x.value()[0]))
+
     def broadcast_object_list(self,
                               obj_list: list[Any],
                               src: int = 0,
@@ -827,7 +876,6 @@ def init_model_parallel_group(
     use_message_queue_broadcaster: bool = False,
     group_name: Optional[str] = None,
 ) -> GroupCoordinator:
-
     return GroupCoordinator(
         group_ranks=group_ranks,
         local_rank=local_rank,
