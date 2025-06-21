@@ -1014,6 +1014,98 @@ def load_log_config(log_config_file: Optional[str]) -> Optional[dict]:
         return None
 
 
+def _clean_content_for_logging(content: str) -> str:
+    """Clean content for safe logging by escaping special characters."""
+    if not content:
+        return content
+
+    # Replace common special characters that can break log formatting
+    clean_content = (
+        content.replace('\n', '\\n')  # Newlines
+        .replace('\r', '\\r')  # Carriage returns
+        .replace('\t', '\\t')  # Tabs
+        .replace('\b', '\\b')  # Backspaces
+        .replace('\f', '\\f')  # Form feeds
+        .replace('\v', '\\v')  # Vertical tabs
+        .replace('\0', '\\0')  # Null characters
+        .replace('"', '\\"')  # Double quotes
+        .replace('\\', '\\\\'))  # Backslashes (do this last)
+
+    return clean_content
+
+
+def _extract_content_from_chunk(chunk_data: dict) -> str:
+    """Extract content from a streaming response chunk."""
+    try:
+        from vllm.entrypoints.openai.protocol import (
+            ChatCompletionStreamResponse, CompletionStreamResponse)
+
+        # Try using Completion types for type-safe parsing
+        if chunk_data.get('object') == 'chat.completion.chunk':
+            chat_response = ChatCompletionStreamResponse.model_validate(
+                chunk_data)
+            if chat_response.choices and chat_response.choices[0].delta.content:
+                return chat_response.choices[0].delta.content
+        elif chunk_data.get('object') == 'text_completion':
+            completion_response = CompletionStreamResponse.model_validate(
+                chunk_data)
+            if completion_response.choices and completion_response.choices[
+                    0].text:
+                return completion_response.choices[0].text
+    except Exception:
+        # Fallback to manual parsing
+        if 'choices' in chunk_data and chunk_data['choices']:
+            choice = chunk_data['choices'][0]
+            if 'delta' in choice and choice['delta'].get('content'):
+                return choice['delta']['content']
+            elif choice.get('text'):
+                return choice['text']
+    return ""
+
+
+def _log_streaming_response(response, response_body: list) -> None:
+    """Log streaming response with buffered content extraction."""
+    content_buffer = []
+
+    def buffered_iterator():
+        chunk_count = 0
+        for chunk in response_body:
+            chunk_count += 1
+            yield chunk
+            # Extract content from chunk
+            try:
+                for line in chunk.decode().split('\n'):
+                    if line.startswith(
+                            'data: ') and not line.endswith('[DONE]'):
+                        chunk_data = json.loads(line[6:].strip())
+                        content_buffer.append(
+                            _extract_content_from_chunk(chunk_data))
+
+                    if line.strip() == 'data: [DONE]' or len(
+                            content_buffer) > 1024:
+                        # Log complete content when done
+                        full_content = ''.join(content_buffer)
+                        full_content = _clean_content_for_logging(full_content)
+                        logger.info(
+                            "response_body={streaming_complete: " \
+                            "content='%s', chunks=%d}",
+                            full_content[:1024], chunk_count)
+                        return
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                continue
+
+    response.body_iterator = iterate_in_threadpool(buffered_iterator())
+
+
+def _log_non_streaming_response(response_body: list) -> None:
+    """Log non-streaming response."""
+    try:
+        decoded_body = response_body[0].decode()
+        logger.info("response_body={%s}", decoded_body)
+    except UnicodeDecodeError:
+        logger.info("response_body={<binary_data>}")
+
+
 def build_app(args: Namespace) -> FastAPI:
     if args.disable_fastapi_docs:
         app = FastAPI(openapi_url=None,
@@ -1101,8 +1193,17 @@ def build_app(args: Namespace) -> FastAPI:
                 section async for section in response.body_iterator
             ]
             response.body_iterator = iterate_in_threadpool(iter(response_body))
-            logger.info("response_body={%s}",
-                        response_body[0].decode() if response_body else None)
+            # Check if this is a streaming response by looking at content-type
+            content_type = response.headers.get("content-type", "")
+            is_streaming = "text/event-stream" in content_type
+
+            # Log response body based on type
+            if not response_body:
+                logger.info("response_body={<empty>}")
+            elif is_streaming:
+                _log_streaming_response(response, response_body)
+            else:
+                _log_non_streaming_response(response_body)
             return response
 
     for middleware in args.middleware:
