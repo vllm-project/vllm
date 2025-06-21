@@ -408,6 +408,8 @@ class EngineArgs:
         ObservabilityConfig.otlp_traces_endpoint
     collect_detailed_traces: Optional[list[DetailedTraceModules]] = \
         ObservabilityConfig.collect_detailed_traces
+    prefix_cache_metrics_max_requests: int = \
+        ObservabilityConfig.prefix_cache_metrics_max_requests
     disable_async_output_proc: bool = not ModelConfig.use_async_output_proc
     scheduling_policy: SchedulerPolicy = SchedulerConfig.policy
     scheduler_cls: Union[str, Type[object]] = SchedulerConfig.scheduler_cls
@@ -800,6 +802,9 @@ class EngineArgs:
         observability_group.add_argument(
             "--otlp-traces-endpoint",
             **observability_kwargs["otlp_traces_endpoint"])
+        observability_group.add_argument(
+            "--prefix-cache-metrics-max-requests",
+            **observability_kwargs["prefix_cache_metrics_max_requests"])
         # TODO: generalise this special case
         choices = observability_kwargs["collect_detailed_traces"]["choices"]
         metavar = f"{{{','.join(choices)}}}"
@@ -1225,6 +1230,8 @@ class EngineArgs:
             show_hidden_metrics_for_version,
             otlp_traces_endpoint=self.otlp_traces_endpoint,
             collect_detailed_traces=self.collect_detailed_traces,
+            prefix_cache_metrics_max_requests=self.
+            prefix_cache_metrics_max_requests,
         )
 
         config = VllmConfig(

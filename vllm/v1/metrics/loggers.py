@@ -55,8 +55,11 @@ class LoggingStatLogger(StatLoggerBase):
         self._reset(time.monotonic())
         self.last_scheduler_stats = SchedulerStats()
         # Prefix cache metrics. This cannot be reset.
-        # TODO: Make the interval configurable.
-        self.prefix_caching_metrics = PrefixCachingMetrics()
+        max_requests = (
+            vllm_config.observability_config.prefix_cache_metrics_max_requests
+            if vllm_config.observability_config else 1000)
+        self.prefix_caching_metrics = PrefixCachingMetrics(
+            max_recent_requests=max_requests)
         self.spec_decoding_logging = SpecDecodingLogging()
         self.last_prompt_throughput: float = 0.0
         self.last_generation_throughput: float = 0.0
