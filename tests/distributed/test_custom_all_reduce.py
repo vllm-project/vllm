@@ -13,6 +13,7 @@ from vllm.distributed.communication_op import (  # noqa
     tensor_model_parallel_all_reduce)
 from vllm.distributed.parallel_state import (get_tensor_model_parallel_group,
                                              get_tp_group, graph_capture)
+from vllm.platforms import current_platform
 
 from ..utils import (ensure_model_parallel_initialized,
                      init_test_distributed_environment, multi_process_parallel)
@@ -163,6 +164,8 @@ def test_custom_allreduce(
     pipeline_parallel_size,
     test_target,
 ):
+    if test_target == eager_quickreduce and not current_platform.is_rocm():
+        pytest.skip("Skip eager_quickreduce on non-ROCm platforms.")
     world_size = tp_size * pipeline_parallel_size
     if world_size > torch.cuda.device_count():
         pytest.skip("Not enough GPUs to run the test.")
