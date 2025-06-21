@@ -378,14 +378,18 @@ class Gemma3MultiModalProcessor(BaseMultiModalProcessor[Gemma3ProcessingInfo]):
         # We need to detect "\n\n" inside "\n\n\n" and "\n\n\n\n"
         tokenizer = self.info.get_tokenizer()
         vocab = tokenizer.get_vocab()
+        eoi_token = vocab[tokenizer.eoi_token]
         newline_1 = vocab["\n"]
         newline_2 = vocab["\n\n"]
         newline_3 = vocab["\n\n\n"]
         newline_4 = vocab["\n\n\n\n"]
 
-        def get_repl_toks(tok: int) -> list[int]:
+        def get_repl_toks(tok: int, previous_tok: int) -> list[int]:
             if tok == newline_3:
-                return [newline_1, newline_2]
+                if previous_tok == eoi_token:
+                    return [newline_2, newline_1]
+                else:
+                    return [newline_1, newline_2]
             if tok == newline_4:
                 return [newline_2, newline_2]
 
@@ -393,10 +397,12 @@ class Gemma3MultiModalProcessor(BaseMultiModalProcessor[Gemma3ProcessingInfo]):
 
         repl_token_ids = list[int]()
         repl_orig_idxs = list[int]()
+        orig_previous_token = None
         for orig_idx, orig_tok in enumerate(new_token_ids):
-            repl_toks = get_repl_toks(orig_tok)
+            repl_toks = get_repl_toks(orig_tok, orig_previous_token)
             repl_token_ids.extend(repl_toks)
             repl_orig_idxs.extend(orig_idx for _ in range(len(repl_toks)))
+            orig_previous_token = orig_tok
 
         repls = find_mm_placeholders(mm_prompt_updates, repl_token_ids,
                                      mm_item_counts)
