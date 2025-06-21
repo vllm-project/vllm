@@ -186,11 +186,11 @@ class SmallerTpProposerWorker(ProposerWorkerBase):
 
         with self._patch_tensor_parallel_group():
             weight_loader = getattr(
-                self._worker.worker.model_runner.model_runner.model.\
+                self._worker.worker.model_runner.model.\
                     lm_head.weight,
                 "weight_loader",
                 default_weight_loader)
             weight_loader(
-                self._worker.worker.model_runner.model_runner.model.\
+                self._worker.worker.model_runner.model.\
                     lm_head.weight,
                 lm_head_weight)

@@ -1154,6 +1154,11 @@ def patch_tensor_parallel_group(tp_group: GroupCoordinator):
         _TP = old_tp_group
 
 
+def is_tp_state_patched():
+    """Check if the tp group is patched."""
+    return _TP_STATE_PATCHED
+
+
 def get_tensor_model_parallel_world_size():
     """Return world size for the tensor model parallel group."""
     return get_tp_group().world_size
