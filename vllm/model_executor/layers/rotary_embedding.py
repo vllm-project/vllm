@@ -71,8 +71,11 @@ def _apply_rotary_emb_torch(
         return torch.stack((o1, o2), dim=-1).flatten(-2)
 
 
-def _apply_rotary_emb(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor,
-                      is_neox_style: bool) -> torch.Tensor:
+def _apply_rotary_emb(x: torch.Tensor,
+                      cos: torch.Tensor,
+                      sin: torch.Tensor,
+                      is_neox_style: bool,
+                      enable_custom_op: bool = True) -> torch.Tensor:
     """
     Args:
         x: [num_tokens, num_heads, head_size]
@@ -81,16 +84,14 @@ def _apply_rotary_emb(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor,
         is_neox_style: Whether to use the Neox-style or GPT-J-style rotary
             positional embeddings.
     """
-    if current_platform.is_cuda():
+    if enable_custom_op and current_platform.is_cuda():
         return apply_rotary_emb(x.unsqueeze(0), cos, sin,
                                 not is_neox_style).squeeze(0)
     else:
         return _apply_rotary_emb_torch(x, cos, sin, is_neox_style)
 
 
-@CustomOp.register("rotary_embedding")
-class RotaryEmbedding(CustomOp):
-    """Original rotary positional embedding."""
+class RotaryEmbeddingBase:
 
     def __init__(
         self,
@@ -134,6 +135,29 @@ class RotaryEmbedding(CustomOp):
         sin = freqs.sin()
         cache = torch.cat((cos, sin), dim=-1)
         return cache
+
+    def extra_repr(self) -> str:
+        s = f"head_size={self.head_size}, rotary_dim={self.rotary_dim}"
+        s += f", max_position_embeddings={self.max_position_embeddings}"
+        s += f", base={self.base}, is_neox_style={self.is_neox_style}"
+        return s
+
+
+@CustomOp.register("rotary_embedding")
+class RotaryEmbedding(RotaryEmbeddingBase, CustomOp):
+    """Original rotary positional embedding."""
+
+    def __init__(
+        self,
+        head_size: int,
+        rotary_dim: int,
+        max_position_embeddings: int,
+        base: float,
+        is_neox_style: bool,
+        dtype: torch.dtype,
+    ) -> None:
+        super().__init__(head_size, rotary_dim, max_position_embeddings, base,
+                         is_neox_style, dtype)
 
     def forward_native(
         self,
@@ -363,12 +387,6 @@ class RotaryEmbedding(CustomOp):
                                                    self.is_neox_style)
                 key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
         return query, key
-
-    def extra_repr(self) -> str:
-        s = f"head_size={self.head_size}, rotary_dim={self.rotary_dim}"
-        s += f", max_position_embeddings={self.max_position_embeddings}"
-        s += f", base={self.base}, is_neox_style={self.is_neox_style}"
-        return s
 
 
 class LinearScalingRotaryEmbedding(RotaryEmbedding):
@@ -759,7 +777,8 @@ def yarn_get_mscale(scale: float = 1, mscale: float = 1) -> float:
     return 0.1 * mscale * math.log(scale) + 1.0
 
 
-class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
+@CustomOp.register("rotary_embedding")
+class DeepseekScalingRotaryEmbedding(RotaryEmbeddingBase, CustomOp):
     """RotaryEmbedding extended with YaRN method.
 
     Credits to Peng et al. github.com/jquesnelle/yarn
@@ -828,7 +847,7 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
         cache = torch.cat((cos, sin), dim=-1)
         return cache
 
-    def forward(
+    def forward_native(
         self,
         positions: torch.Tensor,
         query: torch.Tensor,
@@ -869,6 +888,9 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
             query = query_rot
             key = key_rot
         return query, key
+
+    def forward_cuda(self, *args, **kwargs):
+        return self.forward_native(*args, **kwargs)
 
 
 class Llama3RotaryEmbedding(RotaryEmbedding):
@@ -917,7 +939,8 @@ class Llama3RotaryEmbedding(RotaryEmbedding):
         return new_freqs
 
 
-class Llama4VisionRotaryEmbedding(RotaryEmbedding):
+@CustomOp.register("rotary_embedding")
+class Llama4VisionRotaryEmbedding(RotaryEmbeddingBase, CustomOp):
 
     def __init__(
         self,
@@ -961,7 +984,7 @@ class Llama4VisionRotaryEmbedding(RotaryEmbedding):
             torch.stack([torch.cos(freqs), torch.sin(freqs)], dim=-1))
         return cache
 
-    def forward(
+    def forward_native(
         self,
         query: torch.Tensor,
         key: Optional[torch.Tensor] = None,
@@ -981,8 +1004,12 @@ class Llama4VisionRotaryEmbedding(RotaryEmbedding):
         key_out = torch.view_as_real(key_ * freqs_ci).flatten(3)
         return query_out.type_as(query), key_out.type_as(key)
 
+    def forward_cuda(self, *args, **kwargs):
+        return self.forward_native(*args, **kwargs)
 
-class MRotaryEmbedding(RotaryEmbedding):
+
+@CustomOp.register("rotary_embedding")
+class MRotaryEmbedding(RotaryEmbeddingBase, CustomOp):
     """Rotary Embedding with Multimodal Sections."""
 
     def __init__(
@@ -1006,20 +1033,23 @@ class MRotaryEmbedding(RotaryEmbedding):
         if self.mrope_section:
             assert sum(self.mrope_section) == rotary_dim // 2
 
-    def forward(
+    def _forward(
         self,
         positions: torch.Tensor,
         query: torch.Tensor,
         key: Optional[torch.Tensor] = None,
+        enable_custom_op: bool = True,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
-        """PyTorch-native implementation equivalent to forward().
-
+        """
         Args:
             positions:
                 [num_tokens,] (text only) or
                 [3, num_tokens] (T/H/W positions with multimodal inputs)
             query: [num_tokens, num_heads * head_size]
             key: [num_tokens, num_kv_heads * head_size]
+            enalbe_custom_op:
+                If True, use the custom op implementation.
+                If False, use the PyTorch-native implementation.
         """
         assert positions.ndim == 1 or positions.ndim == 2
         assert key is not None
@@ -1045,16 +1075,38 @@ class MRotaryEmbedding(RotaryEmbedding):
         query = query.view(num_tokens, -1, self.head_size)
         query_rot = query[..., :self.rotary_dim]
         query_pass = query[..., self.rotary_dim:]
-        query_rot = _apply_rotary_emb(query_rot, cos, sin, self.is_neox_style)
+        query_rot = _apply_rotary_emb(query_rot, cos, sin, self.is_neox_style,
+                                      enable_custom_op)
         query = torch.cat((query_rot, query_pass), dim=-1).reshape(query_shape)
 
         key_shape = key.shape
         key = key.view(num_tokens, -1, self.head_size)
         key_rot = key[..., :self.rotary_dim]
         key_pass = key[..., self.rotary_dim:]
-        key_rot = _apply_rotary_emb(key_rot, cos, sin, self.is_neox_style)
+        key_rot = _apply_rotary_emb(key_rot, cos, sin, self.is_neox_style,
+                                    enable_custom_op)
         key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
         return query, key
+
+    def forward_native(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """
+        If this custom op is disabled, it will use the PyTorch-native
+        implementation.
+        """
+        return self._forward(positions, query, key=key, enable_custom_op=False)
+
+    def forward_cuda(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        return self._forward(positions, query, key=key, enable_custom_op=True)
 
     @classmethod
     def get_input_positions(
@@ -1622,7 +1674,7 @@ class DualChunkRotaryEmbedding(CustomOp):
                                              device=self.device)
         return q_cache, qc_cache, k_cache, qc_no_clamp_cache, q_inter_cache
 
-    def forward(
+    def forward_native(
         self,
         positions: torch.Tensor,
         query: torch.Tensor,
