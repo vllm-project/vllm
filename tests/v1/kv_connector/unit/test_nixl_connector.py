@@ -7,7 +7,12 @@ from collections import defaultdict
 from typing import Optional
 from unittest.mock import patch
 
-from nixl._api import nixl_agent as NixlWrapper
+import pytest
+
+try:
+    from nixl._api import nixl_agent as NixlWrapper
+except ImportError:
+    NixlWrapper = None
 
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
     KVConnectorRole, NixlAgentMetadata, NixlConnector, NixlConnectorMetadata,
@@ -84,8 +89,11 @@ def test_prompt_less_than_block_size():
     assert len(scheduler_output.scheduled_new_reqs) == 1
 
 
-class FakeNixlWrapper(NixlWrapper):
-    """Mock implementation of NixlWrapper for testing."""
+class FakeNixlWrapper:
+    """Mock implementation of NixlWrapper for testing.
+    
+    We don't inherit from NixlWrapper because NixlWrapper could be None.
+    """
 
     AGENT_METADATA = b"fake_agent_metadata"
     REMOTE_AGENT_NAME = "remote_agent"
@@ -181,6 +189,7 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
             ))
 
 
+@pytest.mark.skipif(NixlWrapper is None, reason="nixl not installed")
 @patch(
     "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",
     FakeNixlWrapper)
