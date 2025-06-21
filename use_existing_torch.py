@@ -19,3 +19,4 @@ for file in requires_files:
                     print(line.strip())
     print(f"<<< done cleaning {file}")
     print()
+    print(f"<<< done cleaning {file}")
