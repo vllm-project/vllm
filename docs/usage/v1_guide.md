@@ -45,6 +45,18 @@ For each item, our progress towards V1 support falls into one of the following s
 - **🟠 Delayed**: Temporarily dropped in V1 but planned to be re-introduced later.
 - **🔴 Deprecated**: Not planned for V1 unless there is strong demand.
 
+!!! note
+    vLLM V1’s unified scheduler treats both prompt and output tokens the same
+    way by using a simple dictionary (e.g., `{request_id: num_tokens}`) to dynamically
+    allocate a fixed token budget per request, enabling features like chunked prefills,
+    prefix caching, and speculative decoding without a strict separation between prefill
+    and decode phases.
+
+The V1 scheduler supports multiple scheduling policies, including First-Come,
+First-Served (FCFS) and priority-based scheduling (where requests are processed
+based on assigned priority, with FCFS as a tie-breaker), configurable via the
+`--scheduling-policy` argument.
+
 ### Hardware
 
 | Hardware   | Status                             |
