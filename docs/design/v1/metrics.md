@@ -30,6 +30,8 @@ In v0, the following metrics are exposed via a Prometheus-compatible `/metrics` 
 - `vllm:cpu_prefix_cache_hit_rate` (Gauge)
 - `vllm:prompt_tokens_total` (Counter)
 - `vllm:generation_tokens_total` (Counter)
+- `vllm:prompt_throughput_toks_per_s` (Gauge)
+- `vllm:generation_throughput_toks_per_s` (Gauge)
 - `vllm:request_success_total` (Counter)
 - `vllm:request_prompt_tokens` (Histogram)
 - `vllm:request_generation_tokens` (Histogram)

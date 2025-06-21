@@ -223,6 +223,22 @@ class Metrics:
             documentation="Number of emitted tokens.",
             labelnames=labelnames))
 
+        # Latest token throughput stats
+        self.gauge_prompt_throughput_toks_per_s = self._gauge_cls(
+            name="vllm:prompt_throughput_toks_per_s",
+            documentation=(
+                "Number of prompt tokens processed per second over the "
+                "logging interval."),
+            labelnames=labelnames,
+            multiprocess_mode="sum")
+        self.gauge_generation_throughput_toks_per_s = self._gauge_cls(
+            name="vllm:generation_throughput_toks_per_s",
+            documentation=(
+                "Number of generation tokens processed per second over "
+                "the logging interval."),
+            labelnames=labelnames,
+            multiprocess_mode="sum")
+
 
 # --8<-- [end:metrics-definitions]
 
@@ -600,6 +616,17 @@ class PrometheusStatLogger(StatLoggerBase):
                 self._log_counter(
                     self.metrics.counter_spec_decode_num_emitted_tokens,
                     self.spec_decode_metrics.emitted_tokens)
+
+            self._log_gauge(
+                self.metrics.gauge_prompt_throughput_toks_per_s,
+                get_throughput(self.num_prompt_tokens,
+                               now=stats.now,
+                               last_log=self.last_local_log))
+            self._log_gauge(
+                self.metrics.gauge_generation_throughput_toks_per_s,
+                get_throughput(self.num_generation_tokens,
+                               now=stats.now,
+                               last_log=self.last_local_log))
 
             # Reset tracked stats for next interval.
             self.num_prompt_tokens = []
