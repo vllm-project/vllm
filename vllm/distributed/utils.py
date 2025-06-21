@@ -388,6 +388,10 @@ class StatelessProcessGroup:
         used for exchanging metadata. With this function, process A and process B
         can call `StatelessProcessGroup.create` to form a group, and then process A, B,
         C, and D can call `StatelessProcessGroup.create` to form another group.
+
+        The `host` parameter should be an address on a secure network that is ideally
+        completely isolated. Services used on this network are insecure and will make
+        the system vulnerable to remote code execution if exposed to malicious parties.
         """ # noqa
         launch_server = rank == 0
         if launch_server:
