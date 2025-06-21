@@ -86,6 +86,9 @@ class BenchmarkMetrics:
     request_goodput: float
     output_throughput: float
     total_token_throughput: float
+    norm_request_throughput: float
+    norm_output_throughput: float
+    norm_total_token_throughput: float
     mean_ttft_ms: float
     median_ttft_ms: float
     std_ttft_ms: float
@@ -153,6 +156,7 @@ async def get_request(
 
 
 def calculate_metrics(
+    max_concurrency: int,
     input_requests: list[SampleRequest],
     outputs: list[RequestFuncOutput],
     dur_s: float,
@@ -170,7 +174,10 @@ def calculate_metrics(
     all_tpots: list[float] = []
     ttfts: list[float] = []
     e2els: list[float] = []
+
     for i in range(len(outputs)):
+        if getattr(input_requests[i], "is_warmup", False):
+            continue
         if outputs[i].success:
             output_len = outputs[i].output_tokens
 
@@ -232,6 +239,11 @@ def calculate_metrics(
             "on the benchmark arguments.",
             stacklevel=2,
         )
+    # In a high-concurrency scenario, with evenly distributed requests,
+    # this calculates the mean E2E latency per concurrency,
+    # providing a normalized view of performance under load.
+    e2el_per_concurrency = sum(e2els) / max_concurrency
+
     metrics = BenchmarkMetrics(
         completed=completed,
         total_input=total_input,
@@ -240,6 +252,10 @@ def calculate_metrics(
         request_goodput=good_completed / dur_s,
         output_throughput=sum(actual_output_lens) / dur_s,
         total_token_throughput=(total_input + sum(actual_output_lens)) / dur_s,
+        norm_request_throughput=completed / e2el_per_concurrency,
+        norm_output_throughput=sum(actual_output_lens) / e2el_per_concurrency,
+        norm_total_token_throughput=(total_input + sum(actual_output_lens))
+        / e2el_per_concurrency,
         mean_ttft_ms=np.mean(ttfts or 0)
         * 1000,  # ttfts is empty if streaming is not supported by backend
         std_ttft_ms=np.std(ttfts or 0) * 1000,
@@ -424,6 +440,7 @@ async def benchmark(
     benchmark_duration = time.perf_counter() - benchmark_start_time
 
     metrics, actual_output_lens = calculate_metrics(
+        max_concurrency=max_concurrency,
         input_requests=input_requests,
         outputs=outputs,
         dur_s=benchmark_duration,
@@ -457,6 +474,16 @@ async def benchmark(
     print(
         "{:<40} {:<10.2f}".format(
             "Total Token throughput (tok/s):", metrics.total_token_throughput
+        )
+    )
+    print(
+        "{:<40} {:<10.2f}".format(
+            "Norm Output token throughput (tok/s):", metrics.norm_output_throughput
+        )
+    )
+    print(
+        "{:<40} {:<10.2f}".format(
+            "Norm Total Token throughput (tok/s):", metrics.norm_total_token_throughput
         )
     )
 
@@ -623,6 +650,10 @@ def main(args: argparse.Namespace):
         trust_remote_code=args.trust_remote_code,
     )
 
+    if args.warmup:
+        # needs to add warmup requests
+        args.num_prompts += args.max_concurrency
+
     if args.dataset_name is None:
         raise ValueError(
             "Please specify '--dataset-name' and the corresponding "
@@ -742,7 +773,8 @@ def main(args: argparse.Namespace):
                 prefix_len=args.random_prefix_len,
                 input_len=args.random_input_len,
                 output_len=args.random_output_len,
-                range_ratio=args.random_range_ratio,
+                input_range_ratio=args.random_input_range_ratio,
+                output_range_ratio=args.random_output_range_ratio,
             ),
         }
 
@@ -750,6 +782,9 @@ def main(args: argparse.Namespace):
             input_requests = dataset_mapping[args.dataset_name]()
         except KeyError as err:
             raise ValueError(f"Unknown dataset: {args.dataset_name}") from err
+    if args.warmup:
+        for i, req in enumerate(input_requests):
+            req.is_warmup = i < args.max_concurrency
     goodput_config_dict = check_goodput_args(args)
 
     # Collect the sampling parameters.
@@ -997,6 +1032,13 @@ def create_argument_parser():
         "VLLM_TORCH_PROFILER_DIR to enable profiler.",
     )
     parser.add_argument(
+        "--warmup",
+        action="store_true",
+        help="Warmup before benchmark tests. "
+        "it will add a warmup request in each process, "
+        "the result of warmup request will not be calculated in final results.",
+    )
+    parser.add_argument(
         "--save-result",
         action="store_true",
         help="Specify to save benchmark results to a json file",
@@ -1130,13 +1172,22 @@ def create_argument_parser():
         help="Number of output tokens per request, used only for random sampling.",
     )
     random_group.add_argument(
-        "--random-range-ratio",
+        "--random-input-range-ratio",
         type=float,
         default=0.0,
-        help="Range ratio for sampling input/output length, "
+        help="Range ratio for sampling input length, "
         "used only for random sampling. Must be in the range [0, 1) to define "
         "a symmetric sampling range"
-        "[length * (1 - range_ratio), length * (1 + range_ratio)].",
+        "[input_length * (1 - range_ratio), input_length * (1 + range_ratio)].",
+    )
+    random_group.add_argument(
+        "--random-output-range-ratio",
+        type=float,
+        default=0.0,
+        help="Range ratio for sampling output length, "
+        "used only for random sampling. Must be in the range [0, 1) to define "
+        "a symmetric sampling range"
+        "[output_length * (1 - range_ratio), output_length * (1 + range_ratio)].",
     )
     random_group.add_argument(
         "--random-prefix-len",

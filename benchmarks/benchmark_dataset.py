@@ -285,7 +285,8 @@ def process_image(image: Any) -> Mapping[str, Any]:
 class RandomDataset(BenchmarkDataset):
     # Default values copied from benchmark_serving.py for the random dataset.
     DEFAULT_PREFIX_LEN = 0
-    DEFAULT_RANGE_RATIO = 0.0
+    DEFAULT_INPUT_RANGE_RATIO = 0.0
+    DEFAULT_OUTPUT_RANGE_RATIO = 0.0
     DEFAULT_INPUT_LEN = 1024
     DEFAULT_OUTPUT_LEN = 128
 
@@ -300,14 +301,18 @@ class RandomDataset(BenchmarkDataset):
         tokenizer: PreTrainedTokenizerBase,
         num_requests: int,
         prefix_len: int = DEFAULT_PREFIX_LEN,
-        range_ratio: float = DEFAULT_RANGE_RATIO,
+        input_range_ratio: float = DEFAULT_INPUT_RANGE_RATIO,
+        output_range_ratio: float = DEFAULT_OUTPUT_RANGE_RATIO,
         input_len: int = DEFAULT_INPUT_LEN,
         output_len: int = DEFAULT_OUTPUT_LEN,
         **kwargs,
     ) -> list[SampleRequest]:
         # Enforce range_ratio < 1
-        assert range_ratio < 1.0, (
-            "random_range_ratio must be < 1.0 to ensure a valid sampling range"
+        assert input_range_ratio < 1.0, (
+            "random_input_range_ratio must be < 1.0 to ensure a valid sampling range"
+        )
+        assert output_range_ratio < 1.0, (
+            "random_output_range_ratio must be < 1.0 to ensure a valid sampling range"
         )
 
         vocab_size = tokenizer.vocab_size
@@ -321,10 +326,10 @@ class RandomDataset(BenchmarkDataset):
         )
 
         # New sampling logic: [X * (1 - b), X * (1 + b)]
-        input_low = int(real_input_len * (1 - range_ratio))
-        input_high = int(real_input_len * (1 + range_ratio))
-        output_low = int(output_len * (1 - range_ratio))
-        output_high = int(output_len * (1 + range_ratio))
+        input_low = int(real_input_len * (1 - input_range_ratio))
+        input_high = int(real_input_len * (1 + input_range_ratio))
+        output_low = int(output_len * (1 - output_range_ratio))
+        output_high = int(output_len * (1 + output_range_ratio))
 
         # Add logging for debugging
         logger.info("Sampling input_len from [%s, %s]", input_low, input_high)
