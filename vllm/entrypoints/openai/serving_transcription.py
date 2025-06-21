@@ -221,7 +221,7 @@ class OpenAIServingTranscription(OpenAIServing):
                     },
                 },
                 "decoder_prompt":
-                f"<|startoftranscript|>{lang_token}<|transcribe|><|notimestamps|>{request.prompt}"
+                f"<|prev|>{request.prompt}<|startoftranscript|>{lang_token}<|transcribe|><|notimestamps|>"
                 if i == 0 else ""
             }
             prompts.append(cast(PromptType, prompt))
