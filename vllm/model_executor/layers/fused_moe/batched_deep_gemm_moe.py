@@ -102,12 +102,10 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         # for the M expectation of each batch, correctly setting this value
         # may lead to better performance.
         expected_m = max_num_tokens
-
-        dg.m_grouped_gemm_fp8_fp8_bf16_nt_masked((a1q, a1q_scale),
-                                                 (w1, w1_scale),
-                                                 out=workspace1,
-                                                 masked_m=expert_num_tokens,
-                                                 expected_m=expected_m)
+        dg.fp8_m_grouped_gemm_nt_masked((a1q, a1q_scale), (w1, w1_scale),
+                                        out=workspace1,
+                                        masked_m=expert_num_tokens,
+                                        expected_m=expected_m)
 
         # TODO (varun) [Optimization]: Use a batched version of activation.
         # Similarly for the quant below.
@@ -123,8 +121,7 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         a2q = a2q.view(E, max_num_tokens, -1)
         a2q_scale = a2q_scale.view(E, max_num_tokens, -1)
 
-        dg.m_grouped_gemm_fp8_fp8_bf16_nt_masked((a2q, a2q_scale),
-                                                 (w2, w2_scale),
-                                                 out=output,
-                                                 masked_m=expert_num_tokens,
-                                                 expected_m=expected_m)
+        dg.fp8_m_grouped_gemm_nt_masked((a2q, a2q_scale), (w2, w2_scale),
+                                        out=output,
+                                        masked_m=expert_num_tokens,
+                                        expected_m=expected_m)
