@@ -87,6 +87,7 @@ class AttentionSpec(KVCacheSpec):
 @dataclass
 class FullAttentionSpec(AttentionSpec):
     sliding_window: Optional[int] = None
+    attention_chunk_size: Optional[int] = None
     """
     When hybrid allocator is disabled and the model contains both full 
     attention layers and sliding window attention layers, sliding 
@@ -114,6 +115,9 @@ class FullAttentionSpec(AttentionSpec):
         merged_spec = super().merge(specs)
         sliding_window = set(spec.sliding_window for spec in specs
                              if spec.sliding_window is not None)
+        attention_chunk_size = set(spec.attention_chunk_size for spec in specs
+                                   if spec.attention_chunk_size is not None)
+
         if len(sliding_window) == 0:
             merged_spec.sliding_window = None
         elif len(sliding_window) == 1:
@@ -122,6 +126,59 @@ class FullAttentionSpec(AttentionSpec):
             raise ValueError(
                 "All sliding window layers in the same KV cache group "
                 "must have the same window size.")
+        if len(attention_chunk_size) == 0:
+            merged_spec.attention_chunk_size = None
+        elif len(attention_chunk_size) == 1:
+            merged_spec.attention_chunk_size = attention_chunk_size.pop()
+        else:
+            raise ValueError(
+                "All chunked local attention layers in the same KV cache group "
+                "must have the same chunk size.")
+        assert len(sliding_window) + len(attention_chunk_size) <= 1, (
+            "Model with both sliding window layers and chunked local attention "
+            "layers is not supported.")
+        return merged_spec
+
+
+@dataclass
+class ChunkedLocalAttentionSpec(AttentionSpec):
+    attention_chunk_size: int
+
+    @property
+    def type_id(self) -> str:
+        return (f"local_attention_{self.block_size}_{self.page_size_bytes}")
+
+    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
+        max_model_len = vllm_config.model_config.max_model_len
+        max_num_batched_tokens = (
+            vllm_config.scheduler_config.max_num_batched_tokens)
+
+        # During chunked prefill, we allocate KV cache for at most
+        # `self.attention_chunk_size` computed tokens plus the newly scheduled
+        # tokens. And we won't allocate KV cache for more than `max_model_len`
+        # tokens.
+        num_tokens = min(self.attention_chunk_size + max_num_batched_tokens,
+                         max_model_len)
+
+        return cdiv(num_tokens, self.block_size) * self.page_size_bytes
+
+    @classmethod
+    def merge(cls, specs: list[Self]) -> Self:
+        """
+        Merge a list of ChunkedLocalAttentionSpec objects into a single 
+        ChunkedLocalAttentionSpec object.
+        """
+        merged_spec = super().merge(specs)
+        attention_chunk_size = set(spec.attention_chunk_size for spec in specs
+                                   if spec.attention_chunk_size is not None)
+        if len(attention_chunk_size) == 0:
+            merged_spec.attention_chunk_size = 0
+        elif len(attention_chunk_size) == 1:
+            merged_spec.attention_chunk_size = attention_chunk_size.pop()
+        else:
+            raise ValueError(
+                "All chunked local attention layers in the same KV cache group "
+                "must have the same chunk size.")
         return merged_spec
 
 
