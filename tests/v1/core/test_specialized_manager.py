@@ -4,10 +4,10 @@
 import torch
 
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_utils import (BlockHash, BlockHashWithGroupId,
-                                         KVCacheBlock)
+from vllm.v1.core.kv_cache_utils import BlockHashWithGroupId, KVCacheBlock
 from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 from vllm.v1.kv_cache_interface import SlidingWindowSpec
+from vllm.v1.request import BlockHash
 
 
 def get_sliding_window_manager(sliding_window_spec, block_pool):
