@@ -21,8 +21,9 @@ import zmq.asyncio
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+import vllm.envs as envs
 from vllm.utils import (get_open_zmq_inproc_path, make_zmq_socket,
-                        zmq_socket_ctx)
+                        set_default_torch_num_threads, zmq_socket_ctx)
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
                             EngineCoreRequestType, UtilityOutput)
 from vllm.v1.engine.coordinator import DPCoordinator
@@ -419,10 +420,12 @@ class MPClient(EngineCoreClient):
                 self.ctx, output_address, zmq.PULL)
 
             if client_addresses is None:
-                self._init_engines_direct(vllm_config, local_only,
-                                          local_start_index, input_address,
-                                          output_address, executor_class,
-                                          log_stats)
+                disable_omp = (envs.VLLM_WORKER_MULTIPROC_METHOD == "fork" and vllm_config.model_config.is_multimodal_model)
+                with set_default_torch_num_threads(1 if disable_omp else -1):
+                    self._init_engines_direct(vllm_config, local_only,
+                                              local_start_index, input_address,
+                                              output_address, executor_class,
+                                              log_stats)
                 coordinator = self.resources.coordinator
                 if coordinator:
                     self.stats_update_address = (
