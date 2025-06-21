@@ -359,9 +359,13 @@ class ModelOptFp8MoEMethod:
         use_grouped_topk: bool,
         topk_group: Optional[int] = None,
         num_expert_group: Optional[int] = None,
+        global_num_experts: int = -1,
+        expert_map: Optional[torch.Tensor] = None,
         num_fused_shared_experts: Optional[int] = None,
         custom_routing_function: Optional[Callable] = None,
         correction_bias: Optional[torch.Tensor] = None,
+        scoring_func: str = "softmax",
+        e_score_correction_bias: Optional[torch.Tensor] = None,
         activation: str = "silu",
         apply_router_weight_on_input: bool = False,
         inplace: bool = True,
@@ -378,14 +382,14 @@ class ModelOptFp8MoEMethod:
             renormalize=renormalize,
             topk_group=topk_group,
             num_expert_group=num_expert_group,
-            num_fused_shared_experts=num_fused_shared_experts,
             custom_routing_function=custom_routing_function,
-            correction_bias=correction_bias,
-            routed_scaling_factor=routed_scaling_factor,
+            scoring_func=scoring_func,
+            e_score_correction_bias=e_score_correction_bias,
         )
-        from vllm.model_executor.layers.fused_moe.cutlass_moe import (
-            cutlass_moe_fp8)
-        return cutlass_moe_fp8(
+        # from vllm.model_executor.layers.fused_moe.cutlass_moe import (
+        #     cutlass_moe_fp8)
+        from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
+        return fused_experts(
             x,
             layer.w13_weight,
             layer.w2_weight,
@@ -395,11 +399,13 @@ class ModelOptFp8MoEMethod:
             activation=activation,
             use_fp8_w8a8=True,
             per_channel_quant=False,  # ModelOpt uses per-tensor quantization
+            global_num_experts=global_num_experts,
+            expert_map=expert_map,
             w1_scale=layer.w13_weight_scale,
             w2_scale=layer.w2_weight_scale,
             a1_scale=layer.w13_input_scale,
             a2_scale=layer.w2_input_scale,
-            no_combine=no_combine,
+            apply_router_weight_on_input=apply_router_weight_on_input,
         )
 
 class ModelOptNvFp4Config(QuantizationConfig):
