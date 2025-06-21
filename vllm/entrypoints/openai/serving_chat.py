@@ -238,6 +238,7 @@ class OpenAIServingChat(OpenAIServing):
                         request_id=request_id,
                         params=sampling_params,
                         lora_request=lora_request,
+                        trace_headers=trace_headers,
                     )
                 else:
                     generator = self.engine_client.generate(
