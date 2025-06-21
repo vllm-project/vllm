@@ -12,6 +12,7 @@ import os
 import signal
 import socket
 import tempfile
+import threading
 import uuid
 from argparse import Namespace
 from collections.abc import AsyncIterator
@@ -109,6 +110,24 @@ prometheus_multiproc_dir: tempfile.TemporaryDirectory
 logger = init_logger('vllm.entrypoints.openai.api_server')
 
 _running_tasks: set[asyncio.Task] = set()
+
+# Global counter for API-level failed requests
+_api_failed_requests_counter = 0
+_api_failed_requests_lock = threading.Lock()
+
+
+def increment_api_failed_requests():
+    """Thread-safe increment of the API-level failed requests counter."""
+    global _api_failed_requests_counter
+    with _api_failed_requests_lock:
+        _api_failed_requests_counter += 1
+
+
+def get_api_failed_requests_count():
+    """Thread-safe getter for the API-level failed requests counter."""
+    global _api_failed_requests_counter
+    with _api_failed_requests_lock:
+        return _api_failed_requests_counter
 
 
 @asynccontextmanager
@@ -1037,6 +1056,8 @@ def build_app(args: Namespace) -> FastAPI:
 
     @app.exception_handler(HTTPException)
     async def http_exception_handler(_: Request, exc: HTTPException):
+        # Track API-level failed requests
+        increment_api_failed_requests()
         err = ErrorResponse(message=exc.detail,
                             type=HTTPStatus(exc.status_code).phrase,
                             code=exc.status_code)
@@ -1045,6 +1066,8 @@ def build_app(args: Namespace) -> FastAPI:
     @app.exception_handler(RequestValidationError)
     async def validation_exception_handler(_: Request,
                                            exc: RequestValidationError):
+        # Track API-level failed requests
+        increment_api_failed_requests()
         exc_str = str(exc)
         errors_str = str(exc.errors())
 
