@@ -29,9 +29,14 @@ def deep_gemm_block_shape() -> list[int]:
     return [block, block]
 
 
-def _valid_deep_gemm_shape(M: int, N: int, K: int):
+def _valid_deep_gemm_weight_shape(N: int, K: int):
     align = deep_gemm_block_shape()[0]
-    return align <= M and N % align == 0 and K % align == 0
+    return N % align == 0 and K % align == 0
+
+
+def _valid_deep_gemm_num_tokens(M: int):
+    align = deep_gemm_block_shape()[0]
+    return align <= M
 
 
 def _valid_deep_gemm(hidden_states: torch.Tensor, w1: torch.Tensor,
@@ -47,8 +52,13 @@ def _valid_deep_gemm(hidden_states: torch.Tensor, w1: torch.Tensor,
 
     M = hidden_states.size(0)
     _, K, N = w2.size()
-    if not _valid_deep_gemm_shape(M, N, K):
-        logger.debug("DeepGemm disabled: unalinged problem size.")
+    if not _valid_deep_gemm_num_tokens(M):
+        # We don't log in this case as it's too spammy.
+        return False
+
+    if not _valid_deep_gemm_weight_shape(N, K):
+        logger.debug("DeepGemm disabled: unaligned weight shape: %s by %s.", N,
+                     K)
         return False
 
     if (w1.dtype != torch.float8_e4m3fn or w2.dtype != torch.float8_e4m3fn):
