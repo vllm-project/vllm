@@ -1476,10 +1476,10 @@ class MRotaryEmbedding(RotaryEmbedding):
                                           context_len: int,
                                           num_new_tokens: int):
 
-        for dim in range(3):
-            for idx in range(num_new_tokens):
-                out[dim, out_offset +
-                    idx] = mrope_position_delta + context_len + idx
+        values = np.arange(mrope_position_delta + context_len,
+                           mrope_position_delta + context_len + num_new_tokens,
+                           dtype=out.dtype)
+        out[:, out_offset:out_offset + num_new_tokens] = values
 
     @classmethod
     def omni_get_updates_use_audio_in_video(
