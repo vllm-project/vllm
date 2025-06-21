@@ -190,8 +190,7 @@ class OpenAIServingChat(OpenAIServing):
                         "with tool_choice='none'. To adopt the new behavior "
                         "now, use --expand-tools-even-if-tool-choice-none. "
                         "To suppress this warning, either remove tools from "
-                        "the request or set tool_choice to a different value."
-                    )
+                        "the request or set tool_choice to a different value.")
                 tool_dicts = None
             else:
                 tool_dicts = [tool.model_dump() for tool in request.tools]
