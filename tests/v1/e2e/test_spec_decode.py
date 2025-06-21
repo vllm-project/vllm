@@ -13,6 +13,7 @@ TP8_REQUIRED_MODELS = [
     "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
 ]
 
+
 @pytest.fixture
 def test_prompts():
     prompt_types = ["repeat", "sentence"]

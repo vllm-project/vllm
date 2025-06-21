@@ -20,7 +20,8 @@ llama4_model_dir = "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8"
 llama4_eagle_dir = "ronaldbxu/EAGLE-Llama-4-Maverick-17B-128E-Instruct"
 
 
-def _create_proposer(method: str, model_dir: str, draft_model_dir: str, k: int) -> EagleProposer:
+def _create_proposer(method: str, model_dir: str, draft_model_dir: str, 
+                     k: int) -> EagleProposer:
     model_config = ModelConfig(model=model_dir,
                                task="generate",
                                max_model_len=100,
@@ -219,7 +220,7 @@ def test_propose(num_speculative_tokens, model_and_draft_model):
     vocab_size = 100
 
     # Create proposer first so we can use its actual hidden_size
-    proposer = _create_proposer("eagle", model_dir, draft_model_dir, 
+    proposer = _create_proposer("eagle", model_dir, draft_model_dir,
                                 num_speculative_tokens)
     # Get the hidden_size from the proposer to ensure consistency
     hidden_size = proposer.hidden_size
