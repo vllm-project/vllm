@@ -423,6 +423,7 @@ def fused_moe_kernel(
                 a_scale = tl.load(a_scale_ptrs + offs_ks * stride_ask,
                                   mask=token_mask,
                                   other=0.0)
+                # TODO: shouldn't this use offs_ks = use k_start // group_n?
                 b_scale = tl.load(b_scale_ptrs + offs_ks * stride_bsk)
 
                 accumulator += tl.dot(a, b) * a_scale[:,
@@ -840,6 +841,16 @@ def try_get_optimal_moe_config(
             # Else use the default config
             config = get_default_config(M, E, N, w1_shape[2], top_k, dtype,
                                         is_marlin, block_shape)
+    # When group scaling is in use, BLOCK_SIZE_K may not exceed either
+    # of the two block shape dimensions.
+    # That's because fused_moe_kernel executes tl.dot on arrays of size
+    # BLOCK_SIZE_K, then multiplies the result by the product of 2 scales.
+    # So, the entire BLOCK_SIZE_K worth of either argument must use the
+    # same scale factor.
+    if ("BLOCK_SIZE_K" in config) and (block_shape is not None):
+        BLOCK_SIZE_K = config["BLOCK_SIZE_K"]
+        BLOCK_SIZE_K = min(BLOCK_SIZE_K, min(block_shape[0], block_shape[1]))
+        config["BLOCK_SIZE_K"] = BLOCK_SIZE_K
     return config
 
 
