@@ -949,7 +949,7 @@ def cutlass_fp4_moe_mm(a_tensors: torch.Tensor, b_tensors: torch.Tensor,
                        expert_offsets: torch.Tensor, sf_offsets: torch.Tensor,
                        out_dtype: torch.dtype, device: torch.device):
     """
-    An FP4 Blockscaled Group Gemm that takes in  a_tensors, b_tensors and runs 
+    An FP4 Blockscaled Group Gemm that takes in a_tensors, b_tensors and runs 
     the gemms for each combination based on the specified problem sizes.
 
     This is used as the MoE gemm during NVFP4 Quantized FusedMoE forward.
@@ -960,7 +960,7 @@ def cutlass_fp4_moe_mm(a_tensors: torch.Tensor, b_tensors: torch.Tensor,
                     each expert begins its computation. The number of tokens 
                     computed with expert E is expert_offsets[E + 1] - 
                     expert_offsets[E] And the sf_size per expert is 
-                    sf_offset[E+1] - sf_offset[E]
+                    sf_offsets[E+1] - sf_offsets[E]
     - problem_sizes: MxNxK sizes of each expert's multiplication in two grouped
                      MMs used in the fused MoE operation.
     """

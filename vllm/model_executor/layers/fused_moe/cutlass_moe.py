@@ -399,7 +399,7 @@ def cutlass_moe_fp4(a: torch.Tensor, a1_gscale: torch.Tensor,
     w2_blockscale: [e, k, n // block_size], dtype: float8_e4m3
     
     topk_weights: [m, topk] dtype: float8
-    topk_ids: [m, topk] dtype: float8
+    topk_ids: [m, topk] dtype: int32/int64
     
     m, n, k: Unquantized weight shapes, dtype: int
     e: number of experts, dtype: int
