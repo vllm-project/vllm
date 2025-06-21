@@ -2,9 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import argparse
+import datetime
+import json
 import os
 import signal
+import subprocess
 import sys
+import time
+import uuid
 
 import uvloop
 import zmq
@@ -49,7 +54,9 @@ class ServeSubcommand(CLISubcommand):
         if hasattr(args, 'model_tag') and args.model_tag is not None:
             args.model = args.model_tag
 
-        if args.headless or args.api_server_count < 1:
+        if getattr(args, "detach", False):
+            run_detached(args)
+        elif args.headless or args.api_server_count < 1:
             run_headless(args)
         elif args.api_server_count > 1:
             run_multi_api_server(args)
@@ -98,6 +105,30 @@ class ServeSubcommand(CLISubcommand):
             help="Read CLI options from a config file. "
             "Must be a YAML with the following options: "
             "https://docs.vllm.ai/en/latest/configuration/serve_args.html")
+        serve_parser.add_argument(
+            "-d",
+            "--detach",
+            action="store_true",
+            help="Run the vLLM server in detached mode (background).")
+        serve_parser.add_argument(
+            "-t",
+            "--timeout",
+            type=int,
+            default=60,
+            help="Timeout (in seconds) to wait for server "
+            "startup when using --detach.")
+        serve_parser.add_argument(
+            "--log-dir",
+            type=str,
+            default="/var/log/vllm",
+            help="Directory to store vLLM log files (only with -d). "
+            "Fallback to ~/.vllm/logs if no permission.")
+        serve_parser.add_argument(
+            "--pid-dir",
+            type=str,
+            default="/var/run/vllm",
+            help="Directory to store PID files (only with -d). "
+            "Fallback to ~/.vllm/pids if no permission.")
 
         serve_parser = make_arg_parser(serve_parser)
         show_filtered_argument_or_group_from_help(serve_parser, "serve")
@@ -325,3 +356,139 @@ def run_api_server_worker_proc(listen_address,
     uvloop.run(
         run_server_worker(listen_address, sock, args, client_config,
                           **uvicorn_kwargs))
+
+
+def wait_until_server_ready(log_path: str, timeout: int):
+    success_line = "Application startup complete"
+    start_time = time.time()
+
+    try:
+        with open(log_path) as log_fp:
+            while time.time() - start_time < timeout:
+                line = log_fp.readline()
+                if line:
+                    if success_line in line:
+                        print("[✔] Server startup confirmed.")
+                        return True
+                else:
+                    time.sleep(0.1)
+    except FileNotFoundError:
+        return False
+
+    return False
+
+
+def ensure_writable_dir(preferred_path: str, fallback_path: str):
+    try:
+        os.makedirs(preferred_path, exist_ok=True)
+        testfile = os.path.join(preferred_path, ".write_test")
+        with open(testfile, "w") as f:
+            f.write("ok")
+        os.remove(testfile)
+        return preferred_path
+    except (PermissionError, OSError):
+        print(f"[!] Cannot write to {preferred_path}. "
+              f"Falling back to {fallback_path}")
+        os.makedirs(fallback_path, exist_ok=True)
+        return fallback_path
+
+
+def run_detached(args: argparse.Namespace):
+    fallback_base = os.path.expanduser("~/.vllm")
+    log_dir = ensure_writable_dir(args.log_dir,
+                                  os.path.join(fallback_base, "logs"))
+    pid_dir = ensure_writable_dir(args.pid_dir,
+                                  os.path.join(fallback_base, "pids"))
+    registry_dir = fallback_base
+
+    os.makedirs(registry_dir, exist_ok=True)
+
+    instance_id = str(uuid.uuid4())[:8]
+
+    # Build command
+    cmd = ["vllm", "serve"]
+    filtered_args = [
+        arg for arg in sys.argv[2:] if arg not in ("-d", "--detach")
+    ]
+    cmd += filtered_args
+    full_cmd_str = " ".join(cmd)
+
+    log_file = os.path.join(log_dir, f"{instance_id}.log")
+    pid_file = os.path.join(pid_dir, f"{instance_id}.pid")
+    process_list_file = os.path.join(registry_dir, "vllm_processes.json")
+
+    # Start process
+    with open(log_file, "w") as log:
+        process = subprocess.Popen(
+            cmd,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            bufsize=1,  # Line-buffered for real-time output
+        )
+
+    # Wait for confirmation
+    print("Waiting for vLLM server to start...")
+    ready = wait_until_server_ready(log_file, timeout=args.timeout)
+
+    if process.poll() is not None:
+        print(
+            "[✗] vLLM process exited unexpectedly before confirming startup.")
+        return
+
+    pid = process.pid
+    if not ready:
+        if process.poll() is None:
+            # Process still alive, but server not ready: auto-terminate
+            print("[✗] Server not ready within timeout. "
+                  "Terminating the process...")
+
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+                print("Process terminated with SIGTERM.")
+            except subprocess.TimeoutExpired:
+                print("Process did not terminate. Sending SIGKILL...")
+                process.kill()
+                print("Process killed with SIGKILL.")
+
+            print(f"Log file: {log_file}")
+            print("Hint: Try increasing --timeout "
+                  "if the model takes long to load.")
+            return
+        else:
+            # Process already exited, no need to kill
+            print("[✗] vLLM process exited before confirming startup.")
+            print(f"Log file: {log_file}")
+            return
+
+    # Load existing process list
+    if os.path.exists(process_list_file):
+        with open(process_list_file) as f:
+            process_list = json.load(f)
+    else:
+        process_list = []
+
+    # Add new record
+    new_record = {
+        "instance_id": instance_id,
+        "pid": pid,
+        "status": "Running",
+        "time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "log": log_file,
+        "cmd": full_cmd_str,
+    }
+
+    process_list.append(new_record)
+
+    # Save
+    with open(process_list_file, "w") as f:
+        json.dump(process_list, f, indent=2)
+
+    with open(pid_file, "w") as f:
+        f.write(str(pid))
+
+    print("[✔] vLLM server started in detached mode.")
+    print(f"Running detached: {full_cmd_str}")
+    print(f"(instance_id: {instance_id} pid: {pid}).")
+    print(f"Logs: {log_file}")
