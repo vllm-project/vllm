@@ -308,6 +308,9 @@ class _AsyncLLMEngine(LLMEngine):
                 finished_requests_ids = self.scheduler[
                     virtual_engine].get_and_reset_finished_requests_ids()
 
+                finished_requests_ids += self.scheduler[
+                    virtual_engine].get_async_stopped_request_ids()
+
             # Maybe switch from async mode to sync mode
             if not allow_async_output_proc and len(ctx.output_queue) > 0:
                 self._process_model_outputs(ctx=ctx)
