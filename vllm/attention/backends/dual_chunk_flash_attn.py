@@ -1230,7 +1230,6 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
                                       device=query_states.device),
             max_seqlen_k=max_seqlen_k,
             causal=causal,
-            block_table=block_table.unsqueeze(0),
             return_softmax_lse=True,
         )
         softmax_lse = softmax_lse.view(q_len, q_heads, 1).transpose(0,
