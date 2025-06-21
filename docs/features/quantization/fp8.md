@@ -58,6 +58,9 @@ For FP8 quantization, we can recover accuracy with simple RTN quantization. We r
 
 Since simple RTN does not require data for weight quantization and the activations are quantized dynamically, we do not need any calibration data for this quantization flow.
 
+<details>
+<summary>Code</summary>
+
 ```python
 from llmcompressor.transformers import oneshot
 from llmcompressor.modifiers.quantization import QuantizationModifier
@@ -74,6 +77,8 @@ SAVE_DIR = MODEL_ID.split("/")[1] + "-FP8-Dynamic"
 model.save_pretrained(SAVE_DIR)
 tokenizer.save_pretrained(SAVE_DIR)
 ```
+
+</details>
 
 ### 3. Evaluating Accuracy
 

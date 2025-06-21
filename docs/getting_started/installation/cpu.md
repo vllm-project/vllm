@@ -76,6 +76,9 @@ Currently, there are no pre-built CPU wheels.
 
 ### Build image from source
 
+<details>
+<summary>Commands</summary>
+
 ```console
 $ docker build -f docker/Dockerfile.cpu --tag vllm-cpu-env --target vllm-openai .
 
@@ -91,6 +94,8 @@ $ docker run --rm \
              --dtype=bfloat16 \
              other vLLM OpenAI server arguments
 ```
+
+</details>
 
 !!! tip
     For ARM or Apple silicon, use `docker/Dockerfile.arm`
@@ -144,6 +149,9 @@ vllm serve facebook/opt-125m
 
 - If using vLLM CPU backend on a machine with hyper-threading, it is recommended to bind only one OpenMP thread on each physical CPU core using `VLLM_CPU_OMP_THREADS_BIND` or using auto thread binding feature by default. On a hyper-threading enabled platform with 16 logical CPU cores / 8 physical CPU cores:
 
+<details>
+<summary>Commands</summary>
+
 ```console
 $ lscpu -e # check the mapping between logical CPU cores and physical CPU cores
 
@@ -170,6 +178,8 @@ CPU NODE SOCKET CORE L1d:L1i:L2:L3 ONLINE    MAXMHZ   MINMHZ      MHZ
 $ export VLLM_CPU_OMP_THREADS_BIND=0-7
 $ python examples/offline_inference/basic/basic.py
 ```
+
+</details>
 
 - If using vLLM CPU backend on a multi-socket machine with NUMA, be aware to set CPU cores using `VLLM_CPU_OMP_THREADS_BIND` to avoid cross NUMA node memory access.
 

@@ -42,6 +42,9 @@ The Quark quantization process can be listed for 5 steps as below:
 Quark uses [Transformers](https://huggingface.co/docs/transformers/en/index)
 to fetch model and tokenizer.
 
+<details>
+<summary>Code</summary>
+
 ```python
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
@@ -57,11 +60,16 @@ tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, model_max_length=MAX_SEQ_LEN
 tokenizer.pad_token = tokenizer.eos_token
 ```
 
+</details>
+
 ### 2. Prepare the Calibration Dataloader
 
 Quark uses the [PyTorch Dataloader](https://pytorch.org/tutorials/beginner/basics/data_tutorial.html)
 to load calibration data. For more details about how to use calibration datasets efficiently, please refer
 to [Adding Calibration Datasets](https://quark.docs.amd.com/latest/pytorch/calibration_datasets.html).
+
+<details>
+<summary>Code</summary>
 
 ```python
 from datasets import load_dataset
@@ -80,6 +88,8 @@ calib_dataloader = DataLoader(tokenized_outputs['input_ids'],
     batch_size=BATCH_SIZE, drop_last=True)
 ```
 
+</details>
+
 ### 3. Set the Quantization Configuration
 
 We need to set the quantization configuration, you can check
@@ -93,6 +103,9 @@ kv-cache and the quantization algorithm is AutoSmoothQuant.
     under the directory `examples/torch/language_modeling/llm_ptq/models`. For example,
     AutoSmoothQuant config file for Llama is
     `examples/torch/language_modeling/llm_ptq/models/llama/autosmoothquant_config.json`.
+
+<details>
+<summary>Code</summary>
 
 ```python
 from quark.torch.quantization import (Config, QuantizationConfig,
@@ -131,6 +144,8 @@ quant_config = Config(
     algo_config=algo_config)
 ```
 
+</details>
+
 ### 4. Quantize the Model and Export
 
 Then we can apply the quantization. After quantizing, we need to freeze the
@@ -138,6 +153,9 @@ quantized model first before exporting. Note that we need to export model with f
 HuggingFace `safetensors`, you can refer to
 [HuggingFace format exporting](https://quark.docs.amd.com/latest/pytorch/export/quark_export_hf.html)
 for more exporting format details.
+
+<details>
+<summary>Code</summary>
 
 ```python
 import torch
@@ -164,9 +182,14 @@ with torch.no_grad():
         quant_config=quant_config, tokenizer=tokenizer)
 ```
 
+</details>
+
 ### 5. Evaluation in vLLM
 
 Now, you can load and run the Quark quantized model directly through the LLM entrypoint:
+
+<details>
+<summary>Code</summary>
 
 ```python
 from vllm import LLM, SamplingParams
@@ -196,6 +219,8 @@ for output in outputs:
     print(f"Output:    {generated_text!r}")
     print("-" * 60)
 ```
+
+</details>
 
 Or, you can use `lm_eval` to evaluate accuracy:
 

@@ -34,6 +34,9 @@ vllm serve qwen/Qwen1.5-0.5B-Chat
 
 - Call it with litellm:
 
+<details>
+<summary>Code</summary>
+
 ```python
 import litellm 
 
@@ -50,6 +53,8 @@ response = litellm.completion(
 print(response)
 ```
 
+</details>
+
 ### Embeddings
 
 - Start the vLLM server with the supported embedding model, e.g.
@@ -59,6 +64,9 @@ vllm serve BAAI/bge-base-en-v1.5
 ```
 
 - Call it with litellm:
+
+<details>
+<summary>Code</summary>
 
 ```python
 from litellm import embedding   
@@ -72,5 +80,7 @@ embedding = embedding(model="hosted_vllm/BAAI/bge-base-en-v1.5", input=["Hello w
 
 print(embedding)
 ```
+
+</details>
 
 For details, see the tutorial [Using vLLM in LiteLLM](https://docs.litellm.ai/docs/providers/vllm).

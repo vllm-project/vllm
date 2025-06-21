@@ -147,6 +147,9 @@ curl http://localhost:8000/v1/completions \
 
 Since this server is compatible with OpenAI API, you can use it as a drop-in replacement for any applications using OpenAI API. For example, another way to query the server is via the `openai` Python package:
 
+<details>
+<summary>Code</summary>
+
 ```python
 from openai import OpenAI
 
@@ -161,6 +164,8 @@ completion = client.completions.create(model="Qwen/Qwen2.5-1.5B-Instruct",
                                       prompt="San Francisco is a")
 print("Completion result:", completion)
 ```
+
+</details>
 
 A more detailed client example can be found here: <gh-file:examples/online_serving/openai_completion_client.py>
 
@@ -184,6 +189,9 @@ curl http://localhost:8000/v1/chat/completions \
 
 Alternatively, you can use the `openai` Python package:
 
+<details>
+<summary>Code</summary>
+
 ```python
 from openai import OpenAI
 # Set OpenAI's API key and API base to use vLLM's API server.
@@ -204,6 +212,8 @@ chat_response = client.chat.completions.create(
 )
 print("Chat response:", chat_response)
 ```
+
+</details>
 
 ## On Attention Backends
 

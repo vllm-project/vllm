@@ -53,6 +53,9 @@ When quantizing weights to INT4, you need sample data to estimate the weight upd
 It's best to use calibration data that closely matches your deployment data.
 For a general-purpose instruction-tuned model, you can use a dataset like `ultrachat`:
 
+<details>
+<summary>Code</summary>
+
 ```python
 from datasets import load_dataset
 
@@ -72,9 +75,14 @@ def tokenize(sample):
 ds = ds.map(tokenize, remove_columns=ds.column_names)
 ```
 
+</details>
+
 ### 3. Applying Quantization
 
 Now, apply the quantization algorithms:
+
+<details>
+<summary>Code</summary>
 
 ```python
 from llmcompressor.transformers import oneshot
@@ -98,6 +106,8 @@ SAVE_DIR = MODEL_ID.split("/")[1] + "-W4A16-G128"
 model.save_pretrained(SAVE_DIR, save_compressed=True)
 tokenizer.save_pretrained(SAVE_DIR)
 ```
+
+</details>
 
 This process creates a W4A16 model with weights quantized to 4-bit integers.
 
@@ -137,6 +147,9 @@ $ lm_eval --model vllm \
 
 The following is an example of an expanded quantization recipe you can tune to your own use case:
 
+<details>
+<summary>Code</summary>
+
 ```python
 from compressed_tensors.quantization import (
     QuantizationArgs,
@@ -165,6 +178,8 @@ recipe = GPTQModifier(
     dampening_frac=0.01
 )
 ```
+
+</details>
 
 ## Troubleshooting and Support
 

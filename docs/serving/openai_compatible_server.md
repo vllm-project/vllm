@@ -15,6 +15,9 @@ vllm serve NousResearch/Meta-Llama-3-8B-Instruct \
 
 To call the server, in your preferred text editor, create a script that uses an HTTP client. Include any messages that you want to send to the model. Then run that script. Below is an example script using the [official OpenAI Python client](https://github.com/openai/openai-python).
 
+<details>
+<summary>Code</summary>
+
 ```python
 from openai import OpenAI
 client = OpenAI(
@@ -31,6 +34,8 @@ completion = client.chat.completions.create(
 
 print(completion.choices[0].message)
 ```
+
+</details>
 
 !!! tip
     vLLM supports some parameters that are not supported by OpenAI, `top_k` for example.
@@ -147,6 +152,9 @@ with `--enable-request-id-headers`.
 > rather than within the vLLM layer for this reason.
 > See [this PR](https://github.com/vllm-project/vllm/pull/11529) for more details.
 
+<details>
+<summary>Code</summary>
+
 ```python
 completion = client.chat.completions.create(
     model="NousResearch/Meta-Llama-3-8B-Instruct",
@@ -168,6 +176,8 @@ completion = client.completions.create(
 )
 print(completion._request_id)
 ```
+
+</details>
 
 ## API Reference
 
@@ -259,6 +269,9 @@ and passing a list of `messages` in the request. Refer to the examples below for
 
     Since the request schema is not defined by OpenAI client, we post a request to the server using the lower-level `requests` library:
 
+    <details>
+    <summary>Code</summary>
+
     ```python
     import requests
 
@@ -282,6 +295,8 @@ and passing a list of `messages` in the request. Refer to the examples below for
     response_json = response.json()
     print("Embedding output:", response_json["data"][0]["embedding"])
     ```
+
+    </details>
 
 === "DSE-Qwen2-MRL"
 
@@ -387,8 +402,6 @@ Code example: <gh-file:examples/online_serving/openai_classification_client.py>
 
 You can classify multiple texts by passing an array of strings:
 
-Request:
-
 ```bash
 curl -v "http://127.0.0.1:8000/classify" \
   -H "Content-Type: application/json" \
@@ -401,7 +414,8 @@ curl -v "http://127.0.0.1:8000/classify" \
   }'
 ```
 
-Response:
+<details>
+<summary>Response</summary>
 
 ```bash
 {
@@ -438,9 +452,9 @@ Response:
 }
 ```
 
-You can also pass a string directly to the `input` field:
+</details>
 
-Request:
+You can also pass a string directly to the `input` field:
 
 ```bash
 curl -v "http://127.0.0.1:8000/classify" \
@@ -451,7 +465,8 @@ curl -v "http://127.0.0.1:8000/classify" \
   }'
 ```
 
-Response:
+<details>
+<summary>Response</summary>
 
 ```bash
 {
@@ -478,6 +493,8 @@ Response:
   }
 }
 ```
+
+</details>
 
 #### Extra parameters
 
@@ -508,8 +525,6 @@ Code example: <gh-file:examples/online_serving/openai_cross_encoder_score.py>
 
 You can pass a string to both `text_1` and `text_2`, forming a single sentence pair.
 
-Request:
-
 ```bash
 curl -X 'POST' \
   'http://127.0.0.1:8000/score' \
@@ -523,7 +538,8 @@ curl -X 'POST' \
 }'
 ```
 
-Response:
+<details>
+<summary>Response</summary>
 
 ```bash
 {
@@ -542,13 +558,16 @@ Response:
 }
 ```
 
+</details>
+
 #### Batch inference
 
 You can pass a string to `text_1` and a list to `text_2`, forming multiple sentence pairs
 where each pair is built from `text_1` and a string in `text_2`.
 The total number of pairs is `len(text_2)`.
 
-Request:
+<details>
+<summary>Request</summary>
 
 ```bash
 curl -X 'POST' \
@@ -565,7 +584,10 @@ curl -X 'POST' \
 }'
 ```
 
-Response:
+</details>
+
+<details>
+<summary>Response</summary>
 
 ```bash
 {
@@ -589,11 +611,14 @@ Response:
 }
 ```
 
+</details>
+
 You can pass a list to both `text_1` and `text_2`, forming multiple sentence pairs
 where each pair is built from a string in `text_1` and the corresponding string in `text_2` (similar to `zip()`).
 The total number of pairs is `len(text_2)`.
 
-Request:
+<details>
+<summary>Request</summary>
 
 ```bash
 curl -X 'POST' \
@@ -614,7 +639,10 @@ curl -X 'POST' \
 }'
 ```
 
-Response:
+</details>
+
+<details>
+<summary>Response</summary>
 
 ```bash
 {
@@ -637,6 +665,8 @@ Response:
   "usage": {}
 }
 ```
+
+</details>
 
 #### Extra parameters
 
@@ -675,7 +705,8 @@ Code example: <gh-file:examples/online_serving/jinaai_rerank_client.py>
 Note that the `top_n` request parameter is optional and will default to the length of the `documents` field.
 Result documents will be sorted by relevance, and the `index` property can be used to determine original order.
 
-Request:
+<details>
+<summary>Request</summary>
 
 ```bash
 curl -X 'POST' \
@@ -693,7 +724,10 @@ curl -X 'POST' \
 }'
 ```
 
-Response:
+</details>
+
+<details>
+<summary>Response</summary>
 
 ```bash
 {
@@ -720,6 +754,8 @@ Response:
   ]
 }
 ```
+
+</details>
 
 #### Extra parameters
 

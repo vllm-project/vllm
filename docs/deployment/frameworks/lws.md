@@ -17,6 +17,9 @@ vLLM can be deployed with [LWS](https://github.com/kubernetes-sigs/lws) on Kuber
 
 Deploy the following yaml file `lws.yaml`
 
+<details>
+<summary>Config</summary>
+
 ```yaml
 apiVersion: leaderworkerset.x-k8s.io/v1
 kind: LeaderWorkerSet
@@ -111,6 +114,8 @@ spec:
   type: ClusterIP
 ```
 
+</details>
+
 ```bash
 kubectl apply -f lws.yaml
 ```
@@ -175,6 +180,9 @@ curl http://localhost:8080/v1/completions \
 
 The output should be similar to the following
 
+<details>
+<summary>Output</summary>
+
 ```text
 {
   "id": "cmpl-1bb34faba88b43f9862cfbfb2200949d",
@@ -197,3 +205,5 @@ The output should be similar to the following
   }
 }
 ```
+
+</details>

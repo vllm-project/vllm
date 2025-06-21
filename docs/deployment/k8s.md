@@ -29,6 +29,9 @@ Alternatively, you can deploy vLLM to Kubernetes using any of the following:
 
 First, create a Kubernetes PVC and Secret for downloading and storing Hugging Face model:
 
+<details>
+<summary>Config</summary>
+
 ```bash
 cat <<EOF |kubectl apply -f -
 apiVersion: v1
@@ -53,7 +56,12 @@ data:
 EOF
 ```
 
+</details>
+
 Next, start the vLLM server as a Kubernetes Deployment and Service:
+
+<details>
+<summary>Config</summary>
 
 ```bash
 cat <<EOF |kubectl apply -f -
@@ -109,6 +117,8 @@ spec:
 EOF
 ```
 
+</details>
+
 We can verify that the vLLM server has started successfully via the logs (this might take a couple of minutes to download the model):
 
 ```console
@@ -128,6 +138,9 @@ INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
 
       PVC is used to store the model cache and it is optional, you can use hostPath or other storage options
 
+      <details>
+      <summary>Config</summary>
+
       ```yaml
       apiVersion: v1
       kind: PersistentVolumeClaim
@@ -144,6 +157,8 @@ INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
         volumeMode: Filesystem
       ```
 
+      </details>
+
       Secret is optional and only required for accessing gated models, you can skip this step if you are not using gated models
 
       ```yaml
@@ -156,12 +171,15 @@ INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
       stringData:
         token: "REPLACE_WITH_TOKEN"
       ```
-
+  
       Next to create the deployment file for vLLM to run the model server. The following example deploys the `Mistral-7B-Instruct-v0.3` model.
 
       Here are two examples for using NVIDIA GPU and AMD GPU.
 
       NVIDIA GPU:
+
+      <details>
+      <summary>Config</summary>
 
       ```yaml
       apiVersion: apps/v1
@@ -233,9 +251,14 @@ INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
                 periodSeconds: 5
       ```
 
+      </details>
+
       AMD GPU:
 
       You can refer to the `deployment.yaml` below if using AMD ROCm GPU like MI300X.
+
+      <details>
+      <summary>Config</summary>
 
       ```yaml
       apiVersion: apps/v1
@@ -305,11 +328,16 @@ INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
                 mountPath: /dev/shm
       ```
 
+      </details>
+
       You can get the full example with steps and sample yaml files from <https://github.com/ROCm/k8s-device-plugin/tree/master/example/vllm-serve>.
 
 2. Create a Kubernetes Service for vLLM
 
       Next, create a Kubernetes Service file to expose the `mistral-7b` deployment:
+
+      <details>
+      <summary>Config</summary>
 
       ```yaml
       apiVersion: v1
@@ -329,6 +357,8 @@ INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
         sessionAffinity: None
         type: ClusterIP
       ```
+
+      </details>
 
 3. Deploy and Test
 

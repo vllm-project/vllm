@@ -10,6 +10,9 @@ The list of data collected by the latest version of vLLM can be found here: <gh-
 
 Here is an example as of v0.4.0:
 
+<details>
+<summary>Output</summary>
+
 ```json
 {
   "uuid": "fbe880e9-084d-4cab-a395-8984c50f1109",
@@ -40,6 +43,8 @@ Here is an example as of v0.4.0:
   "disable_custom_all_reduce": true
 }
 ```
+
+</details>
 
 You can preview the collected data by running the following command:
 

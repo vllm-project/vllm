@@ -20,6 +20,9 @@ To input multi-modal data, follow this schema in [vllm.inputs.PromptType][]:
 
 You can pass a single image to the `'image'` field of the multi-modal dictionary, as shown in the following examples:
 
+<details>
+<summary>Code</summary>
+
 ```python
 from vllm import LLM
 
@@ -62,9 +65,14 @@ for o in outputs:
     print(generated_text)
 ```
 
+</details>
+
 Full example: <gh-file:examples/offline_inference/vision_language.py>
 
 To substitute multiple images inside the same text prompt, you can pass in a list of images instead:
+
+<details>
+<summary>Code</summary>
 
 ```python
 from vllm import LLM
@@ -95,9 +103,14 @@ for o in outputs:
     print(generated_text)
 ```
 
+</details>
+
 Full example: <gh-file:examples/offline_inference/vision_language_multi_image.py>
 
 Multi-image input can be extended to perform video captioning. We show this with [Qwen2-VL](https://huggingface.co/Qwen/Qwen2-VL-2B-Instruct) as it supports videos:
+
+<details>
+<summary>Code</summary>
 
 ```python
 from vllm import LLM
@@ -126,6 +139,8 @@ for o in outputs:
     print(generated_text)
 ```
 
+</details>
+
 ### Video Inputs
 
 You can pass a list of NumPy arrays directly to the `'video'` field of the multi-modal dictionary
@@ -143,6 +158,9 @@ Full example: <gh-file:examples/offline_inference/audio_language.py>
 
 To input pre-computed embeddings belonging to a data type (i.e. image, video, or audio) directly to the language model,
 pass a tensor of shape `(num_items, feature_size, hidden_size of LM)` to the corresponding field of the multi-modal dictionary.
+
+<details>
+<summary>Code</summary>
 
 ```python
 from vllm import LLM
@@ -167,7 +185,12 @@ for o in outputs:
     print(generated_text)
 ```
 
+</details>
+
 For Qwen2-VL and MiniCPM-V, we accept additional parameters alongside the embeddings:
+
+<details>
+<summary>Code</summary>
 
 ```python
 # Construct the prompt based on your model
@@ -207,6 +230,8 @@ for o in outputs:
     print(generated_text)
 ```
 
+</details>
+
 ## Online Serving
 
 Our OpenAI-compatible server accepts multi-modal data via the [Chat Completions API](https://platform.openai.com/docs/api-reference/chat).
@@ -234,6 +259,9 @@ vllm serve microsoft/Phi-3.5-vision-instruct --task generate \
 ```
 
 Then, you can use the OpenAI client as follows:
+
+<details>
+<summary>Code</summary>
 
 ```python
 from openai import OpenAI
@@ -281,6 +309,8 @@ chat_response = client.chat.completions.create(
 print("Chat completion output:", chat_response.choices[0].message.content)
 ```
 
+</details>
+
 Full example: <gh-file:examples/online_serving/openai_chat_completion_client_for_multimodal.py>
 
 !!! tip
@@ -310,6 +340,9 @@ vllm serve llava-hf/llava-onevision-qwen2-0.5b-ov-hf --task generate --max-model
 ```
 
 Then, you can use the OpenAI client as follows:
+
+<details>
+<summary>Code</summary>
 
 ```python
 from openai import OpenAI
@@ -350,6 +383,8 @@ result = chat_completion_from_url.choices[0].message.content
 print("Chat completion output from image url:", result)
 ```
 
+</details>
+
 Full example: <gh-file:examples/online_serving/openai_chat_completion_client_for_multimodal.py>
 
 !!! note
@@ -372,6 +407,9 @@ vllm serve fixie-ai/ultravox-v0_5-llama-3_2-1b
 ```
 
 Then, you can use the OpenAI client as follows:
+
+<details>
+<summary>Code</summary>
 
 ```python
 import base64
@@ -425,7 +463,12 @@ result = chat_completion_from_base64.choices[0].message.content
 print("Chat completion output from input audio:", result)
 ```
 
+</details>
+
 Alternatively, you can pass `audio_url`, which is the audio counterpart of `image_url` for image input:
+
+<details>
+<summary>Code</summary>
 
 ```python
 chat_completion_from_url = client.chat.completions.create(
@@ -452,6 +495,8 @@ result = chat_completion_from_url.choices[0].message.content
 print("Chat completion output from audio url:", result)
 ```
 
+</details>
+
 Full example: <gh-file:examples/online_serving/openai_chat_completion_client_for_multimodal.py>
 
 !!! note
@@ -469,6 +514,9 @@ pass a tensor of shape to the corresponding field of the multi-modal dictionary.
 #### Image Embedding Inputs
 For image embeddings, you can pass the base64-encoded tensor to the `image_embeds` field.
 The following example demonstrates how to pass image embeddings to the OpenAI server:
+
+<details>
+<summary>Code</summary>
 
 ```python
 image_embedding = torch.load(...)
@@ -525,6 +573,8 @@ chat_completion = client.chat.completions.create(
     model=model,
 )
 ```
+
+</details>
 
 !!! note
     Only one message can contain `{"type": "image_embeds"}`.

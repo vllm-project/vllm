@@ -11,6 +11,9 @@ title: AutoGen
 
 - Setup [AutoGen](https://microsoft.github.io/autogen/0.2/docs/installation/) environment
 
+<details>
+<summary>Commands</summary>
+
 ```console
 pip install vllm
 
@@ -18,6 +21,8 @@ pip install vllm
 # AutoGen requires Python 3.10 or later.
 pip install -U "autogen-agentchat" "autogen-ext[openai]"
 ```
+
+</details>
 
 ## Deploy
 
@@ -29,6 +34,9 @@ python -m vllm.entrypoints.openai.api_server \
 ```
 
 - Call it with AutoGen:
+
+<details>
+<summary>Code</summary>
 
 ```python
 import asyncio
@@ -75,6 +83,8 @@ async def main() -> None:
 
 asyncio.run(main())
 ```
+
+</details>
 
 For details, see the tutorial:
 

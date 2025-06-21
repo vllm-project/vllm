@@ -57,6 +57,9 @@ By default, we optimize model inference using CUDA graphs which take up extra me
 
 You can adjust `compilation_config` to achieve a better balance between inference speed and memory usage:
 
+<details>
+<summary>Code</summary>
+
 ```python
 from vllm import LLM
 from vllm.config import CompilationConfig, CompilationLevel
@@ -70,6 +73,8 @@ llm = LLM(
     ),
 )
 ```
+
+</details>
 
 You can disable graph capturing completely via the `enforce_eager` flag:
 
@@ -127,6 +132,9 @@ reduce the size of the processed multi-modal inputs, which in turn saves memory.
 
 Here are some examples:
 
+<details>
+<summary>Code</summary>
+
 ```python
 from vllm import LLM
 
@@ -142,3 +150,5 @@ llm = LLM(model="OpenGVLab/InternVL2-2B",
               "max_dynamic_patch": 4,  # Default is 12
           })
 ```
+
+</details>

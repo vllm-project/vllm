@@ -15,6 +15,9 @@ vllm serve meta-llama/Llama-3.1-8B-Instruct \
 
 Next, make a request to the model that should result in it using the available tools:
 
+<details>
+<summary>Code</summary>
+
 ```python
 from openai import OpenAI
 import json
@@ -53,6 +56,8 @@ print(f"Function called: {tool_call.name}")
 print(f"Arguments: {tool_call.arguments}")
 print(f"Result: {get_weather(**json.loads(tool_call.arguments))}")
 ```
+
+</details>
 
 Example output:
 
@@ -301,6 +306,9 @@ A tool parser plugin is a Python file containing one or more ToolParser implemen
 
 Here is a summary of a plugin file:
 
+<details>
+<summary>Code</summary>
+
 ```python
 
 # import the required packages
@@ -344,6 +352,8 @@ class ExampleToolParser(ToolParser):
                                             content=text)
 
 ```
+
+</details>
 
 Then you can use this plugin in the command line like this.
 

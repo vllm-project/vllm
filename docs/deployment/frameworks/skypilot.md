@@ -24,6 +24,9 @@ sky check
 
 See the vLLM SkyPilot YAML for serving, [serving.yaml](https://github.com/skypilot-org/skypilot/blob/master/llm/vllm/serve.yaml).
 
+<details>
+<summary>Config</summary>
+
 ```yaml
 resources:
   accelerators: {L4, A10g, A10, L40, A40, A100, A100-80GB} # We can use cheaper accelerators for 8B model.
@@ -67,6 +70,8 @@ run: |
     --stop-token-ids 128009,128001
 ```
 
+</details>
+
 Start the serving the Llama-3 8B model on any of the candidate GPUs listed (L4, A10g, ...):
 
 ```console
@@ -93,6 +98,9 @@ HF_TOKEN="your-huggingface-token" \
 
 SkyPilot can scale up the service to multiple service replicas with built-in autoscaling, load-balancing and fault-tolerance. You can do it by adding a services section to the YAML file.
 
+<details>
+<summary>Config</summary>
+
 ```yaml
 service:
   replicas: 2
@@ -106,6 +114,8 @@ service:
         content: Hello! What is your name?
   max_completion_tokens: 1
 ```
+
+</details>
 
 <details>
 <summary>Click to see the full recipe YAML</summary>
@@ -170,8 +180,7 @@ Wait until the service is ready:
 watch -n10 sky serve status vllm
 ```
 
-<details>
-<summary>Example outputs:</summary>
+Example outputs:
 
 ```console
 Services
@@ -184,9 +193,10 @@ vllm          1   1        xx.yy.zz.121  18 mins ago  1x GCP([Spot]{'L4': 1})  R
 vllm          2   1        xx.yy.zz.245  18 mins ago  1x GCP([Spot]{'L4': 1})  READY   us-east4
 ```
 
-</details>
-
 After the service is READY, you can find a single endpoint for the service and access the service with the endpoint:
+
+<details>
+<summary>Commands</summary>
 
 ```console
 ENDPOINT=$(sky serve status --endpoint 8081 vllm)
@@ -207,6 +217,8 @@ curl -L http://$ENDPOINT/v1/chat/completions \
     "stop_token_ids": [128009,  128001]
   }'
 ```
+
+</details>
 
 To enable autoscaling, you could replace the `replicas` with the following configs in `service`:
 

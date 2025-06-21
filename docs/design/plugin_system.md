@@ -13,6 +13,9 @@ Plugins are user-registered code that vLLM executes. Given vLLM's architecture (
 
 vLLM's plugin system uses the standard Python `entry_points` mechanism. This mechanism allows developers to register functions in their Python packages for use by other packages. An example of a plugin:
 
+<details>
+<summary>Code</summary>
+
 ```python
 # inside `setup.py` file
 from setuptools import setup
@@ -35,6 +38,8 @@ def register():
             "vllm_add_dummy_model.my_llava:MyLlava",
         )
 ```
+
+</details>
 
 For more information on adding entry points to your package, please check the [official documentation](https://setuptools.pypa.io/en/latest/userguide/entry_point.html).
 

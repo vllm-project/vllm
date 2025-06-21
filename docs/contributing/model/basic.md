@@ -27,6 +27,9 @@ All vLLM modules within the model must include a `prefix` argument in their cons
 
 The initialization code should look like this:
 
+<details>
+<summary>Code</summary>
+
 ```python
 from torch import nn
 from vllm.config import VllmConfig
@@ -54,6 +57,8 @@ class MyModelForCausalLM(nn.Module):
         super().__init__()
         self.model = MyModel(vllm_config, prefix=f"{prefix}.model")
 ```
+
+</details>
 
 ### Computation Code
 

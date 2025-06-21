@@ -29,6 +29,9 @@ We can now submit the prompts and call `llm.generate` with the `lora_request` pa
 of `LoRARequest` is a human identifiable name, the second parameter is a globally unique ID for the adapter and
 the third parameter is the path to the LoRA adapter.
 
+<details>
+<summary>Code</summary>
+
 ```python
 sampling_params = SamplingParams(
     temperature=0,
@@ -47,6 +50,8 @@ outputs = llm.generate(
     lora_request=LoRARequest("sql_adapter", 1, sql_lora_path)
 )
 ```
+
+</details>
 
 Check out <gh-file:examples/offline_inference/multilora_inference.py> for an example of how to use LoRA adapters with the async engine and how to use more advanced configuration options.
 
@@ -68,6 +73,9 @@ The server entrypoint accepts all other LoRA configuration parameters (`max_lora
 etc.), which will apply to all forthcoming requests. Upon querying the `/models` endpoint, we should see our LoRA along
 with its base model (if `jq` is not installed, you can follow [this guide](https://jqlang.org/download/) to install it.):
 
+<details>
+<summary>Command</summary>
+
 ```bash
 curl localhost:8000/v1/models | jq .
 {
@@ -86,6 +94,8 @@ curl localhost:8000/v1/models | jq .
     ]
 }
 ```
+
+</details>
 
 Requests can specify the LoRA adapter as if it were any other model via the `model` request parameter. The requests will be
 processed according to the server-wide LoRA configuration (i.e. in parallel with base model requests, and potentially other
@@ -168,7 +178,8 @@ Alternatively, follow these example steps to implement your own plugin:
 
 1. Implement the LoRAResolver interface.
 
-    Example of a simple S3 LoRAResolver implementation:
+    <details>
+    <summary>Example of a simple S3 LoRAResolver implementation</summary>
 
     ```python
     import os
@@ -198,6 +209,8 @@ Alternatively, follow these example steps to implement your own plugin:
             )
             return lora_request
     ```
+
+    </details>
 
 2. Register `LoRAResolver` plugin.
 
@@ -234,6 +247,9 @@ The new format of `--lora-modules` is mainly to support the display of parent mo
 - The `parent` field of LoRA model `sql-lora` now links to its base model `meta-llama/Llama-2-7b-hf`. This correctly reflects the hierarchical relationship between the base model and the LoRA adapter.
 - The `root` field points to the artifact location of the lora adapter.
 
+<details>
+<summary>Command output</summary>
+
 ```bash
 $ curl http://localhost:8000/v1/models
 
@@ -269,3 +285,5 @@ $ curl http://localhost:8000/v1/models
     ]
 }
 ```
+
+</details>

@@ -99,6 +99,9 @@ You can view these profiles either as summaries in the CLI, using `nsys stats [p
 
 CLI example:
 
+<details>
+<summary>Command</summary>
+
 ```bash
 nsys stats report1.nsys-rep
 ...
@@ -117,6 +120,8 @@ nsys stats report1.nsys-rep
       0.7      167,083,069     18,880      8,849.7      2,240.0     1,471  2,499,996    101,436.1  void vllm::reshape_and_cache_flash_kernel<__nv_bfloat16, __nv_bfloat16, (vllm::Fp8KVCacheDataType)0…
 ... 
 ```
+
+</details>
 
 GUI example:
 

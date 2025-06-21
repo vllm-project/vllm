@@ -60,6 +60,9 @@ To identify the particular CUDA operation that causes the error, you can add `--
 
 If GPU/CPU communication cannot be established, you can use the following Python script and follow the instructions below to confirm whether the GPU/CPU communication is working correctly.
 
+<details>
+<summary>Code</summary>
+
 ```python
 # Test PyTorch NCCL
 import torch
@@ -123,6 +126,8 @@ dist.destroy_process_group(gloo_group)
 dist.destroy_process_group()
 ```
 
+</details>
+
 If you are testing with a single node, adjust `--nproc-per-node` to the number of GPUs you want to use:
 
 ```console
@@ -165,6 +170,9 @@ WARNING 12-11 14:50:37 multiproc_worker_utils.py:281] CUDA was previously
 
 or an error from Python that looks like this:
 
+<details>
+<summary>Logs</summary>
+
 ```console
 RuntimeError:
         An attempt has been made to start a new process before the
@@ -184,6 +192,8 @@ RuntimeError:
         To fix this issue, refer to the "Safe importing of main module"
         section in https://docs.python.org/3/library/multiprocessing.html
 ```
+
+</details>
 
 then you must update your Python code to guard usage of `vllm` behind a `if
 __name__ == '__main__':` block. For example, instead of this:
@@ -207,6 +217,9 @@ if __name__ == '__main__':
 
 vLLM heavily depends on `torch.compile` to optimize the model for better performance, which introduces the dependency on the `torch.compile` functionality and the `triton` library. By default, we use `torch.compile` to [optimize some functions](https://github.com/vllm-project/vllm/pull/10406) in the model. Before running vLLM, you can check if `torch.compile` is working as expected by running the following script:
 
+<details>
+<summary>Code</summary>
+
 ```python
 import torch
 
@@ -221,6 +234,8 @@ def f(x):
 x = torch.randn(4, 4).cuda()
 print(f(x))
 ```
+
+</details>
 
 If it raises errors from `torch/_inductor` directory, usually it means you have a custom `triton` library that is not compatible with the version of PyTorch you are using. See [this issue](https://github.com/vllm-project/vllm/issues/12219) for example.
 

@@ -36,6 +36,9 @@ docker build . -f Dockerfile.nginx --tag nginx-lb
 
 Create a file named `nginx_conf/nginx.conf`. Note that you can add as many servers as you'd like. In the below example we'll start with two. To add more, add another `server vllmN:8000 max_fails=3 fail_timeout=10000s;` entry to `upstream backend`.
 
+<details>
+<summary>Config</summary>
+
 ```console
 upstream backend {
     least_conn;
@@ -53,6 +56,8 @@ server {
     }
 }
 ```
+
+</details>
 
 [](){ #nginxloadbalancer-nginx-vllm-container }
 
@@ -93,6 +98,9 @@ Notes:
 - The below example assumes GPU backend used. If you are using CPU backend, remove `--gpus device=ID`, add `VLLM_CPU_KVCACHE_SPACE` and `VLLM_CPU_OMP_THREADS_BIND` environment variables to the docker run command.
 - Adjust the model name that you want to use in your vLLM servers if you don't want to use `Llama-2-7b-chat-hf`.
 
+<details>
+<summary>Command</summary>
+
 ```console
 mkdir -p ~/.cache/huggingface/hub/
 hf_cache_dir=~/.cache/huggingface/
@@ -117,6 +125,8 @@ docker run \
     --name vllm1 vllm \
     --model meta-llama/Llama-2-7b-chat-hf
 ```
+
+</details>
 
 !!! note
     If you are behind proxy, you can pass the proxy settings to the docker run command via `-e http_proxy=$http_proxy -e https_proxy=$https_proxy`.

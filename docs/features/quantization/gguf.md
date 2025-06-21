@@ -41,6 +41,9 @@ vllm serve ./tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf \
 
 You can also use the GGUF model directly through the LLM entrypoint:
 
+<details>
+<summary>Code</summary>
+
 ```python
 from vllm import LLM, SamplingParams
 
@@ -80,3 +83,5 @@ for output in outputs:
    generated_text = output.outputs[0].text
    print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 ```
+
+</details>

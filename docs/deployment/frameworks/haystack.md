@@ -27,6 +27,9 @@ vllm serve mistralai/Mistral-7B-Instruct-v0.1
 
 - Use the `OpenAIGenerator` and `OpenAIChatGenerator` components in Haystack to query the vLLM server.
 
+<details>
+<summary>Code</summary>
+
 ```python
 from haystack.components.generators.chat import OpenAIChatGenerator
 from haystack.dataclasses import ChatMessage
@@ -49,12 +52,17 @@ print(response)
 print("-"*30)
 ```
 
-Output e.g.:
+</details>
+
+<details>
+<summary>Output</summary>
 
 ```console
 ------------------------------
 {'replies': [ChatMessage(_role=<ChatRole.ASSISTANT: 'assistant'>, _content=[TextContent(text=' Of course! Where in Italy would you like to go and what type of trip are you looking to plan?')], _name=None, _meta={'model': 'mistralai/Mistral-7B-Instruct-v0.1', 'index': 0, 'finish_reason': 'stop', 'usage': {'completion_tokens': 23, 'prompt_tokens': 21, 'total_tokens': 44, 'completion_tokens_details': None, 'prompt_tokens_details': None}})]}
 ------------------------------
 ```
+
+</details>
 
 For details, see the tutorial [Using vLLM in Haystack](https://github.com/deepset-ai/haystack-integrations/blob/main/integrations/vllm.md).

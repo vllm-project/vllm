@@ -14,6 +14,9 @@ You can quantize HuggingFace models using the example scripts provided in the Te
 
 Below is an example showing how to quantize a model using modelopt's PTQ API:
 
+<details>
+<summary>Code</summary>
+
 ```python
 import modelopt.torch.quantization as mtq
 from transformers import AutoModelForCausalLM
@@ -33,6 +36,8 @@ def forward_loop(model):
 model = mtq.quantize(model, config, forward_loop)
 ```
 
+</details>
+
 After the model is quantized, you can export it to a quantized checkpoint using the export API:
 
 ```python
@@ -47,6 +52,9 @@ with torch.inference_mode():
 ```
 
 The quantized checkpoint can then be deployed with vLLM. As an example, the following code shows how to deploy `nvidia/Llama-3.1-8B-Instruct-FP8`, which is the FP8 quantized checkpoint derived from `meta-llama/Llama-3.1-8B-Instruct`, using vLLM:
+
+<details>
+<summary>Code</summary>
 
 ```python
 from vllm import LLM, SamplingParams
@@ -76,3 +84,5 @@ def main():
 if __name__ == "__main__":
     main()
 ```
+
+</details>

@@ -448,6 +448,9 @@ elements of the entire head for all context tokens. However, overall,
 all results for output have been calculated but are just stored in
 different thread register memory.
 
+<details>
+<summary>Code</summary>
+
 ```cpp
 float* out_smem = reinterpret_cast<float*>(shared_mem);
 for (int i = NUM_WARPS; i > 1; i /= 2) {
@@ -469,6 +472,8 @@ for (int i = NUM_WARPS; i > 1; i /= 2) {
     // Write out the accs.
 }
 ```
+
+</details>
 
 ## Output
 

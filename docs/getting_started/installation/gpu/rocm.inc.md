@@ -90,6 +90,9 @@ Currently, there are no pre-built ROCm wheels.
 
 4. Build vLLM. For example, vLLM on ROCM 6.3 can be built with the following steps:
 
+    <details>
+    <summary>Commands</summary>
+
     ```bash
     pip install --upgrade pip
 
@@ -108,6 +111,8 @@ Currently, there are no pre-built ROCm wheels.
     export PYTORCH_ROCM_ARCH="gfx90a;gfx942"
     python3 setup.py develop
     ```
+
+    </details>
 
     This may take 5-10 minutes. Currently, `pip install .` does not work for ROCm installation.
 
@@ -201,6 +206,9 @@ DOCKER_BUILDKIT=1 docker build \
 
 To run the above docker image `vllm-rocm`, use the below command:
 
+<details>
+<summary>Command</summary>
+
 ```console
 docker run -it \
    --network=host \
@@ -214,6 +222,8 @@ docker run -it \
    vllm-rocm \
    bash
 ```
+
+</details>
 
 Where the `<path/to/model>` is the location where the model is stored, for example, the weights for llama2 or llama3 models.
 

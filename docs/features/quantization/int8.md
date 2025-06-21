@@ -54,6 +54,9 @@ When quantizing activations to INT8, you need sample data to estimate the activa
 It's best to use calibration data that closely matches your deployment data.
 For a general-purpose instruction-tuned model, you can use a dataset like `ultrachat`:
 
+<details>
+<summary>Code</summary>
+
 ```python
 from datasets import load_dataset
 
@@ -73,9 +76,14 @@ def tokenize(sample):
 ds = ds.map(tokenize, remove_columns=ds.column_names)
 ```
 
+</details>
+
 ### 3. Applying Quantization
 
 Now, apply the quantization algorithms:
+
+<details>
+<summary>Code</summary>
 
 ```python
 from llmcompressor.transformers import oneshot
@@ -102,6 +110,8 @@ SAVE_DIR = MODEL_ID.split("/")[1] + "-W8A8-Dynamic-Per-Token"
 model.save_pretrained(SAVE_DIR, save_compressed=True)
 tokenizer.save_pretrained(SAVE_DIR)
 ```
+
+</details>
 
 This process creates a W8A8 model with weights and activations quantized to 8-bit integers.
 

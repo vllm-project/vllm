@@ -85,6 +85,9 @@ and automatically applies the model's [chat template](https://huggingface.co/doc
     In general, only instruction-tuned models have a chat template.
     Base models may perform poorly as they are not trained to respond to the chat conversation.
 
+<details>
+<summary>Code</summary>
+
 ```python
 from vllm import LLM
 
@@ -114,6 +117,8 @@ for output in outputs:
     generated_text = output.outputs[0].text
     print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 ```
+
+</details>
 
 A code example can be found here: <gh-file:examples/offline_inference/basic/chat.py>
 
