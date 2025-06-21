@@ -172,7 +172,15 @@ class Platform:
         return self._enum == PlatformEnum.CUDA
 
     @classmethod
-    def device_id_to_physical_device_id(cls, device_id: int):
+    def device_id_to_physical_device_id(cls,
+                                        device_id: int) -> Union[int, str]:
+        """
+        Convert a logical device ID to a physical device identifier.
+
+        Returns:
+            int: For regular GPU devices (integer device ID)
+            str: For MIG devices (UUID string)
+        """
         if cls.device_control_env_var in os.environ:
             device_ids = os.environ[cls.device_control_env_var].split(",")
             if device_ids == [""]:
@@ -185,7 +193,20 @@ class Platform:
                        "more information.")
                 raise RuntimeError(msg)
             physical_device_id = device_ids[device_id]
-            return int(physical_device_id)
+
+            # Check if this is a MIG device identifier (starts with "MIG-")
+            if physical_device_id.startswith("MIG-"):
+                # Return the MIG UUID as-is for MIG devices
+                return physical_device_id
+
+            try:
+                return int(physical_device_id)
+            except ValueError as e:
+                raise RuntimeError(
+                    f"Invalid device ID in {cls.device_control_env_var}:"
+                    f"'{physical_device_id}'. "
+                    f"Expected an integer device ID or MIG UUID, but got: {e}."
+                ) from e
         else:
             return device_id
 
