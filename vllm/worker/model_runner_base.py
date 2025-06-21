@@ -13,6 +13,7 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
+from vllm.worker.worker_metrics import VllmWorkerStatsMonitor
 
 if TYPE_CHECKING:
     from vllm.attention import AttentionMetadata
@@ -190,6 +191,7 @@ class ModelRunnerBase(ABC, Generic[T]):
         self.speculative_config = vllm_config.speculative_config
         self.prompt_adapter_config = vllm_config.prompt_adapter_config
         self.observability_config = vllm_config.observability_config
+        self.stats_monitor = VllmWorkerStatsMonitor.GetOrCreate()
 
     # Map of request_id -> generator used for seeded random sampling
     generators: Dict[str, torch.Generator] = {}
