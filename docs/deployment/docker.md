@@ -10,6 +10,9 @@ title: Using Docker
 vLLM offers an official Docker image for deployment.
 The image can be used to run OpenAI compatible server and is available on Docker Hub as [vllm/vllm-openai](https://hub.docker.com/r/vllm/vllm-openai/tags).
 
+<details>
+<summary>Command</summary>
+
 ```console
 docker run --runtime nvidia --gpus all \
     -v ~/.cache/huggingface:/root/.cache/huggingface \
@@ -20,7 +23,12 @@ docker run --runtime nvidia --gpus all \
     --model mistralai/Mistral-7B-v0.1
 ```
 
+</details>
+
 This image can also be used with other container engines such as [Podman](https://podman.io/).
+
+<details>
+<summary>Command</summary>
 
 ```console
 podman run --gpus all \
@@ -31,6 +39,8 @@ podman run --gpus all \
   vllm/vllm-openai:latest \
   --model mistralai/Mistral-7B-v0.1
 ```
+
+</details>
 
 You can add any other [engine-args][engine-args] you need after the image tag (`vllm/vllm-openai:latest`).
 
@@ -71,6 +81,9 @@ You can add any other [engine-args][engine-args] you need after the image tag (`
 
 You can build and run vLLM from source via the provided <gh-file:docker/Dockerfile>. To build vLLM:
 
+<details>
+<summary>Command</summary>
+
 ```console
 # optionally specifies: --build-arg max_jobs=8 --build-arg nvcc_threads=2
 DOCKER_BUILDKIT=1 docker build . \
@@ -78,6 +91,8 @@ DOCKER_BUILDKIT=1 docker build . \
     --tag vllm/vllm-openai \
     --file docker/Dockerfile
 ```
+
+</details>
 
 !!! note
     By default vLLM will build for all GPU types for widest distribution. If you are just building for the
@@ -97,6 +112,9 @@ of PyTorch Nightly and should be considered **experimental**. Using the flag `--
     flags to speed up build process. However, ensure your `max_jobs` is substantially larger than `nvcc_threads` to get the most benefits.
     Keep an eye on memory usage with parallel jobs as it can be substantial (see example below).
 
+<details>
+<summary>Command</summary>
+
 ```console
 # Example of building on Nvidia GH200 server. (Memory usage: ~15GB, Build time: ~1475s / ~25 min, Image size: 6.93GB)
 python3 use_existing_torch.py
@@ -110,6 +128,8 @@ DOCKER_BUILDKIT=1 docker build . \
   --build-arg torch_cuda_arch_list="9.0 10.0+PTX" \
   --build-arg vllm_fa_cmake_gpu_arches="90-real"
 ```
+
+</details>
 
 !!! note
     If you are building the `linux/arm64` image on a non-ARM host (e.g., an x86_64 machine), you need to ensure your system is set up for cross-compilation using QEMU. This allows your host machine to emulate ARM64 execution.
@@ -126,6 +146,9 @@ DOCKER_BUILDKIT=1 docker build . \
 
 To run vLLM with the custom-built Docker image:
 
+<details>
+<summary>Command</summary>
+
 ```console
 docker run --runtime nvidia --gpus all \
     -v ~/.cache/huggingface:/root/.cache/huggingface \
@@ -133,6 +156,8 @@ docker run --runtime nvidia --gpus all \
     --env "HUGGING_FACE_HUB_TOKEN=<secret>" \
     vllm/vllm-openai <args...>
 ```
+
+</details>
 
 The argument `vllm/vllm-openai` specifies the image to run, and should be replaced with the name of the custom-built image (the `-t` tag from the build command).
 

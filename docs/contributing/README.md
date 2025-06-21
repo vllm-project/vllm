@@ -77,11 +77,16 @@ mkdocs serve
 
 Example output:
 
+<details>
+<summary>Output</summary>
+
 ```console
 INFO    -  Documentation built in 106.83 seconds
 INFO    -  [22:02:02] Watching paths for changes: 'docs', 'mkdocs.yaml'
 INFO    -  [22:02:02] Serving on http://127.0.0.1:8000/
 ```
+
+</details>
 
 #### View in Your Browser
 
@@ -92,6 +97,9 @@ Open up [http://127.0.0.1:8000/](http://127.0.0.1:8000/) in your browser to see 
 For additional features and advanced configurations, refer to the official [MkDocs Documentation](https://www.mkdocs.org/).
 
 ## Testing
+
+<details>
+<summary>Commands</summary>
 
 ```bash
 pip install -r requirements/dev.txt
@@ -112,6 +120,8 @@ pytest tests/
 # Run tests for a single test file with detailed output
 pytest -s -v tests/test_logger.py
 ```
+
+</details>
 
 !!! tip
     Since the <gh-file:docker/Dockerfile> ships with Python 3.12, all tests in CI (except `mypy`) are run with Python 3.12.

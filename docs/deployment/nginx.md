@@ -11,11 +11,19 @@ This document shows how to launch multiple vLLM serving containers and use Nginx
 
 This guide assumes that you have just cloned the vLLM project and you're currently in the vllm root directory.
 
+<details>
+<summary>Command</summary>
+
 ```console
 export vllm_root=`pwd`
 ```
 
+</details>
+
 Create a file named `Dockerfile.nginx`:
+
+<details>
+<summary>Dockerfile</summary>
 
 ```console
 FROM nginx:latest
@@ -24,17 +32,27 @@ EXPOSE 80
 CMD ["nginx", "-g", "daemon off;"]
 ```
 
+</details>
+
 Build the container:
+
+<details>
+<summary>Command</summary>
 
 ```console
 docker build . -f Dockerfile.nginx --tag nginx-lb
 ```
+
+</details>
 
 [](){ #nginxloadbalancer-nginx-conf }
 
 ## Create Simple Nginx Config file
 
 Create a file named `nginx_conf/nginx.conf`. Note that you can add as many servers as you'd like. In the below example we'll start with two. To add more, add another `server vllmN:8000 max_fails=3 fail_timeout=10000s;` entry to `upstream backend`.
+
+<details>
+<summary>Config</summary>
 
 ```console
 upstream backend {
@@ -54,16 +72,26 @@ server {
 }
 ```
 
+</details>
+
 [](){ #nginxloadbalancer-nginx-vllm-container }
 
 ## Build vLLM Container
+
+<details>
+<summary>Command</summary>
 
 ```console
 cd $vllm_root
 docker build -f docker/Dockerfile . --tag vllm
 ```
 
+</details>
+
 If you are behind proxy, you can pass the proxy settings to the docker build command as shown below:
+
+<details>
+<summary>Command</summary>
 
 ```console
 cd $vllm_root
@@ -74,13 +102,20 @@ docker build \
     --build-arg https_proxy=$https_proxy
 ```
 
+</details>
+
 [](){ #nginxloadbalancer-nginx-docker-network }
 
 ## Create Docker Network
 
+<details>
+<summary>Command</summary>
+
 ```console
 docker network create vllm_nginx
 ```
+
+</details>
 
 [](){ #nginxloadbalancer-nginx-launch-container }
 
@@ -92,6 +127,9 @@ Notes:
 - If you don't have an existing HuggingFace cache you will want to start `vllm0` and wait for the model to complete downloading and the server to be ready. This will ensure that `vllm1` can leverage the model you just downloaded and it won't have to be downloaded again.
 - The below example assumes GPU backend used. If you are using CPU backend, remove `--gpus device=ID`, add `VLLM_CPU_KVCACHE_SPACE` and `VLLM_CPU_OMP_THREADS_BIND` environment variables to the docker run command.
 - Adjust the model name that you want to use in your vLLM servers if you don't want to use `Llama-2-7b-chat-hf`.
+
+<details>
+<summary>Command</summary>
 
 ```console
 mkdir -p ~/.cache/huggingface/hub/
@@ -118,12 +156,17 @@ docker run \
     --model meta-llama/Llama-2-7b-chat-hf
 ```
 
+</details>
+
 !!! note
     If you are behind proxy, you can pass the proxy settings to the docker run command via `-e http_proxy=$http_proxy -e https_proxy=$https_proxy`.
 
 [](){ #nginxloadbalancer-nginx-launch-nginx }
 
 ## Launch Nginx
+
+<details>
+<summary>Command</summary>
 
 ```console
 docker run \
@@ -134,17 +177,29 @@ docker run \
     --name nginx-lb nginx-lb:latest
 ```
 
+</details>
+
 [](){ #nginxloadbalancer-nginx-verify-nginx }
 
 ## Verify That vLLM Servers Are Ready
+
+<details>
+<summary>Command</summary>
 
 ```console
 docker logs vllm0 | grep Uvicorn
 docker logs vllm1 | grep Uvicorn
 ```
 
+</details>
+
 Both outputs should look like this:
+
+<details>
+<summary>Output</summary>
 
 ```console
 INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
 ```
+
+</details>

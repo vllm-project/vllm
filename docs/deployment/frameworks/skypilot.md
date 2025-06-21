@@ -24,6 +24,9 @@ sky check
 
 See the vLLM SkyPilot YAML for serving, [serving.yaml](https://github.com/skypilot-org/skypilot/blob/master/llm/vllm/serve.yaml).
 
+<details>
+<summary>Config</summary>
+
 ```yaml
 resources:
   accelerators: {L4, A10g, A10, L40, A40, A100, A100-80GB} # We can use cheaper accelerators for 8B model.
@@ -66,6 +69,8 @@ run: |
     --model-url http://localhost:8081/v1 \
     --stop-token-ids 128009,128001
 ```
+
+</details>
 
 Start the serving the Llama-3 8B model on any of the candidate GPUs listed (L4, A10g, ...):
 

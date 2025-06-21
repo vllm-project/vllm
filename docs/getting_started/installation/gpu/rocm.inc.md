@@ -31,15 +31,23 @@ Currently, there are no pre-built ROCm wheels.
 
     Alternatively, you can install PyTorch using PyTorch wheels. You can check PyTorch installation guide in PyTorch [Getting Started](https://pytorch.org/get-started/locally/). Example:
 
+    <details>
+    <summary>Commands</summary>
+
     ```console
     # Install PyTorch
     $ pip uninstall torch -y
     $ pip install --no-cache-dir --pre torch --index-url https://download.pytorch.org/whl/nightly/rocm6.3
     ```
 
+    </details>
+
 1. Install [Triton flash attention for ROCm](https://github.com/ROCm/triton)
 
     Install ROCm's Triton flash attention (the default triton-mlir branch) following the instructions from [ROCm/triton](https://github.com/ROCm/triton/blob/triton-mlir/README.md)
+
+    <details>
+    <summary>Commands</summary>
 
     ```console
     python3 -m pip install ninja cmake wheel pybind11
@@ -52,6 +60,8 @@ Currently, there are no pre-built ROCm wheels.
     cd ../..
     ```
 
+    </details>
+
     !!! note
         If you see HTTP issue related to downloading packages during building triton, please try again as the HTTP error is intermittent.
 
@@ -62,6 +72,9 @@ Currently, there are no pre-built ROCm wheels.
 
     For example, for ROCm 6.3, suppose your gfx arch is `gfx90a`. To get your gfx architecture, run `rocminfo |grep gfx`.
 
+    <details>
+    <summary>Commands</summary>
+
     ```console
     git clone https://github.com/ROCm/flash-attention.git
     cd flash-attention
@@ -71,10 +84,15 @@ Currently, there are no pre-built ROCm wheels.
     cd ..
     ```
 
+    </details>
+
     !!! note
         You might need to downgrade the "ninja" version to 1.10 as it is not used when compiling flash-attention-2 (e.g. `pip install ninja==1.10.2.4`)
 
 3. If you choose to build AITER yourself to use a certain branch or commit, you can build AITER using the following steps:
+
+    <details>
+    <summary>Commands</summary>
 
     ```console
     python3 -m pip uninstall -y aiter
@@ -85,10 +103,15 @@ Currently, there are no pre-built ROCm wheels.
     python3 setup.py develop
     ```
 
+    </details>
+
     !!! note
         You will need to config the `$AITER_BRANCH_OR_COMMIT` for your purpose.
 
 4. Build vLLM. For example, vLLM on ROCM 6.3 can be built with the following steps:
+
+    <details>
+    <summary>Commands</summary>
 
     ```bash
     pip install --upgrade pip
@@ -108,6 +131,8 @@ Currently, there are no pre-built ROCm wheels.
     export PYTORCH_ROCM_ARCH="gfx90a;gfx942"
     python3 setup.py develop
     ```
+
+    </details>
 
     This may take 5-10 minutes. Currently, `pip install .` does not work for ROCm installation.
 
@@ -146,6 +171,9 @@ If you choose to build this rocm_base image yourself, the steps are as follows.
 
 It is important that the user kicks off the docker build using buildkit. Either the user put DOCKER_BUILDKIT=1 as environment variable when calling docker build command, or the user needs to setup buildkit in the docker daemon configuration /etc/docker/daemon.json as follows and restart the daemon:
 
+<details>
+<summary>Config</summary>
+
 ```console
 {
     "features": {
@@ -154,7 +182,12 @@ It is important that the user kicks off the docker build using buildkit. Either 
 }
 ```
 
+</details>
+
 To build vllm on ROCm 6.3 for MI200 and MI300 series, you can use the default:
+
+<details>
+<summary>Command</summary>
 
 ```console
 DOCKER_BUILDKIT=1 docker build \
@@ -162,10 +195,15 @@ DOCKER_BUILDKIT=1 docker build \
     -t rocm/vllm-dev:base .
 ```
 
+</details>
+
 #### Build an image with vLLM
 
 First, build a docker image from <gh-file:docker/Dockerfile.rocm> and launch a docker container from the image.
 It is important that the user kicks off the docker build using buildkit. Either the user put `DOCKER_BUILDKIT=1` as environment variable when calling docker build command, or the user needs to setup buildkit in the docker daemon configuration /etc/docker/daemon.json as follows and restart the daemon:
+
+<details>
+<summary>Config</summary>
 
 ```console
 {
@@ -174,6 +212,8 @@ It is important that the user kicks off the docker build using buildkit. Either 
     }
 }
 ```
+
+</details>
 
 <gh-file:docker/Dockerfile.rocm> uses ROCm 6.3 by default, but also supports ROCm 5.7, 6.0, 6.1, and 6.2, in older vLLM branches.
 It provides flexibility to customize the build of docker image using the following arguments:
@@ -191,6 +231,9 @@ DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile.rocm -t vllm-rocm .
 
 To build vllm on ROCm 6.3 for Radeon RX7900 series (gfx1100), you should pick the alternative base image:
 
+<details>
+<summary>Commands</summary>
+
 ```console
 DOCKER_BUILDKIT=1 docker build \
     --build-arg BASE_IMAGE="rocm/vllm-dev:navi_base" \
@@ -199,7 +242,12 @@ DOCKER_BUILDKIT=1 docker build \
     .
 ```
 
+</details>
+
 To run the above docker image `vllm-rocm`, use the below command:
+
+<details>
+<summary>Command</summary>
 
 ```console
 docker run -it \
@@ -214,6 +262,8 @@ docker run -it \
    vllm-rocm \
    bash
 ```
+
+</details>
 
 Where the `<path/to/model>` is the location where the model is stored, for example, the weights for llama2 or llama3 models.
 

@@ -13,6 +13,9 @@ pip install langchain langchain_community -q
 
 To run inference on a single or multiple GPUs, use `VLLM` class from `langchain`.
 
+<details>
+<summary>Code</summary>
+
 ```python
 from langchain_community.llms import VLLM
 
@@ -27,5 +30,7 @@ llm = VLLM(model="mosaicml/mpt-7b",
 
 print(llm("What is the capital of France ?"))
 ```
+
+</details>
 
 Please refer to this [Tutorial](https://python.langchain.com/docs/integrations/llms/vllm) for more details.

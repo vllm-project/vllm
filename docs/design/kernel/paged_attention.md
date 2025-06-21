@@ -39,6 +39,9 @@ refer to multi-dimensional arrays, but each thread only accesses the
 portion of data assigned to it. I have omitted all other runtime
 parameters here for simplicity.
 
+<details>
+<summary>Code</summary>
+
 ```cpp
 template<typename scalar_t, int HEAD_SIZE, int BLOCK_SIZE, int NUM_THREADS, int PARTITION_SIZE = 0>
 __device__ void paged_attention_kernel(
@@ -50,6 +53,8 @@ __device__ void paged_attention_kernel(
     ... // Other side args.
 )
 ```
+
+</details>
 
 There are also a list of template arguments above the function
 signature that are determined during compilation time. `scalar_t`
@@ -134,9 +139,14 @@ one query token data. Within each warp, every thread group will fetch
 the same query token data, but will multiply it with different key
 token data.
 
+<details>
+<summary>Code</summary>
+
 ```cpp
 const scalar_t* q_ptr = q + seq_idx * q_stride + head_idx * HEAD_SIZE;
 ```
+
+</details>
 
 <figure markdown="span">
   ![](../../assets/kernel/query.png){ align="center" alt="query" width="70%" }
@@ -175,11 +185,16 @@ tokens are processed by the entire thread group after the kernel run.
 In this context, "handle" refers to performing the dot multiplication
 between query data and key data.
 
+<details>
+<summary>Code</summary>
+
 ```cpp
 const scalar_t* k_ptr = k_cache + physical_block_number * kv_block_stride
                     + kv_head_idx * kv_head_stride
                     + physical_block_offset * x;
 ```
+
+</details>
 
 Unlike to `q_ptr`, `k_ptr` in each thread will point to different
 key token at different iterations. As shown above, that `k_ptr`
@@ -235,6 +250,9 @@ point to different tokens and prepare the `k_vecs` in the inner for
 loop. Finally, we perform the dot multiplication between the
 `q_vecs` and each `k_vecs`.
 
+<details>
+<summary>Code</summary>
+
 ```cpp
 q_vecs = ...
 for ... {
@@ -246,6 +264,8 @@ for ... {
     float qk = scale * Qk_dot<scalar_t, THREAD_GROUP_SIZE>::dot(q_vecs[thread_group_offset], k_vecs);
 }
 ```
+
+</details>
 
 As mentioned before, for each thread, it only fetches part of the
 query and key token data at a time. However, there will be a cross
@@ -287,6 +307,9 @@ store the normalized softmax result). Also we can compare and collect
 the `qk_max` for all `qk`s that are calculated by current
 thread group.
 
+<details>
+<summary>Code</summary>
+
 ```cpp
 if (thread_group_offset == 0) {
     const bool mask = token_idx >= context_len;
@@ -295,9 +318,14 @@ if (thread_group_offset == 0) {
 }
 ```
 
+</details>
+
 Please note that the `logits` here is on shared memory, so each
 thread group will set the fields for its own assigned context tokens.
 Overall, the size of logits should be number of context tokens.
+
+<details>
+<summary>Code</summary>
 
 ```cpp
 for (int mask = WARP_SIZE / 2; mask >= THREAD_GROUP_SIZE; mask /= 2) {
@@ -309,9 +337,14 @@ if (lane == 0) {
 }
 ```
 
+</details>
+
 Then we need to get the reduced `qk_max` across each warp. The main
 idea is to make threads in warp to communicate with each other and
 get the final max `qk` .
+
+<details>
+<summary>Code</summary>
 
 ```cpp
 for (int mask = NUM_WARPS / 2; mask >= 1; mask /= 2) {
@@ -319,6 +352,8 @@ for (int mask = NUM_WARPS / 2; mask >= 1; mask /= 2) {
 }
 qk_max = VLLM_SHFL_SYNC(qk_max, 0);
 ```
+
+</details>
 
 Finally, we can get the reduced `qk_max` from whole thread block by
 compare the `qk_max` from all warps in this thread block. Then we
@@ -328,6 +363,9 @@ need to broadcast the final result to each thread.
 
 Similar to `qk_max`, we need to get the reduced sum value from the
 entire thread block too.
+
+<details>
+<summary>Code</summary>
 
 ```cpp
 for (int i = thread_idx; i < num_tokens; i += NUM_THREADS) {
@@ -339,11 +377,16 @@ for (int i = thread_idx; i < num_tokens; i += NUM_THREADS) {
 exp_sum = block_sum<NUM_WARPS>(&red_smem[NUM_WARPS], exp_sum);
 ```
 
+</details>
+
 Firstly, sum all exp values from each thread group, and meanwhile,
 convert each entry of `logits` from `qk` to `exp(qk - qk_max)`.
 Please note, the `qk_max` here is already the max `qk` across the
 whole thread block. And then we can do reduction for `exp_sum`
 across whole thread block just like the `qk_max`.
+
+<details>
+<summary>Code</summary>
 
 ```cpp
 const float inv_sum = __fdividef(1.f, exp_sum + 1e-6f);
@@ -351,6 +394,8 @@ for (int i = thread_idx; i < num_tokens; i += NUM_THREADS) {
     logits[i] *= inv_sum;
 }
 ```
+
+</details>
 
 Finally, with the reduced `qk_max` and `exp_sum`, we can obtain
 the final normalized softmax result as `logits`. This `logits`
@@ -390,6 +435,9 @@ multiple inner iterations, each warp will process one block of value
 tokens. And with multiple outer iterations, the whole context value
 tokens are processed
 
+<details>
+<summary>Code</summary>
+
 ```cpp
 float accs[NUM_ROWS_PER_THREAD];
 for ... { // Iteration over different blocks.
@@ -401,6 +449,8 @@ for ... { // Iteration over different blocks.
     }
 }
 ```
+
+</details>
 
 As shown in the above pseudo code, in the outer loop, similar to
 `k_ptr`, `logits_vec` iterates over different blocks and reads
@@ -430,6 +480,9 @@ Now, we need to perform reduction for `accs` within each warp. This
 process allows each thread to accumulate the `accs` for the
 assigned head positions of all tokens in one block.
 
+<details>
+<summary>Code</summary>
+
 ```cpp
 for (int i = 0; i < NUM_ROWS_PER_THREAD; i++) {
     float acc = accs[i];
@@ -440,6 +493,8 @@ for (int i = 0; i < NUM_ROWS_PER_THREAD; i++) {
 }
 ```
 
+</details>
+
 Next, we perform reduction for `accs` across all warps, allowing
 each thread to have the accumulation of `accs` for the assigned
 head positions of all context tokens. Please note that each `accs`
@@ -447,6 +502,9 @@ in every thread only stores the accumulation for a portion of
 elements of the entire head for all context tokens. However, overall,
 all results for output have been calculated but are just stored in
 different thread register memory.
+
+<details>
+<summary>Code</summary>
 
 ```cpp
 float* out_smem = reinterpret_cast<float*>(shared_mem);
@@ -470,10 +528,15 @@ for (int i = NUM_WARPS; i > 1; i /= 2) {
 }
 ```
 
+</details>
+
 ## Output
 
 Now we can write all of calculated result from local register memory
 to final output global memory.
+
+<details>
+<summary>Code</summary>
 
 ```cpp
 scalar_t* out_ptr = out + seq_idx * num_heads * max_num_partitions * HEAD_SIZE
@@ -481,8 +544,13 @@ scalar_t* out_ptr = out + seq_idx * num_heads * max_num_partitions * HEAD_SIZE
                 + partition_idx * HEAD_SIZE;
 ```
 
+</details>
+
 First, we need to define the `out_ptr` variable, which points to
 the start address of the assigned sequence and assigned head.
+
+<details>
+<summary>Code</summary>
 
 ```cpp
 for (int i = 0; i < NUM_ROWS_PER_THREAD; i++) {
@@ -492,6 +560,8 @@ for (int i = 0; i < NUM_ROWS_PER_THREAD; i++) {
     }
 }
 ```
+
+</details>
 
 Finally, we need to iterate over different assigned head positions
 and write out the corresponding accumulated result based on the

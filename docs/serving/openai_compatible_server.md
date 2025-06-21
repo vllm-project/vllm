@@ -15,6 +15,9 @@ vllm serve NousResearch/Meta-Llama-3-8B-Instruct \
 
 To call the server, in your preferred text editor, create a script that uses an HTTP client. Include any messages that you want to send to the model. Then run that script. Below is an example script using the [official OpenAI Python client](https://github.com/openai/openai-python).
 
+<details>
+<summary>Code</summary>
+
 ```python
 from openai import OpenAI
 client = OpenAI(
@@ -31,6 +34,8 @@ completion = client.chat.completions.create(
 
 print(completion.choices[0].message)
 ```
+
+</details>
 
 !!! tip
     vLLM supports some parameters that are not supported by OpenAI, `top_k` for example.
@@ -96,6 +101,9 @@ vLLM community provides a set of chat templates for popular models. You can find
 With the inclusion of multi-modal chat APIs, the OpenAI spec now accepts chat messages in a new format which specifies
 both a `type` and a `text` field. An example is provided below:
 
+<details>
+<summary>Code</summary>
+
 ```python
 completion = client.chat.completions.create(
     model="NousResearch/Meta-Llama-3-8B-Instruct",
@@ -104,6 +112,8 @@ completion = client.chat.completions.create(
     ]
 )
 ```
+
+</details>
 
 Most chat templates for LLMs expect the `content` field to be a string, but there are some newer models like
 `meta-llama/Llama-Guard-3-1B` that expect the content to be formatted according to the OpenAI schema in the
@@ -125,6 +135,9 @@ vLLM supports a set of parameters that are not part of the OpenAI API.
 In order to use them, you can pass them as extra parameters in the OpenAI client.
 Or directly merge them into the JSON payload if you are using HTTP call directly.
 
+<details>
+<summary>Code</summary>
+
 ```python
 completion = client.chat.completions.create(
     model="NousResearch/Meta-Llama-3-8B-Instruct",
@@ -137,6 +150,8 @@ completion = client.chat.completions.create(
 )
 ```
 
+</details>
+
 ## Extra HTTP Headers
 
 Only `X-Request-Id` HTTP request header is supported for now. It can be enabled
@@ -146,6 +161,9 @@ with `--enable-request-id-headers`.
 > rates. We recommend implementing HTTP headers at the router level (e.g. via Istio),
 > rather than within the vLLM layer for this reason.
 > See [this PR](https://github.com/vllm-project/vllm/pull/11529) for more details.
+
+<details>
+<summary>Code</summary>
 
 ```python
 completion = client.chat.completions.create(
@@ -169,6 +187,8 @@ completion = client.completions.create(
 print(completion._request_id)
 ```
 
+</details>
+
 ## API Reference
 
 [](){ #completions-api }
@@ -184,15 +204,25 @@ Code example: <gh-file:examples/online_serving/openai_completion_client.py>
 
 The following [sampling parameters][sampling-params] are supported.
 
+<details>
+<summary>Code</summary>
+
 ```python
 --8<-- "vllm/entrypoints/openai/protocol.py:completion-sampling-params"
 ```
 
+</details>
+
 The following extra parameters are supported:
+
+<details>
+<summary>Code</summary>
 
 ```python
 --8<-- "vllm/entrypoints/openai/protocol.py:completion-extra-params"
 ```
+
+</details>
 
 [](){ #chat-api }
 
@@ -212,15 +242,25 @@ Code example: <gh-file:examples/online_serving/openai_chat_completion_client.py>
 
 The following [sampling parameters][sampling-params] are supported.
 
+<details>
+<summary>Code</summary>
+
 ```python
 --8<-- "vllm/entrypoints/openai/protocol.py:chat-completion-sampling-params"
 ```
 
+</details>
+
 The following extra parameters are supported:
+
+<details>
+<summary>Code</summary>
 
 ```python
 --8<-- "vllm/entrypoints/openai/protocol.py:chat-completion-extra-params"
 ```
+
+</details>
 
 [](){ #embeddings-api }
 
@@ -243,12 +283,17 @@ and passing a list of `messages` in the request. Refer to the examples below for
 
     To serve the model:
 
+    <details>
+    <summary>Command</summary>
+
     ```bash
     vllm serve TIGER-Lab/VLM2Vec-Full --task embed \
       --trust-remote-code \
       --max-model-len 4096 \
       --chat-template examples/template_vlm2vec.jinja
     ```
+
+    </details>
 
     !!! important
         Since VLM2Vec has the same model architecture as Phi-3.5-Vision, we have to explicitly pass `--task embed`
@@ -258,6 +303,9 @@ and passing a list of `messages` in the request. Refer to the examples below for
         and can be found here: <gh-file:examples/template_vlm2vec.jinja>
 
     Since the request schema is not defined by OpenAI client, we post a request to the server using the lower-level `requests` library:
+
+    <details>
+    <summary>Code</summary>
 
     ```python
     import requests
@@ -283,9 +331,14 @@ and passing a list of `messages` in the request. Refer to the examples below for
     print("Embedding output:", response_json["data"][0]["embedding"])
     ```
 
+    </details>
+
 === "DSE-Qwen2-MRL"
 
     To serve the model:
+
+    <details>
+    <summary>Command</summary>
 
     ```bash
     vllm serve MrLight/dse-qwen2-2b-mrl-v1 --task embed \
@@ -293,6 +346,8 @@ and passing a list of `messages` in the request. Refer to the examples below for
       --max-model-len 8192 \
       --chat-template examples/template_dse_qwen2_vl.jinja
     ```
+
+    </details>
 
     !!! important
         Like with VLM2Vec, we have to explicitly pass `--task embed`.
@@ -310,21 +365,36 @@ Full example: <gh-file:examples/online_serving/openai_chat_embedding_client_for_
 
 The following [pooling parameters][pooling-params] are supported.
 
+<details>
+<summary>Code</summary>
+
 ```python
 --8<-- "vllm/entrypoints/openai/protocol.py:embedding-pooling-params"
 ```
 
+</details>
+
 The following extra parameters are supported by default:
+
+<details>
+<summary>Code</summary>
 
 ```python
 --8<-- "vllm/entrypoints/openai/protocol.py:embedding-extra-params"
 ```
 
+</details>
+
 For chat-like input (i.e. if `messages` is passed), these extra parameters are supported instead:
+
+<details>
+<summary>Code</summary>
 
 ```python
 --8<-- "vllm/entrypoints/openai/protocol.py:chat-embedding-extra-params"
 ```
+
+</details>
 
 [](){ #transcriptions-api }
 
@@ -343,15 +413,25 @@ Code example: <gh-file:examples/online_serving/openai_transcription_client.py>
 
 The following [sampling parameters][sampling-params] are supported.
 
+<details>
+<summary>Code</summary>
+
 ```python
 --8<-- "vllm/entrypoints/openai/protocol.py:transcription-sampling-params"
 ```
 
+</details>
+
 The following extra parameters are supported:
+
+<details>
+<summary>Code</summary>
 
 ```python
 --8<-- "vllm/entrypoints/openai/protocol.py:transcription-extra-params"
 ```
+
+</details>
 
 [](){ #tokenizer-api }
 
@@ -387,7 +467,8 @@ Code example: <gh-file:examples/online_serving/openai_classification_client.py>
 
 You can classify multiple texts by passing an array of strings:
 
-Request:
+<details>
+<summary>Request</summary>
 
 ```bash
 curl -v "http://127.0.0.1:8000/classify" \
@@ -401,7 +482,10 @@ curl -v "http://127.0.0.1:8000/classify" \
   }'
 ```
 
-Response:
+</details>
+
+<details>
+<summary>Response</summary>
 
 ```bash
 {
@@ -438,9 +522,12 @@ Response:
 }
 ```
 
+</details>
+
 You can also pass a string directly to the `input` field:
 
-Request:
+<details>
+<summary>Request</summary>
 
 ```bash
 curl -v "http://127.0.0.1:8000/classify" \
@@ -451,7 +538,10 @@ curl -v "http://127.0.0.1:8000/classify" \
   }'
 ```
 
-Response:
+</details>
+
+<details>
+<summary>Response</summary>
 
 ```bash
 {
@@ -479,19 +569,31 @@ Response:
 }
 ```
 
+</details>
+
 #### Extra parameters
 
 The following [pooling parameters][pooling-params] are supported.
+
+<details>
+<summary>Code</summary>
 
 ```python
 --8<-- "vllm/entrypoints/openai/protocol.py:classification-pooling-params"
 ```
 
+</details>
+
 The following extra parameters are supported:
+
+<details>
+<summary>Code</summary>
 
 ```python
 --8<-- "vllm/entrypoints/openai/protocol.py:classification-extra-params"
 ```
+
+</details>
 
 [](){ #score-api }
 
@@ -508,7 +610,8 @@ Code example: <gh-file:examples/online_serving/openai_cross_encoder_score.py>
 
 You can pass a string to both `text_1` and `text_2`, forming a single sentence pair.
 
-Request:
+<details>
+<summary>Request</summary>
 
 ```bash
 curl -X 'POST' \
@@ -523,7 +626,10 @@ curl -X 'POST' \
 }'
 ```
 
-Response:
+</details>
+
+<details>
+<summary>Response</summary>
 
 ```bash
 {
@@ -542,13 +648,16 @@ Response:
 }
 ```
 
+</details>
+
 #### Batch inference
 
 You can pass a string to `text_1` and a list to `text_2`, forming multiple sentence pairs
 where each pair is built from `text_1` and a string in `text_2`.
 The total number of pairs is `len(text_2)`.
 
-Request:
+<details>
+<summary>Request</summary>
 
 ```bash
 curl -X 'POST' \
@@ -565,7 +674,10 @@ curl -X 'POST' \
 }'
 ```
 
-Response:
+</details>
+
+<details>
+<summary>Response</summary>
 
 ```bash
 {
@@ -588,6 +700,8 @@ Response:
   "usage": {}
 }
 ```
+
+</details>
 
 You can pass a list to both `text_1` and `text_2`, forming multiple sentence pairs
 where each pair is built from a string in `text_1` and the corresponding string in `text_2` (similar to `zip()`).
@@ -614,7 +728,8 @@ curl -X 'POST' \
 }'
 ```
 
-Response:
+<details>
+<summary>Response</summary>
 
 ```bash
 {
@@ -638,19 +753,31 @@ Response:
 }
 ```
 
+</details>
+
 #### Extra parameters
 
 The following [pooling parameters][pooling-params] are supported.
+
+<details>
+<summary>Code</summary>
 
 ```python
 --8<-- "vllm/entrypoints/openai/protocol.py:score-pooling-params"
 ```
 
+</details>
+
 The following extra parameters are supported:
+
+<details>
+<summary>Code</summary>
 
 ```python
 --8<-- "vllm/entrypoints/openai/protocol.py:score-extra-params"
 ```
+
+</details>
 
 [](){ #rerank-api }
 
@@ -675,7 +802,8 @@ Code example: <gh-file:examples/online_serving/jinaai_rerank_client.py>
 Note that the `top_n` request parameter is optional and will default to the length of the `documents` field.
 Result documents will be sorted by relevance, and the `index` property can be used to determine original order.
 
-Request:
+<details>
+<summary>Request</summary>
 
 ```bash
 curl -X 'POST' \
@@ -693,7 +821,10 @@ curl -X 'POST' \
 }'
 ```
 
-Response:
+</details>
+
+<details>
+<summary>Response</summary>
 
 ```bash
 {
@@ -721,16 +852,28 @@ Response:
 }
 ```
 
+</details>
+
 #### Extra parameters
 
 The following [pooling parameters][pooling-params] are supported.
+
+<details>
+<summary>Code</summary>
 
 ```python
 --8<-- "vllm/entrypoints/openai/protocol.py:rerank-pooling-params"
 ```
 
+</details>
+
 The following extra parameters are supported:
+
+<details>
+<summary>Code</summary>
 
 ```python
 --8<-- "vllm/entrypoints/openai/protocol.py:rerank-extra-params"
 ```
+
+</details>

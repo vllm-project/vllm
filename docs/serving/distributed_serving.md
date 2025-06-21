@@ -55,6 +55,9 @@ The first step, is to start containers and organize them into a cluster. We have
 
 Pick a node as the head node, and run the following command:
 
+<details>
+<summary>Command</summary>
+
 ```console
 bash run_cluster.sh \
                 vllm/vllm-openai \
@@ -64,7 +67,12 @@ bash run_cluster.sh \
                 -e VLLM_HOST_IP=ip_of_this_node
 ```
 
+</details>
+
 On the rest of the worker nodes, run the following command:
+
+<details>
+<summary>Command</summary>
 
 ```console
 bash run_cluster.sh \
@@ -74,6 +82,8 @@ bash run_cluster.sh \
                 /path/to/the/huggingface/home/in/this/node \
                 -e VLLM_HOST_IP=ip_of_this_node
 ```
+
+</details>
 
 Then you get a ray cluster of **containers**. Note that you need to keep the shells running these commands alive to hold the cluster. Any shell disconnect will terminate the cluster. In addition, please note that the argument `ip_of_head_node` should be the IP address of the head node, which is accessible by all the worker nodes. The IP addresses of each worker node should be specified in the `VLLM_HOST_IP` environment variable, and should be different for each worker node. Please check the network configuration of your cluster to make sure the nodes can communicate with each other through the specified IP addresses.
 

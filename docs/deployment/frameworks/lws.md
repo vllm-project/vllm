@@ -17,6 +17,9 @@ vLLM can be deployed with [LWS](https://github.com/kubernetes-sigs/lws) on Kuber
 
 Deploy the following yaml file `lws.yaml`
 
+<details>
+<summary>Config</summary>
+
 ```yaml
 apiVersion: leaderworkerset.x-k8s.io/v1
 kind: LeaderWorkerSet
@@ -111,6 +114,8 @@ spec:
   type: ClusterIP
 ```
 
+</details>
+
 ```bash
 kubectl apply -f lws.yaml
 ```
@@ -123,6 +128,9 @@ kubectl get pods
 
 Should get an output similar to this:
 
+<details>
+<summary>Output</summary>
+
 ```bash
 NAME       READY   STATUS    RESTARTS   AGE
 vllm-0     1/1     Running   0          2s
@@ -130,6 +138,8 @@ vllm-0-1   1/1     Running   0          2s
 vllm-1     1/1     Running   0          2s
 vllm-1-1   1/1     Running   0          2s
 ```
+
+</details>
 
 Verify that the distributed tensor-parallel inference works:
 
@@ -162,6 +172,9 @@ Forwarding from [::1]:8080 -> 8080
 
 Open another terminal and send a request
 
+<details>
+<summary>Command</summary>
+
 ```text
 curl http://localhost:8080/v1/completions \
 -H "Content-Type: application/json" \
@@ -173,7 +186,12 @@ curl http://localhost:8080/v1/completions \
 }'
 ```
 
+</details>
+
 The output should be similar to the following
+
+<details>
+<summary>Output</summary>
 
 ```text
 {
@@ -197,3 +215,5 @@ The output should be similar to the following
   }
 }
 ```
+
+</details>

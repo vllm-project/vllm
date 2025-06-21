@@ -25,6 +25,9 @@ Further update the model as follows:
 
 - Implement [get_multimodal_embeddings][vllm.model_executor.models.interfaces.SupportsMultiModal.get_multimodal_embeddings] that returns the embeddings from running the multimodal inputs through the multimodal tokenizer of the model. Below we provide a boilerplate of a typical implementation pattern, but feel free to adjust it to your own needs.
 
+    <details>
+    <summary>Code</summary>
+
     ```python
     class YourModelForImage2Seq(nn.Module):
         ...
@@ -48,10 +51,15 @@ Further update the model as follows:
             return vision_embeddings
     ```
 
+    </details>
+
 !!! important
     The returned `multimodal_embeddings` must be either a **3D [torch.Tensor][]** of shape `(num_items, feature_size, hidden_size)`, or a **list / tuple of 2D [torch.Tensor][]'s** of shape `(feature_size, hidden_size)`, so that `multimodal_embeddings[i]` retrieves the embeddings generated from the `i`-th multimodal data item (e.g, image) of the request.
 
 - Implement [get_input_embeddings][vllm.model_executor.models.interfaces.SupportsMultiModal.get_input_embeddings] to merge `multimodal_embeddings` with text embeddings from the `input_ids`. If input processing for the model is implemented correctly (see sections below), then you can leverage the utility function we provide to easily merge the embeddings.
+
+    <details>
+    <summary>Code</summary>
 
     ```python
     from .utils import merge_multimodal_embeddings
@@ -79,7 +87,12 @@ Further update the model as follows:
             return inputs_embeds
     ```
 
+    </details>
+
 - Implement [get_language_model][vllm.model_executor.models.interfaces.SupportsMultiModal.get_language_model] getter to provide stable access to the underlying language model.
+
+    <details>
+    <summary>Code</summary>
 
     ```python
     class YourModelForImage2Seq(nn.Module):
@@ -89,6 +102,8 @@ Further update the model as follows:
             # Change `language_model` according to your implementation.
             return self.language_model
     ```
+
+    </details>
 
 - Once the above steps are done, update the model class with the [SupportsMultiModal][vllm.model_executor.models.interfaces.SupportsMultiModal] interface.
 
@@ -115,10 +130,15 @@ to return the maximum number of input items for each modality supported by the m
 
 For example, if the model supports any number of images but only one video per prompt:
 
+<details>
+<summary>Code</summary>
+
 ```python
 def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
     return {"image": None, "video": 1}
 ```
+
+</details>
 
 ## 3. Specify dummy inputs
 
@@ -134,6 +154,9 @@ Assuming that the memory usage increases with the number of tokens, the dummy in
 === "Basic example: LLaVA"
 
     Looking at the code of HF's `LlavaForConditionalGeneration`:
+
+    <details>
+    <summary>Code</summary>
 
     ```python
     # https://github.com/huggingface/transformers/blob/v4.47.1/src/transformers/models/llava/modeling_llava.py#L530-L544
@@ -154,8 +177,13 @@ Assuming that the memory usage increases with the number of tokens, the dummy in
     inputs_embeds = inputs_embeds.masked_scatter(special_image_mask, image_features)
     ```
 
+    </details>
+
     The number of placeholder feature tokens per image is `image_features.shape[1]`.
     `image_features` is calculated inside the `get_image_features` method:
+
+    <details>
+    <summary>Code</summary>
 
     ```python
     # https://github.com/huggingface/transformers/blob/v4.47.1/src/transformers/models/llava/modeling_llava.py#L290-L300
@@ -172,11 +200,16 @@ Assuming that the memory usage increases with the number of tokens, the dummy in
     return image_features
     ```
 
+    </details>
+
     We can infer that `image_features.shape[1]` is based on `image_outputs.hidden_states.shape[1]` from the vision tower
     (`CLIPVisionModel` for the [`llava-hf/llava-1.5-7b-hf`](https://huggingface.co/llava-hf/llava-1.5-7b-hf) model).
     Moreover, we only need the sequence length (the second dimension of the tensor) to get `image_features.shape[1]`.
     The sequence length is determined by the initial hidden states in `CLIPVisionTransformer` since the attention
     mechanism doesn't change the sequence length of the output hidden states.
+
+    <details>
+    <summary>Code</summary>
 
     ```python
     # https://github.com/huggingface/transformers/blob/v4.47.1/src/transformers/models/clip/modeling_clip.py#L1094-L1102
@@ -191,7 +224,12 @@ Assuming that the memory usage increases with the number of tokens, the dummy in
     )
     ```
 
+    </details>
+
     To find the sequence length, we turn to the code of `CLIPVisionEmbeddings`:
+
+    <details>
+    <summary>Code</summary>
 
     ```python
     # https://github.com/huggingface/transformers/blob/v4.47.1/src/transformers/models/clip/modeling_clip.py#L247-L257
@@ -208,7 +246,12 @@ Assuming that the memory usage increases with the number of tokens, the dummy in
     return embeddings
     ```
 
+    </details>
+
     We can infer that `embeddings.shape[1] == self.num_positions`, where
+
+    <details>
+    <summary>Code</summary>
 
     ```python
     # https://github.com/huggingface/transformers/blob/v4.47.1/src/transformers/models/clip/modeling_clip.py#L195-L196
@@ -216,7 +259,12 @@ Assuming that the memory usage increases with the number of tokens, the dummy in
     self.num_positions = self.num_patches + 1
     ```
 
+    </details>
+
     Overall, the number of placeholder feature tokens for an image can be calculated as:
+
+    <details>
+    <summary>Code</summary>
 
     ```python
     def get_num_image_tokens(
@@ -238,8 +286,13 @@ Assuming that the memory usage increases with the number of tokens, the dummy in
         return num_image_tokens
     ```
 
+    </details>
+
     Notice that the number of image tokens doesn't depend on the image width and height.
     We can simply use a dummy `image_size` to calculate the multimodal profiling data:
+
+    <details>
+    <summary>Code</summary>
 
     ```python
     # NOTE: In actuality, this is usually implemented as part of the
@@ -268,7 +321,12 @@ Assuming that the memory usage increases with the number of tokens, the dummy in
         }
     ```
 
+    </details>
+
     For the text, we simply expand the multimodal image token from the model config to match the desired number of images.
+
+    <details>
+    <summary>Code</summary>
 
     ```python
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
@@ -280,9 +338,14 @@ Assuming that the memory usage increases with the number of tokens, the dummy in
         return image_token * num_images
     ```
 
+    </details>
+
 === "No input placeholders: Fuyu"
 
     Looking at the code of HF's `FuyuForCausalLM`:
+
+    <details>
+    <summary>Code</summary>
 
     ```python
     # https://github.com/huggingface/transformers/blob/v4.48.3/src/transformers/models/fuyu/modeling_fuyu.py#L311-L322
@@ -300,6 +363,8 @@ Assuming that the memory usage increases with the number of tokens, the dummy in
         )
     ```
 
+    </details>
+
     The number of placeholder feature tokens for the `i`th item in the batch is `patch_embeddings[i].shape[0]`,
     which is the same as `image_patches[i].shape[0]`, i.e. `num_total_patches`.
 
@@ -311,6 +376,9 @@ Assuming that the memory usage increases with the number of tokens, the dummy in
 
     In `FuyuImageProcessor.preprocess`, the images are resized and padded to the target `FuyuImageProcessor.size`,
     returning the dimensions after resizing (but before padding) as metadata.
+
+    <details>
+    <summary>Code</summary>
 
     ```python
     # https://github.com/huggingface/transformers/blob/v4.48.3/src/transformers/models/fuyu/processing_fuyu.py#L541-L544
@@ -346,7 +414,12 @@ Assuming that the memory usage increases with the number of tokens, the dummy in
         ]
     ```
 
+    </details>
+
     In `FuyuImageProcessor.preprocess_with_tokenizer_info`, the images are split into patches based on this metadata:
+
+    <details>
+    <summary>Code</summary>
 
     ```python
     # https://github.com/huggingface/transformers/blob/v4.48.3/src/transformers/models/fuyu/processing_fuyu.py#L417-L425
@@ -382,7 +455,12 @@ Assuming that the memory usage increases with the number of tokens, the dummy in
     assert num_patches == patches.shape[0]
     ```
 
+    </details>
+
     The number of patches is in turn defined by `FuyuImageProcessor.get_num_patches`:
+
+    <details>
+    <summary>Code</summary>
 
     ```python
     # https://github.com/huggingface/transformers/blob/v4.48.3/src/transformers/models/fuyu/image_processing_fuyu.py#L552-L562
@@ -399,8 +477,13 @@ Assuming that the memory usage increases with the number of tokens, the dummy in
     num_patches = num_patches_per_dim_h * num_patches_per_dim_w
     ```
 
+    </details>
+
     These image patches correspond to placeholder tokens (`|SPEAKER|`). So, we just need to maximize the number of image patches. Since input images are first resized
     to fit within `image_processor.size`, we can maximize the number of image patches by inputting an image with size equal to `image_processor.size`.
+
+    <details>
+    <summary>Code</summary>
 
     ```python
     def get_image_size_with_most_features(self) -> ImageSize:
@@ -409,15 +492,25 @@ Assuming that the memory usage increases with the number of tokens, the dummy in
                             height=image_processor.size["height"])
     ```
 
+    </details>
+
     Fuyu does not expect image placeholders in the inputs to HF processor, so
     the dummy prompt text is empty regardless of the number of images.
+
+    <details>
+    <summary>Code</summary>
 
     ```python
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         return ""
     ```
 
+    </details>
+
     For the multimodal image profiling data, the logic is very similar to LLaVA:
+
+    <details>
+    <summary>Code</summary>
 
     ```python
     def get_dummy_mm_data(
@@ -437,6 +530,8 @@ Assuming that the memory usage increases with the number of tokens, the dummy in
         }
     ```
 
+    </details>
+
 ## 4. Specify processing details
 
 Afterwards, create a subclass of [BaseMultiModalProcessor][vllm.multimodal.processing.BaseMultiModalProcessor]
@@ -455,6 +550,9 @@ return a schema of the tensors outputted by the HF processor that are related to
     The output of `CLIPImageProcessor` is a simple tensor with shape
     `(num_images, num_channels, image_height, image_width)`:
 
+    <details>
+    <summary>Code</summary>
+
     ```python
     # https://github.com/huggingface/transformers/blob/v4.47.1/src/transformers/models/clip/image_processing_clip.py#L339-L345
     images = [
@@ -466,7 +564,12 @@ return a schema of the tensors outputted by the HF processor that are related to
     return BatchFeature(data=data, tensor_type=return_tensors)
     ```
 
+    </details>
+
     So, we override [_get_mm_fields_config][vllm.multimodal.processing.BaseMultiModalProcessor._get_mm_fields_config] as follows:
+
+    <details>
+    <summary>Code</summary>
 
     ```python
     def _get_mm_fields_config(
@@ -479,6 +582,8 @@ return a schema of the tensors outputted by the HF processor that are related to
         )
     ```
 
+    </details>
+
     !!! note
         Our [actual code](gh-file:vllm/model_executor/models/llava.py) additionally supports
         pre-computed image embeddings, which can be passed to be model via the `image_embeds` argument.
@@ -487,6 +592,9 @@ return a schema of the tensors outputted by the HF processor that are related to
 
     The `image_patches` output of `FuyuImageProcessor.preprocess_with_tokenizer_info` concatenates
     the patches from each image belonging to an item in the batch:
+
+    <details>
+    <summary>Code</summary>
 
     ```python
     # https://github.com/huggingface/transformers/blob/v4.48.3/src/transformers/models/fuyu/image_processing_fuyu.py#L673-L679
@@ -499,11 +607,16 @@ return a schema of the tensors outputted by the HF processor that are related to
     batch_image_patches.append(image_patches)
     ```
 
+    </details>
+
     The shape of `image_patches` outputted by `FuyuImageProcessor` is therefore
     `(1, num_images, num_patches, patch_width * patch_height * num_channels)`.
 
     In order to support the use of [MultiModalFieldConfig.batched][] like in LLaVA,
     we remove the extra batch dimension by overriding [BaseMultiModalProcessor._call_hf_processor][]:
+
+    <details>
+    <summary>Code</summary>
 
     ```python
     def _call_hf_processor(
@@ -535,11 +648,16 @@ return a schema of the tensors outputted by the HF processor that are related to
         return processed_outputs
     ```
 
+    </details>
+
     !!! note
         Our [actual code](gh-file:vllm/model_executor/models/fuyu.py) has special handling
         for text-only inputs to prevent unnecessary warnings from HF processor.
 
     This lets us override [_get_mm_fields_config][vllm.multimodal.processing.BaseMultiModalProcessor._get_mm_fields_config] as follows:
+
+    <details>
+    <summary>Code</summary>
 
     ```python
     def _get_mm_fields_config(
@@ -549,6 +667,8 @@ return a schema of the tensors outputted by the HF processor that are related to
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(image_patches=MultiModalFieldConfig.batched("image"))
     ```
+
+    </details>
 
 ### Prompt updates
 
@@ -562,6 +682,9 @@ Each [PromptUpdate][vllm.multimodal.processing.PromptUpdate] instance specifies 
 
     Looking at HF's `LlavaProcessor`:
 
+    <details>
+    <summary>Code</summary>
+
     ```python
     # https://github.com/huggingface/transformers/blob/v4.47.1/src/transformers/models/llava/processing_llava.py#L167-L170
     prompt_strings = []
@@ -570,8 +693,13 @@ Each [PromptUpdate][vllm.multimodal.processing.PromptUpdate] instance specifies 
         prompt_strings.append(sample)
     ```
 
+    </details>
+
     It simply repeats each input `image_token` a number of times equal to the number of placeholder feature tokens (`num_image_tokens`).
     Based on this, we override [_get_prompt_updates][vllm.multimodal.processing.BaseMultiModalProcessor._get_prompt_updates] as follows:
+
+    <details>
+    <summary>Code</summary>
 
     ```python
     def _get_prompt_updates(
@@ -603,6 +731,8 @@ Each [PromptUpdate][vllm.multimodal.processing.PromptUpdate] instance specifies 
         ]
     ```
 
+    </details>
+
 === "Handling additional tokens: Fuyu"
 
     Recall the layout of feature tokens from Step 2:
@@ -615,6 +745,9 @@ Each [PromptUpdate][vllm.multimodal.processing.PromptUpdate] instance specifies 
     ```
 
     We define a helper function to return `ncols` and `nrows` directly:
+
+    <details>
+    <summary>Code</summary>
 
     ```python
     def get_image_feature_grid_size(
@@ -642,7 +775,12 @@ Each [PromptUpdate][vllm.multimodal.processing.PromptUpdate] instance specifies 
         return ncols, nrows
     ```
 
+    </details>
+
     Based on this, we can initially define our replacement tokens as:
+
+    <details>
+    <summary>Code</summary>
 
     ```python
     def get_replacement(item_idx: int):
@@ -659,8 +797,13 @@ Each [PromptUpdate][vllm.multimodal.processing.PromptUpdate] instance specifies 
         return ([_IMAGE_TOKEN_ID] * ncols + [_NEWLINE_TOKEN_ID]) * nrows
     ```
 
+    </details>
+
     However, this is not entirely correct. After `FuyuImageProcessor.preprocess_with_tokenizer_info` is called,
     a BOS token (`<s>`) is also added to the promopt:
+
+    <details>
+    <summary>Code</summary>
 
     ```python
     # https://github.com/huggingface/transformers/blob/v4.48.3/src/transformers/models/fuyu/processing_fuyu.py#L417-L435
@@ -684,8 +827,13 @@ Each [PromptUpdate][vllm.multimodal.processing.PromptUpdate] instance specifies 
     )
     ```
 
+    </details>
+
     To assign the vision embeddings to only the image tokens, instead of a string
     you can return an instance of [PromptUpdateDetails][vllm.multimodal.processing.PromptUpdateDetails]:
+
+    <details>
+    <summary>Code</summary>
 
     ```python
     hf_config = self.info.get_hf_config()
@@ -709,8 +857,13 @@ Each [PromptUpdate][vllm.multimodal.processing.PromptUpdate] instance specifies 
         )
     ```
 
+    </details>
+
     Finally, noticing that the HF processor removes the `|ENDOFTEXT|` token from the tokenized prompt,
     we can search for it to conduct the replacement at the start of the string:
+
+    <details>
+    <summary>Code</summary>
 
     ```python
     def _get_prompt_updates(
@@ -751,6 +904,8 @@ Each [PromptUpdate][vllm.multimodal.processing.PromptUpdate] instance specifies 
             )
         ]
     ```
+
+    </details>
 
 ## 5. Register processor-related classes
 

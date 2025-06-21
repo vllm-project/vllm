@@ -11,6 +11,9 @@ Nevertheless, our model resolution may fail for the following reasons:
 To fix this, explicitly specify the model architecture by passing `config.json` overrides to the `hf_overrides` option.
 For example:
 
+<details>
+<summary>Code</summary>
+
 ```python
 from vllm import LLM
 
@@ -19,5 +22,7 @@ model = LLM(
     hf_overrides={"architectures": ["GPT2LMHeadModel"]},  # GPT-2
 )
 ```
+
+</details>
 
 Our [list of supported models][supported-models] shows the model architectures that are recognized by vLLM.

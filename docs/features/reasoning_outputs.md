@@ -33,6 +33,9 @@ vllm serve deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B \
 
 Next, make a request to the model that should return the reasoning content in the response.
 
+<details>
+<summary>Code</summary>
+
 ```python
 from openai import OpenAI
 
@@ -62,11 +65,16 @@ print("reasoning_content:", reasoning_content)
 print("content:", content)
 ```
 
+</details>
+
 The `reasoning_content` field contains the reasoning steps that led to the final conclusion, while the `content` field contains the final conclusion.
 
 ## Streaming chat completions
 
 Streaming chat completions are also supported for reasoning models. The `reasoning_content` field is available in the `delta` field in [chat completion response chunks](https://platform.openai.com/docs/api-reference/chat/streaming).
+
+<details>
+<summary>Output</summary>
 
 ```json
 {
@@ -89,7 +97,12 @@ Streaming chat completions are also supported for reasoning models. The `reasoni
 }
 ```
 
+</details>
+
 OpenAI Python client library does not officially support `reasoning_content` attribute for streaming output. But the client supports extra attributes in the response. You can use `hasattr` to check if the `reasoning_content` attribute is present in the response. For example:
+
+<details>
+<summary>Code</summary>
 
 ```python
 from openai import OpenAI
@@ -140,11 +153,16 @@ for chunk in stream:
         print(content, end="", flush=True)
 ```
 
+</details>
+
 Remember to check whether the `reasoning_content` exists in the response before accessing it. You could checkout the [example](https://github.com/vllm-project/vllm/blob/main/examples/online_serving/openai_chat_completion_with_reasoning_streaming.py).
 
 ## Tool Calling
 
 The reasoning content is also available when both tool calling and the reasoning parser are enabled. Additionally, tool calling only parses functions from the `content` field, not from the `reasoning_content`.
+
+<details>
+<summary>Code</summary>
 
 ```python
 from openai import OpenAI
@@ -182,6 +200,8 @@ print(f"Function called: {tool_call.name}")
 print(f"Arguments: {tool_call.arguments}")
 ```
 
+</details>
+
 For more examples, please refer to <gh-file:examples/online_serving/openai_chat_completion_tool_calls_with_reasoning.py>.
 
 ## Limitations
@@ -191,6 +211,9 @@ For more examples, please refer to <gh-file:examples/online_serving/openai_chat_
 ## How to support a new reasoning model
 
 You can add a new `ReasoningParser` similar to <gh-file:vllm/reasoning/deepseek_r1_reasoning_parser.py>.
+
+<details>
+<summary>Code</summary>
 
 ```python
 # import the required packages
@@ -246,7 +269,12 @@ class ExampleParser(ReasoningParser):
         """
 ```
 
+</details>
+
 Additionally, to enable structured output, you'll need to create a new `Reasoner` similar to the one in <gh-file:vllm/reasoning/deepseek_r1_reasoning_parser.py>.
+
+<details>
+<summary>Code</summary>
 
 ```python
 @dataclass
@@ -271,6 +299,8 @@ class DeepSeekReasoner(Reasoner):
         return self.end_token_id in input_ids
     ...
 ```
+
+</details>
 
 The structured output engine like [xgrammar](https://github.com/mlc-ai/xgrammar) will use `end_token_id` to check if the reasoning content is present in the model output and skip the structured output if it is the case.
 

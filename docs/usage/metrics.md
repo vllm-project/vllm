@@ -6,11 +6,19 @@ OpenAI compatible API server.
 
 You can start the server using Python, or using [Docker][deployment-docker]:
 
+<details>
+<summary>Command</summary>
+
 ```console
 vllm serve unsloth/Llama-3.2-1B-Instruct
 ```
 
+</details>
+
 Then query the endpoint to get the latest metrics from the server:
+
+<details>
+<summary>Output</summary>
 
 ```console
 $ curl http://0.0.0.0:8000/metrics
@@ -29,11 +37,18 @@ vllm:iteration_tokens_total_bucket{le="512.0",model_name="unsloth/Llama-3.2-1B-I
 ...
 ```
 
+</details>
+
 The following metrics are exposed:
+
+<details>
+<summary>Code</summary>
 
 ```python
 --8<-- "vllm/engine/metrics.py:metrics-definitions"
 ```
+
+</details>
 
 Note: when metrics are deprecated in version `X.Y`, they are hidden in version `X.Y+1`
 but can be re-enabled using the `--show-hidden-metrics-for-version=X.Y` escape hatch,

@@ -26,6 +26,9 @@ dstack init
 
 Next, to provision a VM instance with LLM of your choice (`NousResearch/Llama-2-7b-chat-hf` for this example), create the following `serve.dstack.yml` file for the dstack `Service`:
 
+<details>
+<summary>Config</summary>
+
 ```yaml
 type: service
 
@@ -44,7 +47,12 @@ model:
     name: NousResearch/Llama-2-7b-chat-hf
 ```
 
+</details>
+
 Then, run the following CLI for provisioning:
+
+<details>
+<summary>Command</summary>
 
 ```console
 $ dstack run . -f serve.dstack.yml
@@ -73,7 +81,12 @@ spicy-treefrog-1 provisioning completed (running)
 Service is published at ...
 ```
 
+</details>
+
 After the provisioning, you can interact with the model by using the OpenAI SDK:
+
+<details>
+<summary>Code</summary>
 
 ```python
 from openai import OpenAI
@@ -95,6 +108,8 @@ completion = client.chat.completions.create(
 
 print(completion.choices[0].message.content)
 ```
+
+</details>
 
 !!! note
     dstack automatically handles authentication on the gateway using dstack's tokens. Meanwhile, if you don't want to configure a gateway, you can provision dstack `Task` instead of `Service`. The `Task` is for development purpose only. If you want to know more about hands-on materials how to serve vLLM using dstack, check out [this repository](https://github.com/dstackai/dstack-examples/tree/main/deployment/vllm)

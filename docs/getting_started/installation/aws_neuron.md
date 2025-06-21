@@ -47,12 +47,17 @@ Currently, there are no pre-built Neuron wheels.
 
 To build and install vLLM from source, run:
 
+<details>
+<summary>Commands</summary>
+
 ```console
 git clone https://github.com/vllm-project/vllm.git
 cd vllm
 pip install -U -r requirements/neuron.txt
 VLLM_TARGET_DEVICE="neuron" pip install -e .
 ```
+
+</details>
 
 AWS Neuron maintains a [Github fork of vLLM](https://github.com/aws-neuron/upstreaming-to-vllm/tree/neuron-2.23-vllm-v0.7.2) at
 <https://github.com/aws-neuron/upstreaming-to-vllm/tree/neuron-2.23-vllm-v0.7.2>, which contains several features in addition to what's
@@ -66,12 +71,17 @@ Refer to [vLLM User Guide for NxD Inference](https://awsdocs-neuron.readthedocs-
 
 To install the AWS Neuron fork, run the following:
 
+<details>
+<summary>Commands</summary>
+
 ```console
 git clone -b neuron-2.23-vllm-v0.7.2 https://github.com/aws-neuron/upstreaming-to-vllm.git
 cd upstreaming-to-vllm
 pip install -r requirements/neuron.txt
 VLLM_TARGET_DEVICE="neuron" pip install -e .
 ```
+
+</details>
 
 Note that the AWS Neuron fork is only intended to support Neuron hardware; compatibility with other hardwares is not tested.
 
@@ -100,11 +110,16 @@ to perform most of the heavy lifting which includes PyTorch model initialization
 To configure NxD Inference features through the vLLM entrypoint, use the `override_neuron_config` setting. Provide the configs you want to override
 as a dictionary (or JSON object when starting vLLM from the CLI). For example, to disable auto bucketing, include
 
+<details>
+<summary>Config</summary>
+
 ```console
 override_neuron_config={
     "enable_bucketing":False,
 }
 ```
+
+</details>
 
 or when launching vLLM from the CLI, pass
 

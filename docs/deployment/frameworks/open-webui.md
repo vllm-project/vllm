@@ -13,6 +13,9 @@ vllm serve qwen/Qwen1.5-0.5B-Chat
 
 1. Start the [Open WebUI](https://github.com/open-webui/open-webui) docker container (replace the vllm serve host and vllm serve port):
 
+<details>
+<summary>Command</summary>
+
 ```console
 docker run -d -p 3000:8080 \
 --name open-webui \
@@ -21,6 +24,8 @@ docker run -d -p 3000:8080 \
 --restart always \
 ghcr.io/open-webui/open-webui:main
 ```
+
+</details>
 
 1. Open it in the browser: <http://open-webui-host:3000/>
 

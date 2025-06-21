@@ -6,6 +6,9 @@ vLLM currently supports named function calling, as well as the `auto`, `required
 
 Start the server with tool calling enabled. This example uses Meta's Llama 3.1 8B model, so we need to use the llama3 tool calling chat template from the vLLM examples directory:
 
+<details>
+<summary>Command</summary>
+
 ```bash
 vllm serve meta-llama/Llama-3.1-8B-Instruct \
     --enable-auto-tool-choice \
@@ -13,7 +16,12 @@ vllm serve meta-llama/Llama-3.1-8B-Instruct \
     --chat-template examples/tool_chat_template_llama3.1_json.jinja
 ```
 
+</details>
+
 Next, make a request to the model that should result in it using the available tools:
+
+<details>
+<summary>Code</summary>
 
 ```python
 from openai import OpenAI
@@ -54,13 +62,18 @@ print(f"Arguments: {tool_call.arguments}")
 print(f"Result: {get_weather(**json.loads(tool_call.arguments))}")
 ```
 
-Example output:
+</details>
+
+<details>
+<summary>Example output</summary>
 
 ```text
 Function called: get_weather
 Arguments: {"location": "San Francisco, CA", "unit": "fahrenheit"}
 Result: Getting the weather for San Francisco, CA in fahrenheit...
 ```
+
+</details>
 
 This example demonstrates:
 
@@ -301,6 +314,9 @@ A tool parser plugin is a Python file containing one or more ToolParser implemen
 
 Here is a summary of a plugin file:
 
+<details>
+<summary>Code</summary>
+
 ```python
 
 # import the required packages
@@ -345,7 +361,12 @@ class ExampleToolParser(ToolParser):
 
 ```
 
+</details>
+
 Then you can use this plugin in the command line like this.
+
+<details>
+<summary>Command</summary>
 
 ```console
     --enable-auto-tool-choice \
@@ -353,3 +374,5 @@ Then you can use this plugin in the command line like this.
     --tool-call-parser example \
     --chat-template <your chat template> \
 ```
+
+</details>

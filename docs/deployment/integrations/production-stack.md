@@ -60,7 +60,8 @@ And then you can send out a query to the OpenAI-compatible API to check the avai
 curl -o- http://localhost:30080/models
 ```
 
-Expected output:
+<details>
+<summary>Expected output</summary>
 
 ```json
 {
@@ -77,7 +78,12 @@ Expected output:
 }
 ```
 
+</details>
+
 To send an actual chatting request, you can issue a curl request to the OpenAI `/completion` endpoint:
+
+<details>
+<summary>Command</summary>
 
 ```bash
 curl -X POST http://localhost:30080/completions \
@@ -89,7 +95,10 @@ curl -X POST http://localhost:30080/completions \
   }'
 ```
 
-Expected output:
+</details>
+
+<details>
+<summary>Expected output</summary>
 
 ```json
 {
@@ -107,6 +116,8 @@ Expected output:
 }
 ```
 
+</details>
+
 ### Uninstall
 
 To remove the deployment, run:
@@ -120,6 +131,9 @@ sudo helm uninstall vllm
 ### (Advanced) Configuring vLLM production stack
 
 The core vLLM production stack configuration is managed with YAML. Here is the example configuration used in the installation above:
+
+<details>
+<summary>Yaml</summary>
 
 ```yaml
 servingEngineSpec:
@@ -138,6 +152,8 @@ servingEngineSpec:
 
     pvcStorage: "10Gi"
 ```
+
+</details>
 
 In this YAML configuration:
 * **`modelSpec`** includes:

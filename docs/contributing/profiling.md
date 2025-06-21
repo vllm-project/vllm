@@ -29,15 +29,25 @@ Refer to <gh-file:examples/offline_inference/simple_profiling.py> for an example
 
 #### OpenAI Server
 
+<details>
+<summary>Command</summary>
+
 ```bash
 VLLM_TORCH_PROFILER_DIR=./vllm_profile python -m vllm.entrypoints.openai.api_server --model meta-llama/Meta-Llama-3-70B
 ```
 
+</details>
+
 benchmark_serving.py:
+
+<details>
+<summary>Commanad</summary>
 
 ```bash
 python benchmarks/benchmark_serving.py --backend vllm --model meta-llama/Meta-Llama-3-70B --dataset-name sharegpt --dataset-path sharegpt.json --profile --num-prompts 2
 ```
+
+</details>
 
 ## Profile with NVIDIA Nsight Systems
 
@@ -45,6 +55,9 @@ Nsight systems is an advanced tool that exposes more profiling details, such as 
 
 [Install nsight-systems](https://docs.nvidia.com/nsight-systems/InstallationGuide/index.html) using your package manager.
 The following block is an example for Ubuntu.
+
+<details>
+<summary>Command</summary>
 
 ```bash
 apt update
@@ -55,6 +68,8 @@ apt update
 apt install nsight-systems-cli
 ```
 
+</details>
+
 ### Example commands and usage
 
 #### Offline Inference
@@ -63,13 +78,21 @@ For basic usage, you can just append `nsys profile -o report.nsys-rep --trace-fo
 
 The following is an example using the `benchmarks/benchmark_latency.py` script:
 
+<details>
+<summary>Command</summary>
+
 ```bash
 nsys profile -o report.nsys-rep --trace-fork-before-exec=true --cuda-graph-trace=node python benchmarks/benchmark_latency.py --model meta-llama/Llama-3.1-8B-Instruct --num-iters-warmup 5 --num-iters 1 --batch-size 16 --input-len 512 --output-len 8
 ```
 
+</details>
+
 #### OpenAI Server
 
 To profile the server, you will want to prepend your `vllm serve` command with `nsys profile` just like for offline inference, however you must specify `--delay XX --duration YY` parameters according to the needs of your benchmark. After the duration time has been used up, the server will be killed.
+
+<details>
+<summary>Command</summary>
 
 ```bash
 # server
@@ -79,17 +102,29 @@ nsys profile -o report.nsys-rep --trace-fork-before-exec=true --cuda-graph-trace
 python benchmarks/benchmark_serving.py --backend vllm --model meta-llama/Llama-3.1-8B-Instruct --num-prompts 1 --dataset-name random --random-input 1024 --random-output 512
 ```
 
+</details>
+
 In practice, you should set the `--duration` argument to a large value. Whenever you want the server to stop profiling, run:
+
+<details>
+<summary>Command</summary>
 
 ```
 nsys sessions list
 ```
 
+</details>
+
 to get the session id in the form of `profile-XXXXX`, then run:
+
+<details>
+<summary>Command</summary>
 
 ```
 nsys stop --session=profile-XXXXX
 ```
+
+</details>
 
 to manually kill the profiler and generate your `nsys-rep` report.
 
@@ -98,6 +133,9 @@ to manually kill the profiler and generate your `nsys-rep` report.
 You can view these profiles either as summaries in the CLI, using `nsys stats [profile-file]`, or in the GUI by installing Nsight [locally following the directions here](https://developer.nvidia.com/nsight-systems/get-started).
 
 CLI example:
+
+<details>
+<summary>Command</summary>
 
 ```bash
 nsys stats report1.nsys-rep
@@ -118,6 +156,8 @@ nsys stats report1.nsys-rep
 ... 
 ```
 
+</details>
+
 GUI example:
 
 <img width="1799" alt="Screenshot 2025-03-05 at 11 48 42 AM" src="https://github.com/user-attachments/assets/c7cff1ae-6d6f-477d-a342-bd13c4fc424c" />
@@ -136,6 +176,9 @@ The first helper is a Python decorator that can be used to profile a function.
 If a filename is specified, the profile will be saved to that file. If no filename is
 specified, profile data will be printed to stdout.
 
+<details>
+<summary>Code</summary>
+
 ```python
 import vllm.utils
 
@@ -145,10 +188,15 @@ def expensive_function():
     pass
 ```
 
+</details>
+
 ### Example Usage - context manager
 
 The second helper is a context manager that can be used to profile a block of
 code. Similar to the decorator, the filename is optional.
+
+<details>
+<summary>Code</summary>
 
 ```python
 import vllm.utils
@@ -161,12 +209,19 @@ with vllm.utils.cprofile_context("another_function.prof"):
     another_function()
 ```
 
+</details>
+
 ### Analyzing Profile Results
 
 There are multiple tools available that can help analyze the profile results.
 One example is [snakeviz](https://jiffyclub.github.io/snakeviz/).
 
+<details>
+<summary>Command</summary>
+
 ```bash
 pip install snakeviz
 snakeviz expensive_function.prof
 ```
+
+</details>

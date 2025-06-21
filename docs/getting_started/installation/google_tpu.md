@@ -68,6 +68,9 @@ For more information about using TPUs with GKE, see:
 
 Create a TPU v5e with 4 TPU chips:
 
+<details>
+<summary>Commands</summary>
+
 ```console
 gcloud alpha compute tpus queued-resources create QUEUED_RESOURCE_ID \
   --node-id TPU_NAME \
@@ -77,6 +80,8 @@ gcloud alpha compute tpus queued-resources create QUEUED_RESOURCE_ID \
   --runtime-version RUNTIME_VERSION \
   --service-account SERVICE_ACCOUNT
 ```
+
+</details>
 
 | Parameter name     | Description                                                                                                                                                                                              |
 |--------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
@@ -108,18 +113,28 @@ Currently, there are no pre-built TPU wheels.
 
 Install Miniconda:
 
+<details>
+<summary>Commands</summary>
+
 ```bash
 wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
 bash Miniconda3-latest-Linux-x86_64.sh
 source ~/.bashrc
 ```
 
+</details>
+
 Create and activate a Conda environment for vLLM:
+
+<details>
+<summary>Commands</summary>
 
 ```bash
 conda create -n vllm python=3.10 -y
 conda activate vllm
 ```
+
+</details>
 
 Clone the vLLM repository and go to the vLLM directory:
 

@@ -10,13 +10,21 @@ LoRA adapters can be used with any vLLM model that implements [SupportsLoRA][vll
 Adapters can be efficiently served on a per request basis with minimal overhead. First we download the adapter(s) and save
 them locally with
 
+<details>
+<summary>Code</summary>
+
 ```python
 from huggingface_hub import snapshot_download
 
 sql_lora_path = snapshot_download(repo_id="yard1/llama-2-7b-sql-lora-test")
 ```
 
+</details>
+
 Then we instantiate the base model and pass in the `enable_lora=True` flag:
+
+<details>
+<summary>Code</summary>
 
 ```python
 from vllm import LLM, SamplingParams
@@ -25,9 +33,14 @@ from vllm.lora.request import LoRARequest
 llm = LLM(model="meta-llama/Llama-2-7b-hf", enable_lora=True)
 ```
 
+</details>
+
 We can now submit the prompts and call `llm.generate` with the `lora_request` parameter. The first parameter
 of `LoRARequest` is a human identifiable name, the second parameter is a globally unique ID for the adapter and
 the third parameter is the path to the LoRA adapter.
+
+<details>
+<summary>Code</summary>
 
 ```python
 sampling_params = SamplingParams(
@@ -48,6 +61,8 @@ outputs = llm.generate(
 )
 ```
 
+</details>
+
 Check out <gh-file:examples/offline_inference/multilora_inference.py> for an example of how to use LoRA adapters with the async engine and how to use more advanced configuration options.
 
 ## Serving LoRA Adapters
@@ -55,11 +70,16 @@ Check out <gh-file:examples/offline_inference/multilora_inference.py> for an exa
 LoRA adapted models can also be served with the Open-AI compatible vLLM server. To do so, we use
 `--lora-modules {name}={path} {name}={path}` to specify each LoRA module when we kickoff the server:
 
+<details>
+<summary>Command</summary>
+
 ```bash
 vllm serve meta-llama/Llama-2-7b-hf \
     --enable-lora \
     --lora-modules sql-lora=$HOME/.cache/huggingface/hub/models--yard1--llama-2-7b-sql-lora-test/snapshots/0dfa347e8877a4d4ed19ee56c140fa518470028c/
 ```
+
+</details>
 
 !!! note
     The commit ID `0dfa347e8877a4d4ed19ee56c140fa518470028c` may change over time. Please check the latest commit ID in your environment to ensure you are using the correct one.
@@ -67,6 +87,9 @@ vllm serve meta-llama/Llama-2-7b-hf \
 The server entrypoint accepts all other LoRA configuration parameters (`max_loras`, `max_lora_rank`, `max_cpu_loras`,
 etc.), which will apply to all forthcoming requests. Upon querying the `/models` endpoint, we should see our LoRA along
 with its base model (if `jq` is not installed, you can follow [this guide](https://jqlang.org/download/) to install it.):
+
+<details>
+<summary>Command</summary>
 
 ```bash
 curl localhost:8000/v1/models | jq .
@@ -87,11 +110,16 @@ curl localhost:8000/v1/models | jq .
 }
 ```
 
+</details>
+
 Requests can specify the LoRA adapter as if it were any other model via the `model` request parameter. The requests will be
 processed according to the server-wide LoRA configuration (i.e. in parallel with base model requests, and potentially other
 LoRA adapter requests if they were provided and `max_loras` is set high enough).
 
 The following is an example request
+
+<details>
+<summary>Command</summary>
 
 ```bash
 curl http://localhost:8000/v1/completions \
@@ -103,6 +131,8 @@ curl http://localhost:8000/v1/completions \
         "temperature": 0
     }' | jq
 ```
+
+</details>
 
 ## Dynamically serving LoRA Adapters
 
@@ -123,7 +153,8 @@ Loading a LoRA Adapter:
 To dynamically load a LoRA adapter, send a POST request to the `/v1/load_lora_adapter` endpoint with the necessary
 details of the adapter to be loaded. The request payload should include the name and path to the LoRA adapter.
 
-Example request to load a LoRA adapter:
+<details>
+<summary>Example request to load a LoRA adapter</summary>
 
 ```bash
 curl -X POST http://localhost:8000/v1/load_lora_adapter \
@@ -133,6 +164,8 @@ curl -X POST http://localhost:8000/v1/load_lora_adapter \
     "lora_path": "/path/to/sql-lora-adapter"
 }'
 ```
+
+</details>
 
 Upon a successful request, the API will respond with a `200 OK` status code from `vllm serve`, and `curl` returns the response body: `Success: LoRA adapter 'sql_adapter' added successfully`. If an error occurs, such as if the adapter
 cannot be found or loaded, an appropriate error message will be returned.
@@ -144,7 +177,8 @@ with the name or ID of the adapter to be unloaded.
 
 Upon a successful request, the API responds with a `200 OK` status code from `vllm serve`, and `curl` returns the response body: `Success: LoRA adapter 'sql_adapter' removed successfully`.
 
-Example request to unload a LoRA adapter:
+<details>
+<summary>Example request to unload a LoRA adapter</summary>
 
 ```bash
 curl -X POST http://localhost:8000/v1/unload_lora_adapter \
@@ -153,6 +187,8 @@ curl -X POST http://localhost:8000/v1/unload_lora_adapter \
     "lora_name": "sql_adapter"
 }'
 ```
+
+</details>
 
 ### Using Plugins
 Alternatively, you can use the LoRAResolver plugin to dynamically load LoRA adapters. LoRAResolver plugins enable you to load LoRA adapters from both local and remote sources such as local file system and S3. On every request, when there's a new model name that hasn't been loaded yet, the LoRAResolver will try to resolve and load the corresponding LoRA adapter.
@@ -168,7 +204,8 @@ Alternatively, follow these example steps to implement your own plugin:
 
 1. Implement the LoRAResolver interface.
 
-    Example of a simple S3 LoRAResolver implementation:
+    <details>
+    <summary>Example of a simple S3 LoRAResolver implementation</summary>
 
     ```python
     import os
@@ -199,7 +236,12 @@ Alternatively, follow these example steps to implement your own plugin:
             return lora_request
     ```
 
+    </details>
+
 2. Register `LoRAResolver` plugin.
+
+    <details>
+    <summary>Code</summary>
 
     ```python
     from vllm.lora.resolver import LoRAResolverRegistry
@@ -207,6 +249,8 @@ Alternatively, follow these example steps to implement your own plugin:
     s3_resolver = S3LoRAResolver()
     LoRAResolverRegistry.register_resolver("s3_resolver", s3_resolver)
     ```
+
+    </details>
 
     For more details, refer to the [vLLM's Plugins System](../design/plugin_system.md).
 
@@ -233,6 +277,9 @@ The new format of `--lora-modules` is mainly to support the display of parent mo
 
 - The `parent` field of LoRA model `sql-lora` now links to its base model `meta-llama/Llama-2-7b-hf`. This correctly reflects the hierarchical relationship between the base model and the LoRA adapter.
 - The `root` field points to the artifact location of the lora adapter.
+
+<details>
+<summary>Command output</summary>
 
 ```bash
 $ curl http://localhost:8000/v1/models
@@ -269,3 +316,5 @@ $ curl http://localhost:8000/v1/models
     ]
 }
 ```
+
+</details>

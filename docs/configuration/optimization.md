@@ -48,12 +48,17 @@ You can tune the performance by adjusting `max_num_batched_tokens`:
 - For optimal throughput, we recommend setting `max_num_batched_tokens > 8096` especially for smaller models on large GPUs.
 - If `max_num_batched_tokens` is the same as `max_model_len`, that's almost the equivalent to the V0 default scheduling policy (except that it still prioritizes decodes).
 
+<details>
+<summary>Code</summary>
+
 ```python
 from vllm import LLM
 
 # Set max_num_batched_tokens to tune performance
 llm = LLM(model="meta-llama/Llama-3.1-8B-Instruct", max_num_batched_tokens=16384)
 ```
+
+</details>
 
 See related papers for more details (<https://arxiv.org/pdf/2401.08671> or <https://arxiv.org/pdf/2308.16369>).
 
@@ -70,12 +75,17 @@ Tensor parallelism shards model parameters across multiple GPUs within each mode
 - When the model is too large to fit on a single GPU
 - When you need to reduce memory pressure per GPU to allow more KV cache space for higher throughput
 
+<details>
+<summary>Code</summary>
+
 ```python
 from vllm import LLM
 
 # Split model across 4 GPUs
 llm = LLM(model="meta-llama/Llama-3.3-70B-Instruct", tensor_parallel_size=4)
 ```
+
+</details>
 
 For models that are too large to fit on a single GPU (like 70B parameter models), tensor parallelism is essential.
 
@@ -90,6 +100,9 @@ Pipeline parallelism distributes model layers across multiple GPUs. Each GPU pro
 
 Pipeline parallelism can be combined with tensor parallelism for very large models:
 
+<details>
+<summary>Code</summary>
+
 ```python
 from vllm import LLM
 
@@ -100,6 +113,8 @@ llm = LLM(
     pipeline_parallel_size=2
 )
 ```
+
+</details>
 
 ### Expert Parallelism (EP)
 
@@ -134,6 +149,9 @@ If you encounter out-of-memory issues, consider these strategies:
 
 You can reduce memory usage by limiting the context length and batch size:
 
+<details>
+<summary>Code</summary>
+
 ```python
 from vllm import LLM
 
@@ -144,9 +162,14 @@ llm = LLM(
 )
 ```
 
+</details>
+
 ### Adjust CUDA Graph Compilation
 
 CUDA graph compilation in V1 uses more memory than in V0. You can reduce memory usage by adjusting the compilation level:
+
+<details>
+<summary>Code</summary>
 
 ```python
 from vllm import LLM
@@ -161,7 +184,12 @@ llm = LLM(
 )
 ```
 
+</details>
+
 Or, if you are not concerned about latency or overall performance, disable CUDA graph compilation entirely with `enforce_eager=True`:
+
+<details>
+<summary>Code</summary>
 
 ```python
 from vllm import LLM
@@ -172,9 +200,14 @@ llm = LLM(
 )
 ```
 
+</details>
+
 ### Multimodal Models
 
 For multi-modal models, you can reduce memory usage by limiting the number of images/videos per request:
+
+<details>
+<summary>Code</summary>
 
 ```python
 from vllm import LLM
@@ -185,3 +218,5 @@ llm = LLM(
     limit_mm_per_prompt={"image": 2}
 )
 ```
+
+</details>

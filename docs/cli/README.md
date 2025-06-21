@@ -16,7 +16,8 @@ vllm {chat,complete,serve,bench,collect-env,run-batch}
 
 Start the vLLM OpenAI Compatible API server.
 
-Examples:
+<details>
+<summary>Examples</summary>
 
 ```bash
 # Start with a model
@@ -39,11 +40,14 @@ vllm serve --help=max-num-seqs
 vllm serve --help=max
 ```
 
+</details>
+
 ## chat
 
 Generate chat completions via the running API server.
 
-Examples:
+<details>
+<summary>Examples</summary>
 
 ```bash
 # Directly connect to localhost API without arguments
@@ -56,11 +60,14 @@ vllm chat --url http://{vllm-serve-host}:{vllm-serve-port}/v1
 vllm chat --quick "hi"
 ```
 
+</details>
+
 ## complete
 
 Generate text completions based on the given prompt via the running API server.
 
-Examples:
+<details>
+<summary>Examples</summary>
 
 ```bash
 # Directly connect to localhost API without arguments
@@ -72,6 +79,8 @@ vllm complete --url http://{vllm-serve-host}:{vllm-serve-port}/v1
 # Quick complete with a single prompt
 vllm complete --quick "The future of AI is"
 ```
+
+</details>
 
 ## bench
 
@@ -89,7 +98,8 @@ vllm bench {latency, serve, throughput}
 
 Benchmark the latency of a single batch of requests.
 
-Example:
+<details>
+<summary>Example</summary>
 
 ```bash
 vllm bench latency \
@@ -100,11 +110,14 @@ vllm bench latency \
     --load-format dummy
 ```
 
+</details>
+
 ### serve
 
 Benchmark the online serving throughput.
 
-Example:
+<details>
+<summary>Example</summary>
 
 ```bash
 vllm bench serve \
@@ -116,11 +129,14 @@ vllm bench serve \
     --num-prompts  5
 ```
 
+</details>
+
 ### throughput
 
 Benchmark offline inference throughput.
 
-Example:
+<details>
+<summary>Example</summary>
 
 ```bash
 vllm bench throughput \
@@ -130,6 +146,8 @@ vllm bench throughput \
     --enforce-eager \
     --load-format dummy
 ```
+
+</details>
 
 ## collect-env
 
@@ -143,7 +161,8 @@ vllm collect-env
 
 Run batch prompts and write results to file.
 
-Examples:
+<details>
+<summary>Examples</summary>
 
 ```bash
 # Running with a local file
@@ -158,6 +177,8 @@ vllm run-batch \
     -o results.jsonl \
     --model meta-llama/Meta-Llama-3-8B-Instruct
 ```
+
+</details>
 
 ## More Help
 

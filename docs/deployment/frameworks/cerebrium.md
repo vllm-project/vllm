@@ -24,6 +24,9 @@ cerebrium init vllm-project
 
 Next, to install the required packages, add the following to your cerebrium.toml:
 
+<details>
+<summary>Config</summary>
+
 ```toml
 [cerebrium.deployment]
 docker_base_image_url = "nvidia/cuda:12.1.1-runtime-ubuntu22.04"
@@ -32,7 +35,12 @@ docker_base_image_url = "nvidia/cuda:12.1.1-runtime-ubuntu22.04"
 vllm = "latest"
 ```
 
+</details>
+
 Next, let us add our code to handle inference for the LLM of your choice (`mistralai/Mistral-7B-Instruct-v0.1` for this example), add the following code to your `main.py`:
+
+<details>
+<summary>Code</summary>
 
 ```python
 from vllm import LLM, SamplingParams
@@ -54,6 +62,8 @@ def run(prompts: list[str], temperature: float = 0.8, top_p: float = 0.95):
     return {"results": results}
 ```
 
+</details>
+
 Then, run the following code to deploy it to the cloud:
 
 ```console
@@ -61,6 +71,9 @@ cerebrium deploy
 ```
 
 If successful, you should be returned a CURL command that you can call inference against. Just remember to end the url with the function name you are calling (in our case`/run`)
+
+<details>
+<summary>Command</summary>
 
 ```python
 curl -X POST https://api.cortex.cerebrium.ai/v4/p-xxxxxx/vllm/run \
@@ -76,7 +89,12 @@ curl -X POST https://api.cortex.cerebrium.ai/v4/p-xxxxxx/vllm/run \
  }'
 ```
 
+</details>
+
 You should get a response like:
+
+<details>
+<summary>Response</summary>
 
 ```python
 {
@@ -104,5 +122,7 @@ You should get a response like:
     "run_time_ms": 152.53663063049316
 }
 ```
+
+</details>
 
 You now have an autoscaling endpoint where you only pay for the compute you use!

@@ -25,12 +25,17 @@ Currently, there are no pre-built XPU wheels.
 - First, install required driver and Intel OneAPI 2025.0 or later.
 - Second, install Python packages for vLLM XPU backend building:
 
+<details>
+<summary>Commands</summary>
+
 ```console
 git clone https://github.com/vllm-project/vllm.git
 cd vllm
 pip install --upgrade pip
 pip install -v -r requirements/xpu.txt
 ```
+
+</details>
 
 - Then, build and install vLLM XPU backend:
 
@@ -53,6 +58,9 @@ Currently, there are no pre-built XPU images.
 # --8<-- [end:pre-built-images]
 # --8<-- [start:build-image-from-source]
 
+<details>
+<summary>Command</summary>
+
 ```console
 $ docker build -f docker/Dockerfile.xpu -t vllm-xpu-env --shm-size=4g .
 $ docker run -it \
@@ -63,10 +71,15 @@ $ docker run -it \
              vllm-xpu-env
 ```
 
+</details>
+
 # --8<-- [end:build-image-from-source]
 # --8<-- [start:supported-features]
 
 XPU platform supports **tensor parallel** inference/serving and also supports **pipeline parallel** as a beta feature for online serving. We require Ray as the distributed runtime backend. For example, a reference execution like following:
+
+<details>
+<summary>Command</summary>
 
 ```console
 python -m vllm.entrypoints.openai.api_server \
@@ -77,6 +90,8 @@ python -m vllm.entrypoints.openai.api_server \
      --pipeline-parallel-size=2 \
      -tp=8
 ```
+
+</details>
 
 By default, a ray instance will be launched automatically if no existing one is detected in the system, with `num-gpus` equals to `parallel_config.world_size`. We recommend properly starting a ray cluster before execution, referring to the <gh-file:examples/online_serving/run_cluster.sh> helper script.
 

@@ -33,6 +33,9 @@ text.
 
 Now let´s see an example for each of the cases, starting with the `guided_choice`, as it´s the easiest one:
 
+<details>
+<summary>Code</summary>
+
 ```python
 from openai import OpenAI
 client = OpenAI(
@@ -51,7 +54,12 @@ completion = client.chat.completions.create(
 print(completion.choices[0].message.content)
 ```
 
+</details>
+
 The next example shows how to use the `guided_regex`. The idea is to generate an email address, given a simple regex template:
+
+<details>
+<summary>Code</summary>
 
 ```python
 completion = client.chat.completions.create(
@@ -67,6 +75,8 @@ completion = client.chat.completions.create(
 print(completion.choices[0].message.content)
 ```
 
+</details>
+
 One of the most relevant features in structured text generation is the option to generate a valid JSON with pre-defined fields and formats.
 For this we can use the `guided_json` parameter in two different ways:
 
@@ -74,6 +84,9 @@ For this we can use the `guided_json` parameter in two different ways:
 - Defining a [Pydantic model](https://docs.pydantic.dev/latest/) and then extracting the JSON Schema from it (which is normally an easier option).
 
 The next example shows how to use the `guided_json` parameter with a Pydantic model:
+
+<details>
+<summary>Code</summary>
 
 ```python
 from pydantic import BaseModel
@@ -111,6 +124,8 @@ completion = client.chat.completions.create(
 print(completion.choices[0].message.content)
 ```
 
+</details>
+
 !!! tip
     While not strictly necessary, normally it´s better to indicate in the prompt the
     JSON schema and how the fields should be populated. This can improve the
@@ -120,6 +135,9 @@ Finally we have the `guided_grammar` option, which is probably the most
 difficult to use, but it´s really powerful. It allows us to define complete
 languages like SQL queries. It works by using a context free EBNF grammar.
 As an example, we can use to define a specific format of simplified SQL queries:
+
+<details>
+<summary>Code</summary>
 
 ```python
 simplified_sql_grammar = """
@@ -149,6 +167,8 @@ completion = client.chat.completions.create(
 print(completion.choices[0].message.content)
 ```
 
+</details>
+
 See also: [full example](https://docs.vllm.ai/en/latest/examples/online_serving/structured_outputs.html)
 
 ## Reasoning Outputs
@@ -160,6 +180,9 @@ vllm serve deepseek-ai/DeepSeek-R1-Distill-Qwen-7B --reasoning-parser deepseek_r
 ```
 
 Note that you can use reasoning with any provided structured outputs feature. The following uses one with JSON schema:
+
+<details>
+<summary>Code</summary>
 
 ```python
 from pydantic import BaseModel
@@ -190,6 +213,8 @@ print("reasoning_content: ", completion.choices[0].message.reasoning_content)
 print("content: ", completion.choices[0].message.content)
 ```
 
+</details>
+
 See also: [full example](https://docs.vllm.ai/en/latest/examples/online_serving/structured_outputs.html)
 
 ## Experimental Automatic Parsing (OpenAI API)
@@ -201,6 +226,9 @@ At the time of writing (`openai==1.54.4`), this is a "beta" feature in the OpenA
 For the following examples, vLLM was setup using `vllm serve meta-llama/Llama-3.1-8B-Instruct`
 
 Here is a simple example demonstrating how to get structured output using Pydantic models:
+
+<details>
+<summary>Code</summary>
 
 ```python
 from pydantic import BaseModel
@@ -228,7 +256,10 @@ print("Name:", message.parsed.name)
 print("Age:", message.parsed.age)
 ```
 
-Output:
+</details>
+
+<details>
+<summary>Output</summary>
 
 ```console
 ParsedChatCompletionMessage[Testing](content='{"name": "Cameron", "age": 28}', refusal=None, role='assistant', audio=None, function_call=None, tool_calls=[], parsed=Testing(name='Cameron', age=28))
@@ -236,7 +267,12 @@ Name: Cameron
 Age: 28
 ```
 
+</details>
+
 Here is a more complex example using nested Pydantic models to handle a step-by-step math solution:
+
+<details>
+<summary>Code</summary>
 
 ```python
 from typing import List
@@ -268,7 +304,10 @@ for i, step in enumerate(message.parsed.steps):
 print("Answer:", message.parsed.final_answer)
 ```
 
-Output:
+</details>
+
+<details>
+<summary>Output</summary>
 
 ```console
 ParsedChatCompletionMessage[MathResponse](content='{ "steps": [{ "explanation": "First, let\'s isolate the term with the variable \'x\'. To do this, we\'ll subtract 31 from both sides of the equation.", "output": "8x + 31 - 31 = 2 - 31"}, { "explanation": "By subtracting 31 from both sides, we simplify the equation to 8x = -29.", "output": "8x = -29"}, { "explanation": "Next, let\'s isolate \'x\' by dividing both sides of the equation by 8.", "output": "8x / 8 = -29 / 8"}], "final_answer": "x = -29/8" }', refusal=None, role='assistant', audio=None, function_call=None, tool_calls=[], parsed=MathResponse(steps=[Step(explanation="First, let's isolate the term with the variable 'x'. To do this, we'll subtract 31 from both sides of the equation.", output='8x + 31 - 31 = 2 - 31'), Step(explanation='By subtracting 31 from both sides, we simplify the equation to 8x = -29.', output='8x = -29'), Step(explanation="Next, let's isolate 'x' by dividing both sides of the equation by 8.", output='8x / 8 = -29 / 8')], final_answer='x = -29/8'))
@@ -277,6 +316,8 @@ Step #1: explanation='By subtracting 31 from both sides, we simplify the equatio
 Step #2: explanation="Next, let's isolate 'x' by dividing both sides of the equation by 8." output='8x / 8 = -29 / 8'
 Answer: x = -29/8
 ```
+
+</details>
 
 An example of using `structural_tag` can be found here: <gh-file:examples/online_serving/structured_outputs>
 
@@ -296,6 +337,9 @@ These parameters can be used in the same way as the parameters from the Online
 Serving examples above. One example for the usage of the `choice` parameter is
 shown below:
 
+<details>
+<summary>Code</summary>
+
 ```python
 from vllm import LLM, SamplingParams
 from vllm.sampling_params import GuidedDecodingParams
@@ -310,5 +354,7 @@ outputs = llm.generate(
 )
 print(outputs[0].outputs[0].text)
 ```
+
+</details>
 
 See also: [full example](https://docs.vllm.ai/en/latest/examples/online_serving/structured_outputs.html)

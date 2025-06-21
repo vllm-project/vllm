@@ -60,6 +60,9 @@ To identify the particular CUDA operation that causes the error, you can add `--
 
 If GPU/CPU communication cannot be established, you can use the following Python script and follow the instructions below to confirm whether the GPU/CPU communication is working correctly.
 
+<details>
+<summary>Code</summary>
+
 ```python
 # Test PyTorch NCCL
 import torch
@@ -123,6 +126,8 @@ dist.destroy_process_group(gloo_group)
 dist.destroy_process_group()
 ```
 
+</details>
+
 If you are testing with a single node, adjust `--nproc-per-node` to the number of GPUs you want to use:
 
 ```console
@@ -155,6 +160,9 @@ If the test script hangs or crashes, usually it means the hardware/drivers are b
 
 If you have seen a warning in your logs like this:
 
+<details>
+<summary>Logs</summary>
+
 ```console
 WARNING 12-11 14:50:37 multiproc_worker_utils.py:281] CUDA was previously
     initialized. We must use the `spawn` multiprocessing start method. Setting
@@ -163,7 +171,12 @@ WARNING 12-11 14:50:37 multiproc_worker_utils.py:281] CUDA was previously
     for more information.
 ```
 
+</details>
+
 or an error from Python that looks like this:
+
+<details>
+<summary>Logs</summary>
 
 ```console
 RuntimeError:
@@ -185,8 +198,13 @@ RuntimeError:
         section in https://docs.python.org/3/library/multiprocessing.html
 ```
 
+</details>
+
 then you must update your Python code to guard usage of `vllm` behind a `if
 __name__ == '__main__':` block. For example, instead of this:
+
+<details>
+<summary>Code</summary>
 
 ```python
 import vllm
@@ -194,7 +212,12 @@ import vllm
 llm = vllm.LLM(...)
 ```
 
+</details>
+
 try this instead:
+
+<details>
+<summary>Code</summary>
 
 ```python
 if __name__ == '__main__':
@@ -203,9 +226,14 @@ if __name__ == '__main__':
     llm = vllm.LLM(...)
 ```
 
+</details>
+
 ## `torch.compile` Error
 
 vLLM heavily depends on `torch.compile` to optimize the model for better performance, which introduces the dependency on the `torch.compile` functionality and the `triton` library. By default, we use `torch.compile` to [optimize some functions](https://github.com/vllm-project/vllm/pull/10406) in the model. Before running vLLM, you can check if `torch.compile` is working as expected by running the following script:
+
+<details>
+<summary>Code</summary>
 
 ```python
 import torch
@@ -222,17 +250,24 @@ x = torch.randn(4, 4).cuda()
 print(f(x))
 ```
 
+</details>
+
 If it raises errors from `torch/_inductor` directory, usually it means you have a custom `triton` library that is not compatible with the version of PyTorch you are using. See [this issue](https://github.com/vllm-project/vllm/issues/12219) for example.
 
 ## Model failed to be inspected
 
 If you see an error like:
 
+<details>
+<summary>Logs</summary>
+
 ```text
   File "vllm/model_executor/models/registry.py", line xxx, in _raise_for_unsupported
     raise ValueError(
 ValueError: Model architectures ['<arch>'] failed to be inspected. Please check the logs for more details.
 ```
+
+</details>
 
 It means that vLLM failed to import the model file.
 Usually, it is related to missing dependencies or outdated binaries in the vLLM build.
@@ -242,6 +277,9 @@ Please read the logs carefully to determine the root cause of the error.
 
 If you see an error like:
 
+<details>
+<summary>Logs</summary>
+
 ```text
 Traceback (most recent call last):
 ...
@@ -250,13 +288,20 @@ Traceback (most recent call last):
 TypeError: 'NoneType' object is not iterable
 ```
 
+</details>
+
 or:
+
+<details>
+<summary>Logs</summary>
 
 ```text
   File "vllm/model_executor/models/registry.py", line xxx, in _raise_for_unsupported
     raise ValueError(
 ValueError: Model architectures ['<arch>'] are not supported for now. Supported architectures: [...]
 ```
+
+</details>
 
 But you are sure that the model is in the [list of supported models][supported-models], there may be some issue with vLLM's model resolution. In that case, please follow [these steps](../configuration/model_resolution.md) to explicitly specify the vLLM implementation for the model.
 

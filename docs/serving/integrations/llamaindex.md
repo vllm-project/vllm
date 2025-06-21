@@ -13,6 +13,9 @@ pip install llama-index-llms-vllm -q
 
 To run inference on a single or multiple GPUs, use `Vllm` class from `llamaindex`.
 
+<details>
+<summary>Code</summary>
+
 ```python
 from llama_index.llms.vllm import Vllm
 
@@ -23,5 +26,7 @@ llm = Vllm(
     vllm_kwargs={"swap_space": 1, "gpu_memory_utilization": 0.5},
 )
 ```
+
+</details>
 
 Please refer to this [Tutorial](https://docs.llamaindex.ai/en/latest/examples/llm/vllm/) for more details.

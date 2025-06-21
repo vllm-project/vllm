@@ -25,11 +25,16 @@ vLLM also supports model implementations that are available in Transformers. Thi
 
 To check if the modeling backend is Transformers, you can simply do this:
 
+<details>
+<summary>Code</summary>
+
 ```python
 from vllm import LLM
 llm = LLM(model=..., task="generate")  # Name or path of your model
 llm.apply_model(lambda model: print(type(model)))
 ```
+
+</details>
 
 If it is `TransformersForCausalLM` then it means it's based on Transformers!
 
@@ -70,7 +75,10 @@ To make your model compatible with the Transformers backend, it needs:
 2. `MyAttention` must use `ALL_ATTENTION_FUNCTIONS` to call attention.
 3. `MyModel` must contain `_supports_attention_backend = True`.
 
-```python title="modeling_my_model.py"
+<details>
+<summary>modeling_my_model.py</summary>
+
+```python
 
 from transformers import PreTrainedModel
 from torch import nn
@@ -93,6 +101,8 @@ class MyModel(PreTrainedModel):
     _supports_attention_backend = True
 ```
 
+</details>
+
 Here is what happens in the background when this model is loaded:
 
 1. The config is loaded.
@@ -103,7 +113,10 @@ That's it!
 
 For your model to be compatible with vLLM's tensor parallel and/or pipeline parallel features, you must add `base_model_tp_plan` and/or `base_model_pp_plan` to your model's config class:
 
-```python title="configuration_my_model.py"
+<details>
+<summary>configuration_my_model.py</summary>
+
+```python
 
 from transformers import PretrainedConfig
 
@@ -122,6 +135,8 @@ class MyConfig(PretrainedConfig):
         "norm": (["hidden_states"], ["hidden_states"]),
     }
 ```
+
+</details>
 
 - `base_model_tp_plan` is a `dict` that maps fully qualified layer name patterns to tensor parallel styles (currently only `"colwise"` and `"rowwise"` are supported).
 - `base_model_pp_plan` is a `dict` that maps direct child layer names to `tuple`s of `list`s of `str`s:
@@ -145,6 +160,9 @@ The [Transformers backend][transformers-backend] enables you to run models direc
 !!! tip
     The easiest way to check if your model is really supported at runtime is to run the program below:
 
+    <details>
+    <summary>Code</summary>
+
     ```python
     from vllm import LLM
 
@@ -159,6 +177,8 @@ The [Transformers backend][transformers-backend] enables you to run models direc
     print(output)
     ```
 
+    </details>
+
     If vLLM successfully returns text (for generative models) or hidden states (for pooling models), it indicates that your model is supported.
 
 Otherwise, please refer to [Adding a New Model][new-model] for instructions on how to implement your model in vLLM.
@@ -167,6 +187,9 @@ Alternatively, you can [open an issue on GitHub](https://github.com/vllm-project
 #### Download a model
 
 If you prefer, you can use the Hugging Face CLI to [download a model](https://huggingface.co/docs/huggingface_hub/guides/cli#huggingface-cli-download) or specific files from a model repository:
+
+<details>
+<summary>Commands</summary>
 
 ```console
 # Download a model
@@ -179,9 +202,14 @@ huggingface-cli download HuggingFaceH4/zephyr-7b-beta --cache-dir ./path/to/cach
 huggingface-cli download HuggingFaceH4/zephyr-7b-beta eval_results.json
 ```
 
+</details>
+
 #### List the downloaded models
 
 Use the Hugging Face CLI to [manage models](https://huggingface.co/docs/huggingface_hub/guides/manage-cache#scan-your-cache) stored in local cache:
+
+<details>
+<summary>Commands</summary>
 
 ```console
 # List cached models
@@ -194,9 +222,14 @@ huggingface-cli scan-cache -v
 huggingface-cli scan-cache --dir ~/.cache/huggingface/hub
 ```
 
+</details>
+
 #### Delete a cached model
 
 Use the Hugging Face CLI to interactively [delete downloaded model](https://huggingface.co/docs/huggingface_hub/guides/manage-cache#clean-your-cache) from the cache:
+
+<details>
+<summary>Commands</summary>
 
 ```console
 # The `delete-cache` command requires extra dependencies to work with the TUI.
@@ -224,18 +257,28 @@ Start deletion.
 Done. Deleted 1 repo(s) and 0 revision(s) for a total of 438.9M.
 ```
 
+</details>
+
 #### Using a proxy
 
 Here are some tips for loading/downloading models from Hugging Face using a proxy:
 
 - Set the proxy globally for your session (or set it in the profile file):
 
+<details>
+<summary>Commands</summary>
+
 ```shell
 export http_proxy=http://your.proxy.server:port
 export https_proxy=http://your.proxy.server:port
 ```
 
+</details>
+
 - Set the proxy for just the current command:
+
+<details>
+<summary>Commands</summary>
 
 ```shell
 https_proxy=http://your.proxy.server:port huggingface-cli download <model_name>
@@ -244,7 +287,12 @@ https_proxy=http://your.proxy.server:port huggingface-cli download <model_name>
 https_proxy=http://your.proxy.server:port  vllm serve <model_name> --disable-log-requests
 ```
 
+</details>
+
 - Set the proxy in Python interpreter:
+
+<details>
+<summary>Code</summary>
 
 ```python
 import os
@@ -252,6 +300,8 @@ import os
 os.environ['http_proxy'] = 'http://your.proxy.server:port'
 os.environ['https_proxy'] = 'http://your.proxy.server:port'
 ```
+
+</details>
 
 ### ModelScope
 
@@ -262,6 +312,9 @@ export VLLM_USE_MODELSCOPE=True
 ```
 
 And use with `trust_remote_code=True`.
+
+<details>
+<summary>Code</summary>
 
 ```python
 from vllm import LLM
@@ -276,6 +329,8 @@ print(output)
 output = llm.encode("Hello, my name is")
 print(output)
 ```
+
+</details>
 
 [](){ #feature-status-legend }
 
@@ -493,6 +548,9 @@ See [this page][multimodal-inputs] on how to pass multi-modal inputs to the mode
 
     Offline inference:
 
+    <details>
+    <summary>Code</summary>
+
     ```python
     from vllm import LLM
 
@@ -501,6 +559,8 @@ See [this page][multimodal-inputs] on how to pass multi-modal inputs to the mode
         limit_mm_per_prompt={"image": 4},
     )
     ```
+
+    </details>
 
     Online serving:
 
@@ -600,6 +660,9 @@ Specified using `--task generate`.
 
     For the best results, we recommend using the following dependency versions (tested on A10 and L40):
 
+    <details>
+    <summary>Dependency versions</summary>
+
     ```text
     # Core vLLM-compatible dependencies with Molmo accuracy setup (tested on L40)
     torch==2.5.1
@@ -621,6 +684,8 @@ Specified using `--task generate`.
     # Installed FlashAttention (for float16 only)
     flash-attn>=2.5.6  # Not used in float32, but should be documented
     ```
+
+    </details>
 
     **Note:** Make sure you understand the security implications of using outdated packages.
 

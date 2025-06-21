@@ -27,6 +27,9 @@ All vLLM modules within the model must include a `prefix` argument in their cons
 
 The initialization code should look like this:
 
+<details>
+<summary>Code</summary>
+
 ```python
 from torch import nn
 from vllm.config import VllmConfig
@@ -55,9 +58,14 @@ class MyModelForCausalLM(nn.Module):
         self.model = MyModel(vllm_config, prefix=f"{prefix}.model")
 ```
 
+</details>
+
 ### Computation Code
 
 - Add a `get_input_embeddings` method inside `MyModel` module that returns the text embeddings given `input_ids`. This is equivalent to directly calling the text embedding layer, but provides a unified interface in case `MyModel` is used within a composite multimodal model.
+
+<details>
+<summary>Code</summary>
 
 ```python
 class MyModel(nn.Module):
@@ -67,7 +75,12 @@ class MyModel(nn.Module):
         ... 
 ```
 
+</details>
+
 - Rewrite the [forward][torch.nn.Module.forward] method of your model to remove any unnecessary code, such as training-specific code. Modify the input parameters to treat `input_ids` and `positions` as flattened tensors with a single batch size dimension, without a max-sequence length dimension.
+
+<details>
+<summary>Code</summary>
 
 ```python
 def forward(
@@ -77,6 +90,8 @@ def forward(
 ) -> torch.Tensor:
     ...
 ```
+
+</details>
 
 !!! note
     Currently, vLLM supports the basic multi-head attention mechanism and its variant with rotary positional embeddings.

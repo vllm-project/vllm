@@ -29,6 +29,9 @@ Alternatively, you can deploy vLLM to Kubernetes using any of the following:
 
 First, create a Kubernetes PVC and Secret for downloading and storing Hugging Face model:
 
+<details>
+<summary>Config</summary>
+
 ```bash
 cat <<EOF |kubectl apply -f -
 apiVersion: v1
@@ -53,7 +56,12 @@ data:
 EOF
 ```
 
+</details>
+
 Next, start the vLLM server as a Kubernetes Deployment and Service:
+
+<details>
+<summary>Config</summary>
 
 ```bash
 cat <<EOF |kubectl apply -f -
@@ -109,7 +117,12 @@ spec:
 EOF
 ```
 
+</details>
+
 We can verify that the vLLM server has started successfully via the logs (this might take a couple of minutes to download the model):
+
+<details>
+<summary>Logs</summary>
 
 ```console
 kubectl logs -l app.kubernetes.io/name=vllm
@@ -120,6 +133,8 @@ INFO:     Application startup complete.
 INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
 ```
 
+</details>
+
 ## Deployment with GPUs
 
 **Pre-requisite**: Ensure that you have a running [Kubernetes cluster with GPUs](https://kubernetes.io/docs/tasks/manage-gpus/scheduling-gpus/).
@@ -127,6 +142,9 @@ INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
 1. Create a PVC, Secret and Deployment for vLLM
 
       PVC is used to store the model cache and it is optional, you can use hostPath or other storage options
+
+      <details>
+      <summary>Config</summary>
 
       ```yaml
       apiVersion: v1
@@ -144,7 +162,12 @@ INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
         volumeMode: Filesystem
       ```
 
+      </details>
+
       Secret is optional and only required for accessing gated models, you can skip this step if you are not using gated models
+
+      <details>
+      <summary>Config</summary>
 
       ```yaml
       apiVersion: v1
@@ -157,11 +180,16 @@ INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
         token: "REPLACE_WITH_TOKEN"
       ```
 
+      </details>
+  
       Next to create the deployment file for vLLM to run the model server. The following example deploys the `Mistral-7B-Instruct-v0.3` model.
 
       Here are two examples for using NVIDIA GPU and AMD GPU.
 
       NVIDIA GPU:
+
+      <details>
+      <summary>Config</summary>
 
       ```yaml
       apiVersion: apps/v1
@@ -233,9 +261,14 @@ INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
                 periodSeconds: 5
       ```
 
+      </details>
+
       AMD GPU:
 
       You can refer to the `deployment.yaml` below if using AMD ROCm GPU like MI300X.
+
+      <details>
+      <summary>Config</summary>
 
       ```yaml
       apiVersion: apps/v1
@@ -305,11 +338,16 @@ INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
                 mountPath: /dev/shm
       ```
 
+      </details>
+
       You can get the full example with steps and sample yaml files from <https://github.com/ROCm/k8s-device-plugin/tree/master/example/vllm-serve>.
 
 2. Create a Kubernetes Service for vLLM
 
       Next, create a Kubernetes Service file to expose the `mistral-7b` deployment:
+
+      <details>
+      <summary>Config</summary>
 
       ```yaml
       apiVersion: v1
@@ -330,16 +368,26 @@ INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
         type: ClusterIP
       ```
 
+      </details>
+
 3. Deploy and Test
 
       Apply the deployment and service configurations using `kubectl apply -f <filename>`:
+
+      <details>
+      <summary>Command</summary>
 
       ```console
       kubectl apply -f deployment.yaml
       kubectl apply -f service.yaml
       ```
 
+      </details>
+
       To test the deployment, run the following `curl` command:
+
+      <details>
+      <summary>Command</summary>
 
       ```console
       curl http://mistral-7b.default.svc.cluster.local/v1/completions \
@@ -351,6 +399,8 @@ INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
               "temperature": 0
             }'
       ```
+
+      </details>
 
       If the service is correctly deployed, you should receive a response from the vLLM model.
 
