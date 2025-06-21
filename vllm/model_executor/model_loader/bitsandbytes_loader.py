@@ -577,10 +577,10 @@ def dequantize_dq(quant_states: dict) -> None:
     thereby avoiding this computational overhead during inference. This comes 
     at the cost of increased memory usage.
     """
-    from bitsandbytes.functional import dequantize_blockwise
+    from bitsandbytes.functional import QuantState, dequantize_blockwise
     for _, quant_state in quant_states.items():
         # Copied from: https://github.com/bitsandbytes-foundation/bitsandbytes/blob/0.45.3/bitsandbytes/functional.py#L1352-#L1356
-        if quant_state.nested:
+        if isinstance(quant_state, QuantState) and quant_state.nested:
             absmax = dequantize_blockwise(quant_state.absmax,
                                           quant_state.state2)
             absmax += quant_state.offset
