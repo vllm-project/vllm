@@ -6,9 +6,11 @@ import torch
 import vllm.envs as envs
 from vllm._custom_ops import scaled_fp8_quant
 from vllm.compilation.activation_quant_fusion import ActivationQuantFusionPass
+from vllm.compilation.fusion import GroupShape
 from vllm.compilation.fx_utils import find_auto_fn, find_auto_fn_maybe
 from vllm.config import CompilationConfig, PassConfig, VllmConfig
 from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.fp8_quantization import QuantFP8
 
 from .backend import TestBackend
 
@@ -19,10 +21,11 @@ class TestModel(torch.nn.Module):
         super().__init__(*args, **kwargs)
         self.silu_and_mul = SiluAndMul()
         self.scale = torch.rand(1, dtype=torch.float32)
+        self.quant_fp8 = QuantFP8(GroupShape.PER_TOKEN)
 
     def forward(self, x):
         y = self.silu_and_mul(x)
-        x2 = scaled_fp8_quant(y, self.scale)
+        x2 = self.quant_fp8(y, self.scale)
         return x2
 
 
