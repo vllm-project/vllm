@@ -1,0 +1,109 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+import functools
+
+import jax
+from jax.experimental import pallas as pl
+from jax.experimental.pallas import tpu as pltpu
+
+
+def _kv_cache_update_kernel(
+    # Prefetch
+    slices_ref,  # [num_slices, 3]
+    # Input
+    new_kv_hbm_ref,  # [tokens, kv_head_num, head_dim]
+    kv_cache_hbm_ref,
+    # Output
+    _,  # [total_num_pages * page_size, kv_head_num, head_dim]
+    # Scratch
+    scratch,  # [block_size, page_size, kv_head_num, head_dim]
+    sem,
+):
+    async_copies = []
+    block_idx = pl.program_id(0)
+    block_size = scratch.shape[0]
+
+    # Copy from new_kv_hbm_ref to scratch
+    for i in range(block_size):
+        offset_i = i + block_idx * block_size
+        new_kv_start = slices_ref[offset_i, 1]
+        length = slices_ref[offset_i, 2]
+        async_copy = pltpu.make_async_copy(
+            new_kv_hbm_ref.at[pl.ds(new_kv_start, length), ...],
+            scratch.at[i, pl.ds(0, length), ...],
+            sem,
+        )
+        async_copy.start()
+        async_copies.append(async_copy)
+
+    for async_copy in async_copies:
+        async_copy.wait()
+
+    # Copy from scratch to kv_cache_hbm_ref
+    async_copies.clear()
+    for i in range(block_size):
+        offset_i = i + block_idx * block_size
+        kv_cache_start = slices_ref[offset_i, 0]
+        length = slices_ref[offset_i, 2]
+        async_copy = pltpu.make_async_copy(
+            scratch.at[i, pl.ds(0, length), ...],
+            kv_cache_hbm_ref.at[pl.ds(kv_cache_start, length), ...],
+            sem,
+        )
+        async_copy.start()
+        async_copies.append(async_copy)
+    for async_copy in async_copies:
+        async_copy.wait()
+
+
+@functools.partial(
+    jax.jit,
+    static_argnames=["page_size", "block_size"],
+)
+def kv_cache_update(
+    new_kv: jax.Array,  # [total_num_token, kv_head_num, head_dim]
+    slices: jax.
+    Array,  # [num_slices, 3], list of (kv_cache_start, new_kv_start, slice_len)
+    kv_cache: jax.
+    Array,  # [total_num_pages * page_size, kv_head_num, head_dim]
+    *,
+    page_size: int = 32,
+    block_size: int = 8,
+):
+    assert slices.shape[0] % block_size == 0
+    _, kv_head_num, head_dim = new_kv.shape
+
+    in_specs = [
+        pl.BlockSpec(memory_space=pltpu.TPUMemorySpace.ANY),
+        pl.BlockSpec(memory_space=pltpu.TPUMemorySpace.ANY),
+    ]
+
+    out_specs = [pl.BlockSpec(memory_space=pltpu.TPUMemorySpace.ANY)]
+    out_shape = [jax.ShapeDtypeStruct(kv_cache.shape, dtype=kv_cache.dtype)]
+
+    scalar_prefetches = [slices]
+    scratch = pltpu.VMEM(
+        (block_size, page_size, kv_head_num, head_dim),
+        new_kv.dtype,
+    )
+
+    scratch_shapes = [
+        scratch,
+        pltpu.SemaphoreType.DMA,
+    ]
+
+    kernel = pl.pallas_call(
+        _kv_cache_update_kernel,
+        grid_spec=pltpu.PrefetchScalarGridSpec(
+            num_scalar_prefetch=len(scalar_prefetches),
+            in_specs=in_specs,
+            out_specs=out_specs,
+            grid=(slices.shape[0] // block_size, ),
+            scratch_shapes=scratch_shapes,
+        ),
+        out_shape=out_shape,
+        input_output_aliases={len(scalar_prefetches) + 1: 0},
+    )
+
+    return kernel(*scalar_prefetches, new_kv, kv_cache)[0]
