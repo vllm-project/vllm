@@ -13,6 +13,7 @@ from torch.distributed.distributed_c10d import is_nccl_available
 import vllm.envs as envs
 from vllm.logger import init_logger
 
+from . import current_platform
 from .interface import DeviceCapability, Platform, PlatformEnum, _Backend
 
 if TYPE_CHECKING:
@@ -20,12 +21,13 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-try:
-    from amdsmi import (AmdSmiException, amdsmi_get_gpu_asic_info,
-                        amdsmi_get_processor_handles, amdsmi_init,
-                        amdsmi_shut_down, amdsmi_topo_get_link_type)
-except ImportError as e:
-    logger.warning("Failed to import from amdsmi with %r", e)
+if current_platform.is_rocm():
+    try:
+        from amdsmi import (AmdSmiException, amdsmi_get_gpu_asic_info,
+                            amdsmi_get_processor_handles, amdsmi_init,
+                            amdsmi_shut_down, amdsmi_topo_get_link_type)
+    except ImportError as e:
+        logger.warning("Failed to import from amdsmi with %r", e)
 
 try:
     import vllm._C  # noqa: F401
@@ -33,10 +35,11 @@ except ImportError as e:
     logger.warning("Failed to import from vllm._C with %r", e)
 
 # import custom ops, trigger op registration
-try:
-    import vllm._rocm_C  # noqa: F401
-except ImportError as e:
-    logger.warning("Failed to import from vllm._rocm_C with %r", e)
+if current_platform.is_rocm():
+    try:
+        import vllm._rocm_C  # noqa: F401
+    except ImportError as e:
+        logger.warning("Failed to import from vllm._rocm_C with %r", e)
 
 # Models not supported by ROCm.
 _ROCM_UNSUPPORTED_MODELS: list[str] = []
