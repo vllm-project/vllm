@@ -25,6 +25,9 @@ vllm serve meta-llama/Llama-2-7b-hf
 # Specify the port
 vllm serve meta-llama/Llama-2-7b-hf --port 8100
 
+# Serve over a Unix domain socket
+vllm serve meta-llama/Llama-2-7b-hf --uds /tmp/vllm.sock
+
 # Check with --help for more options
 # To list all groups
 vllm serve --help=listgroup

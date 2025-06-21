@@ -1265,6 +1265,12 @@ def create_server_socket(addr: tuple[str, int]) -> socket.socket:
     return sock
 
 
+def create_server_unix_socket(path: str) -> socket.socket:
+    sock = socket.socket(family=socket.AF_UNIX, type=socket.SOCK_STREAM)
+    sock.bind(path)
+    return sock
+
+
 def validate_api_server_args(args):
     valid_tool_parses = ToolParserManager.tool_parsers.keys()
     if args.enable_auto_tool_choice \
@@ -1295,8 +1301,11 @@ def setup_server(args):
     # workaround to make sure that we bind the port before the engine is set up.
     # This avoids race conditions with ray.
     # see https://github.com/vllm-project/vllm/issues/8204
-    sock_addr = (args.host or "", args.port)
-    sock = create_server_socket(sock_addr)
+    if args.uds:
+        sock = create_server_unix_socket(args.uds)
+    else:
+        sock_addr = (args.host or "", args.port)
+        sock = create_server_socket(sock_addr)
 
     # workaround to avoid footguns where uvicorn drops requests with too
     # many concurrent requests active
@@ -1308,12 +1317,14 @@ def setup_server(args):
 
     signal.signal(signal.SIGTERM, signal_handler)
 
-    addr, port = sock_addr
-    is_ssl = args.ssl_keyfile and args.ssl_certfile
-    host_part = f"[{addr}]" if is_valid_ipv6_address(
-        addr) else addr or "0.0.0.0"
-    listen_address = f"http{'s' if is_ssl else ''}://{host_part}:{port}"
-
+    if args.uds:
+        listen_address = f"unix:{args.uds}"
+    else:
+        addr, port = sock_addr
+        is_ssl = args.ssl_keyfile and args.ssl_certfile
+        host_part = f"[{addr}]" if is_valid_ipv6_address(
+            addr) else addr or "0.0.0.0"
+        listen_address = f"http{'s' if is_ssl else ''}://{host_part}:{port}"
     return listen_address, sock
 
 
