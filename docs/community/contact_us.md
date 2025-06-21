@@ -8,3 +8,4 @@ title: Contact Us
 - For coordinating contributions and development, please use [Slack](https://slack.vllm.ai)
 - For security disclosures, please use GitHub's [Security Advisories](https://github.com/vllm-project/vllm/security/advisories) feature
 - For collaborations and partnerships, please contact us at [vllm-questions@lists.berkeley.edu](mailto:vllm-questions@lists.berkeley.edu)
+<!-- Please keep this file up to date with the "Contact Us" section in vllm/README.md. -->
