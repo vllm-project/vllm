@@ -419,6 +419,8 @@ class ModelConfig:
     - "transformers" will use the Transformers model implementation."""
     override_attention_dtype: Optional[str] = None
     """Override dtype for attention"""
+    enforce_include_usage: bool = False
+    """Enforce including usage on every request."""
 
     def compute_hash(self) -> str:
         """
