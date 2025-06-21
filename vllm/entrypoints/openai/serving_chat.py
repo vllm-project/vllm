@@ -182,15 +182,15 @@ class OpenAIServingChat(OpenAIServing):
                 assert request.tools is not None
                 if len(request.tools) > 0:
                     logger.warning(
-                        "Tools are specified but tool_choice is set to 'none' and "
-                        "--expand-tools-even-if-tool-choice-none is not enabled. "
-                        "Tool definitions will be excluded from the prompt. "
-                        "This behavior will change in vLLM v0.10 where tool definitions "
-                        "will be included by default even with tool_choice='none'. "
-                        "To adopt the new behavior now, "
-                        "use --expand-tools-even-if-tool-choice-none. "
-                        "To suppress this warning, either remove tools from the request "
-                        "or set tool_choice to a different value."
+                        "Tools are specified but tool_choice is set to 'none' "
+                        "and --expand-tools-even-if-tool-choice-none is not "
+                        "enabled. Tool definitions will be excluded from the "
+                        "prompt. This behavior will change in vLLM v0.10 where "
+                        "tool definitions will be included by default even "
+                        "with tool_choice='none'. To adopt the new behavior "
+                        "now, use --expand-tools-even-if-tool-choice-none. "
+                        "To suppress this warning, either remove tools from "
+                        "the request or set tool_choice to a different value."
                     )
                 tool_dicts = None
             else:
