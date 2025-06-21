@@ -2,10 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from http import HTTPStatus
+from typing import Optional
 from unittest.mock import MagicMock
 
 import pytest
 
+import vllm.envs as envs
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.openai.protocol import (ErrorResponse,
@@ -14,6 +16,7 @@ from vllm.entrypoints.openai.protocol import (ErrorResponse,
 from vllm.entrypoints.openai.serving_models import (BaseModelPath,
                                                     OpenAIServingModels)
 from vllm.lora.request import LoRARequest
+from vllm.lora.resolver import LoRAResolver
 
 MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
 BASE_MODEL_PATHS = [BaseModelPath(name=MODEL_NAME, model_path=MODEL_NAME)]
@@ -21,6 +24,20 @@ LORA_LOADING_SUCCESS_MESSAGE = (
     "Success: LoRA adapter '{lora_name}' added successfully.")
 LORA_UNLOADING_SUCCESS_MESSAGE = (
     "Success: LoRA adapter '{lora_name}' removed successfully.")
+
+
+class DummyLoRAResolver(LoRAResolver):
+    """A dummy LoRA resolver for testing."""
+
+    async def resolve_lora(self, base_model_name: str,
+                           lora_name: str) -> Optional[LoRARequest]:
+        if lora_name == "test_lora":
+            return LoRARequest(
+                lora_name=lora_name,
+                lora_path=f"/dummy/path/{lora_name}",
+                lora_int_id=abs(hash(lora_name)),
+            )
+        return None
 
 
 async def _async_serving_models_init() -> OpenAIServingModels:
@@ -122,3 +139,52 @@ async def test_unload_lora_adapter_not_found():
     assert isinstance(response, ErrorResponse)
     assert response.type == "NotFoundError"
     assert response.code == HTTPStatus.NOT_FOUND
+
+
+@pytest.mark.asyncio
+async def test_load_lora_adapter_with_resolver_success():
+    serving_models = await _async_serving_models_init()
+    serving_models.lora_resolvers.append(DummyLoRAResolver())
+    envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING = True
+    request = LoadLoRAAdapterRequest(lora_name="test_lora", lora_path="")
+    response = await serving_models.load_lora_adapter(request)
+    assert isinstance(response, str)
+    assert response == LORA_LOADING_SUCCESS_MESSAGE.format(
+        lora_name="test_lora")
+
+
+@pytest.mark.asyncio
+async def test_load_lora_adapter_with_resolver_fallback_fails():
+    serving_models = await _async_serving_models_init()
+    serving_models.lora_resolvers.append(DummyLoRAResolver())
+    envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING = True
+    request = LoadLoRAAdapterRequest(lora_name="no_test_lora", lora_path="")
+    response = await serving_models.load_lora_adapter(request)
+    assert isinstance(response, ErrorResponse)
+    assert response.type == "InvalidUserInput"
+    assert response.code == HTTPStatus.BAD_REQUEST
+
+
+@pytest.mark.asyncio
+async def test_load_lora_adapter_with_resolver_fallback_success():
+    serving_models = await _async_serving_models_init()
+    serving_models.lora_resolvers.append(DummyLoRAResolver())
+    envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING = True
+    request = LoadLoRAAdapterRequest(lora_name="no_test_lora",
+                                     lora_path="/dummy/path/no_test_lora")
+    response = await serving_models.load_lora_adapter(request)
+    assert isinstance(response, str)
+    assert response == LORA_LOADING_SUCCESS_MESSAGE.format(
+        lora_name="no_test_lora")
+
+
+@pytest.mark.asyncio
+async def test_load_lora_adapter_with_resolver_disabled_fails():
+    serving_models = await _async_serving_models_init()
+    serving_models.lora_resolvers.append(DummyLoRAResolver())
+    envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING = False
+    request = LoadLoRAAdapterRequest(lora_name="test_lora", lora_path="")
+    response = await serving_models.load_lora_adapter(request)
+    assert isinstance(response, ErrorResponse)
+    assert response.type == "InvalidUserInput"
+    assert response.code == HTTPStatus.BAD_REQUEST
