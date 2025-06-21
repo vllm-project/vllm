@@ -1,16 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional
-
 import pytest
 import torch
 
 import vllm.envs as envs
-from vllm import _custom_ops as ops
 from vllm.compilation.fix_functionalization import FixFunctionalizationPass
 from vllm.compilation.fusion import FusionPass
 from vllm.compilation.fx_utils import find_auto_fn, find_auto_fn_maybe, is_func
+from vllm.compilation.noop_elimination import NoOpEliminationPass
 from vllm.compilation.sequence_parallelism import SequenceParallelismPass
 from vllm.config import (CompilationConfig, DeviceConfig, ModelConfig,
                          PassConfig, VllmConfig)
@@ -26,6 +24,7 @@ from vllm.utils import update_environment_variables
 from ..utils import multi_gpu_test
 from .backend import TestBackend
 
+FP8_DTYPE = current_platform.fp8_dtype()
 prompts = [
     "Hello, my name is",
     "The president of the United States is",
@@ -39,13 +38,13 @@ class TestModel(torch.nn.Module):
     def __init__(self,
                  hidden_size=16,
                  intermediate_size=32,
-                 vllm_config: Optional[VllmConfig] = None):
+                 vllm_config: VllmConfig = None):
         super().__init__()
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
         self.gate_proj = torch.nn.Parameter(
             torch.empty((intermediate_size, hidden_size)))
-        self.norm = RMSNorm(hidden_size, 1e-05)
+        self.norm = RMSNorm(intermediate_size, 1e-05)
         # Initialize weights
         torch.nn.init.normal_(self.gate_proj, std=0.02)
 
@@ -93,7 +92,7 @@ class TestQuantModel(torch.nn.Module):
     def __init__(self,
                  hidden_size=16,
                  intermediate_size=32,
-                 vllm_config: Optional[VllmConfig] = None):
+                 vllm_config: VllmConfig = None):
         super().__init__()
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
@@ -101,15 +100,19 @@ class TestQuantModel(torch.nn.Module):
         self.gate_proj = torch.nn.Parameter(torch.empty(
             (intermediate_size, hidden_size)),
                                             requires_grad=False)
-        self.norm = RMSNorm(hidden_size, 1e-05)
+        self.norm = RMSNorm(intermediate_size, 1e-05)
         # Initialize weights
         torch.nn.init.normal_(self.gate_proj, std=0.02)
 
         self.fp8_linear = Fp8LinearOp(cutlass_fp8_supported=True,
                                       use_per_token_if_dynamic=False)
 
-        # Register scale as a buffer
-        self.register_buffer('scale', torch.tensor(1.0, dtype=torch.float32))
+        self.scale = torch.rand(1, dtype=torch.float32)
+        # Create a weight that is compatible with torch._scaled_mm,
+        # which expects a column-major layout.
+        self.w = torch.rand(hidden_size,
+                            intermediate_size).to(dtype=FP8_DTYPE).t()
+        self.wscale = torch.rand(1, dtype=torch.float32)
 
     def forward(self, hidden_states, residual):
         """
@@ -135,16 +138,15 @@ class TestQuantModel(torch.nn.Module):
         # layer normalization
         norm_output, residual_output = self.norm(all_reduce, residual)
 
-        # Use the same quantization primitive as Fp8LinearOp
         # for static input quantization
         # self.fp8_linear is initialized with use_per_token_if_dynamic=False
-        quant_result, _ = ops.scaled_fp8_quant(
-            norm_output,
-            scale=self.scale.to(norm_output.device),
-            scale_ub=None,
-            use_per_token_if_dynamic=self.fp8_linear.use_per_token_if_dynamic)
+        fp8_linear_result = self.fp8_linear.apply(norm_output,
+                                                  self.w,
+                                                  self.wscale,
+                                                  input_scale=self.scale.to(
+                                                      norm_output.device))
 
-        return quant_result, residual_output
+        return fp8_linear_result, residual_output
 
     def ops_in_model_before(self):
         ops_to_remove = [torch.ops.vllm.all_reduce.default
@@ -256,9 +258,11 @@ def sequence_parallelism_pass_on_test_model(
                                            seed=42)
 
     sequence_parallelism_pass = SequenceParallelismPass(vllm_config)
+    noop_pass = NoOpEliminationPass(vllm_config)
     func_pass = FixFunctionalizationPass(vllm_config)
 
-    passes_for_backend = [sequence_parallelism_pass]
+    passes_for_backend = [noop_pass, sequence_parallelism_pass]
+
     if enable_fusion:
         fusion_pass = FusionPass.instance(vllm_config)
         passes_for_backend.append(fusion_pass)

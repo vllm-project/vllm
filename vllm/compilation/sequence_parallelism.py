@@ -475,6 +475,7 @@ class SequenceParallelismPass(VllmInductorPass):
 
     def __call__(self, graph: fx.Graph):
         self.begin()
+        self.dump_graph(graph, "before_sequence_parallelism_pass")
         count = self.patterns.apply(graph)
         logger.debug("Replaced %s patterns", count)
         self.dump_graph(graph, "after_sequence_parallelism_pass")
