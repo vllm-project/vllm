@@ -1040,6 +1040,37 @@ def run_qwen2_5_omni(questions: list[str], modality: str):
     )
 
 
+def run_tarsier2(questions: list[str], modality: str) -> ModelRequestData:
+    model_name = "omni-research/Tarsier2-Recap-7b"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=4096,
+        hf_overrides={"architectures": ["Tarsier2ForConditionalGeneration"]},
+        limit_mm_per_prompt={modality: 1},
+    )
+
+    if modality == "image":
+        placeholder = "<|image_pad|>"
+    elif modality == "video":
+        placeholder = "<|video_pad|>"
+
+    prompts = [
+        (
+            "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
+            f"<|im_start|>user\n<|vision_start|>{placeholder}<|vision_end|>"
+            f"{question}<|im_end|>\n"
+            "<|im_start|>assistant\n"
+        )
+        for question in questions
+    ]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
 # SkyworkR1V
 def run_skyworkr1v(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -1112,6 +1143,7 @@ model_example_map = {
     "skywork_chat": run_skyworkr1v,
     "smolvlm": run_smolvlm,
     "tarsier": run_tarsier,
+    "tarsier2": run_tarsier2,
 }
 
 

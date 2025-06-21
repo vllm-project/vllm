@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # ruff: noqa
 import json
-import re
 from collections.abc import Sequence
 from typing import Any, Dict, List, Optional, Union
+
+import regex as re
 
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DeltaFunctionCall, DeltaMessage,
