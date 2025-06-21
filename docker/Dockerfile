@@ -365,3 +365,15 @@ FROM vllm-openai-base AS vllm-openai
 
 ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
 #################### OPENAI API SERVER ####################
+
+#################### OPENAI API SERVER (W/ AUDIO+VIDEO) ####################
+FROM vllm-openai-base AS vllm-openai-av
+
+# Install the optional multimodal extras.
+# They only pull in pure-Python libs (librosa, soundfile, decord), so
+# there's no heavy GPU build step and the core wheel stays unchanged.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system "vllm[audio,video]"
+
+ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
+#################### OPENAI API SERVER (W/ AUDIO+VIDEO) ####################
