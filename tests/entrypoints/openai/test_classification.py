@@ -18,6 +18,8 @@ def server():
         "--enforce-eager",
         "--max-model-len",
         "512",
+        "--task",
+        "classify",
         "--dtype",
         DTYPE,
     ]
