@@ -32,16 +32,18 @@
 # Use INPUT_LEN=1800,  OUTPUT_LEN=20, MIN_CACHE_HIT_PCT=60, MAX_LATENCY_ALLOWED_MS=500
 
 TAG=$(date +"%Y_%m_%d_%H_%M")
-BASE=""
-MODEL="meta-llama/Llama-3.1-8B-Instruct"
+
+BASE=/home/xiowei/vllm
+MODEL=neuralmagic/Meta-Llama-3.1-8B-Instruct-quantized.w8a8
 TP=1
 DOWNLOAD_DIR=""
-INPUT_LEN=4000
-OUTPUT_LEN=16
+INPUT_LEN=1800
+OUTPUT_LEN=128
 MIN_CACHE_HIT_PCT=0
-MAX_LATENCY_ALLOWED_MS=100000000000
-NUM_SEQS_LIST="128 256"
+MAX_LATENCY_ALLOWED_MS=1000000000
+NUM_SEQS_LIST="128 256 384 512"
 NUM_BATCHED_TOKENS_LIST="512 1024 2048 4096"
+
 
 LOG_FOLDER="$BASE/auto-benchmark/$TAG"
 RESULT="$LOG_FOLDER/result.txt"
@@ -71,7 +73,7 @@ start_server() {
     local max_num_batched_tokens=$3
     local vllm_log=$4
     
-    pkill -f vllm
+    # pkill -f vllm
 
     VLLM_USE_V1=1 VLLM_SERVER_DEV_MODE=1 vllm serve $MODEL \
         --disable-log-requests \
