@@ -1898,7 +1898,17 @@ class ParallelConfig:
         if self.distributed_executor_backend == "external_launcher":
             import os
             os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
-            logger.info("Disabling V1 multiprocessing for external launcher.")
+            # For torchrun, cannot set VLLM_DP_RANK and VLLM_DP_RANK_LOCAL for
+            # diff process, calculate them use torchrun rank and local_rank.
+            rank = int(os.environ["RANK"])
+            local_rank = int(os.environ["LOCAL_RANK"])
+            self.data_parallel_rank = rank // self.world_size
+            self.data_parallel_rank_local = local_rank // self.world_size
+
+            logger.info(
+                "Disabling V1 multiprocessing for external launcher, "
+                "and setting data parallel rank: %s, local rank: %s",
+                self.data_parallel_rank, self.data_parallel_rank_local)
 
         if self.distributed_executor_backend is None and self.world_size > 1:
             # We use multiprocessing by default if world_size fits on the
