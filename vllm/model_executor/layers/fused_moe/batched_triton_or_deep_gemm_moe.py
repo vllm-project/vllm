@@ -6,6 +6,7 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
     BatchedDeepGemmExperts)
+from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
     BatchedTritonExperts)
 
@@ -20,43 +21,45 @@ class BatchedTritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
                  use_int8_w8a8: bool = False,
                  use_int8_w8a16: bool = False,
                  use_int4_w4a16: bool = False,
-                 per_channel_quant: bool = False,
                  block_shape: Optional[list[int]] = None,
+                 per_act_token_quant: bool = False,
                  allow_deep_gemm: bool = False):
-        super().__init__()
         assert not use_int8_w8a8, "NYI"
         assert not use_int8_w8a16, "NYI"
         assert not use_int4_w4a16, "NYI"
 
+        super().__init__(
+            FusedMoEQuantConfig.make(
+                use_fp8_w8a8=use_fp8_w8a8,
+                use_int8_w8a8=use_int8_w8a8,
+                use_int8_w8a16=use_int8_w8a16,
+                use_int4_w4a16=use_int4_w4a16,
+                block_shape=block_shape,
+                per_act_token_quant=per_act_token_quant,
+            ))
         self.max_num_tokens = max_num_tokens
         self.world_size = world_size
         self.dp_size = dp_size
-        self.use_fp8_w8a8 = use_fp8_w8a8
-        self.use_int8_w8a8 = use_int8_w8a8
-        self.use_int8_w8a16 = use_int8_w8a16
-        self.use_int4_w4a16 = use_int4_w4a16
-        self.per_channel_quant = per_channel_quant
-        self.block_shape = block_shape
         self.allow_deep_gemm = allow_deep_gemm
 
         # BatchedTritonKernel doesn't support block quantization
         # at the moment.
         self.batched_triton_experts = BatchedTritonExperts(
             max_num_tokens=self.max_num_tokens,
-            use_fp8_w8a8=self.use_fp8_w8a8,
-            use_int8_w8a8=self.use_int8_w8a8,
-            use_int8_w8a16=self.use_int8_w8a16,
-            use_int4_w4a16=self.use_int4_w4a16,
-            per_channel_quant=self.per_channel_quant,
-            block_shape=self.block_shape,
             world_size=self.world_size,
-            dp_size=self.dp_size) if self.block_shape is None else None
+            dp_size=self.dp_size,
+            use_fp8_w8a8=use_fp8_w8a8,
+            use_int8_w8a8=use_int8_w8a8,
+            use_int8_w8a16=use_int8_w8a16,
+            use_int4_w4a16=use_int4_w4a16,
+            per_act_token_quant=self.per_act_token_quant,
+            block_shape=self.block_shape,
+        ) if self.block_shape is None else None
 
-        is_fp8_128_block_quantized = (self.use_fp8_w8a8
-                                      and self.block_shape is not None
-                                      and len(self.block_shape) == 2 and all(
-                                          [b == 128
-                                           for b in self.block_shape]))
+        is_fp8_128_block_quantized = (
+            use_fp8_w8a8 and self.block_shape
+            == BatchedDeepGemmExperts.DEEPGEMM_BLOCK_SHAPE)
+
         self.batched_deep_gemm_experts = BatchedDeepGemmExperts(
             max_num_tokens=self.max_num_tokens,
             world_size=self.world_size,
@@ -67,11 +70,30 @@ class BatchedTritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         assert (self.batched_deep_gemm_experts is not None
                 or self.batched_triton_experts is not None)
 
+    @property
+    def activation_formats(
+        self
+    ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
+        if self.batched_triton_experts is not None:
+            assert (self.batched_deep_gemm_experts is None
+                    or self.batched_deep_gemm_experts.activation_formats
+                    == self.batched_triton_experts.activation_formats)
+            return self.batched_triton_experts.activation_formats
+        else:
+            assert self.batched_deep_gemm_experts is not None
+            return self.batched_deep_gemm_experts.activation_formats
+
     def supports_chunking(self) -> bool:
         bdge = self.batched_deep_gemm_experts
         bte = self.batched_triton_experts
         return ((bdge is None or bdge.supports_chunking())
                 and (bte is None or bte.supports_chunking()))
+
+    def supports_expert_map(self) -> bool:
+        bdge = self.batched_deep_gemm_experts
+        bte = self.batched_triton_experts
+        return ((bdge is None or bdge.supports_expert_map())
+                and (bte is None or bte.supports_expert_map()))
 
     def workspace_shapes(
         self,
@@ -87,7 +109,8 @@ class BatchedTritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         # Note: the deep gemm workspaces are strictly larger than the triton
         # workspaces so we can be pessimistic here and allocate for DeepGemm
         # even if we fall back to triton later, e.g. if expert maps are set.
-        if self.allow_deep_gemm and self.batched_deep_gemm_experts is not None:
+        if self.allow_deep_gemm:
+            assert self.batched_deep_gemm_experts is not None
             return self.batched_deep_gemm_experts.workspace_shapes(
                 a, aq, M, N, K, topk, global_num_experts, local_num_experts)
         else:
