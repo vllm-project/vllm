@@ -983,48 +983,7 @@ class DPEngineCoreActor(DPEngineCoreProc):
         finally:
             self.shutdown()
     
-    # deprecated
-    def _reinit_data_parallel(self, new_dp_size: int):
-        logger.info(
-            f"Reinitializing data parallel with dp_size: {new_dp_size}")
-        from vllm.distributed.utils import (
-            stateless_destroy_torch_distributed_process_group)
-        stateless_destroy_torch_distributed_process_group(self.dp_group)
-        self.vllm_config.parallel_config.data_parallel_size = new_dp_size
-        self.vllm_config.parallel_config.data_parallel_master_port = 50000
-        self.dp_group = stateless_init_torch_distributed_process_group(
-            self.vllm_config.parallel_config.data_parallel_master_ip,
-            self.vllm_config.parallel_config.data_parallel_master_port,
-            self.vllm_config.parallel_config.data_parallel_rank,
-            new_dp_size,
-            backend="gloo")
-
-    # deprecated
     def reinit(self, new_dp_size: int):
-        logger.info(f"Reinitializing engine core with dp_size: {new_dp_size}")
-        assert isinstance(self.model_executor, RayDistributedExecutor)
-        logger.info("assertion passed")
-        self.model_executor._reinit_workers_ray(new_dp_size)
-
-        # This is needed because we need to call get_dp_padding() on the old workers
-        # so that the EngineCore.init()|get_dp_padding()|all_reduce() can proceed
-        logger.info("Calling determine_available_memory()")
-        self.vllm_config.parallel_config.data_parallel_size = new_dp_size
-        self.model_executor.determine_available_memory()
-        logger.info("Calling initialize_from_config()")
-        self.model_executor.initialize_from_config(self.kv_cache_configs,
-                                                   reinit=True)
-        logger.info("initialize_from_config() called")
-
-    # deprecated
-    def destroy_dp_states(self):
-        from vllm.distributed.utils import (
-            stateless_destroy_torch_distributed_process_group)
-        stateless_destroy_torch_distributed_process_group(self.dp_group)
-        logger.info("Destroyed engine core dp states")
-        self.model_executor.destroy_dp_states()
-    
-    def reinit_dp_states(self, new_dp_size: int):
         self.vllm_config.parallel_config.data_parallel_size = new_dp_size
         self.vllm_config.parallel_config.data_parallel_master_port = 50000
         self.dp_group = stateless_init_torch_distributed_process_group(

@@ -560,6 +560,9 @@ class AsyncLLM(EngineClient):
 
     async def stop_profile(self) -> None:
         await self.engine_core.profile_async(False)
+    
+    async def reinit(self, dp_size: int) -> None:
+        await self.engine_core.reinit_async(dp_size)
 
     async def reset_mm_cache(self) -> None:
         self.processor.mm_registry.reset_processor_cache()
