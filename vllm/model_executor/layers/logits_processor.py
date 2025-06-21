@@ -3,6 +3,7 @@
 """A layer that compute logits from hidden_stats."""
 import inspect
 from concurrent.futures import ThreadPoolExecutor
+from itertools import zip_longest
 from typing import Optional
 
 import torch
@@ -153,10 +154,17 @@ def _apply_logits_processors(
         if logits_processors:
             found_logits_processors = True
 
-            for seq_id, logits_row_idx in zip(seq_ids,
-                                              seq_group.sample_indices):
+            for i, (seq_id, logits_row_idx) in enumerate(
+                    zip_longest(seq_ids,
+                                seq_group.sample_indices,
+                                fillvalue=seq_ids[-1])):
                 logits_row = logits[logits_row_idx]
-                past_tokens_ids = seq_group.seq_data[seq_id].output_token_ids
+                max_output_len = len(
+                    seq_group.seq_data[seq_id].output_token_ids)
+                num_samples = len(seq_group.sample_indices)
+                past_tokens_ids = seq_group.seq_data[
+                    seq_id].output_token_ids[:max_output_len - num_samples +
+                                             i + 1]
                 prompt_tokens_ids = seq_group.seq_data[seq_id].prompt_token_ids
 
                 if _logits_processor_threadpool is not None:
