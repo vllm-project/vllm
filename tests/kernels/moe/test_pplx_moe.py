@@ -361,8 +361,11 @@ def test_pplx_prepare_finalize(
         use_fp8_w8a8 = False
         act_dtype = dtype
 
-    if not use_fp8_w8a8 and per_act_token_quant and block_shape is not None:
+    if not use_fp8_w8a8 and (per_act_token_quant or block_shape is not None):
         pytest.skip("Skip quantization test for non-quantized type")
+
+    if per_act_token_quant and block_shape is not None:
+        pytest.skip("Skip illgal quantization combination")
 
     current_platform.seed_everything(7)
     m, n, k = mnk
@@ -654,8 +657,11 @@ def test_pplx_moe(
         use_fp8_w8a8 = False
         quant_dtype = None
 
-    if not use_fp8_w8a8 and per_act_token_quant and block_shape is not None:
+    if not use_fp8_w8a8 and (per_act_token_quant or block_shape is not None):
         pytest.skip("Skip quantization test for non-quantized type")
+
+    if per_act_token_quant and block_shape is not None:
+        pytest.skip("Skip illgal quantization combination")
 
     a = torch.randn((m, k), device="cuda", dtype=torch.bfloat16) / 10
     score = torch.randn((m, e), device="cuda", dtype=torch.bfloat16)

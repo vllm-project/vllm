@@ -131,10 +131,12 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             orig_a_scale_block_shape = a1q_scale.shape[-1]
 
             # pad out scales if needed. TODO (bnell): do for non-scalar scales?
-            if scalar_scales:
-                #print(f"a1q_scale {a1q.shape}, {a1q_scale.shape}")
+            if False and scalar_scales:
+                print(f"a1q_scale {a1q.shape}, {a1q_scale.shape}")
                 a1q_scale = a1q_scale.repeat(a1q.shape[1],
                                              4 * torch.float32.itemsize)
+
+            a1q_scale = a1q_scale.repeat(repeat_rows, repeat_cols)
 
             #assert a1_scale is None or a1_scale.shape[0] == a1q.shape[1], f"{a1_scale.shape}, {a1q_scale.shape}"
 
@@ -170,11 +172,10 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             expert_x_scale_shape = (
                 num_local_experts,
                 expert_x.size(1),
-                (expert_x.size(2) + block_size - 1) //
-                block_size if not scalar_scales else 1,
+                cdiv(expert_x.size(2), block_size) if not scalar_scales else 1,
             )
 
-            #print(f"EXPERT_X_SCALE {expert_x_scale_shape}")
+            print(f"EXPERT_X_SCALE {expert_x_scale_shape}")
 
             expert_x_scale = torch.zeros(
                 expert_x_scale_shape,

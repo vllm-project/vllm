@@ -71,7 +71,7 @@ def moe_mmk(
         # channel-wise
         elif per_channel_quant:
             # TODO: probably not correct
-            b_scale_ptrs = b_scale_ptr + expert_id * stride_bse + offs_bsn[
+            b_scale_ptrs = b_scale_ptr + expert_id * stride_bse + offs_n[
                 None, :] * stride_bsn
             b_scale = tl.load(b_scale_ptrs)
             # Load per-token scale for activations
@@ -526,19 +526,10 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             dtype=b_type,
             device=a1.device)
 
-        if quant_config.quant_dtype is not None:
-            if quant_config.block_shape is not None:
-                _, block_k = quant_config.block_shape
-                k_tiles = (hidden_dim + block_k - 1) // block_k
-                scale_shape = (num_local_experts, self.max_num_tokens, k_tiles)
-            else:
-                if quant_config.per_act_token_quant:
-                    num = self.max_num_tokens
-                else:
-                    num = 1
-                scale_shape = (num_local_experts, num, 1)
-
-            #print(f"SCALE_SHAPE {block_shape} {b_a1.shape} {scale_shape}")
+        if quant_config.is_quantized:
+            scale_shape = quant_config.batched_scale_shape(num_local_experts,
+                                                           self.max_num_tokens,
+                                                           hidden_dim)
 
             b_a1_scale = torch.zeros(scale_shape,
                                      dtype=torch.float32,
@@ -555,36 +546,25 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             rows = torch.count_nonzero(topks.flatten())
             if rows == 0:
                 continue
-            rhs = a1[:topks.numel()][topks]
             idx = expert_id - first_expert
+            tokens_per_expert[idx] = rows
+            rhs = a1[:topks.numel()][topks]
             if quant_config.quant_dtype is not None:
                 if a1_scale is not None:
                     assert False, "NYI"
                     rhs_a1_scale = a1_scale[:topks.numel()][topks]
                 else:
                     rhs_a1_scale = None
-                b_a1[idx, :rows, :], b_s = (moe_kernel_quantize_input(
+                b_a1[idx, :rows, :], b_a1_scale[idx] = (moe_kernel_quantize_input(
                     rhs,
                     rhs_a1_scale,
                     quant_config.quant_dtype,
                     quant_config.per_act_token_quant,
                     quant_config.block_shape,
                 ))
-                if (quant_config.block_shape is None
-                        and not quant_config.per_act_token_quant):
-                    b_a1_scale[idx] = b_s
-                else:
-                    #print(f"XXXXX rhs={rhs.shape} b_s={b_s.shape}")
-                    assert rows == b_s.shape[0] and b_a1_scale.shape[
-                        -1] == b_s.shape[-1]
-                    b_a1_scale[idx, :rows] = b_s
             else:
                 b_a1[idx, :rows, :] = rhs
 
-            tokens_per_expert[idx] = rows
-
-        #b_a1_scale.fill_(0.0001)
-        #print(f"A1Q_scale = {b_a1_scale.shape}\n{b_a1_scale}")
         assert b_a1_scale is None or b_a1_scale.ndim == 3
 
         return b_a1, b_a1_scale, tokens_per_expert, None, None
@@ -645,7 +625,6 @@ class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
                 per_act_token_quant=per_act_token_quant,
                 block_shape=block_shape,
             ))
-        assert not use_fp8_w8a8, "NYI"
         assert not use_int8_w8a8, "NYI"
         assert not use_int8_w8a16, "NYI"
         assert not use_int4_w4a16, "NYI"
@@ -684,6 +663,15 @@ class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         workspace2 = (self.max_num_tokens * num_dp, N)
         return (workspace13, workspace2, workspace13, a.dtype)
 
+    def dequant(self, t: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+        assert self.quant_config.is_quantized
+        f32 = torch.float32
+        if self.quant_config.is_per_act_token or self.quant_config.is_per_tensor:
+            return t.to(f32) * scale
+        else:
+            t32 = t.to(f32).view(-1, self.quant_config.block_shape[1])
+            return (t32 * scale.view(-1, 1)).view(t.shape)
+
     def apply(
         self,
         output: torch.Tensor,
@@ -711,7 +699,12 @@ class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         assert num_local_experts == w1.size(0), (
             f"{num_local_experts} == {w1.size(0)}")
 
+        assert a2_scale is None, "NYI"
+
         N = w1.size(1) // 2
+        f32 = torch.float32
+
+        #output.fill_(0)
 
         for expert in range(num_local_experts):
             # Indexing expert_num_tokens doesn't work w/cudagraphs or inductor
@@ -725,9 +718,23 @@ class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
                 continue
 
             tmp = _resize_cache(workspace2, (num, N))
-            input = hidden_states[expert, :num, :] @ w1[expert].transpose(0, 1)
-            self.activation(activation, tmp, input)
-            output[expert, :num, :] = tmp @ w2[expert].transpose(0, 1)
+
+            if self.quant_config.is_quantized:
+                input = self.dequant(hidden_states[expert, :, :], a1q_scale[expert])
+                w1_dq = self.dequant(w1[expert], w1_scale[expert])
+                input = input[:num] @ w1_dq.transpose(0, 1)
+            else:
+                input = hidden_states[expert, :num, :] @ w1[expert].transpose(0, 1)
+
+            self.activation(activation, tmp, input.to(tmp.dtype))
+
+            if self.quant_config.is_quantized:
+                w2_dq = self.dequant(w2[expert], w2_scale[expert])
+            else:
+                w2_dq = w2[expert]
+
+            output[expert, :num, :] = tmp @ w2_dq.transpose(0, 1).to(tmp.dtype)
+
 
 def maybe_fix_scales(scales: Optional[torch.Tensor], num_experts: int) -> Optional[torch.Tensor]:
     if scales is not None:
@@ -742,6 +749,7 @@ def maybe_fix_scales(scales: Optional[torch.Tensor], num_experts: int) -> Option
             scales = scales.view(num_experts, -1, scales.size(-1))
 
     return scales
+
 
 def batched_moe_kernel_quantize_input(
     A: torch.Tensor,
