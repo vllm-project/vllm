@@ -12,11 +12,13 @@ from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import supports_multimodal
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
+from vllm.triton_utils import triton
 from vllm.v1.attention.backends.flash_attn import (CommonAttentionMetadata,
                                                    FlashAttentionMetadata)
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.spec_decode.utils import prepare_eagle_input_kernel
+from vllm.v1.spec_decode.utils import (advance_state_kernel,
+                                       prepare_eagle_input_kernel)
 
 logger = init_logger(__name__)
 
@@ -208,52 +210,12 @@ class EagleProposer:
         attn_metadata.max_query_len = 1
         attn_metadata.query_start_loc = self.arange[:batch_size + 1]
         for _ in range(self.num_speculative_tokens - 1):
-            # Update the inputs.
-            # cast to int32 is crucial when eagle model is compiled.
-            # tensor.argmax() returns int64 by default.
-            input_ids = draft_token_ids_list[-1].int()
-            positions += 1
 
-            # NOTE(woosuk): We should handle the case where the draft model
-            # generates tokens beyond the max model length. Since it is complex
-            # to remove such requests from the batch, we keep them in the batch
-            # but adjust the position ids and slot mappings to avoid the
-            # out-of-range access during the model execution. The draft tokens
-            # generated with this adjustment should be ignored.
-            exceeds_max_model_len = positions >= self.max_model_len
-            # Mask out the position ids that exceed the max model length.
-            # Otherwise, we may get out-of-range error in RoPE.
-            clamped_positions = torch.where(exceeds_max_model_len, 0,
-                                            positions)
-
-            # Increment the sequence lengths.
-            attn_metadata.max_seq_len += 1
-            attn_metadata.seq_lens += 1
-            # Consider max model length.
-            attn_metadata.max_seq_len = min(attn_metadata.max_seq_len,
-                                            self.max_model_len)
-            # For the requests that exceed the max model length, we set the
-            # sequence length to 1 to minimize their overheads in attention.
-            attn_metadata.seq_lens.masked_fill_(exceeds_max_model_len, 1)
-
-            # Compute the slot mapping.
-            block_numbers = clamped_positions // self.block_size
-            block_ids = block_table.gather(dim=1,
-                                           index=block_numbers.view(-1, 1))
-            block_ids = block_ids.view(-1)
-            attn_metadata.slot_mapping = (block_ids * self.block_size +
-                                          clamped_positions % self.block_size)
-            # Mask out the slot mappings that exceed the max model length.
-            # Otherwise, the KV cache will be inadvertently updated with the
-            # padding tokens.
-            attn_metadata.slot_mapping.masked_fill_(exceeds_max_model_len,
-                                                    PADDING_SLOT_ID)
+            self.advance_speculative_state(draft_token_ids_list[-1], positions,
+                                           hidden_states, attn_metadata,
+                                           batch_size)
 
             # copy inputs to buffer for cudagraph
-            self.input_ids[:batch_size] = input_ids
-            self.positions[:batch_size] = clamped_positions
-            self.hidden_states[:batch_size] = hidden_states
-
             # Run the model.
             with set_forward_context(per_layer_attn_metadata,
                                      self.vllm_config,
@@ -274,6 +236,46 @@ class EagleProposer:
         # [batch_size, num_speculative_tokens]
         draft_token_ids = torch.stack(draft_token_ids_list, dim=1)
         return draft_token_ids
+
+    def advance_speculative_state(self, draft_token_ids: torch.Tensor,
+                                  positions: torch.Tensor,
+                                  hidden_states: torch.Tensor,
+                                  attn_metadata: FlashAttentionMetadata,
+                                  batch_size: int):
+        # Calculate number of thread blocks
+        grid = lambda meta: (triton.cdiv(batch_size, meta['BLOCK_SIZE']), )
+        attn_metadata.slot_mapping = torch.empty_like(positions)
+        advance_state_kernel[grid](
+            # === Input tensors ===
+            draft_token_ids,
+            positions,
+
+            # === Model input buffers to be updated ===
+            self.input_ids[:batch_size],
+            self.positions[:batch_size],
+
+            # === Metadata tensors ===
+            attn_metadata.seq_lens,
+            attn_metadata.block_table,
+            attn_metadata.slot_mapping,
+
+            # === Scalar configuration ===
+            self.max_model_len,
+            self.block_size,
+            self.max_model_len // self.block_size,
+
+            # === Execution control ===
+            batch_size,
+            BLOCK_SIZE=1024,
+            PADDING_SLOT_ID=PADDING_SLOT_ID)
+
+        self.hidden_states[:batch_size] = hidden_states
+
+        # Increment the sequence lengths.
+        attn_metadata.max_seq_len += 1
+        # Consider max model length.
+        attn_metadata.max_seq_len = min(attn_metadata.max_seq_len,
+                                        self.max_model_len)
 
     @staticmethod
     def prepare_inputs(
