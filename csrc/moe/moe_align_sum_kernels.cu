@@ -239,7 +239,7 @@ void moe_sum(torch::Tensor& input,   // [num_tokens, topk, hidden_size]
              torch::Tensor& output)  // [num_tokens, hidden_size]
 {
   const int hidden_size = input.size(-1);
-  const int num_tokens = output.numel() / hidden_size;
+  const auto num_tokens = output.numel() / hidden_size;
   const int topk = input.size(1);
 
   dim3 grid(num_tokens);
