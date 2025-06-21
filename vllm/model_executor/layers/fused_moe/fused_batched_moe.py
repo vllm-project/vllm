@@ -595,6 +595,7 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         use_int8_w8a8: bool = False,
         use_int8_w8a16: bool = False,
         use_int4_w4a16: bool = False,
+        use_mxfp4_w4a4: bool = False,
         per_channel_quant: bool = False,
         block_shape: Optional[list[int]] = None,
         world_size: int = 1,
@@ -605,6 +606,7 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         self.use_int8_w8a8 = use_int8_w8a8
         self.use_int4_w4a16 = use_int4_w4a16
         self.use_int8_w8a16 = use_int8_w8a16
+        self.use_mxfp4_w4a4 = use_mxfp4_w4a4
         self.block_shape = block_shape
         self.per_channel_quant = per_channel_quant
         self.max_num_tokens = max_num_tokens
@@ -614,6 +616,10 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         assert not use_int8_w8a8, "NYI"
         assert not use_int4_w4a16, "NYI"
         assert self.block_shape is None, "NYI"
+
+        if use_mxfp4_w4a4:
+            raise ValueError("BatchedTritonExperts does not "
+                             "support use_mxfp4_w4a4=True for now.")
 
     def supports_chunking(self) -> bool:
         return False
@@ -685,6 +691,7 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         config_dtype = get_config_dtype_str(use_fp8_w8a8=self.use_fp8_w8a8,
                                             use_int8_w8a16=self.use_int8_w8a16,
                                             use_int4_w4a16=self.use_int4_w4a16,
+                                            use_mxfp4_w4a4=self.use_mxfp4_w4a4,
                                             dtype=hidden_states.dtype)
 
         config = try_get_optimal_moe_config(

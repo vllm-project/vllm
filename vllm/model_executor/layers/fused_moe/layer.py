@@ -470,6 +470,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 use_int8_w8a8=False,
                 use_int8_w8a16=False,
                 use_int4_w4a16=False,
+                use_mxfp4_w4a4=False,
                 block_shape=None,
                 per_channel_quant=False,
             )
@@ -480,6 +481,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 use_int8_w8a8=False,
                 use_int8_w8a16=False,
                 use_int4_w4a16=False,
+                use_mxfp4_w4a4=False,
                 block_shape=None,
                 per_channel_quant=False,
             )
