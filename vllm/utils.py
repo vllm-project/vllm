@@ -194,10 +194,13 @@ TORCH_DTYPE_TO_NUMPY_DTYPE = {
 @contextlib.contextmanager
 def set_default_torch_num_threads(num_threads: int):
     """Sets the default number of threads for PyTorch to the given value."""
-    old_num_threads = torch.get_num_threads()
-    torch.set_num_threads(num_threads)
-    yield
-    torch.set_num_threads(old_num_threads)
+    if num_threads == -1:
+        yield
+    else:
+        old_num_threads = torch.get_num_threads()
+        torch.set_num_threads(num_threads)
+        yield
+        torch.set_num_threads(old_num_threads)
 
 
 P = ParamSpec('P')
