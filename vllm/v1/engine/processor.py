@@ -9,6 +9,7 @@ from vllm.config import VllmConfig
 from vllm.inputs import ProcessorInputs, PromptType, SingletonInputs
 from vllm.inputs.parse import split_enc_dec_inputs
 from vllm.inputs.preprocess import InputPreprocessor
+from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalKwargs,
                              MultiModalRegistry)
@@ -327,6 +328,44 @@ class Processor:
                     orig_sorted_mm_inputs, sorted_mm_hashes)
             else:
                 sorted_mm_inputs = orig_sorted_mm_inputs
+
+        # Tokenize aLoRA invocation sequence if applicable.
+        if (self.lora_config and self.lora_config.activated_lora_enabled
+                and lora_request is not None):
+
+            text_config = self.model_config.hf_config.get_text_config()
+
+            peft_helper = PEFTHelper.from_local_dir(
+                lora_request.lora_path, text_config.max_position_embeddings,
+                lora_request.tensorizer_config_dict)
+
+            if peft_helper.invocation_string is not None:
+
+                invocation_tokens = self.input_preprocessor._tokenize_prompt(
+                    peft_helper.invocation_string,
+                    lora_request=lora_request,
+                    tokenization_kwargs=tokenization_kwargs)
+
+                invocation_start = -1
+                n = len(invocation_tokens)
+                token_ids = decoder_inputs["prompt_token_ids"]
+
+                if n > 0 and len(token_ids) >= n:
+                    # scan backward for the last match
+                    # (faster than full forward scan+max)
+                    for idx in range(len(token_ids) - n, -1, -1):
+                        if token_ids[idx:idx + n] == invocation_tokens:
+                            # weights activated 1 token after start
+                            invocation_start = idx + 1
+                            break
+
+                if invocation_start == -1:
+                    raise ValueError(
+                        "Invocation sequence not found in prompt "
+                        f"for request '{request_id}'. aLoRA models require the "
+                        "invocation tokens to be present in the input.")
+
+                lora_request.invocation_start = invocation_start
 
         return decoder_inputs.get("prompt"), EngineCoreRequest(
             request_id=request_id,

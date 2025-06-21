@@ -473,6 +473,12 @@ def hash_request_tokens(hash_function: Any, block_size: int,
             # MM and LoRA requests need extra keys for block-hash computation.
             req_extra_keys, curr_mm_idx = generate_block_hash_extra_keys(
                 request, start, end, curr_mm_idx)
+            # Respect a-LoRA behaviour
+            if (request.lora_request is not None
+                    and request.lora_request.invocation_start is not None
+                    and end <= request.lora_request.invocation_start):
+                # cache is equivalent to base model cache
+                req_extra_keys = None
 
         block_hash = hash_block_tokens(hash_function, parent_block_hash_value,
                                        block_token_ids, req_extra_keys)

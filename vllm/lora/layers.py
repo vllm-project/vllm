@@ -19,6 +19,7 @@ from vllm.distributed import (get_tensor_model_parallel_rank,
                               tensor_model_parallel_all_gather,
                               tensor_model_parallel_all_reduce)
 from vllm.distributed.utils import divide
+from vllm.forward_context import get_forward_context
 # yapf: disable
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearBase,
@@ -874,7 +875,8 @@ class MergedQKVParallelLinearWithLoRA(MergedColumnParallelLinearWithLoRA):
         model_config: Optional[PretrainedConfig],
     ) -> bool:
         return (type(source_layer) is QKVParallelLinear
-                and len(packed_modules_list) == 3)
+                and len(packed_modules_list) == 3
+                and not lora_config.activated_lora_enabled)
 
 
 #TODO: Implement this
@@ -1283,3 +1285,50 @@ class LinearScalingRotaryEmbeddingWithLoRA(BaseLayerWithLoRA):
 
     def extra_repr(self) -> str:
         return self.base_layer.extra_repr()
+
+
+class MergedQKVParallelLinearWithActivatedLoRA(MergedQKVParallelLinearWithLoRA
+                                               ):
+
+    def apply(self,
+              x: torch.Tensor,
+              bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+        output = self.base_layer.quant_method.apply(self.base_layer, x, bias)
+
+        # In transformers backend, x and output have extra batch dimension like
+        # (1, seq_len, hidden_dim), while punica expects (seq_len, hidden_dim),
+        # therefore we need to flatten the batch dimensions.
+        if x.ndim == 3 and output.ndim == 3:
+            output = output.flatten(0, 1)
+            x = x.flatten(0, 1)
+
+        # Extract aLoRA batch metadata from forward context
+        alora_metadata = get_forward_context().alora_metadata
+
+        mask1d = alora_metadata.mask1d
+        mask2d = mask1d.unsqueeze(1).to(output.dtype)
+
+        # Clone base layer output before running LoRA
+        orig_out = output.clone()
+
+        # Apply LoRA in‐place on `output`:
+        self.punica_wrapper.add_lora_linear(output, x, self.lora_a_stacked,
+                                            self.lora_b_stacked,
+                                            self.lora_bias_stacked, 1.0,
+                                            self.output_slices)
+        # Apply alora mask
+        final_output = orig_out.mul(mask2d) + output.mul(1.0 - mask2d)
+        return final_output
+
+    @classmethod
+    def can_replace_layer(
+        cls,
+        source_layer: nn.Module,
+        lora_config: LoRAConfig,
+        packed_modules_list: list,
+        model_config: Optional[PretrainedConfig],
+    ) -> bool:
+        """Returns True if the layer can be replaced by this LoRA layer."""
+        return (type(source_layer) is QKVParallelLinear
+                and len(packed_modules_list) == 3
+                and lora_config.activated_lora_enabled)
