@@ -6,11 +6,15 @@ import importlib.util
 import json
 import logging
 import os
+import platform
 import re
 import subprocess
 import sys
+import sysconfig
+import tarfile
 from pathlib import Path
-from shutil import which
+from shutil import copy, copytree, which
+from tempfile import TemporaryDirectory
 
 import torch
 from packaging.version import Version, parse
@@ -80,6 +84,71 @@ def is_url_available(url: str) -> bool:
     except Exception:
         return False
     return status == 200
+
+
+def open_url(url: str, timeout: int = 300):
+    from urllib.request import Request, urlopen
+    headers = {
+        'User-Agent':
+        'Mozilla/5.0 (X11; Linux x86_64; rv:109.0) '
+        'Gecko/20100101 Firefox/119.0',
+    }
+    return urlopen(Request(url, headers=headers), timeout=timeout)
+
+
+def download_extract_copy(url: str, install_paths: dict[Path, Path]):
+    with tarfile.open(fileobj=open_url(url), mode="r|*") as file, \
+            TemporaryDirectory() as tmp_path:
+        file.extractall(path=tmp_path)
+
+        for archive_path, output_path in install_paths.items():
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            src_path = tmp_path / archive_path
+            if os.path.isdir(src_path):
+                copytree(src_path, output_path, dirs_exist_ok=True)
+            else:
+                copy(src_path, output_path)
+
+
+def download_toolchain(nvcc_version: str, ptxas_version: str, dst_path: Path):
+    system = platform.system().lower()
+    arch = platform.machine()
+    arch = {"arm64": "aarch64"}.get(arch, arch)
+
+    download_extract_copy(
+        "https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvcc/"
+        f"{system}-{arch}/cuda_nvcc-{system}-{arch}-{nvcc_version}-archive.tar.xz",
+        {
+            Path(f"cuda_nvcc-{system}-{arch}-{nvcc_version}-archive/bin"):
+            dst_path / "bin",
+        },
+    )
+    download_extract_copy(
+        "https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvcc/"
+        f"{system}-{arch}/cuda_nvcc-{system}-{arch}-{ptxas_version}-archive.tar.xz",
+        {
+            Path(f"cuda_nvcc-{system}-{arch}-{ptxas_version}-archive/bin/ptxas"):
+            dst_path / "bin",
+            Path(f"cuda_nvcc-{system}-{arch}-{ptxas_version}-archive/nvvm/bin"):
+            dst_path / "nvvm/bin",
+        },
+    )
+
+
+class OverrideFiles:
+
+    def __init__(self, override_map: dict[Path, Path]):
+        self.override_map = override_map
+
+    def __enter__(self):
+        for target, destination in self.override_map.items():
+            target.rename(target.with_suffix('.backup'))
+            target.symlink_to(destination)
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        for target in self.override_map:
+            target.unlink()
+            target.with_suffix('.backup').rename(target)
 
 
 class CMakeExtension(Extension):
@@ -205,9 +274,25 @@ class cmake_build_ext(build_ext):
         # Make sure we use the nvcc from CUDA_HOME
         if _is_cuda():
             cmake_args += [f'-DCMAKE_CUDA_COMPILER={CUDA_HOME}/bin/nvcc']
-        subprocess.check_call(
-            ['cmake', ext.cmake_lists_dir, *build_tool, *cmake_args],
-            cwd=self.build_temp)
+
+        # 12.6 is known to segfault when compiling flash attention,
+        # instead, hack toolchain to use ptxas from 12.8
+        # https://github.com/Dao-AILab/flash-attention/blob/main/hopper/setup.py#L404
+        override_files = {}
+        if _is_cuda() and get_nvcc_cuda_version() == Version("12.6"):
+            nvcc_version = "12.6.85"
+            ptxas_version = "12.8.93"
+            temp_path = Path(__file__).parent / ".deps/nvidia-toolchain"
+            download_toolchain(nvcc_version, ptxas_version, temp_path)
+            override_files = {
+                Path(CUDA_HOME) / "bin/ptxas": temp_path / "bin/ptxas",
+                Path(CUDA_HOME) / "nvvm/bin/cicc": temp_path / "nvvm/bin/cicc",
+            }
+
+        with OverrideFiles(override_files):
+            subprocess.check_call(
+                ['cmake', ext.cmake_lists_dir, *build_tool, *cmake_args],
+                cwd=self.build_temp)
 
     def build_extensions(self) -> None:
         # Ensure that CMake is present and working
@@ -497,7 +582,6 @@ def get_rocm_version():
 
 
 def get_neuronxcc_version():
-    import sysconfig
     site_dir = sysconfig.get_paths()["purelib"]
     version_file = os.path.join(site_dir, "neuronxcc", "version",
                                 "__init__.py")
