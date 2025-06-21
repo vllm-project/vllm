@@ -43,6 +43,39 @@ def test_model_load_and_run(vllm_runner, model_id: str, force_marlin: bool,
         print(outputs[0][1])
 
 
+DYNAMIC_QUANT_MODELS = ["Qwen/Qwen2.5-VL-3B-Instruct"]
+
+
+@pytest.mark.skipif(not is_quant_method_supported("fp8"),
+                    reason="FP8 is not supported on this GPU type.")
+@pytest.mark.parametrize("model_id", DYNAMIC_QUANT_MODELS)
+@pytest.mark.parametrize("force_marlin", [True])
+@pytest.mark.parametrize(
+    "force_torch_scaled_mm",
+    [True, False] if current_platform.is_rocm() else [False])
+@pytest.mark.parametrize(
+    "use_rocm_aiter", [True, False] if current_platform.is_rocm() else [False])
+def test_model_load_and_run_dynamic_quant(vllm_runner, model_id: str,
+                                          force_marlin: bool,
+                                          force_torch_scaled_mm: bool,
+                                          use_rocm_aiter: bool,
+                                          monkeypatch) -> None:
+
+    if use_rocm_aiter:
+        monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+    if force_marlin:
+        monkeypatch.setenv("VLLM_TEST_FORCE_FP8_MARLIN", "1")
+    if force_torch_scaled_mm:
+        monkeypatch.setenv("VLLM_ROCM_USE_SKINNY_GEMM", "0")
+
+    with vllm_runner(model_id, quantization="fp8") as llm:
+        # note: this does not test accuracy, just that we can run through
+        # see lm-eval tests for accuracy
+        outputs = llm.generate_greedy(prompts=["Hello my name is"],
+                                      max_tokens=10)
+        print(outputs[0][1])
+
+
 KV_CACHE_MODELS = [
     # Deprecated AutoFP8 format using .kv_scale
     "neuralmagic/Meta-Llama-3-8B-Instruct-FP8-KV",

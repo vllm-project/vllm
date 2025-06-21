@@ -195,6 +195,8 @@ class Fp8LinearMethod(LinearMethodBase):
             # Default to using per_token quantization if cutlass is supported
             use_per_token_if_dynamic=cutlass_fp8_supported())
 
+        self.weight_no_pad_dim1 = None
+
     def create_weights(
         self,
         layer: torch.nn.Module,
@@ -308,6 +310,20 @@ class Fp8LinearMethod(LinearMethodBase):
             torch.cuda.empty_cache()
         return weight
 
+    def _maybe_per_tensor_padding(self, weight: torch.Tensor,
+                                  weight_scale: torch.Tensor) -> torch.Tensor:
+        # apply padding for the per_tensor_w8a8 case on rocm.
+        if current_platform.is_rocm() and weight_scale.numel() == 1:
+            # store the weight shape at dim 1 to remove the padding.
+            self.weight_no_pad_dim1 = weight.t().shape[1]
+            pad_dim1_w = (16 - (weight.shape[1] % 16)) % 16
+            pad_dim0_w = (16 - (weight.shape[0] % 16)) % 16
+            weight = F.pad(weight, (0, pad_dim1_w, 0, pad_dim0_w),
+                           mode='constant',
+                           value=0.0)
+            weight = weight.contiguous()
+        return weight
+
     def process_weights_after_loading(self, layer: Module) -> None:
         size_k_first = True
         # TODO(rob): refactor block quant into separate class.
@@ -335,6 +351,7 @@ class Fp8LinearMethod(LinearMethodBase):
             qweight, weight_scale = ops.scaled_fp8_quant(layer.weight,
                                                          scale=None)
 
+            qweight = self._maybe_per_tensor_padding(qweight, weight_scale)
             # Update the layer with the new values.
             layer.weight = Parameter(qweight.t(), requires_grad=False)
             layer.weight_scale = Parameter(weight_scale, requires_grad=False)
@@ -373,6 +390,8 @@ class Fp8LinearMethod(LinearMethodBase):
                 )
 
             weight = self._maybe_pad_weight(weight)
+            weight = self._maybe_per_tensor_padding(weight, weight_scale)
+
             # Update layer with new values.
             layer.weight = Parameter(weight.t(), requires_grad=False)
             layer.weight_scale = Parameter(weight_scale, requires_grad=False)
@@ -414,12 +433,20 @@ class Fp8LinearMethod(LinearMethodBase):
                 use_aiter_and_is_supported=self.use_aiter_and_is_supported,
             )
 
-        return self.fp8_linear.apply(input=x,
-                                     weight=layer.weight,
-                                     weight_scale=layer.weight_scale,
-                                     out_dtype=self.out_dtype,
-                                     input_scale=layer.input_scale,
-                                     bias=bias)
+        if self.weight_no_pad_dim1 is None:
+            output_shape = [*x.shape[:-1], layer.weight.shape[1]]
+        else:
+            output_shape = [*x.shape[:-1], self.weight_no_pad_dim1]
+
+        return self.fp8_linear.apply(
+            input=x,
+            weight=layer.weight,
+            weight_scale=layer.weight_scale,
+            output_shape=output_shape,
+            out_dtype=self.out_dtype,
+            input_scale=layer.input_scale,
+            bias=bias,
+        )
 
 
 class Fp8MoEMethod(FusedMoEMethodBase):
