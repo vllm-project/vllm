@@ -7,6 +7,7 @@ import os
 from typing import Any, Callable, Optional
 
 import torch
+import torch.nn.functional as F
 
 import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -1000,6 +1001,7 @@ def inplace_fused_experts(hidden_states: torch.Tensor,
                           topk_weights: torch.Tensor,
                           topk_ids: torch.Tensor,
                           activation: str = "silu",
+                          is_act_and_mul: bool = True,
                           apply_router_weight_on_input: bool = False,
                           use_fp8_w8a8: bool = False,
                           use_int8_w8a8: bool = False,
@@ -1016,7 +1018,8 @@ def inplace_fused_experts(hidden_states: torch.Tensor,
                           a2_scale: Optional[torch.Tensor] = None,
                           block_shape: Optional[list[int]] = None) -> None:
     fused_experts_impl(hidden_states, w1, w2, topk_weights, topk_ids, True,
-                       activation, apply_router_weight_on_input, use_fp8_w8a8,
+                       activation, is_act_and_mul,
+                       apply_router_weight_on_input, use_fp8_w8a8,
                        use_int8_w8a8, use_int8_w8a16, use_int4_w4a16,
                        per_channel_quant, global_num_experts, expert_map,
                        w1_scale, w2_scale, w1_zp, w2_zp, a1_scale, a2_scale,
@@ -1030,6 +1033,7 @@ def inplace_fused_experts_fake(
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         activation: str = "silu",
+        is_act_and_mul: bool = True,
         apply_router_weight_on_input: bool = False,
         use_fp8_w8a8: bool = False,
         use_int8_w8a8: bool = False,
@@ -1064,6 +1068,7 @@ def outplace_fused_experts(
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         activation: str = "silu",
+        is_act_and_mul: bool = True,
         apply_router_weight_on_input: bool = False,
         use_fp8_w8a8: bool = False,
         use_int8_w8a8: bool = False,
@@ -1080,12 +1085,12 @@ def outplace_fused_experts(
         a2_scale: Optional[torch.Tensor] = None,
         block_shape: Optional[list[int]] = None) -> torch.Tensor:
     return fused_experts_impl(hidden_states, w1, w2, topk_weights, topk_ids,
-                              False, activation, apply_router_weight_on_input,
-                              use_fp8_w8a8, use_int8_w8a8, use_int8_w8a16,
-                              use_int4_w4a16, per_channel_quant,
-                              global_num_experts, expert_map, w1_scale,
-                              w2_scale, w1_zp, w2_zp, a1_scale, a2_scale,
-                              block_shape)
+                              False, activation, is_act_and_mul,
+                              apply_router_weight_on_input, use_fp8_w8a8,
+                              use_int8_w8a8, use_int8_w8a16, use_int4_w4a16,
+                              per_channel_quant, global_num_experts,
+                              expert_map, w1_scale, w2_scale, w1_zp, w2_zp,
+                              a1_scale, a2_scale, block_shape)
 
 
 def outplace_fused_experts_fake(
@@ -1095,6 +1100,7 @@ def outplace_fused_experts_fake(
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         activation: str = "silu",
+        is_act_and_mul: bool = True,
         use_fp8_w8a8: bool = False,
         use_int8_w8a8: bool = False,
         use_int8_w8a16: bool = False,
@@ -1144,6 +1150,7 @@ def fused_experts(hidden_states: torch.Tensor,
                   topk_ids: torch.Tensor,
                   inplace: bool = False,
                   activation: str = "silu",
+                  is_act_and_mul: bool = True,
                   apply_router_weight_on_input: bool = False,
                   use_fp8_w8a8: bool = False,
                   use_int8_w8a8: bool = False,
@@ -1166,6 +1173,8 @@ def fused_experts(hidden_states: torch.Tensor,
     if (allow_deep_gemm and use_fp8_w8a8 and N > 512
             and _valid_deep_gemm(hidden_states, w1, w2)):
         assert apply_router_weight_on_input is False
+        assert is_act_and_mul, (
+            "DeepGemm only supports is_act_and_mul=True for now.")
         return deep_gemm_moe_fp8(
             hidden_states=hidden_states,
             w1=w1,
@@ -1190,6 +1199,7 @@ def fused_experts(hidden_states: torch.Tensor,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             activation=activation,
+            is_act_and_mul=is_act_and_mul,
             apply_router_weight_on_input=apply_router_weight_on_input,
             use_fp8_w8a8=use_fp8_w8a8,
             use_int8_w8a8=use_int8_w8a8,
@@ -1215,6 +1225,7 @@ def fused_experts_impl(
     topk_ids: torch.Tensor,
     inplace: bool = False,
     activation: str = "silu",
+    is_act_and_mul: bool = True,
     apply_router_weight_on_input: bool = False,
     use_fp8_w8a8: bool = False,
     use_int8_w8a8: bool = False,
@@ -1361,14 +1372,21 @@ def fused_experts_impl(
                                 per_channel_quant=per_channel_quant,
                                 block_shape=block_shape)
 
-        if activation == "silu":
+        # Activation function with multiplication
+        if activation == "silu" and is_act_and_mul:
             torch.ops._C.silu_and_mul(intermediate_cache2,
                                       intermediate_cache1.view(-1, N))
-        elif activation == "gelu":
+        elif activation == "gelu" and is_act_and_mul:
             torch.ops._C.gelu_and_mul(intermediate_cache2,
                                       intermediate_cache1.view(-1, N))
+        # Activation function without multiplication
+        elif activation == "silu":
+            intermediate_cache2 = F.silu(intermediate_cache1.view(-1, N))
+        elif activation == "gelu":
+            intermediate_cache2 = F.gelu(intermediate_cache1.view(-1, N))
         else:
-            raise ValueError(f"Unsupported FusedMoe activation: {activation}")
+            raise ValueError(f"Unsupported FusedMoe activation: {activation}, "
+                             f"with is_act_and_mul={is_act_and_mul}.")
 
         qintermediate_cache2, a2q_scale = moe_kernel_quantize_input(
             A=intermediate_cache2,
@@ -1413,6 +1431,7 @@ def fused_moe(
     renormalize: bool,
     inplace: bool = False,
     activation: str = "silu",
+    is_act_and_mul: bool = True,
     use_grouped_topk: bool = False,
     num_expert_group: Optional[int] = None,
     topk_group: Optional[int] = None,
@@ -1448,6 +1467,9 @@ def fused_moe(
         Defaults to False.
     - activation (str): The activation function to apply after the first
         MoE layer.
+    - is_act_and_mul (bool): If True, use activation-and-mul function for
+        activation (self-gated activation), otherwise use activation function
+        for activation (ungated activation).
     - num_expert_group: Optional[int]: additional parameter for grouped_topk
     - topk_group: Optional[int]: additional parameter for grouped_topk
     - use_grouped_topk: If True, use grouped_topk instead of fused_topk
@@ -1481,6 +1503,9 @@ def fused_moe(
     Returns:
     - torch.Tensor: The output tensor after applying the MoE layer.
     """
+    if not is_act_and_mul:
+        assert inplace is False, (
+            "is_act_and_mul=False is not supported with inplace=True")
 
     if use_grouped_topk:
         assert num_expert_group is not None and topk_group is not None
@@ -1501,6 +1526,7 @@ def fused_moe(
                          topk_ids,
                          inplace=inplace,
                          activation=activation,
+                         is_act_and_mul=is_act_and_mul,
                          use_fp8_w8a8=use_fp8_w8a8,
                          use_int8_w8a8=use_int8_w8a8,
                          use_int8_w8a16=use_int8_w8a16,
