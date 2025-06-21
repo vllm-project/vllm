@@ -227,7 +227,11 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         "--expand-tools-even-if-tool-choice-none",
         action="store_true",
         default=False,
-        help="Include tool definitions in prompt when tool_choice='none'")
+        help="[DEPRECATED] Include tool definitions in prompts even when tool_choice='none'. "
+        "This is a transitional option that will be removed in v0.10.0. "
+        "In v0.10.0, tool definitions will always be included regardless of "
+        "tool_choice setting. Use this flag now to test the new behavior "
+        "before the breaking change.")
 
     valid_tool_parsers = ToolParserManager.tool_parsers.keys()
     parser.add_argument(
