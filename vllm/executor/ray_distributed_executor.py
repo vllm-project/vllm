@@ -12,6 +12,8 @@ import cloudpickle
 import msgspec
 
 import vllm.envs as envs
+from vllm.distributed.device_communicators.ray_communicator import (
+    RayCudaCommunicator)
 from vllm.executor.executor_base import (
     DistributedExecutorBase)  # yapf: disable
 from vllm.executor.msgspec_utils import encode_hook
@@ -626,6 +628,12 @@ class RayDistributedExecutor(DistributedExecutorBase):
                     ]
 
             forward_dag = MultiOutputNode(outputs)
+
+        from vllm.distributed.device_communicators.ray_accelerator_context import (
+            register_accelerator_context)
+
+        register_accelerator_context(torch_module_name="cuda",
+                                     communicator_cls=RayCudaCommunicator)
 
         return forward_dag.experimental_compile(
             enable_asyncio=enable_asyncio,
