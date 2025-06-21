@@ -6,12 +6,14 @@
 # docs/assets/contributing/dockerfile-stages-dependency.png
 
 ARG CUDA_VERSION=12.8.1
+ARG INSTALL_KV_CONNECTOR=false
 #################### BASE BUILD IMAGE ####################
 # prepare basic build environment
 FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu20.04 AS base
 ARG CUDA_VERSION=12.8.1
 ARG PYTHON_VERSION=3.12
 ARG TARGETPLATFORM
+ARG INSTALL_KV_CONNECTOR=false
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Install Python and other dependencies
@@ -185,6 +187,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04 AS vllm-base
 ARG CUDA_VERSION=12.8.1
 ARG PYTHON_VERSION=3.12
+ARG INSTALL_KV_CONNECTOR=false
 WORKDIR /vllm-workspace
 ENV DEBIAN_FRONTEND=noninteractive
 ARG TARGETPLATFORM
@@ -339,13 +342,19 @@ RUN mv mkdocs.yaml test_docs/
 # base openai image with additional requirements, for any subsequent openai-style images
 FROM vllm-base AS vllm-openai-base
 ARG TARGETPLATFORM
+ARG INSTALL_KV_CONNECTOR=false
 
 # This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
 # Reference: https://github.com/astral-sh/uv/pull/1694
 ENV UV_HTTP_TIMEOUT=500
 
+COPY requirements/kv_connectors.txt requirements/kv_connectors.txt
+
 # install additional dependencies for openai api server
 RUN --mount=type=cache,target=/root/.cache/uv \
+    if [ "$INSTALL_KV_CONNECTOR" = "true" ]; then \
+        uv pip install --system -r requirements/kv_connectors.txt; \
+    fi; \
     if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
         uv pip install --system accelerate hf_transfer 'modelscope!=1.15.0' 'bitsandbytes>=0.42.0' 'timm==0.9.10' boto3 runai-model-streamer runai-model-streamer[s3]; \
     else \
