@@ -175,9 +175,23 @@ class OpenAIServingChat(OpenAIServing):
                     "--enable-auto-tool-choice and --tool-call-parser to be set"
                 )
 
-            if (request.tools is None
-                    or (request.tool_choice == "none"
-                        and not self.expand_tools_even_if_tool_choice_none)):
+            if request.tools is None:
+                tool_dicts = None
+            elif (request.tool_choice == "none"
+                  and not self.expand_tools_even_if_tool_choice_none):
+                assert request.tools is not None
+                if len(request.tools) > 0:
+                    logger.warning(
+                        "Tools are specified but tool_choice is set to 'none' and "
+                        "--expand-tools-even-if-tool-choice-none is not enabled. "
+                        "Tool definitions will be excluded from the prompt. "
+                        "This behavior will change in vLLM v0.10 where tool definitions "
+                        "will be included by default even with tool_choice='none'. "
+                        "To adopt the new behavior now, "
+                        "use --expand-tools-even-if-tool-choice-none. "
+                        "To suppress this warning, either remove tools from the request "
+                        "or set tool_choice to a different value."
+                    )
                 tool_dicts = None
             else:
                 tool_dicts = [tool.model_dump() for tool in request.tools]
