@@ -30,9 +30,8 @@ def server():
 
 @pytest.fixture(scope="module")
 def st_main_score(hf_runner):
-    # I don't know where the randomness comes from,
-    # but this value changes over time.
-    # Perhaps related to the version of the dependency.
+    # The main score related to the version of the dependency.
+    # So we need to recalculate every time.
     main_score, st_dtype = mteb_test_rerank_models_hf(hf_runner, MODEL_NAME)
     return main_score
 
