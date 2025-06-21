@@ -1419,9 +1419,6 @@ class LLMEngine:
 
                 # Tracing
                 self.do_tracing(scheduler_outputs)
-        else:
-            # Multi-step case
-            return ctx.request_outputs
 
         if not self.has_unfinished_requests():
             # Drain async postprocessor (if exists)
