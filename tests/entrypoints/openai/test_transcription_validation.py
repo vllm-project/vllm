@@ -82,6 +82,8 @@ async def test_long_audio_request(mary_had_lamb):
 
     mary_had_lamb.seek(0)
     audio, sr = librosa.load(mary_had_lamb)
+    # Add small silence after each audio for repeatability in the split process
+    audio = np.pad(audio, (0, 1600))
     repeated_audio = np.tile(audio, 10)
     # Repeated audio to buffer
     buffer = io.BytesIO()
