@@ -35,6 +35,9 @@ Studies have shown that FP8 E4M3 quantization typically only minimally degrades 
 
 Here is an example of how to enable FP8 quantization:
 
+<details>
+<summary>Code</summary>
+
 ```python
 # To calculate kv cache scales on the fly enable the calculate_kv_scales
 # parameter
@@ -49,6 +52,8 @@ prompt = "London is the capital of"
 out = llm.generate(prompt, sampling_params)[0].outputs[0].text
 print(out)
 ```
+
+</details>
 
 The `kv_cache_dtype` argument specifies the data type for KV cache storage:
 - `"auto"`: Uses the model's default "unquantized" data type
@@ -70,6 +75,9 @@ pip install llmcompressor
 ### Example Usage
 
 Here's a complete example using `meta-llama/Llama-3.1-8B-Instruct` (most models can use this same pattern):
+
+<details>
+<summary>Code</summary>
 
 ```python
 from datasets import load_dataset
@@ -133,9 +141,14 @@ model.save_pretrained(SAVE_DIR, save_compressed=True)
 tokenizer.save_pretrained(SAVE_DIR)
 ```
 
+</details>
+
 The above script will create a folder in your current directory containing your quantized model (e.g., `Llama-3.1-8B-Instruct-FP8-KV`) with calibrated scales.
 
 When running the model you must specify `kv_cache_dtype="fp8"` in order to enable the kv cache quantization and use the scales.
+
+<details>
+<summary>Code</summary>
 
 ```python
 from vllm import LLM, SamplingParams
@@ -146,3 +159,5 @@ prompt = "London is the capital of"
 out = llm.generate(prompt, sampling_params)[0].outputs[0].text
 print(out)
 ```
+
+</details>

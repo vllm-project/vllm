@@ -10,16 +10,11 @@ LoRA adapters can be used with any vLLM model that implements [SupportsLoRA][vll
 Adapters can be efficiently served on a per request basis with minimal overhead. First we download the adapter(s) and save
 them locally with
 
-<details>
-<summary>Code</summary>
-
 ```python
 from huggingface_hub import snapshot_download
 
 sql_lora_path = snapshot_download(repo_id="yard1/llama-2-7b-sql-lora-test")
 ```
-
-</details>
 
 Then we instantiate the base model and pass in the `enable_lora=True` flag:
 

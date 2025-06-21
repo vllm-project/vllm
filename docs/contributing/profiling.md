@@ -29,25 +29,15 @@ Refer to <gh-file:examples/offline_inference/simple_profiling.py> for an example
 
 #### OpenAI Server
 
-<details>
-<summary>Command</summary>
-
 ```bash
 VLLM_TORCH_PROFILER_DIR=./vllm_profile python -m vllm.entrypoints.openai.api_server --model meta-llama/Meta-Llama-3-70B
 ```
 
-</details>
-
 benchmark_serving.py:
-
-<details>
-<summary>Commanad</summary>
 
 ```bash
 python benchmarks/benchmark_serving.py --backend vllm --model meta-llama/Meta-Llama-3-70B --dataset-name sharegpt --dataset-path sharegpt.json --profile --num-prompts 2
 ```
-
-</details>
 
 ## Profile with NVIDIA Nsight Systems
 
@@ -78,14 +68,9 @@ For basic usage, you can just append `nsys profile -o report.nsys-rep --trace-fo
 
 The following is an example using the `benchmarks/benchmark_latency.py` script:
 
-<details>
-<summary>Command</summary>
-
 ```bash
 nsys profile -o report.nsys-rep --trace-fork-before-exec=true --cuda-graph-trace=node python benchmarks/benchmark_latency.py --model meta-llama/Llama-3.1-8B-Instruct --num-iters-warmup 5 --num-iters 1 --batch-size 16 --input-len 512 --output-len 8
 ```
-
-</details>
 
 #### OpenAI Server
 
@@ -106,25 +91,15 @@ python benchmarks/benchmark_serving.py --backend vllm --model meta-llama/Llama-3
 
 In practice, you should set the `--duration` argument to a large value. Whenever you want the server to stop profiling, run:
 
-<details>
-<summary>Command</summary>
-
 ```
 nsys sessions list
 ```
 
-</details>
-
 to get the session id in the form of `profile-XXXXX`, then run:
-
-<details>
-<summary>Command</summary>
 
 ```
 nsys stop --session=profile-XXXXX
 ```
-
-</details>
 
 to manually kill the profiler and generate your `nsys-rep` report.
 

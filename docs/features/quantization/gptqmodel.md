@@ -31,6 +31,9 @@ After installing GPTQModel, you are ready to quantize a model. Please refer to t
 
 Here is an example of how to quantize `meta-llama/Llama-3.2-1B-Instruct`:
 
+<details>
+<summary>Code</summary>
+
 ```python
 from datasets import load_dataset
 from gptqmodel import GPTQModel, QuantizeConfig
@@ -54,6 +57,8 @@ model.quantize(calibration_dataset, batch_size=2)
 model.save(quant_path)
 ```
 
+</details>
+
 ## Running a quantized model with vLLM
 
 To run an GPTQModel quantized model with vLLM, you can use [DeepSeek-R1-Distill-Qwen-7B-gptqmodel-4bit-vortex-v2](https://huggingface.co/ModelCloud/DeepSeek-R1-Distill-Qwen-7B-gptqmodel-4bit-vortex-v2) with the following command:
@@ -66,6 +71,9 @@ python examples/offline_inference/llm_engine_example.py \
 ## Using GPTQModel with vLLM's Python API
 
 GPTQModel quantized models are also supported directly through the LLM entrypoint:
+
+<details>
+<summary>Code</summary>
 
 ```python
 from vllm import LLM, SamplingParams
@@ -96,3 +104,5 @@ for output in outputs:
     print(f"Prompt: {prompt!r}\nGenerated text: {generated_text!r}")
     print("-"*50)
 ```
+
+</details>

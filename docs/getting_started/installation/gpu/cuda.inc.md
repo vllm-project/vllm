@@ -92,15 +92,10 @@ uv pip install -U vllm \
 
 If you want to access the wheels for previous commits (e.g. to bisect the behavior change, performance regression), due to the limitation of `pip`, you have to specify the full URL of the wheel file by embedding the commit hash in the URL:
 
-<details>
-<summary>Commands</summary>
-
 ```console
 export VLLM_COMMIT=33f460b17a54acb3b6cc0b03f4a17876cff5eafd # use full commit hash from the main branch
 pip install https://wheels.vllm.ai/${VLLM_COMMIT}/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl
 ```
-
-</details>
 
 Note that the wheels are built with Python 3.8 ABI (see [PEP 425](https://peps.python.org/pep-0425/) for more details about ABI), so **they are compatible with Python 3.8 and later**. The version string in the wheel file name (`1.0.0.dev`) is just a placeholder to have a unified URL for the wheels, the actual versions of wheels are contained in the wheel metadata (the wheels listed in the extra index url have correct versions). Although we don't support Python 3.8 any more (because PyTorch 2.5 dropped support for Python 3.8), the wheels are still built with Python 3.8 ABI to keep the same wheel name as before.
 
@@ -239,15 +234,10 @@ VLLM_CUTLASS_SRC_DIR=/path/to/cutlass pip install -e .
 To avoid your system being overloaded, you can limit the number of compilation jobs
 to be run simultaneously, via the environment variable `MAX_JOBS`. For example:
 
-<details>
-<summary>Commands</summary>
-
 ```console
 export MAX_JOBS=6
 pip install -e .
 ```
-
-</details>
 
 This is especially useful when you are building on less powerful machines. For example, when you use WSL it only [assigns 50% of the total memory by default](https://learn.microsoft.com/en-us/windows/wsl/wsl-config#main-wsl-settings), so using `export MAX_JOBS=1` can avoid compiling multiple files simultaneously and running out of memory.
 A side effect is a much slower build process.
@@ -270,27 +260,17 @@ docker run \
 
 If you don't want to use docker, it is recommended to have a full installation of CUDA Toolkit. You can download and install it from [the official website](https://developer.nvidia.com/cuda-toolkit-archive). After installation, set the environment variable `CUDA_HOME` to the installation path of CUDA Toolkit, and make sure that the `nvcc` compiler is in your `PATH`, e.g.:
 
-<details>
-<summary>Commands</summary>
-
 ```console
 export CUDA_HOME=/usr/local/cuda
 export PATH="${CUDA_HOME}/bin:$PATH"
 ```
 
-</details>
-
 Here is a sanity check to verify that the CUDA Toolkit is correctly installed:
-
-<details>
-<summary>Commands</summary>
 
 ```console
 nvcc --version # verify that nvcc is in your PATH
 ${CUDA_HOME}/bin/nvcc --version # verify that nvcc is in your CUDA_HOME
 ```
-
-</details>
 
 #### Unsupported OS build
 
@@ -298,15 +278,10 @@ vLLM can fully run only on Linux but for development purposes, you can still bui
 
 Simply disable the `VLLM_TARGET_DEVICE` environment variable before installing:
 
-<details>
-<summary>Commands</summary>
-
 ```console
 export VLLM_TARGET_DEVICE=empty
 pip install -e .
 ```
-
-</details>
 
 # --8<-- [end:build-wheel-from-source]
 # --8<-- [start:set-up-using-docker]
@@ -318,15 +293,10 @@ See [deployment-docker-pre-built-image][deployment-docker-pre-built-image] for i
 
 Another way to access the latest code is to use the docker images:
 
-<details>
-<summary>Commands</summary>
-
 ```console
 export VLLM_COMMIT=33f460b17a54acb3b6cc0b03f4a17876cff5eafd # use full commit hash from the main branch
 docker pull public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:${VLLM_COMMIT}
 ```
-
-</details>
 
 These docker images are used for CI and testing only, and they are not intended for production use. They will be expired after several days.
 

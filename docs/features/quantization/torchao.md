@@ -4,6 +4,9 @@ TorchAO is an architecture optimization library for PyTorch, it provides high pe
 
 We recommend installing the latest torchao nightly with
 
+<details>
+<summary>Command</summary>
+
 ```console
 # Install the latest TorchAO nightly build
 # Choose the CUDA version that matches your system (cu126, cu128, etc.)
@@ -12,8 +15,13 @@ pip install \
     --index-url https://download.pytorch.org/whl/nightly/cu126
 ```
 
+</details>
+
 ## Quantizing HuggingFace Models
 You can quantize your own huggingface model with torchao, e.g. [transformers](https://huggingface.co/docs/transformers/main/en/quantization/torchao) and [diffusers](https://huggingface.co/docs/diffusers/en/quantization/torchao), and save the checkpoint to huggingface hub like [this](https://huggingface.co/jerryzh168/llama3-8b-int8wo) with the following example code:
+
+<details>
+<summary>Code</summary>
 
 ```Python
 import torch
@@ -36,5 +44,7 @@ hub_repo = # YOUR HUB REPO ID
 tokenizer.push_to_hub(hub_repo)
 quantized_model.push_to_hub(hub_repo, safe_serialization=False)
 ```
+
+</details>
 
 Alternatively, you can use the [TorchAO Quantization space](https://huggingface.co/spaces/medmekk/TorchAO_Quantization) for quantizing models with a simple UI.

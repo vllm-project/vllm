@@ -13,15 +13,10 @@ sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 10 --slave /
 
 Second, clone vLLM project:
 
-<details>
-<summary>Commands</summary>
-
 ```console
 git clone https://github.com/vllm-project/vllm.git vllm_source
 cd vllm_source
 ```
-
-</details>
 
 Third, install Python packages for vLLM CPU backend building:
 

@@ -27,6 +27,9 @@ Usually, these repositories have a `quantize_config.json` file that includes a `
 
 ## Read bitblas format checkpoint
 
+<details>
+<summary>Code</summary>
+
 ```python
 from vllm import LLM
 import torch
@@ -41,7 +44,12 @@ llm = LLM(
 )
 ```
 
+</details>
+
 ## Read gptq format checkpoint
+
+<details>
+<summary>Code</summary>
 
 ```python
 from vllm import LLM
@@ -57,3 +65,5 @@ llm = LLM(
     max_model_len=1024
 )
 ```
+
+</details>

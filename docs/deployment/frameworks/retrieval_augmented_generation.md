@@ -15,12 +15,17 @@ Here are the integrations:
 
 - Setup vLLM and langchain environment
 
+<details>
+<summary>Command</summary>
+
 ```console
 pip install -U vllm \
             langchain_milvus langchain_openai \
             langchain_community beautifulsoup4 \
             langchain-text-splitters
 ```
+
+</details>
 
 ### Deploy
 
@@ -52,6 +57,9 @@ python retrieval_augmented_generation_with_langchain.py
 
 - Setup vLLM and llamaindex environment
 
+<details>
+<summary>Command</summary>
+
 ```console
 pip install vllm \
             llama-index llama-index-readers-web \
@@ -59,6 +67,8 @@ pip install vllm \
             llama-index-embeddings-openai-like \
             llama-index-vector-stores-milvus \
 ```
+
+</details>
 
 ### Deploy
 

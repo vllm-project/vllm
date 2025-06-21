@@ -45,6 +45,9 @@ See [configuration][configuration] for a list of options when initializing the m
 The [encode][vllm.LLM.encode] method is available to all pooling models in vLLM.
 It returns the extracted hidden states directly, which is useful for reward models.
 
+<details>
+<summary>Code</summary>
+
 ```python
 from vllm import LLM
 
@@ -55,10 +58,15 @@ data = output.outputs.data
 print(f"Data: {data!r}")
 ```
 
+</details>
+
 ### `LLM.embed`
 
 The [embed][vllm.LLM.embed] method outputs an embedding vector for each prompt.
 It is primarily designed for embedding models.
+
+<details>
+<summary>Code</summary>
 
 ```python
 from vllm import LLM
@@ -70,12 +78,17 @@ embeds = output.outputs.embedding
 print(f"Embeddings: {embeds!r} (size={len(embeds)})")
 ```
 
+</details>
+
 A code example can be found here: <gh-file:examples/offline_inference/basic/embed.py>
 
 ### `LLM.classify`
 
 The [classify][vllm.LLM.classify] method outputs a probability vector for each prompt.
 It is primarily designed for classification models.
+
+<details>
+<summary>Code</summary>
 
 ```python
 from vllm import LLM
@@ -86,6 +99,8 @@ llm = LLM(model="jason9693/Qwen2.5-1.5B-apeach", task="classify")
 probs = output.outputs.probs
 print(f"Class Probabilities: {probs!r} (size={len(probs)})")
 ```
+
+</details>
 
 A code example can be found here: <gh-file:examples/offline_inference/basic/classify.py>
 

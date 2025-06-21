@@ -38,6 +38,9 @@ The quantization process involves four main steps:
 
 Load your model and tokenizer using the standard `transformers` AutoModel classes:
 
+<details>
+<summary>Code</summary>
+
 ```python
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
@@ -48,11 +51,16 @@ model = AutoModelForCausalLM.from_pretrained(
 tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
 ```
 
+</details>
+
 ### 2. Preparing Calibration Data
 
 When quantizing activations to INT8, you need sample data to estimate the activation scales.
 It's best to use calibration data that closely matches your deployment data.
 For a general-purpose instruction-tuned model, you can use a dataset like `ultrachat`:
+
+<details>
+<summary>Code</summary>
 
 ```python
 from datasets import load_dataset
@@ -73,9 +81,14 @@ def tokenize(sample):
 ds = ds.map(tokenize, remove_columns=ds.column_names)
 ```
 
+</details>
+
 ### 3. Applying Quantization
 
 Now, apply the quantization algorithms:
+
+<details>
+<summary>Code</summary>
 
 ```python
 from llmcompressor.transformers import oneshot
@@ -103,6 +116,8 @@ model.save_pretrained(SAVE_DIR, save_compressed=True)
 tokenizer.save_pretrained(SAVE_DIR)
 ```
 
+</details>
+
 This process creates a W8A8 model with weights and activations quantized to 8-bit integers.
 
 ### 4. Evaluating Accuracy
@@ -116,6 +131,9 @@ model = LLM("./Meta-Llama-3-8B-Instruct-W8A8-Dynamic-Per-Token")
 
 To evaluate accuracy, you can use `lm_eval`:
 
+<details>
+<summary>Command</summary>
+
 ```console
 $ lm_eval --model vllm \
   --model_args pretrained="./Meta-Llama-3-8B-Instruct-W8A8-Dynamic-Per-Token",add_bos_token=true \
@@ -124,6 +142,8 @@ $ lm_eval --model vllm \
   --limit 250 \
   --batch_size 'auto'
 ```
+
+</details>
 
 !!! note
     Quantized models can be sensitive to the presence of the `bos` token. Make sure to include the `add_bos_token=True` argument when running evaluations.

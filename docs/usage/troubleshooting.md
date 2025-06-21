@@ -203,21 +203,13 @@ RuntimeError:
 then you must update your Python code to guard usage of `vllm` behind a `if
 __name__ == '__main__':` block. For example, instead of this:
 
-<details>
-<summary>Code</summary>
-
 ```python
 import vllm
 
 llm = vllm.LLM(...)
 ```
 
-</details>
-
 try this instead:
-
-<details>
-<summary>Code</summary>
 
 ```python
 if __name__ == '__main__':
@@ -225,8 +217,6 @@ if __name__ == '__main__':
 
     llm = vllm.LLM(...)
 ```
-
-</details>
 
 ## `torch.compile` Error
 

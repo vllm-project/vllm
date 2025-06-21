@@ -22,6 +22,9 @@ And usually, these repositories have a config.json file that includes a quantiza
 
 For pre-quantized checkpoints, vLLM will try to infer the quantization method from the config file, so you don't need to explicitly specify the quantization argument.
 
+<details>
+<summary>Code</summary>
+
 ```python
 from vllm import LLM
 import torch
@@ -34,9 +37,14 @@ llm = LLM(
 )
 ```
 
+</details>
+
 ## Inflight quantization: load as 4bit quantization
 
 For inflight 4bit quantization with BitsAndBytes, you need to explicitly specify the quantization argument.
+
+<details>
+<summary>Code</summary>
 
 ```python
 from vllm import LLM
@@ -49,6 +57,8 @@ llm = LLM(
     quantization="bitsandbytes"
 )
 ```
+
+</details>
 
 ## OpenAI Compatible Server
 

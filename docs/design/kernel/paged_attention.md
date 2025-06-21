@@ -139,14 +139,9 @@ one query token data. Within each warp, every thread group will fetch
 the same query token data, but will multiply it with different key
 token data.
 
-<details>
-<summary>Code</summary>
-
 ```cpp
 const scalar_t* q_ptr = q + seq_idx * q_stride + head_idx * HEAD_SIZE;
 ```
-
-</details>
 
 <figure markdown="span">
   ![](../../assets/kernel/query.png){ align="center" alt="query" width="70%" }

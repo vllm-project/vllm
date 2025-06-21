@@ -48,14 +48,9 @@ Here is an example as of v0.4.0:
 
 You can preview the collected data by running the following command:
 
-<details>
-<summary>Command</summary>
-
 ```bash
 tail ~/.config/vllm/usage_stats.json
 ```
-
-</details>
 
 ## Opting out
 

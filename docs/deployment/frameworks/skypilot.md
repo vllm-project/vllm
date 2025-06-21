@@ -86,6 +86,9 @@ Check the output of the command. There will be a shareable gradio link (like the
 
 **Optional**: Serve the 70B model instead of the default 8B and use more GPU:
 
+<details>
+<summary>Command</summary>
+
 ```console
 HF_TOKEN="your-huggingface-token" \
   sky launch serving.yaml \
@@ -94,9 +97,14 @@ HF_TOKEN="your-huggingface-token" \
   --env MODEL_NAME=meta-llama/Meta-Llama-3-70B-Instruct
 ```
 
+</details>
+
 ## Scale up to multiple replicas
 
 SkyPilot can scale up the service to multiple service replicas with built-in autoscaling, load-balancing and fault-tolerance. You can do it by adding a services section to the YAML file.
+
+<details>
+<summary>Config</summary>
 
 ```yaml
 service:
@@ -111,6 +119,8 @@ service:
         content: Hello! What is your name?
   max_completion_tokens: 1
 ```
+
+</details>
 
 <details>
 <summary>Click to see the full recipe YAML</summary>
@@ -163,11 +173,16 @@ run: |
 
 Start the serving the Llama-3 8B model on multiple replicas:
 
+<details>
+<summary>Command</summary>
+
 ```console
 HF_TOKEN="your-huggingface-token" \
   sky serve up -n vllm serving.yaml \
   --env HF_TOKEN
 ```
+
+</details>
 
 Wait until the service is ready:
 
@@ -193,6 +208,9 @@ vllm          2   1        xx.yy.zz.245  18 mins ago  1x GCP([Spot]{'L4': 1})  R
 
 After the service is READY, you can find a single endpoint for the service and access the service with the endpoint:
 
+<details>
+<summary>Commands</summary>
+
 ```console
 ENDPOINT=$(sky serve status --endpoint 8081 vllm)
 curl -L http://$ENDPOINT/v1/chat/completions \
@@ -213,7 +231,12 @@ curl -L http://$ENDPOINT/v1/chat/completions \
   }'
 ```
 
+</details>
+
 To enable autoscaling, you could replace the `replicas` with the following configs in `service`:
+
+<details>
+<summary>Config</summary>
 
 ```yaml
 service:
@@ -222,6 +245,8 @@ service:
     max_replicas: 4
     target_qps_per_replica: 2
 ```
+
+</details>
 
 This will scale the service up to when the QPS exceeds 2 for each replica.
 

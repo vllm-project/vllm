@@ -37,6 +37,9 @@ The quantization process involves four main steps:
 
 Load your model and tokenizer using the standard `transformers` AutoModel classes:
 
+<details>
+<summary>Code</summary>
+
 ```python
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
@@ -47,11 +50,16 @@ model = AutoModelForCausalLM.from_pretrained(
 tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
 ```
 
+</details>
+
 ### 2. Preparing Calibration Data
 
 When quantizing weights to INT4, you need sample data to estimate the weight updates and calibrated scales.
 It's best to use calibration data that closely matches your deployment data.
 For a general-purpose instruction-tuned model, you can use a dataset like `ultrachat`:
+
+<details>
+<summary>Code</summary>
 
 ```python
 from datasets import load_dataset
@@ -72,9 +80,14 @@ def tokenize(sample):
 ds = ds.map(tokenize, remove_columns=ds.column_names)
 ```
 
+</details>
+
 ### 3. Applying Quantization
 
 Now, apply the quantization algorithms:
+
+<details>
+<summary>Code</summary>
 
 ```python
 from llmcompressor.transformers import oneshot
@@ -99,6 +112,8 @@ model.save_pretrained(SAVE_DIR, save_compressed=True)
 tokenizer.save_pretrained(SAVE_DIR)
 ```
 
+</details>
+
 This process creates a W4A16 model with weights quantized to 4-bit integers.
 
 ### 4. Evaluating Accuracy
@@ -112,6 +127,9 @@ model = LLM("./Meta-Llama-3-8B-Instruct-W4A16-G128")
 
 To evaluate accuracy, you can use `lm_eval`:
 
+<details>
+<summary>Commands</summary>
+
 ```console
 $ lm_eval --model vllm \
   --model_args pretrained="./Meta-Llama-3-8B-Instruct-W4A16-G128",add_bos_token=true \
@@ -120,6 +138,8 @@ $ lm_eval --model vllm \
   --limit 250 \
   --batch_size 'auto'
 ```
+
+</details>
 
 !!! note
     Quantized models can be sensitive to the presence of the `bos` token. Make sure to include the `add_bos_token=True` argument when running evaluations.
@@ -136,6 +156,9 @@ $ lm_eval --model vllm \
   - `actorder` sets the activation ordering. When compressing the weights of a layer weight, the order in which channels are quantized matters. Setting `actorder="weight"` can improve accuracy without added latency.
 
 The following is an example of an expanded quantization recipe you can tune to your own use case:
+
+<details>
+<summary>Code</summary>
 
 ```python
 from compressed_tensors.quantization import (
@@ -165,6 +188,8 @@ recipe = GPTQModifier(
     dampening_frac=0.01
 )
 ```
+
+</details>
 
 ## Troubleshooting and Support
 

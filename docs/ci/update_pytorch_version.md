@@ -110,15 +110,10 @@ team if you want to get the package published there.
 ### xFormers
 Similar to FlashInfer, here is how to build and install xFormers from source:
 
-<details>
-<summary>Commands</summary>
-
 ```bash
 export TORCH_CUDA_ARCH_LIST='7.0 7.5 8.0 8.9 9.0 10.0+PTX'
 MAX_JOBS=16 uv pip install --system --no-build-isolation "git+https://github.com/facebookresearch/xformers@v0.0.30"
 ```
-
-</details>
 
 ### Mamba
 

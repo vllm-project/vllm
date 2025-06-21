@@ -12,6 +12,9 @@ Further update the model as follows:
 
 - Reserve a keyword parameter in [forward][torch.nn.Module.forward] for each input tensor that corresponds to a multi-modal input, as shown in the following example:
 
+  <details>
+  <summary>Code</summary>
+
   ```diff
     def forward(
         self,
@@ -20,6 +23,8 @@ Further update the model as follows:
   +     pixel_values: torch.Tensor,
     ) -> SamplerOutput:
   ```
+
+  </details>
   
   More conveniently, you can simply pass `**kwargs` to the [forward][torch.nn.Module.forward] method and retrieve the keyword parameters for multimodal inputs from it.
 
@@ -915,6 +920,9 @@ and [BaseMultiModalProcessor][vllm.multimodal.processing.BaseMultiModalProcessor
 decorate the model class with {meth}`MULTIMODAL_REGISTRY.register_processor <vllm.multimodal.registry.MultiModalRegistry.register_processor>`
 to register them to the multi-modal registry:
 
+<details>
+<summary>Code</summary>
+
 ```diff
   from vllm.model_executor.models.interfaces import SupportsMultiModal
 + from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -924,6 +932,8 @@ to register them to the multi-modal registry:
 +                                         dummy_inputs=YourDummyInputsBuilder)
   class YourModelForImage2Seq(nn.Module, SupportsMultiModal):
 ```
+
+</details>
 
 ## Notes
 

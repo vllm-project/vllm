@@ -15,6 +15,9 @@ pip install autoawq
 
 After installing AutoAWQ, you are ready to quantize a model. Please refer to the [AutoAWQ documentation](https://casper-hansen.github.io/AutoAWQ/examples/#basic-quantization) for further details. Here is an example of how to quantize `mistralai/Mistral-7B-Instruct-v0.2`:
 
+<details>
+<summary>Code</summary>
+
 ```python
 from awq import AutoAWQForCausalLM
 from transformers import AutoTokenizer
@@ -39,7 +42,12 @@ tokenizer.save_pretrained(quant_path)
 print(f'Model is quantized and saved at "{quant_path}"')
 ```
 
+</details>
+
 To run an AWQ model with vLLM, you can use [TheBloke/Llama-2-7b-Chat-AWQ](https://huggingface.co/TheBloke/Llama-2-7b-Chat-AWQ) with the following command:
+
+<details>
+<summary>Code</summary>
 
 ```console
 python examples/offline_inference/llm_engine_example.py \
@@ -47,7 +55,12 @@ python examples/offline_inference/llm_engine_example.py \
     --quantization awq
 ```
 
+</details>
+
 AWQ models are also supported directly through the LLM entrypoint:
+
+<details>
+<summary>Code</summary>
 
 ```python
 from vllm import LLM, SamplingParams
@@ -73,3 +86,5 @@ for output in outputs:
     generated_text = output.outputs[0].text
     print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 ```
+
+</details>

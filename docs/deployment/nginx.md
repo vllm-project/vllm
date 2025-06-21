@@ -11,14 +11,9 @@ This document shows how to launch multiple vLLM serving containers and use Nginx
 
 This guide assumes that you have just cloned the vLLM project and you're currently in the vllm root directory.
 
-<details>
-<summary>Command</summary>
-
 ```console
 export vllm_root=`pwd`
 ```
-
-</details>
 
 Create a file named `Dockerfile.nginx`:
 
@@ -36,14 +31,9 @@ CMD ["nginx", "-g", "daemon off;"]
 
 Build the container:
 
-<details>
-<summary>Command</summary>
-
 ```console
 docker build . -f Dockerfile.nginx --tag nginx-lb
 ```
-
-</details>
 
 [](){ #nginxloadbalancer-nginx-conf }
 
@@ -78,15 +68,10 @@ server {
 
 ## Build vLLM Container
 
-<details>
-<summary>Command</summary>
-
 ```console
 cd $vllm_root
 docker build -f docker/Dockerfile . --tag vllm
 ```
-
-</details>
 
 If you are behind proxy, you can pass the proxy settings to the docker build command as shown below:
 
@@ -108,14 +93,9 @@ docker build \
 
 ## Create Docker Network
 
-<details>
-<summary>Command</summary>
-
 ```console
 docker network create vllm_nginx
 ```
-
-</details>
 
 [](){ #nginxloadbalancer-nginx-launch-container }
 
@@ -183,23 +163,13 @@ docker run \
 
 ## Verify That vLLM Servers Are Ready
 
-<details>
-<summary>Command</summary>
-
 ```console
 docker logs vllm0 | grep Uvicorn
 docker logs vllm1 | grep Uvicorn
 ```
 
-</details>
-
 Both outputs should look like this:
-
-<details>
-<summary>Output</summary>
 
 ```console
 INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
 ```
-
-</details>

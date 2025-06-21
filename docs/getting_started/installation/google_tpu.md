@@ -126,15 +126,10 @@ source ~/.bashrc
 
 Create and activate a Conda environment for vLLM:
 
-<details>
-<summary>Commands</summary>
-
 ```bash
 conda create -n vllm python=3.10 -y
 conda activate vllm
 ```
-
-</details>
 
 Clone the vLLM repository and go to the vLLM directory:
 

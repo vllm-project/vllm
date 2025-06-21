@@ -32,6 +32,9 @@ vllm serve ./tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf \
 
 GGUF assumes that huggingface can convert the metadata to a config file. In case huggingface doesn't support your model you can manually create a config and pass it as hf-config-path
 
+<details>
+<summary>Command</summary>
+
 ```console
 # If you model is not supported by huggingface you can manually provide a huggingface compatible config path
 vllm serve ./tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf \
@@ -39,7 +42,12 @@ vllm serve ./tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf \
    --hf-config-path Tinyllama/TInyLlama-1.1B-Chat-v1.0
 ```
 
+</details>
+
 You can also use the GGUF model directly through the LLM entrypoint:
+
+<details>
+<summary>Code</summary>
 
 ```python
 from vllm import LLM, SamplingParams
@@ -80,3 +88,5 @@ for output in outputs:
    generated_text = output.outputs[0].text
    print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 ```
+
+</details>

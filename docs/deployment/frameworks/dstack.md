@@ -18,11 +18,16 @@ dstack server
 
 Next, to configure your dstack project, run:
 
+<details>
+<summary>Code</summary>
+
 ```console
 mkdir -p vllm-dstack
 cd vllm-dstack
 dstack init
 ```
+
+</details>
 
 Next, to provision a VM instance with LLM of your choice (`NousResearch/Llama-2-7b-chat-hf` for this example), create the following `serve.dstack.yml` file for the dstack `Service`:
 
