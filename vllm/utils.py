@@ -208,6 +208,8 @@ _K = TypeVar("_K", bound=Hashable)
 _V = TypeVar("_V")
 _T = TypeVar("_T")
 
+_TT = TypeVar("_TT", bound=type)
+
 
 class _Sentinel:
     ...
@@ -2721,39 +2723,32 @@ def import_pynvml():
     return pynvml
 
 
-def warn_for_unimplemented_methods(cls: type[T]) -> type[T]:
+def warn_for_unimplemented_methods(cls: _TT) -> _TT:
     """
-    A replacement for `abc.ABC`.
-    When we use `abc.ABC`, subclasses will fail to instantiate
-    if they do not implement all abstract methods.
+    A replacement for :class:`abc.ABC`.
+    When we use :class:`abc.ABC`, subclasses will fail to instantiate
+    if they do not implement all :func:`~abc.abstractmethod` s.
     Here, we only require `raise NotImplementedError` in the
     base class, and log a warning if the method is not implemented
     in the subclass.
     """
 
-    original_init = cls.__init__
+    original_init = cls.__init__  # type: ignore[misc]
 
     def find_unimplemented_methods(self: object):
-        unimplemented_methods = []
-        for attr_name in dir(self):
-            # bypass inner method
-            if attr_name.startswith('_'):
-                continue
+        unimplemented_method_names = list[str]()
 
-            try:
-                attr = getattr(self, attr_name)
-                # get the func of callable method
-                if callable(attr):
-                    attr_func = attr.__func__
-            except AttributeError:
-                continue
-            src = inspect.getsource(attr_func)
-            if "NotImplementedError" in src:
-                unimplemented_methods.append(attr_name)
-        if unimplemented_methods:
-            method_names = ','.join(unimplemented_methods)
-            msg = (f"Methods {method_names} not implemented in {self}")
-            logger.warning(msg)
+        for attr_name in dir(self):
+            func = getattr(self, attr_name, None)
+            if callable(func) and hasattr(func, "__isabstractmethod__"):
+                unimplemented_method_names.append(attr_name)
+
+        if unimplemented_method_names:
+            logger.warning(
+                "The following methods are not implemented in %s: %s",
+                type(self).__name__,
+                ",".join(unimplemented_method_names),
+            )
 
     @wraps(original_init)
     def wrapped_init(self, *args, **kwargs) -> None:
