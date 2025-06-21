@@ -251,6 +251,10 @@ class CudaPlatformBase(Platform):
 
             # Default backends for V1 engine
             # Prefer FlashInfer for Blackwell GPUs if installed
+            if dtype not in (torch.float16, torch.bfloat16):
+                logger.info_once(
+                    f"Using FlexAttenion backend for {dtype} on V1 engine.")
+                return "vllm.v1.attention.backends.flex_attention.FlexAttentionBackend"  # noqa: E501
             if cls.is_device_capability(100):
                 try:
                     import flashinfer  # noqa: F401

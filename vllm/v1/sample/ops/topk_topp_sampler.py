@@ -101,7 +101,8 @@ class TopKTopPSampler(nn.Module):
                            "per-request generators. Falling back to "
                            "PyTorch-native implementation.")
             return self.forward_native(logits, generators, k, p)
-        return flashinfer_sample(logits, k, p, generators)
+        # flashinfer sampling functions expect contiguous logits.
+        return flashinfer_sample(logits.contiguous(), k, p, generators)
 
     def forward_tpu(
         self,
