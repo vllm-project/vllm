@@ -20,7 +20,7 @@ llama4_model_dir = "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8"
 llama4_eagle_dir = "ronaldbxu/EAGLE-Llama-4-Maverick-17B-128E-Instruct"
 
 
-def _create_proposer(method: str, model_dir: str, draft_model_dir: str, 
+def _create_proposer(method: str, model_dir: str, draft_model_dir: str,
                      k: int) -> EagleProposer:
     model_config = ModelConfig(model=model_dir,
                                task="generate",
