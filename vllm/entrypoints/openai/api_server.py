@@ -46,6 +46,7 @@ from vllm.entrypoints.chat_utils import (load_chat_template,
                                          resolve_mistral_chat_template)
 from vllm.entrypoints.launcher import serve_http
 from vllm.entrypoints.logger import RequestLogger
+from vllm.entrypoints.metadata import get_metadata
 from vllm.entrypoints.openai.cli_args import (log_non_default_args,
                                               make_arg_parser,
                                               validate_parsed_serve_args)
@@ -1345,6 +1346,10 @@ async def run_server_worker(listen_address,
 
         vllm_config = await engine_client.get_vllm_config()
         await init_app_state(engine_client, vllm_config, app.state, args)
+
+        app.include_router(
+            get_metadata(vllm_config).get_router(
+                brief_metadata_only=not args.disable_brief_metadata_only))
 
         logger.info("Starting vLLM API server %d on %s", server_index,
                     listen_address)

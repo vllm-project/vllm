@@ -279,6 +279,12 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         help=
         "If set to True, enable tracking server_load_metrics in the app state."
     )
+    parser.add_argument(
+        "--disable-brief-metadata-only",
+        action='store_true',
+        default=False,
+        help="If set to True, metadata will display more information, "
+        "such as hf_config, which could expose sensitive information.")
 
     return parser
 
