@@ -132,12 +132,13 @@ def bench_run(
         )
 
     # GPTQ quant
-    q_w_gptq = None
-    repack_sort_indices = None
-    if (
+    repack_supported = (
         quant_type in GPTQ_MARLIN_24_SUPPORTED_QUANT_TYPES
         and group_size in MARLIN_SUPPORTED_GROUP_SIZES
-    ):
+    )
+    q_w_gptq = None
+    repack_sort_indices = None
+    if repack_supported:
         (w_ref, q_w, s, g_idx, rand_perm) = gptq_quantize_weights(
             b, quant_type, group_size, act_order
         )
@@ -238,14 +239,13 @@ def bench_run(
         ).blocked_autorange(min_run_time=min_run_time)
     )
 
-    print(f"gptq_marlin_gemm_fp16 {quant_type=}")
     results.append(
         benchmark.Timer(
             stmt="output = gptq_marlin_gemm(a, None, marlin_q_w, marlin_s, marlin_s2, marlin_zp, marlin_g_idx, marlin_sort_indices, marlin_workspace.scratch, quant_type, size_m, size_n, size_k, is_k_full, False, False, False)",  # noqa: E501
             globals=globals,
             label=label,
             sub_label=sub_label,
-            description="gptq_marlin_gemm_fp16",
+            description="gptq_marlin_gemm",
         ).blocked_autorange(min_run_time=min_run_time)
     )
 
@@ -273,15 +273,16 @@ def bench_run(
             ).blocked_autorange(min_run_time=min_run_time)
         )
 
-    results.append(
-        benchmark.Timer(
-            stmt="q_res = gptq_marlin_repack(q_w_gptq, repack_sort_indices, size_k, size_n, quant_type.size_bits)",  # noqa: E501
-            globals=globals,
-            label=label,
-            sub_label=sub_label,
-            description="gptq_marlin_repack",
-        ).blocked_autorange(min_run_time=min_run_time)
-    )
+    if repack_supported:
+        results.append(
+            benchmark.Timer(
+                stmt="q_res = gptq_marlin_repack(q_w_gptq, repack_sort_indices, size_k, size_n, quant_type.size_bits)",  # noqa: E501
+                globals=globals,
+                label=label,
+                sub_label=sub_label,
+                description="gptq_marlin_repack",
+            ).blocked_autorange(min_run_time=min_run_time)
+        )
 
     if as_supported_case:
         results.append(
@@ -299,8 +300,6 @@ def main(args):
     print("Benchmarking models:")
     for i, model in enumerate(args.models):
         print(f"[{i}]  {model}")
-    print(query_marlin_supported_quant_types(False, False))  # test_gptq_marlin_repack
-    print(query_marlin_supported_quant_types(True))  # test_awq_marlin_repack
     results: list[benchmark.Measurement] = []
 
     for model in args.models:
