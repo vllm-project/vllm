@@ -13,6 +13,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_zero_points, query_marlin_supported_quant_types, unpack_cols)
 from vllm.model_executor.parameter import (BasevLLMParameter,
                                            permute_param_layout_)
+from vllm.platforms import current_platform
 
 from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
 
@@ -26,6 +27,9 @@ class MarlinLinearKernel(MPLinearKernel):
     @classmethod
     def can_implement(cls,
                       c: MPLinearLayerConfig) -> tuple[bool, Optional[str]]:
+        # Marlin uses inline PTX, so it can only be compatible with Nvidia
+        if not current_platform.is_cuda():
+            return False, "Marlin only supported on CUDA"
 
         quant_types = query_marlin_supported_quant_types(c.zero_points)
         if c.weight_type not in quant_types:
