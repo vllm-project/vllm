@@ -108,8 +108,6 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         workspace2: torch.Tensor,
         expert_num_tokens: Optional[torch.Tensor],
     ):
-        import deep_gemm as dg
-
         a1q = hidden_states
         _, N, K = w1.size()
 
@@ -144,8 +142,8 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
                                   (M_sum, N // 2))
         mm2_out = _resize_cache(workspace2, (M_sum, K))
 
-        dg.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
-            (a1q, a1q_scale), (w1, w1_scale), mm1_out, expert_ids)
+        torch.ops.vllm.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
+            a1q, a1q_scale, w1, w1_scale, mm1_out, expert_ids)
 
         self.activation(activation, act_out, mm1_out.view(-1, N))
 
@@ -155,8 +153,8 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
                                                    column_major_scales=True,
                                                    out_q=quant_out)
 
-        dg.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
-            (a2q, a2q_scale), (w2, w2_scale), mm2_out, expert_ids)
+        torch.ops.vllm.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
+            a2q, a2q_scale, w2, w2_scale, mm2_out, expert_ids)
 
         torch.index_select(mm2_out, 0, inv_perm, out=output)
 

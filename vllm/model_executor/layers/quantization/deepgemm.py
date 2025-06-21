@@ -82,3 +82,27 @@ direct_register_custom_op(
     fake_impl=w8a8_block_fp8_matmul_deepgemm_fake,
     dispatch_key=current_platform.dispatch_key,
 )
+
+
+def m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
+        a: torch.Tensor, a_scale: torch.Tensor, w: torch.Tensor,
+        w_scale: torch.Tensor, out: torch.Tensor,
+        expert_ids: torch.Tensor) -> None:
+    deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
+        (a, a_scale), (w, w_scale), out, expert_ids)
+
+
+def m_grouped_gemm_fp8_fp8_bf16_nt_contiguous_fake(
+        a: torch.Tensor, a_scale: torch.Tensor, w: torch.Tensor,
+        w_scale: torch.Tensor, out: torch.Tensor,
+        expert_ids: torch.Tensor) -> None:
+    return None
+
+
+direct_register_custom_op(
+    op_name="m_grouped_gemm_fp8_fp8_bf16_nt_contiguous",
+    op_func=m_grouped_gemm_fp8_fp8_bf16_nt_contiguous,
+    mutates_args=["out"],
+    fake_impl=m_grouped_gemm_fp8_fp8_bf16_nt_contiguous_fake,
+    dispatch_key=current_platform.dispatch_key,
+)

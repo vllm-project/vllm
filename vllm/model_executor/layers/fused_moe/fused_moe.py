@@ -1166,6 +1166,8 @@ def fused_experts(hidden_states: torch.Tensor,
     if (allow_deep_gemm and use_fp8_w8a8 and N > 512
             and _valid_deep_gemm(hidden_states, w1, w2)):
         assert apply_router_weight_on_input is False
+        # Force registration of deepgemm moe kernels as vllm custom ops
+        import vllm.model_executor.layers.quantization.deepgemm  # noqa: F401
         return deep_gemm_moe_fp8(
             hidden_states=hidden_states,
             w1=w1,
