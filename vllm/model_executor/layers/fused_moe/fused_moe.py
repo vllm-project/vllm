@@ -20,6 +20,9 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP)
 from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache, moe_kernel_quantize_input)
+from vllm.model_executor.layers.fused_moe.cutlass_moe import (
+    _valid_cutlass_block_scaled_grouped_gemm,
+    run_cutlass_block_scaled_fused_experts)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils import direct_register_custom_op
@@ -1159,7 +1162,9 @@ def fused_experts(hidden_states: torch.Tensor,
                   a1_scale: Optional[torch.Tensor] = None,
                   a2_scale: Optional[torch.Tensor] = None,
                   block_shape: Optional[list[int]] = None,
-                  allow_deep_gemm: bool = False) -> torch.Tensor:
+                  allow_deep_gemm: bool = False,
+                  allow_cutlass_block_scaled_grouped_gemm: bool = False,
+                  ) -> torch.Tensor:
     # For now, disable DeepGemm for small N (<= 512) until better
     # permute/unpermute ops are available.
     N = w1.shape[1]
@@ -1181,6 +1186,18 @@ def fused_experts(hidden_states: torch.Tensor,
             a1_scale=a1_scale,
             a2_scale=a2_scale,
             apply_router_weight_on_input=apply_router_weight_on_input,
+        )
+    elif (allow_cutlass_block_scaled_grouped_gemm and use_fp8_w8a8
+            and _valid_cutlass_block_scaled_grouped_gemm(hidden_states, w1, w2)):
+        assert apply_router_weight_on_input is False
+        return run_cutlass_block_scaled_fused_experts(
+            a=hidden_states,
+            w1=w1,
+            w2=w2,
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids
         )
     else:
         return dispatch_fused_experts_func(inplace)(

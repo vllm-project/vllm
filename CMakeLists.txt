@@ -296,6 +296,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     "csrc/quantization/fp4/nvfp4_quant_entry.cu"
     "csrc/quantization/fp4/nvfp4_scaled_mm_entry.cu"
     "csrc/quantization/fp4/nvfp4_blockwise_moe_kernel.cu"
+    "csrc/quantization/cutlass_w8a8/moe/moe_data.cu"
     "csrc/sparse/cutlass/sparse_scaled_mm_entry.cu"
     "csrc/cutlass_extensions/common.cpp"
     "csrc/attention/mla/cutlass_mla_entry.cu")
@@ -547,8 +548,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # if it's possible to compile MoE kernels that use its output.
   cuda_archs_loose_intersection(SCALED_MM_ARCHS "9.0a" "${CUDA_ARCHS}")
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.3 AND SCALED_MM_ARCHS)
-    set(SRCS "csrc/quantization/cutlass_w8a8/moe/grouped_mm_c3x.cu"
-             "csrc/quantization/cutlass_w8a8/moe/moe_data.cu")
+    set(SRCS "csrc/quantization/cutlass_w8a8/moe/grouped_mm_c3x.cu")
     set_gencode_flags_for_srcs(
       SRCS "${SRCS}"
       CUDA_ARCHS "${SCALED_MM_ARCHS}")
@@ -562,6 +562,26 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
                      "if you intend on running FP8 quantized MoE models on Hopper.")
     else()
       message(STATUS "Not building grouped_mm_c3x as no compatible archs found "
+                     "in CUDA target architectures")
+    endif()
+  endif()
+  
+  cuda_archs_loose_intersection(SCALED_MM_ARCHS "10.0a" "${CUDA_ARCHS}")
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND SCALED_MM_ARCHS)
+    set(SRCS "csrc/quantization/cutlass_w8a8/moe/blockwise_scaled_group_mm_sm100.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${SRCS}"
+      CUDA_ARCHS "${SCALED_MM_ARCHS}")
+    list(APPEND VLLM_EXT_SRC "${SRCS}")
+    list(APPEND VLLM_GPU_FLAGS "-DENABLE_CUTLASS_MOE_SM100=1")
+    message(STATUS "Building blockwise_scaled_group_mm_sm100 for archs: ${SCALED_MM_ARCHS}")
+  else()
+    if (NOT ${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND SCALED_MM_ARCHS)
+      message(STATUS "Not building blockwise_scaled_group_mm_sm100 kernels as CUDA Compiler version is "
+                     "not >= 12.8, we recommend upgrading to CUDA 12.8 or later "
+                     "if you intend on running FP8 quantized MoE models on Blackwell.")
+    else()
+      message(STATUS "Not building blockwise_scaled_group_mm_sm100 as no compatible archs found "
                      "in CUDA target architectures")
     endif()
   endif()
