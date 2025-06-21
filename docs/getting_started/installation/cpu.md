@@ -184,13 +184,20 @@ $ python examples/offline_inference/basic/basic.py
   - Tensor Parallel is supported for serving and offline inferencing. In general each NUMA node is treated as one GPU card. Below is the example script to enable Tensor Parallel = 2 for serving:
 
     ```console
-    VLLM_CPU_KVCACHE_SPACE=40 VLLM_CPU_OMP_THREADS_BIND="0-31|32-63" vllm serve meta-llama/Llama-2-7b-chat-hf -tp=2 --distributed-executor-backend mp
+    VLLM_CPU_KVCACHE_SPACE=40 \
+    VLLM_CPU_OMP_THREADS_BIND="0-31|32-63" \
+    vllm serve meta-llama/Llama-2-7b-chat-hf \
+    -tp=2 \
+    --distributed-executor-backend mp
     ```
 
     or using default auto thread binding:
 
     ```console
-    VLLM_CPU_KVCACHE_SPACE=40 vllm serve meta-llama/Llama-2-7b-chat-hf -tp=2 --distributed-executor-backend mp
+    VLLM_CPU_KVCACHE_SPACE=40 \
+    vllm serve meta-llama/Llama-2-7b-chat-hf \
+    -tp=2 \
+    --distributed-executor-backend mp
     ```
 
   - For each thread id list in `VLLM_CPU_OMP_THREADS_BIND`, users should guarantee threads in the list belong to a same NUMA node.

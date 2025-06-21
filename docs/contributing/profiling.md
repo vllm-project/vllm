@@ -36,7 +36,13 @@ VLLM_TORCH_PROFILER_DIR=./vllm_profile python -m vllm.entrypoints.openai.api_ser
 benchmark_serving.py:
 
 ```bash
-python benchmarks/benchmark_serving.py --backend vllm --model meta-llama/Meta-Llama-3-70B --dataset-name sharegpt --dataset-path sharegpt.json --profile --num-prompts 2
+python benchmarks/benchmark_serving.py \
+    --backend vllm \
+    --model meta-llama/Meta-Llama-3-70B \
+    --dataset-name sharegpt \
+    --dataset-path sharegpt.json \
+    --profile \
+    --num-prompts 2
 ```
 
 ## Profile with NVIDIA Nsight Systems
@@ -64,7 +70,16 @@ For basic usage, you can just append `nsys profile -o report.nsys-rep --trace-fo
 The following is an example using the `benchmarks/benchmark_latency.py` script:
 
 ```bash
-nsys profile -o report.nsys-rep --trace-fork-before-exec=true --cuda-graph-trace=node python benchmarks/benchmark_latency.py --model meta-llama/Llama-3.1-8B-Instruct --num-iters-warmup 5 --num-iters 1 --batch-size 16 --input-len 512 --output-len 8
+nsys profile -o report.nsys-rep \
+    --trace-fork-before-exec=true \
+    --cuda-graph-trace=node \
+    python benchmarks/benchmark_latency.py \
+    --model meta-llama/Llama-3.1-8B-Instruct \
+    --num-iters-warmup 5 \
+    --num-iters 1 \
+    --batch-size 16 \
+    --input-len 512 \
+    --output-len 8
 ```
 
 #### OpenAI Server
@@ -73,10 +88,22 @@ To profile the server, you will want to prepend your `vllm serve` command with `
 
 ```bash
 # server
-nsys profile -o report.nsys-rep --trace-fork-before-exec=true --cuda-graph-trace=node --delay 30 --duration 60 vllm serve meta-llama/Llama-3.1-8B-Instruct
+nsys profile -o report.nsys-rep \
+    --trace-fork-before-exec=true \
+    --cuda-graph-trace=node \
+    --delay 30 \
+    --duration 60 \
+    vllm serve \
+    meta-llama/Llama-3.1-8B-Instruct
 
 # client
-python benchmarks/benchmark_serving.py --backend vllm --model meta-llama/Llama-3.1-8B-Instruct --num-prompts 1 --dataset-name random --random-input 1024 --random-output 512
+python benchmarks/benchmark_serving.py \
+    --backend vllm \
+    --model meta-llama/Llama-3.1-8B-Instruct \
+    --num-prompts 1 \
+    --dataset-name random \
+    --random-input 1024 \
+    --random-output 512
 ```
 
 In practice, you should set the `--duration` argument to a large value. Whenever you want the server to stop profiling, run:
