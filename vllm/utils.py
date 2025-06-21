@@ -490,6 +490,11 @@ class PyObjectCache:
 
 
 @cache
+def is_fake_hpu() -> bool:
+    return os.environ.get('VLLM_USE_FAKE_HPU', '0') != '0'
+
+
+@cache
 def get_max_shared_memory_bytes(gpu: int = 0) -> int:
     """Returns the maximum shared memory per thread block in bytes."""
     from vllm import _custom_ops as ops
