@@ -238,6 +238,7 @@ _SPECULATIVE_DECODING_MODELS = {
 }
 
 _TRANSFORMERS_MODELS = {
+    "TransformersForMultimodalLM": ("transformers", "TransformersForMultimodalLM"), # noqa: E501
     "TransformersForCausalLM": ("transformers", "TransformersForCausalLM"),
 }
 # yapf: enable
@@ -463,7 +464,10 @@ class _ModelRegistry:
 
         # make sure Transformers backend is put at the last as a fallback
         if len(normalized_arch) != len(architectures):
-            normalized_arch.append("TransformersForCausalLM")
+            # The order matters. If the CausalLM comes first, then checks for
+            # registered model in MultimodalRegistry fail
+            normalized_arch.extend(
+                ["TransformersForMultimodalLM", "TransformersForCausalLM"])
         return normalized_arch
 
     def inspect_model_cls(
@@ -471,7 +475,6 @@ class _ModelRegistry:
         architectures: Union[str, list[str]],
     ) -> tuple[_ModelInfo, str]:
         architectures = self._normalize_archs(architectures)
-
         for arch in architectures:
             model_info = self._try_inspect_model_cls(arch)
             if model_info is not None:
