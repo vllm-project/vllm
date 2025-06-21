@@ -30,6 +30,7 @@ from vllm.entrypoints.openai.serving_engine import (OpenAIServing,
                                                     clamp_prompt_logprobs,
                                                     is_text_tokens_prompt)
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
+from vllm.entrypoints.utils import get_max_tokens
 from vllm.inputs.data import (EmbedsPrompt, TokensPrompt, is_embeds_prompt,
                               is_tokens_prompt)
 from vllm.logger import init_logger
@@ -155,15 +156,19 @@ class OpenAIServingCompletion(OpenAIServing):
                     input_length = len(engine_prompt["prompt_token_ids"])
                 else:
                     assert_never(engine_prompt)
-                default_max_tokens = self.max_model_len - input_length
+
+                max_tokens = get_max_tokens(
+                    max_model_len=self.max_model_len,
+                    request=request,
+                    input_length=input_length,
+                    default_sampling_params=self.default_sampling_params)
 
                 if request.use_beam_search:
                     sampling_params = request.to_beam_search_params(
-                        default_max_tokens, self.default_sampling_params)
+                        max_tokens, self.default_sampling_params)
                 else:
                     sampling_params = request.to_sampling_params(
-                        default_max_tokens,
-                        self.model_config.logits_processor_pattern,
+                        max_tokens, self.model_config.logits_processor_pattern,
                         self.default_sampling_params)
 
                 request_id_item = f"{request_id}-{i}"

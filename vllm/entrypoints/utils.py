@@ -4,13 +4,17 @@
 import asyncio
 import functools
 import os
-from typing import Any, Optional
+import sys
+from typing import Any, Optional, Union, cast
 
 from fastapi import Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.background import BackgroundTask, BackgroundTasks
 
+from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
+                                              CompletionRequest)
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -231,3 +235,20 @@ def show_filtered_argument_or_group_from_help(parser, subcommand_name):
             print(f"\nNo group or parameter matching '{search_keyword}'")
             print("Tip: use `--help=listgroup` to view all groups.")
             sys.exit(1)
+
+
+def get_max_tokens(max_model_len: int, request: Union[ChatCompletionRequest,
+                                                      CompletionRequest],
+                   input_length: int, default_sampling_params) -> int:
+
+    user_max_tokens = getattr(request, "max_completion_tokens",
+                              request.max_tokens) or sys.maxsize
+
+    max_output_tokens = current_platform.get_max_output_tokens(
+        prompt_len=input_length)
+
+    default_max_tokens = max_model_len - input_length
+
+    return min(
+        max_output_tokens, cast(int, user_max_tokens), default_max_tokens,
+        cast(int, default_sampling_params.get("max_tokens", sys.maxsize)))
