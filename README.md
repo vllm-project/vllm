@@ -159,6 +159,7 @@ If you use vLLM for your research, please cite our [paper](https://arxiv.org/abs
 - For coordinating contributions and development, please use [Slack](https://slack.vllm.ai)
 - For security disclosures, please use GitHub's [Security Advisories](https://github.com/vllm-project/vllm/security/advisories) feature
 - For collaborations and partnerships, please contact us at [vllm-questions@lists.berkeley.edu](mailto:vllm-questions@lists.berkeley.edu)
+<!-- Please keep this section up to date with vllm/docs/community/contact_us.md. -->
 
 ## Media Kit
 
