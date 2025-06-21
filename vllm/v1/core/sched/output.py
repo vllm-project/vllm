@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Optional, Union
 
 if TYPE_CHECKING:
     import numpy as np
@@ -155,3 +155,13 @@ class SchedulerOutput:
 
     # KV Cache Connector metadata.
     kv_connector_metadata: Optional[KVConnectorMetadata] = None
+
+
+@dataclass
+class ScheduledRequest:
+    request_id: str
+    num_new_tokens: int
+    encoder_inputs_to_schedule: list[int] | None
+    num_scheduled_spec_tokens: int
+    spec_token_ids: list[int] | None
+    request_data: Union[NewRequestData, CachedRequestData]
