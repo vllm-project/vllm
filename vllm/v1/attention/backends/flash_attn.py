@@ -151,6 +151,7 @@ class FlashAttentionMetadataBuilder(
             runner.parallel_config)
         self.num_heads_kv = model_config.get_num_kv_heads(
             runner.parallel_config)
+        self.kv_cache_dtype = kv_cache_spec.dtype
         self.headdim = model_config.get_head_size()
         self.block_size = kv_cache_spec.block_size
         self.kv_cache_spec = kv_cache_spec
@@ -215,12 +216,14 @@ class FlashAttentionMetadataBuilder(
                     batch_size=batch_size,
                     max_seqlen_q=max_query_len,
                     max_seqlen_k=max_seq_len,
-                    cache_seqlens=seqlens,
                     num_heads_q=self.num_heads_q,
                     num_heads_kv=self.num_heads_kv,
                     headdim=self.headdim,
-                    page_size=self.block_size,
+                    cache_seqlens=seqlens,
+                    qkv_dtype=torch.float8_e4m3fn if self.kv_cache_dtype
+                    == torch.uint8 else self.kv_cache_dtype,
                     cu_seqlens_q=cu_query_lens,
+                    page_size=self.block_size,
                     causal=causal,
                     window_size=self.aot_sliding_window,
                 )
