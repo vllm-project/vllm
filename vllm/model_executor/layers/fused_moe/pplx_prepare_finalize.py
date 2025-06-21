@@ -69,7 +69,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             a1 = a1 * rank_topk_weights.to(a1.dtype)
 
         repeat_cols = 4
-        repeat_rows = 1 if self.per_act_token else a1.shape[0]
+        repeat_rows = 1 if self.per_act_token else a1.size(0)
         a1q, a1q_scale = moe_kernel_quantize_input(
             a1, (None if self.per_act_token else a1_scale), self.quant_dtype,
             self.per_act_token, self.block_shape)

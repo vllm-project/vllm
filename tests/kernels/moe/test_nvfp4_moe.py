@@ -136,7 +136,7 @@ def test_cutlass_fp4_moe_no_graph(m: int, n: int, k: int, e: int, topk: int,
                                                   device=w2.device,
                                                   block_size=quant_blocksize)
 
-        torch_output = torch_moe(a_in_dtype, w1_d, w2_d, score, topk, None)
+        torch_output = torch_moe(a_in_dtype, w1_d, w2_d, score, topk)
 
         torch.testing.assert_close(torch_output,
                                    cutlass_output,
