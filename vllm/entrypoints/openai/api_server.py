@@ -1226,12 +1226,6 @@ async def init_app_state(
         state.openai_serving_models,
         request_logger=request_logger,
     ) if model_config.task == "classify" else None
-    state.jinaai_serving_reranking = ServingScores(
-        engine_client,
-        model_config,
-        state.openai_serving_models,
-        request_logger=request_logger
-    ) if model_config.task == "score" else None
     state.openai_serving_tokenization = OpenAIServingTokenization(
         engine_client,
         model_config,
