@@ -1970,7 +1970,7 @@ class ParallelConfig:
 
         if not current_platform.use_custom_allreduce():
             self.disable_custom_all_reduce = True
-            logger.info(
+            logger.debug(
                 "Disabled the custom all-reduce kernel because it is not "
                 "supported on current platform.")
         if self.ray_workers_use_nsight and not self.use_ray:
