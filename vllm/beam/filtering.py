@@ -22,13 +22,7 @@ def format_filter(filter_params_list):
 
 
 DEFAULT_CHAR_SERVER_FILTER = format_filter(
-    [
-        ("annotations_porn", 0.1098),
-        ("annotations_racist", 0.2814),
-        ("annotations_disturbing", 0.1827),
-        ("annotations_harmful_promotes_selfharm", 0.0749),
-        ("annotations_harmful_promotes_terrorism", 0.1129),
-    ]
+    [{"name": "annotations_porn", "threshold": 0.5156}, {"name": "annotations_racist", "threshold": 0.9763}, {"name": "annotations_disturbing", "threshold": 0.5472}, {"name": "annotations_harmful_promotes_selfharm", "threshold": 0.0657}]
 )
 
 MAX_GENERATIONS = 10
