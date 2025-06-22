@@ -253,7 +253,6 @@ class StepPool(SimplePooler):
                 offset += prompt_len
                 pooled_data.append(pooled_data_i)
 
-        pooled_data = []
         returned_token_ids = self.returned_token_ids
         step_tag_id = self.step_tag_id
 
