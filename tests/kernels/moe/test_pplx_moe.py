@@ -171,9 +171,9 @@ def test_fused_moe_batched_experts(
 
     with set_current_vllm_config(vllm_config):
         topk_weight, topk_ids, _ = fused_topk(a, score, topk, False)
-        baseline_output = torch_experts(a, w1, w2, topk_weight, topk_ids)
+        baseline_output = torch_experts(a, w1, w2, topk_weight, topk_ids) # only for baseline
         torch_output = torch_batched_moe(a, w1, w2, topk_weight, topk_ids)
-        batched_output = naive_batched_moe(a, w1, w2, topk_weight, topk_ids)
+        batched_output = naive_batched_moe(a, w1, w2, topk_weight, topk_ids) # pick torch_experts or this
 
     torch.testing.assert_close(baseline_output,
                                torch_output,
@@ -666,11 +666,14 @@ def test_pplx_moe(
     a = torch.randn((m, k), device="cuda", dtype=torch.bfloat16) / 10
     score = torch.randn((m, e), device="cuda", dtype=torch.bfloat16)
 
-    _, w1, w1_s, _, w2, w2_s = make_test_weights(e,
-                                                 n,
-                                                 k,
-                                                 quant_dtype=quant_dtype,
-                                                 block_shape=block_shape)
+    _, w1, w1_s, _, w2, w2_s = make_test_weights(
+        e,
+        n,
+        k,
+        quant_dtype=quant_dtype,
+        block_shape=block_shape,
+        per_act_token_quant=per_act_token_quant,
+    )
 
     parallel_launch(world_size, _pplx_moe, dp_size, a, w1, w2, score, topk,
                     w1_s, w2_s, quant_dtype, per_act_token_quant, block_shape,

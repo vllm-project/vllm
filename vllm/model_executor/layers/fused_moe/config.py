@@ -14,6 +14,8 @@ from vllm.distributed import get_dp_group, get_tensor_model_parallel_rank
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
+from vllm.utils import cdiv
+
 
 logger = init_logger(__name__)
 

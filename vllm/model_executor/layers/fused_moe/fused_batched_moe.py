@@ -13,6 +13,7 @@ from vllm.model_executor.layers.fused_moe.fused_moe import (
     get_config_dtype_str, try_get_optimal_moe_config)
 from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache, moe_kernel_quantize_input)
+from vllm.model_executor.layers.quantization.utils.quant_utils import group_broadcast
 
 
 @triton.jit
@@ -555,13 +556,17 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                     rhs_a1_scale = a1_scale[:topks.numel()][topks]
                 else:
                     rhs_a1_scale = None
-                b_a1[idx, :rows, :], b_a1_scale[idx] = (moe_kernel_quantize_input(
+                b_a1[idx, :rows, :], b_s = (moe_kernel_quantize_input(
                     rhs,
                     rhs_a1_scale,
                     quant_config.quant_dtype,
                     quant_config.per_act_token_quant,
                     quant_config.block_shape,
                 ))
+                if quant_config.is_per_tensor:
+                    b_a1_scale[idx] = b_s
+                else:
+                    b_a1_scale[idx, :rows] = b_s[:rows]
             else:
                 b_a1[idx, :rows, :] = rhs
 
@@ -669,8 +674,7 @@ class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         if self.quant_config.is_per_act_token or self.quant_config.is_per_tensor:
             return t.to(f32) * scale
         else:
-            t32 = t.to(f32).view(-1, self.quant_config.block_shape[1])
-            return (t32 * scale.view(-1, 1)).view(t.shape)
+            return t.to(f32) * group_broadcast(scale, t.shape)
 
     def apply(
         self,
