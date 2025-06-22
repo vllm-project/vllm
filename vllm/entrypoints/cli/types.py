@@ -20,7 +20,8 @@ class CLISubcommand:
         raise NotImplementedError("Subclasses should implement this method")
 
     def validate(self, args: argparse.Namespace) -> None:
-        ...
+        # No validation by default
+        pass
 
     def subparser_init(
             self,
