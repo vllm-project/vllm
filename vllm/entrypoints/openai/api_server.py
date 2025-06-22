@@ -1130,8 +1130,11 @@ def build_app(args: Namespace) -> FastAPI:
                     and append X-Request-Id to it.
                     """
                     if message["type"] == "http.response.start":
-                        response_headers = MutableHeaders(raw=message["headers"])
-                        request_id = request_headers.get("X-Request-Id", uuid.uuid4().hex)
+                        response_headers = MutableHeaders(
+                            raw=message["headers"])
+                        request_id = request_headers.get(
+                            "X-Request-Id",
+                            uuid.uuid4().hex)
                         response_headers.append("X-Request-Id", request_id)
                     await send(message)
 
