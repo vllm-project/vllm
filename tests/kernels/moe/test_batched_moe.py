@@ -190,15 +190,13 @@ def test_batched_mm(num_experts: int, max_tokens_per_expert: int, K: int,
         B,
         ref_output,
         num_expert_tokens,
-        None,
-        None,
-        None,
     )
 
     q_ref_output = native_batched_masked_quant_matmul(A_q, B_q, q_ref_output,
                                                       num_expert_tokens,
                                                       A_scale, B_scale,
-                                                      block_shape)
+                                                      block_shape,
+                                                      per_act_token_quant)
 
     rtol, atol = {
         torch.float16: (6e-2, 6e-2),
@@ -207,7 +205,6 @@ def test_batched_mm(num_experts: int, max_tokens_per_expert: int, K: int,
     }[test_output.dtype]
 
     torch.testing.assert_close(ref_output, q_ref_output, atol=atol, rtol=rtol)
-
     #torch.testing.assert_close(ref_output, test_output, atol=atol, rtol=rtol)
     #torch.testing.assert_close(test_output, q_ref_output, atol=atol, rtol=rtol)
 
