@@ -5,8 +5,8 @@ from vllm.entrypoints.cli.benchmark.serve import BenchmarkServingSubcommand
 from vllm.entrypoints.cli.benchmark.throughput import (
     BenchmarkThroughputSubcommand)
 
-__all__ = [
-    BenchmarkLatencySubcommand,
-    BenchmarkServingSubcommand,
-    BenchmarkThroughputSubcommand,
+__all__: list[str] = [
+    "BenchmarkLatencySubcommand",
+    "BenchmarkServingSubcommand",
+    "BenchmarkThroughputSubcommand",
 ]

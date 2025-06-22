@@ -8,6 +8,8 @@ from vllm.entrypoints.cli.types import CLISubcommand
 class BenchmarkSubcommandBase(CLISubcommand):
     """ The base class of subcommands for vllm bench. """
 
+    help: str
+
     @classmethod
     def add_cli_args(cls, parser: argparse.ArgumentParser) -> None:
         """Add the CLI arguments to the parser."""
