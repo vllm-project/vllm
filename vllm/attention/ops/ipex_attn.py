@@ -29,7 +29,7 @@ class _PagedAttention:
         head_size: int,
         *args,
     ) -> Tuple[int, ...]:
-        return (2, num_blocks, block_size * num_kv_heads * head_size)
+        return 2, num_blocks, block_size * num_kv_heads * head_size
 
     @staticmethod
     def split_kv_cache(
