@@ -70,6 +70,7 @@ pull_request_rules:
   conditions:
     - or:
       - files~=^benchmarks/
+      - files~=^vllm/benchmarks/
       - files~=^tests/benchmarks/
       - files~=^\.buildkite/nightly-benchmarks/
   actions:
