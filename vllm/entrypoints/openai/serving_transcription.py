@@ -213,16 +213,21 @@ class OpenAIServingTranscription(OpenAIServing):
         chunks = [y] if duration < 30 else self._split_audio(y, sr)
         prompts = []
         for i, chunk in enumerate(chunks):
+            # Decide whether to pass the original prompt to this chunk
+            if i == 0 or request.reuse_initial_prompt:
+                decoder_prompt = (
+                    f"<|startoftranscript|>{lang_token}<|transcribe|>"
+                    f"<|notimestamps|>{request.prompt}"
+                )
+            else:
+                decoder_prompt = ""
+
             prompt = {
                 "encoder_prompt": {
                     "prompt": "",
-                    "multi_modal_data": {
-                        "audio": (chunk, sr),
-                    },
+                    "multi_modal_data": {"audio": (chunk, sr)},
                 },
-                "decoder_prompt":
-                f"<|startoftranscript|>{lang_token}<|transcribe|><|notimestamps|>{request.prompt}"
-                if i == 0 else ""
+                "decoder_prompt": decoder_prompt,
             }
             prompts.append(cast(PromptType, prompt))
         return prompts, duration

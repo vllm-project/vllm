@@ -1726,11 +1726,20 @@ class TranscriptionRequest(OpenAIBaseModel):
 
     prompt: str = Field(default="")
     """An optional text to guide the model's style or continue a previous audio
-    segment.
-
-    The [prompt](https://platform.openai.com/docs/guides/speech-to-text#prompting)
+    segment. The [prompt](https://platform.openai.com/docs/guides/speech-to-text#prompting)
     should match the audio language.
     """
+    
+    reuse_initial_prompt: bool = Field(
+        default=False,
+        description=(
+            "If True, the same `prompt` is appended to every audio chunk "
+            "after the first one.  If False (default), only the first chunk "
+            "receives the prompt."
+        ),
+    )
+
+
 
     response_format: AudioResponseFormat = Field(default="json")
     """
