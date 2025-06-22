@@ -65,113 +65,144 @@ def bench_run(
     size_n: int,
 ):
     label = "Quant Matmul"
-
     sub_label = "{}, act={} k_full={}, q={}, g={}, MKN=({}x{}x{})".format(
         model, act_order, is_k_full, str(quant_type), group_size, size_m, size_k, size_n
     )
-
     print(f"Testing: {sub_label}")
 
     a = torch.randn(size_m, size_k).to(torch.half).cuda()
     b = torch.rand(size_k, size_n).to(torch.half).cuda()
-
     has_zp = quant_type in [scalar_types.uint4, scalar_types.uint8]
-
     if act_order and (group_size == -1 or group_size == size_k or has_zp):
         return
-
     if size_k % group_size != 0:
         return
 
-    # Marlin quant
-    marlin_g_idx = None
-    marlin_sort_indices = None
-    marlin_zp = None
-    marlin_s2 = None
-    if quant_type == scalar_types.float4_e2m1f:
-        if group_size != 16 or act_order:
-            return
-        marlin_w_ref, marlin_q_w, marlin_s, marlin_s2 = rand_marlin_weight_fp4_like(
-            b.T, group_size
-        )
-    elif quant_type == scalar_types.float8_e4m3fn:
-        if group_size not in [-1, 128] or act_order:
-            return
-        marlin_w_ref, marlin_q_w, marlin_s = marlin_quant_fp8_torch(b.T, group_size)
-    elif group_size == 16:
-        return
-    elif has_zp:
-        marlin_w_ref, marlin_q_w, marlin_s, marlin_zp = awq_marlin_quantize(
-            b, quant_type, group_size
-        )
-    else:
-        marlin_w_ref, marlin_q_w, marlin_s, marlin_g_idx, marlin_sort_indices, _ = (
-            marlin_quantize(b, quant_type, group_size, act_order)
-        )
-
-    # Marlin_24 quant
-    marlin_24_w_ref = None
-    marlin_24_q_w_comp = None
-    marlin_24_meta = None
-    marlin_24_s = None
-    if (
+    marlin_24_supported = (
         quant_type in GPTQ_MARLIN_24_SUPPORTED_QUANT_TYPES
         and group_size in GPTQ_MARLIN_24_SUPPORTED_GROUP_SIZES
-    ):
-        (marlin_24_w_ref, marlin_24_q_w_comp, marlin_24_meta, marlin_24_s) = (
-            marlin_24_quantize(b, quant_type, group_size)
-        )
-
-    # GPTQ quant
+    )
     repack_supported = (
         quant_type in GPTQ_MARLIN_24_SUPPORTED_QUANT_TYPES
         and group_size in MARLIN_SUPPORTED_GROUP_SIZES
     )
-    q_w_gptq = None
-    repack_sort_indices = None
-    if repack_supported:
-        (w_ref, q_w, s, g_idx, rand_perm) = gptq_quantize_weights(
-            b, quant_type, group_size, act_order
-        )
-        q_w_gptq = gptq_pack(q_w, quant_type.size_bits, size_k, size_n)
-
-        # For act_order, sort the "weights" and "g_idx"
-        # so that group ids are increasing
-        repack_sort_indices = torch.empty(0, dtype=torch.int, device=b.device)
-        if act_order:
-            (q_w, g_idx, repack_sort_indices) = sort_weights(q_w, g_idx)
-
-    # Prepare
-    marlin_workspace = MarlinWorkspace(
-        size_n, GPTQ_MARLIN_MIN_THREAD_N, GPTQ_MARLIN_MAX_PARALLEL
-    )
-
-    marlin_24_workspace = MarlinWorkspace(
-        size_n, GPTQ_MARLIN_24_MIN_THREAD_N, GPTQ_MARLIN_24_MAX_PARALLEL
-    )
-
-    # AllSpark W8A16 quant
-    as_supported_case = (
+    allspark_supported = (
         quant_type in ALLSPARK_SUPPORTED_QUANT_TYPES
         and group_size == -1
         and not act_order
         and is_k_full
     )
-    if as_supported_case:
-        properties = torch.cuda.get_device_properties(b.device.index)
-        sm_count = properties.multi_processor_count
-        sm_version = properties.major * 10 + properties.minor
 
-        supported_arch = sm_version >= 80 and sm_version < 90
-        as_supported_case = as_supported_case and supported_arch
-        if supported_arch:
-            w_ref, qw, s, zp = quantize_weights(b, quant_type, group_size, has_zp)
-            qw = qw.to(torch.uint8)
-
-            qw_reorder, s_reorder, zp_reorder = ops.allspark_repack_weight(
-                qw, s, zp, has_zp
+    def gen_marlin_params():
+        # Marlin quant
+        marlin_g_idx = marlin_sort_indices = marlin_zp = marlin_s2 = None
+        if quant_type == scalar_types.float4_e2m1f:
+            if group_size != 16 or act_order:
+                return
+            marlin_w_ref, marlin_q_w, marlin_s, marlin_s2 = rand_marlin_weight_fp4_like(
+                b.T, group_size
             )
-            CUBLAS_M_THRESHOLD = ALLSPARK_AMPERE_M_CUBLAS_THRESHOLD
+        elif quant_type == scalar_types.float8_e4m3fn:
+            if group_size not in [-1, 128] or act_order:
+                return
+            marlin_w_ref, marlin_q_w, marlin_s = marlin_quant_fp8_torch(b.T, group_size)
+        elif group_size == 16:
+            return
+        elif has_zp:
+            marlin_w_ref, marlin_q_w, marlin_s, marlin_zp = awq_marlin_quantize(
+                b, quant_type, group_size
+            )
+        else:
+            marlin_w_ref, marlin_q_w, marlin_s, marlin_g_idx, marlin_sort_indices, _ = (
+                marlin_quantize(b, quant_type, group_size, act_order)
+            )
+        return (
+            marlin_w_ref,
+            marlin_q_w,
+            marlin_s,
+            marlin_s2,
+            marlin_zp,
+            marlin_g_idx,
+            marlin_sort_indices,
+        )
+
+    def gen_marlin_24_params():
+        marlin_24_w_ref = marlin_24_q_w_comp = marlin_24_meta = marlin_24_s = None
+        if marlin_24_supported:
+            (marlin_24_w_ref, marlin_24_q_w_comp, marlin_24_meta, marlin_24_s) = (
+                marlin_24_quantize(b, quant_type, group_size)
+            )
+        return (marlin_24_w_ref, marlin_24_q_w_comp, marlin_24_meta, marlin_24_s)
+
+    def gen_repack_params():
+        q_w_gptq = None
+        repack_sort_indices = None
+        if repack_supported:
+            (w_ref, q_w, s, g_idx, rand_perm) = gptq_quantize_weights(
+                b, quant_type, group_size, act_order
+            )
+            q_w_gptq = gptq_pack(q_w, quant_type.size_bits, size_k, size_n)
+
+            # For act_order, sort the "weights" and "g_idx"
+            # so that group ids are increasing
+            repack_sort_indices = torch.empty(0, dtype=torch.int, device=b.device)
+            if act_order:
+                (q_w, g_idx, repack_sort_indices) = sort_weights(q_w, g_idx)
+        return q_w_gptq, repack_sort_indices
+
+    def gen_allspark_params():
+        qw_reorder = s_reorder = zp_reorder = sm_count = sm_version = (
+            CUBLAS_M_THRESHOLD
+        ) = None
+        nonlocal allspark_supported
+        if allspark_supported:
+            properties = torch.cuda.get_device_properties(b.device.index)
+            sm_count = properties.multi_processor_count
+            sm_version = properties.major * 10 + properties.minor
+
+            supported_arch = sm_version >= 80 and sm_version < 90
+            allspark_supported = allspark_supported and supported_arch
+            if supported_arch:
+                w_ref, qw, s, zp = quantize_weights(b, quant_type, group_size, has_zp)
+                qw = qw.to(torch.uint8)
+
+                qw_reorder, s_reorder, zp_reorder = ops.allspark_repack_weight(
+                    qw, s, zp, has_zp
+                )
+                CUBLAS_M_THRESHOLD = ALLSPARK_AMPERE_M_CUBLAS_THRESHOLD
+        return (
+            qw_reorder,
+            s_reorder,
+            zp_reorder,
+            sm_count,
+            sm_version,
+            CUBLAS_M_THRESHOLD,
+        )
+
+    (
+        marlin_w_ref,
+        marlin_q_w,
+        marlin_s,
+        marlin_s2,
+        marlin_zp,
+        marlin_g_idx,
+        marlin_sort_indices,
+    ) = gen_marlin_params()
+    (marlin_24_w_ref, marlin_24_q_w_comp, marlin_24_meta, marlin_24_s) = (
+        gen_marlin_24_params()
+    )
+    q_w_gptq, repack_sort_indices = gen_repack_params()
+    qw_reorder, s_reorder, zp_reorder, sm_count, sm_version, CUBLAS_M_THRESHOLD = (
+        gen_allspark_params()
+    )
+
+    # Prepare
+    marlin_workspace = MarlinWorkspace(
+        size_n, GPTQ_MARLIN_MIN_THREAD_N, GPTQ_MARLIN_MAX_PARALLEL
+    )
+    marlin_24_workspace = MarlinWorkspace(
+        size_n, GPTQ_MARLIN_24_MIN_THREAD_N, GPTQ_MARLIN_24_MAX_PARALLEL
+    )
 
     globals = {
         # Gen params
@@ -201,12 +232,12 @@ def bench_run(
         "q_w_gptq": q_w_gptq,
         "repack_sort_indices": repack_sort_indices,
         # AllSpark W8A16 params
-        "qw_reorder": qw_reorder if as_supported_case else None,
-        "s_reorder": s_reorder if as_supported_case else None,
-        "zp_reorder": zp_reorder if as_supported_case else None,
-        "sm_count": sm_count if as_supported_case else None,
-        "sm_version": sm_version if as_supported_case else None,
-        "CUBLAS_M_THRESHOLD": CUBLAS_M_THRESHOLD if as_supported_case else None,
+        "qw_reorder": qw_reorder,
+        "s_reorder": s_reorder,
+        "zp_reorder": zp_reorder,
+        "sm_count": sm_count,
+        "sm_version": sm_version,
+        "CUBLAS_M_THRESHOLD": CUBLAS_M_THRESHOLD,
         # Kernels
         "gptq_marlin_gemm": ops.gptq_marlin_gemm,
         "gptq_marlin_24_gemm": ops.gptq_marlin_24_gemm,
@@ -250,10 +281,7 @@ def bench_run(
         ).blocked_autorange(min_run_time=min_run_time)
     )
 
-    if (
-        quant_type in GPTQ_MARLIN_24_SUPPORTED_QUANT_TYPES
-        and group_size in GPTQ_MARLIN_24_SUPPORTED_GROUP_SIZES
-    ):
+    if marlin_24_supported:
         results.append(
             benchmark.Timer(
                 stmt="output = gptq_marlin_24_gemm(a, marlin_24_q_w_comp, marlin_24_meta, marlin_24_s, marlin_24_workspace.scratch, quant_type, size_m, size_n, size_k)",  # noqa: E501
@@ -275,7 +303,7 @@ def bench_run(
             ).blocked_autorange(min_run_time=min_run_time)
         )
 
-    if as_supported_case:
+    if allspark_supported:
         results.append(
             benchmark.Timer(
                 stmt="output = allspark_w8a16_gemm(a, qw_reorder, s_reorder, zp_reorder, size_n, group_size, sm_count, sm_version, CUBLAS_M_THRESHOLD, False, True)",  # noqa: E501
