@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-# Commands that act as an interactive OpenAI API client
+
+from __future__ import annotations
 
 import argparse
 import os
 import signal
 import sys
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 from openai import OpenAI
 from openai.types.chat import ChatCompletionMessageParam
@@ -44,8 +45,7 @@ def _interactive_cli(args: argparse.Namespace) -> tuple[str, OpenAI]:
     return model_name, openai_client
 
 
-def chat(system_prompt: Optional[str], model_name: str,
-         client: OpenAI) -> None:
+def chat(system_prompt: str | None, model_name: str, client: OpenAI) -> None:
     conversation: list[ChatCompletionMessageParam] = []
     if system_prompt is not None:
         conversation.append({"role": "system", "content": system_prompt})
