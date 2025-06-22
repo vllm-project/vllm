@@ -122,6 +122,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         self.is_multimodal_model = model_config.is_multimodal_model
         self.is_pooling_model = model_config.pooler_config is not None
+        self.is_step_pooler = (self.is_pooling_model
+                               and model_config.pooler_config.pooling_type
+                               == "STEP")
         self.max_model_len = model_config.max_model_len
         self.max_num_tokens = scheduler_config.max_num_batched_tokens
         self.max_num_reqs = scheduler_config.max_num_seqs
@@ -202,6 +205,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             pin_memory=self.pin_memory,
             vocab_size=self.model_config.get_vocab_size(),
             block_sizes=[self.cache_config.block_size],
+            sampling_needs_token_ids=self.is_step_pooler,
         )
 
         self.use_cuda_graph = (
@@ -2301,6 +2305,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 pin_memory=self.pin_memory,
                 vocab_size=self.model_config.get_vocab_size(),
                 block_sizes=block_sizes,
+                sampling_needs_token_ids=self.is_step_pooler,
             )
 
     def _allocate_kv_cache_tensors(
