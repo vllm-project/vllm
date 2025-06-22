@@ -142,11 +142,6 @@ completion = client.chat.completions.create(
 Only `X-Request-Id` HTTP request header is supported for now. It can be enabled
 with `--enable-request-id-headers`.
 
-> Note that enablement of the headers can impact performance significantly at high QPS
-> rates. We recommend implementing HTTP headers at the router level (e.g. via Istio),
-> rather than within the vLLM layer for this reason.
-> See [this PR](https://github.com/vllm-project/vllm/pull/11529) for more details.
-
 ```python
 completion = client.chat.completions.create(
     model="NousResearch/Meta-Llama-3-8B-Instruct",
