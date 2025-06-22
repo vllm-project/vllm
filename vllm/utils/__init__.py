@@ -528,16 +528,14 @@ class AsyncMicrobatchTokenizer:
         self.max_batch_size = max_batch_size
         self.batch_wait_timeout_s = batch_wait_timeout_s
 
-        self._queue: Optional[asyncio.Queue[tuple[str, object, dict,
-                                                  asyncio.Future]]] = None
+        self._queues: dict[tuple, asyncio.Queue[tuple[str, object, dict,
+                                                      asyncio.Future]]] = {}
+        self._batcher_tasks: dict[tuple, asyncio.Task] = {}
 
         # Single worker that owns the blocking tokenizer.
         self._executor = ThreadPoolExecutor(max_workers=1)
 
         self._loop: Optional[asyncio.AbstractEventLoop] = None
-
-        # Handle to the currently running batcher task (if any).
-        self._batcher_task: Optional[asyncio.Task] = None
 
     # ------------------------------------------------------------------
     # Public async API
@@ -545,38 +543,50 @@ class AsyncMicrobatchTokenizer:
     async def __call__(self, prompt, **kwargs):
         loop = asyncio.get_running_loop()
         fut: asyncio.Future = loop.create_future()
-        self._ensure_queue_and_batcher(loop)
-        assert self._queue is not None
-        await self._queue.put(("encode", prompt, kwargs, fut))
+        key = self._queue_key("encode", kwargs)
+        queue = self._ensure_queue_and_batcher(loop, key)
+        await queue.put(("encode", prompt, kwargs, fut))
         return await fut
 
     async def decode(self, token_ids, **kwargs):
         loop = asyncio.get_running_loop()
         fut: asyncio.Future = loop.create_future()
-        self._ensure_queue_and_batcher(loop)
-        assert self._queue is not None
-        await self._queue.put(("decode", token_ids, kwargs, fut))
+        key = self._queue_key("decode", kwargs)
+        queue = self._ensure_queue_and_batcher(loop, key)
+        await queue.put(("decode", token_ids, kwargs, fut))
         return await fut
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
-    def _ensure_queue_and_batcher(self, loop: asyncio.AbstractEventLoop):
+    def _ensure_queue_and_batcher(self, loop: asyncio.AbstractEventLoop,
+                                  key: tuple):
+        """Return the queue for key, creating queue 
+        and batcher task if needed."""
         if self._loop is not loop:
-            self._queue = asyncio.Queue()
+            for task in self._batcher_tasks.values():
+                if not task.done():
+                    task.cancel()
+
+            self._queues = {}
+            self._batcher_tasks = {}
             self._loop = loop
-            self._batcher_task = None
 
-        if self._batcher_task is None or self._batcher_task.done():
-            self._batcher_task = loop.create_task(self._batch_loop())
+        if key not in self._queues:
+            self._queues[key] = asyncio.Queue()
 
-    async def _batch_loop(self):
+        if key not in self._batcher_tasks or self._batcher_tasks[key].done():
+            self._batcher_tasks[key] = loop.create_task(
+                self._batch_loop(self._queues[key]))
+
+        return self._queues[key]
+
+    async def _batch_loop(self, queue: asyncio.Queue):
         """Runs until the queue stays empty long enough to finish."""
         loop = asyncio.get_running_loop()
 
         while True:
-            assert self._queue is not None
-            first_item = await self._queue.get()
+            first_item = await queue.get()
             batch = [first_item]
             deadline = loop.time() + self.batch_wait_timeout_s
 
@@ -585,8 +595,7 @@ class AsyncMicrobatchTokenizer:
                 if timeout <= 0:
                     break
                 try:
-                    assert self._queue is not None
-                    item = await asyncio.wait_for(self._queue.get(), timeout)
+                    item = await asyncio.wait_for(queue.get(), timeout)
                     batch.append(item)
                 except asyncio.TimeoutError:
                     break
@@ -657,20 +666,42 @@ class AsyncMicrobatchTokenizer:
                             fut.set_exception(e)
 
             # If queue is empty, exit and let new requests spawn a fresh task
-            if self._queue is not None and self._queue.empty():
+            if queue.empty():
                 return
 
     def __del__(self):
-        if self._batcher_task is None:
-            return
+        for task in self._batcher_tasks.values():
+            if not task.done():
+                task.cancel()
 
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            return
+    def _queue_key(self, op: str, kwargs: dict) -> tuple:
+        """Return a normalized key describing op + kwargs.
+        
+        Decode -> ("decode", )
+        Encode, add_special_tokens {T/F}, truncation False -> 
+        ("encode", add_special_tokens, False, None)
+        Encode, truncation True and max_length 
+        equals tokenizer.model_max_length (or None) ->
+        ("encode", add_special_tokens, True, "model_max")
+        All other encode variants -> ("encode", "other")
+        """
 
-        if loop.is_running():
-            self._batcher_task.cancel()
+        if op == "decode":
+            return ("decode", )
+
+        add_special_tokens = kwargs.get("add_special_tokens", True)
+        truncation = kwargs.get("truncation", False)
+        max_length = kwargs.get("max_length")
+
+        if not truncation:
+            return ("encode", add_special_tokens, False, None)
+
+        model_max = getattr(self.tokenizer, "model_max_length", None)
+        if max_length is None or (model_max is not None
+                                  and max_length == model_max):
+            return ("encode", add_special_tokens, True, "model_max")
+
+        return ("encode", "other")
 
 
 def make_async(
