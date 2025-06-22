@@ -65,8 +65,8 @@ pull_request_rules:
       add:
         - multi-modality
 
-- name: label-perf-benchmarks
-  description: Automatically apply perf-benchmarks label
+- name: label-performance
+  description: Automatically apply performance label
   conditions:
     - or:
       - files~=^benchmarks/
@@ -76,7 +76,7 @@ pull_request_rules:
   actions:
     label:
       add:
-        - perf-benchmarks
+        - performance
 
 - name: label-qwen
   description: Automatically apply qwen label
