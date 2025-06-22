@@ -49,7 +49,7 @@ if TYPE_CHECKING:
     VLLM_XLA_CACHE_PATH: str = os.path.join(VLLM_CACHE_ROOT, "xla_cache")
     VLLM_XLA_CHECK_RECOMPILATION: bool = False
     VLLM_FUSED_MOE_CHUNK_SIZE: int = 64 * 1024
-    VLLM_ENABLE_FUSED_MOE_ACTIVATION_CHUNKING: bool = False
+    VLLM_ENABLE_FUSED_MOE_ACTIVATION_CHUNKING: bool = True
     VLLM_USE_RAY_SPMD_WORKER: bool = False
     VLLM_USE_RAY_COMPILED_DAG: bool = False
     VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE: str = "auto"
@@ -541,7 +541,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # https://github.com/vllm-project/vllm/issues/19631.
     "VLLM_ENABLE_FUSED_MOE_ACTIVATION_CHUNKING":
     lambda: bool(
-        int(os.getenv("VLLM_ENABLE_FUSED_MOE_ACTIVATION_CHUNKING", "0"))),
+        int(os.getenv("VLLM_ENABLE_FUSED_MOE_ACTIVATION_CHUNKING", "1"))),
 
     # If set, vllm will skip the deprecation warnings.
     "VLLM_NO_DEPRECATION_WARNING":
