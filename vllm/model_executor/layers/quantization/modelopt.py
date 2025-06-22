@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any, Callable, Optional, Union
+from typing import Any, Callable, Optional, Union, List
 
 import torch
 from torch.nn import Module
@@ -42,9 +42,13 @@ class ModelOptFp8Config(QuantizationConfig):
     def __init__(
         self,
         is_checkpoint_fp8_serialized: bool = False,
+        kv_cache_quant_method: Optional[str] = None,
+        exclude_modules: Optional[List[str]] = None,
     ) -> None:
         super().__init__()
         self.is_checkpoint_fp8_serialized = is_checkpoint_fp8_serialized
+        self.kv_cache_quant_method = kv_cache_quant_method
+        self.exclude_modules = exclude_modules
         if is_checkpoint_fp8_serialized:
             logger.warning("Detected ModelOpt fp8 checkpoint. Please note that"
                            " the format is experimental and could change.")
@@ -69,6 +73,13 @@ class ModelOptFp8Config(QuantizationConfig):
     def from_config(cls, config: dict[str, Any]) -> "ModelOptFp8Config":
         quant_config = cls.get_from_keys(config, ["quantization"])
         quant_method = quant_config["quant_algo"]
+        kv_cache_quant_method = cls.get_from_keys(config, ["quantization"]).get(
+            "kv_cache_quant_algo"
+        )
+        exclude_modules = cls.get_from_keys(config, ["quantization"]).get(
+            "exclude_modules"
+        )
+
         if quant_method not in QUANT_ALGOS:
             raise ValueError(f"ModelOpt currently only supports: {QUANT_ALGOS}"
                              " quantizations in vLLM. Please check the "
@@ -76,7 +87,15 @@ class ModelOptFp8Config(QuantizationConfig):
                              "quant configuration.")
         is_checkpoint_fp8_serialized = ("FP8" in quant_method)
 
-        return cls(is_checkpoint_fp8_serialized)
+        # Convert exclude_modules to handle the language_model prefix that gets added by mllama4.py
+        converted_exclude_modules = []
+        if exclude_modules:
+            for module in exclude_modules:
+                converted_exclude_modules.append(module)
+                if not module.startswith("language_model."):
+                    converted_exclude_modules.append(f"language_model.{module}")
+
+        return cls(is_checkpoint_fp8_serialized, kv_cache_quant_method, converted_exclude_modules)
 
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["QuantizeMethodBase"]:

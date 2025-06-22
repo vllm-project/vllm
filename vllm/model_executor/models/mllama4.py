@@ -914,30 +914,46 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
         params_dict = dict(self.named_parameters())
         updated_params: set[str] = set()
 
-        # language_model is an Llama4ForCausalLM instance. We load it's
-        # using llama4's load_weights routine.
-        language_model_weights, other_weights = self.separate_weights(
-            weights, prefix="language_model.")
+        # Debug: Print first 30 parameter names from initialized model
+        print("=== INITIALIZED MODEL PARAMETERS ===")
+        print("First 30 parameter names containing 'scale':")
+        scale_params = [name for name in params_dict.keys() if "scale" in name]
+        for i, name in enumerate(scale_params[:30]):
+            print(f"  {i+1:2d}. {name}")
+        print(f"Total parameters with 'scale': {len(scale_params)}")
+        print(f"Total model parameters: {len(params_dict)}")
+        print("=== END DEBUG ===\n")
 
-        # If no language_model weights found, try with "model." prefix and rename
-        language_model_weights_list = list(language_model_weights)
-        if not language_model_weights_list:
-            # No language_model.* weights found, try model.* weights
-            def rename_model_weights():
-                for name, weight in weights:
-                    if name.startswith("model."):
-                        # Rename model.* to language_model.model.*
-                        yield (name.replace("model.", "language_model.model.", 1), weight)
-                    else:
-                        # Keep other weights as is
-                        yield (name, weight)
+        # Combine renaming and separation logic in a single pass
+        def process_and_separate_weights():
+            language_model_weights = []
+            other_weights = []
 
-            language_model_weights, other_weights = self.separate_weights(
-                rename_model_weights(), prefix="language_model.")
+            for name, weight in weights:
+                # Apply renaming logic
+                if name.startswith("model."):
+                    # Rename model.* to language_model.model.*
+                    renamed = name.replace("model.", "language_model.model.", 1)
+                elif name.startswith("lm_head.weight"):
+                    # Rename lm_head.weight to language_model.lm_head.weight
+                    renamed = name.replace("lm_head.weight", "language_model.lm_head.weight")
+                else:
+                    # Keep other weights as is
+                    renamed = name
 
+                # Separate into language_model and other weights
+                if renamed.startswith("language_model."):
+                    language_model_weights.append((renamed, weight))
+                else:
+                    other_weights.append((renamed, weight))
+
+            return language_model_weights, other_weights
+
+        language_model_weights, other_weights = process_and_separate_weights()
+
+        # Load language model weights
         loader = AutoWeightsLoader(self)
-        loaded_language_model_params = loader.load_weights(
-            language_model_weights)
+        loaded_language_model_params = loader.load_weights(language_model_weights)
         assert loaded_language_model_params is not None
         updated_params.update(loaded_language_model_params)
 
