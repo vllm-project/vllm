@@ -40,6 +40,8 @@ class SchedulerStats:
 
     spec_decoding_stats: Optional[SpecDecodingStats] = None
 
+    num_corrupted_reqs: int = 0
+
 
 @dataclass
 class LoRAStats:
