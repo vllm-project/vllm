@@ -181,7 +181,7 @@ class OpenAIServingChat(OpenAIServing):
                   and not self.expand_tools_even_if_tool_choice_none):
                 assert request.tools is not None
                 if len(request.tools) > 0:
-                    logger.warning(
+                    logger.warning_once(
                         "Tools are specified but tool_choice is set to 'none' "
                         "and --expand-tools-even-if-tool-choice-none is not "
                         "enabled. Tool definitions will be excluded from the "

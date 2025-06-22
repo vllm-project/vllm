@@ -227,7 +227,8 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         "--expand-tools-even-if-tool-choice-none",
         action="store_true",
         default=False,
-        help="[DEPRECATED] Include tool definitions in prompts "
+        deprecated=True,
+        help="Include tool definitions in prompts "
         "even when tool_choice='none'. "
         "This is a transitional option that will be removed in v0.10.0. "
         "In v0.10.0, tool definitions will always be included regardless of "
