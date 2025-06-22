@@ -1,37 +1,39 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from __future__ import annotations
+
 import argparse
 import asyncio
-
-from prometheus_client import start_http_server
+import importlib.metadata
 
 from vllm.entrypoints.cli.types import CLISubcommand
-from vllm.entrypoints.logger import logger
 from vllm.entrypoints.openai.run_batch import main as run_batch_main
 from vllm.entrypoints.openai.run_batch import make_arg_parser
 from vllm.entrypoints.utils import (VLLM_SUBCMD_PARSER_EPILOG,
                                     show_filtered_argument_or_group_from_help)
+from vllm.logger import init_logger
 from vllm.utils import FlexibleArgumentParser
-from vllm.version import __version__ as VLLM_VERSION
+
+logger = init_logger(__name__)
 
 
 class RunBatchSubcommand(CLISubcommand):
     """The `run-batch` subcommand for vLLM CLI."""
-
-    def __init__(self):
-        self.name = "run-batch"
-        super().__init__()
+    name = "run-batch"
 
     @staticmethod
     def cmd(args: argparse.Namespace) -> None:
-        logger.info("vLLM batch processing API version %s", VLLM_VERSION)
+        logger.info("vLLM batch processing API version %s",
+                    importlib.metadata.version("vllm"))
         logger.info("args: %s", args)
 
         # Start the Prometheus metrics server.
         # LLMEngine uses the Prometheus client
         # to publish metrics at the /metrics endpoint.
         if args.enable_metrics:
+            from prometheus_client import start_http_server
+
             logger.info("Prometheus metrics enabled")
             start_http_server(port=args.port, addr=args.url)
         else:

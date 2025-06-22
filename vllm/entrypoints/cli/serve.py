@@ -38,10 +38,7 @@ logger = init_logger(__name__)
 
 class ServeSubcommand(CLISubcommand):
     """The `serve` subcommand for the vLLM CLI. """
-
-    def __init__(self):
-        self.name = "serve"
-        super().__init__()
+    name = "serve"
 
     @staticmethod
     def cmd(args: argparse.Namespace) -> None:
