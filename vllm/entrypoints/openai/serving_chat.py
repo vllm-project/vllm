@@ -179,7 +179,6 @@ class OpenAIServingChat(OpenAIServing):
                 tool_dicts = None
             elif (request.tool_choice == "none"
                   and not self.expand_tools_even_if_tool_choice_none):
-                assert request.tools is not None
                 if len(request.tools) > 0:
                     logger.warning_once(
                         "Tools are specified but tool_choice is set to 'none' "
