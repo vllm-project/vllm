@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 import types
 from importlib.util import find_spec
 
@@ -23,7 +24,22 @@ if HAS_TRITON:
             x.driver for x in backends.values()
             if x.driver and x.driver.is_active()
         ]
-        if len(active_drivers) != 1:
+
+        # Check if we're in a distributed environment where CUDA_VISIBLE_DEVICES
+        # might be temporarily empty (e.g., Ray sets it to "" during actor init)
+        cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
+        is_distributed_env = (cuda_visible_devices is not None
+                              and len(cuda_visible_devices.strip()) == 0)
+
+        # Apply lenient driver check for distributed environments
+        if is_distributed_env and len(active_drivers) == 0:
+            # Allow 0 drivers in distributed environments - they may become
+            # active later when CUDA context is properly initialized
+            logger.debug(
+                "Triton found 0 active drivers in distributed environment. "
+                "This is expected during initialization.")
+        elif not is_distributed_env and len(active_drivers) != 1:
+            # Strict check for non-distributed environments
             logger.info(
                 "Triton is installed but %d active driver(s) found "
                 "(expected 1). Disabling Triton to prevent runtime errors.",
@@ -52,9 +68,11 @@ class TritonPlaceholder(types.ModuleType):
 
     def __init__(self):
         super().__init__("triton")
+        self.__version__ = "3.3.0"
         self.jit = self._dummy_decorator("jit")
         self.autotune = self._dummy_decorator("autotune")
         self.heuristics = self._dummy_decorator("heuristics")
+        self.Config = self._dummy_decorator("Config")
         self.language = TritonLanguagePlaceholder()
         logger.warning_once(
             "Triton is not installed. Using dummy decorators. "

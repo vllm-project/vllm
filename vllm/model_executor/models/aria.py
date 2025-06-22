@@ -486,6 +486,11 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
     """
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
+            # mapping for new names in checkpoint saved after transformers v4.52
+            "model.language_model.": "language_model.model.",
+            "model.vision_tower.": "vision_tower.",
+            "model.multi_modal_projector.": "multi_modal_projector.",
+            # mapping for original checkpoint
             "language_model.model": "language_model",
             "language_model.lm_head": "lm_head",
         },
@@ -615,7 +620,8 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
-        if multimodal_embeddings is not None:
+        if multimodal_embeddings is not None \
+            and len(multimodal_embeddings) != 0:
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids, inputs_embeds, multimodal_embeddings,
                 self.config.image_token_index)
