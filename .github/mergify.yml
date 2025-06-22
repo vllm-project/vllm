@@ -65,6 +65,18 @@ pull_request_rules:
       add:
         - multi-modality
 
+- name: label-perf-benchmarks
+  description: Automatically apply perf-benchmarks label
+  conditions:
+    - or:
+      - files~=^benchmarks/
+      - files~=^tests/benchmarks/
+      - files~=^\.buildkite/nightly-benchmarks/
+  actions:
+    label:
+      add:
+        - perf-benchmarks
+
 - name: label-qwen
   description: Automatically apply qwen label
   conditions:
