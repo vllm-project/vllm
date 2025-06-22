@@ -509,6 +509,7 @@ class WorkerWrapperBase:
         """
         self.rpc_rank = rpc_rank
         self.worker: Optional[WorkerBase] = None
+        self.vllm_config: Optional[VllmConfig] = None
         # do not store this `vllm_config`, `init_worker` will set the final
         # one. TODO: investigate if we can remove this field in
         # `WorkerWrapperBase`, `init_cached_hf_modules` should be
