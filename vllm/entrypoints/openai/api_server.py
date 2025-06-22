@@ -1094,7 +1094,9 @@ def build_app(args: Namespace) -> FastAPI:
                 if not url_path.startswith("/v1"):
                     await self.app(scope, receive, send)
                     return
-                if headers.get("Authorization") != "Bearer " + token:
+                # Type narrow to satisfy mypy.
+                if isinstance(token, str) and headers.get(
+                        "Authorization") != "Bearer " + token:
                     response = JSONResponse(content={"error": "Unauthorized"},
                                             status_code=401)
                     await response(scope, receive, send)
