@@ -188,7 +188,7 @@ def bench_run(
         marlin_g_idx,
         marlin_sort_indices,
     ) = gen_marlin_params()
-    (marlin_24_w_ref, marlin_24_q_w_comp, marlin_24_meta, marlin_24_s) = (
+    marlin_24_w_ref, marlin_24_q_w_comp, marlin_24_meta, marlin_24_s = (
         gen_marlin_24_params()
     )
     q_w_gptq, repack_sort_indices = gen_repack_params()
