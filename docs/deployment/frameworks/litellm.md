@@ -34,26 +34,23 @@ vllm serve qwen/Qwen1.5-0.5B-Chat
 
 - Call it with litellm:
 
-<details>
-<summary>Code</summary>
+??? Code
 
-```python
-import litellm 
+    ```python
+    import litellm 
 
-messages = [{ "content": "Hello, how are you?","role": "user"}]
+    messages = [{ "content": "Hello, how are you?","role": "user"}]
 
-# hosted_vllm is prefix key word and necessary
-response = litellm.completion(
-            model="hosted_vllm/qwen/Qwen1.5-0.5B-Chat", # pass the vllm model name
-            messages=messages,
-            api_base="http://{your-vllm-server-host}:{your-vllm-server-port}/v1",
-            temperature=0.2,
-            max_tokens=80)
+    # hosted_vllm is prefix key word and necessary
+    response = litellm.completion(
+                model="hosted_vllm/qwen/Qwen1.5-0.5B-Chat", # pass the vllm model name
+                messages=messages,
+                api_base="http://{your-vllm-server-host}:{your-vllm-server-port}/v1",
+                temperature=0.2,
+                max_tokens=80)
 
-print(response)
-```
-
-</details>
+    print(response)
+    ```
 
 ### Embeddings
 
@@ -64,9 +61,6 @@ vllm serve BAAI/bge-base-en-v1.5
 ```
 
 - Call it with litellm:
-
-<details>
-<summary>Code</summary>
 
 ```python
 from litellm import embedding   
@@ -80,7 +74,5 @@ embedding = embedding(model="hosted_vllm/BAAI/bge-base-en-v1.5", input=["Hello w
 
 print(embedding)
 ```
-
-</details>
 
 For details, see the tutorial [Using vLLM in LiteLLM](https://docs.litellm.ai/docs/providers/vllm).

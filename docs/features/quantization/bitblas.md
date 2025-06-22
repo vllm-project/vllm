@@ -27,9 +27,6 @@ Usually, these repositories have a `quantize_config.json` file that includes a `
 
 ## Read bitblas format checkpoint
 
-<details>
-<summary>Code</summary>
-
 ```python
 from vllm import LLM
 import torch
@@ -44,26 +41,21 @@ llm = LLM(
 )
 ```
 
-</details>
-
 ## Read gptq format checkpoint
 
-<details>
-<summary>Code</summary>
+??? Code
 
-```python
-from vllm import LLM
-import torch
+    ```python
+    from vllm import LLM
+    import torch
 
-# "hxbgsyxh/llama-13b-4bit-g-1" is a pre-quantized checkpoint.
-model_id = "hxbgsyxh/llama-13b-4bit-g-1"
-llm = LLM(
-    model=model_id,
-    dtype=torch.float16,
-    trust_remote_code=True,
-    quantization="bitblas",
-    max_model_len=1024
-)
-```
-
-</details>
+    # "hxbgsyxh/llama-13b-4bit-g-1" is a pre-quantized checkpoint.
+    model_id = "hxbgsyxh/llama-13b-4bit-g-1"
+    llm = LLM(
+        model=model_id,
+        dtype=torch.float16,
+        trust_remote_code=True,
+        quantization="bitblas",
+        max_model_len=1024
+    )
+    ```

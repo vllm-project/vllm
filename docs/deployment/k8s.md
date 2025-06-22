@@ -29,95 +29,89 @@ Alternatively, you can deploy vLLM to Kubernetes using any of the following:
 
 First, create a Kubernetes PVC and Secret for downloading and storing Hugging Face model:
 
-<details>
-<summary>Config</summary>
+??? Config
 
-```bash
-cat <<EOF |kubectl apply -f -
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: vllm-models
-spec:
-  accessModes:
-    - ReadWriteOnce
-  volumeMode: Filesystem
-  resources:
-    requests:
-      storage: 50Gi
----
-apiVersion: v1
-kind: Secret
-metadata:
-  name: hf-token-secret
-type: Opaque
-data:
-  token: $(HF_TOKEN)
-EOF
-```
-
-</details>
+    ```bash
+    cat <<EOF |kubectl apply -f -
+    apiVersion: v1
+    kind: PersistentVolumeClaim
+    metadata:
+      name: vllm-models
+    spec:
+      accessModes:
+        - ReadWriteOnce
+      volumeMode: Filesystem
+      resources:
+        requests:
+          storage: 50Gi
+    ---
+    apiVersion: v1
+    kind: Secret
+    metadata:
+      name: hf-token-secret
+    type: Opaque
+    data:
+      token: $(HF_TOKEN)
+    EOF
+    ```
 
 Next, start the vLLM server as a Kubernetes Deployment and Service:
 
-<details>
-<summary>Config</summary>
+??? Config
 
-```bash
-cat <<EOF |kubectl apply -f -
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: vllm-server
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app.kubernetes.io/name: vllm
-  template:
+    ```bash
+    cat <<EOF |kubectl apply -f -
+    apiVersion: apps/v1
+    kind: Deployment
     metadata:
-      labels:
-        app.kubernetes.io/name: vllm
+      name: vllm-server
     spec:
-      containers:
-      - name: vllm
-        image: vllm/vllm-openai:latest
-        command: ["/bin/sh", "-c"]
-        args: [
-          "vllm serve meta-llama/Llama-3.2-1B-Instruct"
-        ]
-        env:
-        - name: HUGGING_FACE_HUB_TOKEN
-          valueFrom:
-            secretKeyRef:
-              name: hf-token-secret
-              key: token
-        ports:
-          - containerPort: 8000
-        volumeMounts:
+      replicas: 1
+      selector:
+        matchLabels:
+          app.kubernetes.io/name: vllm
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: vllm
+        spec:
+          containers:
+          - name: vllm
+            image: vllm/vllm-openai:latest
+            command: ["/bin/sh", "-c"]
+            args: [
+              "vllm serve meta-llama/Llama-3.2-1B-Instruct"
+            ]
+            env:
+            - name: HUGGING_FACE_HUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-token-secret
+                  key: token
+            ports:
+              - containerPort: 8000
+            volumeMounts:
+              - name: llama-storage
+                mountPath: /root/.cache/huggingface
+          volumes:
           - name: llama-storage
-            mountPath: /root/.cache/huggingface
-      volumes:
-      - name: llama-storage
-        persistentVolumeClaim:
-          claimName: vllm-models
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: vllm-server
-spec:
-  selector:
-    app.kubernetes.io/name: vllm
-  ports:
-  - protocol: TCP
-    port: 8000
-    targetPort: 8000
-  type: ClusterIP
-EOF
-```
-
-</details>
+            persistentVolumeClaim:
+              claimName: vllm-models
+    ---
+    apiVersion: v1
+    kind: Service
+    metadata:
+      name: vllm-server
+    spec:
+      selector:
+        app.kubernetes.io/name: vllm
+      ports:
+      - protocol: TCP
+        port: 8000
+        targetPort: 8000
+      type: ClusterIP
+    EOF
+    ```
 
 We can verify that the vLLM server has started successfully via the logs (this might take a couple of minutes to download the model):
 
@@ -139,7 +133,7 @@ INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
       PVC is used to store the model cache and it is optional, you can use hostPath or other storage options
 
       <details>
-      <summary>Config</summary>
+      <summary>Yaml</summary>
 
       ```yaml
       apiVersion: v1
@@ -179,7 +173,7 @@ INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
       NVIDIA GPU:
 
       <details>
-      <summary>Config</summary>
+      <summary>Yaml</summary>
 
       ```yaml
       apiVersion: apps/v1
@@ -258,7 +252,7 @@ INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
       You can refer to the `deployment.yaml` below if using AMD ROCm GPU like MI300X.
 
       <details>
-      <summary>Config</summary>
+      <summary>Yaml</summary>
 
       ```yaml
       apiVersion: apps/v1
@@ -337,7 +331,7 @@ INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
       Next, create a Kubernetes Service file to expose the `mistral-7b` deployment:
 
       <details>
-      <summary>Config</summary>
+      <summary>Yaml</summary>
 
       ```yaml
       apiVersion: v1

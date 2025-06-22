@@ -16,31 +16,28 @@ vllm {chat,complete,serve,bench,collect-env,run-batch}
 
 Start the vLLM OpenAI Compatible API server.
 
-<details>
-<summary>Examples</summary>
+??? Examples
 
-```bash
-# Start with a model
-vllm serve meta-llama/Llama-2-7b-hf
+    ```bash
+    # Start with a model
+    vllm serve meta-llama/Llama-2-7b-hf
 
-# Specify the port
-vllm serve meta-llama/Llama-2-7b-hf --port 8100
+    # Specify the port
+    vllm serve meta-llama/Llama-2-7b-hf --port 8100
 
-# Check with --help for more options
-# To list all groups
-vllm serve --help=listgroup
+    # Check with --help for more options
+    # To list all groups
+    vllm serve --help=listgroup
 
-# To view a argument group
-vllm serve --help=ModelConfig
+    # To view a argument group
+    vllm serve --help=ModelConfig
 
-# To view a single argument
-vllm serve --help=max-num-seqs
+    # To view a single argument
+    vllm serve --help=max-num-seqs
 
-# To search by keyword
-vllm serve --help=max
-```
-
-</details>
+    # To search by keyword
+    vllm serve --help=max
+    ```
 
 ## chat
 

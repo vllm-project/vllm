@@ -77,16 +77,11 @@ mkdocs serve
 
 Example output:
 
-<details>
-<summary>Output</summary>
-
 ```console
 INFO    -  Documentation built in 106.83 seconds
 INFO    -  [22:02:02] Watching paths for changes: 'docs', 'mkdocs.yaml'
 INFO    -  [22:02:02] Serving on http://127.0.0.1:8000/
 ```
-
-</details>
 
 #### View in Your Browser
 
@@ -98,30 +93,27 @@ For additional features and advanced configurations, refer to the official [MkDo
 
 ## Testing
 
-<details>
-<summary>Commands</summary>
+??? note "Commands"
 
-```bash
-pip install -r requirements/dev.txt
+    ```bash
+    pip install -r requirements/dev.txt
 
-# Linting, formatting and static type checking
-pre-commit install --hook-type pre-commit --hook-type commit-msg
+    # Linting, formatting and static type checking
+    pre-commit install --hook-type pre-commit --hook-type commit-msg
 
-# You can manually run pre-commit with
-pre-commit run --all-files
+    # You can manually run pre-commit with
+    pre-commit run --all-files
 
-# To manually run something from CI that does not run
-# locally by default, you can run:
-pre-commit run mypy-3.9 --hook-stage manual --all-files
+    # To manually run something from CI that does not run
+    # locally by default, you can run:
+    pre-commit run mypy-3.9 --hook-stage manual --all-files
 
-# Unit tests
-pytest tests/
+    # Unit tests
+    pytest tests/
 
-# Run tests for a single test file with detailed output
-pytest -s -v tests/test_logger.py
-```
-
-</details>
+    # Run tests for a single test file with detailed output
+    pytest -s -v tests/test_logger.py
+    ```
 
 !!! tip
     Since the <gh-file:docker/Dockerfile> ships with Python 3.12, all tests in CI (except `mypy`) are run with Python 3.12.

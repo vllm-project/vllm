@@ -148,9 +148,6 @@ llm = LLM(
 
 CUDA graph compilation in V1 uses more memory than in V0. You can reduce memory usage by adjusting the compilation level:
 
-<details>
-<summary>Code</summary>
-
 ```python
 from vllm import LLM
 from vllm.config import CompilationConfig, CompilationLevel
@@ -163,8 +160,6 @@ llm = LLM(
     )
 )
 ```
-
-</details>
 
 Or, if you are not concerned about latency or overall performance, disable CUDA graph compilation entirely with `enforce_eager=True`:
 

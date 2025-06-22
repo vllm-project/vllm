@@ -24,9 +24,6 @@ vllm serve Qwen/Qwen1.5-7B-Chat
 
 - Start the Dify server with docker compose ([details](https://github.com/langgenius/dify?tab=readme-ov-file#quick-start)):
 
-<details>
-<summary>Commands</summary>
-
 ```console
 git clone https://github.com/langgenius/dify.git
 cd dify
@@ -34,8 +31,6 @@ cd docker
 cp .env.example .env
 docker compose up -d
 ```
-
-</details>
 
 - Open the browser to access `http://localhost/install`, config the basic login information and login.
 

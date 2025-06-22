@@ -57,24 +57,21 @@ By default, we optimize model inference using CUDA graphs which take up extra me
 
 You can adjust `compilation_config` to achieve a better balance between inference speed and memory usage:
 
-<details>
-<summary>Code</summary>
+??? Code
 
-```python
-from vllm import LLM
-from vllm.config import CompilationConfig, CompilationLevel
+    ```python
+    from vllm import LLM
+    from vllm.config import CompilationConfig, CompilationLevel
 
-llm = LLM(
-    model="meta-llama/Llama-3.1-8B-Instruct",
-    compilation_config=CompilationConfig(
-        level=CompilationLevel.PIECEWISE,
-        # By default, it goes up to max_num_seqs
-        cudagraph_capture_sizes=[1, 2, 4, 8, 16],
-    ),
-)
-```
-
-</details>
+    llm = LLM(
+        model="meta-llama/Llama-3.1-8B-Instruct",
+        compilation_config=CompilationConfig(
+            level=CompilationLevel.PIECEWISE,
+            # By default, it goes up to max_num_seqs
+            cudagraph_capture_sizes=[1, 2, 4, 8, 16],
+        ),
+    )
+    ```
 
 You can disable graph capturing completely via the `enforce_eager` flag:
 
@@ -132,23 +129,20 @@ reduce the size of the processed multi-modal inputs, which in turn saves memory.
 
 Here are some examples:
 
-<details>
-<summary>Code</summary>
+??? Code
 
-```python
-from vllm import LLM
+    ```python
+    from vllm import LLM
 
-# Available for Qwen2-VL series models
-llm = LLM(model="Qwen/Qwen2.5-VL-3B-Instruct",
-          mm_processor_kwargs={
-              "max_pixels": 768 * 768,  # Default is 1280 * 28 * 28
-          })
+    # Available for Qwen2-VL series models
+    llm = LLM(model="Qwen/Qwen2.5-VL-3B-Instruct",
+            mm_processor_kwargs={
+                "max_pixels": 768 * 768,  # Default is 1280 * 28 * 28
+            })
 
-# Available for InternVL series models
-llm = LLM(model="OpenGVLab/InternVL2-2B",
-          mm_processor_kwargs={
-              "max_dynamic_patch": 4,  # Default is 12
-          })
-```
-
-</details>
+    # Available for InternVL series models
+    llm = LLM(model="OpenGVLab/InternVL2-2B",
+            mm_processor_kwargs={
+                "max_dynamic_patch": 4,  # Default is 12
+            })
+    ```

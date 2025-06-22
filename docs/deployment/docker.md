@@ -20,8 +20,6 @@ docker run --runtime nvidia --gpus all \
     --model mistralai/Mistral-7B-v0.1
 ```
 
-</details>
-
 This image can also be used with other container engines such as [Podman](https://podman.io/).
 
 ```console
@@ -99,24 +97,21 @@ of PyTorch Nightly and should be considered **experimental**. Using the flag `--
     flags to speed up build process. However, ensure your `max_jobs` is substantially larger than `nvcc_threads` to get the most benefits.
     Keep an eye on memory usage with parallel jobs as it can be substantial (see example below).
 
-<details>
-<summary>Command</summary>
+??? Command
 
-```console
-# Example of building on Nvidia GH200 server. (Memory usage: ~15GB, Build time: ~1475s / ~25 min, Image size: 6.93GB)
-python3 use_existing_torch.py
-DOCKER_BUILDKIT=1 docker build . \
-  --file docker/Dockerfile \
-  --target vllm-openai \
-  --platform "linux/arm64" \
-  -t vllm/vllm-gh200-openai:latest \
-  --build-arg max_jobs=66 \
-  --build-arg nvcc_threads=2 \
-  --build-arg torch_cuda_arch_list="9.0 10.0+PTX" \
-  --build-arg vllm_fa_cmake_gpu_arches="90-real"
-```
-
-</details>
+    ```console
+    # Example of building on Nvidia GH200 server. (Memory usage: ~15GB, Build time: ~1475s / ~25 min, Image size: 6.93GB)
+    python3 use_existing_torch.py
+    DOCKER_BUILDKIT=1 docker build . \
+    --file docker/Dockerfile \
+    --target vllm-openai \
+    --platform "linux/arm64" \
+    -t vllm/vllm-gh200-openai:latest \
+    --build-arg max_jobs=66 \
+    --build-arg nvcc_threads=2 \
+    --build-arg torch_cuda_arch_list="9.0 10.0+PTX" \
+    --build-arg vllm_fa_cmake_gpu_arches="90-real"
+    ```
 
 !!! note
     If you are building the `linux/arm64` image on a non-ARM host (e.g., an x86_64 machine), you need to ensure your system is set up for cross-compilation using QEMU. This allows your host machine to emulate ARM64 execution.

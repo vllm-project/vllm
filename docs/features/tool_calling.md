@@ -15,49 +15,46 @@ vllm serve meta-llama/Llama-3.1-8B-Instruct \
 
 Next, make a request to the model that should result in it using the available tools:
 
-<details>
-<summary>Code</summary>
+??? Code
 
-```python
-from openai import OpenAI
-import json
+    ```python
+    from openai import OpenAI
+    import json
 
-client = OpenAI(base_url="http://localhost:8000/v1", api_key="dummy")
+    client = OpenAI(base_url="http://localhost:8000/v1", api_key="dummy")
 
-def get_weather(location: str, unit: str):
-    return f"Getting the weather for {location} in {unit}..."
-tool_functions = {"get_weather": get_weather}
+    def get_weather(location: str, unit: str):
+        return f"Getting the weather for {location} in {unit}..."
+    tool_functions = {"get_weather": get_weather}
 
-tools = [{
-    "type": "function",
-    "function": {
-        "name": "get_weather",
-        "description": "Get the current weather in a given location",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "location": {"type": "string", "description": "City and state, e.g., 'San Francisco, CA'"},
-                "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}
-            },
-            "required": ["location", "unit"]
+    tools = [{
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "description": "Get the current weather in a given location",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "location": {"type": "string", "description": "City and state, e.g., 'San Francisco, CA'"},
+                    "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}
+                },
+                "required": ["location", "unit"]
+            }
         }
-    }
-}]
+    }]
 
-response = client.chat.completions.create(
-    model=client.models.list().data[0].id,
-    messages=[{"role": "user", "content": "What's the weather like in San Francisco?"}],
-    tools=tools,
-    tool_choice="auto"
-)
+    response = client.chat.completions.create(
+        model=client.models.list().data[0].id,
+        messages=[{"role": "user", "content": "What's the weather like in San Francisco?"}],
+        tools=tools,
+        tool_choice="auto"
+    )
 
-tool_call = response.choices[0].message.tool_calls[0].function
-print(f"Function called: {tool_call.name}")
-print(f"Arguments: {tool_call.arguments}")
-print(f"Result: {get_weather(**json.loads(tool_call.arguments))}")
-```
-
-</details>
+    tool_call = response.choices[0].message.tool_calls[0].function
+    print(f"Function called: {tool_call.name}")
+    print(f"Arguments: {tool_call.arguments}")
+    print(f"Result: {get_weather(**json.loads(tool_call.arguments))}")
+    ```
 
 Example output:
 
@@ -306,54 +303,51 @@ A tool parser plugin is a Python file containing one or more ToolParser implemen
 
 Here is a summary of a plugin file:
 
-<details>
-<summary>Code</summary>
+??? Code
 
-```python
+    ```python
 
-# import the required packages
+    # import the required packages
 
-# define a tool parser and register it to vllm
-# the name list in register_module can be used
-# in --tool-call-parser. you can define as many
-# tool parsers as you want here.
-@ToolParserManager.register_module(["example"])
-class ExampleToolParser(ToolParser):
-    def __init__(self, tokenizer: AnyTokenizer):
-        super().__init__(tokenizer)
+    # define a tool parser and register it to vllm
+    # the name list in register_module can be used
+    # in --tool-call-parser. you can define as many
+    # tool parsers as you want here.
+    @ToolParserManager.register_module(["example"])
+    class ExampleToolParser(ToolParser):
+        def __init__(self, tokenizer: AnyTokenizer):
+            super().__init__(tokenizer)
 
-    # adjust request. e.g.: set skip special tokens
-    # to False for tool call output.
-    def adjust_request(
-            self, request: ChatCompletionRequest) -> ChatCompletionRequest:
-        return request
+        # adjust request. e.g.: set skip special tokens
+        # to False for tool call output.
+        def adjust_request(
+                self, request: ChatCompletionRequest) -> ChatCompletionRequest:
+            return request
 
-    # implement the tool call parse for stream call
-    def extract_tool_calls_streaming(
-        self,
-        previous_text: str,
-        current_text: str,
-        delta_text: str,
-        previous_token_ids: Sequence[int],
-        current_token_ids: Sequence[int],
-        delta_token_ids: Sequence[int],
-        request: ChatCompletionRequest,
-    ) -> Union[DeltaMessage, None]:
-        return delta
+        # implement the tool call parse for stream call
+        def extract_tool_calls_streaming(
+            self,
+            previous_text: str,
+            current_text: str,
+            delta_text: str,
+            previous_token_ids: Sequence[int],
+            current_token_ids: Sequence[int],
+            delta_token_ids: Sequence[int],
+            request: ChatCompletionRequest,
+        ) -> Union[DeltaMessage, None]:
+            return delta
 
-    # implement the tool parse for non-stream call
-    def extract_tool_calls(
-        self,
-        model_output: str,
-        request: ChatCompletionRequest,
-    ) -> ExtractedToolCallInformation:
-        return ExtractedToolCallInformation(tools_called=False,
-                                            tool_calls=[],
-                                            content=text)
+        # implement the tool parse for non-stream call
+        def extract_tool_calls(
+            self,
+            model_output: str,
+            request: ChatCompletionRequest,
+        ) -> ExtractedToolCallInformation:
+            return ExtractedToolCallInformation(tools_called=False,
+                                                tool_calls=[],
+                                                content=text)
 
-```
-
-</details>
+    ```
 
 Then you can use this plugin in the command line like this.
 

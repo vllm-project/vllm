@@ -60,25 +60,22 @@ And then you can send out a query to the OpenAI-compatible API to check the avai
 curl -o- http://localhost:30080/models
 ```
 
-<details>
-<summary>Expected output</summary>
+??? Output
 
-```json
-{
-  "object": "list",
-  "data": [
+    ```json
     {
-      "id": "facebook/opt-125m",
-      "object": "model",
-      "created": 1737428424,
-      "owned_by": "vllm",
-      "root": null
+      "object": "list",
+      "data": [
+        {
+          "id": "facebook/opt-125m",
+          "object": "model",
+          "created": 1737428424,
+          "owned_by": "vllm",
+          "root": null
+        }
+      ]
     }
-  ]
-}
-```
-
-</details>
+    ```
 
 To send an actual chatting request, you can issue a curl request to the OpenAI `/completion` endpoint:
 
@@ -92,26 +89,23 @@ curl -X POST http://localhost:30080/completions \
   }'
 ```
 
-<details>
-<summary>Expected output</summary>
+??? Output
 
-```json
-{
-  "id": "completion-id",
-  "object": "text_completion",
-  "created": 1737428424,
-  "model": "facebook/opt-125m",
-  "choices": [
+    ```json
     {
-      "text": " there was a brave knight who...",
-      "index": 0,
-      "finish_reason": "length"
+      "id": "completion-id",
+      "object": "text_completion",
+      "created": 1737428424,
+      "model": "facebook/opt-125m",
+      "choices": [
+        {
+          "text": " there was a brave knight who...",
+          "index": 0,
+          "finish_reason": "length"
+        }
+      ]
     }
-  ]
-}
-```
-
-</details>
+    ```
 
 ### Uninstall
 
@@ -127,28 +121,25 @@ sudo helm uninstall vllm
 
 The core vLLM production stack configuration is managed with YAML. Here is the example configuration used in the installation above:
 
-<details>
-<summary>Yaml</summary>
+??? Yaml
 
-```yaml
-servingEngineSpec:
-  runtimeClassName: ""
-  modelSpec:
-  - name: "opt125m"
-    repository: "vllm/vllm-openai"
-    tag: "latest"
-    modelURL: "facebook/opt-125m"
+    ```yaml
+    servingEngineSpec:
+      runtimeClassName: ""
+      modelSpec:
+      - name: "opt125m"
+        repository: "vllm/vllm-openai"
+        tag: "latest"
+        modelURL: "facebook/opt-125m"
 
-    replicaCount: 1
+        replicaCount: 1
 
-    requestCPU: 6
-    requestMemory: "16Gi"
-    requestGPU: 1
+        requestCPU: 6
+        requestMemory: "16Gi"
+        requestGPU: 1
 
-    pvcStorage: "10Gi"
-```
-
-</details>
+        pvcStorage: "10Gi"
+    ```
 
 In this YAML configuration:
 * **`modelSpec`** includes:
