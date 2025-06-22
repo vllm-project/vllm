@@ -49,10 +49,10 @@ __global__ void LLGemm_Silu_kernel(float4* af4, __half2* bf4, _Float16* c,
   float4 rowA_elem4[NUM_A_ROWS_PER_BLOCK];
   // float4 colB_elem4;
   __half2 colB_elem4x, colB_elem4y, colB_elem4z, colB_elem4w;
-  float4 sum4;                      //[NUM_A_ROWS_PER_BLOCK];
+  // float4 sum4;                      //[NUM_A_ROWS_PER_BLOCK];
   float acc[NUM_A_ROWS_PER_BLOCK];  //= 0.0;
   __half2 acch2;
-  __half2 oval;
+  // __half2 oval;
 
   // rowA_elem4 = af4[row_addr + threadid];
   //__syncthreads();
@@ -74,7 +74,7 @@ __global__ void LLGemm_Silu_kernel(float4* af4, __half2* bf4, _Float16* c,
 
   // __syncthreads();
   __half2 Af2;
-  __half2 Bf2;
+  // __half2 Bf2;
   float2 S;
   // auto Bh2ptr = reinterpret_cast<__half2 *>(&colB_elem4);
   // auto Bf2x = *Bh2ptr;
