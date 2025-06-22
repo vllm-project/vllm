@@ -9,8 +9,8 @@ import sys
 import uvloop
 import zmq
 
+import vllm
 import vllm.envs as envs
-from vllm import AsyncEngineArgs
 from vllm.entrypoints.cli.types import CLISubcommand
 from vllm.entrypoints.openai.api_server import (run_server, run_server_worker,
                                                 setup_server)
@@ -38,10 +38,7 @@ logger = init_logger(__name__)
 
 class ServeSubcommand(CLISubcommand):
     """The `serve` subcommand for the vLLM CLI. """
-
-    def __init__(self):
-        self.name = "serve"
-        super().__init__()
+    name = "serve"
 
     @staticmethod
     def cmd(args: argparse.Namespace) -> None:
@@ -115,7 +112,7 @@ def run_headless(args: argparse.Namespace):
         raise ValueError("api_server_count can't be set in headless mode")
 
     # Create the EngineConfig.
-    engine_args = AsyncEngineArgs.from_cli_args(args)
+    engine_args = vllm.AsyncEngineArgs.from_cli_args(args)
     usage_context = UsageContext.OPENAI_API_SERVER
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
 
@@ -175,7 +172,7 @@ def run_multi_api_server(args: argparse.Namespace):
 
     listen_address, sock = setup_server(args)
 
-    engine_args = AsyncEngineArgs.from_cli_args(args)
+    engine_args = vllm.AsyncEngineArgs.from_cli_args(args)
     usage_context = UsageContext.OPENAI_API_SERVER
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
     model_config = vllm_config.model_config
