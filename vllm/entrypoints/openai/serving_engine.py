@@ -8,6 +8,7 @@ import sys
 import time
 from collections.abc import AsyncGenerator, Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from contextvars import ContextVar
 from http import HTTPStatus
 from typing import (Annotated, Any, Callable, ClassVar, Generic, Optional,
                     TypeVar, Union, cast, overload)
@@ -80,6 +81,9 @@ from vllm.tracing import (contains_trace_headers, extract_trace_headers,
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
 from vllm.utils import (AsyncMicrobatchTokenizer, is_list_of,
                         merge_async_iterators, random_uuid)
+
+request_async_tokenizer: ContextVar[Optional[AsyncMicrobatchTokenizer]] = (
+    ContextVar("request_async_tokenizer", default=None))
 
 logger = init_logger(__name__)
 
@@ -227,14 +231,36 @@ class OpenAIServing:
         self._async_tokenizer: Optional[AsyncMicrobatchTokenizer] = None
 
     def _set_tokenizer(self, tokenizer):
-        """Set or update the tokenizer.
-        Will only create a new AsyncMicrobatchTokenizer if:
-        1. This is the first time a tokenizer is set
-        2. We're using a different tokenizer
         """
-        if (self._async_tokenizer is None
-                or self._async_tokenizer.tokenizer != tokenizer):
-            self._async_tokenizer = AsyncMicrobatchTokenizer(tokenizer)
+        Return (and cache) an `AsyncMicrobatchTokenizer` bound to the 
+        given tokenizer.
+
+        The cache key is the tokenizer instance itself. This guarantees that
+        distinct tokenizers each get their own `AsyncMicrobatchTokenizer`, 
+        while repeated calls with the same tokenizer re-use the cached wrapper.
+        """
+        if not hasattr(self, "_async_tokenizer_pool"):
+            self._async_tokenizer_pool: dict[AnyTokenizer,
+                                             AsyncMicrobatchTokenizer] = {}
+
+        tok = self._async_tokenizer_pool.get(tokenizer)
+        if tok is None:
+            tok = AsyncMicrobatchTokenizer(tokenizer)
+            self._async_tokenizer_pool[tokenizer] = tok
+
+        # Bind to this coroutine so downstream helpers
+        # pick up the correct tokenizer
+        request_async_tokenizer.set(tok)
+
+        return tok
+
+    @staticmethod
+    def _get_request_async_tokenizer() -> AsyncMicrobatchTokenizer:
+        """Get the current request's async tokenizer."""
+        tok = request_async_tokenizer.get()
+        if tok is None:
+            raise RuntimeError("Tokenizer not initialized for this request.")
+        return tok
 
     async def _preprocess(
         self,
@@ -478,9 +504,7 @@ class OpenAIServing:
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]],
         add_special_tokens: bool,
     ) -> TextTokensPrompt:
-        if self._async_tokenizer is None:
-            raise RuntimeError(
-                "Tokenizer not initialized. Call _set_tokenizer() first.")
+        async_tokenizer = self._get_request_async_tokenizer()
 
         if (self.model_config.encoder_config is not None
                 and self.model_config.encoder_config.get(
@@ -488,17 +512,17 @@ class OpenAIServing:
             prompt = prompt.lower()
 
         if truncate_prompt_tokens is None:
-            encoded = await self._async_tokenizer(
+            encoded = await async_tokenizer(
                 prompt, add_special_tokens=add_special_tokens)
         elif truncate_prompt_tokens < 0:
             # Negative means we cap at the model's max length
-            encoded = await self._async_tokenizer(
+            encoded = await async_tokenizer(
                 prompt,
                 add_special_tokens=add_special_tokens,
                 truncation=True,
                 max_length=self.max_model_len)
         else:
-            encoded = await self._async_tokenizer(
+            encoded = await async_tokenizer(
                 prompt,
                 add_special_tokens=add_special_tokens,
                 truncation=True,
@@ -515,9 +539,7 @@ class OpenAIServing:
         prompt_ids: list[int],
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]],
     ) -> TextTokensPrompt:
-        if self._async_tokenizer is None:
-            raise RuntimeError(
-                "Tokenizer not initialized. Call _set_tokenizer() first.")
+        async_tokenizer = self._get_request_async_tokenizer()
 
         if truncate_prompt_tokens is None:
             input_ids = prompt_ids
@@ -526,7 +548,7 @@ class OpenAIServing:
         else:
             input_ids = prompt_ids[-truncate_prompt_tokens:]
 
-        input_text = await self._async_tokenizer.decode(input_ids)
+        input_text = await async_tokenizer.decode(input_ids)
 
         return self._validate_input(request, input_ids, input_text)
 

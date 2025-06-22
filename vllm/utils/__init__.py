@@ -575,12 +575,8 @@ class AsyncMicrobatchTokenizer:
         loop = asyncio.get_running_loop()
 
         while True:
-            try:
-                assert self._queue is not None
-                first_item = await self._queue.get()
-            except asyncio.CancelledError:
-                return
-
+            assert self._queue is not None
+            first_item = await self._queue.get()
             batch = [first_item]
             deadline = loop.time() + self.batch_wait_timeout_s
 
@@ -608,27 +604,25 @@ class AsyncMicrobatchTokenizer:
                 # batched tokenizer call for a big speed-up.
                 can_batch = all(kw == kwargs_list[0] for kw in kwargs_list)
 
-                def _encode_batch_single(prompts=prompts,
-                                         kwargs_list=kwargs_list):
-                    """Tokenize each prompt individually (fallback)."""
-                    return [
-                        self.tokenizer(p, **kw)
-                        for p, kw in zip(prompts, kwargs_list)
-                    ]
+                if can_batch and len(prompts) > 1:
 
-                def _encode_batch_group(prompts=prompts,
-                                        kwargs_list=kwargs_list):
-                    """Tokenize the micro-batch in one call 
-                    and split results."""
-                    grouped = self.tokenizer(prompts, **kwargs_list[0])
-                    single_encodings = []
-                    for i in range(len(prompts)):
-                        data_i = {k: v[i] for k, v in grouped.items()}
-                        single_encodings.append(BatchEncoding(data_i))
-                    return single_encodings
+                    def encode_fn(prompts=prompts, kwargs_list=kwargs_list):
+                        """Tokenize the micro-batch in one call 
+                        and split results."""
+                        grouped = self.tokenizer(prompts, **kwargs_list[0])
+                        single_encodings = []
+                        for i in range(len(prompts)):
+                            data_i = {k: v[i] for k, v in grouped.items()}
+                            single_encodings.append(BatchEncoding(data_i))
+                        return single_encodings
+                else:
 
-                encode_fn = _encode_batch_group if can_batch and len(
-                    prompts) > 1 else _encode_batch_single
+                    def encode_fn(prompts=prompts, kwargs_list=kwargs_list):
+                        """Tokenize each prompt individually (fallback)."""
+                        return [
+                            self.tokenizer(p, **kw)
+                            for p, kw in zip(prompts, kwargs_list)
+                        ]
 
                 try:
                     results = await loop.run_in_executor(
