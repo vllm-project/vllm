@@ -253,6 +253,17 @@ class AiterFlashAttentionMetadataBuilder:
                 max_seq_len=local_max_seq_len,
                 causal=True)
 
+            local_cu_seq_lens = torch.zeros(virt_k_seqlens_np.shape[0] + 1,
+                                            dtype=torch.int32,
+                                            device=self.runner.device)
+            local_cu_seq_lens[1:] = torch.cumsum(
+                torch.from_numpy(virt_k_seqlens_np).to(
+                    device=self.runner.device,
+                    dtype=torch.int32,
+                    non_blocking=True),
+                dim=0)
+
+
             local_attn_metadata = \
             AiterFlashAttentionMetadata.LocalAttentionMetadata(
                 local_query_start_loc=local_query_start_loc,
@@ -260,6 +271,7 @@ class AiterFlashAttentionMetadataBuilder:
                 local_block_table=virt_block_table_tensor,
                 local_max_query_len=local_max_query_len,
                 local_max_seq_len=local_max_seq_len,
+                local_cu_seq_lens=local_cu_seq_lens,
                 local_scheduler_metadata=local_scheduler_metadata,
             )
 
@@ -368,6 +380,7 @@ class AiterFlashAttentionMetadata:
         local_block_table: torch.Tensor
         local_max_query_len: int
         local_max_seq_len: int
+        local_cu_seq_lens: torch.Tensor
         local_scheduler_metadata: Optional[torch.Tensor]
 
     local_attn_metadata: Optional[LocalAttentionMetadata] = None
@@ -546,7 +559,8 @@ class AiterFlashAttentionImpl(AttentionImpl):
                     alibi_slopes=self.alibi_slopes,
                     window_size=self.sliding_window,
                     block_table=block_table,
-                    cu_seqlens_k=cu_seq_lens,
+                    cu_seqlens_k=(cu_seq_lens if not use_local_attn else
+                                  local_metadata.local_cu_seq_lens),
                 )
 
             _, num_heads, head_size = query.shape
