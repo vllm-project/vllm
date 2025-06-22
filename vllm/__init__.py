@@ -57,8 +57,9 @@ if typing.TYPE_CHECKING:
 else:
 
     def __getattr__(name: str) -> typing.Any:
+        from importlib import import_module
+
         if name in MODULE_ATTRS:
-            from importlib import import_module
             module_name, attr_name = MODULE_ATTRS[name].split(":")
             module = import_module(module_name, __package__)
             return getattr(module, attr_name)
