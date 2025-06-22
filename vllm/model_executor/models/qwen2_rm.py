@@ -77,7 +77,7 @@ class Qwen2RewardBaseModel(nn.Module, SupportsLoRA, SupportsPP):
     ) -> Union[torch.Tensor, IntermediateTensors]:
         hidden_states = self.model(input_ids, positions, intermediate_tensors,
                                    inputs_embeds)
-        logits, _ = self.score(hidden_states)
+        logits = self.score(hidden_states)
         return logits
 
     def pooler(
