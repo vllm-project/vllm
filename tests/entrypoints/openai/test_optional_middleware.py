@@ -100,7 +100,7 @@ async def test_not_v1_api_token(server: RemoteOpenAIServer):
 async def test_enable_request_id_header(server: RemoteOpenAIServer):
     response = requests.get(server.url_for("health"))
     assert "X-Request-Id" in response.headers
-    assert len(response.headers.get("X-Request-Id")) == 32
+    assert len(response.headers.get("X-Request-Id", "")) == 32
 
 
 @pytest.mark.parametrize(
