@@ -116,10 +116,10 @@ body[data-md-color-scheme="slate"] .md-nav__item--section > label.md-nav__link .
   right: .3rem;
   display: block;
   padding: .1rem .4rem;
-  color: var(--md-default-bg-color);
+  color: var(--md-primary-bg-color);
   font-weight: bold;
   font-size: .8rem;
-  border: .05rem solid var(--md-default-bg-color--lighter);
+  border: .05rem solid var(--md-primary-bg-color);
   border-radius: .1rem;
-  content: "cmd+k";
+  content: var(--md-search-extension-shortcut);
 }
