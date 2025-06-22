@@ -152,7 +152,7 @@ def use_rocm_custom_paged_attention(
                 and (qtype == torch.half or qtype == torch.bfloat16)
                 and head_size == 128 and block_size == 16
                 and (gqa_ratio >= 3 and gqa_ratio <= 16)
-                and max_seq_len <= 32768 and alibi_slopes is None
+                and max_seq_len <= 128 * 1024 and alibi_slopes is None
                 and kv_cache_dtype == "auto"
                 and envs.VLLM_ROCM_CUSTOM_PAGED_ATTN)
 
@@ -228,9 +228,8 @@ class RocmPlatform(Platform):
 
         if envs.VLLM_USE_V1:
             if envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA \
-                and (on_mi3xx() or on_gfx9()):
-                logger.info(
-                    "Using Aiter Flash Attention backend on V1 engine.")
+                and on_gfx9():
+                logger.info("Using Flash Attention backend on V1 engine.")
                 return ("vllm.v1.attention.backends."
                         "rocm_aiter_fa.AiterFlashAttentionBackend")
             else:

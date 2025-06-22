@@ -1,50 +1,28 @@
 {
     "1": {
         "BLOCK_SIZE_M": 16,
-<<<<<<< HEAD
-        "BLOCK_SIZE_N": 32,
-        "BLOCK_SIZE_K": 256,
-        "GROUP_SIZE_M": 1,
-        "num_warps": 4,
-=======
         "BLOCK_SIZE_N": 128,
         "BLOCK_SIZE_K": 256,
         "GROUP_SIZE_M": 1,
         "num_warps": 8,
->>>>>>> origin/main
         "num_stages": 2,
         "waves_per_eu": 0
     },
     "2": {
-<<<<<<< HEAD
-        "BLOCK_SIZE_M": 32,
-        "BLOCK_SIZE_N": 16,
-        "BLOCK_SIZE_K": 256,
-        "GROUP_SIZE_M": 1,
-        "num_warps": 2,
-=======
         "BLOCK_SIZE_M": 16,
         "BLOCK_SIZE_N": 128,
         "BLOCK_SIZE_K": 256,
         "GROUP_SIZE_M": 1,
         "num_warps": 8,
->>>>>>> origin/main
         "num_stages": 2,
         "waves_per_eu": 0
     },
     "4": {
         "BLOCK_SIZE_M": 16,
-<<<<<<< HEAD
-        "BLOCK_SIZE_N": 64,
-        "BLOCK_SIZE_K": 256,
-        "GROUP_SIZE_M": 1,
-        "num_warps": 4,
-=======
         "BLOCK_SIZE_N": 128,
         "BLOCK_SIZE_K": 256,
         "GROUP_SIZE_M": 1,
         "num_warps": 8,
->>>>>>> origin/main
         "num_stages": 2,
         "waves_per_eu": 0
     },
@@ -53,25 +31,15 @@
         "BLOCK_SIZE_N": 128,
         "BLOCK_SIZE_K": 128,
         "GROUP_SIZE_M": 1,
-<<<<<<< HEAD
-        "num_warps": 4,
-=======
         "num_warps": 8,
->>>>>>> origin/main
         "num_stages": 2,
         "waves_per_eu": 0
     },
     "16": {
         "BLOCK_SIZE_M": 16,
-<<<<<<< HEAD
-        "BLOCK_SIZE_N": 64,
-        "BLOCK_SIZE_K": 128,
-        "GROUP_SIZE_M": 4,
-=======
         "BLOCK_SIZE_N": 128,
         "BLOCK_SIZE_K": 128,
         "GROUP_SIZE_M": 1,
->>>>>>> origin/main
         "num_warps": 2,
         "num_stages": 2,
         "waves_per_eu": 0
@@ -81,21 +49,13 @@
         "BLOCK_SIZE_N": 128,
         "BLOCK_SIZE_K": 128,
         "GROUP_SIZE_M": 1,
-<<<<<<< HEAD
-        "num_warps": 4,
-=======
         "num_warps": 2,
->>>>>>> origin/main
         "num_stages": 2,
         "waves_per_eu": 0
     },
     "32": {
         "BLOCK_SIZE_M": 16,
-<<<<<<< HEAD
-        "BLOCK_SIZE_N": 64,
-=======
         "BLOCK_SIZE_N": 128,
->>>>>>> origin/main
         "BLOCK_SIZE_K": 128,
         "GROUP_SIZE_M": 4,
         "num_warps": 2,
@@ -104,11 +64,7 @@
     },
     "48": {
         "BLOCK_SIZE_M": 16,
-<<<<<<< HEAD
-        "BLOCK_SIZE_N": 64,
-=======
         "BLOCK_SIZE_N": 128,
->>>>>>> origin/main
         "BLOCK_SIZE_K": 128,
         "GROUP_SIZE_M": 4,
         "num_warps": 2,
@@ -117,11 +73,7 @@
     },
     "64": {
         "BLOCK_SIZE_M": 16,
-<<<<<<< HEAD
-        "BLOCK_SIZE_N": 64,
-=======
         "BLOCK_SIZE_N": 128,
->>>>>>> origin/main
         "BLOCK_SIZE_K": 128,
         "GROUP_SIZE_M": 1,
         "num_warps": 2,
@@ -130,9 +82,6 @@
     },
     "96": {
         "BLOCK_SIZE_M": 16,
-<<<<<<< HEAD
-        "BLOCK_SIZE_N": 64,
-=======
         "BLOCK_SIZE_N": 128,
         "BLOCK_SIZE_K": 128,
         "GROUP_SIZE_M": 8,
@@ -143,63 +92,32 @@
     "128": {
         "BLOCK_SIZE_M": 16,
         "BLOCK_SIZE_N": 128,
->>>>>>> origin/main
         "BLOCK_SIZE_K": 128,
         "GROUP_SIZE_M": 4,
         "num_warps": 4,
         "num_stages": 2,
         "waves_per_eu": 0
     },
-<<<<<<< HEAD
-    "128": {
-        "BLOCK_SIZE_M": 16,
-        "BLOCK_SIZE_N": 64,
-        "BLOCK_SIZE_K": 256,
-        "GROUP_SIZE_M": 1,
-        "num_warps": 2,
-        "num_stages": 2,
-        "waves_per_eu": 0
-    },
-    "256": {
-        "BLOCK_SIZE_M": 16,
-        "BLOCK_SIZE_N": 64,
-        "BLOCK_SIZE_K": 128,
-        "GROUP_SIZE_M": 4,
-=======
     "256": {
         "BLOCK_SIZE_M": 16,
         "BLOCK_SIZE_N": 128,
         "BLOCK_SIZE_K": 128,
         "GROUP_SIZE_M": 8,
->>>>>>> origin/main
         "num_warps": 4,
         "num_stages": 2,
         "waves_per_eu": 0
     },
     "512": {
         "BLOCK_SIZE_M": 32,
-<<<<<<< HEAD
-        "BLOCK_SIZE_N": 256,
-        "BLOCK_SIZE_K": 128,
-        "GROUP_SIZE_M": 8,
-        "num_warps": 8,
-=======
         "BLOCK_SIZE_N": 128,
         "BLOCK_SIZE_K": 128,
         "GROUP_SIZE_M": 8,
         "num_warps": 4,
->>>>>>> origin/main
         "num_stages": 2,
         "waves_per_eu": 0
     },
     "1024": {
         "BLOCK_SIZE_M": 64,
-<<<<<<< HEAD
-        "BLOCK_SIZE_N": 256,
-        "BLOCK_SIZE_K": 128,
-        "GROUP_SIZE_M": 8,
-        "num_warps": 8,
-=======
         "BLOCK_SIZE_N": 128,
         "BLOCK_SIZE_K": 128,
         "GROUP_SIZE_M": 8,
@@ -240,7 +158,6 @@
         "BLOCK_SIZE_K": 128,
         "GROUP_SIZE_M": 4,
         "num_warps": 4,
->>>>>>> origin/main
         "num_stages": 2,
         "waves_per_eu": 0
     }

@@ -445,7 +445,7 @@ Specified using `--task classify`.
 | Architecture                     | Models   | Example HF Models                      | [LoRA][lora-adapter]   | [PP][distributed-serving]   | [V1](gh-issue:8779)   |
 |----------------------------------|----------|----------------------------------------|------------------------|-----------------------------|-----------------------|
 | `JambaForSequenceClassification` | Jamba    | `ai21labs/Jamba-tiny-reward-dev`, etc. | ✅︎                     | ✅︎                          |                       |
-
+| `GPT2ForSequenceClassification`  | GPT2     | `nie3e/sentiment-polish-gpt2-small`    |                        |                             |                       |
 If your model is not in the above list, we will try to automatically convert the model using
 [as_classification_model][vllm.model_executor.models.adapters.as_classification_model]. By default, the class probabilities are extracted from the softmaxed hidden state corresponding to the last token.
 
@@ -562,6 +562,7 @@ Specified using `--task generate`.
 | `SkyworkR1VChatModel`                        | Skywork-R1V-38B                                                          | T + I                                                                 | `Skywork/Skywork-R1V-38B`                                                                                                                               |                        | ✅︎                          | ✅︎                    |
 | `SmolVLMForConditionalGeneration`            | SmolVLM2                                                                 | T + I                                                                 | `SmolVLM2-2.2B-Instruct`                                                                                                                                | ✅︎                     |                             | ✅︎                    |
 | `TarsierForConditionalGeneration`            | Tarsier                                                                  | T + I<sup>E+</sup>                                                    | `omni-search/Tarsier-7b`,`omni-search/Tarsier-34b`                                                                                                      |                        | ✅︎                          | ✅︎                    |
+| `Tarsier2ForConditionalGeneration`<sup>^</sup>            | Tarsier2                                                                  | T + I<sup>E+</sup> + V<sup>E+</sup>                                                    | `omni-research/Tarsier2-Recap-7b`,`omni-research/Tarsier2-7b-0115`                                                                                                      |                        | ✅︎                          | ✅︎                    |
 
 <sup>^</sup> You need to set the architecture name via `--hf-overrides` to match the one in vLLM.  
 &nbsp;&nbsp;&nbsp;&nbsp;• For example, to use DeepSeek-VL2 series models:  

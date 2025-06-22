@@ -6,6 +6,14 @@ from transformers import AutoModelForSequenceClassification
 
 from vllm.platforms import current_platform
 
+# TODO: enable when float32 is supported by V1
+# @pytest.fixture(autouse=True)
+# def v1(run_with_both_engines):
+#     # Simple autouse wrapper to run both engines for each test
+#     # This can be promoted up to conftest.py to run for every
+#     # test in a package
+#     pass
+
 
 @pytest.mark.parametrize(
     "model",
@@ -29,7 +37,7 @@ def test_models(
         # switch to use ROCm CK FA backend
         monkeypatch.setenv("VLLM_USE_TRITON_FLASH_ATTN", "False")
 
-    with vllm_runner(model, dtype=dtype) as vllm_model:
+    with vllm_runner(model, max_model_len=512, dtype=dtype) as vllm_model:
         vllm_outputs = vllm_model.classify(example_prompts)
 
     with hf_runner(model,
