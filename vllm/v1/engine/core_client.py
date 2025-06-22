@@ -874,9 +874,6 @@ class AsyncMPClient(MPClient):
 
     async def profile_async(self, is_start: bool = True) -> None:
         await self.call_utility_async("profile", is_start)
-    
-    async def reinit_async(self, dp_size: int) -> None:
-        await self.call_utility_async("reinit", dp_size)
 
     async def reset_mm_cache_async(self) -> None:
         await self.call_utility_async("reset_mm_cache")
@@ -1149,3 +1146,7 @@ class RayDPClient(DPAsyncMPClient):
             addresses=addresses,
             executor_class=executor_class,
             log_stats=log_stats)
+
+    async def reinit_async(self, dp_size: int) -> None:
+        self.resources.engine_manager.scale(dp_size)
+        await self.call_utility_async("reinit", dp_size)

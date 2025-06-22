@@ -984,6 +984,14 @@ class DPEngineCoreActor(DPEngineCoreProc):
             self.shutdown()
     
     def reinit(self, new_dp_size: int):
+        # Destroy the old DP states
+        from vllm.distributed.utils import (
+            stateless_destroy_torch_distributed_process_group)
+        stateless_destroy_torch_distributed_process_group(self.dp_group)
+        logger.info("Destroyed engine core dp states")
+        self.model_executor.destroy_dp_states()
+
+        # Create the new DP states
         self.vllm_config.parallel_config.data_parallel_size = new_dp_size
         self.vllm_config.parallel_config.data_parallel_master_port = 50000
         self.dp_group = stateless_init_torch_distributed_process_group(

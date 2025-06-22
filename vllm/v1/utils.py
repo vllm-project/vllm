@@ -313,9 +313,14 @@ class CoreEngineActorManager:
 
         from vllm.v1.engine.core import DPEngineCoreActor
 
+        self.vllm_config = vllm_config
+        self.executor_class = executor_class
+        self.log_stats = log_stats
+        self.addresses = addresses
+
         self.local_engine_actors: list[ray.ActorHandle] = []
         self.remote_engine_actors: list[ray.ActorHandle] = []
-        self.upscale_engine_actors: list[ray.ActorHandle] = []
+        self.run_refs: list[ray.ObjectRef] = []
         dp_size = vllm_config.parallel_config.data_parallel_size
         local_engine_count = \
             vllm_config.parallel_config.data_parallel_size_local
@@ -371,60 +376,7 @@ class CoreEngineActorManager:
         ray.get(refs)
         logger.info("Created DP engine actors")
 
-        # Simulate upscale DP
-
-        new_dp_size = 4
-
-        destroy_refs = []
-        import time
-        start_destroy = time.time()
         for actor in self.local_engine_actors + self.remote_engine_actors:
-            destroy_refs.append(actor.destroy_dp_states.remote())
-        ray.get(destroy_refs)
-        finish_destroy = time.time()
-        logger.info(
-            f"Destroyed DP states in {finish_destroy - start_destroy} seconds")
-
-        new_refs = []
-        upscale_placement_groups, upscale_local_dp_ranks = \
-            self.create_upscale_placement_groups(vllm_config, new_dp_size)
-        finish_pg = time.time()
-        logger.info(
-            f"Created new DP placement groups in {finish_pg - finish_destroy} seconds")
-
-        for pg, local_dp_rank in zip(upscale_placement_groups,
-                                     upscale_local_dp_ranks):
-            dp_vllm_config = copy.deepcopy(vllm_config)
-            dp_vllm_config.parallel_config.data_parallel_size = new_dp_size
-            dp_vllm_config.parallel_config.data_parallel_master_port = 50000
-            # assumes this is on head node and all existing DP ranks are local
-            actor = ray.remote(DPEngineCoreActor).options(
-                scheduling_strategy=PlacementGroupSchedulingStrategy(
-                    placement_group=pg,
-                    placement_group_bundle_index=world_size,
-                )).remote(vllm_config=dp_vllm_config,
-                          executor_class=executor_class,
-                          log_stats=log_stats,
-                          on_head_node=True,
-                          addresses=addresses,
-                          dp_rank=local_dp_rank,
-                          local_dp_rank=local_dp_rank)
-            self.upscale_engine_actors.append(actor)
-            new_refs.append(actor.wait_for_init.remote())
-
-        reinit_refs = []
-        self.run_refs = []
-        for actor in self.local_engine_actors + self.remote_engine_actors:
-            reinit_refs.append(actor.reinit_dp_states.remote(new_dp_size))
-        assert len(reinit_refs) == 2
-        ray.get(new_refs + reinit_refs)
-        finish_reinit = time.time()
-        logger.info(
-            f"Reinitialized DP states in {finish_reinit - finish_pg} seconds"
-        )
-        logger.info("Scaled up DP engine actors")
-
-        for actor in self.local_engine_actors + self.remote_engine_actors + self.upscale_engine_actors:
             self.run_refs.append(actor.run.remote())
 
     @staticmethod
@@ -542,10 +494,61 @@ class CoreEngineActorManager:
             ray.kill(actor)
         for pg in self.created_placement_groups:
             ray.util.remove_placement_group(pg)
+    
+    def scale(self, new_dp_size: int):
+        import copy
 
-    def reinit(self, new_dp_size: int):
-        for actor in self.local_engine_actors + self.remote_engine_actors:
-            actor.reinit.remote(new_dp_size)
+        import ray
+        from ray.util.scheduling_strategies import (
+            PlacementGroupSchedulingStrategy)
+
+        from vllm.v1.engine.core import DPEngineCoreActor
+
+        assert new_dp_size > self.vllm_config.parallel_config.data_parallel_size, (
+            "Only support upscale for now: "
+            f"new_dp_size {new_dp_size}, current_dp_size "
+            f"{self.vllm_config.parallel_config.data_parallel_size}")
+
+        new_engine_actors = []
+        new_refs = []
+        upscale_placement_groups, upscale_local_dp_ranks = \
+            self.create_upscale_placement_groups(self.vllm_config, new_dp_size)
+
+        self.vllm_config.parallel_config.data_parallel_size = new_dp_size
+        # FIXME(rui): this is a hack. Only works for scaling once.
+        self.vllm_config.parallel_config.data_parallel_master_port = 50000
+
+        world_size = self.vllm_config.parallel_config.world_size
+
+        for pg, local_dp_rank in zip(upscale_placement_groups,
+                                     upscale_local_dp_ranks):
+            dp_vllm_config = copy.deepcopy(self.vllm_config)
+            # assumes this is on head node and all existing DP ranks are local
+            actor = ray.remote(DPEngineCoreActor).options(
+                scheduling_strategy=PlacementGroupSchedulingStrategy(
+                    placement_group=pg,
+                    placement_group_bundle_index=world_size,
+                )).remote(vllm_config=dp_vllm_config,
+                          executor_class=self.executor_class,
+                          log_stats=self.log_stats,
+                          on_head_node=True,
+                          addresses=self.addresses,
+                          dp_rank=local_dp_rank,
+                          local_dp_rank=local_dp_rank)
+            new_engine_actors.append(actor)
+            new_refs.append(actor.wait_for_init.remote())
+
+        # NOTE(rui): we don't wait here, and continue to launch the new engine actors.
+        # This makes scale() async so that we can call reinit() on existing engine actors.
+        # The synchronization is done in reinit(): the completion of reinit() also indicates
+        # completion of all the new engine actors.
+        # ray.get(new_refs)
+
+        # FIXME(rui): this may not be local actor
+        self.local_engine_actors.extend(new_engine_actors)
+        for actor in self.local_engine_actors:
+            self.run_refs.append(actor.run.remote())
+        logger.info("Launching upscale DP engine actors")
 
 
 def wait_for_engine_startup(
