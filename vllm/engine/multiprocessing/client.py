@@ -16,7 +16,8 @@ from zmq import Frame  # type: ignore[attr-defined]
 from zmq.asyncio import Socket
 
 from vllm import PoolingParams
-from vllm.config import DecodingConfig, ModelConfig, VllmConfig, ObservabilityConfig
+from vllm.config import (DecodingConfig, ModelConfig, VllmConfig,
+                         ObservabilityConfig)
 from vllm.core.scheduler import SchedulerOutputs
 # yapf conflicts with isort for this block
 # yapf: disable
