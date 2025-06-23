@@ -41,6 +41,7 @@ class ShardedStateLoader(BaseModelLoader):
         extra_config = ({} if load_config.model_loader_extra_config is None
                         else load_config.model_loader_extra_config.copy())
         self.pattern = extra_config.pop("pattern", self.DEFAULT_PATTERN)
+        self.strict = extra_config.pop("strict", True)
         if extra_config:
             raise ValueError(f"Unexpected extra config keys for load format "
                              f"{load_config.load_format}: "
@@ -48,7 +49,7 @@ class ShardedStateLoader(BaseModelLoader):
 
     @staticmethod
     def _filter_subtensors(
-        tensors: dict[str, torch.Tensor], ) -> dict[str, torch.Tensor]:
+            tensors: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         """
         Filter out all tensors that share the same memory or a subset of the
         memory of another tensor.
@@ -58,7 +59,7 @@ class ShardedStateLoader(BaseModelLoader):
         for key, tensor in tensors.items():
             if tensor.numel():
                 ptr = tensor.untyped_storage().data_ptr()
-                same_storage_groups[tensor.device, ptr].append((key, tensor))
+                same_storage_groups[(tensor.device, ptr)].append((key, tensor))
 
         def get_end_ptr(tensor: torch.Tensor) -> int:
             return tensor.view(-1)[-1].data_ptr() + tensor.element_size()
@@ -147,8 +148,15 @@ class ShardedStateLoader(BaseModelLoader):
             param_data.copy_(tensor)
             state_dict.pop(key)
         if state_dict:
-            raise ValueError(
-                f"Missing keys {tuple(state_dict)} in loaded state!")
+            missing_keys = tuple(state_dict)
+            if self.strict:
+                raise ValueError(
+                    f"Missing keys {missing_keys} in loaded state!")
+            logger.debug(
+                "Missing %d keys in checkpoint: %s",
+                len(missing_keys),
+                missing_keys,
+            )
 
     def iterate_over_files(
             self, paths) -> Generator[tuple[str, torch.Tensor], None, None]:
