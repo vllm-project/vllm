@@ -386,7 +386,7 @@ def run_8_bit(moe_tensors: MOETensors8Bit,
 def run_blocked_8_bit(moe_tensors: MOETensors8Bit,
               topk_weights: torch.Tensor,
               topk_ids: torch.Tensor,
-              per_act_token: bool) -> torch.Tensor:
+              per_act_block: bool) -> torch.Tensor:
     assert not any([
         t is None for t in [
             moe_tensors.w1_q, moe_tensors.w2_q, moe_tensors.w1_scale,
@@ -404,7 +404,7 @@ def run_blocked_8_bit(moe_tensors: MOETensors8Bit,
         'w2_scale': moe_tensors.w2_scale,
         'a1_scale': moe_tensors.a_scale,
         'global_num_experts': moe_tensors.w1.size(0),
-        'per_act_token': per_act_token,
+        'per_act_block': per_act_block,
     }
 
     return cutlass_moe_blocked_fp8(**kwargs)
@@ -556,7 +556,7 @@ def test_cutlass_moe_8_bit_EP(
 @pytest.mark.parametrize("m,n,k", MNK_FACTORS)
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
-@pytest.mark.parametrize("per_act_token", [True, False])
+@pytest.mark.parametrize("per_act_block", [True, False])
 @pytest.mark.skipif(
     (lambda x: x is None or not ops.cutlass_group_gemm_supported(x.to_int()))(
         current_platform.get_device_capability()),
@@ -567,12 +567,12 @@ def test_blocked_cutlass_moe_8_bit(
     k: int,
     e: int,
     topk: int,
-    per_act_token: bool,
+    per_act_block: bool,
 ):
     current_platform.seed_everything(7)
     with set_current_vllm_config(vllm_config):
         mt = MOETensors8Bit.make_moe_tensors_blocked_8bit(
-            m, k, n, e, per_act_token, block_size=(128, 128),
+            m, k, n, e, per_act_block, block_size=(128, 128),
             dtype=torch.bfloat16)
 
         score = torch.randn((m, e), device="cuda", dtype=torch.bfloat16)
@@ -588,7 +588,7 @@ def test_blocked_cutlass_moe_8_bit(
         cutlass_output = run_blocked_8_bit(mt,
                                    topk_weights,
                                    topk_ids,
-                                   per_act_token)
+                                   per_act_block)
 
         # print("out torch:", torch_output)
         # print("out cutlass:", cutlass_output)

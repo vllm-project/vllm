@@ -56,8 +56,7 @@ def run_blocked_cutlass_moe_fp8(
     workspace13: torch.Tensor,
     workspace2: torch.Tensor,
     out_dtype: torch.dtype,
-    per_act_token: bool,
-    expert_num_tokens: Optional[torch.Tensor],
+    per_act_block: bool,
 ) -> torch.Tensor:
     a1q = hidden_states
 
@@ -76,13 +75,8 @@ def run_blocked_cutlass_moe_fp8(
     assert a2_scale is None or a2_scale.dim(
     ) == 0 or a2_scale.shape[0] == 1, "Intermediate scale shape mismatch"
     assert out_dtype in [torch.half, torch.bfloat16], "Invalid output dtype"
-    if expert_map is not None:
-        assert expert_num_tokens is None
 
-    is_pplx = expert_num_tokens is not None
-
-    M = a1q.shape[0]  # no pplx
-    padded_M = a1q.shape[1]  # pplx
+    M = a1q.shape[0]
     _, K, N = w2.shape
     device = a1q.device
 
@@ -100,60 +94,37 @@ def run_blocked_cutlass_moe_fp8(
     topk = local_topk_ids.shape[1]
     local_E = w1.shape[0]
 
-    if is_pplx:
-        expert_offsets = torch.empty((local_E),
-                                     dtype=torch.int32,
-                                     device=device)
-        problem_sizes1 = torch.empty((local_E, 3),
-                                     dtype=torch.int32,
-                                     device=device)
-        problem_sizes2 = torch.empty((local_E, 3),
-                                     dtype=torch.int32,
-                                     device=device)
-
-        ops.get_cutlass_pplx_moe_mm_data(expert_offsets, problem_sizes1,
-                                         problem_sizes2, expert_num_tokens,
-                                         local_E, padded_M, N, K)
-
-        w1_scale = w1_scale.reshape(w1_scale.shape[0], -1)
-        w2_scale = w2_scale.reshape(w2_scale.shape[0], -1)
-        a1q = a1q.reshape(-1, a1q.shape[2])
-        a1q_scale = a1q_scale.reshape(-1, a1q_scale.shape[2]).contiguous()
-
+    expert_offsets = torch.empty((global_num_experts + 1),
+                                dtype=torch.int32,
+                                device=device)
+    problem_sizes1 = torch.empty((global_num_experts, 3),
+                                dtype=torch.int32,
+                                device=device)
+    problem_sizes2 = torch.empty((global_num_experts, 3),
+                                dtype=torch.int32,
+                                device=device)
+    # print("global_num_experts:", global_num_experts)
+    # print("expert_offsets.shape:", expert_offsets.shape)
+    if expert_map is not None:
+        a_map = torch.zeros((local_topk_ids.numel()),
+                            dtype=torch.int32,
+                            device=device)
     else:
-        expert_offsets = torch.empty((global_num_experts + 1),
-                                    dtype=torch.int32,
-                                    device=device)
-        problem_sizes1 = torch.empty((global_num_experts, 3),
-                                    dtype=torch.int32,
-                                    device=device)
-        problem_sizes2 = torch.empty((global_num_experts, 3),
-                                    dtype=torch.int32,
-                                    device=device)
-        # print("global_num_experts:", global_num_experts)
-        # print("expert_offsets.shape:", expert_offsets.shape)
-        if expert_map is not None:
-            a_map = torch.zeros((local_topk_ids.numel()),
-                                dtype=torch.int32,
-                                device=device)
-        else:
-            a_map = torch.empty((local_topk_ids.numel()),
-                                dtype=torch.int32,
-                                device=device)
-
-        c_map = torch.empty((local_topk_ids.numel()),
+        a_map = torch.empty((local_topk_ids.numel()),
                             dtype=torch.int32,
                             device=device)
 
-        ops.get_cutlass_moe_mm_data(local_topk_ids, expert_offsets, problem_sizes1,
-                                    problem_sizes2, a_map, c_map,
-                                    global_num_experts, N, K)
+    c_map = torch.empty((local_topk_ids.numel()),
+                        dtype=torch.int32,
+                        device=device)
 
-        # print("FIRST A1Q SCALE:", a1q_scale)
+    ops.get_cutlass_moe_mm_data(local_topk_ids, expert_offsets, problem_sizes1,
+                                problem_sizes2, a_map, c_map,
+                                global_num_experts, N, K)
 
-        a1q = _fp8_perm(a1q, a_map)
-        a1q_scale = a1q_scale[a_map] if per_act_token else a1q_scale
-        expert_offsets = expert_offsets[:-1]
+    a1q = _fp8_perm(a1q, a_map)
+    a1q_scale = a1q_scale[a_map] if per_act_block else a1q_scale
+    expert_offsets = expert_offsets[:-1]
 
     # print("expert_offsets.shape:", expert_offsets.shape)
 
@@ -181,16 +152,11 @@ def run_blocked_cutlass_moe_fp8(
                             device=device,
                             dtype=torch.int64)
 
-    if is_pplx:
-        c1 = _resize_cache(workspace13, (local_E * padded_M, N * 2))
-        c2 = _resize_cache(workspace2, (local_E * padded_M, N))
-        c3 = _resize_cache(workspace13, (local_E * padded_M, K))
-    else:
-        c1 = _resize_cache(workspace13, (M * topk, N * 2))
-        c2 = _resize_cache(workspace2, (M * topk, N))
-        c3 = _resize_cache(workspace13, (M * topk, K))
+    c1 = _resize_cache(workspace13, (M * topk, N * 2))
+    c2 = _resize_cache(workspace2, (M * topk, N))
+    c3 = _resize_cache(workspace13, (M * topk, K))
 
-    # print("PER ACT TOKEN:", per_act_token)
+    # print("PER ACT TOKEN:", per_act_block)
     # print("SHAPES BEFORE REPEAT:", a1q.shape, a1q_scale.shape)
 
     def transpose_a_scales(a_scales, expert_offsets):
@@ -207,7 +173,7 @@ def run_blocked_cutlass_moe_fp8(
             a_scales_t[start_out:end_out] = a_scales[start_in:end_in].t().flatten()
         return a_scales_t.contiguous()
 
-    if per_act_token:
+    if per_act_block:
         a1q_scale_t = torch.empty((a1q_scale.shape[0] * a1q_scale.shape[1]),
                               device=device,
                               dtype=a1q_scale.dtype)
@@ -267,14 +233,14 @@ def run_blocked_cutlass_moe_fp8(
     # print("problem_sizes1:", problem_sizes1)
 
     ops.cutlass_moe_blockwise_mm(c1, a1q.contiguous(), w1.contiguous(),
-                                 a1q_scale_t if per_act_token else a1q_scale,
+                                 a1q_scale_t if per_act_block else a1q_scale,
                                  w1_scale.transpose(1, 2).contiguous(),
                                  expert_offsets,
                                  problem_sizes1, ab_strides1,
-                                 ab_strides1, c_strides1, per_act_token)
+                                 ab_strides1, c_strides1, per_act_block)
 
     # verify_mul(c1, w1, w1_scale, a1q,
-    #              a1q_scale if per_act_token else a1q_scale.t(),
+    #              a1q_scale if per_act_block else a1q_scale.t(),
     #              (128, 128), out_dtype, expert_offsets)
 
     # print("out c1:", c1[:, 0:1])
@@ -287,7 +253,7 @@ def run_blocked_cutlass_moe_fp8(
     # print("out c2:", c2[:, 0:5])
     
 
-    if per_act_token:
+    if per_act_block:
         a2q, a2q_scale = per_token_group_quant_fp8(c2, 128)
         a2q_scale_t = torch.empty((a2q_scale.shape[0] * a2q_scale.shape[1]),
                               device=device,
@@ -311,24 +277,21 @@ def run_blocked_cutlass_moe_fp8(
         c3.fill_(0)
 
     ops.cutlass_moe_blockwise_mm(c3, a2q, w2,
-                                 a2q_scale_t if per_act_token else a2q_scale,
+                                 a2q_scale_t if per_act_block else a2q_scale,
                                  w2_scale.transpose(1, 2).contiguous(),
                                  expert_offsets,
                                  problem_sizes2, ab_strides2,
-                                 ab_strides2, c_strides2, per_act_token)
+                                 ab_strides2, c_strides2, per_act_block)
 
     # verify_mul(c3, w2, w2_scale, a2q,
-    #              a2q_scale if per_act_token else a2q_scale.t(),
+    #              a2q_scale if per_act_block else a2q_scale.t(),
     #              (128, 128), out_dtype, expert_offsets)
 
     # print("out c3:", c3[:, 0:5])
 
     # print("**********************")
 
-    if is_pplx:
-        return c3.reshape(local_E, padded_M, K)
-    else:
-        return c3[c_map].view(M, topk, K)
+    return c3[c_map].view(M, topk, K)
 
 
 class CutlassExpertsBlockedFp8(mk.FusedMoEPermuteExpertsUnpermute):
@@ -337,12 +300,12 @@ class CutlassExpertsBlockedFp8(mk.FusedMoEPermuteExpertsUnpermute):
         self,
         max_experts_per_worker: int,
         out_dtype: torch.dtype,
-        per_act_token: bool,
+        per_act_block: bool,
     ):
         super().__init__()
         self.max_experts_per_worker = max_experts_per_worker
         self.out_dtype = out_dtype
-        self.per_act_token = per_act_token
+        self.per_act_block = per_act_block
 
     def workspace_shapes(
         self,
@@ -381,13 +344,13 @@ class CutlassExpertsBlockedFp8(mk.FusedMoEPermuteExpertsUnpermute):
         assert w1_zp is None, "w1_zp is not supported in CUTLASS MoE"
         assert w2_zp is None, "w2_zp is not supported in CUTLASS MoE"
         activation_callable = lambda i, o: self.activation(activation, i, o)
+        assert expert_num_tokens is None, "PPLX is not supported in blocked CUTLASS MoE" # noqa: E501
         return run_blocked_cutlass_moe_fp8(hidden_states, w1, w2, topk_ids,
                                            activation_callable,
                                            global_num_experts, expert_map, w1_scale,
                                            w2_scale, a1q_scale, a2_scale,
                                            workspace13, workspace2,
-                                           self.out_dtype, self.per_act_token,
-                                           expert_num_tokens)
+                                           self.out_dtype, self.per_act_block)
 
 
 def cutlass_moe_blocked_fp8(
@@ -403,7 +366,7 @@ def cutlass_moe_blocked_fp8(
     a2_scale: Optional[torch.Tensor] = None,
     apply_router_weight_on_input: bool = False,
     global_num_experts: int = -1,
-    per_act_token: bool = False,
+    per_act_block: bool = False,
 ) -> torch.Tensor:
     """
     This function computes a a8w8-quantized Mixture of Experts (MoE) layer
@@ -442,13 +405,13 @@ def cutlass_moe_blocked_fp8(
     fn = mk.FusedMoEModularKernel(
         MoEPrepareAndFinalizeNoEP(
             quant_dtype=torch.float8_e4m3fn,
-            per_channel_quant=per_act_token,
-            block_shape=[128, 128] if per_act_token else None,
+            per_channel_quant=per_act_block,
+            block_shape=[128, 128] if per_act_block else None,
         ),
         CutlassExpertsBlockedFp8(
             max_experts_per_worker=global_num_experts,
             out_dtype=out_dtype,
-            per_act_token=per_act_token,
+            per_act_block=per_act_block,
         ),
     )
 

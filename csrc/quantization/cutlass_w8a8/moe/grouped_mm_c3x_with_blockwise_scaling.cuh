@@ -100,7 +100,7 @@ void cutlass_blockwise_group_gemm_caller(
     torch::Tensor const& b_scales, torch::Tensor const& expert_offsets,
     torch::Tensor const& problem_sizes, torch::Tensor const& a_strides,
     torch::Tensor const& b_strides, torch::Tensor const& c_strides,
-    bool per_act_token) {
+    bool per_act_block) {
   using ElementAB = typename Gemm::ElementAB;
   using ElementD = typename Gemm::ElementD;
   using ElementScale = typename Gemm::ElementScale;
@@ -132,7 +132,7 @@ void cutlass_blockwise_group_gemm_caller(
   run_get_group_gemm_starts_blockscale_fp8<LayoutSFA, LayoutSFB, ScaleConfig>(
       expert_offsets, problem_sizes, a_ptrs, b_ptrs, out_ptrs, a_scales_ptrs,
       b_scales_ptrs, a_tensors, b_tensors, out_tensors, a_scales, b_scales,
-      layout_SFA, layout_SFB, n_scale_size, k_scale_size, per_act_token);
+      layout_SFA, layout_SFB, n_scale_size, k_scale_size, per_act_block);
 
   using GemmKernel = typename Gemm::GemmKernel;
   using StrideA = Stride<int64_t, Int<1>, Int<0>>;

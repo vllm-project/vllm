@@ -62,7 +62,7 @@ __global__ void __get_group_gemm_starts_blockscale_fp8(
     ElementScale* a_scales_base_as_int, ElementScale* b_scales_base_as_int,
     LayoutSFA* layout_sfa_base_as_int, LayoutSFB* layout_sfb_base_as_int,
     int64_t n, int64_t k, int64_t n_scale, int64_t k_scale,
-    bool per_act_token) {
+    bool per_act_block) {
   int expert_id = threadIdx.x;
 
   int64_t expert_offset = expert_offsets[expert_id];
@@ -72,7 +72,7 @@ __global__ void __get_group_gemm_starts_blockscale_fp8(
   b_offsets[expert_id] = b_base_as_int + expert_id * k * n;
   out_offsets[expert_id] = out_base_as_int + expert_offset * n;
   a_scales_offsets[expert_id] =
-      a_scales_base_as_int + (per_act_token ? expert_offset : 0) * k_scale;
+      a_scales_base_as_int + (per_act_block ? expert_offset : 0) * k_scale;
   b_scales_offsets[expert_id] =
       b_scales_base_as_int + n_scale * expert_id * k_scale;
 
@@ -106,7 +106,7 @@ __global__ void __get_group_gemm_starts_blockscale_fp8(
             static_cast<LayoutSFA*>(layout_SFA.data_ptr()),             \
             static_cast<LayoutSFB*>(layout_SFB.data_ptr()),             \
             out_tensors.size(1), a_tensors.size(1), n_scale_size,            \
-            k_scale_size, per_act_token);                                    \
+            k_scale_size, per_act_block);                                    \
   }
 
 namespace {
@@ -147,7 +147,7 @@ void run_get_group_gemm_starts_blockscale_fp8(
     torch::Tensor& out_tensors, const torch::Tensor& a_scales,
     const torch::Tensor& b_scales, torch::Tensor& layout_SFA,
     torch::Tensor& layout_SFB, int64_t n_scale_size, int64_t k_scale_size,
-    bool per_act_token) {
+    bool per_act_block) {
   int num_experts = (int)expert_offsets.size(0);
   auto stream = at::cuda::getCurrentCUDAStream(a_tensors.device().index());
 

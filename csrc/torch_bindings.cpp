@@ -446,7 +446,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "b_tensors, "
       "               Tensor a_scales, Tensor b_scales, Tensor expert_offsets, "
       "               Tensor problem_sizes, Tensor a_strides, "
-      "               Tensor b_strides, Tensor c_strides, bool per_act_token "
+      "               Tensor b_strides, Tensor c_strides, bool per_act_block "
       "               ) -> ()",
       {stride_tag});
   ops.impl("cutlass_moe_blockwise_mm", torch::kCUDA, &cutlass_moe_blockwise_mm);

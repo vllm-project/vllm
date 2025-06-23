@@ -969,7 +969,7 @@ def cutlass_moe_blockwise_mm(out_tensors: torch.Tensor, a_tensors: torch.Tensor,
                    b_scales: torch.Tensor, expert_offsets: torch.Tensor,
                    problem_sizes: torch.Tensor, a_strides: torch.Tensor,
                    b_strides: torch.Tensor, c_strides: torch.Tensor,
-                   per_act_token: bool):
+                   per_act_block: bool):
     """
     A single grouped matrix multiplication used in CUTLASS-based
     blockwise-scaled fused MoE.
@@ -985,7 +985,7 @@ def cutlass_moe_blockwise_mm(out_tensors: torch.Tensor, a_tensors: torch.Tensor,
     return torch.ops._C.cutlass_moe_blockwise_mm(out_tensors, a_tensors, b_tensors,
                                        a_scales, b_scales, expert_offsets,
                                        problem_sizes, a_strides, b_strides,
-                                       c_strides, per_act_token)
+                                       c_strides, per_act_block)
 
 
 def cutlass_fp4_moe_mm(a_tensors: torch.Tensor, b_tensors: torch.Tensor,

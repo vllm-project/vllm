@@ -45,7 +45,7 @@ void cutlass_moe_blockwise_mm_sm90(
     torch::Tensor const& b_scales, torch::Tensor const& expert_offsets,
     torch::Tensor const& problem_sizes, torch::Tensor const& a_strides,
     torch::Tensor const& b_strides, torch::Tensor const& c_strides,
-    bool per_act_token);
+    bool per_act_block);
 
 #endif
 
@@ -251,12 +251,12 @@ void cutlass_moe_blockwise_mm(
     torch::Tensor const& b_scales, torch::Tensor const& expert_offsets,
     torch::Tensor const& problem_sizes, torch::Tensor const& a_strides,
     torch::Tensor const& b_strides, torch::Tensor const& c_strides,
-    bool per_act_token) {
+    bool per_act_block) {
   int32_t version_num = get_sm_version_num();
 #if defined ENABLE_CUTLASS_MOE_SM90 && ENABLE_CUTLASS_MOE_SM90
   cutlass_moe_blockwise_mm_sm90(out_tensors, a_tensors, b_tensors, a_scales,
                                 b_scales, expert_offsets, problem_sizes,
-                                a_strides, b_strides, c_strides, per_act_token);
+                                a_strides, b_strides, c_strides, per_act_block);
   return;
 #endif
   TORCH_CHECK_NOT_IMPLEMENTED(
