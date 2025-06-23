@@ -97,7 +97,7 @@ class KVCacheCoordinator(ABC):
             for manager in self.single_type_managers)
 
     def cache_blocks(self, request: RequestParams, block_hashes: list[BlockHash],
-                     num_computed_tokens: int) -> None:
+                     num_computed_tokens: int, token_ids: Optional[list[int]] = None) -> None:
         """
         Cache the blocks for the request.
 
@@ -106,9 +106,12 @@ class KVCacheCoordinator(ABC):
             block_hashes: The block hashes of the request.
             num_computed_tokens: The total number of tokens that need to be cached 
                 (including tokens that are already cached).
+            token_ids: The token IDs for the request. If None, will only cache
+                blocks that have existing block hashes (i.e. have been cached
+                previously).
         """
         for manager in self.single_type_managers:
-            manager.cache_blocks(request: RequestParam, block_hashes, num_computed_tokens)
+            manager.cache_blocks(request, token_ids=token_ids, block_hashes=block_hashes, num_tokens=num_computed_tokens)
 
     def free(self, request_id: str) -> None:
         """

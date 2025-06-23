@@ -12,7 +12,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.utils import is_pin_memory_available, make_tensor_with_pad
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.worker.block_table import BlockTable, MultiGroupBlockTable
-from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
+from vllm.v1.worker.gpu_input_batch import CachedRequestGenerationState, InputBatch
 
 VOCAB_SIZE = 1024
 NUM_OUTPUT_TOKENS = 20
@@ -57,7 +57,7 @@ def _compare_objs(obj1, obj2):
 
 def _remove_requests(
         input_batch: InputBatch, batch_size: int,
-        reqs: list[CachedRequestState]) -> tuple[set[str], list[int]]:
+        reqs: list[CachedRequestGenerationState]) -> tuple[set[str], list[int]]:
     """
     Remove some requests randomly from the batch and returns a tuple
     of 1) set of request removed 2) indices of the requests removed
@@ -80,7 +80,7 @@ def _remove_requests(
 
 
 def _construct_expected_sampling_metadata(
-    reqs: list[CachedRequestState],
+            reqs: list[CachedRequestGenerationState],
     req_ids_retained: set[int],
     req_id_index_in_input_batch: dict[str, int],
     device: torch.device,
@@ -197,7 +197,7 @@ def _construct_cached_request_state(req_id_suffix: int):
         np.random.randint(0, VOCAB_SIZE)
         for _ in range(np.random.randint(0, NUM_OUTPUT_TOKENS))
     ]
-    return CachedRequestState(
+    return CachedRequestGenerationState(
         req_id=f"req_id_{req_id_suffix}",
         prompt_token_ids=prompt_token_ids,
         sampling_params=_create_sampling_params(),
@@ -231,12 +231,12 @@ def test_sampling_metadata_in_input_batch(device: str, batch_size: int):
         vocab_size=1024,
         block_sizes=[1],
     )
-    reqs: list[CachedRequestState] = []
+    reqs: list[CachedRequestGenerationState] = []
     req_id_reqs = {}
     req_id_output_token_ids = {}
     # Add requests
     for req_index in range(batch_size):
-        req: CachedRequestState = _construct_cached_request_state(req_index)
+        req: CachedRequestGenerationState = _construct_cached_request_state(req_index)
         input_batch.add_request(req, req_index)
         reqs.append(req)
         req_id_reqs[req.req_id] = req
@@ -331,12 +331,12 @@ def test_swap_states_in_input_batch(device: str, batch_size: int,
         block_sizes=[1],
     )
 
-    reqs: list[CachedRequestState] = []
+    reqs: list[CachedRequestGenerationState] = []
     req_id_reqs = {}
     req_id_output_token_ids = {}
     # Add requests
     for req_index in range(batch_size):
-        req: CachedRequestState = _construct_cached_request_state(req_index)
+        req: CachedRequestGenerationState = _construct_cached_request_state(req_index)
         input_batch.add_request(req, req_index)
         reqs.append(req)
         req_id_reqs[req.req_id] = req

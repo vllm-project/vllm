@@ -873,7 +873,7 @@ class Scheduler(SchedulerInterface):
             if self.kv_cache_manager.enable_caching:
                 block_hashes = self.kv_cache_manager.req_to_block_hashes.get(request_state.request_id, [])
                 self.kv_cache_manager.cache_blocks(
-                    request_state.params, request_state.all_token_ids, block_hashes, request_state.num_tokens)
+                    request_state, block_hashes, request_state.num_tokens)
 
             if stopped:
                 assert status is not None

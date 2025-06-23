@@ -196,7 +196,7 @@ class KVCacheManager:
         """
 
         Args:
-            request_id: The id of the request to allocate slots for.
+            request: The request to allocate slots for.
             num_computed_tokens: The number of computed tokens for the request.
             num_new_tokens: The number of new tokens to allocate slots for.
             num_new_computed_tokens: The number of new computed tokens hitting 
@@ -387,10 +387,10 @@ class KVCacheManager:
         return KVCacheBlocks(
             self.coordinator.get_blocks(request_id)).get_block_ids()
 
-    def cache_blocks(self, request: "RequestGenerationState", block_hashes: list[BlockHash],
-                     num_computed_tokens: int) -> None:
+    def cache_blocks(self, request: "RequestParams", token_ids: Optional[list[int]], block_hashes: list[BlockHash],
+                     num_computed_tokens: int, ) -> None:
         """Cache the blocks for the request."""
-        self.coordinator.cache_blocks(request, block_hashes,
+        self.coordinator.cache_blocks(request, token_ids, block_hashes,
                                       num_computed_tokens)
 
     def create_empty_block_list(self) -> KVCacheBlocks:
