@@ -43,17 +43,19 @@ llm = LLM(
 
 ## Read gptq format checkpoint
 
-```python
-from vllm import LLM
-import torch
+??? Code
 
-# "hxbgsyxh/llama-13b-4bit-g-1" is a pre-quantized checkpoint.
-model_id = "hxbgsyxh/llama-13b-4bit-g-1"
-llm = LLM(
-    model=model_id,
-    dtype=torch.float16,
-    trust_remote_code=True,
-    quantization="bitblas",
-    max_model_len=1024
-)
-```
+    ```python
+    from vllm import LLM
+    import torch
+
+    # "hxbgsyxh/llama-13b-4bit-g-1" is a pre-quantized checkpoint.
+    model_id = "hxbgsyxh/llama-13b-4bit-g-1"
+    llm = LLM(
+        model=model_id,
+        dtype=torch.float16,
+        trust_remote_code=True,
+        quantization="bitblas",
+        max_model_len=1024
+    )
+    ```
