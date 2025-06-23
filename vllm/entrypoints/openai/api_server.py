@@ -34,8 +34,6 @@ from starlette.datastructures import State
 from starlette.routing import Mount
 from typing_extensions import assert_never
 
-
-
 import vllm.envs as envs
 from vllm.config import VllmConfig, ModelConfig, ObservabilityConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
