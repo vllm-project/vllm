@@ -211,12 +211,13 @@ def shuffle_layer(
             ) for weight in expert_weights_buffer
         ]
 
+    # 4. Execute the P2P operations. The real communication happens here.
     if p2p_ops:
         reqs = batch_isend_irecv(p2p_ops)
         for req in reqs:
             req.wait()
 
-    # 4. Copy the weights from the buffer back to the original weights.
+    # 5. Copy the weights from the buffer back to the original weights.
     for dst in range(num_local_experts):
         if is_unchanged[dst]:
             continue
