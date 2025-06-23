@@ -6,6 +6,9 @@ This module implements the core rearrangement algorithm.
 
 The rearrangement algorithm is adapted from
 [DeepSeek EPLB](https://github.com/deepseek-ai/eplb).
+
+Please find at [#12](https://github.com/deepseek-ai/EPLB/issues/12) an example
+on how the EPLB algorithm works.
 """
 
 import torch

@@ -52,6 +52,16 @@ class EplbState:
     Mapping from physical experts to logical experts.
 
     Shape: (num_moe_layers, num_physical_experts)
+
+    # Example
+
+    For a 2-layer MoE model with 6 physical experts and 4 logical experts on 3
+    EP ranks, the mapping could look like this:
+
+    ```
+    [[0, 1, 2, 3, 0, 1],
+     [0, 2, 0, 1, 0, 3]]
+    ```
     """
     logical_to_physical_map: torch.Tensor
     """
@@ -60,12 +70,37 @@ class EplbState:
     This is a sparse matrix, where -1 indicates no mapping.
 
     Shape: (num_moe_layers, num_logical_experts, num_redundant_experts + 1)
+
+    # Example
+
+    For a 2-layer MoE model with 6 physical experts and 4 logical experts on 3
+    EP ranks, the mapping could look like this:
+
+    ```
+    [[[0, 4, -1],
+      [1, 5, -1],
+      [2, -1, -1],
+      [3, -1, -1]],
+     [[0, 2, 4],
+      [3, -1, -1],
+      [1, -1, -1],
+      [5, -1, -1]]]
+    ```
     """
     logical_replica_count: torch.Tensor
     """
     Number of replicas for each logical expert.
+    This is exactly the non-`-1` count in the `logical_to_physical_map`.
 
     Shape: (num_moe_layers, num_logical_experts)
+
+    # Example
+    For a 2-layer MoE model with 6 physical experts and 4 logical experts on 3
+    EP ranks, the count could look like this:
+
+    ```
+    [[2, 2, 1, 1],
+     [3, 1, 1, 1]]
     """
 
     expert_load_pass: torch.Tensor
