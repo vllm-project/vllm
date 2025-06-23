@@ -189,6 +189,7 @@ class TestNixlHandshake:
         "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",
         FakeNixlWrapper)
     def test_multi_xfer_one_engine(
+        self,
         # dist_init is a fixture that initializes the distributed environment.
         dist_init):
         """Test case where multiple xfers are initiated to the same engine.
@@ -210,19 +211,31 @@ class TestNixlHandshake:
         assert isinstance(connector.connector_worker.nixl_wrapper,
                           FakeNixlWrapper)
         connector.connector_worker.nixl_wrapper.set_cycles_before_xfer_done(3)
-        for i in range(4):
+        num_xfers = 4
+        while True:
+            # For the same request_id, initiate multiple xfers across different
+            # round of `execute_model` calls.
             metadata = NixlConnectorMetadata()
-            metadata.add_new_req(request_id=request_id,
-                                 local_block_ids=[i + 1, i + 2, i + 3],
-                                 kv_transfer_params={
-                                     "remote_block_ids": [i + 4, i + 5, i + 6],
-                                     "remote_engine_id":
-                                     FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
-                                     "remote_host": "localhost",
-                                     "remote_port": 1234,
-                                 })
+            if num_xfers > 0:
+                num_xfers -= 1
+                metadata.add_new_req(
+                    request_id=request_id,
+                    local_block_ids=[
+                        num_xfers + 1, num_xfers + 2, num_xfers + 3
+                    ],
+                    kv_transfer_params={
+                        "remote_block_ids":
+                        [num_xfers + 4, num_xfers + 5, num_xfers + 6],
+                        "remote_engine_id":
+                        FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
+                        "remote_host":
+                        "localhost",
+                        "remote_port":
+                        1234,
+                    })
             connector.bind_connector_metadata(metadata)
 
+            # Mimic maybe_setup_kv_connector in gpu_model_runner.
             dummy_ctx = ForwardContext(
                 no_compile_layers={},
                 attn_metadata={},
@@ -234,11 +247,13 @@ class TestNixlHandshake:
             assert _after_load - _before_load < 0.1, "start_load_kv took " \
                 f"{_after_load - _before_load} seconds"
 
-        while True:
+            # Mimic get_finished_kv_transfers in gpu_model_runner.
             _, done_recving = connector.get_finished(finished_req_ids=set())
             if len(done_recving) > 0:
                 assert request_id in done_recving
                 break
+
+            connector.clear_connector_metadata()
 
     @patch(
         "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",
