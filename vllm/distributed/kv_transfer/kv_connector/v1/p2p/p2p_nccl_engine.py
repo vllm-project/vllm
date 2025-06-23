@@ -159,7 +159,7 @@ class P2pNcclEngine:
                                                  daemon=True)
             self._ping_thread.start()
 
-        self.nccl_timeout_s = float(self.config.get_from_extra_config(
+        self.nccl_timeout_s = int(self.config.get_from_extra_config(
             "nccl_timeout_s", DEFAULT_TIMEOUT_SECONDS))
 
         self.max_num_timers = int(self.config.get_from_extra_config(
