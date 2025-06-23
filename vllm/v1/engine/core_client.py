@@ -1059,6 +1059,7 @@ class DPAsyncMPClient(AsyncMPClient):
 
         chosen_engine = self.get_core_engine_for_request(
             request.data_parallel_rank)
+        logger.info(f"chosen_engine: {chosen_engine.index}")
         self.reqs_in_flight[request.request_id] = chosen_engine
 
         to_await = self._send_input(EngineCoreRequestType.ADD, request,
@@ -1161,3 +1162,4 @@ class RayDPClient(DPAsyncMPClient):
         for i in range(old_dp_size, dp_size):
             # FIXME(rui): fix "local" for multi-node
             self.core_engines.append(CoreEngine(i, local=True))
+        self.resources.coordinator.reinit(dp_size)

@@ -55,6 +55,12 @@ class DPCoordinator:
         # Assume coordinator is colocated with front-end procs.
         front_publish_address = get_open_zmq_ipc_path()
 
+        # For scaling DP
+        self.scale_dp_address = get_open_zmq_ipc_path()
+        self.ctx = zmq.Context()
+        # Don't create the socket yet - wait until after child process starts
+        self.scale_dp_socket = None
+
         dp_size = parallel_config.data_parallel_size
         assert dp_size > 1, "Coordinator only used for data parallel"
 
@@ -72,6 +78,7 @@ class DPCoordinator:
                 "front_publish_address": front_publish_address,
                 "back_output_address": back_output_address,
                 "back_publish_address": back_publish_address,
+                "scale_dp_address": self.scale_dp_address,
             },
             daemon=True)
         self.proc.start()
@@ -90,6 +97,30 @@ class DPCoordinator:
 
     def close(self):
         self._finalizer()
+
+    def reinit(self, dp_size: int):
+        logger.info(f"Communicating to CoordinatorProc to reinit DP size to {dp_size}")
+        try:
+            # Create the socket only when needed
+            if self.scale_dp_socket is None:
+                self.scale_dp_socket = make_zmq_socket(
+                    path=self.scale_dp_address,
+                    ctx=self.ctx,
+                    socket_type=zmq.PUSH,
+                )
+
+            # Add a longer delay to ensure the child process is ready
+            # The child process needs time to start and create its sockets
+            time.sleep(0.5)
+
+            # Try to send with a timeout
+            self.scale_dp_socket.send(msgspec.msgpack.encode(dp_size), flags=zmq.NOBLOCK)
+        except zmq.Again:
+            logger.error("Failed to send message - socket not ready (EAGAIN)")
+            raise
+        except Exception as e:
+            logger.error(f"Failed to send reinitialization request: {e}")
+            raise
 
 
 class EngineState:
@@ -116,6 +147,7 @@ class CoordinatorProc:
         front_publish_address: str,
         back_output_address: str,
         back_publish_address: str,
+        scale_dp_address: str,
     ):
         coordinator = CoordinatorProc(engine_count=engine_count)
         try:
@@ -123,16 +155,17 @@ class CoordinatorProc:
                 front_publish_address,
                 back_output_address,
                 back_publish_address,
+                scale_dp_address,
             )
         except KeyboardInterrupt:
             logger.info("DP Coordinator process exiting")
 
     def process_input_socket(self, front_publish_address: str,
                              back_output_address: str,
-                             back_publish_address: str):
+                             back_publish_address: str,
+                             scale_dp_address: str):
 
         decoder = MsgpackDecoder(EngineCoreOutputs)
-
         with make_zmq_socket(
                 path=front_publish_address,  # IPC
                 ctx=self.ctx,
@@ -148,11 +181,17 @@ class CoordinatorProc:
                 ctx=self.ctx,
                 socket_type=zmq.XPUB,
                 bind=True,
-        ) as publish_back:
+        ) as publish_back, make_zmq_socket(
+                path=scale_dp_address,  # IPC
+                ctx=self.ctx,
+                socket_type=zmq.PULL,
+                bind=True,
+        ) as scale_dp_front:
 
             poller = zmq.Poller()
             poller.register(publish_front, zmq.POLLIN)
             poller.register(output_back, zmq.POLLIN)
+            poller.register(scale_dp_front, zmq.POLLIN)
             last_publish_time = 0
             while True:
                 elapsed = int(time.time() * 1000) - last_publish_time
@@ -171,6 +210,14 @@ class CoordinatorProc:
                     continue
 
                 events = dict(events)
+                if scale_dp_front in events:
+                    try:
+                        buffer = scale_dp_front.recv()
+                        dp_size = msgspec.msgpack.decode(buffer)
+                        self._reinit(dp_size)
+                    except Exception as e:
+                        logger.error(f"Error processing scale_dp message: {e}")
+                        raise
 
                 if publish_front in events:
                     buffer = publish_front.recv()
@@ -254,3 +301,10 @@ class CoordinatorProc:
     def _get_engine_counts(self) -> list[list[int]]:
         """Return list of [waiting, running] count lists for each engine."""
         return [e.request_counts for e in self.engines]
+
+    def _reinit(self, dp_size: int):
+        logger.info(f"Reinitializing CoordinatorProc to size {dp_size}")
+        old_dp_size = len(self.engines)
+        assert dp_size > old_dp_size, "Only support upscale for now"
+        self.engines.extend([EngineState() for _ in range(dp_size - old_dp_size)])
+        self.stats_changed = True
