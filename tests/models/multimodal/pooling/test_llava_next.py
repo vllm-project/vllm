@@ -68,7 +68,7 @@ def _run_test(
                      dtype=dtype,
                      max_model_len=4096,
                      enforce_eager=True) as vllm_model:
-        vllm_outputs = vllm_model.encode(input_texts, images=input_images)
+        vllm_outputs = vllm_model.embed(input_texts, images=input_images)
 
     with hf_runner(model, dtype=dtype,
                    auto_cls=AutoModelForImageTextToText) as hf_model:
