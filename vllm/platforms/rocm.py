@@ -141,7 +141,8 @@ def use_rocm_custom_paged_attention(
                 and (head_size == 64 or head_size == 128)
                 and (block_size == 16 or block_size == 32)
                 and (gqa_ratio >= 1 and gqa_ratio <= 16)
-                and max_seq_len <= 32768 and (envs.VLLM_ROCM_CUSTOM_PAGED_ATTN)
+                and max_seq_len <= 128 * 1024
+                and (envs.VLLM_ROCM_CUSTOM_PAGED_ATTN)
                 and not (envs.VLLM_ROCM_USE_AITER_PAGED_ATTN
                          and envs.VLLM_ROCM_USE_AITER))
 
@@ -151,7 +152,7 @@ def use_rocm_custom_paged_attention(
                 and (qtype == torch.half or qtype == torch.bfloat16)
                 and head_size == 128 and block_size == 16
                 and (gqa_ratio >= 3 and gqa_ratio <= 16)
-                and max_seq_len <= 32768 and alibi_slopes is None
+                and max_seq_len <= 128 * 1024 and alibi_slopes is None
                 and kv_cache_dtype == "auto"
                 and envs.VLLM_ROCM_CUSTOM_PAGED_ATTN)
 
@@ -214,9 +215,15 @@ class RocmPlatform(Platform):
             selected_backend = _Backend.ROCM_FLASH
 
         if envs.VLLM_USE_V1:
-            logger.info("Using Triton Attention backend on V1 engine.")
-            return ("vllm.v1.attention.backends."
-                    "triton_attn.TritonAttentionBackend")
+            if envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA \
+                and on_gfx9():
+                logger.info("Using Flash Attention backend on V1 engine.")
+                return ("vllm.v1.attention.backends."
+                        "rocm_aiter_fa.AiterFlashAttentionBackend")
+            else:
+                logger.info("Using Triton Attention backend on V1 engine.")
+                return ("vllm.v1.attention.backends."
+                        "triton_attn.TritonAttentionBackend")
         if selected_backend == _Backend.ROCM_FLASH:
             if not cls.has_device_capability(90):
                 # not Instinct series GPUs.

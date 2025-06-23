@@ -253,6 +253,26 @@ class MultiModalProfiler(Generic[_I]):
         seq_len: int,
         mm_counts: Optional[Mapping[str, int]] = None,
     ) -> Mapping[str, int]:
-        mm_inputs = self._get_dummy_mm_inputs(seq_len, mm_counts)
+        max_tokens_per_item = self.processing_info.get_max_tokens_per_item(
+            seq_len=seq_len, mm_counts=mm_counts)
+        if max_tokens_per_item is not None:
+            if mm_counts is None:
+                total_mm_tokens = sum(max_tokens_per_item.values())
+            else:
+                total_mm_tokens = sum(max_tokens_per_item[k] * mm_counts[k]
+                                      for k in max_tokens_per_item.keys()
+                                      & mm_counts.keys())
+            if total_mm_tokens > seq_len:
+                logger.warning_once(
+                    "The sequence length (%d) is smaller than the pre-defined"
+                    " wosrt-case total number of multimodal tokens (%d). "
+                    "This may cause certain multi-modal inputs to fail during "
+                    "inference. To avoid this, you should increase "
+                    "`max_model_len` or reduce `mm_counts`.",
+                    seq_len,
+                    total_mm_tokens,
+                )
+            return max_tokens_per_item
 
+        mm_inputs = self._get_dummy_mm_inputs(seq_len, mm_counts)
         return self._get_mm_num_tokens(mm_inputs)

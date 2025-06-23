@@ -115,6 +115,11 @@ repos:
     entry: python tools/check_spdx_header.py
     language: python
     types: [python]
+  - id: check-root-lazy-imports
+    name: Check root lazy imports
+    entry: python tools/check_init_lazy_imports.py
+    language: python
+    types: [python]
   - id: check-filenames
     name: Check for spaces in all filenames
     entry: bash
