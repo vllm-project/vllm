@@ -259,6 +259,7 @@ class Worker(WorkerBase):
                 x for x in warmup_sizes if x not in
                 self.vllm_config.compilation_config.cudagraph_capture_sizes
             ]
+        # We skip EPLB here since we don't want to record dummy metrics
         for size in sorted(warmup_sizes, reverse=True):
             logger.info("Compile and warming up model for size %d", size)
             self.model_runner._dummy_run(size, skip_eplb=True)
@@ -274,6 +275,7 @@ class Worker(WorkerBase):
             max_num_reqs = min(self.scheduler_config.max_num_seqs,
                                self.scheduler_config.max_num_batched_tokens)
 
+            # We skip EPLB here since we don't want to record dummy metrics
             hidden_states, last_hidden_states = \
                 self.model_runner._dummy_run(
                     num_tokens=max_num_reqs,

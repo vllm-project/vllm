@@ -2026,7 +2026,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 assert isinstance(self.drafter, EagleProposer)
                 self.drafter.dummy_run(num_tokens)
 
-        # This is necessary to avoid blocking DP
+        # This is necessary to avoid blocking DP.
+        # For dummy runs, we typically skip EPLB since we don't have any real
+        # requests to process.
+        # However, in DP settings, there may be cases when some DP ranks do
+        # not have any requests to process, so they're executing dummy batches.
+        # In such cases, we still have to trigger EPLB to make sure
+        # ranks execute the rearrangement in synchronization.
         if not skip_eplb:
             self.eplb_step(is_dummy=True, is_profile=is_profile)
 
@@ -2222,6 +2228,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Cache the dummy encoder outputs.
             self.encoder_cache["tmp"] = dict(enumerate(dummy_encoder_outputs))
 
+        # Add `is_profile` here to pre-allocate communication buffers
         hidden_states, last_hidden_states \
             = self._dummy_run(self.max_num_tokens, is_profile=True)
         if get_pp_group().is_last_rank:
@@ -2257,6 +2264,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             for num_tokens in tqdm(reversed(self.cudagraph_batch_sizes),
                                    desc="Capturing CUDA graphs",
                                    total=len(self.cudagraph_batch_sizes)):
+                # We skip EPLB here since we don't want to record dummy metrics
                 for _ in range(
                         self.compilation_config.cudagraph_num_of_warmups):
                     self._dummy_run(num_tokens,
