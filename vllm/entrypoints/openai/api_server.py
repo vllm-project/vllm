@@ -1329,11 +1329,6 @@ def setup_server(args):
 
     signal.signal(signal.SIGTERM, signal_handler)
 
-<<<<<<< HEAD
-    async with build_async_engine_client(args) as engine_client:
-        observability_config = await engine_client.get_observability_config()
-        app = build_app(args, observability_config)
-=======
     addr, port = sock_addr
     is_ssl = args.ssl_keyfile and args.ssl_certfile
     host_part = f"[{addr}]" if is_valid_ipv6_address(
@@ -1358,7 +1353,6 @@ async def run_server_worker(listen_address,
 
     if args.tool_parser_plugin and len(args.tool_parser_plugin) > 3:
         ToolParserManager.import_tool_parser(args.tool_parser_plugin)
-
     server_index = client_config.get("client_index", 0) if client_config else 0
 
     # Load logging config for uvicorn if specified
@@ -1367,8 +1361,8 @@ async def run_server_worker(listen_address,
         uvicorn_kwargs['log_config'] = log_config
 
     async with build_async_engine_client(args, client_config) as engine_client:
-        app = build_app(args)
->>>>>>> main
+        observability_config = await engine_client.get_observability_config()
+        app = build_app(args, observability_config)
 
         vllm_config = await engine_client.get_vllm_config()
         await init_app_state(engine_client, vllm_config, app.state, args)
