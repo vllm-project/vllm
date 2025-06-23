@@ -15,7 +15,7 @@ vLLM can be **run and scaled to multiple service replicas on clouds and Kubernet
 - Check that you have installed SkyPilot ([docs](https://skypilot.readthedocs.io/en/latest/getting-started/installation.html)).
 - Check that `sky check` shows clouds or Kubernetes are enabled.
 
-```console
+```bash
 pip install skypilot-nightly
 sky check
 ```
@@ -24,52 +24,54 @@ sky check
 
 See the vLLM SkyPilot YAML for serving, [serving.yaml](https://github.com/skypilot-org/skypilot/blob/master/llm/vllm/serve.yaml).
 
-```yaml
-resources:
-  accelerators: {L4, A10g, A10, L40, A40, A100, A100-80GB} # We can use cheaper accelerators for 8B model.
-  use_spot: True
-  disk_size: 512  # Ensure model checkpoints can fit.
-  disk_tier: best
-  ports: 8081  # Expose to internet traffic.
+??? Yaml
 
-envs:
-  MODEL_NAME: meta-llama/Meta-Llama-3-8B-Instruct
-  HF_TOKEN: <your-huggingface-token>  # Change to your own huggingface token, or use --env to pass.
+    ```yaml
+    resources:
+      accelerators: {L4, A10g, A10, L40, A40, A100, A100-80GB} # We can use cheaper accelerators for 8B model.
+      use_spot: True
+      disk_size: 512  # Ensure model checkpoints can fit.
+      disk_tier: best
+      ports: 8081  # Expose to internet traffic.
 
-setup: |
-  conda create -n vllm python=3.10 -y
-  conda activate vllm
+    envs:
+      MODEL_NAME: meta-llama/Meta-Llama-3-8B-Instruct
+      HF_TOKEN: <your-huggingface-token>  # Change to your own huggingface token, or use --env to pass.
 
-  pip install vllm==0.4.0.post1
-  # Install Gradio for web UI.
-  pip install gradio openai
-  pip install flash-attn==2.5.7
+    setup: |
+      conda create -n vllm python=3.10 -y
+      conda activate vllm
 
-run: |
-  conda activate vllm
-  echo 'Starting vllm api server...'
-  python -u -m vllm.entrypoints.openai.api_server \
-    --port 8081 \
-    --model $MODEL_NAME \
-    --trust-remote-code \
-    --tensor-parallel-size $SKYPILOT_NUM_GPUS_PER_NODE \
-    2>&1 | tee api_server.log &
+      pip install vllm==0.4.0.post1
+      # Install Gradio for web UI.
+      pip install gradio openai
+      pip install flash-attn==2.5.7
 
-  echo 'Waiting for vllm api server to start...'
-  while ! `cat api_server.log | grep -q 'Uvicorn running on'`; do sleep 1; done
+    run: |
+      conda activate vllm
+      echo 'Starting vllm api server...'
+      python -u -m vllm.entrypoints.openai.api_server \
+        --port 8081 \
+        --model $MODEL_NAME \
+        --trust-remote-code \
+        --tensor-parallel-size $SKYPILOT_NUM_GPUS_PER_NODE \
+        2>&1 | tee api_server.log &
 
-  echo 'Starting gradio server...'
-  git clone https://github.com/vllm-project/vllm.git || true
-  python vllm/examples/online_serving/gradio_openai_chatbot_webserver.py \
-    -m $MODEL_NAME \
-    --port 8811 \
-    --model-url http://localhost:8081/v1 \
-    --stop-token-ids 128009,128001
-```
+      echo 'Waiting for vllm api server to start...'
+      while ! `cat api_server.log | grep -q 'Uvicorn running on'`; do sleep 1; done
+
+      echo 'Starting gradio server...'
+      git clone https://github.com/vllm-project/vllm.git || true
+      python vllm/examples/online_serving/gradio_openai_chatbot_webserver.py \
+        -m $MODEL_NAME \
+        --port 8811 \
+        --model-url http://localhost:8081/v1 \
+        --stop-token-ids 128009,128001
+    ```
 
 Start the serving the Llama-3 8B model on any of the candidate GPUs listed (L4, A10g, ...):
 
-```console
+```bash
 HF_TOKEN="your-huggingface-token" sky launch serving.yaml --env HF_TOKEN
 ```
 
@@ -81,7 +83,7 @@ Check the output of the command. There will be a shareable gradio link (like the
 
 **Optional**: Serve the 70B model instead of the default 8B and use more GPU:
 
-```console
+```bash
 HF_TOKEN="your-huggingface-token" \
   sky launch serving.yaml \
   --gpus A100:8 \
@@ -93,72 +95,71 @@ HF_TOKEN="your-huggingface-token" \
 
 SkyPilot can scale up the service to multiple service replicas with built-in autoscaling, load-balancing and fault-tolerance. You can do it by adding a services section to the YAML file.
 
-```yaml
-service:
-  replicas: 2
-  # An actual request for readiness probe.
-  readiness_probe:
-    path: /v1/chat/completions
-    post_data:
-    model: $MODEL_NAME
-    messages:
-      - role: user
-        content: Hello! What is your name?
-  max_completion_tokens: 1
-```
+??? Yaml
 
-<details>
-<summary>Click to see the full recipe YAML</summary>
-
-```yaml
-service:
-  replicas: 2
-  # An actual request for readiness probe.
-  readiness_probe:
-    path: /v1/chat/completions
-    post_data:
-      model: $MODEL_NAME
-      messages:
-        - role: user
-          content: Hello! What is your name?
+    ```yaml
+    service:
+      replicas: 2
+      # An actual request for readiness probe.
+      readiness_probe:
+        path: /v1/chat/completions
+        post_data:
+        model: $MODEL_NAME
+        messages:
+          - role: user
+            content: Hello! What is your name?
       max_completion_tokens: 1
+    ```
 
-resources:
-  accelerators: {L4, A10g, A10, L40, A40, A100, A100-80GB} # We can use cheaper accelerators for 8B model.
-  use_spot: True
-  disk_size: 512  # Ensure model checkpoints can fit.
-  disk_tier: best
-  ports: 8081  # Expose to internet traffic.
+??? Yaml
 
-envs:
-  MODEL_NAME: meta-llama/Meta-Llama-3-8B-Instruct
-  HF_TOKEN: <your-huggingface-token>  # Change to your own huggingface token, or use --env to pass.
+    ```yaml
+    service:
+      replicas: 2
+      # An actual request for readiness probe.
+      readiness_probe:
+        path: /v1/chat/completions
+        post_data:
+          model: $MODEL_NAME
+          messages:
+            - role: user
+              content: Hello! What is your name?
+          max_completion_tokens: 1
 
-setup: |
-  conda create -n vllm python=3.10 -y
-  conda activate vllm
+    resources:
+      accelerators: {L4, A10g, A10, L40, A40, A100, A100-80GB} # We can use cheaper accelerators for 8B model.
+      use_spot: True
+      disk_size: 512  # Ensure model checkpoints can fit.
+      disk_tier: best
+      ports: 8081  # Expose to internet traffic.
 
-  pip install vllm==0.4.0.post1
-  # Install Gradio for web UI.
-  pip install gradio openai
-  pip install flash-attn==2.5.7
+    envs:
+      MODEL_NAME: meta-llama/Meta-Llama-3-8B-Instruct
+      HF_TOKEN: <your-huggingface-token>  # Change to your own huggingface token, or use --env to pass.
 
-run: |
-  conda activate vllm
-  echo 'Starting vllm api server...'
-  python -u -m vllm.entrypoints.openai.api_server \
-    --port 8081 \
-    --model $MODEL_NAME \
-    --trust-remote-code \
-    --tensor-parallel-size $SKYPILOT_NUM_GPUS_PER_NODE \
-    2>&1 | tee api_server.log
-```
+    setup: |
+      conda create -n vllm python=3.10 -y
+      conda activate vllm
 
-</details>
+      pip install vllm==0.4.0.post1
+      # Install Gradio for web UI.
+      pip install gradio openai
+      pip install flash-attn==2.5.7
+
+    run: |
+      conda activate vllm
+      echo 'Starting vllm api server...'
+      python -u -m vllm.entrypoints.openai.api_server \
+        --port 8081 \
+        --model $MODEL_NAME \
+        --trust-remote-code \
+        --tensor-parallel-size $SKYPILOT_NUM_GPUS_PER_NODE \
+        2>&1 | tee api_server.log
+    ```
 
 Start the serving the Llama-3 8B model on multiple replicas:
 
-```console
+```bash
 HF_TOKEN="your-huggingface-token" \
   sky serve up -n vllm serving.yaml \
   --env HF_TOKEN
@@ -166,12 +167,11 @@ HF_TOKEN="your-huggingface-token" \
 
 Wait until the service is ready:
 
-```console
+```bash
 watch -n10 sky serve status vllm
 ```
 
-<details>
-<summary>Example outputs:</summary>
+Example outputs:
 
 ```console
 Services
@@ -184,29 +184,29 @@ vllm          1   1        xx.yy.zz.121  18 mins ago  1x GCP([Spot]{'L4': 1})  R
 vllm          2   1        xx.yy.zz.245  18 mins ago  1x GCP([Spot]{'L4': 1})  READY   us-east4
 ```
 
-</details>
-
 After the service is READY, you can find a single endpoint for the service and access the service with the endpoint:
 
-```console
-ENDPOINT=$(sky serve status --endpoint 8081 vllm)
-curl -L http://$ENDPOINT/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "meta-llama/Meta-Llama-3-8B-Instruct",
-    "messages": [
-    {
-      "role": "system",
-      "content": "You are a helpful assistant."
-    },
-    {
-      "role": "user",
-      "content": "Who are you?"
-    }
-    ],
-    "stop_token_ids": [128009,  128001]
-  }'
-```
+??? Commands
+
+    ```bash
+    ENDPOINT=$(sky serve status --endpoint 8081 vllm)
+    curl -L http://$ENDPOINT/v1/chat/completions \
+      -H "Content-Type: application/json" \
+      -d '{
+        "model": "meta-llama/Meta-Llama-3-8B-Instruct",
+        "messages": [
+        {
+          "role": "system",
+          "content": "You are a helpful assistant."
+        },
+        {
+          "role": "user",
+          "content": "Who are you?"
+        }
+        ],
+        "stop_token_ids": [128009,  128001]
+      }'
+    ```
 
 To enable autoscaling, you could replace the `replicas` with the following configs in `service`:
 
@@ -220,67 +220,64 @@ service:
 
 This will scale the service up to when the QPS exceeds 2 for each replica.
 
-<details>
-<summary>Click to see the full recipe YAML</summary>
+??? Yaml
 
-```yaml
-service:
-  replica_policy:
-    min_replicas: 2
-    max_replicas: 4
-    target_qps_per_replica: 2
-  # An actual request for readiness probe.
-  readiness_probe:
-    path: /v1/chat/completions
-    post_data:
-      model: $MODEL_NAME
-      messages:
-        - role: user
-          content: Hello! What is your name?
-      max_completion_tokens: 1
+    ```yaml
+    service:
+      replica_policy:
+        min_replicas: 2
+        max_replicas: 4
+        target_qps_per_replica: 2
+      # An actual request for readiness probe.
+      readiness_probe:
+        path: /v1/chat/completions
+        post_data:
+          model: $MODEL_NAME
+          messages:
+            - role: user
+              content: Hello! What is your name?
+          max_completion_tokens: 1
 
-resources:
-  accelerators: {L4, A10g, A10, L40, A40, A100, A100-80GB} # We can use cheaper accelerators for 8B model.
-  use_spot: True
-  disk_size: 512  # Ensure model checkpoints can fit.
-  disk_tier: best
-  ports: 8081  # Expose to internet traffic.
+    resources:
+      accelerators: {L4, A10g, A10, L40, A40, A100, A100-80GB} # We can use cheaper accelerators for 8B model.
+      use_spot: True
+      disk_size: 512  # Ensure model checkpoints can fit.
+      disk_tier: best
+      ports: 8081  # Expose to internet traffic.
 
-envs:
-  MODEL_NAME: meta-llama/Meta-Llama-3-8B-Instruct
-  HF_TOKEN: <your-huggingface-token>  # Change to your own huggingface token, or use --env to pass.
+    envs:
+      MODEL_NAME: meta-llama/Meta-Llama-3-8B-Instruct
+      HF_TOKEN: <your-huggingface-token>  # Change to your own huggingface token, or use --env to pass.
 
-setup: |
-  conda create -n vllm python=3.10 -y
-  conda activate vllm
+    setup: |
+      conda create -n vllm python=3.10 -y
+      conda activate vllm
 
-  pip install vllm==0.4.0.post1
-  # Install Gradio for web UI.
-  pip install gradio openai
-  pip install flash-attn==2.5.7
+      pip install vllm==0.4.0.post1
+      # Install Gradio for web UI.
+      pip install gradio openai
+      pip install flash-attn==2.5.7
 
-run: |
-  conda activate vllm
-  echo 'Starting vllm api server...'
-  python -u -m vllm.entrypoints.openai.api_server \
-    --port 8081 \
-    --model $MODEL_NAME \
-    --trust-remote-code \
-    --tensor-parallel-size $SKYPILOT_NUM_GPUS_PER_NODE \
-    2>&1 | tee api_server.log
-```
-
-</details>
+    run: |
+      conda activate vllm
+      echo 'Starting vllm api server...'
+      python -u -m vllm.entrypoints.openai.api_server \
+        --port 8081 \
+        --model $MODEL_NAME \
+        --trust-remote-code \
+        --tensor-parallel-size $SKYPILOT_NUM_GPUS_PER_NODE \
+        2>&1 | tee api_server.log
+    ```
 
 To update the service with the new config:
 
-```console
+```bash
 HF_TOKEN="your-huggingface-token" sky serve update vllm serving.yaml --env HF_TOKEN
 ```
 
 To stop the service:
 
-```console
+```bash
 sky serve down vllm
 ```
 
@@ -288,42 +285,39 @@ sky serve down vllm
 
 It is also possible to access the Llama-3 service with a separate GUI frontend, so the user requests send to the GUI will be load-balanced across replicas.
 
-<details>
-<summary>Click to see the full GUI YAML</summary>
+??? Yaml
 
-```yaml
-envs:
-  MODEL_NAME: meta-llama/Meta-Llama-3-8B-Instruct
-  ENDPOINT: x.x.x.x:3031 # Address of the API server running vllm.
+    ```yaml
+    envs:
+      MODEL_NAME: meta-llama/Meta-Llama-3-8B-Instruct
+      ENDPOINT: x.x.x.x:3031 # Address of the API server running vllm.
 
-resources:
-  cpus: 2
+    resources:
+      cpus: 2
 
-setup: |
-  conda create -n vllm python=3.10 -y
-  conda activate vllm
+    setup: |
+      conda create -n vllm python=3.10 -y
+      conda activate vllm
 
-  # Install Gradio for web UI.
-  pip install gradio openai
+      # Install Gradio for web UI.
+      pip install gradio openai
 
-run: |
-  conda activate vllm
-  export PATH=$PATH:/sbin
+    run: |
+      conda activate vllm
+      export PATH=$PATH:/sbin
 
-  echo 'Starting gradio server...'
-  git clone https://github.com/vllm-project/vllm.git || true
-  python vllm/examples/online_serving/gradio_openai_chatbot_webserver.py \
-    -m $MODEL_NAME \
-    --port 8811 \
-    --model-url http://$ENDPOINT/v1 \
-    --stop-token-ids 128009,128001 | tee ~/gradio.log
-```
-
-</details>
+      echo 'Starting gradio server...'
+      git clone https://github.com/vllm-project/vllm.git || true
+      python vllm/examples/online_serving/gradio_openai_chatbot_webserver.py \
+        -m $MODEL_NAME \
+        --port 8811 \
+        --model-url http://$ENDPOINT/v1 \
+        --stop-token-ids 128009,128001 | tee ~/gradio.log
+    ```
 
 1. Start the chat web UI:
 
-    ```console
+    ```bash
     sky launch \
       -c gui ./gui.yaml \
       --env ENDPOINT=$(sky serve status --endpoint vllm)

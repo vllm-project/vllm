@@ -13,7 +13,7 @@ AWQ, GPTQ, Rotation and SmoothQuant.
 
 Before quantizing models, you need to install Quark. The latest release of Quark can be installed with pip:
 
-```console
+```bash
 pip install amd-quark
 ```
 
@@ -22,13 +22,13 @@ for more installation details.
 
 Additionally, install `vllm` and `lm-evaluation-harness` for evaluation:
 
-```console
+```bash
 pip install vllm lm-eval==0.4.4
 ```
 
 ## Quantization Process
 
-After installing Quark, we will use an example to illustrate how to use Quark.  
+After installing Quark, we will use an example to illustrate how to use Quark.
 The Quark quantization process can be listed for 5 steps as below:
 
 1. Load the model
@@ -42,20 +42,22 @@ The Quark quantization process can be listed for 5 steps as below:
 Quark uses [Transformers](https://huggingface.co/docs/transformers/en/index)
 to fetch model and tokenizer.
 
-```python
-from transformers import AutoTokenizer, AutoModelForCausalLM
+??? Code
 
-MODEL_ID = "meta-llama/Llama-2-70b-chat-hf"
-MAX_SEQ_LEN = 512
+    ```python
+    from transformers import AutoTokenizer, AutoModelForCausalLM
 
-model = AutoModelForCausalLM.from_pretrained(
-    MODEL_ID, device_map="auto", torch_dtype="auto",
-)
-model.eval()
+    MODEL_ID = "meta-llama/Llama-2-70b-chat-hf"
+    MAX_SEQ_LEN = 512
 
-tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, model_max_length=MAX_SEQ_LEN)
-tokenizer.pad_token = tokenizer.eos_token
-```
+    model = AutoModelForCausalLM.from_pretrained(
+        MODEL_ID, device_map="auto", torch_dtype="auto",
+    )
+    model.eval()
+
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, model_max_length=MAX_SEQ_LEN)
+    tokenizer.pad_token = tokenizer.eos_token
+    ```
 
 ### 2. Prepare the Calibration Dataloader
 
@@ -63,22 +65,24 @@ Quark uses the [PyTorch Dataloader](https://pytorch.org/tutorials/beginner/basic
 to load calibration data. For more details about how to use calibration datasets efficiently, please refer
 to [Adding Calibration Datasets](https://quark.docs.amd.com/latest/pytorch/calibration_datasets.html).
 
-```python
-from datasets import load_dataset
-from torch.utils.data import DataLoader
+??? Code
 
-BATCH_SIZE = 1
-NUM_CALIBRATION_DATA = 512
+    ```python
+    from datasets import load_dataset
+    from torch.utils.data import DataLoader
 
-# Load the dataset and get calibration data.
-dataset = load_dataset("mit-han-lab/pile-val-backup", split="validation")
-text_data = dataset["text"][:NUM_CALIBRATION_DATA]
+    BATCH_SIZE = 1
+    NUM_CALIBRATION_DATA = 512
 
-tokenized_outputs = tokenizer(text_data, return_tensors="pt",
-    padding=True, truncation=True, max_length=MAX_SEQ_LEN)
-calib_dataloader = DataLoader(tokenized_outputs['input_ids'],
-    batch_size=BATCH_SIZE, drop_last=True)
-```
+    # Load the dataset and get calibration data.
+    dataset = load_dataset("mit-han-lab/pile-val-backup", split="validation")
+    text_data = dataset["text"][:NUM_CALIBRATION_DATA]
+
+    tokenized_outputs = tokenizer(text_data, return_tensors="pt",
+        padding=True, truncation=True, max_length=MAX_SEQ_LEN)
+    calib_dataloader = DataLoader(tokenized_outputs['input_ids'],
+        batch_size=BATCH_SIZE, drop_last=True)
+    ```
 
 ### 3. Set the Quantization Configuration
 
@@ -94,42 +98,44 @@ kv-cache and the quantization algorithm is AutoSmoothQuant.
     AutoSmoothQuant config file for Llama is
     `examples/torch/language_modeling/llm_ptq/models/llama/autosmoothquant_config.json`.
 
-```python
-from quark.torch.quantization import (Config, QuantizationConfig,
-                                     FP8E4M3PerTensorSpec,
-                                     load_quant_algo_config_from_file)
+??? Code
 
-# Define fp8/per-tensor/static spec.
-FP8_PER_TENSOR_SPEC = FP8E4M3PerTensorSpec(observer_method="min_max",
-    is_dynamic=False).to_quantization_spec()
+    ```python
+    from quark.torch.quantization import (Config, QuantizationConfig,
+                                        FP8E4M3PerTensorSpec,
+                                        load_quant_algo_config_from_file)
 
-# Define global quantization config, input tensors and weight apply FP8_PER_TENSOR_SPEC.
-global_quant_config = QuantizationConfig(input_tensors=FP8_PER_TENSOR_SPEC,
-    weight=FP8_PER_TENSOR_SPEC)
+    # Define fp8/per-tensor/static spec.
+    FP8_PER_TENSOR_SPEC = FP8E4M3PerTensorSpec(observer_method="min_max",
+        is_dynamic=False).to_quantization_spec()
 
-# Define quantization config for kv-cache layers, output tensors apply FP8_PER_TENSOR_SPEC.
-KV_CACHE_SPEC = FP8_PER_TENSOR_SPEC
-kv_cache_layer_names_for_llama = ["*k_proj", "*v_proj"]
-kv_cache_quant_config = {name :
-    QuantizationConfig(input_tensors=global_quant_config.input_tensors,
-                       weight=global_quant_config.weight,
-                       output_tensors=KV_CACHE_SPEC)
-    for name in kv_cache_layer_names_for_llama}
-layer_quant_config = kv_cache_quant_config.copy()
+    # Define global quantization config, input tensors and weight apply FP8_PER_TENSOR_SPEC.
+    global_quant_config = QuantizationConfig(input_tensors=FP8_PER_TENSOR_SPEC,
+        weight=FP8_PER_TENSOR_SPEC)
 
-# Define algorithm config by config file.
-LLAMA_AUTOSMOOTHQUANT_CONFIG_FILE =
-    'examples/torch/language_modeling/llm_ptq/models/llama/autosmoothquant_config.json'
-algo_config = load_quant_algo_config_from_file(LLAMA_AUTOSMOOTHQUANT_CONFIG_FILE)
+    # Define quantization config for kv-cache layers, output tensors apply FP8_PER_TENSOR_SPEC.
+    KV_CACHE_SPEC = FP8_PER_TENSOR_SPEC
+    kv_cache_layer_names_for_llama = ["*k_proj", "*v_proj"]
+    kv_cache_quant_config = {name :
+        QuantizationConfig(input_tensors=global_quant_config.input_tensors,
+                        weight=global_quant_config.weight,
+                        output_tensors=KV_CACHE_SPEC)
+        for name in kv_cache_layer_names_for_llama}
+    layer_quant_config = kv_cache_quant_config.copy()
 
-EXCLUDE_LAYERS = ["lm_head"]
-quant_config = Config(
-    global_quant_config=global_quant_config,
-    layer_quant_config=layer_quant_config,
-    kv_cache_quant_config=kv_cache_quant_config,
-    exclude=EXCLUDE_LAYERS,
-    algo_config=algo_config)
-```
+    # Define algorithm config by config file.
+    LLAMA_AUTOSMOOTHQUANT_CONFIG_FILE =
+        'examples/torch/language_modeling/llm_ptq/models/llama/autosmoothquant_config.json'
+    algo_config = load_quant_algo_config_from_file(LLAMA_AUTOSMOOTHQUANT_CONFIG_FILE)
+
+    EXCLUDE_LAYERS = ["lm_head"]
+    quant_config = Config(
+        global_quant_config=global_quant_config,
+        layer_quant_config=layer_quant_config,
+        kv_cache_quant_config=kv_cache_quant_config,
+        exclude=EXCLUDE_LAYERS,
+        algo_config=algo_config)
+    ```
 
 ### 4. Quantize the Model and Export
 
@@ -139,68 +145,72 @@ HuggingFace `safetensors`, you can refer to
 [HuggingFace format exporting](https://quark.docs.amd.com/latest/pytorch/export/quark_export_hf.html)
 for more exporting format details.
 
-```python
-import torch
-from quark.torch import ModelQuantizer, ModelExporter
-from quark.torch.export import ExporterConfig, JsonExporterConfig
+??? Code
 
-# Apply quantization.
-quantizer = ModelQuantizer(quant_config)
-quant_model = quantizer.quantize_model(model, calib_dataloader)
+    ```python
+    import torch
+    from quark.torch import ModelQuantizer, ModelExporter
+    from quark.torch.export import ExporterConfig, JsonExporterConfig
 
-# Freeze quantized model to export.
-freezed_model = quantizer.freeze(model)
+    # Apply quantization.
+    quantizer = ModelQuantizer(quant_config)
+    quant_model = quantizer.quantize_model(model, calib_dataloader)
 
-# Define export config.
-LLAMA_KV_CACHE_GROUP = ["*k_proj", "*v_proj"]
-export_config = ExporterConfig(json_export_config=JsonExporterConfig())
-export_config.json_export_config.kv_cache_group = LLAMA_KV_CACHE_GROUP
+    # Freeze quantized model to export.
+    freezed_model = quantizer.freeze(model)
 
-# Model: Llama-2-70b-chat-hf-w-fp8-a-fp8-kvcache-fp8-pertensor-autosmoothquant
-EXPORT_DIR = MODEL_ID.split("/")[1] + "-w-fp8-a-fp8-kvcache-fp8-pertensor-autosmoothquant"
-exporter = ModelExporter(config=export_config, export_dir=EXPORT_DIR)
-with torch.no_grad():
-    exporter.export_safetensors_model(freezed_model,
-        quant_config=quant_config, tokenizer=tokenizer)
-```
+    # Define export config.
+    LLAMA_KV_CACHE_GROUP = ["*k_proj", "*v_proj"]
+    export_config = ExporterConfig(json_export_config=JsonExporterConfig())
+    export_config.json_export_config.kv_cache_group = LLAMA_KV_CACHE_GROUP
+
+    # Model: Llama-2-70b-chat-hf-w-fp8-a-fp8-kvcache-fp8-pertensor-autosmoothquant
+    EXPORT_DIR = MODEL_ID.split("/")[1] + "-w-fp8-a-fp8-kvcache-fp8-pertensor-autosmoothquant"
+    exporter = ModelExporter(config=export_config, export_dir=EXPORT_DIR)
+    with torch.no_grad():
+        exporter.export_safetensors_model(freezed_model,
+            quant_config=quant_config, tokenizer=tokenizer)
+    ```
 
 ### 5. Evaluation in vLLM
 
 Now, you can load and run the Quark quantized model directly through the LLM entrypoint:
 
-```python
-from vllm import LLM, SamplingParams
+??? Code
 
-# Sample prompts.
-prompts = [
-    "Hello, my name is",
-    "The president of the United States is",
-    "The capital of France is",
-    "The future of AI is",
-]
-# Create a sampling params object.
-sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
+    ```python
+    from vllm import LLM, SamplingParams
 
-# Create an LLM.
-llm = LLM(model="Llama-2-70b-chat-hf-w-fp8-a-fp8-kvcache-fp8-pertensor-autosmoothquant",
-          kv_cache_dtype='fp8',quantization='quark')
-# Generate texts from the prompts. The output is a list of RequestOutput objects
-# that contain the prompt, generated text, and other information.
-outputs = llm.generate(prompts, sampling_params)
-# Print the outputs.
-print("\nGenerated Outputs:\n" + "-" * 60)
-for output in outputs:
-    prompt = output.prompt
-    generated_text = output.outputs[0].text
-    print(f"Prompt:    {prompt!r}")
-    print(f"Output:    {generated_text!r}")
-    print("-" * 60)
-```
+    # Sample prompts.
+    prompts = [
+        "Hello, my name is",
+        "The president of the United States is",
+        "The capital of France is",
+        "The future of AI is",
+    ]
+    # Create a sampling params object.
+    sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
+
+    # Create an LLM.
+    llm = LLM(model="Llama-2-70b-chat-hf-w-fp8-a-fp8-kvcache-fp8-pertensor-autosmoothquant",
+            kv_cache_dtype='fp8',quantization='quark')
+    # Generate texts from the prompts. The output is a list of RequestOutput objects
+    # that contain the prompt, generated text, and other information.
+    outputs = llm.generate(prompts, sampling_params)
+    # Print the outputs.
+    print("\nGenerated Outputs:\n" + "-" * 60)
+    for output in outputs:
+        prompt = output.prompt
+        generated_text = output.outputs[0].text
+        print(f"Prompt:    {prompt!r}")
+        print(f"Output:    {generated_text!r}")
+        print("-" * 60)
+    ```
 
 Or, you can use `lm_eval` to evaluate accuracy:
 
-```console
-$ lm_eval --model vllm \
+```bash
+lm_eval --model vllm \
   --model_args pretrained=Llama-2-70b-chat-hf-w-fp8-a-fp8-kvcache-fp8-pertensor-autosmoothquant,kv_cache_dtype='fp8',quantization='quark' \
   --tasks gsm8k
 ```
@@ -212,7 +222,7 @@ to quantize large language models more conveniently. It supports quantizing mode
 of different quantization schemes and optimization algorithms. It can export the quantized model
 and run evaluation tasks on the fly. With the script, the example above can be:
 
-```console
+```bash
 python3 quantize_quark.py --model_dir meta-llama/Llama-2-70b-chat-hf \
                           --output_dir /path/to/output \
                           --quant_scheme w_fp8_a_fp8 \

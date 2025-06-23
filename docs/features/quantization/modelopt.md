@@ -4,7 +4,7 @@ The [NVIDIA TensorRT Model Optimizer](https://github.com/NVIDIA/TensorRT-Model-O
 
 We recommend installing the library with:
 
-```console
+```bash
 pip install nvidia-modelopt
 ```
 
@@ -14,24 +14,26 @@ You can quantize HuggingFace models using the example scripts provided in the Te
 
 Below is an example showing how to quantize a model using modelopt's PTQ API:
 
-```python
-import modelopt.torch.quantization as mtq
-from transformers import AutoModelForCausalLM
+??? Code
 
-# Load the model from HuggingFace
-model = AutoModelForCausalLM.from_pretrained("<path_or_model_id>")
+    ```python
+    import modelopt.torch.quantization as mtq
+    from transformers import AutoModelForCausalLM
 
-# Select the quantization config, for example, FP8
-config = mtq.FP8_DEFAULT_CFG
+    # Load the model from HuggingFace
+    model = AutoModelForCausalLM.from_pretrained("<path_or_model_id>")
 
-# Define a forward loop function for calibration
-def forward_loop(model):
-    for data in calib_set:
-        model(data)
+    # Select the quantization config, for example, FP8
+    config = mtq.FP8_DEFAULT_CFG
 
-# PTQ with in-place replacement of quantized modules
-model = mtq.quantize(model, config, forward_loop)
-```
+    # Define a forward loop function for calibration
+    def forward_loop(model):
+        for data in calib_set:
+            model(data)
+
+    # PTQ with in-place replacement of quantized modules
+    model = mtq.quantize(model, config, forward_loop)
+    ```
 
 After the model is quantized, you can export it to a quantized checkpoint using the export API:
 
@@ -48,31 +50,33 @@ with torch.inference_mode():
 
 The quantized checkpoint can then be deployed with vLLM. As an example, the following code shows how to deploy `nvidia/Llama-3.1-8B-Instruct-FP8`, which is the FP8 quantized checkpoint derived from `meta-llama/Llama-3.1-8B-Instruct`, using vLLM:
 
-```python
-from vllm import LLM, SamplingParams
+??? Code
 
-def main():
+    ```python
+    from vllm import LLM, SamplingParams
 
-    model_id = "nvidia/Llama-3.1-8B-Instruct-FP8"
-    # Ensure you specify quantization='modelopt' when loading the modelopt checkpoint
-    llm = LLM(model=model_id, quantization="modelopt", trust_remote_code=True)
+    def main():
 
-    sampling_params = SamplingParams(temperature=0.8, top_p=0.9)
+        model_id = "nvidia/Llama-3.1-8B-Instruct-FP8"
+        # Ensure you specify quantization='modelopt' when loading the modelopt checkpoint
+        llm = LLM(model=model_id, quantization="modelopt", trust_remote_code=True)
 
-    prompts = [
-        "Hello, my name is",
-        "The president of the United States is",
-        "The capital of France is",
-        "The future of AI is",
-    ]
+        sampling_params = SamplingParams(temperature=0.8, top_p=0.9)
 
-    outputs = llm.generate(prompts, sampling_params)
+        prompts = [
+            "Hello, my name is",
+            "The president of the United States is",
+            "The capital of France is",
+            "The future of AI is",
+        ]
 
-    for output in outputs:
-        prompt = output.prompt
-        generated_text = output.outputs[0].text
-        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+        outputs = llm.generate(prompts, sampling_params)
 
-if __name__ == "__main__":
-    main()
-```
+        for output in outputs:
+            prompt = output.prompt
+            generated_text = output.outputs[0].text
+            print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+
+    if __name__ == "__main__":
+        main()
+    ```

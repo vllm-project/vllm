@@ -29,89 +29,93 @@ Alternatively, you can deploy vLLM to Kubernetes using any of the following:
 
 First, create a Kubernetes PVC and Secret for downloading and storing Hugging Face model:
 
-```bash
-cat <<EOF |kubectl apply -f -
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: vllm-models
-spec:
-  accessModes:
-    - ReadWriteOnce
-  volumeMode: Filesystem
-  resources:
-    requests:
-      storage: 50Gi
----
-apiVersion: v1
-kind: Secret
-metadata:
-  name: hf-token-secret
-type: Opaque
-data:
-  token: $(HF_TOKEN)
-EOF
-```
+??? Config
+
+    ```bash
+    cat <<EOF |kubectl apply -f -
+    apiVersion: v1
+    kind: PersistentVolumeClaim
+    metadata:
+      name: vllm-models
+    spec:
+      accessModes:
+        - ReadWriteOnce
+      volumeMode: Filesystem
+      resources:
+        requests:
+          storage: 50Gi
+    ---
+    apiVersion: v1
+    kind: Secret
+    metadata:
+      name: hf-token-secret
+    type: Opaque
+    data:
+      token: $(HF_TOKEN)
+    EOF
+    ```
 
 Next, start the vLLM server as a Kubernetes Deployment and Service:
 
-```bash
-cat <<EOF |kubectl apply -f -
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: vllm-server
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app.kubernetes.io/name: vllm
-  template:
+??? Config
+
+    ```bash
+    cat <<EOF |kubectl apply -f -
+    apiVersion: apps/v1
+    kind: Deployment
     metadata:
-      labels:
-        app.kubernetes.io/name: vllm
+      name: vllm-server
     spec:
-      containers:
-      - name: vllm
-        image: vllm/vllm-openai:latest
-        command: ["/bin/sh", "-c"]
-        args: [
-          "vllm serve meta-llama/Llama-3.2-1B-Instruct"
-        ]
-        env:
-        - name: HUGGING_FACE_HUB_TOKEN
-          valueFrom:
-            secretKeyRef:
-              name: hf-token-secret
-              key: token
-        ports:
-          - containerPort: 8000
-        volumeMounts:
+      replicas: 1
+      selector:
+        matchLabels:
+          app.kubernetes.io/name: vllm
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: vllm
+        spec:
+          containers:
+          - name: vllm
+            image: vllm/vllm-openai:latest
+            command: ["/bin/sh", "-c"]
+            args: [
+              "vllm serve meta-llama/Llama-3.2-1B-Instruct"
+            ]
+            env:
+            - name: HUGGING_FACE_HUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-token-secret
+                  key: token
+            ports:
+              - containerPort: 8000
+            volumeMounts:
+              - name: llama-storage
+                mountPath: /root/.cache/huggingface
+          volumes:
           - name: llama-storage
-            mountPath: /root/.cache/huggingface
-      volumes:
-      - name: llama-storage
-        persistentVolumeClaim:
-          claimName: vllm-models
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: vllm-server
-spec:
-  selector:
-    app.kubernetes.io/name: vllm
-  ports:
-  - protocol: TCP
-    port: 8000
-    targetPort: 8000
-  type: ClusterIP
-EOF
-```
+            persistentVolumeClaim:
+              claimName: vllm-models
+    ---
+    apiVersion: v1
+    kind: Service
+    metadata:
+      name: vllm-server
+    spec:
+      selector:
+        app.kubernetes.io/name: vllm
+      ports:
+      - protocol: TCP
+        port: 8000
+        targetPort: 8000
+      type: ClusterIP
+    EOF
+    ```
 
 We can verify that the vLLM server has started successfully via the logs (this might take a couple of minutes to download the model):
 
-```console
+```bash
 kubectl logs -l app.kubernetes.io/name=vllm
 ...
 INFO:     Started server process [1]
@@ -127,6 +131,9 @@ INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
 1. Create a PVC, Secret and Deployment for vLLM
 
       PVC is used to store the model cache and it is optional, you can use hostPath or other storage options
+
+      <details>
+      <summary>Yaml</summary>
 
       ```yaml
       apiVersion: v1
@@ -144,6 +151,8 @@ INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
         volumeMode: Filesystem
       ```
 
+      </details>
+
       Secret is optional and only required for accessing gated models, you can skip this step if you are not using gated models
 
       ```yaml
@@ -156,12 +165,15 @@ INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
       stringData:
         token: "REPLACE_WITH_TOKEN"
       ```
-
+  
       Next to create the deployment file for vLLM to run the model server. The following example deploys the `Mistral-7B-Instruct-v0.3` model.
 
       Here are two examples for using NVIDIA GPU and AMD GPU.
 
       NVIDIA GPU:
+
+      <details>
+      <summary>Yaml</summary>
 
       ```yaml
       apiVersion: apps/v1
@@ -233,9 +245,14 @@ INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
                 periodSeconds: 5
       ```
 
+      </details>
+
       AMD GPU:
 
       You can refer to the `deployment.yaml` below if using AMD ROCm GPU like MI300X.
+
+      <details>
+      <summary>Yaml</summary>
 
       ```yaml
       apiVersion: apps/v1
@@ -305,11 +322,16 @@ INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
                 mountPath: /dev/shm
       ```
 
+      </details>
+
       You can get the full example with steps and sample yaml files from <https://github.com/ROCm/k8s-device-plugin/tree/master/example/vllm-serve>.
 
 2. Create a Kubernetes Service for vLLM
 
       Next, create a Kubernetes Service file to expose the `mistral-7b` deployment:
+
+      <details>
+      <summary>Yaml</summary>
 
       ```yaml
       apiVersion: v1
@@ -330,18 +352,20 @@ INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
         type: ClusterIP
       ```
 
+      </details>
+
 3. Deploy and Test
 
       Apply the deployment and service configurations using `kubectl apply -f <filename>`:
 
-      ```console
+      ```bash
       kubectl apply -f deployment.yaml
       kubectl apply -f service.yaml
       ```
 
       To test the deployment, run the following `curl` command:
 
-      ```console
+      ```bash
       curl http://mistral-7b.default.svc.cluster.local/v1/completions \
         -H "Content-Type: application/json" \
         -d '{
