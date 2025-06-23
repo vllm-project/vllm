@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import pybase64
 from io import BytesIO
 from pathlib import Path
 
+import pybase64
 import torch
 from PIL import Image
 
