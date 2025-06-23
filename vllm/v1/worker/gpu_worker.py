@@ -185,14 +185,16 @@ class Worker(WorkerBase):
         destroy_model_parallel()
         destroy_distributed_environment()
 
-    def reinit_dp_states(self, new_dp_size: int):
+    def reinit_dp_states(self, new_dp_size: int, new_port: int, new_worker_port: int):
         logger.info("Reinitializing dp states")
         import time
         start_reinit_dp_states = time.time()
         self.vllm_config.parallel_config.data_parallel_size = new_dp_size
         self.model_runner.vllm_config.parallel_config.data_parallel_size = new_dp_size
-        self.vllm_config.parallel_config.data_parallel_master_port = 50000
-        self.model_runner.vllm_config.parallel_config.data_parallel_master_port = 50000
+        self.vllm_config.parallel_config.data_parallel_master_port = new_port
+        self.model_runner.vllm_config.parallel_config.data_parallel_master_port = new_port
+        self.vllm_config.parallel_config.data_parallel_worker_port = new_worker_port
+        self.model_runner.vllm_config.parallel_config.data_parallel_worker_port = new_worker_port
         with set_current_vllm_config(self.vllm_config):
             reinit_worker_distributed_environment(self.vllm_config, self.rank,
                                                   self.distributed_init_method,

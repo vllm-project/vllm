@@ -462,6 +462,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
             else:
                 self.non_driver_workers.append(worker)
 
+    # deprecated
     def _reinit_workers_ray(self, new_dp_size: int):
         """Re-initialize the workers in the Ray cluster.
         """
@@ -485,11 +486,12 @@ class RayDistributedExecutor(DistributedExecutorBase):
         self._run_workers("destroy_dp_states")
         logger.info("Destroying dp states done")
     
-    def reinit_dp_states(self, new_dp_size: int):
+    def reinit_dp_states(self, new_dp_size: int, new_port: int, new_worker_port: int):
         logger.info("Reinitializing dp states")
         self.vllm_config.parallel_config.data_parallel_size = new_dp_size
-        self.vllm_config.parallel_config.data_parallel_master_port = 50000
-        self._run_workers("reinit_dp_states", new_dp_size)
+        self.vllm_config.parallel_config.data_parallel_master_port = new_port
+        self.vllm_config.parallel_config.data_parallel_worker_port = new_worker_port
+        self._run_workers("reinit_dp_states", new_dp_size, new_port, new_worker_port)
 
     def _driver_execute_model(
         self, execute_model_req: Optional[ExecuteModelRequest]

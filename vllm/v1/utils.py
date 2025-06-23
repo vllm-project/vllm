@@ -321,6 +321,7 @@ class CoreEngineActorManager:
         self.local_engine_actors: list[ray.ActorHandle] = []
         self.remote_engine_actors: list[ray.ActorHandle] = []
         self.run_refs: list[ray.ObjectRef] = []
+        self.upscale_counter = 0
         dp_size = vllm_config.parallel_config.data_parallel_size
         local_engine_count = \
             vllm_config.parallel_config.data_parallel_size_local
@@ -463,6 +464,7 @@ class CoreEngineActorManager:
         assert upscale_dp_size > 0, (
             "Upstream DP size must be greater than current DP size")
 
+        self.upscale_counter += 1
         for node in nodes:
             node_resources = available_resources[node.node_id]
             available_engine_count = int(node_resources["GPU"]) // world_size
@@ -474,7 +476,7 @@ class CoreEngineActorManager:
                     break
                 bundles = [{"GPU": 1.0}] * world_size + [{"CPU": 1.0}]
                 pg = ray.util.placement_group(
-                    name=f"dp_rank_upscale_{len(placement_groups)}",
+                    name=f"dp_rank_{len(placement_groups)}_upscale_{self.upscale_counter}_size_{new_dp_size}",
                     strategy="STRICT_PACK",
                     bundles=bundles,
                 )
@@ -495,7 +497,7 @@ class CoreEngineActorManager:
         for pg in self.created_placement_groups:
             ray.util.remove_placement_group(pg)
     
-    def scale(self, new_dp_size: int):
+    def scale(self, new_dp_size: int, new_port: int, new_worker_port: int):
         import copy
 
         import ray
@@ -515,8 +517,8 @@ class CoreEngineActorManager:
             self.create_upscale_placement_groups(self.vllm_config, new_dp_size)
 
         self.vllm_config.parallel_config.data_parallel_size = new_dp_size
-        # FIXME(rui): this is a hack. Only works for scaling once.
-        self.vllm_config.parallel_config.data_parallel_master_port = 50000
+        self.vllm_config.parallel_config.data_parallel_master_port = new_port
+        self.vllm_config.parallel_config.data_parallel_worker_port = new_worker_port
 
         world_size = self.vllm_config.parallel_config.world_size
 

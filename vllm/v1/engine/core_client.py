@@ -21,7 +21,7 @@ import zmq.asyncio
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.utils import (get_open_zmq_inproc_path, make_zmq_socket,
+from vllm.utils import (get_open_port, get_open_zmq_inproc_path, make_zmq_socket,
                         zmq_socket_ctx)
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
                             EngineCoreRequestType, UtilityOutput)
@@ -1148,5 +1148,16 @@ class RayDPClient(DPAsyncMPClient):
             log_stats=log_stats)
 
     async def reinit_async(self, dp_size: int) -> None:
-        self.resources.engine_manager.scale(dp_size)
-        await self.call_utility_async("reinit", dp_size)
+        old_dp_size = self.vllm_config.parallel_config.data_parallel_size
+        new_port = get_open_port()
+        new_worker_port = get_open_port()
+        logger.info(f"Using new port {new_port} and "
+                    f"new worker port {new_worker_port} "
+                    "for DP scaling")
+
+        self.resources.engine_manager.scale(dp_size, new_port, new_worker_port)
+        await self.call_utility_async("reinit", dp_size, new_port, new_worker_port)
+
+        for i in range(old_dp_size, dp_size):
+            # FIXME(rui): fix "local" for multi-node
+            self.core_engines.append(CoreEngine(i, local=True))

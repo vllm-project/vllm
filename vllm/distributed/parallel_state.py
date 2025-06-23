@@ -937,7 +937,7 @@ def init_distributed_environment(
             f"data_parallel_size: {parallel_config.data_parallel_size}, world_size_across_dp: {world_size}"
         )
         ip = parallel_config.data_parallel_master_ip
-        port = parallel_config.data_parallel_master_port + 5  # for worker we add 5
+        port = parallel_config.data_parallel_worker_port
         distributed_init_method = get_distributed_init_method(ip, port)
         logger.info(
             "Adjusting world_size=%d rank=%d distributed_init_method=%s for DP",

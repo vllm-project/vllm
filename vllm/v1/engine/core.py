@@ -983,7 +983,7 @@ class DPEngineCoreActor(DPEngineCoreProc):
         finally:
             self.shutdown()
     
-    def reinit(self, new_dp_size: int):
+    def reinit(self, new_dp_size: int, new_port: int, new_worker_port: int):
         # Destroy the old DP states
         from vllm.distributed.utils import (
             stateless_destroy_torch_distributed_process_group)
@@ -993,7 +993,8 @@ class DPEngineCoreActor(DPEngineCoreProc):
 
         # Create the new DP states
         self.vllm_config.parallel_config.data_parallel_size = new_dp_size
-        self.vllm_config.parallel_config.data_parallel_master_port = 50000
+        self.vllm_config.parallel_config.data_parallel_master_port = new_port
+        self.vllm_config.parallel_config.data_parallel_worker_port = new_worker_port
         self.dp_group = stateless_init_torch_distributed_process_group(
             self.vllm_config.parallel_config.data_parallel_master_ip,
             self.vllm_config.parallel_config.data_parallel_master_port,
@@ -1003,7 +1004,7 @@ class DPEngineCoreActor(DPEngineCoreProc):
         
         assert isinstance(self.model_executor, RayDistributedExecutor)
         logger.info("assertion passed")
-        self.model_executor.reinit_dp_states(new_dp_size)
+        self.model_executor.reinit_dp_states(new_dp_size, new_port, new_worker_port)
 
         # This is needed because we need to call get_dp_padding() on the old workers
         # so that the EngineCore.init()|get_dp_padding()|all_reduce() can proceed

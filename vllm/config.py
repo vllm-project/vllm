@@ -1771,6 +1771,8 @@ class ParallelConfig:
     """Port for data parallel messaging."""
     data_parallel_master_port: int = 29500
     """Port of the data parallel master."""
+    data_parallel_worker_port: int = 29501
+    """Port of the data parallel worker."""
     data_parallel_backend: str = "mp"
     """Backend to use for data parallel, either "mp" or "ray"."""
     enable_expert_parallel: bool = False
