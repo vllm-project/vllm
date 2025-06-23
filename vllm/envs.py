@@ -130,6 +130,7 @@ if TYPE_CHECKING:
     VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS: int = 1
     VLLM_SLEEP_WHEN_IDLE: bool = False
     VLLM_MQ_MAX_CHUNK_BYTES_MB: int = 16
+    VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: int = 300
     VLLM_KV_CACHE_LAYOUT: Optional[str] = None
     VLLM_COMPUTE_NANS_IN_LOGITS: bool = False
 
@@ -896,6 +897,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # processes via zmq.
     "VLLM_MQ_MAX_CHUNK_BYTES_MB":
     lambda: int(os.getenv("VLLM_MQ_MAX_CHUNK_BYTES_MB", "16")),
+
+    # Timeout in seconds for execute_model RPC calls in multiprocessing
+    # executor (only applies when TP > 1).
+    "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS":
+    lambda: int(os.getenv("VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS", "300")),
 
     # KV Cache layout used throughout vllm.
     # Some common values are:
