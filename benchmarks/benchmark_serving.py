@@ -28,7 +28,6 @@ import gc
 import json
 import os
 import random
-
 import time
 import warnings
 from collections.abc import AsyncGenerator, Iterable
@@ -1369,8 +1368,6 @@ def create_argument_parser():
         help="The ending request rate for ramp-up (RPS). "
         "Needs to be specified when --ramp-up-strategy is used.",
     )
-
-    args = parser.parse_args()
 
     return parser
 
