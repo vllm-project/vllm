@@ -60,7 +60,7 @@ class FixFunctionalizationPass(VllmInductorPass):
 
             # rms_norm replacements avoid the most copies for LLaMa.
             elif at_target == torch.ops._C.fused_add_rms_norm.default:
-                mutated_args = {1: 'input', 2: 'residual'}
+                mutated_args = {1: 'result', 2: 'residual_out'}
                 self.defunctionalize(graph, node, mutated_args)
             elif at_target == torch.ops._C.fused_add_rms_norm_static_fp8_quant.default:  # noqa: E501
                 mutated_args = {1: 'result', 2: 'residual'}
