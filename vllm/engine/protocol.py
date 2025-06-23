@@ -250,6 +250,11 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
+    async def get_observability_config(self) -> "ObservabilityConfig":
+        """Get the observability configuration of the vLLM engine."""
+        ...
+
+    @abstractmethod
     async def get_decoding_config(self) -> DecodingConfig:
         """Get the decoding configuration of the vLLM engine."""
         ...
