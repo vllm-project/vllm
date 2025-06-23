@@ -212,7 +212,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.block_table import BlockTable
 
 try:
-    from vllm.vllm_flash_attn import flash_attn_varlen_func
+    from vllm_kernels.vllm_flash_attn import flash_attn_varlen_func
     is_vllm_fa = True
 except ImportError:
     # For rocm use upstream flash attention

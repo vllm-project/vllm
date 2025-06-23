@@ -31,8 +31,8 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 if current_platform.is_cuda():
-    from vllm.vllm_flash_attn import (flash_attn_varlen_func,
-                                      get_scheduler_metadata)
+    from vllm_kernels.vllm_flash_attn import (flash_attn_varlen_func,
+                                              get_scheduler_metadata)
 
 logger = init_logger(__name__)
 

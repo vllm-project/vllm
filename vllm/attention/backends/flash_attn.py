@@ -7,6 +7,8 @@ from itertools import accumulate
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type
 
 import torch
+from vllm_kernels.vllm_flash_attn import (flash_attn_varlen_func,
+                                          flash_attn_with_kvcache)
 
 from vllm import _custom_ops as ops
 # yapf conflicts with isort for this block
@@ -28,8 +30,6 @@ from vllm.attention.utils.fa_utils import (flash_attn_supports_fp8,
 from vllm.logger import init_logger
 from vllm.multimodal import MultiModalPlaceholderMap
 from vllm.utils import async_tensor_h2d, make_tensor_with_pad
-from vllm.vllm_flash_attn import (flash_attn_varlen_func,
-                                  flash_attn_with_kvcache)
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner import (ModelInputForGPUBuilder,

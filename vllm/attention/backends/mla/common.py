@@ -223,7 +223,7 @@ else:
     triton_attention = None
 
 try:
-    from vllm.vllm_flash_attn import flash_attn_varlen_func
+    from vllm_kernels.vllm_flash_attn import flash_attn_varlen_func
     is_vllm_fa = True
 except ImportError:
     is_vllm_fa = False

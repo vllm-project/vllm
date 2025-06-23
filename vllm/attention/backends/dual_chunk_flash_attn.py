@@ -9,6 +9,9 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type
 import torch
 import torch.distributed
 import torch.nn.functional as F
+from vllm_kernels.vllm_flash_attn import (flash_attn_varlen_func,
+                                          flash_attn_with_kvcache,
+                                          sparse_attn_func)
 
 from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import AttentionLayer, AttentionType
@@ -19,8 +22,6 @@ from vllm.attention.backends.flash_attn import (FlashAttentionBackend,
 from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
 from vllm.logger import init_logger
 from vllm.utils import async_tensor_h2d
-from vllm.vllm_flash_attn import (flash_attn_varlen_func,
-                                  flash_attn_with_kvcache, sparse_attn_func)
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner import ModelInputForGPUBuilder

@@ -12,7 +12,7 @@ def get_flash_attn_version(requires_alibi: bool = False) -> Optional[int]:
     # import here to avoid circular dependencies
     from vllm.platforms import current_platform
     try:
-        from vllm.vllm_flash_attn.flash_attn_interface import (
+        from vllm_kernels.vllm_flash_attn.flash_attn_interface import (
             fa_version_unsupported_reason, is_fa_version_supported)
         device_capability = current_platform.get_device_capability()
 
