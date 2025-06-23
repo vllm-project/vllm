@@ -54,12 +54,12 @@ def step_reward_patch_hf_model(hf_model: HfRunner):
             all_scores_res.append(non_zero_elements_list)
         return all_scores_res
 
-    def reward(self: HfRunner, prompts: list[str]) -> list[list[float]]:
-        input_ids = self.tokenizer(prompts, return_tensors="pt", padding=True)
-        input_ids = self.wrap_device(input_ids)
-        outputs = self.model(input_ids=input_ids)
+    def reward(prompts: list[str]) -> list[list[float]]:
+        input_ids = hf_model.tokenizer(prompts, return_tensors="pt").input_ids
+        input_ids = hf_model.wrap_device(input_ids)
+        outputs = hf_model.model(input_ids=input_ids)
 
-        step_sep_id = self.tokenizer.encode("<extra_0>")[0]
+        step_sep_id = hf_model.tokenizer.encode("<extra_0>")[0]
         token_masks = (input_ids == step_sep_id)
         return make_step_rewards(outputs[0], token_masks)
 
@@ -101,4 +101,4 @@ def test_prm_models(
         hf_output = torch.tensor(hf_output)
         vllm_output = torch.tensor(vllm_output)
 
-        assert torch.allclose(hf_output, vllm_output, 1e-1)
+        assert torch.allclose(hf_output, vllm_output, 1e-2)
