@@ -184,13 +184,14 @@ class KVCacheManager:
 
     def allocate_slots(
         self,
-        request_id: str,
+        request: RequestParams,
         num_computed_tokens: int,
         num_new_tokens: int,
         num_new_computed_tokens: int = 0,
         new_computed_blocks: Optional[KVCacheBlocks] = None,
         num_draft_tokens: int = 0,
         num_lookahead_tokens: int = 0,
+        delay_cache_blocks: bool = False,
     ) -> Optional[KVCacheBlocks]:
         """
 
@@ -206,6 +207,9 @@ class KVCacheManager:
             num_lookahead_tokens: The number of speculative tokens to allocate.
                 This is used by spec decode proposers with kv-cache such 
                 as eagle.
+            delay_cache_blocks: Whether to skip caching the blocks. This is
+                 used by P/D when allocating blocks used in a KV transfer
+                 which will complete in a future step
 
         Blocks layout:
         ```
@@ -239,7 +243,7 @@ class KVCacheManager:
         # insufficient free blocks.
         # Should call this function before allocating new blocks to reduce
         # the number of evicted blocks.
-        self.coordinator.remove_skipped_blocks(request_id, num_computed_tokens)
+        self.coordinator.remove_skipped_blocks(request.request_id, num_computed_tokens)
 
         # The number of computed tokens is the number of computed tokens plus
         # the new prefix caching hits
@@ -250,7 +254,7 @@ class KVCacheManager:
             self.max_model_len)
 
         num_blocks_to_allocate = self.coordinator.get_num_blocks_to_allocate(
-            request_id=request_id,
+            request_id=request.request_id,
             num_tokens=num_tokens_need_slot,
             new_computed_blocks=new_computed_block_list,
         )
@@ -269,11 +273,27 @@ class KVCacheManager:
 
         # Append the new computed blocks to the request blocks until now to
         # avoid the case where the new blocks cannot be allocated.
-        self.coordinator.save_new_computed_blocks(request_id,
+        self.coordinator.save_new_computed_blocks(request.request_id,
                                                   new_computed_block_list)
 
         new_blocks = self.coordinator.allocate_new_blocks(
-            request_id, num_tokens_need_slot)
+            request.request_id, num_tokens_need_slot)
+
+        # P/D: delay caching blocks if we have to recv from
+        # remote. Update state for locally cached blocks.
+        if not self.enable_caching or delay_cache_blocks:
+            return KVCacheBlocks(new_blocks)
+
+        # Speculated tokens might be rejected in the future, so we does
+        # not cache any speculated tokens. We only cache blocks with
+        # generated (accepted) tokens.
+        self.coordinator.cache_blocks(
+            request,
+            # token_ids unknown; we only want to recache blocks that were
+            #  already cached (i.e. already have block hashes)
+            token_ids=None, 
+            block_hashes=self.req_to_block_hashes[request.request_id],
+            num_computed_tokens=num_computed_tokens + num_new_tokens - num_draft_tokens)
 
         return KVCacheBlocks(new_blocks)
 

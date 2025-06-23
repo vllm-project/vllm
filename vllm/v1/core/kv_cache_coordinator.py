@@ -7,7 +7,7 @@ from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
 from vllm.v1.core.single_type_kv_cache_manager import (
     FullAttentionManager, get_manager_for_kv_cache_spec)
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig
-from vllm.v1.request import RequestGenerationState
+from vllm.v1.request import RequestParams
 
 
 class KVCacheCoordinator(ABC):
@@ -96,7 +96,7 @@ class KVCacheCoordinator(ABC):
             manager.allocate_new_blocks(request_id, num_tokens)
             for manager in self.single_type_managers)
 
-    def cache_blocks(self, request_id: str, block_hashes: list[BlockHash],
+    def cache_blocks(self, request: RequestParams, block_hashes: list[BlockHash],
                      num_computed_tokens: int) -> None:
         """
         Cache the blocks for the request.
@@ -108,7 +108,7 @@ class KVCacheCoordinator(ABC):
                 (including tokens that are already cached).
         """
         for manager in self.single_type_managers:
-            manager.cache_blocks(request_id, block_hashes, num_computed_tokens)
+            manager.cache_blocks(request: RequestParam, block_hashes, num_computed_tokens)
 
     def free(self, request_id: str) -> None:
         """
