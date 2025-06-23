@@ -7,7 +7,6 @@ import threading
 import time
 import uuid
 from collections import defaultdict
-from concurrent.futures import Future, ThreadPoolExecutor
 from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
@@ -391,9 +390,13 @@ class NixlConnectorWorker:
         # Background thread for handling new handshake requests.
         self._nixl_handshake_listener_t: Optional[threading.Thread] = None
         # Background thread for initializing new NIXL handshakes.
-        self._nixl_handshake_initiator_t: Optional[threading.Thread] = None
-        self._pending_hanshake = queue.Queue[tuple[ReqId, ReqMeta]]()
+        self._nixl_handshake_initiator_t: threading.Thread = threading.Thread(
+            target=self._nixl_handshake_in_sequence,
+            daemon=True,
+            name="vllm-nixl-handshake-initiator")
+        self._pending_handshake = queue.Queue[tuple[ReqId, ReqMeta]]()
         self._ready_requests = queue.Queue[tuple[ReqId, ReqMeta]]()
+        self._nixl_handshake_initiator_t.start()
 
         self.vllm_config = vllm_config
         self.block_size = vllm_config.cache_config.block_size
@@ -455,6 +458,16 @@ class NixlConnectorWorker:
                     logger.warning(
                         "Connection listener got unexpected message %s", msg)
                 sock.send_multipart((identity, b"", encoded_data))
+
+    def _nixl_handshake_in_sequence(self):
+        """
+        Call _nixl_handshake for each pending handshake in sequence, since nixl
+        API is not thread-safe.
+        """
+        while True:
+            req_id, meta = self._pending_handshake.get()
+            self._nixl_handshake(meta.remote_host, meta.remote_port)
+            self._ready_requests.put((req_id, meta))
 
     def _nixl_handshake(self, host: str, port: int):
         """Do a NIXL handshake with a remote instance."""
@@ -691,7 +704,7 @@ class NixlConnectorWorker:
         assert nixl_agent_meta.attn_backend_name == self.backend_name
 
         remote_agent_meta = self.nixl_wrapper.add_remote_agent(
-                nixl_agent_meta.agent_metadata)
+            nixl_agent_meta.agent_metadata)
 
         # Number of D TP workers reading from a single P TP worker. This is
         # 1 when P and D `--tensor-parallel-size` match.
@@ -720,8 +733,9 @@ class NixlConnectorWorker:
                 "local_kv_heads*tp_ratio, block_size, head_dim] and same dtype."
             )
 
-        assert self.block_size == remote_block_size, "Remote P worker with " \
-        f"different block size is not supported {self.block_size=} {remote_block_size=}"
+        assert self.block_size == remote_block_size, (
+            "Remote P worker with different block size is not supported "
+            f"{self.block_size=} {remote_block_size=}")
 
         # Create dst descs and xfer side handles. TP workers have same #blocks.
         if engine_id in self.dst_num_blocks:
@@ -760,7 +774,7 @@ class NixlConnectorWorker:
             descs = self.nixl_wrapper.get_xfer_descs(blocks_data, "VRAM")
             self.dst_xfer_side_handles[
                 engine_id] = self.nixl_wrapper.prep_xfer_dlist(
-                    remote_agent_meta , descs)
+                    remote_agent_meta, descs)
 
         # Only add to _remote_agents dict once we've finished successfully.
         self._remote_agents[engine_id][remote_tp_rank] = remote_agent_meta
@@ -890,19 +904,7 @@ class NixlConnectorWorker:
                 remote_engine_id, len(meta.local_block_ids),
                 len(meta.remote_block_ids))
             if remote_engine_id not in self._remote_agents:
-                self._pending_hanshake.put((req_id, meta))
-                if not self._nixl_handshake_initiator_t:
-                    def _nixl_handshake_in_sequence():
-                        while True:
-                            req_id, meta = self._pending_hanshake.get()
-                            self._nixl_handshake(meta.remote_host, meta.remote_port)
-                            self._ready_requests.put((req_id, meta))
-
-                    self._nixl_handshake_initiator_t = threading.Thread(
-                        target=_nixl_handshake_in_sequence,
-                        daemon=True,
-                        name="vllm-nixl-handshake-initiator")
-                    self._nixl_handshake_initiator_t.start()
+                self._pending_handshake.put((req_id, meta))
             else:
                 self._read_blocks_for_req(req_id, meta)
 

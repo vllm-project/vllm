@@ -85,7 +85,8 @@ def test_prompt_less_than_block_size():
 class FakeNixlWrapper:
     """Mock implementation of NixlWrapper for testing.
     
-    We don't inherit from NixlWrapper because NixlWrapper could be None.
+    We don't inherit from nixl._api.nixl_agent because nixl may not be
+    installed.
     """
 
     AGENT_METADATA = b"fake_agent_metadata"
@@ -180,63 +181,64 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
                 block_len=self.block_len,
                 attn_backend_name=self.backend_name,
             ))
-@patch(
-    "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",
-    FakeNixlWrapper)
-def test_multi_xfer_one_engine(
-    # dist_init is a fixture that initializes the distributed environment.
-    dist_init):
-    """Test case where multiple xfers are initiated to the same engine.
-    
-    This test triggers the connector to load remote KV for the same
-    `request_id`. The transfer is not done immediately due to
-    `set_cycles_before_xfer_done`, so there is a state where there are multiple
-    transfer states for the same `request_id`, and `get_finished` should handle
-    it correctly (wait for all transfers to be done).
-    """
-    vllm_config = create_vllm_config()
-
-    request_id = "req_id"
-
-    # Test worker role in decode server.
-    connector = NixlConnector(vllm_config, KVConnectorRole.WORKER)
-    connector.connector_worker = FakeNixlConnectorWorker(vllm_config,
-                                                         connector.engine_id,
-                                                         hand_shake_latency=0)
-    assert isinstance(connector.connector_worker.nixl_wrapper, FakeNixlWrapper)
-    connector.connector_worker.nixl_wrapper.set_cycles_before_xfer_done(3)
-    for i in range(4):
-        metadata = NixlConnectorMetadata()
-        metadata.add_new_req(request_id=request_id,
-                             local_block_ids=[i + 1, i + 2, i + 3],
-                             kv_transfer_params={
-                                 "remote_block_ids": [i + 4, i + 5, i + 6],
-                                 "remote_engine_id":
-                                 FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
-                                 "remote_host": "localhost",
-                                 "remote_port": 1234,
-                             })
-        connector.bind_connector_metadata(metadata)
-
-        dummy_ctx = ForwardContext(
-            no_compile_layers={},
-            attn_metadata={},
-            virtual_engine=0,
-        )
-        _before_load = time.perf_counter()
-        connector.start_load_kv(dummy_ctx)
-        _after_load = time.perf_counter()
-        assert _after_load - _before_load < 0.1, "start_load_kv took " \
-            f"{_after_load - _before_load} seconds"
-
-    while True:
-        _, done_recving = connector.get_finished(finished_req_ids=set())
-        if len(done_recving) > 0:
-            assert request_id in done_recving
-            break
 
 
 class TestNixlHandshake:
+
+    @patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",
+        FakeNixlWrapper)
+    def test_multi_xfer_one_engine(
+        # dist_init is a fixture that initializes the distributed environment.
+        dist_init):
+        """Test case where multiple xfers are initiated to the same engine.
+        
+        This test triggers the connector to load remote KV for the same
+        `request_id`. The transfer is not done immediately due to
+        `set_cycles_before_xfer_done`, so there is a state where there are
+        multiple transfer states for the same `request_id`, and `get_finished`
+        should handle it correctly (wait for all transfers to be done).
+        """
+        vllm_config = create_vllm_config()
+
+        request_id = "req_id"
+
+        # Test worker role in decode server.
+        connector = NixlConnector(vllm_config, KVConnectorRole.WORKER)
+        connector.connector_worker = FakeNixlConnectorWorker(
+            vllm_config, connector.engine_id, hand_shake_latency=0)
+        assert isinstance(connector.connector_worker.nixl_wrapper,
+                          FakeNixlWrapper)
+        connector.connector_worker.nixl_wrapper.set_cycles_before_xfer_done(3)
+        for i in range(4):
+            metadata = NixlConnectorMetadata()
+            metadata.add_new_req(request_id=request_id,
+                                 local_block_ids=[i + 1, i + 2, i + 3],
+                                 kv_transfer_params={
+                                     "remote_block_ids": [i + 4, i + 5, i + 6],
+                                     "remote_engine_id":
+                                     FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
+                                     "remote_host": "localhost",
+                                     "remote_port": 1234,
+                                 })
+            connector.bind_connector_metadata(metadata)
+
+            dummy_ctx = ForwardContext(
+                no_compile_layers={},
+                attn_metadata={},
+                virtual_engine=0,
+            )
+            _before_load = time.perf_counter()
+            connector.start_load_kv(dummy_ctx)
+            _after_load = time.perf_counter()
+            assert _after_load - _before_load < 0.1, "start_load_kv took " \
+                f"{_after_load - _before_load} seconds"
+
+        while True:
+            _, done_recving = connector.get_finished(finished_req_ids=set())
+            if len(done_recving) > 0:
+                assert request_id in done_recving
+                break
 
     @patch(
         "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",
@@ -251,16 +253,18 @@ class TestNixlHandshake:
 
         # Test worker role in decode server.
         connector = NixlConnector(vllm_config, KVConnectorRole.WORKER)
-        connector.connector_worker = FakeNixlConnectorWorker(vllm_config, connector.engine_id)
+        connector.connector_worker = FakeNixlConnectorWorker(
+            vllm_config, connector.engine_id)
         metadata = NixlConnectorMetadata()
         metadata.add_new_req(request_id="id",
-                            local_block_ids=[1, 2, 3],
-                            kv_transfer_params={
-                                "remote_block_ids": [4, 5, 6],
-                                "remote_engine_id": FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
-                                "remote_host": "localhost",
-                                "remote_port": 1234,
-                            })
+                             local_block_ids=[1, 2, 3],
+                             kv_transfer_params={
+                                 "remote_block_ids": [4, 5, 6],
+                                 "remote_engine_id":
+                                 FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
+                                 "remote_host": "localhost",
+                                 "remote_port": 1234,
+                             })
         connector.bind_connector_metadata(metadata)
 
         timeout = 2.5
@@ -296,18 +300,20 @@ class TestNixlHandshake:
 
         # Test worker role in decode server.
         connector = NixlConnector(vllm_config, KVConnectorRole.WORKER)
-        connector.connector_worker = FakeNixlConnectorWorker(vllm_config, connector.engine_id)
+        connector.connector_worker = FakeNixlConnectorWorker(
+            vllm_config, connector.engine_id)
         metadata = NixlConnectorMetadata()
         total_reqs = 5
         for i in range(total_reqs):
             metadata.add_new_req(request_id=f"id_{i}",
-                                local_block_ids=[1, 2, 3],
-                                kv_transfer_params={
-                                    "remote_block_ids": [4, 5, 6],
-                                    "remote_engine_id": FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
-                                    "remote_host": "localhost",
-                                    "remote_port": 1234,
-                                })
+                                 local_block_ids=[1, 2, 3],
+                                 kv_transfer_params={
+                                     "remote_block_ids": [4, 5, 6],
+                                     "remote_engine_id":
+                                     FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
+                                     "remote_host": "localhost",
+                                     "remote_port": 1234,
+                                 })
         connector.bind_connector_metadata(metadata)
 
         timeout = 2.5 * total_reqs
