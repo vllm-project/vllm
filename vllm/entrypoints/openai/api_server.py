@@ -1086,17 +1086,15 @@ def build_app(args: Namespace) -> FastAPI:
                     # in which case we don't need to do anything
                     await self.app(scope, receive, send)
                     return
-                root_path = scope["root_path"]
-                url_path = URL(scope=scope).path
+                root_path = scope.get("root_path", "")
+                url_path = URL(scope=scope).path.removeprefix(root_path)
                 headers = Headers(scope=scope)
-                if root_path and url_path.startswith(root_path):
-                    url_path = url_path[len(root_path):]
                 if not url_path.startswith("/v1"):
                     await self.app(scope, receive, send)
                     return
                 # Type narrow to satisfy mypy.
                 if isinstance(token, str) and headers.get(
-                        "Authorization") != "Bearer " + token:
+                        "Authorization") != f"Bearer {token}":
                     response = JSONResponse(content={"error": "Unauthorized"},
                                             status_code=401)
                     await response(scope, receive, send)
