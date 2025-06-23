@@ -29,6 +29,7 @@ from vllm.transformers_utils.tokenizer import (AnyTokenizer, MistralTokenizer,
                                                PreTrainedTokenizer,
                                                PreTrainedTokenizerFast)
 from vllm.utils import make_async, merge_async_iterators
+from pydantic import BaseModel
 
 logger = init_logger(__name__)
 
@@ -174,8 +175,8 @@ class ServingScores(OpenAIServing):
               for t1, t2 in input_pairs))
 
         for prompt_inputs, (t1, t2) in zip(tokenized_prompts, input_pairs):
-
-            request_prompt = f"{t1}{tokenizer.sep_token}{t2}"
+            sep_token = tokenizer.sep_token if tokenizer.sep_token else ''
+            request_prompt = f"{t1}{sep_token}{t2}"
 
             input_ids = prompt_inputs["input_ids"]
             text_token_prompt = \
@@ -431,3 +432,45 @@ class ServingScores(OpenAIServing):
             model=model_name,
             results=results,
             usage=RerankUsage(total_tokens=num_prompt_tokens))
+
+from fastapi import APIRouter, Request
+from transformers import AutoTokenizer
+import torch
+import re
+
+def clean_chatml(text: str) -> str:
+    return re.sub(r"<\|im_(start|end)\|>\s*", "", text)
+
+router = APIRouter()
+
+class ScoreInput(BaseModel):
+    prompt: str
+    response: str
+
+class ScoreOutput(BaseModel):
+    score: float
+
+@router.post("/v1/score", response_model=ScoreOutput)
+async def score_reward_model(payload: ScoreInput, request: Request):
+    # 获取模型和 tokenizer（FastAPI engine 注入）
+    engine = request.app.state.engine
+    model = engine.model_executor.driver.model
+    tokenizer = engine.tokenizer
+
+    if not hasattr(model, "score"):
+        return {"score": -1.0}  # 或抛出错误
+
+    # === 👇 与训练时保持一致的输入处理逻辑 ===
+    prompt = clean_chatml(payload.prompt.strip())
+    response = clean_chatml(payload.response.strip()) + tokenizer.eos_token
+    full_input = prompt + response
+
+    tokens = tokenizer(full_input, return_tensors="pt", padding="max_length", truncation=True, max_length=1024).to("cuda")
+
+    with torch.no_grad():
+        reward = model.score(
+            input_ids=tokens["input_ids"],
+            attention_mask=tokens["attention_mask"]
+        )
+
+    return {"score": reward.item()}
