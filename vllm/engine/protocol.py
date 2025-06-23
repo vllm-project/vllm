@@ -250,7 +250,7 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
-    async def get_observability_config(self) -> ModelConfig:
+    async def get_observability_config(self) -> "ObservabilityConfig":
         """Get the observability configuration of the vLLM engine."""
         ...
 
