@@ -437,10 +437,9 @@ class Llama4Model(LlamaModel):
                     continue
                 if name.endswith("scale") and "expert" not in name:
                     # Remapping the name of FP8 kv-scale.
-                    remapped_name = maybe_remap_kv_scale_name(name, params_dict)
-                    if remapped_name is None:
+                    name = maybe_remap_kv_scale_name(name, params_dict)
+                    if name is None:
                         continue
-                    name = remapped_name
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)

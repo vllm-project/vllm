@@ -40,7 +40,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.model_loader.utils import initialize_model
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader, maybe_remap_kv_scale_name
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
@@ -968,6 +968,19 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
                     else:
                         # Standard model.* to language_model.model.* renaming
                         renamed = name.replace("model.", "language_model.model.", 1)
+
+                        # Handle FP8 scale parameters: k_proj.k_scale -> attn.k_scale, v_proj.v_scale -> attn.v_scale
+                        if ".k_proj.k_scale" in renamed:
+                            original_renamed = renamed
+                            renamed = renamed.replace(".k_proj.k_scale", ".attn.k_scale")
+                            print(f"Remapped FP8 k_scale: {original_renamed} -> {renamed}")
+                        elif ".v_proj.v_scale" in renamed:
+                            original_renamed = renamed
+                            renamed = renamed.replace(".v_proj.v_scale", ".attn.v_scale")
+                            print(f"Remapped FP8 v_scale: {original_renamed} -> {renamed}")
+                    # Track renamed scale parameters
+                    if "scale" in renamed:
+                        renamed_scales.append(renamed)
                 elif name.startswith("lm_head.weight"):
                     # Rename lm_head.weight to language_model.lm_head.weight
                     renamed = name.replace("lm_head.weight", "language_model.lm_head.weight")
