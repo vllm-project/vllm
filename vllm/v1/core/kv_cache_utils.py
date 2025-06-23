@@ -605,6 +605,7 @@ def create_kv_cache_group_specs(
         merged_layer_spec = layer_specs[0].merge(layer_specs)
         kv_cache_groups.append(
             KVCacheGroupSpec(layer_names_one_group, merged_layer_spec))
+    print("len(kv_cache_groups): ", len(kv_cache_groups))
     return kv_cache_groups
 
 
@@ -692,7 +693,6 @@ def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
     page_size = get_uniform_page_size(kv_cache_spec)
     num_blocks = get_num_blocks(vllm_config, len(kv_cache_spec),
                                 available_memory, page_size)
-
     per_layer_size = page_size * num_blocks
     # All layers have the same KV cache spec, so we create one kv cache group
     # for all layers.
@@ -734,6 +734,8 @@ def is_kv_cache_page_size_uniform(
     """
 
     page_sizes = {layer.page_size_bytes for layer in kv_cache_spec.values()}
+    print("page_sizes: ", page_sizes)
+
     return len(page_sizes) == 1
 
 
@@ -811,6 +813,10 @@ def _get_kv_cache_config_uniform_page_size(
     for layer_name, layer_spec in kv_cache_spec.items():
         same_type_layers[layer_spec.type_id].append(layer_name)
 
+
+    for layer_type in same_type_layers.keys():
+        print(layer_type, len(same_type_layers[layer_type]))
+
     # Split each group into smaller groups, to make the number of layers in each
     # group identical. Add padding to the last group of each type if necessary.
     # E.g., (full.0, full.1), (sw.0, sw.1, sw.2)
@@ -824,6 +830,9 @@ def _get_kv_cache_config_uniform_page_size(
     # strategy if we want to support more complex patterns (e.g., 20 full + 30
     # sw, where the group size should be 10).
     group_size = min([len(layers) for layers in same_type_layers.values()])
+
+    print("group_size: ", group_size)
+
     grouped_layers = []
     for layers in same_type_layers.values():
         num_padding_layers = group_size - len(layers) % group_size
@@ -846,17 +855,26 @@ def _get_kv_cache_config_uniform_page_size(
     # full.0, sw.0, sw.2: share a Tensor with size=available_memory//2
     # full.1, sw.1: share another Tensor with size=available_memory//2
     page_size = get_uniform_page_size(kv_cache_spec)
+    print("page_size: ", page_size)
     num_blocks = get_num_blocks(vllm_config, group_size, available_memory,
                                 page_size)
+    print("num_blocks: ", num_blocks)
     per_memory_pool_size = page_size * num_blocks
+    print("per_memory_pool_size: ", per_memory_pool_size)
+
     kv_cache_tensors = []
     for i in range(group_size):
+        print("i: ", i)
         shared_by = []
         for j in range(len(kv_cache_groups)):
+            print("j: ", j)
+            print("grouped_layers[j]: ", grouped_layers[j])
             if i < len(grouped_layers[j]):
                 shared_by.append(grouped_layers[j][i])
+        print("shared_by: ", shared_by)
         kv_cache_tensors.append(
             KVCacheTensor(size=per_memory_pool_size, shared_by=shared_by))
+    print("kv_cache_tensors: ", kv_cache_tensors)
 
     kv_cache_config = KVCacheConfig(
         num_blocks=num_blocks,

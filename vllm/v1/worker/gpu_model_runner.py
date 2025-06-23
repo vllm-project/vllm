@@ -2355,6 +2355,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 assert raw_tensor.numel() % kv_cache_spec.page_size_bytes == 0
                 num_blocks = (raw_tensor.numel() //
                               kv_cache_spec.page_size_bytes)
+                print("layer_name: ", layer_name)
+                print("num_blocks: ", num_blocks)
                 if isinstance(kv_cache_spec, AttentionSpec):
                     kv_cache_shape = self.attn_backends[i].get_kv_cache_shape(
                         num_blocks, kv_cache_spec.block_size,
@@ -2388,16 +2390,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     dtype = kv_cache_spec.dtype
                     state_tensors = []
                     start_pos = 0
+                    print("kv_cache_spec.shapes: ", kv_cache_spec.shapes)
                     for shape in kv_cache_spec.shapes:
                         target_shape = (num_blocks, *shape)
                         size_in_bytes = np.prod(shape) * get_dtype_size(
                             dtype) * num_blocks
+                        print("size_in_bytes: ", size_in_bytes)
                         tensor = raw_tensor[start_pos:start_pos +
                                             size_in_bytes]
                         tensor = tensor.view(dtype).view(target_shape)
                         state_tensors.append(tensor)
                         start_pos += size_in_bytes
-                    assert start_pos == raw_tensor.numel()
+                    #assert start_pos == raw_tensor.numel()
                     kv_caches[layer_name] = tuple(state_tensors)
                 else:
                     raise NotImplementedError

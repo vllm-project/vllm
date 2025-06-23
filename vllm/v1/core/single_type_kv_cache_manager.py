@@ -121,6 +121,10 @@ class SingleTypeKVCacheManager(ABC):
         req_blocks = self.req_to_blocks[request_id]
         num_required_blocks = cdiv(num_tokens, self.block_size)
         num_new_blocks = num_required_blocks - len(req_blocks)
+        print("[allocate_new_blocks] num_tokens: ", num_tokens)
+        print("[allocate_new_blocks] block_size: ", self.block_size)
+        print("[allocate_new_blocks] num_required_blocks: ", num_required_blocks)
+
         if num_new_blocks <= 0:
             return []
         else:
