@@ -70,7 +70,10 @@ To make your model compatible with the Transformers backend, it needs:
 2. `MyAttention` must use `ALL_ATTENTION_FUNCTIONS` to call attention.
 3. `MyModel` must contain `_supports_attention_backend = True`.
 
-```python title="modeling_my_model.py"
+<details>
+<summary>modeling_my_model.py</summary>
+
+```python
 
 from transformers import PreTrainedModel
 from torch import nn
@@ -93,6 +96,8 @@ class MyModel(PreTrainedModel):
     _supports_attention_backend = True
 ```
 
+</details>
+
 Here is what happens in the background when this model is loaded:
 
 1. The config is loaded.
@@ -103,7 +108,10 @@ That's it!
 
 For your model to be compatible with vLLM's tensor parallel and/or pipeline parallel features, you must add `base_model_tp_plan` and/or `base_model_pp_plan` to your model's config class:
 
-```python title="configuration_my_model.py"
+<details>
+<summary>configuration_my_model.py</summary>
+
+```python
 
 from transformers import PretrainedConfig
 
@@ -122,6 +130,8 @@ class MyConfig(PretrainedConfig):
         "norm": (["hidden_states"], ["hidden_states"]),
     }
 ```
+
+</details>
 
 - `base_model_tp_plan` is a `dict` that maps fully qualified layer name patterns to tensor parallel styles (currently only `"colwise"` and `"rowwise"` are supported).
 - `base_model_pp_plan` is a `dict` that maps direct child layer names to `tuple`s of `list`s of `str`s:
@@ -168,7 +178,7 @@ Alternatively, you can [open an issue on GitHub](https://github.com/vllm-project
 
 If you prefer, you can use the Hugging Face CLI to [download a model](https://huggingface.co/docs/huggingface_hub/guides/cli#huggingface-cli-download) or specific files from a model repository:
 
-```console
+```bash
 # Download a model
 huggingface-cli download HuggingFaceH4/zephyr-7b-beta
 
@@ -183,7 +193,7 @@ huggingface-cli download HuggingFaceH4/zephyr-7b-beta eval_results.json
 
 Use the Hugging Face CLI to [manage models](https://huggingface.co/docs/huggingface_hub/guides/manage-cache#scan-your-cache) stored in local cache:
 
-```console
+```bash
 # List cached models
 huggingface-cli scan-cache
 
@@ -197,6 +207,9 @@ huggingface-cli scan-cache --dir ~/.cache/huggingface/hub
 #### Delete a cached model
 
 Use the Hugging Face CLI to interactively [delete downloaded model](https://huggingface.co/docs/huggingface_hub/guides/manage-cache#clean-your-cache) from the cache:
+
+<details>
+<summary>Commands</summary>
 
 ```console
 # The `delete-cache` command requires extra dependencies to work with the TUI.
@@ -223,6 +236,8 @@ Press <space> to select, <enter> to validate and <ctrl+c> to quit without modifi
 Start deletion.
 Done. Deleted 1 repo(s) and 0 revision(s) for a total of 438.9M.
 ```
+
+</details>
 
 #### Using a proxy
 
@@ -392,15 +407,15 @@ Specified using `--task embed`.
 | Architecture                                           | Models              | Example HF Models                                                                                                   | [LoRA][lora-adapter] | [PP][distributed-serving] | [V1](gh-issue:8779)   |
 |--------------------------------------------------------|---------------------|---------------------------------------------------------------------------------------------------------------------|----------------------|---------------------------|-----------------------|
 | `BertModel`                                            | BERT-based          | `BAAI/bge-base-en-v1.5`, `Snowflake/snowflake-arctic-embed-xs`, etc.                                                |                      |                           |                       |
-| `Gemma2Model`                                          | Gemma 2-based       | `BAAI/bge-multilingual-gemma2`, etc.                                                                                | ✅︎                   |                           |                       |
+| `Gemma2Model`                                          | Gemma 2-based       | `BAAI/bge-multilingual-gemma2`, etc.                                                                                | ✅︎                   |                           | ✅︎                     |
 | `GritLM`                                               | GritLM              | `parasail-ai/GritLM-7B-vllm`.                                                                                       | ✅︎                   | ✅︎                        |                       |
 | `GteModel`                                             | Arctic-Embed-2.0-M  | `Snowflake/snowflake-arctic-embed-m-v2.0`.                                                                          | ︎                     |                           |                       |
 | `GteNewModel`                                          | mGTE-TRM (see note) | `Alibaba-NLP/gte-multilingual-base`, etc.                                                                           | ︎                     | ︎                         |                       |
 | `ModernBertModel`                                      | ModernBERT-based    | `Alibaba-NLP/gte-modernbert-base`, etc.                                                                             | ︎                     | ︎                         |                       |
 | `NomicBertModel`                                       | Nomic BERT          | `nomic-ai/nomic-embed-text-v1`, `nomic-ai/nomic-embed-text-v2-moe`, `Snowflake/snowflake-arctic-embed-m-long`, etc. | ︎                     | ︎                         |                       |
-| `LlamaModel`, `LlamaForCausalLM`, `MistralModel`, etc. | Llama-based         | `intfloat/e5-mistral-7b-instruct`, etc.                                                                             | ✅︎                   | ✅︎                        |                       |
-| `Qwen2Model`, `Qwen2ForCausalLM`                       | Qwen2-based         | `ssmits/Qwen2-7B-Instruct-embed-base` (see note), `Alibaba-NLP/gte-Qwen2-7B-instruct` (see note), etc.              | ✅︎                   | ✅︎                        |                       |
-| `Qwen3Model`, `Qwen3ForCausalLM`                       | Qwen3-based         | `Qwen/Qwen3-Embedding-0.6B`, etc.                                                                                   | ✅︎                   | ✅︎                        |                       |
+| `LlamaModel`, `LlamaForCausalLM`, `MistralModel`, etc. | Llama-based         | `intfloat/e5-mistral-7b-instruct`, etc.                                                                             | ✅︎                   | ✅︎                        | ✅︎                     |
+| `Qwen2Model`, `Qwen2ForCausalLM`                       | Qwen2-based         | `ssmits/Qwen2-7B-Instruct-embed-base` (see note), `Alibaba-NLP/gte-Qwen2-7B-instruct` (see note), etc.              | ✅︎                   | ✅︎                        | ✅︎                     |
+| `Qwen3Model`, `Qwen3ForCausalLM`                       | Qwen3-based         | `Qwen/Qwen3-Embedding-0.6B`, etc.                                                                                   | ✅︎                   | ✅︎                        | ✅︎                     |
 | `RobertaModel`, `RobertaForMaskedLM`                   | RoBERTa-based       | `sentence-transformers/all-roberta-large-v1`, etc.                                                                  |                      |                           |                       |
 
 !!! note
@@ -427,9 +442,10 @@ Specified using `--task reward`.
 
 | Architecture              | Models          | Example HF Models                                                      | [LoRA][lora-adapter]   | [PP][distributed-serving]   | [V1](gh-issue:8779)   |
 |---------------------------|-----------------|------------------------------------------------------------------------|------------------------|-----------------------------|-----------------------|
-| `InternLM2ForRewardModel` | InternLM2-based | `internlm/internlm2-1_8b-reward`, `internlm/internlm2-7b-reward`, etc. | ✅︎                     | ✅︎                          |                       |
-| `LlamaForCausalLM`        | Llama-based     | `peiyi9979/math-shepherd-mistral-7b-prm`, etc.                         | ✅︎                     | ✅︎                          |                       |
-| `Qwen2ForRewardModel`     | Qwen2-based     | `Qwen/Qwen2.5-Math-RM-72B`, etc.                                       | ✅︎                     | ✅︎                          |                       |
+| `InternLM2ForRewardModel` | InternLM2-based | `internlm/internlm2-1_8b-reward`, `internlm/internlm2-7b-reward`, etc. | ✅︎                     | ✅︎                          | ✅︎                     |
+| `LlamaForCausalLM`        | Llama-based     | `peiyi9979/math-shepherd-mistral-7b-prm`, etc.                         | ✅︎                     | ✅︎                          | ✅︎                     |
+| `Qwen2ForRewardModel`     | Qwen2-based     | `Qwen/Qwen2.5-Math-RM-72B`, etc.                                       | ✅︎                     | ✅︎                          | ✅︎                     |
+| `Qwen2ForProcessRewardModel`     | Qwen2-based     | `Qwen/Qwen2.5-Math-PRM-7B`, etc.                                       | ✅︎                     | ✅︎                          | ✅︎                     |
 
 If your model is not in the above list, we will try to automatically convert the model using
 [as_reward_model][vllm.model_executor.models.adapters.as_reward_model]. By default, we return the hidden states of each token directly.
@@ -445,7 +461,7 @@ Specified using `--task classify`.
 | Architecture                     | Models   | Example HF Models                      | [LoRA][lora-adapter]   | [PP][distributed-serving]   | [V1](gh-issue:8779)   |
 |----------------------------------|----------|----------------------------------------|------------------------|-----------------------------|-----------------------|
 | `JambaForSequenceClassification` | Jamba    | `ai21labs/Jamba-tiny-reward-dev`, etc. | ✅︎                     | ✅︎                          |                       |
-
+| `GPT2ForSequenceClassification`  | GPT2     | `nie3e/sentiment-polish-gpt2-small`    |                        |                             | ✅︎                     |
 If your model is not in the above list, we will try to automatically convert the model using
 [as_classification_model][vllm.model_executor.models.adapters.as_classification_model]. By default, the class probabilities are extracted from the softmaxed hidden state corresponding to the last token.
 
@@ -456,7 +472,7 @@ Specified using `--task score`.
 | Architecture                          | Models            | Example HF Models                                                                    | [V1](gh-issue:8779)   |
 |---------------------------------------|-------------------|--------------------------------------------------------------------------------------|-----------------------|
 | `BertForSequenceClassification`       | BERT-based        | `cross-encoder/ms-marco-MiniLM-L-6-v2`, etc.                                         |                       |
-| `Qwen3ForSequenceClassification`      | Qwen3-based       | `tomaarsen/Qwen3-Reranker-0.6B-seq-cls`, `Qwen/Qwen3-Reranker-0.6B` (see note), etc. |                       |
+| `Qwen3ForSequenceClassification`      | Qwen3-based       | `tomaarsen/Qwen3-Reranker-0.6B-seq-cls`, `Qwen/Qwen3-Reranker-0.6B` (see note), etc. | ✅︎                     |
 | `RobertaForSequenceClassification`    | RoBERTa-based     | `cross-encoder/quora-roberta-base`, etc.                                             |                       |
 | `XLMRobertaForSequenceClassification` | XLM-RoBERTa-based | `BAAI/bge-reranker-v2-m3`, etc.                                                      |                       |
 
@@ -601,27 +617,29 @@ Specified using `--task generate`.
 
     For the best results, we recommend using the following dependency versions (tested on A10 and L40):
 
-    ```text
-    # Core vLLM-compatible dependencies with Molmo accuracy setup (tested on L40)
-    torch==2.5.1
-    torchvision==0.20.1
-    transformers==4.48.1
-    tokenizers==0.21.0
-    tiktoken==0.7.0
-    vllm==0.7.0
+    ??? Dependency versions
 
-    # Optional but recommended for improved performance and stability
-    triton==3.1.0
-    xformers==0.0.28.post3
-    uvloop==0.21.0
-    protobuf==5.29.3
-    openai==1.60.2
-    opencv-python-headless==4.11.0.86
-    pillow==10.4.0
+        ```text
+        # Core vLLM-compatible dependencies with Molmo accuracy setup (tested on L40)
+        torch==2.5.1
+        torchvision==0.20.1
+        transformers==4.48.1
+        tokenizers==0.21.0
+        tiktoken==0.7.0
+        vllm==0.7.0
 
-    # Installed FlashAttention (for float16 only)
-    flash-attn>=2.5.6  # Not used in float32, but should be documented
-    ```
+        # Optional but recommended for improved performance and stability
+        triton==3.1.0
+        xformers==0.0.28.post3
+        uvloop==0.21.0
+        protobuf==5.29.3
+        openai==1.60.2
+        opencv-python-headless==4.11.0.86
+        pillow==10.4.0
+
+        # Installed FlashAttention (for float16 only)
+        flash-attn>=2.5.6  # Not used in float32, but should be documented
+        ```
 
     **Note:** Make sure you understand the security implications of using outdated packages.
 

@@ -49,6 +49,7 @@ if TYPE_CHECKING:
     VLLM_XLA_CACHE_PATH: str = os.path.join(VLLM_CACHE_ROOT, "xla_cache")
     VLLM_XLA_CHECK_RECOMPILATION: bool = False
     VLLM_FUSED_MOE_CHUNK_SIZE: int = 64 * 1024
+    VLLM_ENABLE_FUSED_MOE_ACTIVATION_CHUNKING: bool = True
     VLLM_USE_RAY_SPMD_WORKER: bool = False
     VLLM_USE_RAY_COMPILED_DAG: bool = False
     VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE: str = "auto"
@@ -129,6 +130,7 @@ if TYPE_CHECKING:
     VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS: int = 1
     VLLM_SLEEP_WHEN_IDLE: bool = False
     VLLM_MQ_MAX_CHUNK_BYTES_MB: int = 16
+    VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: int = 300
     VLLM_KV_CACHE_LAYOUT: Optional[str] = None
     VLLM_COMPUTE_NANS_IN_LOGITS: bool = False
 
@@ -535,6 +537,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: bool(int(os.getenv("VLLM_XLA_USE_SPMD", "0"))),
     "VLLM_FUSED_MOE_CHUNK_SIZE":
     lambda: int(os.getenv("VLLM_FUSED_MOE_CHUNK_SIZE", "32768")),
+    # Control whether to use fused MoE activation chunking. Current chunking
+    # logic is incompatible with torch.compile and causes IMA. See issue
+    # https://github.com/vllm-project/vllm/issues/19631.
+    "VLLM_ENABLE_FUSED_MOE_ACTIVATION_CHUNKING":
+    lambda: bool(
+        int(os.getenv("VLLM_ENABLE_FUSED_MOE_ACTIVATION_CHUNKING", "1"))),
 
     # If set, vllm will skip the deprecation warnings.
     "VLLM_NO_DEPRECATION_WARNING":
@@ -889,6 +897,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # processes via zmq.
     "VLLM_MQ_MAX_CHUNK_BYTES_MB":
     lambda: int(os.getenv("VLLM_MQ_MAX_CHUNK_BYTES_MB", "16")),
+
+    # Timeout in seconds for execute_model RPC calls in multiprocessing
+    # executor (only applies when TP > 1).
+    "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS":
+    lambda: int(os.getenv("VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS", "300")),
 
     # KV Cache layout used throughout vllm.
     # Some common values are:
