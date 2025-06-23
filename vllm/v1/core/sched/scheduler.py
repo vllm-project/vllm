@@ -244,7 +244,7 @@ class Scheduler(SchedulerInterface):
 
             while True:
                 new_blocks = self.kv_cache_manager.allocate_slots(
-                    request.request_id,
+                    request.params,
                     request.num_computed_tokens,
                     num_new_tokens,
                     num_draft_tokens=num_draft_tokens,
@@ -427,7 +427,7 @@ class Scheduler(SchedulerInterface):
                             break
 
                 new_blocks = self.kv_cache_manager.allocate_slots(
-                    request.request_id,
+                    request.params,
                     request.num_computed_tokens,
                     num_new_tokens + num_external_computed_tokens,
                     num_new_local_computed_tokens,
