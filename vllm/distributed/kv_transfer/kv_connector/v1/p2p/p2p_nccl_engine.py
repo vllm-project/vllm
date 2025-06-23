@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MEM_POOL_SIZE_GB = 32
 DEFAULT_PING_SECONDS = 3
-DEFAULT_TIMEOUT_SECONDS = 3
+DEFAULT_TIMEOUT_SECONDS = 10
 
 
 @contextmanager
