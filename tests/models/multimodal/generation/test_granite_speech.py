@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Sequence
 from typing import Optional
@@ -9,7 +10,8 @@ from transformers import AutoModelForSpeechSeq2Seq
 from vllm.lora.request import LoRARequest
 from vllm.sequence import SampleLogprobs
 
-from ....conftest import HfRunner, PromptAudioInput, VllmRunner, _AudioAssets
+from ....conftest import (AudioTestAssets, HfRunner, PromptAudioInput,
+                          VllmRunner)
 from ...registry import HF_EXAMPLE_MODELS
 from ...utils import check_logprobs_close
 
@@ -27,7 +29,7 @@ def vllm_to_hf_output(
     return output_ids, hf_output_str, out_logprobs
 
 
-MODEL_NAME = "ibm-granite/granite-speech-3.3-8b"
+MODEL_NAME = "ibm-granite/granite-speech-3.3-2b"
 # Audio lora co-exists directly in the model directory, but
 # currently still needs to be passed directly to vLLM.
 audio_lora_path = MODEL_NAME
@@ -116,9 +118,9 @@ def run_test(
 @pytest.mark.parametrize("max_model_len", [2048])
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [10])
-def test_models(hf_runner, vllm_runner, model: str, audio_assets: _AudioAssets,
-                dtype: str, max_model_len: int, max_tokens: int,
-                num_logprobs: int) -> None:
+def test_models(hf_runner, vllm_runner, model: str,
+                audio_assets: AudioTestAssets, dtype: str, max_model_len: int,
+                max_tokens: int, num_logprobs: int) -> None:
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
     model_info.check_available_online(on_fail="skip")
     model_info.check_transformers_version(on_fail="skip")

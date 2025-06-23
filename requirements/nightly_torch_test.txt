@@ -8,9 +8,10 @@ pytest-rerunfailures
 pytest-shard
 pytest-timeout
 
-
 librosa # required by audio tests in entrypoints/openai
-sentence-transformers
+sentence-transformers # required for embedding tests
+transformers==4.52.4
+transformers_stream_generator # required for qwen-vl test
 numba == 0.61.2; python_version > '3.9'
 # testing utils
 boto3
@@ -23,5 +24,24 @@ runai-model-streamer-s3==0.11.0
 tensorizer>=2.9.0
 lm-eval==0.4.8
 buildkite-test-collector==0.1.9
-
 lm-eval[api]==0.4.8 # required for model evaluation test
+
+# required for quantization test
+bitsandbytes>=0.45.3
+
+# required for minicpmo_26 test
+vector_quantize_pytorch
+vocos
+
+# required for Basic Models Test
+blobfile # required for kimi-vl test
+matplotlib # required for qwen-vl test
+
+# required for  Multi-Modal Models Test (Standard)
+num2words # required for smolvlm test
+pqdm
+timm # required for internvl test
+mistral-common==1.6.2
+
+schemathesis==3.39.15  # Required for openai schema test.
+mteb>=1.38.11, <2 # required for mteb test

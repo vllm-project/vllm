@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from vllm.transformers_utils.configs.chatglm import ChatGLMConfig
 from vllm.transformers_utils.configs.cohere2 import Cohere2Config
@@ -22,8 +23,9 @@ from vllm.transformers_utils.configs.mlp_speculator import MLPSpeculatorConfig
 from vllm.transformers_utils.configs.moonvit import MoonViTConfig
 from vllm.transformers_utils.configs.mpt import MPTConfig
 from vllm.transformers_utils.configs.nemotron import NemotronConfig
+from vllm.transformers_utils.configs.nemotron_h import NemotronHConfig
 from vllm.transformers_utils.configs.nvlm_d import NVLM_D_Config
-from vllm.transformers_utils.configs.ovis2 import OvisConfig
+from vllm.transformers_utils.configs.ovis import OvisConfig
 from vllm.transformers_utils.configs.skyworkr1v import SkyworkR1VChatConfig
 from vllm.transformers_utils.configs.solar import SolarConfig
 from vllm.transformers_utils.configs.telechat2 import Telechat2Config
@@ -49,6 +51,7 @@ __all__ = [
     "MoonViTConfig",
     "KimiVLConfig",
     "NemotronConfig",
+    "NemotronHConfig",
     "NVLM_D_Config",
     "OvisConfig",
     "SkyworkR1VChatConfig",

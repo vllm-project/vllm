@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from typing import Any, Optional, TypedDict, Union
 
@@ -50,7 +51,7 @@ IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
 })
 
 VIDEO_PROMPTS = VIDEO_ASSETS.prompts({
-    "sample_demo_1":
+    "baby_reading":
     qwen2_vl_chat_template(
         VIDEO_PLACEHOLDER,
         "Describe this video with a short sentence ",

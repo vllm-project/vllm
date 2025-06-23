@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass, field
 from typing import Optional
@@ -67,13 +68,17 @@ class SpecDecodingLogging:
             spec_decoding_stats.num_accepted_tokens_per_pos)
 
     def log(self, log_fn=logger.info):
+        if not self.num_drafts:
+            return
         num_drafts = np.sum(self.num_drafts)
         num_draft_tokens = np.sum(self.num_draft_tokens)
         num_accepted_tokens = np.sum(self.num_accepted_tokens)
 
         draft_acceptance_rate = (num_accepted_tokens / num_draft_tokens *
                                  100 if num_draft_tokens > 0 else float("nan"))
-        mean_acceptance_length = (num_accepted_tokens / num_drafts)
+
+        # Conventionally, mean acceptance length includes the bonus token
+        mean_acceptance_length = 1 + (num_accepted_tokens / num_drafts)
 
         pos_matrix = np.array(self.accepted_tokens_per_pos_lists)
         acceptance_rates = np.sum(pos_matrix, axis=0) / num_drafts
@@ -103,10 +108,12 @@ class SpecDecodingProm:
       rate(vllm:spec_decode_num_accepted_tokens_total[$interval]) /
       rate(vllm:spec_decode_num_draft_tokens_total[$interval])
 
-    The mean acceptance length can be calculated using:
+    The mean acceptance length (conventionally including bonus tokens)
+    can be calculated using:
 
+      1 + (
       rate(vllm:spec_decode_num_accepted_tokens_total[$interval]) /
-      rate(vllm:spec_decode_num_drafts[$interval])
+      rate(vllm:spec_decode_num_drafts[$interval]))
 
     A per-position acceptance rate vector can be computed using
 
@@ -114,25 +121,31 @@ class SpecDecodingProm:
       vllm:spec_decode_num_drafts[$interval]
     """
 
-    def __init__(self, speculative_config: Optional[SpeculativeConfig],
-                 labelnames: list[str], labelvalues: list[str]):
+    _counter_cls = prometheus_client.Counter
+
+    def __init__(
+        self,
+        speculative_config: Optional[SpeculativeConfig],
+        labelnames: list[str],
+        labelvalues: list[str],
+    ):
         self.spec_decoding_enabled = speculative_config is not None
         if not self.spec_decoding_enabled:
             return
 
         self.counter_spec_decode_num_drafts = \
-            prometheus_client.Counter(
-                name="vllm:spec_decode_num_drafts_total",
+            self._counter_cls(
+                name="vllm:spec_decode_num_drafts",
                 documentation="Number of spec decoding drafts.",
                 labelnames=labelnames).labels(*labelvalues)
         self.counter_spec_decode_num_draft_tokens = \
-            prometheus_client.Counter(
-                name="vllm:spec_decode_num_draft_tokens_total",
+            self._counter_cls(
+                name="vllm:spec_decode_num_draft_tokens",
                 documentation="Number of draft tokens.",
-                labelnames=labelnames).labels(*labelvalues)
+                labelnames=labelnames,).labels(*labelvalues)
         self.counter_spec_decode_num_accepted_tokens = \
-            prometheus_client.Counter(
-                name="vllm:spec_decode_num_accepted_tokens_total",
+            self._counter_cls(
+                name="vllm:spec_decode_num_accepted_tokens",
                 documentation="Number of accepted tokens.",
                 labelnames=labelnames).labels(*labelvalues)
 
@@ -140,12 +153,13 @@ class SpecDecodingProm:
         num_spec_tokens = (speculative_config.num_speculative_tokens
                            if self.spec_decoding_enabled else 0)
         pos_labelnames = labelnames + ["position"]
-        base_counter = prometheus_client.Counter(
+        base_counter = self._counter_cls(
             name="vllm:spec_decode_num_accepted_tokens_per_pos",
             documentation="Accepted tokens per draft position.",
-            labelnames=pos_labelnames)
-        self.counter_spec_decode_num_accepted_tokens_per_pos: \
-            list[prometheus_client.Counter] = []
+            labelnames=pos_labelnames,
+        )
+        self.counter_spec_decode_num_accepted_tokens_per_pos: list[
+            prometheus_client.Counter] = []
         for pos in range(num_spec_tokens):
             pos_labelvalues = labelvalues + [str(pos)]
             self.counter_spec_decode_num_accepted_tokens_per_pos.append(

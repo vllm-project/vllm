@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import gguf
 import pytest
@@ -36,3 +37,9 @@ def test_ggml_opcheck(quant_type):
     opcheck(torch.ops._C.ggml_moe_a8,
             (x, qweight, sorted_token_ids, expert_ids, num_tokens_post_padded,
              quant_type, qweight.shape[0], 1, x.shape[0]))
+
+    topk_ids = torch.zeros((1, 1), device='cuda', dtype=torch.int32)
+
+    opcheck(
+        torch.ops._C.ggml_moe_a8_vec,
+        (x, qweight, topk_ids, 1, quant_type, qweight.shape[0], x.shape[0]))

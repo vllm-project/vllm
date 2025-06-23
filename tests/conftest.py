@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
 import os
 import tempfile
-from collections import UserList
 from enum import Enum
 from typing import Any, Callable, Optional, TypedDict, TypeVar, Union
 
@@ -34,6 +33,7 @@ from vllm.inputs import (ExplicitEncoderDecoderPrompt, TextPrompt,
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams
+from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils import cuda_device_count_stateless
 
 logger = init_logger(__name__)
@@ -58,16 +58,12 @@ def _read_prompts(filename: str) -> list[str]:
         return prompts
 
 
-class _ImageAssetPrompts(TypedDict):
+class ImageAssetPrompts(TypedDict):
     stop_sign: str
     cherry_blossom: str
 
 
-class _ImageAssetsBase(UserList[ImageAsset]):
-    pass
-
-
-class _ImageAssets(_ImageAssetsBase):
+class ImageTestAssets(list[ImageAsset]):
 
     def __init__(self) -> None:
         super().__init__([
@@ -75,7 +71,7 @@ class _ImageAssets(_ImageAssetsBase):
             ImageAsset("cherry_blossom"),
         ])
 
-    def prompts(self, prompts: _ImageAssetPrompts) -> list[str]:
+    def prompts(self, prompts: ImageAssetPrompts) -> list[str]:
         """
         Convenience method to define the prompt for each test image.
 
@@ -85,35 +81,27 @@ class _ImageAssets(_ImageAssetsBase):
         return [prompts["stop_sign"], prompts["cherry_blossom"]]
 
 
-class _VideoAssetPrompts(TypedDict):
-    sample_demo_1: str
+class VideoAssetPrompts(TypedDict):
+    baby_reading: str
 
 
-class _VideoAssetsBase(UserList[VideoAsset]):
-    pass
-
-
-class _VideoAssets(_VideoAssetsBase):
+class VideoTestAssets(list[VideoAsset]):
 
     def __init__(self) -> None:
         super().__init__([
-            VideoAsset("sample_demo_1"),
+            VideoAsset("baby_reading"),
         ])
 
-    def prompts(self, prompts: _VideoAssetPrompts) -> list[str]:
-        return [prompts["sample_demo_1"]]
+    def prompts(self, prompts: VideoAssetPrompts) -> list[str]:
+        return [prompts["baby_reading"]]
 
 
-class _AudioAssetPrompts(TypedDict):
+class AudioAssetPrompts(TypedDict):
     mary_had_lamb: str
     winning_call: str
 
 
-class _AudioAssetsBase(UserList[AudioAsset]):
-    pass
-
-
-class _AudioAssets(_AudioAssetsBase):
+class AudioTestAssets(list[AudioAsset]):
 
     def __init__(self) -> None:
         super().__init__([
@@ -121,16 +109,16 @@ class _AudioAssets(_AudioAssetsBase):
             AudioAsset("winning_call"),
         ])
 
-    def prompts(self, prompts: _AudioAssetPrompts) -> list[str]:
+    def prompts(self, prompts: AudioAssetPrompts) -> list[str]:
         return [prompts["mary_had_lamb"], prompts["winning_call"]]
 
 
-IMAGE_ASSETS = _ImageAssets()
-"""Singleton instance of :class:`_ImageAssets`."""
-VIDEO_ASSETS = _VideoAssets()
-"""Singleton instance of :class:`_VideoAssets`."""
-AUDIO_ASSETS = _AudioAssets()
-"""Singleton instance of :class:`_AudioAssets`."""
+IMAGE_ASSETS = ImageTestAssets()
+"""Singleton instance of {class}`ImageTestAssets`."""
+VIDEO_ASSETS = VideoTestAssets()
+"""Singleton instance of {class}`VideoTestAssets`."""
+AUDIO_ASSETS = AudioTestAssets()
+"""Singleton instance of {class}`AudioTestAssets`."""
 
 
 @pytest.fixture(scope="function", autouse=True)
@@ -158,6 +146,7 @@ def run_with_both_engines(request, monkeypatch):
     # Automatically runs tests twice, once with V1 and once without
     use_v1 = request.param
     # Tests decorated with `@skip_v1` are only run without v1
+    skip_v0 = request.node.get_closest_marker("skip_v0")
     skip_v1 = request.node.get_closest_marker("skip_v1")
 
     if use_v1:
@@ -165,6 +154,8 @@ def run_with_both_engines(request, monkeypatch):
             pytest.skip("Skipping test on vllm V1")
         monkeypatch.setenv('VLLM_USE_V1', '1')
     else:
+        if skip_v0:
+            pytest.skip("Skipping test on vllm V0")
         monkeypatch.setenv('VLLM_USE_V1', '0')
 
     yield
@@ -278,17 +269,17 @@ def example_long_prompts() -> list[str]:
 
 
 @pytest.fixture(scope="session")
-def image_assets() -> _ImageAssets:
+def image_assets() -> ImageTestAssets:
     return IMAGE_ASSETS
 
 
 @pytest.fixture(scope="session")
-def video_assets() -> _VideoAssets:
+def video_assets() -> VideoTestAssets:
     return VIDEO_ASSETS
 
 
 @pytest.fixture(scope="session")
-def audio_assets() -> _AudioAssets:
+def audio_assets() -> AudioTestAssets:
     return AUDIO_ASSETS
 
 
@@ -325,19 +316,26 @@ class HfRunner:
         dtype: str = "auto",
         *,
         model_kwargs: Optional[dict[str, Any]] = None,
+        trust_remote_code: bool = True,
         is_sentence_transformer: bool = False,
         is_cross_encoder: bool = False,
         skip_tokenizer_init: bool = False,
         auto_cls: type[_BaseAutoModelClass] = AutoModelForCausalLM,
     ) -> None:
+        model_name = maybe_model_redirect(model_name)
         self.model_name = model_name
 
         self.config = AutoConfig.from_pretrained(
             model_name,
-            trust_remote_code=True,
+            trust_remote_code=trust_remote_code,
         )
         self.device = self.get_default_device()
-        self.dtype = torch_dtype = _get_and_verify_dtype(self.config, dtype)
+        self.dtype = torch_dtype = _get_and_verify_dtype(
+            self.model_name,
+            self.config,
+            dtype=dtype,
+            is_pooling_model=is_sentence_transformer or is_cross_encoder,
+        )
 
         model_kwargs = model_kwargs if model_kwargs is not None else {}
         model_kwargs.setdefault("torch_dtype", torch_dtype)
@@ -350,7 +348,7 @@ class HfRunner:
                 model_name,
                 device=self.device,
                 model_kwargs=model_kwargs,
-                trust_remote_code=True,
+                trust_remote_code=trust_remote_code,
             )
         elif is_cross_encoder:
             # Lazy init required for AMD CI
@@ -360,19 +358,25 @@ class HfRunner:
                 model_name,
                 device=self.device,
                 automodel_args=model_kwargs,
-                trust_remote_code=True,
+                trust_remote_code=trust_remote_code,
             )
         else:
             model = auto_cls.from_pretrained(
                 model_name,
-                trust_remote_code=True,
+                trust_remote_code=trust_remote_code,
                 **model_kwargs,
             )
+
+            # in case some unquantized custom models are not in same dtype
+            if (getattr(model, "quantization_method", None) is None
+                    and any(p.dtype != self.dtype
+                            for p in model.parameters())):
+                model = model.to(dtype=self.dtype)
 
             if (getattr(model, "quantization_method", None) != "bitsandbytes"
                     and len({p.device
                              for p in model.parameters()}) < 2):
-                model = model.to(self.device)
+                model = model.to(device=self.device)
 
             self.model = model
 
@@ -380,7 +384,7 @@ class HfRunner:
             self.tokenizer = AutoTokenizer.from_pretrained(
                 model_name,
                 torch_dtype=torch_dtype,
-                trust_remote_code=True,
+                trust_remote_code=trust_remote_code,
             )
 
         # don't put this import at the top level
@@ -389,7 +393,7 @@ class HfRunner:
         self.processor = AutoProcessor.from_pretrained(
             model_name,
             torch_dtype=torch_dtype,
-            trust_remote_code=True,
+            trust_remote_code=trust_remote_code,
         )
         if skip_tokenizer_init:
             self.tokenizer = self.processor.tokenizer
@@ -437,6 +441,15 @@ class HfRunner:
             all_inputs.append(inputs)
 
         return all_inputs
+
+    def get_prompt_embeddings(self, prompts: list[str]) -> list[torch.Tensor]:
+        all_inputs = self.get_inputs(prompts)
+        embeddings = []
+        for inputs in all_inputs:
+            input_ids = self.wrap_device(inputs)["input_ids"]
+            embedding = self.model.get_input_embeddings()(input_ids).squeeze(0)
+            embeddings.append(embedding)
+        return embeddings
 
     def classify(self, prompts: list[str]) -> list[str]:
         # output is final logits
@@ -719,8 +732,12 @@ class HfRunner:
                **kwargs) -> list[list[torch.Tensor]]:
         return self.model.encode(prompts, *args, **kwargs)
 
-    def predict(self, prompts: list[list[str]]) -> torch.Tensor:
-        return self.model.predict(prompts, convert_to_tensor=True)
+    def predict(self, prompts: list[list[str]], *args,
+                **kwargs) -> torch.Tensor:
+        return self.model.predict(prompts,
+                                  *args,
+                                  convert_to_tensor=True,
+                                  **kwargs)
 
     def __enter__(self):
         return self
@@ -738,7 +755,7 @@ def hf_runner():
 class VllmRunner:
     """
     The default value of some arguments have been modified from
-    :class:`~vllm.LLM` as follows:
+    {class}`~vllm.LLM` as follows:
 
     - `trust_remote_code`: Set to `True` instead of `False` for convenience.
     - `seed`: Set to `0` instead of `None` for test reproducibility.
@@ -1029,8 +1046,10 @@ class VllmRunner:
         self,
         text_1: Union[str, list[str]],
         text_2: Union[str, list[str]],
+        *args,
+        **kwargs,
     ) -> list[float]:
-        req_outputs = self.model.score(text_1, text_2)
+        req_outputs = self.model.score(text_1, text_2, *args, **kwargs)
         return [req_output.outputs.score for req_output in req_outputs]
 
     def apply_model(self, func: Callable[[nn.Module], _R]) -> list[_R]:

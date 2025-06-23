@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
 
 import pytest
@@ -11,8 +12,8 @@ from vllm.engine.async_llm_engine import AsyncLLMEngine
 UNSUPPORTED_MODELS_V1 = [
     "openai/whisper-large-v3",  # transcription
     "facebook/bart-large-cnn",  # encoder decoder
-    "mistralai/Mamba-Codestral-7B-v0.1",  # mamba
-    "hmellor/bamba-tiny-random",  # hybrid
+    "state-spaces/mamba-130m-hf",  # mamba1
+    "hmellor/tiny-random-BambaForCausalLM",  # hybrid
     "BAAI/bge-m3",  # embedding
 ]
 

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from typing import Optional
 
@@ -9,7 +10,7 @@ from vllm.inputs.data import ExplicitEncoderDecoderPrompt, TextPrompt
 from vllm.multimodal.image import rescale_image_size
 from vllm.sequence import SampleLogprobs
 
-from ....conftest import IMAGE_ASSETS, HfRunner, VllmRunner, _ImageAssets
+from ....conftest import IMAGE_ASSETS, HfRunner, ImageTestAssets, VllmRunner
 from ...utils import check_logprobs_close
 
 MODELS = ["microsoft/Florence-2-base"]
@@ -99,6 +100,8 @@ def run_test(
         )
 
 
+# FIXME: https://github.com/huggingface/transformers/issues/38358
+@pytest.mark.skip("Model initialization fails")
 @pytest.mark.core_model
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize(
@@ -118,7 +121,7 @@ def run_test(
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("num_logprobs", [5])
 def test_models(hf_runner: type[HfRunner], vllm_runner: type[VllmRunner],
-                image_assets: _ImageAssets, model: str,
+                image_assets: ImageTestAssets, model: str,
                 size_factors: list[int], dtype: str, max_tokens: int,
                 num_logprobs: int) -> None:
     images = [asset.pil_image for asset in image_assets]
