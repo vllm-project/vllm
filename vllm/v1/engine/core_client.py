@@ -424,8 +424,7 @@ class MPClient(EngineCoreClient):
                 # multimodal model during engine initialization, othwewise
                 # multimodal processor will call blocking ops like x.to(dtype)
                 # which will cause deadlock with OpenMP.
-                disable_omp = (envs.VLLM_WORKER_MULTIPROC_METHOD == "fork" and
-                               vllm_config.model_config.is_multimodal_model)
+                disable_omp = envs.VLLM_WORKER_MULTIPROC_METHOD == "fork"
                 with set_default_torch_num_threads(1 if disable_omp else -1):
                     self._init_engines_direct(vllm_config, local_only,
                                               local_start_index, input_address,
