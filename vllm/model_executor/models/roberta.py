@@ -14,9 +14,14 @@ from vllm.model_executor.layers.pooler import ClassifierPooler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.bert import BertEmbeddingModel, BertModel
+from vllm.model_executor.models.bert import (BertEmbeddingModel,
+                                             BertMMTokenIdsMixin, BertModel,
+                                             TokenTypeInputBuilder,
+                                             TokenTypeMultiModalProcessor,
+                                             TokenTypeProcessingInfo)
 from vllm.model_executor.models.utils import WeightsMapper, maybe_prefix
 from vllm.model_executor.pooling_metadata import PoolingMetadata
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors, PoolerOutput
 from vllm.transformers_utils.config import (
     get_cross_encoder_activation_function)
@@ -48,17 +53,10 @@ class RobertaEmbedding(nn.Module):
         if self.position_embedding_type != "absolute":
             raise ValueError("Only 'absolute' position_embedding_type" +
                              " is supported")
+        self.input_ids: Optional[torch.Tensor] = None
 
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        position_ids: torch.Tensor,
-        token_type_ids: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-
-        input_shape = input_ids.size()
-        inputs_embeds = self.word_embeddings(input_ids)
-
+    def _correct_positions(self, input_ids: torch.Tensor,
+                           position_ids: torch.Tensor) -> torch.Tensor:
         zero_pos = torch.where(position_ids == 0)[0]
         end_pos = torch.cat((zero_pos[1:],
                              torch.tensor([position_ids.shape[0]],
@@ -78,19 +76,56 @@ class RobertaEmbedding(nn.Module):
             pos_list.append(
                 create_position_ids_from_input_ids(tokens, self.padding_idx))
 
-        corrected_positions = torch.cat(pos_list)
+        return torch.cat(pos_list)
 
-        # Position embeddings.
-        position_embeddings = self.position_embeddings(corrected_positions)
-        if token_type_ids is None:
-            token_type_ids = torch.zeros(input_shape,
+    def maybe_store_input_ids(self, input_ids: torch.Tensor):
+        self.input_ids = input_ids
+
+    def forward(
+        self,
+        input_ids: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.Tensor] = None,
+        token_type_ids: Optional[torch.Tensor] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+        apply_layer_norm: bool = True,
+    ) -> torch.Tensor:
+
+        # forward was called directly without going
+        # throught the multi-modal flow
+        if input_ids is not None and position_ids is not None \
+            and inputs_embeds is None and token_type_ids is None:
+            token_type_ids = torch.zeros(input_ids.size(),
                                          dtype=torch.long,
-                                         device=inputs_embeds.device)
+                                         device=input_ids.device)
 
-        token_type_embeddings = self.token_type_embeddings(token_type_ids)
-        embeddings = inputs_embeds + token_type_embeddings + position_embeddings
-        embeddings = self.LayerNorm(embeddings)
-        return embeddings
+        tensors_to_add: list[torch.Tensor] = []
+
+        if inputs_embeds is not None:
+            tensors_to_add.append(inputs_embeds)
+
+        if token_type_ids is not None:
+            tensors_to_add.append(self.token_type_embeddings(token_type_ids))
+
+        if position_ids is not None:
+            inputs = input_ids if input_ids is not None else self.input_ids
+            if inputs is None:  # it can by during _dummy_run
+                corrected_positions = position_ids
+            else:
+                corrected_positions = self._correct_positions(
+                    input_ids=inputs, position_ids=position_ids)
+
+            tensors_to_add.append(
+                self.position_embeddings(corrected_positions))
+
+        if input_ids is not None:
+            tensors_to_add.append(self.word_embeddings(input_ids))
+
+        embeds = torch.stack(tensors_to_add, dim=0).sum(dim=0)
+
+        if apply_layer_norm:
+            return self.LayerNorm(embeds)
+        else:
+            return embeds
 
 
 # Adapted from transformers
@@ -145,7 +180,11 @@ class RobertaEmbeddingModel(BertEmbeddingModel):
         assert len(loaded), "Unable to load RobertaEmbeddingModel"
 
 
-class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding):
+@MULTIMODAL_REGISTRY.register_processor(TokenTypeMultiModalProcessor,
+                                        info=TokenTypeProcessingInfo,
+                                        dummy_inputs=TokenTypeInputBuilder)
+class RobertaForSequenceClassification(nn.Module, BertMMTokenIdsMixin,
+                                       SupportsCrossEncoding):
     """A model that uses Roberta to provide embedding functionalities.
 
    This class encapsulates the BertModel and provides an interface for
@@ -184,6 +223,9 @@ class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding):
 
         self._pooler = ClassifierPooler(vllm_config.model_config,
                                         self.classifier)
+
+    def get_language_model(self) -> torch.nn.Module:
+        return self.roberta
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         bert_weights, task_weights = roberta_task_weights_filter(weights)
