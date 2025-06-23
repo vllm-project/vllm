@@ -336,6 +336,9 @@ class NixlConnectorWorker:
         # Agent.
         self.nixl_wrapper = NixlWrapper(str(uuid.uuid4()), None)
         # Map of engine_id -> {rank0: agent_name0, rank1: agent_name1..}.
+        # TODO(lk-chen): This field is accessed from multiple threads, and we
+        # don't have a proper lock to protect it yet. We seem fine for now
+        # because we don't have eviction logic.
         self._remote_agents: dict[EngineId, dict[int, str]] = defaultdict(dict)
 
         # NIXL handshake port.
@@ -427,8 +430,7 @@ class NixlConnectorWorker:
 
     def __del__(self):
         """Cleanup background threads on destruction."""
-        if self._nixl_handshake_initiator_t:
-            self._nixl_handshake_initiator_t.join(timeout=0)
+        self._nixl_handshake_initiator_t.join(timeout=0)
         if self._nixl_handshake_listener_t:
             self._nixl_handshake_listener_t.join(timeout=0)
 
@@ -466,10 +468,13 @@ class NixlConnectorWorker:
         """
         while True:
             req_id, meta = self._pending_handshake.get()
-            self._nixl_handshake(meta.remote_host, meta.remote_port)
+            rank_to_agent_name = self._nixl_handshake(meta.remote_host,
+                                                      meta.remote_port)
+            # Only add to _remote_agents dict once we've finished successfully.
+            self._remote_agents[meta.remote_engine_id] = rank_to_agent_name
             self._ready_requests.put((req_id, meta))
 
-    def _nixl_handshake(self, host: str, port: int):
+    def _nixl_handshake(self, host: str, port: int) -> dict[int, str]:
         """Do a NIXL handshake with a remote instance."""
 
         start_time = time.perf_counter()
@@ -478,7 +483,7 @@ class NixlConnectorWorker:
         # a hack to keep us moving. We will switch when moving to etcd
         # or where we have a single ZMQ socket in the scheduler.
 
-        def handshake(path: str, rank: int) -> NixlAgentMetadata:
+        def handshake(path: str, rank: int) -> tuple[NixlAgentMetadata, str]:
             # Send query for the request.
             with zmq_ctx(zmq.REQ, path) as sock:
                 sock.send(GET_META_MSG)
@@ -488,19 +493,20 @@ class NixlConnectorWorker:
                 got_metadata_time = time.perf_counter()
 
                 # Register Remote agent.
-                self.add_remote_agent(metadata, rank)
+                remote_agent_name = self.add_remote_agent(metadata, rank)
                 setup_agent_time = time.perf_counter()
 
                 logger.debug("NIXL handshake: get metadata took: %s",
                              got_metadata_time - start_time)
                 logger.debug("NIXL handshake: add agent took: %s",
                              setup_agent_time - got_metadata_time)
-                return metadata
+                return metadata, remote_agent_name
 
         # Handshake with remote agent-rank0 first to get the tp_size of remote
         path = make_zmq_path("tcp", host, port)
         logger.debug("Querying master rank metadata on path: %s", path)
-        metadata = handshake(path, 0)
+        rank_to_agent_name: dict[int, str] = {}
+        metadata, rank_to_agent_name[0] = handshake(path, 0)
 
         # Handshake only with the other TP remote the current local rank will
         # pull from. With homogeneous TP it happens to be the same rank_i.
@@ -510,7 +516,10 @@ class NixlConnectorWorker:
             path = make_zmq_path("tcp", host, port + p_remote_rank)
             logger.debug("Querying metadata on path: %s at remote rank %s",
                          path, p_remote_rank)
-            _ = handshake(path, p_remote_rank)
+            _, rank_to_agent_name[p_remote_rank] = handshake(
+                path, p_remote_rank)
+
+        return rank_to_agent_name
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in nixl."""
@@ -651,7 +660,7 @@ class NixlConnectorWorker:
 
     def add_remote_agent(self,
                          nixl_agent_meta: NixlAgentMetadata,
-                         remote_tp_rank: int = 0):
+                         remote_tp_rank: int = 0) -> str:
         """
         Add the remote NIXL agent and prepare the descriptors for reading cache
         blocks from remote.
@@ -692,8 +701,8 @@ class NixlConnectorWorker:
         """ # noqa: E501
         engine_id = nixl_agent_meta.engine_id
         # TODO re-evaluate refreshing for scaling/recovery
-        if remote_tp_rank in self._remote_agents.get(engine_id, ()):
-            return
+        if remote_tp_rank in self._remote_agents.get(engine_id, {}):
+            return self._remote_agents[engine_id][remote_tp_rank]
 
         if engine_id in self._tp_size:
             assert self._tp_size[engine_id] == nixl_agent_meta.tp_size
@@ -703,7 +712,7 @@ class NixlConnectorWorker:
         # layout and close outputs.
         assert nixl_agent_meta.attn_backend_name == self.backend_name
 
-        remote_agent_meta = self.nixl_wrapper.add_remote_agent(
+        remote_agent_name = self.nixl_wrapper.add_remote_agent(
             nixl_agent_meta.agent_metadata)
 
         # Number of D TP workers reading from a single P TP worker. This is
@@ -774,10 +783,9 @@ class NixlConnectorWorker:
             descs = self.nixl_wrapper.get_xfer_descs(blocks_data, "VRAM")
             self.dst_xfer_side_handles[
                 engine_id] = self.nixl_wrapper.prep_xfer_dlist(
-                    remote_agent_meta, descs)
+                    remote_agent_name, descs)
 
-        # Only add to _remote_agents dict once we've finished successfully.
-        self._remote_agents[engine_id][remote_tp_rank] = remote_agent_meta
+        return remote_agent_name
 
     def get_finished(self) -> tuple[set[str], set[str]]:
         """
