@@ -222,44 +222,38 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
         layer.w2_weight_scale_2 = torch.nn.Parameter(
             1 / layer.w2_weight_global_scale.data, requires_grad=False)
 
-        #w13_input_scale = layer.w13_input_scale.max(dim=1).values.to(
-        #    torch.float32)
-        #layer.g1_alphas = torch.nn.Parameter(
-        #    (w13_input_scale * w13_weight_scale_2).to(torch.float32),
-        #    requires_grad=False)
+        if not self.use_marlin:
+            # w13
+            w13_input_scale = 1 / layer.w13_input_scale.max(dim=1).values.to(
+                torch.float32)
 
-        #w13_blockscale_swizzled = self.swizzle_blockscale(
-        #    layer.w13_weight_scale)
+            layer.g1_alphas = torch.nn.Parameter(
+                (w13_input_scale * w13_weight_scale_2).to(torch.float32),
+                requires_grad=False)
 
-        #layer.w13_blockscale_swizzled = torch.nn.Parameter(
-        #    w13_blockscale_swizzled, requires_grad=False)
+            layer.w13_blockscale_swizzled = torch.nn.Parameter(
+                self.swizzle_blockscale(layer.w13_weight_scale),
+                requires_grad=False)
 
-        # This is for quantization, so we need to invert it.
-        #layer.w13_input_scale_quant = torch.nn.Parameter(
-        #    (1 / w13_input_scale).to(torch.float32), requires_grad=False)
+            # This is for quantization, so we need to invert it.
+            layer.w13_input_scale_quant = torch.nn.Parameter(
+                (1 / w13_input_scale).to(torch.float32), requires_grad=False)
 
-        # GEMM 2
-        #layer.g2_alphas = torch.nn.Parameter(
-        #    (layer.w2_input_scale * layer.w2_weight_scale_2).to(torch.float32),
-        #    requires_grad=False)
+            # w2
+            layer.g2_alphas = torch.nn.Parameter(
+                ((1 / layer.w2_input_scale) * layer.w2_weight_scale_2).to(
+                    torch.float32),
+                requires_grad=False)
 
-        # This is for quantization, so we need to invert it.
-        #layer.w2_input_scale_quant = torch.nn.Parameter(
-        #    (1 / layer.w2_input_scale).to(torch.float32), requires_grad=False)
+            layer.w2_input_scale_quant = torch.nn.Parameter(
+                (layer.w2_input_scale).to(torch.float32), requires_grad=False)
 
-        #w2_blockscale_swizzled = self.swizzle_blockscale(layer.w2_weight_scale)
-
-        #layer.w2_blockscale_swizzled = torch.nn.Parameter(
-        #    w2_blockscale_swizzled, requires_grad=False)
+            layer.w2_blockscale_swizzled = torch.nn.Parameter(
+                self.swizzle_blockscale(layer.w2_weight_scale),
+                requires_grad=False)
 
         if self.use_marlin:
             prepare_moe_fp4_layer_for_marlin(layer)
-            #del layer.g1_alphas
-            #del layer.g2_alphas
-            #del layer.w13_input_scale_quant
-            #del layer.w2_input_scale_quant
-            #del layer.w13_blockscale_swizzled
-            #del layer.w2_blockscale_swizzled
 
     def apply(
         self,
@@ -279,20 +273,20 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
     ):
-        if self.use_marlin:
-            topk_weights, topk_ids = FusedMoE.select_experts(
-                hidden_states=x,
-                router_logits=router_logits,
-                use_grouped_topk=use_grouped_topk,
-                top_k=top_k,
-                renormalize=renormalize,
-                topk_group=topk_group,
-                num_expert_group=num_expert_group,
-                custom_routing_function=custom_routing_function,
-                scoring_func=scoring_func,
-                e_score_correction_bias=e_score_correction_bias,
-            )
+        topk_weights, topk_ids = FusedMoE.select_experts(
+            hidden_states=x,
+            router_logits=router_logits,
+            use_grouped_topk=use_grouped_topk,
+            top_k=top_k,
+            renormalize=renormalize,
+            topk_group=topk_group,
+            num_expert_group=num_expert_group,
+            custom_routing_function=custom_routing_function,
+            scoring_func=scoring_func,
+            e_score_correction_bias=e_score_correction_bias,
+        )
 
+        if self.use_marlin:
             return torch.ops.vllm.fused_marlin_moe(
                 x,
                 layer.w13_weight,
@@ -307,7 +301,7 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
                 quant_type_id=scalar_types.float4_e2m1f.id,
                 global_num_experts=global_num_experts,
                 expert_map=expert_map)
-        """
+
         assert activation == "silu", "Only SiLU activation is supported."
         assert not apply_router_weight_on_input, (
             "Router weight on input is not "
@@ -315,18 +309,6 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
         assert expert_map is None, ("Expert Parallelism / expert_map "
                                     "is currently not supported for "
                                     "ModelOptNvFp4FusedMoE.")
-
-        topk_weights, topk_ids = FusedMoE.select_experts(
-            hidden_states=x,
-            router_logits=router_logits,
-            use_grouped_topk=use_grouped_topk,
-            top_k=top_k,
-            renormalize=renormalize,
-            topk_group=topk_group,
-            num_expert_group=num_expert_group,
-            custom_routing_function=custom_routing_function,
-            scoring_func=scoring_func,
-            e_score_correction_bias=e_score_correction_bias)
 
         from vllm.model_executor.layers.fused_moe.cutlass_moe import (
             cutlass_moe_fp4)
@@ -349,7 +331,6 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
                                a1_gscale=layer.w13_input_scale_quant,
                                a2_gscale=layer.w2_input_scale_quant,
                                device=x.device).to(x.dtype)
-        """
 
 
 class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
