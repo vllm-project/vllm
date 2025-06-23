@@ -1034,7 +1034,8 @@ def load_log_config(log_config_file: Optional[str]) -> Optional[dict]:
         return None
 
 
-def build_app(args: Namespace, observability_config: ObservabilityConfig) -> FastAPI:
+def build_app(args: Namespace,
+              observability_config: ObservabilityConfig) -> FastAPI:
     if args.disable_fastapi_docs:
         app = FastAPI(openapi_url=None,
                       docs_url=None,
