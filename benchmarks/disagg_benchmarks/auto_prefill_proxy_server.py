@@ -11,10 +11,14 @@ AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(total=6 * 60 * 60)
 app = Quart(__name__)
 
 # 解析命令行参数
-parser = argparse.ArgumentParser(description="Disaggregated Prefill Proxy Server")
-parser.add_argument("--p_ports", nargs="+", type=int, required=True, help="List of producer ports")
-parser.add_argument("--d_ports", nargs="+", type=int, required=True, help="List of consumer ports")
-parser.add_argument("--proxy_port", type=int, default=8000, help="Proxy server port")
+parser = argparse.ArgumentParser(
+    description="Disaggregated Prefill Proxy Server")
+parser.add_argument("--p_ports", nargs="+", type=int, required=True,
+                    help="List of producer ports")
+parser.add_argument("--d_ports", nargs="+", type=int, required=True,
+                    help="List of consumer ports")
+parser.add_argument("--proxy_port", type=int, default=8000,
+                    help="Proxy server port")
 args = parser.parse_args()
 
 request_serial = 0

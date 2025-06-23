@@ -183,8 +183,10 @@ if __name__ == "__main__":
 
         # The GPUs sometimes come in format of "GPUTYPE\nGPUTYPE\n...",
         # we want to turn it into "8xGPUTYPE"
-        df["GPU"] = df["GPU"].apply(
-            lambda x: f"{len(x.split('\n'))}x{x.split('\n')[0]}")
+        def format_gpu(x):
+            parts = x.split('\n')
+            return f"{len(parts)}x{parts[0]}"
+        df["GPU"] = df["GPU"].apply(format_gpu)
 
     # get markdown tables
     latency_md_table = tabulate(latency_results,

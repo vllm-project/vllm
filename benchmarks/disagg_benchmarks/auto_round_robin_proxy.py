@@ -59,12 +59,13 @@ async def main(ports, proxy_port):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Round Robin Proxy Server")
-    parser.add_argument("--ports", nargs="+", type=int, required=True, help="List of target ports")
-    parser.add_argument("--proxy_port", type=int, default=8001, help="Proxy server port")
+    parser.add_argument("--ports", nargs="+", type=int, required=True,
+                        help="List of target ports")
+    parser.add_argument("--proxy_port", type=int, default=8001,
+                        help="Proxy server port")
     args = parser.parse_args()
 
     try:
-        args = parser.parse_args()
         asyncio.run(main(args.ports, args.proxy_port))
     except Exception as e:
         print(f"An error occurred: {str(e)}")
