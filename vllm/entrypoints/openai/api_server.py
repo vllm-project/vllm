@@ -1353,6 +1353,7 @@ async def run_server_worker(listen_address,
 
     if args.tool_parser_plugin and len(args.tool_parser_plugin) > 3:
         ToolParserManager.import_tool_parser(args.tool_parser_plugin)
+
     server_index = client_config.get("client_index", 0) if client_config else 0
 
     # Load logging config for uvicorn if specified
