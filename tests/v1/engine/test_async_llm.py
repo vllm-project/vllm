@@ -15,7 +15,6 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.inputs import PromptType
 from vllm.platforms import current_platform
 from vllm.sampling_params import RequestOutputKind
-from vllm.utils import set_default_torch_num_threads
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.metrics.loggers import LoggingStatLogger
 
@@ -108,8 +107,7 @@ async def test_load(
     with monkeypatch.context() as m, ExitStack() as after:
         m.setenv("VLLM_USE_V1", "1")
 
-        with set_default_torch_num_threads(1):
-            engine = AsyncLLM.from_engine_args(engine_args)
+        engine = AsyncLLM.from_engine_args(engine_args)
         after.callback(engine.shutdown)
 
         NUM_REQUESTS = 100
@@ -156,8 +154,7 @@ async def test_abort(
     with monkeypatch.context() as m, ExitStack() as after:
         m.setenv("VLLM_USE_V1", "1")
 
-        with set_default_torch_num_threads(1):
-            engine = AsyncLLM.from_engine_args(engine_args)
+        engine = AsyncLLM.from_engine_args(engine_args)
         after.callback(engine.shutdown)
 
         NUM_REQUESTS = 100
@@ -229,8 +226,7 @@ async def test_finished_flag(
     with monkeypatch.context() as m, ExitStack() as after:
         m.setenv("VLLM_USE_V1", "1")
 
-        with set_default_torch_num_threads(1):
-            engine = AsyncLLM.from_engine_args(engine_args)
+        engine = AsyncLLM.from_engine_args(engine_args)
         after.callback(engine.shutdown)
 
         sampling_params = SamplingParams(
@@ -264,8 +260,7 @@ async def test_mid_stream_cancellation(monkeypatch: pytest.MonkeyPatch,
     with monkeypatch.context() as m, ExitStack() as after:
         m.setenv("VLLM_USE_V1", "1")
 
-        with set_default_torch_num_threads(1):
-            engine = AsyncLLM.from_engine_args(engine_args)
+        engine = AsyncLLM.from_engine_args(engine_args)
         after.callback(engine.shutdown)
 
         NUM_REQUESTS = 100
@@ -327,11 +322,10 @@ async def test_customize_loggers(monkeypatch):
     with monkeypatch.context() as m, ExitStack() as after:
         m.setenv("VLLM_USE_V1", "1")
 
-        with set_default_torch_num_threads(1):
-            engine = AsyncLLM.from_engine_args(
-                TEXT_ENGINE_ARGS,
-                stat_loggers=[MockLoggingStatLogger],
-            )
+        engine = AsyncLLM.from_engine_args(
+            TEXT_ENGINE_ARGS,
+            stat_loggers=[MockLoggingStatLogger],
+        )
         after.callback(engine.shutdown)
 
         await engine.do_log_stats()
@@ -346,8 +340,7 @@ async def test_dp_rank_argument(monkeypatch: pytest.MonkeyPatch):
     with monkeypatch.context() as m, ExitStack() as after:
         m.setenv("VLLM_USE_V1", "1")
 
-        with set_default_torch_num_threads(1):
-            engine = AsyncLLM.from_engine_args(TEXT_ENGINE_ARGS)
+        engine = AsyncLLM.from_engine_args(TEXT_ENGINE_ARGS)
         after.callback(engine.shutdown)
 
         sampling_params = SamplingParams(max_tokens=100,
@@ -383,8 +376,7 @@ async def test_check_health(monkeypatch: pytest.MonkeyPatch):
     with monkeypatch.context() as m, ExitStack() as after:
         m.setenv("VLLM_USE_V1", "1")
 
-        with set_default_torch_num_threads(1):
-            engine = AsyncLLM.from_engine_args(TEXT_ENGINE_ARGS)
+        engine = AsyncLLM.from_engine_args(TEXT_ENGINE_ARGS)
         after.callback(engine.shutdown)
 
         # Test 1: Healthy engine should not raise any exception

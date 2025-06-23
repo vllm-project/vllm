@@ -19,7 +19,6 @@ from vllm.distributed.kv_events import (BlockStored, KVEventBatch,
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import set_default_torch_num_threads
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core import EngineCore
 from vllm.v1.engine.core_client import (AsyncMPClient, EngineCoreClient,
@@ -141,14 +140,13 @@ def test_engine_core_client(monkeypatch: pytest.MonkeyPatch,
             UsageContext.UNKNOWN_CONTEXT)
         executor_class = Executor.get_class(vllm_config)
 
-        with set_default_torch_num_threads(1):
-            client = EngineCoreClient.make_client(
-                multiprocess_mode=multiprocessing_mode,
-                asyncio_mode=False,
-                vllm_config=vllm_config,
-                executor_class=executor_class,
-                log_stats=False,
-            )
+        client = EngineCoreClient.make_client(
+            multiprocess_mode=multiprocessing_mode,
+            asyncio_mode=False,
+            vllm_config=vllm_config,
+            executor_class=executor_class,
+            log_stats=False,
+        )
 
         MAX_TOKENS = 20
         params = SamplingParams(max_tokens=MAX_TOKENS)
@@ -228,14 +226,13 @@ async def test_engine_core_client_asyncio(monkeypatch: pytest.MonkeyPatch):
             usage_context=UsageContext.UNKNOWN_CONTEXT)
         executor_class = Executor.get_class(vllm_config)
 
-        with set_default_torch_num_threads(1):
-            client = EngineCoreClient.make_client(
-                multiprocess_mode=True,
-                asyncio_mode=True,
-                vllm_config=vllm_config,
-                executor_class=executor_class,
-                log_stats=True,
-            )
+        client = EngineCoreClient.make_client(
+            multiprocess_mode=True,
+            asyncio_mode=True,
+            vllm_config=vllm_config,
+            executor_class=executor_class,
+            log_stats=True,
+        )
 
         try:
             MAX_TOKENS = 20
@@ -318,14 +315,13 @@ def test_kv_cache_events(
             UsageContext.UNKNOWN_CONTEXT)
 
         executor_class = Executor.get_class(vllm_config)
-        with set_default_torch_num_threads(1):
-            client = EngineCoreClient.make_client(
-                multiprocess_mode=multiprocessing_mode,
-                asyncio_mode=False,
-                vllm_config=vllm_config,
-                executor_class=executor_class,
-                log_stats=False,
-            )
+        client = EngineCoreClient.make_client(
+            multiprocess_mode=multiprocessing_mode,
+            asyncio_mode=False,
+            vllm_config=vllm_config,
+            executor_class=executor_class,
+            log_stats=False,
+        )
         endpoint = publisher_config.endpoint.replace("*", "127.0.0.1")
         subscriber = MockSubscriber(endpoint,
                                     topic=publisher_config.topic,
@@ -401,14 +397,13 @@ async def test_kv_cache_events_dp(
             UsageContext.UNKNOWN_CONTEXT)
 
         executor_class = Executor.get_class(vllm_config)
-        with set_default_torch_num_threads(1):
-            client = EngineCoreClient.make_client(
-                multiprocess_mode=multiprocessing_mode,
-                asyncio_mode=True,
-                vllm_config=vllm_config,
-                executor_class=executor_class,
-                log_stats=False,
-            )
+        client = EngineCoreClient.make_client(
+            multiprocess_mode=multiprocessing_mode,
+            asyncio_mode=True,
+            vllm_config=vllm_config,
+            executor_class=executor_class,
+            log_stats=False,
+        )
         await asyncio.sleep(1)
 
         # Build endpoints for all DP ranks

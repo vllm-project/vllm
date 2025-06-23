@@ -12,7 +12,6 @@ from transformers import AutoTokenizer
 from vllm import SamplingParams
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
-from vllm.utils import set_default_torch_num_threads
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core import EngineCore
 from vllm.v1.executor.abstract import Executor, UniProcExecutor
@@ -58,10 +57,9 @@ def test_engine_core(monkeypatch: pytest.MonkeyPatch):
         vllm_config = engine_args.create_engine_config()
         executor_class = Executor.get_class(vllm_config)
 
-        with set_default_torch_num_threads(1):
-            engine_core = EngineCore(vllm_config=vllm_config,
-                                     executor_class=executor_class,
-                                     log_stats=True)
+        engine_core = EngineCore(vllm_config=vllm_config,
+                                 executor_class=executor_class,
+                                 log_stats=True)
         """Test basic request lifecycle."""
 
         # First request.
@@ -193,10 +191,9 @@ def test_engine_core_advanced_sampling(monkeypatch: pytest.MonkeyPatch):
         vllm_config = engine_args.create_engine_config()
         executor_class = Executor.get_class(vllm_config)
 
-        with set_default_torch_num_threads(1):
-            engine_core = EngineCore(vllm_config=vllm_config,
-                                     executor_class=executor_class,
-                                     log_stats=True)
+        engine_core = EngineCore(vllm_config=vllm_config,
+                                 executor_class=executor_class,
+                                 log_stats=True)
         """Test basic request lifecycle."""
         # First request.
         request: EngineCoreRequest = make_request()
@@ -290,10 +287,9 @@ def test_engine_core_concurrent_batches(monkeypatch: pytest.MonkeyPatch):
             enforce_eager=True,
         )
         vllm_config = engine_args.create_engine_config()
-        with set_default_torch_num_threads(1):
-            engine_core = EngineCore(vllm_config=vllm_config,
-                                     log_stats=False,
-                                     executor_class=DummyExecutor)
+        engine_core = EngineCore(vllm_config=vllm_config,
+                                 log_stats=False,
+                                 executor_class=DummyExecutor)
         assert engine_core.batch_queue is not None
 
         # Add two requests in a row. Each request have 12 prompt tokens.
@@ -399,10 +395,9 @@ def test_engine_core_tp(monkeypatch: pytest.MonkeyPatch):
         vllm_config = engine_args.create_engine_config()
         executor_class = Executor.get_class(vllm_config)
 
-        with set_default_torch_num_threads(1):
-            engine_core = EngineCore(vllm_config=vllm_config,
-                                     executor_class=executor_class,
-                                     log_stats=True)
+        engine_core = EngineCore(vllm_config=vllm_config,
+                                 executor_class=executor_class,
+                                 log_stats=True)
 
         def get_worker_cache_config_field(worker, key: str):
             return getattr(worker.cache_config, key)
