@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import weakref
 
@@ -6,6 +7,8 @@ import pytest
 
 from vllm import LLM, PoolingParams, PoolingRequestOutput
 from vllm.distributed import cleanup_dist_env_and_memory
+
+from ...models.utils import check_embeddings_close
 
 MODEL_NAME = "intfloat/multilingual-e5-small"
 
@@ -26,6 +29,14 @@ TOKEN_IDS = [
 ]
 
 
+@pytest.fixture(autouse=True)
+def v1(run_with_both_engines):
+    # Simple autouse wrapper to run both engines for each test
+    # This can be promoted up to conftest.py to run for every
+    # test in a package
+    pass
+
+
 @pytest.fixture(scope="module")
 def llm():
     # pytest caches the fixture so we use weakref.proxy to
@@ -34,7 +45,8 @@ def llm():
               max_num_batched_tokens=32768,
               tensor_parallel_size=1,
               gpu_memory_utilization=0.75,
-              enforce_eager=True)
+              enforce_eager=True,
+              seed=0)
 
     with llm.deprecate_legacy_api():
         yield weakref.proxy(llm)
@@ -44,9 +56,15 @@ def llm():
     cleanup_dist_env_and_memory()
 
 
-def assert_outputs_equal(o1: list[PoolingRequestOutput],
+def assert_outputs_match(o1: list[PoolingRequestOutput],
                          o2: list[PoolingRequestOutput]):
-    assert [o.outputs for o in o1] == [o.outputs for o in o2]
+    check_embeddings_close(
+        embeddings_0_lst=[o.outputs.data for o in o1],
+        embeddings_1_lst=[o.outputs.data for o in o2],
+        name_0="hf",
+        name_1="vllm",
+        tol=1e-2,
+    )
 
 
 @pytest.mark.skip_global_cleanup
@@ -61,7 +79,7 @@ def test_v1_v2_api_consistency_single_prompt_tokens(llm: LLM,
 
     v2_output = llm.encode({"prompt_token_ids": prompt_token_ids},
                            pooling_params=pooling_params)
-    assert_outputs_equal(v1_output, v2_output)
+    assert_outputs_match(v1_output, v2_output)
 
 
 @pytest.mark.skip_global_cleanup
@@ -78,7 +96,7 @@ def test_v1_v2_api_consistency_multi_prompt_tokens(llm: LLM):
         } for p in TOKEN_IDS],
         pooling_params=pooling_params,
     )
-    assert_outputs_equal(v1_output, v2_output)
+    assert_outputs_match(v1_output, v2_output)
 
 
 @pytest.mark.skip_global_cleanup

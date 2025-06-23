@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
 from typing import Literal, NamedTuple, Optional
@@ -8,7 +9,7 @@ import pytest
 from vllm.config import TaskOption
 from vllm.logger import init_logger
 
-from ..utils import compare_two_settings, fork_new_process_for_each_test
+from ..utils import compare_two_settings, create_new_process_for_each_test
 
 logger = init_logger("test_expert_parallel")
 
@@ -209,7 +210,7 @@ def _compare_tp(
         for params in settings.iter_params(model_name)
     ],
 )
-@fork_new_process_for_each_test
+@create_new_process_for_each_test()
 def test_ep(
     model_name: str,
     parallel_setup: ParallelSetup,

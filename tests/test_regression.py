@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Containing tests that check for regressions in vLLM's behavior.
 
 It should include tests that are reported by users and making sure they
@@ -7,11 +8,13 @@ will never happen again.
 """
 import gc
 
+import pytest
 import torch
 
 from vllm import LLM, SamplingParams
 
 
+@pytest.mark.skip(reason="In V1, we reject tokens > max_seq_len")
 def test_duplicated_ignored_sequence_group():
     """https://github.com/vllm-project/vllm/issues/1655"""
 
@@ -54,12 +57,14 @@ def test_gc():
     assert allocated < 50 * 1024 * 1024
 
 
-def test_model_from_modelscope(monkeypatch):
+def test_model_from_modelscope(monkeypatch: pytest.MonkeyPatch):
     # model: https://modelscope.cn/models/qwen/Qwen1.5-0.5B-Chat/summary
-    MODELSCOPE_MODEL_NAME = "qwen/Qwen1.5-0.5B-Chat"
-    monkeypatch.setenv("VLLM_USE_MODELSCOPE", "True")
-    try:
-        llm = LLM(model=MODELSCOPE_MODEL_NAME)
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_USE_MODELSCOPE", "True")
+        # Don't use HF_TOKEN for ModelScope repos, otherwise it will fail
+        # with 400 Client Error: Bad Request.
+        m.setenv("HF_TOKEN", "")
+        llm = LLM(model="qwen/Qwen1.5-0.5B-Chat")
 
         prompts = [
             "Hello, my name is",
@@ -71,10 +76,3 @@ def test_model_from_modelscope(monkeypatch):
 
         outputs = llm.generate(prompts, sampling_params)
         assert len(outputs) == 4
-    finally:
-        monkeypatch.delenv("VLLM_USE_MODELSCOPE", raising=False)
-
-
-if __name__ == "__main__":
-    import pytest
-    pytest.main([__file__])

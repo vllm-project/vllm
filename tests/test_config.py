@@ -1,12 +1,82 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from dataclasses import asdict
+from dataclasses import MISSING, Field, asdict, dataclass, field
+from typing import Literal, Union
 
 import pytest
 
-from vllm.config import ModelConfig, PoolerConfig
+from vllm.compilation.backends import VllmBackend
+from vllm.config import (LoadConfig, ModelConfig, PoolerConfig, VllmConfig,
+                         config, get_field)
 from vllm.model_executor.layers.pooler import PoolingType
 from vllm.platforms import current_platform
+
+
+class _TestConfig1:
+    pass
+
+
+@dataclass
+class _TestConfig2:
+    a: int
+    """docstring"""
+
+
+@dataclass
+class _TestConfig3:
+    a: int = 1
+
+
+@dataclass
+class _TestConfig4:
+    a: Union[Literal[1], Literal[2]] = 1
+    """docstring"""
+
+
+@pytest.mark.parametrize(("test_config", "expected_error"), [
+    (_TestConfig1, "must be a dataclass"),
+    (_TestConfig2, "must have a default"),
+    (_TestConfig3, "must have a docstring"),
+    (_TestConfig4, "must use a single Literal"),
+])
+def test_config(test_config, expected_error):
+    with pytest.raises(Exception, match=expected_error):
+        config(test_config)
+
+
+def test_compile_config_repr_succeeds():
+    # setup: VllmBackend mutates the config object
+    config = VllmConfig()
+    backend = VllmBackend(config)
+    backend.configure_post_pass()
+
+    # test that repr(config) succeeds
+    val = repr(config)
+    assert 'VllmConfig' in val
+    assert 'inductor_passes' in val
+
+
+@dataclass
+class _TestConfigFields:
+    a: int
+    b: dict = field(default_factory=dict)
+    c: str = "default"
+
+
+def test_get_field():
+    with pytest.raises(ValueError):
+        get_field(_TestConfigFields, "a")
+
+    b = get_field(_TestConfigFields, "b")
+    assert isinstance(b, Field)
+    assert b.default is MISSING
+    assert b.default_factory is dict
+
+    c = get_field(_TestConfigFields, "c")
+    assert isinstance(c, Field)
+    assert c.default == "default"
+    assert c.default_factory is MISSING
 
 
 @pytest.mark.parametrize(
@@ -130,7 +200,7 @@ def test_get_pooling_config():
         revision=None,
     )
 
-    pooling_config = model_config._init_pooler_config(None)
+    pooling_config = model_config._init_pooler_config()
     assert pooling_config is not None
 
     assert pooling_config.normalize
@@ -150,11 +220,12 @@ def test_get_pooling_config_from_args():
                                dtype="float16",
                                revision=None)
 
-    override_config = PoolerConfig(pooling_type='CLS', normalize=True)
+    override_pooler_config = PoolerConfig(pooling_type='CLS', normalize=True)
+    model_config.override_pooler_config = override_pooler_config
 
-    pooling_config = model_config._init_pooler_config(override_config)
+    pooling_config = model_config._init_pooler_config()
     assert pooling_config is not None
-    assert asdict(pooling_config) == asdict(override_config)
+    assert asdict(pooling_config) == asdict(override_pooler_config)
 
 
 @pytest.mark.skipif(current_platform.is_rocm(),
@@ -289,7 +360,7 @@ def test_uses_mrope(model_id, uses_mrope):
 def test_generation_config_loading():
     model_id = "Qwen/Qwen2.5-1.5B-Instruct"
 
-    # When set generation_config to None, the default generation config
+    # When set generation_config to "vllm", the default generation config
     # will not be loaded.
     model_config = ModelConfig(model_id,
                                task="auto",
@@ -298,7 +369,7 @@ def test_generation_config_loading():
                                trust_remote_code=False,
                                seed=0,
                                dtype="float16",
-                               generation_config=None)
+                               generation_config="vllm")
     assert model_config.get_diff_sampling_param() == {}
 
     # When set generation_config to "auto", the default generation config
@@ -340,7 +411,7 @@ def test_generation_config_loading():
 
     assert model_config.get_diff_sampling_param() == override_result
 
-    # When generation_config is set to None and override_generation_config
+    # When generation_config is set to "vllm" and override_generation_config
     # is set, the override_generation_config should be used directly.
     model_config = ModelConfig(
         model_id,
@@ -350,7 +421,48 @@ def test_generation_config_loading():
         trust_remote_code=False,
         seed=0,
         dtype="float16",
-        generation_config=None,
+        generation_config="vllm",
         override_generation_config=override_generation_config)
 
     assert model_config.get_diff_sampling_param() == override_generation_config
+
+
+@pytest.mark.parametrize("pt_load_map_location", [
+    "cuda",
+    {
+        "": "cuda"
+    },
+])
+def test_load_config_pt_load_map_location(pt_load_map_location):
+    load_config = LoadConfig(pt_load_map_location=pt_load_map_location)
+    config = VllmConfig(load_config=load_config)
+
+    assert config.load_config.pt_load_map_location == pt_load_map_location
+
+
+@pytest.mark.parametrize(
+    ("model_id", "max_model_len", "expected_max_len", "should_raise"), [
+        ("BAAI/bge-reranker-base", None, 512, False),
+        ("BAAI/bge-reranker-base", 256, 256, False),
+        ("BAAI/bge-reranker-base", 513, 512, True),
+    ])
+def test_get_and_verify_max_len(model_id, max_model_len, expected_max_len,
+                                should_raise):
+    """Test get_and_verify_max_len with different configurations."""
+    model_config = ModelConfig(
+        model_id,
+        task="auto",
+        tokenizer=model_id,
+        tokenizer_mode="auto",
+        trust_remote_code=False,
+        seed=0,
+        dtype="float16",
+        revision=None,
+    )
+
+    if should_raise:
+        with pytest.raises(ValueError):
+            model_config.get_and_verify_max_len(max_model_len)
+    else:
+        actual_max_len = model_config.get_and_verify_max_len(max_model_len)
+        assert actual_max_len == expected_max_len

@@ -1,12 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import sys
 from contextlib import nullcontext
 
+import pytest
 from vllm_test_utils import BlameResult, blame
 
 from vllm import LLM, SamplingParams
 from vllm.distributed import cleanup_dist_env_and_memory
+
+
+@pytest.fixture(scope="function", autouse=True)
+def use_v0_only(monkeypatch):
+    """
+    V1 only supports xgrammar so this is irrelevant.
+    """
+    monkeypatch.setenv('VLLM_USE_V1', '0')
 
 
 def run_normal_opt125m():

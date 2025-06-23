@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Derived from BART implementation posted on HuggingFace; license below:
 #
@@ -19,7 +20,8 @@
 # limitations under the License.
 """PyTorch BART model."""
 import math
-from typing import Iterable, Optional, Tuple
+from collections.abc import Iterable
+from typing import Optional
 
 import torch
 from torch import nn
@@ -37,14 +39,13 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsV0Only
+from .interfaces import SupportsQuant, SupportsV0Only
 from .utils import maybe_prefix
 
 logger = logging.get_logger(__name__)
@@ -697,7 +698,7 @@ class BartDecoder(nn.Module):
         return hidden_states
 
 
-class BartModel(nn.Module):
+class BartModel(nn.Module, SupportsQuant):
     _tied_weights_keys = [
         "encoder.embed_tokens.weight", "decoder.embed_tokens.weight"
     ]
@@ -763,7 +764,8 @@ class BartModel(nn.Module):
         return decoder_outputs
 
 
-class BartForConditionalGeneration(nn.Module, SupportsV0Only):
+class BartForConditionalGeneration(nn.Module, SupportsV0Only, SupportsQuant):
+    packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
     base_model_prefix = "model"
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -790,7 +792,6 @@ class BartForConditionalGeneration(nn.Module, SupportsV0Only):
 
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size)
-        self.sampler = get_sampler()
 
     def forward(
         self,
@@ -827,14 +828,6 @@ class BartForConditionalGeneration(nn.Module, SupportsV0Only):
                                        sampling_metadata)
         return logits
 
-    def sample(
-        self,
-        logits: Optional[torch.Tensor],
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(logits, sampling_metadata)
-        return next_tokens
-
     stacked_params_mapping = {
         "q_proj": {
             "param_name": "qkv_proj",
@@ -868,14 +861,14 @@ class BartForConditionalGeneration(nn.Module, SupportsV0Only):
     def _rename_stacked_param(
         self,
         name: str,
-    ) -> Tuple[str, Optional[str]]:
+    ) -> tuple[str, Optional[str]]:
         for key, mapping in self.stacked_params_mapping.items():
             if key in name:
                 name = name.replace(key, mapping["param_name"])
                 return name, mapping["shard_id"]
         return name, None
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
 
         model_params_dict = dict(self.model.named_parameters())
         top_params_dict = dict(self.named_parameters())

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """E2E tests to verify the correctness of the encoder-decoder framework
 
 Run `pytest tests/encoder_decoder/test_e2e_correctness.py`.
@@ -19,6 +20,15 @@ from ..models.utils import check_logprobs_close
 LIST_ENC_DEC_SUPPORTED_BACKENDS = [
     _Backend.XFORMERS, _Backend.FLASH_ATTN, None
 ]
+
+
+@pytest.fixture(scope="function", autouse=True)
+def use_v0_only(monkeypatch):
+    """
+    Since this module is V0 only, set VLLM_USE_V1=0 for
+    all tests in the module.
+    """
+    monkeypatch.setenv('VLLM_USE_V1', '0')
 
 
 def vllm_to_hf_output(

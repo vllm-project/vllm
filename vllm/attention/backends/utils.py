@@ -1,20 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention backend utils"""
 from collections import defaultdict
 from contextlib import contextmanager
+from dataclasses import dataclass
 from itertools import accumulate
-from typing import TYPE_CHECKING, Any, Dict, List, Tuple, Type, TypeVar, Union
+from typing import (TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type,
+                    TypeVar, Union)
 
 import numpy as np
 import torch
 
-from vllm import envs
 from vllm.attention import (AttentionMetadata, AttentionMetadataBuilder,
                             AttentionState)
 from vllm.attention.backends.abstract import AttentionType
+from vllm.config import ModelConfig
 from vllm.logger import init_logger
 from vllm.multimodal import MultiModalPlaceholderMap
-from vllm.platforms import current_platform
 from vllm.utils import async_tensor_h2d, make_tensor_with_pad
 
 logger = init_logger(__name__)
@@ -344,10 +346,10 @@ class CommonAttentionState(AttentionState):
         if is_encoder_decoder_model:
             # The encoder decoder model works only with XFormers and
             # Flash Attention backend. Assert the same.
-            assert self.runner.attn_backend.get_name() in\
-                ["XFORMERS", "FLASH_ATTN"], \
-                f"Expected attn_backend name to be either 'XFORMERS' or " \
-                f"'FLASH_ATTN', but "\
+            assert self.runner.attn_backend.get_name() in \
+                   ["XFORMERS", "FLASH_ATTN", "ROCM_FLASH"], \
+                f"Expected attn_backend name to be either 'XFORMERS'," \
+                f"'ROCM_FLASH', or 'FLASH_ATTN', but " \
                 f"got '{self.runner.attn_backend.get_name()}'"
             self._update_captured_metadata_for_enc_dec_model(
                 batch_size=batch_size, attn_metadata=attn_metadata)
@@ -366,12 +368,12 @@ class CommonAttentionState(AttentionState):
         if is_encoder_decoder_model:
             # The encoder decoder model works only with XFormers and
             # Flash Attention backend. Assert the same.
-            assert self.runner.attn_backend.get_name() in\
-                ["XFORMERS", "FLASH_ATTN"], \
-                f"Expected attn_backend name to be either 'XFORMERS' or "\
-                f"'FLASH_ATTN', but "\
+            assert self.runner.attn_backend.get_name() in \
+                   ["XFORMERS", "FLASH_ATTN", "ROCM_FLASH"], \
+                f"Expected attn_backend name to be either 'XFORMERS'," \
+                f"'ROCM_FLASH', or 'FLASH_ATTN', but " \
                 f"got '{self.runner.attn_backend.get_name()}'"
-            self._add_additonal_input_buffers_for_enc_dec_model(
+            self._add_additional_input_buffers_for_enc_dec_model(
                 attn_metadata=attn_metadata, input_buffers=input_buffers)
         return input_buffers
 
@@ -425,7 +427,7 @@ class CommonAttentionState(AttentionState):
         attn_metadata.max_encoder_seq_len = self.runner.max_seq_len_to_capture
         attn_metadata.num_encoder_tokens = 0
 
-    def _add_additonal_input_buffers_for_enc_dec_model(
+    def _add_additional_input_buffers_for_enc_dec_model(
             self, attn_metadata, input_buffers: Dict[str, Any]):
         """
         Saves additional input buffers specific to the encoder-decoder model
@@ -549,7 +551,7 @@ def get_num_prefill_decode_query_kv_tokens(
     based on the attention metadata and the specified attention type.
 
     Args:
-        attn_metadata (FlashAttentionMetadata): Attention Metadata object.
+        attn_metadata (AttentionMetadata): Attention Metadata object.
         attn_type (AttentionType): The type of attention being used.
     Returns:
         Tuple[int, int, int]: A tuple containing three integers:
@@ -587,33 +589,22 @@ def get_num_prefill_decode_query_kv_tokens(
             num_decode_query_tokens)
 
 
-def get_flash_attn_version():
-    try:
-        from vllm.vllm_flash_attn.flash_attn_interface import (
-            fa_version_unsupported_reason, is_fa_version_supported)
+@dataclass
+class MLADims:
+    q_lora_rank: Optional[int]
+    kv_lora_rank: int
+    qk_nope_head_dim: int
+    qk_rope_head_dim: int
+    v_head_dim: int
 
-        # if hopper default to FA3, otherwise stick to FA2 for now
-        # TODO(lucas): profile FA3 on ampere to see if it makes sense to
-        #  use FA3 as default for both
-        if current_platform.get_device_capability()[0] == 9:
-            fa_version = 3 if is_fa_version_supported(3) else 2
-        else:
-            fa_version = 2
 
-        if envs.VLLM_FLASH_ATTN_VERSION is not None:
-            assert envs.VLLM_FLASH_ATTN_VERSION in [2, 3]
-            fa_version = envs.VLLM_FLASH_ATTN_VERSION
-            if (current_platform.get_device_capability()[0] == 10
-                    and envs.VLLM_FLASH_ATTN_VERSION == 3):
-                logger.warning("Cannot use FA version 3 on Blackwell platform",
-                               "defaulting to FA version 2.")
-                fa_version = 2
+def get_mla_dims(model_config: ModelConfig) -> MLADims:
+    hf_text_config = model_config.hf_text_config
 
-        if not is_fa_version_supported(fa_version):
-            logger.error("Cannot use FA version %d is not supported due to %s",
-                         fa_version, fa_version_unsupported_reason(fa_version))
-
-        assert is_fa_version_supported(fa_version)
-        return fa_version
-    except (ImportError, AssertionError):
-        return None
+    return MLADims(
+        q_lora_rank=getattr(hf_text_config, "q_lora_rank", None),
+        kv_lora_rank=hf_text_config.kv_lora_rank,
+        qk_nope_head_dim=hf_text_config.qk_nope_head_dim,
+        qk_rope_head_dim=hf_text_config.qk_rope_head_dim,
+        v_head_dim=hf_text_config.v_head_dim,
+    )

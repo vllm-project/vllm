@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Custom activation functions."""
 import math
 from typing import Optional
@@ -354,6 +355,7 @@ def get_act_fn(act_fn_name: str) -> nn.Module:
 _ACTIVATION_AND_MUL_REGISTRY = LazyDict({
     "gelu": lambda: GeluAndMul(),
     "silu": lambda: SiluAndMul(),
+    "geglu": lambda: GeluAndMul(),
 })
 
 

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import inspect
 from typing import Optional
@@ -9,9 +10,10 @@ import torch
 
 from vllm.sampling_params import SamplingParams
 from vllm.utils import is_pin_memory_available, make_tensor_with_pad
+from vllm.v1.pool.metadata import PoolingMetadata
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.worker.gpu_input_batch import (BlockTable, CachedRequestState,
-                                            InputBatch)
+from vllm.v1.worker.block_table import BlockTable, MultiGroupBlockTable
+from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
 VOCAB_SIZE = 1024
 NUM_OUTPUT_TOKENS = 20
@@ -41,7 +43,11 @@ def _compare_objs(obj1, obj2):
         elif isinstance(a, np.ndarray):
             if np.allclose(a, b):
                 is_same = True
-        elif isinstance(a, (BlockTable, SamplingMetadata)):
+        elif isinstance(a, MultiGroupBlockTable):
+            for a_i, b_i in zip(a.block_tables, b.block_tables):
+                _compare_objs(a_i, b_i)
+            is_same = True
+        elif isinstance(a, (BlockTable, SamplingMetadata, PoolingMetadata)):
             _compare_objs(a, b)
             is_same = True  # if we make it here must be same
         elif a == b:
@@ -100,6 +106,7 @@ def _construct_expected_sampling_metadata(
                                          VOCAB_SIZE,
                                          dtype=torch.bool,
                                          device=device)
+    bad_words_token_ids = {}
     for req in reqs:
         if req.req_id not in req_ids_retained:
             continue
@@ -123,6 +130,9 @@ def _construct_expected_sampling_metadata(
         if req.sampling_params.allowed_token_ids:
             allowed_token_ids_mask[index_in_input_batch][
                 req.sampling_params.allowed_token_ids] = True
+        if req.sampling_params.bad_words_token_ids:
+            bad_words_token_ids[
+                index_in_input_batch] = req.sampling_params.bad_words_token_ids
 
     return SamplingMetadata(
         temperature=torch.tensor(temperature, dtype=torch.float,
@@ -159,6 +169,7 @@ def _construct_expected_sampling_metadata(
                       and all(x == 1 for x in repetition_penalties)),
         logit_bias=logit_bias,
         allowed_token_ids_mask=allowed_token_ids_mask,
+        bad_words_token_ids=bad_words_token_ids,
     )
 
 
@@ -190,11 +201,11 @@ def _construct_cached_request_state(req_id_suffix: int):
     return CachedRequestState(
         req_id=f"req_id_{req_id_suffix}",
         prompt_token_ids=prompt_token_ids,
-        prompt=None,
         sampling_params=_create_sampling_params(),
+        pooling_params=None,
         mm_inputs=[],
         mm_positions=[],
-        block_ids=[],
+        block_ids=([], ),
         generator=None,
         num_computed_tokens=len(output_token_ids),
         output_token_ids=output_token_ids,
@@ -216,10 +227,11 @@ def test_sampling_metadata_in_input_batch(device: str, batch_size: int):
     input_batch: InputBatch = InputBatch(
         max_num_reqs=batch_size,
         max_model_len=1024,
-        max_num_blocks_per_req=10,
+        max_num_batched_tokens=1024,
         device=torch.device(device),
         pin_memory=is_pin_memory_available(),
         vocab_size=1024,
+        block_sizes=[1],
     )
     reqs: list[CachedRequestState] = []
     req_id_reqs = {}
@@ -284,6 +296,8 @@ def test_sampling_metadata_in_input_batch(device: str, batch_size: int):
         assert torch.allclose(
             expected_sampling_metadata.allowed_token_ids_mask,
             sampling_metadata.allowed_token_ids_mask)
+    assert expected_sampling_metadata.bad_words_token_ids == \
+        sampling_metadata.bad_words_token_ids
 
 
 @pytest.mark.parametrize("device", CUDA_DEVICES)
@@ -303,18 +317,20 @@ def test_swap_states_in_input_batch(device: str, batch_size: int,
     input_batch: InputBatch = InputBatch(
         max_num_reqs=batch_size,
         max_model_len=1024,
-        max_num_blocks_per_req=10,
+        max_num_batched_tokens=1024,
         device=torch.device(device),
         pin_memory=is_pin_memory_available(),
         vocab_size=1024,
+        block_sizes=[1],
     )
     ref_input_batch: InputBatch = InputBatch(
         max_num_reqs=batch_size,
         max_model_len=1024,
-        max_num_blocks_per_req=10,
+        max_num_batched_tokens=1024,
         device=torch.device(device),
         pin_memory=is_pin_memory_available(),
         vocab_size=1024,
+        block_sizes=[1],
     )
 
     reqs: list[CachedRequestState] = []

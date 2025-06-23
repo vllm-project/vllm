@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Iterable, List, Optional, Set, Tuple
+from collections.abc import Iterable
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -50,7 +52,7 @@ class Medusa(nn.Module):
        needs to have truncated_vocab_size (=k) as an attribute."""
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
-        config = vllm_config.model_config.hf_config
+        config = vllm_config.speculative_config.draft_model_config.hf_config
         super().__init__()
         self.config = config
         self.blocks = nn.ModuleList([
@@ -96,13 +98,13 @@ class Medusa(nn.Module):
         # checkpoint file has token_map tensor.
         self.token_map = None
 
-    def forward(self, hidden_states: torch.Tensor) -> List[torch.Tensor]:
+    def forward(self, hidden_states: torch.Tensor) -> list[torch.Tensor]:
         return [block(hidden_states) for block in self.blocks]
 
     def compute_logits(
-            self, hidden_states: List[torch.Tensor],
-            sampling_metadata: SamplingMetadata) -> List[torch.Tensor]:
-        logits_lst: List[torch.Tensor] = []
+            self, hidden_states: list[torch.Tensor],
+            sampling_metadata: SamplingMetadata) -> list[torch.Tensor]:
+        logits_lst: list[torch.Tensor] = []
 
         for hs, lm_head in zip(hidden_states, self.lm_heads):
             _logits = self.logits_processor(lm_head, hs, sampling_metadata)
@@ -127,9 +129,9 @@ class Medusa(nn.Module):
 
     def sample(
         self,
-        logits: List[torch.Tensor],
+        logits: list[torch.Tensor],
         sampling_metadata: SamplingMetadata,
-    ) -> List[SamplerOutput]:
+    ) -> list[SamplerOutput]:
         logits = torch.stack(logits, dim=0).float()
         logprobs = torch.log_softmax(logits, dim=-1)
         token_ids = logits.argmax(-1)  # support only top-1 for now
@@ -144,7 +146,7 @@ class Medusa(nn.Module):
             token_prob_list.append(probs[:, seq_group.sample_indices])
             token_logprob_list.append(logprobs[:, seq_group.sample_indices])
 
-        outputs: List[Optional[SamplerOutput]] = []
+        outputs: list[Optional[SamplerOutput]] = []
         for idx in range(len(sampling_metadata.seq_groups)):
             outputs.append(
                 SamplerOutput(
@@ -160,7 +162,14 @@ class Medusa(nn.Module):
         self,
         previous_hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
-    ) -> List[SamplerOutput]:
+    ) -> Optional[list[SamplerOutput]]:
+        # During preemption, we may receive an empty tensor (batch_size=0)
+        if previous_hidden_states.size(0) == 0:
+            # Return None to signal the Top1Proposer that no proposals
+            # were generated for this batch, allowing it to handle this
+            # special case appropriately
+            return None
+
         return self.sample(
             logits=self.compute_logits(
                 hidden_states=self.forward(previous_hidden_states),
@@ -169,10 +178,10 @@ class Medusa(nn.Module):
             sampling_metadata=sampling_metadata,
         )
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         params_dict = dict(self.named_parameters())
-        loaded_params: Set[str] = set()
+        loaded_params: set[str] = set()
 
         weights_map = {}
 

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from typing import List, Optional, Set, Tuple
 
@@ -52,7 +53,8 @@ class SmallerTpProposerWorker(ProposerWorkerBase):
         """Create a SmallerTpProposerWorker.
 
         Args:
-            worker (MultiStepWorker): an actual worker wrapped with this class
+            worker (~vllm.spec_decode.multi_step_worker.MultiStepWorker): an
+            actual worker wrapped with this class
             draft_ranks (List[int]): if this value is given, only the GPU ranks
             written in this value participate in draft generation
         """

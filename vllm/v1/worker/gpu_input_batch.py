@@ -1,23 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
-# Datastructures defining an input batch
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# Datastructures defining a GPU input batch
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional, cast
+from typing import Optional, cast
 
 import numpy as np
 import torch
 
 from vllm.lora.request import LoRARequest
-from vllm.multimodal import MultiModalKwargs
+from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
+from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams, SamplingType
+from vllm.utils import swap_dict_values
+from vllm.v1.outputs import LogprobsTensors
+from vllm.v1.pool.metadata import PoolingMetadata
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.utils import copy_slice
-from vllm.v1.worker.block_table import BlockTable
+from vllm.v1.worker.block_table import MultiGroupBlockTable
 
 _SAMPLING_EPS = 1e-5
-
-if TYPE_CHECKING:
-    from vllm.multimodal.inputs import PlaceholderRange
 
 
 @dataclass
@@ -25,13 +27,13 @@ class CachedRequestState:
 
     req_id: str
     prompt_token_ids: list[int]
-    prompt: Optional[str]
     mm_inputs: list[MultiModalKwargs]
-    mm_positions: list["PlaceholderRange"]
-    sampling_params: SamplingParams
+    mm_positions: list[PlaceholderRange]
+    sampling_params: Optional[SamplingParams]
+    pooling_params: Optional[PoolingParams]
     generator: Optional[torch.Generator]
 
-    block_ids: list[int]
+    block_ids: tuple[list[int], ...]
     num_computed_tokens: int
     output_token_ids: list[int]
 
@@ -40,25 +42,35 @@ class CachedRequestState:
 
     lora_request: Optional[LoRARequest] = None
 
+    def __post_init__(self):
+        self.num_prompt_tokens = len(self.prompt_token_ids)
+
     @property
     def num_tokens(self) -> int:
-        return len(self.prompt_token_ids) + len(self.output_token_ids)
+        return self.num_prompt_tokens + len(self.output_token_ids)
+
+    def get_token_id(self, idx: int) -> int:
+        if idx < self.num_prompt_tokens:
+            return self.prompt_token_ids[idx]
+        else:
+            return self.output_token_ids[idx - self.num_prompt_tokens]
 
 
 class InputBatch:
 
     def __init__(
-        self,
-        max_num_reqs: int,
-        max_model_len: int,
-        max_num_blocks_per_req: int,
-        device: torch.device,
-        pin_memory: bool,
-        vocab_size: int,
+            self,
+            max_num_reqs: int,
+            max_model_len: int,
+            max_num_batched_tokens: int,
+            device: torch.device,
+            pin_memory: bool,
+            vocab_size: int,
+            block_sizes: list[int],  # The block_size of each kv cache group
     ):
         self.max_num_reqs = max_num_reqs
         self.max_model_len = max_model_len
-        self.max_num_blocks_per_req = max_num_blocks_per_req
+        self.max_num_batched_tokens = max_num_batched_tokens
         self.device = device
         self.pin_memory = pin_memory
         self.vocab_size = vocab_size
@@ -90,11 +102,13 @@ class InputBatch:
             self.num_computed_tokens_cpu_tensor.numpy()
 
         # Block table.
-        self.block_table = BlockTable(
+        self.block_table = MultiGroupBlockTable(
             max_num_reqs=max_num_reqs,
-            max_num_blocks_per_req=max_num_blocks_per_req,
+            max_model_len=max_model_len,
+            max_num_batched_tokens=max_num_batched_tokens,
             pin_memory=pin_memory,
             device=device,
+            block_sizes=block_sizes,
         )
 
         # Sampling-related.
@@ -196,6 +210,9 @@ class InputBatch:
         # that are currently in the prefill phase.
         self.num_prompt_logprobs: dict[str, int] = {}
 
+        # To accumulate prompt logprobs tensor chunks across prefill steps.
+        self.in_progress_prompt_logprobs_cpu: dict[str, LogprobsTensors] = {}
+
         self.logit_bias: list[Optional[dict[int,
                                             float]]] = [None] * max_num_reqs
         self.has_allowed_token_ids: set[str] = set()
@@ -204,10 +221,15 @@ class InputBatch:
         self.allowed_token_ids_mask: Optional[torch.Tensor] = None
         self.allowed_token_ids_mask_cpu_tensor: Optional[torch.Tensor] = None
 
+        # req_index -> bad_words_token_ids
+        self.bad_words_token_ids: dict[int, list[list[int]]] = {}
+
         self.req_output_token_ids: list[Optional[list[int]]] = []
 
         # This is updated each time the batch constituents change.
         self.sampling_metadata = self._make_sampling_metadata()
+
+        self.pooling_params: dict[str, PoolingParams] = {}
 
     @property
     def req_ids(self) -> list[str]:
@@ -252,73 +274,83 @@ class InputBatch:
         self.num_computed_tokens_cpu[req_index] = request.num_computed_tokens
         self.block_table.add_row(request.block_ids, req_index)
 
-        sampling_params = request.sampling_params
-        if sampling_params.sampling_type == SamplingType.GREEDY:
-            # Avoid later division by zero.
-            self.temperature_cpu[req_index] = -1.0
-            self.greedy_reqs.add(req_id)
-        else:
-            self.temperature_cpu[req_index] = sampling_params.temperature
-            self.random_reqs.add(req_id)
+        if sampling_params := request.sampling_params:
+            if sampling_params.sampling_type == SamplingType.GREEDY:
+                # Avoid later division by zero.
+                self.temperature_cpu[req_index] = -1.0
+                self.greedy_reqs.add(req_id)
+            else:
+                self.temperature_cpu[req_index] = sampling_params.temperature
+                self.random_reqs.add(req_id)
 
-        self.top_p_cpu[req_index] = sampling_params.top_p
-        if sampling_params.top_p < 1:
-            self.top_p_reqs.add(req_id)
-        top_k = sampling_params.top_k
-        if 0 < top_k < self.vocab_size:
-            self.top_k_reqs.add(req_id)
-        else:
-            top_k = self.vocab_size
-        self.top_k_cpu[req_index] = top_k
-        self.min_p_cpu[req_index] = sampling_params.min_p
-        self.frequency_penalties_cpu[
-            req_index] = sampling_params.frequency_penalty
-        if sampling_params.min_p > _SAMPLING_EPS:
-            self.min_p_reqs.add(req_id)
-        if sampling_params.frequency_penalty != 0.0:
-            self.frequency_penalties_reqs.add(req_id)
-        self.presence_penalties_cpu[
-            req_index] = sampling_params.presence_penalty
-        if sampling_params.presence_penalty != 0.0:
-            self.presence_penalties_reqs.add(req_id)
-        self.repetition_penalties_cpu[
-            req_index] = sampling_params.repetition_penalty
-        if sampling_params.repetition_penalty != 1.0:
-            self.repetition_penalties_reqs.add(req_id)
-        if sampling_params.min_tokens:
-            self.min_tokens[req_index] = (sampling_params.min_tokens,
-                                          sampling_params.all_stop_token_ids)
+            self.top_p_cpu[req_index] = sampling_params.top_p
+            if sampling_params.top_p < 1:
+                self.top_p_reqs.add(req_id)
+            top_k = sampling_params.top_k
+            if 0 < top_k < self.vocab_size:
+                self.top_k_reqs.add(req_id)
+            else:
+                top_k = self.vocab_size
+            self.top_k_cpu[req_index] = top_k
+            self.min_p_cpu[req_index] = sampling_params.min_p
+            self.frequency_penalties_cpu[
+                req_index] = sampling_params.frequency_penalty
+            if sampling_params.min_p > _SAMPLING_EPS:
+                self.min_p_reqs.add(req_id)
+            if sampling_params.frequency_penalty != 0.0:
+                self.frequency_penalties_reqs.add(req_id)
+            self.presence_penalties_cpu[
+                req_index] = sampling_params.presence_penalty
+            if sampling_params.presence_penalty != 0.0:
+                self.presence_penalties_reqs.add(req_id)
+            self.repetition_penalties_cpu[
+                req_index] = sampling_params.repetition_penalty
+            if sampling_params.repetition_penalty != 1.0:
+                self.repetition_penalties_reqs.add(req_id)
+            if sampling_params.min_tokens:
+                self.min_tokens[req_index] = (
+                    sampling_params.min_tokens,
+                    sampling_params.all_stop_token_ids)
 
-        # NOTE(woosuk): self.generators should not include the requests that
-        # do not have their own generator.
-        if request.generator is not None:
-            self.generators[req_index] = request.generator
+            # NOTE(woosuk): self.generators should not include the requests that
+            # do not have their own generator.
+            if request.generator is not None:
+                self.generators[req_index] = request.generator
 
-        if sampling_params.logprobs is not None:
-            self.num_logprobs[req_id] = sampling_params.logprobs
-        if sampling_params.prompt_logprobs is not None:
-            self.num_prompt_logprobs[req_id] = sampling_params.prompt_logprobs
-        if sampling_params.logit_bias is not None:
-            self.logit_bias[req_index] = sampling_params.logit_bias
+            if sampling_params.logprobs is not None:
+                self.num_logprobs[req_id] = sampling_params.logprobs
+            if sampling_params.prompt_logprobs is not None:
+                self.num_prompt_logprobs[
+                    req_id] = sampling_params.prompt_logprobs
+            if sampling_params.logit_bias is not None:
+                self.logit_bias[req_index] = sampling_params.logit_bias
 
-        if sampling_params.allowed_token_ids:
-            self.has_allowed_token_ids.add(req_id)
-            if self.allowed_token_ids_mask_cpu_tensor is None:
-                # Lazy allocation for this tensor, which can be large.
+            if sampling_params.allowed_token_ids:
+                self.has_allowed_token_ids.add(req_id)
+                if self.allowed_token_ids_mask_cpu_tensor is None:
+                    # Lazy allocation for this tensor, which can be large.
+                    # False means we don't fill with -inf.
+                    self.allowed_token_ids_mask = torch.zeros(
+                        self.max_num_reqs,
+                        self.vocab_size,
+                        dtype=torch.bool,
+                        device=self.device)
+                    self.allowed_token_ids_mask_cpu_tensor = torch.zeros(
+                        self.max_num_reqs,
+                        self.vocab_size,
+                        dtype=torch.bool,
+                        device="cpu")
+                self.allowed_token_ids_mask_cpu_tensor[req_index] = True
                 # False means we don't fill with -inf.
-                self.allowed_token_ids_mask = torch.zeros(self.max_num_reqs,
-                                                          self.vocab_size,
-                                                          dtype=torch.bool,
-                                                          device=self.device)
-                self.allowed_token_ids_mask_cpu_tensor = torch.zeros(
-                    self.max_num_reqs,
-                    self.vocab_size,
-                    dtype=torch.bool,
-                    device="cpu")
-            self.allowed_token_ids_mask_cpu_tensor[req_index] = True
-            # False means we don't fill with -inf.
-            self.allowed_token_ids_mask_cpu_tensor[req_index][
-                sampling_params.allowed_token_ids] = False
+                self.allowed_token_ids_mask_cpu_tensor[req_index][
+                    sampling_params.allowed_token_ids] = False
+
+            if sampling_params.bad_words_token_ids:
+                self.bad_words_token_ids[
+                    req_index] = sampling_params.bad_words_token_ids
+        else:
+            assert request.pooling_params is not None
+            self.pooling_params[req_id] = request.pooling_params
 
         # Add request lora ID
         if request.lora_request:
@@ -354,6 +386,7 @@ class InputBatch:
         self.generators.pop(req_index, None)
         self.num_logprobs.pop(req_id, None)
         self.num_prompt_logprobs.pop(req_id, None)
+        self.in_progress_prompt_logprobs_cpu.pop(req_id, None)
 
         # LoRA
         lora_id = self.request_lora_mapping[req_index]
@@ -369,6 +402,8 @@ class InputBatch:
         if self.allowed_token_ids_mask_cpu_tensor is not None:
             # False means we don't fill with -inf.
             self.allowed_token_ids_mask_cpu_tensor[req_index].fill_(False)
+        self.bad_words_token_ids.pop(req_index, None)
+        self.pooling_params.pop(req_id, None)
         return req_index
 
     def swap_states(self, i1: int, i2: int) -> None:
@@ -413,27 +448,9 @@ class InputBatch:
         self.token_ids_cpu[i1, ...] = self.token_ids_cpu[i2, ...]
         self.token_ids_cpu[i2, ...] = tmp
 
-        g1 = self.generators.get(i1)
-        g2 = self.generators.get(i2)
-        if g1 is not None:
-            self.generators[i2] = g1
-        else:
-            self.generators.pop(i2, None)
-        if g2 is not None:
-            self.generators[i1] = g2
-        else:
-            self.generators.pop(i1, None)
-
-        t1 = self.min_tokens.get(i1)
-        t2 = self.min_tokens.get(i2)
-        if t1 is not None:
-            self.min_tokens[i2] = t1
-        else:
-            self.min_tokens.pop(i2, None)
-        if t2 is not None:
-            self.min_tokens[i1] = t2
-        else:
-            self.min_tokens.pop(i1, None)
+        swap_dict_values(self.generators, i1, i2)
+        swap_dict_values(self.min_tokens, i1, i2)
+        swap_dict_values(self.bad_words_token_ids, i1, i2)
 
         self.request_lora_mapping[i1], self.request_lora_mapping[i2] =\
             self.request_lora_mapping[i2], self.request_lora_mapping[i1]
@@ -448,6 +465,11 @@ class InputBatch:
         self.block_table.swap_row(i1, i2)
 
     def condense(self, empty_req_indices: list[int]) -> None:
+        """Move non-empty requests down into lower, empty indices.
+        
+        Args:
+          empty_req_indices: empty batch indices, sorted descending.
+        """
         num_reqs = self.num_reqs
         if num_reqs == 0:
             # The batched states are empty.
@@ -518,6 +540,10 @@ class InputBatch:
                     empty_index] = self.allowed_token_ids_mask_cpu_tensor[
                         last_req_index]
 
+            bad_words_token_ids = self.bad_words_token_ids.pop(
+                last_req_index, None)
+            if bad_words_token_ids is not None:
+                self.bad_words_token_ids[empty_index] = bad_words_token_ids
             # Decrement last_req_index since it is now empty.
             last_req_index -= 1
 
@@ -585,6 +611,26 @@ class InputBatch:
             no_penalties=self.no_penalties,
             logit_bias=self.logit_bias[:num_reqs],
             allowed_token_ids_mask=allowed_token_ids_mask,
+            bad_words_token_ids=self.bad_words_token_ids,
+        )
+
+    @property
+    def pooling_metadata(self) -> PoolingMetadata:
+        if len(self.pooling_params) == 0:
+            pooling_params = []
+        else:
+            # Note, for now this assumes that all request in the batch
+            # are either sampling or pooling requests
+            assert len(self.req_ids) == len(self.pooling_params)
+            pooling_params = [
+                self.pooling_params[req_id] for req_id in self.req_ids
+            ]
+
+        return PoolingMetadata(
+            prompt_lens=torch.from_numpy(
+                self.num_prompt_tokens[:self.num_reqs]).to(self.device),
+            prompt_token_ids=self.sampling_metadata.prompt_token_ids,
+            pooling_params=pooling_params,
         )
 
     def _make_prompt_token_ids_tensor(self) -> torch.Tensor:

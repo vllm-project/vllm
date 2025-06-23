@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import contextlib
 import os
@@ -11,7 +12,6 @@ from ...utils import RemoteOpenAIServer
 
 # # any model with a chat template should work here
 MODEL_NAME = "Qwen/Qwen2-1.5B-Instruct"
-DUMMY_CHAT_TEMPLATE = """{% for message in messages %}{{message['role'] + ': ' + message['content'] + '\\n'}}{% endfor %}"""  # noqa: E501
 API_KEY = "abc-123"
 ERROR_API_KEY = "abc"
 ROOT_PATH = "llm"
@@ -28,8 +28,6 @@ def server():
         "4080",
         "--root-path",  # use --root-path=/llm for testing
         "/" + ROOT_PATH,
-        "--chat-template",
-        DUMMY_CHAT_TEMPLATE,
     ]
     envs = os.environ.copy()
 

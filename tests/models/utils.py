@@ -1,14 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import warnings
 from collections.abc import Sequence
-from typing import Optional, Union
+from typing import Any, NamedTuple, Optional, Union
 
 import torch
+import torch.nn.functional as F
 
 from vllm.config import ModelConfig, TaskOption
 from vllm.inputs import InputContext
 from vllm.sequence import Logprob, PromptLogprobs, SampleLogprobs
+
+from .registry import HF_EXAMPLE_MODELS
 
 TokensText = tuple[list[int], str]
 
@@ -250,21 +254,18 @@ def check_logprobs_close(
 
 
 def build_model_context(
-    model_name: str,
+    model_id: str,
     task: TaskOption = "auto",
-    tokenizer_name: Optional[str] = None,
-    trust_remote_code: bool = False,
-    dtype: Optional[Union[str, torch.dtype]] = None,
-    mm_processor_kwargs: Optional[dict] = None,
-    limit_mm_per_prompt: Optional[dict] = None,
+    dtype: Union[str, torch.dtype] = "auto",
+    model_config_kwargs: Optional[dict[str, Any]] = None,
+    mm_processor_kwargs: Optional[dict[str, Any]] = None,
+    limit_mm_per_prompt: Optional[dict[str, int]] = None,
     disable_mm_preprocessor_cache: bool = True,
 ):
     """Creates an InputContext for a given model.
 
     Args:
-        model_name: Name of the model being considered.
-        tokenizer_name: Name of the tokenizer being considered.
-        trust_remote_code: Whether or not to allow loading remote code.
+        model_id: ID of the model being considered.
         mm_processor_kwargs: optional processor kwargs for to be leveraged
             in the input processor, mapper, dummy data creation, etc.
         limit_mm_per_prompt: Multimodal limits.
@@ -272,21 +273,73 @@ def build_model_context(
     Returns:
         InputContext for the model being considered.
     """
-    if tokenizer_name is None:
-        tokenizer_name = model_name
-    if dtype is None:
-        dtype = "half"
+    model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id)
+    model_info.check_available_online(on_fail="skip")
+    model_info.check_transformers_version(on_fail="skip")
 
+    model_config_kwargs = model_config_kwargs or {}
     model_config = ModelConfig(
-        model_name,
+        model_id,
         task=task,
-        tokenizer=tokenizer_name,
-        tokenizer_mode="auto",
-        trust_remote_code=trust_remote_code,
+        tokenizer=model_info.tokenizer or model_id,
+        tokenizer_mode=model_info.tokenizer_mode,
+        trust_remote_code=model_info.trust_remote_code,
         dtype=dtype,
         seed=0,
         mm_processor_kwargs=mm_processor_kwargs,
         limit_mm_per_prompt=limit_mm_per_prompt,
         disable_mm_preprocessor_cache=disable_mm_preprocessor_cache,
+        hf_overrides=model_info.hf_overrides,
+        **model_config_kwargs,
     )
     return InputContext(model_config)
+
+
+def check_embeddings_close(
+    *,
+    embeddings_0_lst: Sequence[list[float]],
+    embeddings_1_lst: Sequence[list[float]],
+    name_0: str,
+    name_1: str,
+    tol: float = 1e-3,
+) -> None:
+    assert len(embeddings_0_lst) == len(embeddings_1_lst)
+
+    for prompt_idx, (embeddings_0, embeddings_1) in enumerate(
+            zip(embeddings_0_lst, embeddings_1_lst)):
+        assert len(embeddings_0) == len(embeddings_1), (
+            f"Length mismatch: {len(embeddings_0)} vs. {len(embeddings_1)}")
+
+        sim = F.cosine_similarity(torch.tensor(embeddings_0),
+                                  torch.tensor(embeddings_1),
+                                  dim=0)
+
+        fail_msg = (f"Test{prompt_idx}:"
+                    f"\nCosine similarity: \t{sim:.4f}"
+                    f"\n{name_0}:\t{embeddings_0[:16]!r}"
+                    f"\n{name_1}:\t{embeddings_1[:16]!r}")
+
+        assert sim >= 1 - tol, fail_msg
+
+
+def matryoshka_fy(tensor: torch.Tensor, dimensions: int):
+    tensor = torch.tensor(tensor)
+    tensor = tensor[..., :dimensions]
+    tensor = F.normalize(tensor, p=2, dim=1)
+    return tensor
+
+
+class EmbedModelInfo(NamedTuple):
+    name: str
+    is_matryoshka: bool = False
+    matryoshka_dimensions: Optional[list[int]] = None
+    architecture: str = ""
+    dtype: str = "auto"
+    enable_test: bool = True
+
+
+class RerankModelInfo(NamedTuple):
+    name: str
+    architecture: str = ""
+    dtype: str = "auto"
+    enable_test: bool = True

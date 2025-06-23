@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for rejection sampling."""
 
 import pytest
@@ -9,6 +10,14 @@ from vllm.model_executor.layers.typical_acceptance_sampler import (
 from vllm.model_executor.utils import set_random_seed
 
 CUDA_DEVICES = [f"cuda:{i}" for i in range(1)]
+
+
+@pytest.fixture(scope="function", autouse=True)
+def use_v0_only(monkeypatch):
+    """
+    This file tests V0 internals, so set VLLM_USE_V1=0.
+    """
+    monkeypatch.setenv('VLLM_USE_V1', '0')
 
 
 def get_zero_temperature_prob_dist(batch_size, k, vocab_size):
@@ -239,7 +248,7 @@ def test_temperature_zero_target_distribution(seed: int, device: str):
                                     size=(batch_size, 1),
                                     dtype=torch.int64)
     # The target probaility distribution is a temperature zero distribution
-    # with zero entroy. Since our draft token ids don't match the probability
+    # with zero entropy. Since our draft token ids don't match the probability
     # 1.0 tokens in the target distribution we will reject all of them and
     # fallback to the greedy sampling for selecting 1 token for each sequence.
     # Verify the same.

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
 from typing import Final, Generic, Optional, Protocol, TypeVar, Union
@@ -19,10 +20,11 @@ _C = TypeVar("_C", bound=PretrainedConfig)
 
 class VisionEncoderInfo(ABC, Generic[_C]):
 
-    def __init__(self, vision_config: _C) -> None:
+    def __init__(self, hf_config: _C) -> None:
         super().__init__()
 
-        self.vision_config = vision_config
+        self.hf_config = hf_config
+        self.vision_config = hf_config.vision_config
 
     @abstractmethod
     def get_num_image_tokens(
@@ -31,10 +33,6 @@ class VisionEncoderInfo(ABC, Generic[_C]):
         image_width: int,
         image_height: int,
     ) -> int:
-        raise NotImplementedError
-
-    @abstractmethod
-    def get_max_image_tokens(self) -> int:
         raise NotImplementedError
 
     @abstractmethod
@@ -61,15 +59,14 @@ def get_vision_encoder_info(
     from .pixtral import PixtralHFEncoderInfo, PixtralVisionConfig
     from .siglip import SiglipEncoderInfo, SiglipVisionConfig
 
-    vision_config = hf_config.vision_config
-    if isinstance(vision_config, CLIPVisionConfig):
-        return CLIPEncoderInfo(vision_config)
-    if isinstance(vision_config, PixtralVisionConfig):
-        return PixtralHFEncoderInfo(vision_config)
-    if isinstance(vision_config, SiglipVisionConfig):
-        return SiglipEncoderInfo(vision_config)
+    if isinstance(hf_config.vision_config, CLIPVisionConfig):
+        return CLIPEncoderInfo(hf_config)
+    if isinstance(hf_config.vision_config, PixtralVisionConfig):
+        return PixtralHFEncoderInfo(hf_config)
+    if isinstance(hf_config.vision_config, SiglipVisionConfig):
+        return SiglipEncoderInfo(hf_config)
 
-    msg = f"Unsupported vision config: {type(vision_config)}"
+    msg = f"Unsupported vision config: {type(hf_config.vision_config)}"
     raise NotImplementedError(msg)
 
 

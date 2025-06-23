@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests whether gptq models with quantized lm_head can be loaded.
 
 Run `pytest tests/quantization/test_quant_lm_head_true.py --forked`.
@@ -29,7 +30,10 @@ def test_lm_head(
     vllm_runner,
     model_id: str,
     lm_head_quantized: bool,
+    monkeypatch,
 ) -> None:
+    # vllm_runner.apply_model() relies on V0 internals.
+    monkeypatch.setenv("VLLM_USE_V1", "0")
     with vllm_runner(model_id, dtype=torch.float16,
                      max_model_len=2048) as vllm_model:
 

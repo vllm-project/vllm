@@ -1,22 +1,45 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-This file contains a new class `KVLookupBufferBase` that allows developers to 
-think of KV cache operations as inserting new KV cache entries (`insert`) 
-into the lookup buffer and querying existing KV caches (`drop_select`) 
+This file contains a new class `KVLookupBufferBase` that allows developers to
+think of KV cache operations as inserting new KV cache entries (`insert`)
+into the lookup buffer and querying existing KV caches (`drop_select`)
 from the lookup buffer.
 
-All distributed communications are abstracted behind this class.
+This file also contains a new class `KVStoreBufferBase` that allows developers
+to manage the KVCache buffer as a simple key-value storage buffer with basic
+put/get operations.
+
+These classes above are abstracted behind class `KVCacheBufferBase`.
 """
 
 from abc import ABC, abstractmethod
-from typing import List, Optional
+from typing import Optional
 
 import torch
 
 
-class KVLookupBufferBase(ABC):
+class KVCacheBufferBase(ABC):
     """
-    Abstract base class for a lookup buffer.
+    Abstract base class for a KVCache buffer.
+    """
+
+    @abstractmethod
+    def close(self) -> None:
+        """Close the buffer and release resources.
+
+        This method is responsible for cleaning up resources related to the
+        KVCache buffer when it is no longer needed.
+
+        Raises:
+            NotImplementedError: This method must be implemented in subclasses.
+        """
+        raise NotImplementedError
+
+
+class KVLookupBufferBase(KVCacheBufferBase):
+    """
+    Abstract base class for a KVCache lookup buffer.
 
     This class provides an abstraction for a key-value (KV) cache lookup buffer.
     
@@ -71,7 +94,7 @@ class KVLookupBufferBase(ABC):
     @abstractmethod
     def drop_select(
             self, input_tokens: Optional[torch.Tensor],
-            roi: Optional[torch.Tensor]) -> List[Optional[torch.Tensor]]:
+            roi: Optional[torch.Tensor]) -> list[Optional[torch.Tensor]]:
         """Select and *drop* KV cache entries from the lookup buffer.
         
         The functionality is similar to the following python statements
@@ -89,7 +112,42 @@ class KVLookupBufferBase(ABC):
             roi (torch.Tensor): A binary mask on top of the input tokens
 
         Returns:
-            List[Optional[torch.Tensor]]: A list of tensors. Can be None.
+            list[Optional[torch.Tensor]]: A list of tensors. Can be None.
+
+        Raises:
+            NotImplementedError: This method must be implemented in subclasses.
+        """
+        raise NotImplementedError
+
+
+class KVStoreBufferBase(KVCacheBufferBase):
+    """
+    Abstract base class for a KVCache storage buffer with key-value semantics.
+    This class provides a simple key-value storage buffer abstract with basic
+    put/get operations, which enables flexible KVCache transfer granular
+    control.
+
+    The functionality is similar to a distributed key-value store, where:
+    - Key: A unique string identifier for the cached entry
+    - Value:
+        - Tensor to be stored and retrieved
+        - None (indicating deletion or empty value)
+    """
+
+    @abstractmethod
+    def put(
+        self,
+        key: str,
+        value: Optional[torch.Tensor],
+    ) -> None:
+        """Store a key-value pair in the buffer.
+
+        Args:
+            key (str): Unique identifier for a tensor, this tensor could be the
+                key cache tensor, value cache tensor, or hidden state tensor
+                generated during model forwarding.
+
+            value (Optional[torch.Tensor]): Tensor to be stored.
 
         Raises:
             NotImplementedError: This method must be implemented in subclasses.
@@ -97,11 +155,19 @@ class KVLookupBufferBase(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def close(self) -> None:
-        """Close the buffer and release resources.
+    def get(
+        self,
+        key: str,
+    ) -> Optional[torch.Tensor]:
+        """Retrieve a value from the buffer by key.
 
-        This method is responsible for cleaning up resources related to the 
-        lookup buffer when it is no longer needed.
+        Args:
+            key (str): Unique identifier for a tensor, this tensor could be the
+                key cache tensor, value cache tensor, or hidden state tensor
+                generated during model forwarding.
+
+        Returns:
+            Optional[torch.Tensor]: Stored tensor if exists, None otherwise.
 
         Raises:
             NotImplementedError: This method must be implemented in subclasses.

@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import random
 from typing import Optional
 
 import pytest
 
-from tests.v1.engine.utils import PLP_APC_UNSUPPORTED_MSG
 from vllm import LLM, SamplingParams
+from vllm.v1.metrics.reader import Counter, Gauge, Histogram, Metric, Vector
 
 MODEL = "facebook/opt-125m"
 DTYPE = "half"
@@ -51,7 +52,7 @@ def _get_test_sampling_params(
     """Generate random sampling params for a batch."""
 
     def get_mostly_n_gt1() -> int:
-        """Mostly n \in [2,20], ~1/3 n=1"""
+        r"""Mostly n \in [2,20], ~1/3 n=1"""
         x = random.randint(0, 28)
         if x < 10:
             return 1
@@ -100,15 +101,65 @@ def test_parallel_sampling(vllm_model, example_prompts) -> None:
                 f" {n}. Repeats: {repeats}")
 
 
-def test_llm_engine_refuses_prompt_logprobs_with_apc(vllm_model_apc):
-    """Test passes if LLMEngine raises an exception when it is configured
-    for automatic prefix caching and it receives a request with
-    prompt_logprobs enabled, which is incompatible."""
-    model: LLM = vllm_model_apc.model
-    with pytest.raises(ValueError) as excinfo:
-        model.generate(
-            "Hello, my name is",
-            SamplingParams(temperature=0.8, top_p=0.95, prompt_logprobs=5))
+def test_engine_metrics(vllm_runner, monkeypatch, example_prompts):
+    max_tokens = 100
+    # Use spec decoding to test num_accepted_tokens_per_pos
+    speculative_config = {
+        "method": "ngram",
+        "prompt_lookup_max": 5,
+        "prompt_lookup_min": 3,
+        "num_speculative_tokens": 5,
+    }
+    monkeypatch.setenv("VLLM_USE_V1", "1")
+    with vllm_runner(
+            MODEL,
+            speculative_config=speculative_config,
+            disable_log_stats=False,
+    ) as vllm_model:
+        model: LLM = vllm_model.model
+        sampling_params = SamplingParams(temperature=0.0,
+                                         max_tokens=max_tokens)
+        outputs = model.generate(example_prompts, sampling_params)
 
-    # Validate exception string is correct
-    assert str(excinfo.value) == PLP_APC_UNSUPPORTED_MSG
+        n_prompts = len(example_prompts)
+        assert len(outputs) == n_prompts
+
+        total_tokens = 0
+        for out in outputs:
+            assert len(out.outputs) == 1
+            total_tokens += len(out.outputs[0].token_ids)
+        assert total_tokens == max_tokens * n_prompts
+
+        metrics = model.get_metrics()
+
+        def find_metric(name) -> list[Metric]:
+            found = []
+            for metric in metrics:
+                if metric.name == name:
+                    found.append(metric)
+            return found
+
+        num_requests_running = find_metric("vllm:num_requests_running")
+        assert len(num_requests_running) == 1
+        assert isinstance(num_requests_running[0], Gauge)
+        assert num_requests_running[0].value == .0
+
+        generation_tokens = find_metric("vllm:generation_tokens")
+        assert len(generation_tokens) == 1
+        assert isinstance(generation_tokens[0], Counter)
+        assert generation_tokens[0].value == total_tokens
+
+        request_generation_tokens = find_metric(
+            "vllm:request_generation_tokens")
+        assert len(request_generation_tokens) == 1
+        assert isinstance(request_generation_tokens[0], Histogram)
+        assert "+Inf" in request_generation_tokens[0].buckets
+        assert request_generation_tokens[0].buckets["+Inf"] == n_prompts
+        assert request_generation_tokens[0].count == n_prompts
+        assert request_generation_tokens[0].sum == total_tokens
+
+        num_accepted_tokens_per_pos = find_metric(
+            "vllm:spec_decode_num_accepted_tokens_per_pos")
+        assert len(num_accepted_tokens_per_pos) == 1
+        assert isinstance(num_accepted_tokens_per_pos[0], Vector)
+        assert len(num_accepted_tokens_per_pos[0].values) == 5

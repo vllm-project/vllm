@@ -58,7 +58,9 @@ void cutlass_scaled_sparse_mm(torch::Tensor& c, torch::Tensor const& a,
 
   // Guard against compilation issues for sm90 kernels
 #if defined ENABLE_SPARSE_SCALED_MM_C3X && ENABLE_SPARSE_SCALED_MM_C3X
-  if (version_num >= 90) {
+  // We build for 9.0a which is not forward compatible, so restrict this to
+  // Hopper only
+  if (version_num == 90) {
     cutlass_scaled_sparse_mm_sm90(c, a, bt_nzs, bt_meta, a_scales, b_scales,
                                   bias);
     return;
@@ -82,7 +84,9 @@ std::vector<torch::Tensor> cutlass_sparse_compress(torch::Tensor const& a) {
 
   // Guard against compilation issues for sm90 kernels
 #if defined ENABLE_SPARSE_SCALED_MM_C3X && ENABLE_SPARSE_SCALED_MM_C3X
-  if (version_num >= 90) {
+  // We build for 9.0a which is not forward compatible, so restrict this to
+  // Hopper only
+  if (version_num == 90) {
     std::vector<torch::Tensor> result_tensors;
 
     auto [a_meta, a_nzs] = cutlass_sparse_compress_sm90(a);

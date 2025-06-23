@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests register custom quantization config.
 
 See https://github.com/vllm-project/vllm/issues/11926 for more details.
@@ -14,7 +15,7 @@ import torch.nn.functional as F
 from vllm.model_executor.layers.linear import LinearBase  # noqa: E501
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization import (
-    get_quantization_config, register_quantization_config)
+    QuantizationMethods, get_quantization_config, register_quantization_config)
 from vllm.model_executor.layers.quantization.base_config import (  # noqa: E501
     QuantizationConfig)
 
@@ -54,7 +55,7 @@ class CustomQuantConfig(QuantizationConfig):
         """Initialize the quantization config."""
         self.num_bits = num_bits
 
-    def get_name(self) -> str:
+    def get_name(self) -> QuantizationMethods:
         """Name of the quantization method."""
         return "custom_quant"
 
@@ -101,8 +102,10 @@ def test_register_quantization_config():
                          argvalues=[
                              "meta-llama/Llama-3.2-1B-Instruct",
                          ])
-def test_custom_quant(vllm_runner, model):
+def test_custom_quant(vllm_runner, model, monkeypatch):
     """Test infer with the custom quantization method."""
+    # vllm_runner.apply_model() relies on V0 internals.
+    monkeypatch.setenv("VLLM_USE_V1", "0")
     with vllm_runner(model_name=model,
                      quantization="custom_quant",
                      enforce_eager=True) as llm:

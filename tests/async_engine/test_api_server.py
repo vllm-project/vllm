@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 import subprocess
 import sys
 import time
@@ -44,7 +46,10 @@ def api_server(tokenizer_pool_size: int, distributed_executor_backend: str):
         distributed_executor_backend,
     ]
 
-    uvicorn_process = subprocess.Popen(commands)
+    # API Server Test Requires V0.
+    my_env = os.environ.copy()
+    my_env["VLLM_USE_V1"] = "0"
+    uvicorn_process = subprocess.Popen(commands, env=my_env)
     yield
     uvicorn_process.terminate()
 

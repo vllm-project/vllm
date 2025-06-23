@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """A block manager that manages token blocks."""
 from typing import Dict, List, Optional
 from typing import Sequence as GenericSequence
@@ -269,6 +270,10 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         self.block_tables[seq_id].free()
         del self.block_tables[seq_id]
 
+    def remove_seq_from_computed_blocks_tracker(self, seq: Sequence) -> None:
+        seq_id = seq.seq_id
+        self._computed_blocks_tracker.remove_seq(seq_id)
+
     def free_cross(self, seq_group: SequenceGroup) -> None:
         request_id = seq_group.request_id
         if request_id not in self.cross_block_tables:
@@ -456,8 +461,8 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
     def get_prefix_cache_hit_rate(self, device: Device) -> float:
         return self.block_allocator.get_prefix_cache_hit_rate(device)
 
-    def reset_prefix_cache(self) -> bool:
-        return self.block_allocator.reset_prefix_cache()
+    def reset_prefix_cache(self, device: Optional[Device] = None) -> bool:
+        return self.block_allocator.reset_prefix_cache(device)
 
     def _can_swap(self,
                   seq_group: SequenceGroup,

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import time
 
@@ -14,6 +15,15 @@ from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.engine.metrics import RayPrometheusStatLogger
 from vllm.sampling_params import SamplingParams
 from vllm.test_utils import MODEL_WEIGHTS_S3_BUCKET
+
+
+@pytest.fixture(scope="function", autouse=True)
+def use_v0_only(monkeypatch):
+    """
+    This module tests V0 internals, so set VLLM_USE_V1=0.
+    """
+    monkeypatch.setenv('VLLM_USE_V1', '0')
+
 
 MODELS = [
     "distilbert/distilgpt2",
@@ -239,8 +249,10 @@ def test_metric_spec_decode(
             dtype=dtype,
             disable_log_stats=False,
             gpu_memory_utilization=0.4,
-            speculative_model=model,
-            num_speculative_tokens=k,
+            speculative_config={
+                "model": model,
+                "num_speculative_tokens": k,
+            },
     ) as vllm_model:
 
         # Force log interval to be 0 to catch all metrics.
@@ -291,8 +303,10 @@ def test_metric_spec_decode_interval(
         dtype=dtype,
         disable_log_stats=False,
         gpu_memory_utilization=0.4,
-        speculative_model=model,
-        num_speculative_tokens=k,
+        speculative_config={
+            "model": model,
+            "num_speculative_tokens": k,
+        },
         enforce_eager=True,
     )
 

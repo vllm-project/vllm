@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
 
@@ -29,6 +30,7 @@ def sample_regex():
             r"(25[0-5]|(2[0-4]|1\d|[1-9]|)\d)")
 
 
+# Note: Ensure this only uses attributes compatible with xgrammar
 @pytest.fixture
 def sample_json_schema():
     return {
@@ -44,9 +46,15 @@ def sample_json_schema():
                 "type": "array",
                 "items": {
                     "type": "string",
-                    "maxLength": 10
-                },
-                "minItems": 3
+                }
+            },
+            "grade": {
+                "type": "string",
+                "pattern": "^[A-D]$"  # Regex pattern
+            },
+            "email": {
+                "type": "string",
+                "pattern": "^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$"
             },
             "work_history": {
                 "type": "array",
@@ -57,48 +65,48 @@ def sample_json_schema():
                             "type": "string"
                         },
                         "duration": {
-                            "type": "number"
+                            "type": "number",
+                            "minimum": 0.0,
+                            "maximum": 100.0,  # Numeric range
                         },
                         "position": {
                             "type": "string"
                         }
                     },
-                    "required": ["company", "position"]
-                }
+                    "required": ["company", "duration", "position"],
+                    "additionalProperties": False
+                },
+                "minItems": 0,
+                "maxItems": 3
             }
         },
-        "required": ["name", "age", "skills", "work_history"]
+        "required":
+        ["name", "age", "skills", "grade", "email", "work_history"],
+        "additionalProperties": False
     }
 
 
+# A schema unsupported by xgrammar
 @pytest.fixture
-def sample_complex_json_schema():
+def unsupported_json_schema():
     return {
         "type": "object",
         "properties": {
             "score": {
                 "type": "integer",
-                "minimum": 0,
-                "maximum": 100  # Numeric range
-            },
-            "grade": {
-                "type": "string",
-                "pattern": "^[A-D]$"  # Regex pattern
-            },
-            "email": {
-                "type": "string",
-                "pattern": "^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$"
+                "multipleOf": 5  # Numeric multiple
             },
             "tags": {
                 "type": "array",
                 "items": {
                     "type": "string",
-                    "pattern":
-                    "^[a-z]{1,10}$"  # Combining length and pattern restrictions
+                    "minLength": 10,
+                    "maxLength": 20
                 }
             }
         },
-        "required": ["score", "grade", "email", "tags"]
+        "required": ["score", "tags"],
+        "additionalProperties": False
     }
 
 
@@ -137,7 +145,8 @@ def sample_definition_json_schema():
         },
         'required': ['steps', 'final_answer'],
         'title': 'MathReasoning',
-        'type': 'object'
+        'type': 'object',
+        "additionalProperties": False
     }
 
 
@@ -150,7 +159,19 @@ def sample_guided_choice():
 
 
 @pytest.fixture
-def sample_sql_statements():
+def sample_sql_ebnf():
+    return """
+root ::= select_statement
+select_statement ::= "SELECT" column "from" table "where" condition
+column ::= "col_1" | "col_2"
+table ::= "table_1" | "table_2"
+condition ::= column "=" number
+number ::= "1" | "2"
+"""
+
+
+@pytest.fixture
+def sample_sql_lark():
     return ("""
 start: select_statement
 select_statement: "SELECT" column "from" table "where" condition

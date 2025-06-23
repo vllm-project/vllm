@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-
-import math
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Any
 
 import pytest
@@ -11,6 +10,15 @@ from torch import tensor
 from vllm.entrypoints.openai.protocol import ScoreResponse
 
 from ...utils import RemoteOpenAIServer
+
+
+@pytest.fixture(autouse=True)
+def v1(run_with_both_engines):
+    # Simple autouse wrapper to run both engines for each test
+    # This can be promoted up to conftest.py to run for every
+    # test in a package
+    pass
+
 
 MODELS = [
     {
@@ -92,7 +100,7 @@ class TestModel:
         hf_outputs = run_transformers(runner, model, text_pairs)
 
         for i in range(len(vllm_outputs)):
-            assert math.isclose(hf_outputs[i], vllm_outputs[i], rel_tol=0.01)
+            assert hf_outputs[i] == pytest.approx(vllm_outputs[i], rel=0.01)
 
     def test_text_1_list_text_2_list(self, server: RemoteOpenAIServer,
                                      model: dict[str, Any], runner):
@@ -124,7 +132,7 @@ class TestModel:
         hf_outputs = run_transformers(runner, model, text_pairs)
 
         for i in range(len(vllm_outputs)):
-            assert math.isclose(hf_outputs[i], vllm_outputs[i], rel_tol=0.01)
+            assert hf_outputs[i] == pytest.approx(vllm_outputs[i], rel=0.01)
 
     def test_text_1_str_text_2_str(self, server: RemoteOpenAIServer,
                                    model: dict[str, Any], runner):
@@ -150,7 +158,7 @@ class TestModel:
         hf_outputs = run_transformers(runner, model, text_pairs)
 
         for i in range(len(vllm_outputs)):
-            assert math.isclose(hf_outputs[i], vllm_outputs[i], rel_tol=0.01)
+            assert hf_outputs[i] == pytest.approx(vllm_outputs[i], rel=0.01)
 
     def test_score_max_model_len(self, server: RemoteOpenAIServer,
                                  model: dict[str, Any]):

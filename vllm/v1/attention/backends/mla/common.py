@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
+# MLA Common Components
+
 This file implements common components for MLA implementations.
 
 First we define:
@@ -21,7 +24,7 @@ Main reference: DeepseekV2 paper, and FlashInfer Implementation
 (https://arxiv.org/abs/2405.04434 and https://github.com/flashinfer-ai/flashinfer/pull/551).
 
 Deepseek's MLA attention works the following way:
-* Use a single latent vector to represent the per-token entry of the KV cache.
+* Use a single latent vector to represent the per-token entry of the KV cache. 
 * For decode (i.e. the memory friendly approach) the attention "simulates" a
 multi-head attention, while the compute is similar to multi-query attention.
 
@@ -54,9 +57,9 @@ W_DQ        project h_t to q_c                  shape [H, Lq]
 W_UQ        project q_c to q_nope               shape [Lq, N * P]
 W_QR        project q_c to q_pe                 shape [Lq, N * R]
 W_DKV       project h_t to kv_c                 shape [H, Lkv]
-W_UK        project kv_c to k_nope              shape [Lkv, N * P]
-W_KR        project h_t to k_pe                 shape [H, N * R]
-W_UV        project kv_c to v                   shape [Lkv, N * V]
+W_UK        project kv_c to k_nope              shape [Lkv, N, P]
+W_KR        project h_t to k_pe                 shape [H, R]
+W_UV        project kv_c to v                   shape [Lkv, N, V]
 W_O         project v to h_t                    shape [N * V, H]
 
 
@@ -69,8 +72,8 @@ new_kv_c = h_t @ W_DKV
 new_k_pe = RoPE(h_t @ W_KR)
 kv_c     = torch.cat([new_kv_c, cache_kv_c], dim=0)
 k_pe     = torch.cat([new_k_pe, cache_k_pe], dim=0)
-k_nope   = (kv_c @ W_UK).view(Skv, N, P)
-v        = (kv_c @ W_UV).view(Skv, N, V)
+k_nope   = (kv_c @ W_UK.view(Lkv, N * P)).view(Skv, N, P)
+v        = (kv_c @ W_UV.view(Lkv, N * V)).view(Skv, N, V)
 
 // MHA with QK headdim = P + R
 //           V headdim = V
@@ -79,31 +82,21 @@ spda_o = scaled_dot_product_attention(
     torch.cat([q_nope, q_pe], dim=-1),
     torch.cat([k_nope, k_pe.unsqueeze(1).expand(-1, N, -1)], dim=-1),
     v
-)
+) 
 return spda_o @ W_O
 
 NOTE: in the actual code,
-    `kv_b_proj` is [W_UK; W_UV] concatnated per head
-    `q_b_proj` is [W_UQ; W_QR] concatnated per head
+    `kv_b_proj` is [W_UK; W_UV] concatenated per head
+    `q_b_proj` is [W_UQ; W_QR] concatenated per head
     `out_proj` is W_O
 
 
 ## Data-Movement Friendly Approach (i.e. "_forward_decode"):
 
-Ahead of time, compute:
-
-% this projects from q_c to [Sq, N * Lkv]
-W_UQ_UK = einsum("qnp,knp -> qnk"
-                     W_UQ.view(Lq, N, P), W_UK.view(Lkv, N, P)
-                ).view(Lkv, N * Lkv)
-% this projects from attn output [Sq, N * Lkv] to [Sq, H]
-W_UV_O  = einsum("knv,nvh -> nkh"
-                     W_UV.view(Lkv, N, V), W_O.view(N, V, H)
-                ).view(N * Lkv, H)
-
 Runtime
 q_c      = h_t @ W_DQ
-q_latent = q_c @ W_UQ_UK.view(Sq, N, Lkv)
+q_nope   = (q_c @ W_UQ).view(-1, N, P)
+ql_nope  = einsum("snh,lnh->snl", q, W_UK)
 q_pe     = RoPE(q_c @ W_QR).view(Sq, N, R)
 new_kv_c = h_t @ W_DKV
 new_k_pe = RoPE(h_t @ W_KR)
@@ -116,29 +109,31 @@ k_pe     = torch.cat([new_k_pe, cache_k_pe], dim=0)
 // NOTE: this is less compute-friendly since Lkv > P
 //       but is more data-movement friendly since its MQA vs MHA
 spda_o = scaled_dot_product_attention(
-    torch.cat([q_latent, q_pe], dim=-1),
+    torch.cat([ql_nope, q_pe], dim=-1),
     torch.cat([kv_c, k_pe], dim=-1),
     kv_c
 )
-return spda_o.reshape(-1, N * Lkv) @ W_UV_O
+
+o = einsum("snl,lnv->snv", spda_o.reshape(-1, N, Lkv), W_UV)
+return o.view(-1, N * V) @ self.num_heads @ W_O
 
 
 ## Chunked Prefill
 
-For chunked prefill we want to use the compute friendly algorithm. We are
-assuming sufficiently large Sq / Skv ratio, in the future may want to switch to
+For chunked prefill we want to use the compute friendly algorithm. We are 
+assuming sufficiently large Sq / Skv ratio, in the future may want to switch to 
 the data-movement friendly approach if the chunk (i.e. `Sq`) is small.
 
 However, the compute-friendly approach can potentially run out of memory if Skv
 is large due to: `k_nope = (kv_c @ W_UK).view(Skv, N, P)`
 
-To mitigate this, we chunk the computation of attention with respect to the
-current context (i.e. `cache_kv_c` and `cache_k_pe`) so that we can used a
+To mitigate this, we chunk the computation of attention with respect to the 
+current context (i.e. `cache_kv_c` and `cache_k_pe`) so that we can used a 
 fixed workspace size.
 
 The chunked prefill approach is as follows:
 
-MCC        Max chunk of context to process per iter, computed dynamically,
+MCC        Max chunk of context to process per iter, computed dynamically, 
            used to bound the memory usage
 
 q_c        = h_t @ W_DQ
@@ -146,8 +141,8 @@ q_nope     = (q_c @ W_UQ).view(Sq, N, P)
 q_pe       = RoPE(q_c @ W_QR).view(Sq, N, R)
 new_kv_c   = h_t @ W_DKV
 new_k_pe   = RoPE(h_t @ W_KR)
-new_k_nope = (new_kv_c @ W_UK).view(Sq, N, P)
-new_v      = (new_kv_c @ W_UV).view(Sq, N, V)
+new_k_nope = (new_kv_c @ W_UK.view(Lkv, N * P)).view(Sq, N, P)
+new_v      = (new_kv_c @ W_UV.view(Lkv, N * V)).view(Sq, N, V)
 
 // MHA between queries and new KV
 //     with QK headdim = P + R
@@ -160,7 +155,7 @@ curr_o, curr_lse = scaled_dot_product_attention(
     new_v,
     casual=True,
     return_softmax_lse=True
-)
+) 
 
 // Compute attention with the already existing context
 for chunk_idx in range(cdiv(C, MCC)):
@@ -198,42 +193,35 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Generic, Optional, TypeVar
 
 import torch
-from compressed_tensors.quantization import QuantizationStrategy
 
 from vllm import _custom_ops as ops
-from vllm import envs
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionLayer,
                                               AttentionMetadata,
                                               MLAAttentionImpl)
-from vllm.attention.backends.utils import get_flash_attn_version
-from vllm.attention.ops.triton_merge_attn_states import merge_attn_states
-from vllm.distributed import (get_tensor_model_parallel_world_size,
-                              tensor_model_parallel_all_reduce)
+from vllm.attention.backends.utils import get_mla_dims
+from vllm.attention.ops.merge_attn_states import merge_attn_states
+from vllm.attention.utils.fa_utils import get_flash_attn_version
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               LinearBase, RowParallelLinear,
+                                               LinearBase,
                                                UnquantizedLinearMethod)
-from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
-    CompressedTensorsLinearMethod)
-from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
-    CompressedTensorsW8A8Fp8)
-from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
-from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    apply_fp8_linear_generic, current_platform_fp8_dtype, is_fp8)
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    scaled_quantize)
-from vllm.model_executor.layers.rotary_embedding import (
-    DeepseekScalingRotaryEmbedding, RotaryEmbedding)
+from vllm.platforms import current_platform
 from vllm.utils import cdiv, round_down
+from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
+                                              CommonAttentionMetadata)
+from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.worker.block_table import BlockTable
 
 try:
     from vllm.vllm_flash_attn import flash_attn_varlen_func
+    is_vllm_fa = True
 except ImportError:
     # For rocm use upstream flash attention
     from flash_attn import flash_attn_varlen_func
+    is_vllm_fa = False
 
 if TYPE_CHECKING:
-    from vllm.v1.core.scheduler_output import SchedulerOutput
+    from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.worker.gpu_input_batch import InputBatch
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
@@ -269,10 +257,6 @@ class MLACommonBackend(AttentionBackend):
     def get_supported_head_sizes() -> list[int]:
         return [576]
 
-    @staticmethod
-    def use_cascade_attention(*args, **kwargs) -> bool:
-        return False
-
 
 @dataclass
 class MLACommonPrefillMetadata:
@@ -288,9 +272,6 @@ class MLACommonPrefillMetadata:
         max_seq_lens: list[int]
         workspace: torch.Tensor
 
-    # Input positions for rotrary embeddings since for MLA the rotary
-    # position embeddings are applied inside the attention backend
-    input_positions: torch.Tensor
     block_table: torch.Tensor
     query_start_loc: torch.Tensor
     max_query_len: int
@@ -299,9 +280,6 @@ class MLACommonPrefillMetadata:
 
 @dataclass
 class MLACommonDecodeMetadata:
-    # Input positions for rotrary embeddings since for MLA the rotary
-    # position embeddings are applied inside the attention backend
-    input_positions: torch.Tensor
     block_table: torch.Tensor
     seq_lens: torch.Tensor
 
@@ -334,9 +312,6 @@ class MLACommonMetadata(Generic[D]):
     num_decode_tokens: int
     num_prefills: int
 
-    # For logging.
-    num_input_tokens: int = 0  # Number of tokens including padding.
-
     # The dimension of the attention heads
     head_dim: Optional[int] = None
 
@@ -355,7 +330,7 @@ class MLACommonMetadata(Generic[D]):
 M = TypeVar("M", bound=MLACommonMetadata)
 
 
-class MLACommonMetadataBuilder(Generic[M]):
+class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
     """
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
@@ -363,6 +338,8 @@ class MLACommonMetadataBuilder(Generic[M]):
 
     def __init__(self,
                  runner: "GPUModelRunner",
+                 kv_cache_spec: AttentionSpec,
+                 block_table: BlockTable,
                  metadata_cls: Optional[type[M]] = None):
         self.metadata_cls = metadata_cls \
             if metadata_cls is not None else MLACommonMetadata
@@ -371,6 +348,15 @@ class MLACommonMetadataBuilder(Generic[M]):
         model_config = runner.model_config
         cache_config = runner.cache_config
         self.chunked_prefill_enabled = scheduler_config.chunked_prefill_enabled
+        self.num_heads = model_config.get_num_attention_heads(
+            runner.parallel_config)
+        self.mla_dims = get_mla_dims(model_config)
+        self.aot_schedule = current_platform.is_cuda()
+        self.kv_cache_spec = kv_cache_spec
+
+        # Dont try to access the runner on AMD
+        if self.aot_schedule:
+            self.page_size = self.kv_cache_spec.block_size
 
         if self.chunked_prefill_enabled:
             self.chunked_prefill_workspace_size = min(
@@ -396,7 +382,7 @@ class MLACommonMetadataBuilder(Generic[M]):
                 dtype=model_config.dtype,
                 device=runner.device,
             )
-            self.page_size = self.runner.block_size
+        self.block_table = block_table
 
     def reorder_batch(self, input_batch: "InputBatch",
                       scheduler_output: "SchedulerOutput") -> bool:
@@ -436,19 +422,17 @@ class MLACommonMetadataBuilder(Generic[M]):
         # the above loop
         num_decodes = len(decodes)
         num_prefills = len(prefills)
-        first_prefill = 0
         modified_batch = False
 
         for i in range(1, min(num_decodes, num_prefills) + 1):
             # If the decode is at the "back" of the batch, i, we can swap it
             # with the prefill closest to the front of the batch
-            if decodes[num_decodes - i] >= num_decodes:
-                input_batch.swap_states(prefills[first_prefill],
-                                        decodes[num_decodes - i])
-                first_prefill += 1
-                modified_batch = True
-            else:
+            decode_idx = decodes[num_decodes - i]
+            if decode_idx < num_decodes:
                 break
+
+            input_batch.swap_states(prefills[i - 1], decode_idx)
+            modified_batch = True
 
         # Save for next `build` call
         # TODO(lucas): this is a bit of a hack, we should probably have a
@@ -460,87 +444,118 @@ class MLACommonMetadataBuilder(Generic[M]):
 
         return modified_batch
 
-    def _build_decode(self, input_positions: torch.Tensor,
-                      block_table: torch.Tensor, seq_lens: torch.Tensor):
+    def _build_decode(self, block_table_tensor: torch.Tensor,
+                      seq_lens: torch.Tensor):
         return MLACommonDecodeMetadata(
-            input_positions=input_positions,
-            block_table=block_table,
+            block_table=block_table_tensor,
             seq_lens=seq_lens,
         )
 
-    def build(self, num_reqs: int, num_actual_tokens: int, max_query_len: int,
-              common_prefix_len: int) -> M:
+    def build_for_cudagraph_capture(
+            self, common_attn_metadata: CommonAttentionMetadata) -> M:
+        """
+        This method builds the metadata for full cudagraph capture.
+        Currently, only decode is supported for full cudagraphs with MLA.
+        """
+        m = common_attn_metadata
+        assert m.num_reqs == m.num_actual_tokens, \
+            "MLA only supports decode-only full CUDAGraph capture. " \
+            "Make sure all cudagraph capture sizes <= max_num_seq."
+
+        m.max_query_len = 1  # decode-only
+
+        # Update state usually set in reorder_batch.
+        self._num_decodes = m.num_reqs
+        self._num_decode_tokens = m.num_actual_tokens
+        self._num_prefills = 0
+        self._num_prefill_tokens = 0
+        return self.build(0, m)
+
+    def build(self, common_prefix_len: int,
+              common_attn_metadata: CommonAttentionMetadata) -> M:
+        num_reqs = common_attn_metadata.num_reqs
+        num_actual_tokens = common_attn_metadata.num_actual_tokens
+        max_query_len = common_attn_metadata.max_query_len
+
         assert self._num_decodes + self._num_prefills == num_reqs
 
+        # Note(simon): be careful about the CPU <> GPU memory movement in this
+        # function. We should avoid GPU -> CPU sync as much as possible because
+        # it blocks on all previous kernels.
         device = self.runner.device
-        query_start_loc = self.runner.query_start_loc_cpu[:num_reqs + 1].to(
-            device, non_blocking=True)
-        seq_lens = self.runner.seq_lens_cpu[:num_reqs].to(device,
-                                                          non_blocking=True)
-        block_table = (
-            self.runner.input_batch.block_table.get_device_tensor()[:num_reqs])
-        slot_mapping = self.runner.slot_mapping_cpu[:num_actual_tokens].to(
-            device, non_blocking=True).long()
-        input_positions = self.runner.positions_cpu[:num_actual_tokens].to(
-            device, non_blocking=True).long()
+        block_table = self.block_table
+        block_table_tensor = block_table.get_device_tensor()[:num_reqs]
+        block_table.slot_mapping[:num_actual_tokens].copy_(
+            block_table.slot_mapping_cpu[:num_actual_tokens],
+            non_blocking=True)
+        block_table.slot_mapping[num_actual_tokens:].fill_(-1)
+        slot_mapping = block_table.slot_mapping[:num_actual_tokens]
+
+        query_start_loc = common_attn_metadata.query_start_loc
+        seq_lens = common_attn_metadata.seq_lens
 
         prefill_metadata = None
         if self._num_prefills > 0:
             reqs_start = self._num_decodes  # prefill_start
-            tokens_start = self._num_decode_tokens
 
             context_lens_cpu = self.runner.input_batch.\
                 num_computed_tokens_cpu_tensor[reqs_start:num_reqs]
-            context_lens = context_lens_cpu.to(device, non_blocking=True)
+            max_context_len_cpu = context_lens_cpu.max().item()
+            num_prefills_with_context_cpu = (context_lens_cpu > 0).sum().item()
+            prefill_query_start_loc = query_start_loc[
+                reqs_start:] - query_start_loc[reqs_start]
 
             chunked_context_metadata = None
             if self.chunked_prefill_enabled and self._num_prefills > 0 \
-                and context_lens.max() > 0:
+                and max_context_len_cpu > 0:
                 # NOTE: it is recommend you read the `Chunked Prefill` section
                 # in the comment at the top of the file before trying to
                 # understand the following code
-
-                num_prefills_with_context = (context_lens > 0).sum().item()
 
                 # currently we allocate an equal amount of workspace for each
                 # prefill in the batch, we could probably use a more advanced
                 # algorithm here and allocate more workspace to prefills with
                 # longer context lengths
-                max_context_chunk = \
-                    self.chunked_prefill_workspace_size \
-                        // num_prefills_with_context
+                max_context_chunk = (self.chunked_prefill_workspace_size //
+                                     num_prefills_with_context_cpu)
 
-                # align max_context_chunk to page_size by rounding down,
-                # currently the `gather_cache` kernel cannot handle
-                # `context_chunk_starts` that are not aligned to page_size
-                max_context_chunk = round_down(max_context_chunk,
-                                               self.page_size)
+                if self.aot_schedule:
+                    # align max_context_chunk to page_size by rounding down,
+                    # currently the `gather_cache` kernel cannot handle
+                    # `context_chunk_starts` that are not aligned to page_size
+                    max_context_chunk = round_down(max_context_chunk,
+                                                   self.page_size)
 
                 assert max_context_chunk > 0
-                num_chunks = cdiv(context_lens.max(), max_context_chunk)
+                num_chunks = cdiv(max_context_len_cpu, max_context_chunk)
 
                 # if `max_context_chunk = 256`, `num_chunks = 3`, and
                 #   `num_prefills_with_context = 4`, create a tensor that looks
                 # like
                 #  [[0, 0, 0, 0], [256, 256, 256, 256], [512, 512, 512, 512]]
+                # Note(simon): this is done in CPU because of downstream's
+                # of `to_list`.
                 chunk_starts = \
-                    torch.arange(num_chunks, device=device, dtype=torch.int32) \
+                    torch.arange(num_chunks, dtype=torch.int32) \
                     .unsqueeze(1).expand(-1, self._num_prefills) \
                     * max_context_chunk
-                chunk_ends = torch.min(context_lens.unsqueeze(0),
+                chunk_ends = torch.min(context_lens_cpu.unsqueeze(0),
                                        chunk_starts + max_context_chunk)
                 chunk_seq_lens = (chunk_ends - chunk_starts).clamp(min=0)
-                _chunk_cu_seq_lens = chunk_seq_lens.cumsum(dim=1).to(
-                    torch.int32)
-                zero = torch.zeros(num_chunks,
-                                   dtype=torch.int32,
-                                   device=device).unsqueeze(-1)
+
+                cu_seq_lens_cpu = torch.zeros(num_chunks,
+                                              self._num_prefills + 1,
+                                              dtype=torch.int32,
+                                              pin_memory=True)
+                torch.cumsum(chunk_seq_lens,
+                             dim=1,
+                             out=cu_seq_lens_cpu[:, 1:],
+                             dtype=torch.int32)
 
                 chunked_context_metadata = \
                     MLACommonPrefillMetadata.ChunkedContextMetadata(
-                    cu_seq_lens=torch.cat(
-                        [zero, _chunk_cu_seq_lens], dim=1),
-                    starts=chunk_starts,
+                    cu_seq_lens=cu_seq_lens_cpu.to(device, non_blocking=True),
+                    starts=chunk_starts.to(device, non_blocking=True),
                     seq_tot=chunk_seq_lens.sum(dim=1).tolist(),
                     max_seq_lens=chunk_seq_lens.max(dim=1).values.tolist(),
                     workspace=self.chunked_prefill_workspace,
@@ -550,19 +565,16 @@ class MLACommonMetadataBuilder(Generic[M]):
                     self.chunked_prefill_workspace_size
 
             prefill_metadata = MLACommonPrefillMetadata(
-                input_positions=input_positions[tokens_start:],
-                block_table=block_table[reqs_start:, ...],
-                query_start_loc=query_start_loc[reqs_start:] -
-                query_start_loc[reqs_start],
-                max_query_len=seq_lens[reqs_start:].max().item(),
+                block_table=block_table_tensor[reqs_start:, ...],
+                query_start_loc=prefill_query_start_loc,
+                max_query_len=max_query_len,
                 chunked_context=chunked_context_metadata,
             )
 
         decode_metadata = None
         if self._num_decodes > 0:
             decode_metadata = self._build_decode(
-                input_positions=input_positions[:self._num_decode_tokens],
-                block_table=block_table[:self._num_decodes, ...],
+                block_table_tensor=block_table_tensor[:self._num_decodes, ...],
                 seq_lens=seq_lens[:self._num_decodes],
             )
 
@@ -578,6 +590,10 @@ class MLACommonMetadataBuilder(Generic[M]):
             prefill=prefill_metadata,
             decode=decode_metadata,
         )
+
+    def can_run_in_cudagraph(
+            self, common_attn_metadata: CommonAttentionMetadata) -> bool:
+        return common_attn_metadata.max_query_len == 1
 
 
 class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
@@ -598,6 +614,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         blocksparse_params: Optional[dict[str, Any]],
         logits_soft_cap: Optional[float],
         attn_type: str,
+        kv_sharing_target_layer_name: Optional[str],
         # MLA Specific Arguments
         q_lora_rank: Optional[int],
         kv_lora_rank: int,
@@ -605,14 +622,11 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         qk_rope_head_dim: int,
         qk_head_dim: int,
         v_head_dim: int,
-        rotary_emb: RotaryEmbedding,
-        # q_proj should be q_b_proj if q_lora_rank is not None, but from an
-        # attention backend perspective we rely on the layer to pass in the
-        # correct matrix
-        q_proj: ColumnParallelLinear,
         kv_b_proj: ColumnParallelLinear,
-        o_proj: RowParallelLinear,
     ) -> None:
+        if kv_sharing_target_layer_name is not None:
+            raise NotImplementedError("KV sharing is not supported for MLA")
+
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
@@ -625,107 +639,77 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         self.qk_rope_head_dim = qk_rope_head_dim
         self.qk_head_dim = qk_head_dim
         self.v_head_dim = v_head_dim
-
-        self.rotary_emb = rotary_emb
-        self.use_yarn_rope = isinstance(rotary_emb,
-                                        DeepseekScalingRotaryEmbedding)
-        self.q_proj = q_proj
         self.kv_b_proj = kv_b_proj
-        self.o_proj = o_proj
         self.vllm_flash_attn_version = get_flash_attn_version()
 
         # Handle the differences between the flash_attn_varlen from flash_attn
         # and the one from vllm_flash_attn. The former is used on RoCM and the
         # latter has an additional parameter to control FA2 vs FA3
         self.flash_attn_varlen_func = flash_attn_varlen_func
+        self.vllm_flash_attn_version = get_flash_attn_version()
         if self.vllm_flash_attn_version is not None:
             self.flash_attn_varlen_func = \
                 functools.partial(flash_attn_varlen_func,
                                   fa_version=self.vllm_flash_attn_version)
 
-    def _v_up_proj_and_o_proj(self, x):
-        if envs.VLLM_MLA_PERFORM_MATRIX_ABSORPTION:
-            if is_fp8(self.W_UV_O):
-                output_parallel = apply_fp8_linear_generic(
-                    x.flatten(start_dim=1), self.W_UV_O, self.W_UV_O_scales,
-                    self.reqaunt_input_group_shape,
-                    self.reqaunt_weight_group_shape)
-            else:
-                output_parallel = torch.matmul(x.flatten(start_dim=1),
-                                               self.W_UV_O)
-            if self.tp_size > 1:
-                output = tensor_model_parallel_all_reduce(output_parallel)
-            else:
-                output = output_parallel
-            return output
-        else:
-            x = torch.einsum("bnl,lnv->bnv", x, self.W_UV)
-            return self.o_proj(x.reshape(-1,
-                                         self.num_heads * self.v_head_dim))[0]
+        # For MLA the v head dim is smaller than qk head dim so we pad out
+        # v with 0s to match the qk head dim for attention backends that do
+        # not support different headdims
+        # We don't need to pad V if we are on a hopper system with FA3
+        self._pad_v = self.vllm_flash_attn_version is None or not (
+            self.vllm_flash_attn_version == 3
+            and current_platform.get_device_capability()[0] == 9)
 
-    def _q_proj_and_k_up_proj(self, x):
-        if envs.VLLM_MLA_PERFORM_MATRIX_ABSORPTION:
-            if is_fp8(self.W_Q_UK):
-                return apply_fp8_linear_generic(
-                    x, self.W_Q_UK, self.W_Q_UK_scales,
-                    self.reqaunt_input_group_shape,
-                    self.reqaunt_weight_group_shape).view(
-                        -1, self.num_heads, self.kv_lora_rank)
-            return torch.matmul(x, self.W_Q_UK)\
-                .view(-1, self.num_heads, self.kv_lora_rank)
-        else:
-            x = torch.matmul(x, self.W_Q)\
-                .view(-1, self.num_heads, self.qk_nope_head_dim)
-            return torch.einsum("bnp,lnp->bnl", x, self.W_UK)\
-                .view(-1, self.num_heads, self.kv_lora_rank)
+    def _flash_attn_varlen_diff_headdims(self,
+                                         q,
+                                         k,
+                                         v,
+                                         return_softmax_lse=False,
+                                         softmax_scale=None,
+                                         **kwargs):
+        maybe_padded_v = v
+        if self._pad_v:
+            maybe_padded_v = torch.nn.functional.pad(
+                v, [0, q.shape[-1] - v.shape[-1]], value=0)
+
+        attn_out = self.flash_attn_varlen_func(
+            q=q,
+            k=k,
+            v=maybe_padded_v,
+            return_softmax_lse=return_softmax_lse,
+            softmax_scale=softmax_scale,
+            **kwargs,
+        )
+
+        # Unpack the output if there is multiple results
+        lse = None
+        if isinstance(attn_out, tuple):
+            attn_out, lse = attn_out[0], attn_out[1]
+
+        # Remain consistent with old `flash_attn_varlen_func` where there
+        # is only one output tensor if `return_softmax_lse` is False.
+        if return_softmax_lse:
+            return attn_out, lse
+        return attn_out
+
+    def _v_up_proj(self, x):
+        # Convert from (B, N, L) to (N, B, L)
+        x = x.view(-1, self.num_heads, self.kv_lora_rank).transpose(0, 1)
+        # Multiply (N, B, L) x (N, L, V) -> (N, B, V)
+        x = torch.bmm(x, self.W_UV)
+        # Convert from (N, B, V) to (B, N * V)
+        return x.transpose(0, 1).reshape(-1, self.num_heads * self.v_head_dim)
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
 
-        # TODO(lucas) This is very gross, we need a more wide scale refactor of
-        # all the FP8 code with a more standard way of
-        # defining schemes/group-shapes, we should also potentially force
-        # quant_methods to support a decompress function
-        #
-        # returns input_group_shape, weight_group_shape
-        def get_scale_group_shapes_for_fp8(layer: LinearBase) -> \
-            tuple[tuple[int, int], tuple[int, int]]:
-            if isinstance(layer.quant_method, Fp8LinearMethod):
-                if layer.quant_method.block_quant:
-                    weight_block_size = \
-                        layer.quant_method.quant_config.weight_block_size
-                    # per-token-group (1, X), block-quantized (X, Y)
-                    return (1, weight_block_size[-1]), weight_block_size
-                else:
-                    return (-1, -1), (-1, -1)  # per-tensor, per-tensor
-            elif isinstance(layer.quant_method, CompressedTensorsLinearMethod)\
-                and isinstance(layer.scheme, CompressedTensorsW8A8Fp8):
-                # this is hacky but we always assume the for
-                # CompressedTensorsW8A8Fp8 the input is dynamic per-token
-                # we ignore if it is static-per-tensor since we are going to
-                # requantize after later anyways
-                strategy = layer.scheme.strategy
-                if strategy == QuantizationStrategy.TENSOR:
-                    return (1, -1), (-1, -1)  # per-token, per-tensor
-                elif strategy == QuantizationStrategy.CHANNEL:
-                    return (1, -1), (-1, 1)  # per-token, per-channel
-                else:
-                    raise NotImplementedError(
-                        f"QuantizationStrategy.{strategy} is not supported for "
-                        "fp8 MLA, please run with VLLM_MLA_DISABLE=1")
-            else:
-                raise NotImplementedError(
-                    "Can't determine scale group shapes for "
-                    f"{layer.quant_method}, please run with VLLM_MLA_DISABLE=1"
-                )
-
         def get_layer_weight(layer):
-            if hasattr(layer, "weight"):
-                return layer.weight
-            elif hasattr(layer, "qweight"):
-                return layer.qweight
-            else:
-                raise AttributeError(
-                    f"Layer '{layer}' has neither weight nor qweight")
+            WEIGHT_NAMES = ("weight", "qweight", "weight_packed")
+            for attr in WEIGHT_NAMES:
+                if hasattr(layer, attr):
+                    return getattr(layer, attr)
+            raise AttributeError(
+                f"Layer '{layer}' has no recognized weight attribute:"
+                f" {WEIGHT_NAMES}.")
 
         def get_and_maybe_dequant_weights(layer: LinearBase):
             if not isinstance(layer.quant_method, UnquantizedLinearMethod):
@@ -741,10 +725,9 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                 return dequant_weights.T
             return layer.weight
 
-        weight_dtype = get_layer_weight(self.kv_b_proj).dtype
-        assert get_layer_weight(self.o_proj).dtype == weight_dtype
-        assert get_layer_weight(self.q_proj).dtype == weight_dtype
-
+        # we currently do not have quantized bmm's which are needed for
+        # `W_UV` and `W_UK_T`, we we just store fp16/bf16 copies and perform
+        # the bmm's in 16-bit, the extra memory overhead of this is fairly low
         kv_b_proj_weight = get_and_maybe_dequant_weights(self.kv_b_proj).T
         assert kv_b_proj_weight.shape == (
             self.kv_lora_rank,
@@ -763,89 +746,10 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         W_UK, W_UV = kv_b_proj_weight.split(
             [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
 
-        q_proj_weight = get_and_maybe_dequant_weights(self.q_proj).T\
-                .view(-1, self.num_heads, self.qk_head_dim)
-
-        # can be W_Q or W_UQ depending q_lora_rank, the former if
-        # q_lora_rank is None, the latter otherwise. From the Attention backend
-        # perspective though we call these both W_Q and rely on the layer
-        # to pass in the correct matrix
-        W_Q = q_proj_weight[..., :self.qk_nope_head_dim]
-        self.W_QR = q_proj_weight[..., self.qk_nope_head_dim:]\
-            .flatten(start_dim=1).contiguous()
-
-        # W_QR is small so for simplicity we dont bother requantizing it
-        self.W_QR = self.W_QR.to(act_dtype)
-
-        if envs.VLLM_MLA_PERFORM_MATRIX_ABSORPTION:
-            requantization_enabled = not envs.VLLM_MLA_DISABLE_REQUANTIZATION
-            if is_fp8(weight_dtype) and requantization_enabled:
-                # This assumes it wise to requantize using the same group shapes
-                # (i.e. strategy, per-tensor, per-channel, block etc.) that the
-                # weights were originally quantized
-                requant_input_group_shape, requant_weight_group_shape = \
-                    get_scale_group_shapes_for_fp8(self.q_proj)
-                assert (requant_input_group_shape, requant_weight_group_shape)\
-                    == get_scale_group_shapes_for_fp8(self.kv_b_proj)
-                assert (requant_input_group_shape, requant_weight_group_shape)\
-                    == get_scale_group_shapes_for_fp8(self.o_proj)
-                self.reqaunt_input_group_shape = requant_input_group_shape
-                self.reqaunt_weight_group_shape = requant_weight_group_shape
-
-            #
-            # Perform matrix-absorption following
-            #     https://github.com/flashinfer-ai/flashinfer/pull/551
-            # for decode, as a result we end up with absorbed weights for decode
-            # and another copy of raw weights for prefill.
-            #
-            self.W_UK, self.W_UV = kv_b_proj_weight.split(
-                [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
-            # We absorb `W_UK` into `W_Q` resulting in either W_Q_UK or W_UQ_UK
-            # depending q_lora_rank, the former if q_lora_rank is None, the
-            # latter otherwise
-            # basically if q_lora_rank is none we are absorbing into q_proj
-            # instead of UQ
-            W_Q_UK = torch.einsum("qnd,lnd -> qnl", W_Q, W_UK)\
-                .flatten(start_dim=1).contiguous()
-
-            if is_fp8(weight_dtype) and requantization_enabled:
-                W_Q_UK, W_Q_UK_scales = scaled_quantize(
-                    W_Q_UK,
-                    self.reqaunt_weight_group_shape,
-                    quant_dtype=current_platform_fp8_dtype)
-                # For FP8 save the transpose so we can use
-                # `apply_w8a8_block_fp8_linear` directly
-                self.W_Q_UK = W_Q_UK.T.contiguous()
-                self.W_Q_UK_scales = W_Q_UK_scales.T.contiguous()
-            else:
-                self.W_Q_UK = W_Q_UK.to(act_dtype)
-
-            W_O = get_and_maybe_dequant_weights(self.o_proj)\
-                .view(-1, self.num_heads, self.v_head_dim)
-            W_UV_O = torch.einsum("lnd,hnd -> nlh", W_UV, W_O)\
-                .flatten(start_dim=0, end_dim=1).contiguous()
-
-            if is_fp8(weight_dtype) and requantization_enabled:
-                W_UV_O, W_UV_O_scales = scaled_quantize(
-                    W_UV_O,
-                    self.reqaunt_weight_group_shape,
-                    quant_dtype=current_platform_fp8_dtype)
-                # For FP8 save the transpose so we can use
-                # `apply_w8a8_block_fp8_linear` directly
-                self.W_UV_O = W_UV_O.T.contiguous()
-                self.W_UV_O_scales = W_UV_O_scales.T.contiguous()
-            else:
-                self.W_UV_O = W_UV_O.to(act_dtype)
-
-            self.tp_size = get_tensor_model_parallel_world_size()
-        else:
-            if is_fp8(weight_dtype):
-                raise NotImplementedError(
-                    "Currently fp8 requires matrix absorption")
-
-            self.W_UV = W_UV
-            self.W_UK = W_UK
-            self.W_Q = W_Q.flatten(start_dim=1)
+        # Convert from (L, N, V) to (N, L, V)
+        self.W_UV = W_UV.transpose(0, 1)
+        # Convert from (L, N, P) to (N, P, L)
+        self.W_UK_T = W_UK.permute(1, 2, 0)
 
     def _compute_prefill_context(
         self,
@@ -886,16 +790,11 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             k = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))),
                           dim=-1)
 
-            # For MLA the v head dim is smaller than qk head dim so we pad
-            # out v with 0s to match the qk head dim
-            v_padded = torch.nn.functional.pad(v,
-                                               [0, q.shape[-1] - v.shape[-1]],
-                                               value=0)
-
-            attn_output, attn_softmax_lse = self.flash_attn_varlen_func(
+            attn_output, attn_softmax_lse = \
+                self._flash_attn_varlen_diff_headdims(
                 q=q,
                 k=k,
-                v=v_padded,
+                v=v,
                 cu_seqlens_q=prefill_metadata.query_start_loc,
                 cu_seqlens_k=prefill_metadata.chunked_context.cu_seq_lens[i],
                 max_seqlen_q=prefill_metadata.max_query_len,
@@ -942,15 +841,10 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
 
         k = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))), dim=-1)
 
-        # For MLA the v head dim is smaller than qk head dim so we pad out
-        # v with 0s to match the qk head dim
-        v_padded = torch.nn.functional.pad(v, [0, q.shape[-1] - v.shape[-1]],
-                                           value=0)
-
-        output = self.flash_attn_varlen_func(
+        output = self._flash_attn_varlen_diff_headdims(
             q=q,
             k=k,
-            v=v_padded,
+            v=v,
             cu_seqlens_q=attn_metadata.prefill.query_start_loc,
             cu_seqlens_k=attn_metadata.prefill.query_start_loc,
             max_seqlen_q=attn_metadata.prefill.max_query_len,
@@ -974,17 +868,16 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                 suffix_lse=suffix_lse,
             )
 
-        # slice by `:v.shape[-1]` in order to remove v headdim padding
-        output = output\
-            .view(-1, self.num_heads, q.shape[-1])[..., :v.shape[-1]]\
-                .reshape(-1, self.num_heads * v.shape[-1])
+        # unpad if necessary
+        if self._pad_v:
+            output = output[..., :v.shape[-1]]
 
-        return self.o_proj(output)[0]
+        return output.flatten(start_dim=-2)
 
     @abstractmethod
     def _forward_decode(
         self,
-        q_nope: torch.Tensor,
+        ql_nope: torch.Tensor,
         q_pe: torch.Tensor,
         kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: M,
@@ -994,31 +887,36 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
     def forward(
         self,
         layer: AttentionLayer,
-        hidden_states_or_q_c: torch.Tensor,  # query in unified attn
+        q: torch.Tensor,
         k_c_normed: torch.Tensor,  # key in unified attn
         k_pe: torch.Tensor,  # value in unified attn
         kv_cache: torch.Tensor,
         attn_metadata: M,
         output: Optional[torch.Tensor] = None,
+        output_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
 
         assert output is not None, "Output tensor must be provided."
 
+        if output_scale is not None:
+            raise NotImplementedError(
+                "fused output quantization is not yet supported"
+                " for MLACommonImpl")
+
         if attn_metadata is None:
-            # Profiling run.
-            return output
+            # The zero fill is required when used with DP + EP
+            # to ensure all ranks within a DP group compute the
+            # same expert outputs.
+            return output.fill_(0)
 
         num_actual_toks = attn_metadata.num_actual_tokens
 
         # Inputs and outputs may be padded for CUDA graphs
         output_padded = output
         output = output[:num_actual_toks, ...]
-        hidden_states_or_q_c = hidden_states_or_q_c[:num_actual_toks, ...]
+        q = q[:num_actual_toks, ...]
         k_c_normed = k_c_normed[:num_actual_toks, ...]
         k_pe = k_pe[:num_actual_toks, ...]
-
-        # Restore head dim (for rotary embedding)
-        k_pe = k_pe.unsqueeze(1)
 
         assert attn_metadata.num_decodes is not None and \
             attn_metadata.num_prefills is not None and \
@@ -1028,29 +926,11 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         has_prefill = attn_metadata.num_prefills > 0
         num_decode_tokens = attn_metadata.num_decode_tokens
 
-        decode_hs_or_q_c = hidden_states_or_q_c[:num_decode_tokens]
-        decode_k_pe = k_pe[:num_decode_tokens]
+        decode_q = q[:num_decode_tokens]
 
-        prefill_hs_or_q_c = hidden_states_or_q_c[num_decode_tokens:]
+        prefill_q = q[num_decode_tokens:]
         prefill_k_pe = k_pe[num_decode_tokens:]
         prefill_k_c_normed = k_c_normed[num_decode_tokens:]
-
-        if has_decode:
-            assert attn_metadata.decode is not None
-            decode_q_nope = self._q_proj_and_k_up_proj(decode_hs_or_q_c)
-            decode_q_pe = torch.matmul(decode_hs_or_q_c, self.W_QR)\
-                .view(-1, self.num_heads, self.qk_rope_head_dim)
-            decode_q_pe[...], decode_k_pe[...] = self.rotary_emb(
-                attn_metadata.decode.input_positions, decode_q_pe, decode_k_pe)
-
-        if has_prefill:
-            assert attn_metadata.prefill is not None
-            prefill_q = self.q_proj(prefill_hs_or_q_c)[0]\
-                .view(-1, self.num_heads, self.qk_head_dim)
-            prefill_q_pe = prefill_q[..., self.qk_nope_head_dim:]
-            prefill_q_pe[...], prefill_k_pe[...] = self.rotary_emb(
-                attn_metadata.prefill.input_positions, prefill_q_pe,
-                prefill_k_pe)
 
         # write the latent and rope to kv cache
         if kv_cache.numel() > 0:
@@ -1069,7 +949,17 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                 attn_metadata)
 
         if has_decode:
+            assert attn_metadata.decode is not None
+            decode_q_nope, decode_q_pe = decode_q.split(
+                [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
+            # Convert from (B, N, P) to (N, B, P)
+            decode_q_nope = decode_q_nope.transpose(0, 1)
+            # Multiply (N, B, P) x (N, P, L) -> (N, B, L)
+            decode_ql_nope = torch.bmm(decode_q_nope, self.W_UK_T)
+            # Convert from (N, B, L) to (B, N, L)
+            decode_ql_nope = decode_ql_nope.transpose(0, 1)
+
             output[:num_decode_tokens] = self._forward_decode(
-                decode_q_nope, decode_q_pe, kv_cache, attn_metadata)
+                decode_ql_nope, decode_q_pe, kv_cache, attn_metadata)
 
         return output_padded

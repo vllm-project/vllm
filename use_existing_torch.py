@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import glob
 
-requires_files = glob.glob('requirements*.txt')
+requires_files = glob.glob('requirements/*.txt')
 requires_files += ["pyproject.toml"]
 for file in requires_files:
     print(f">>> cleaning {file}")
