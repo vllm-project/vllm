@@ -48,7 +48,7 @@ class LoRAStats:
 
 
 @dataclass
-class RequestGenerationStateStats:
+class RequestStateStats:
     """Stats that need to be tracked across delta updates."""
 
     num_generation_tokens: int = 0
@@ -100,7 +100,7 @@ class IterationStats:
 
     def update_from_output(self, output: "EngineCoreOutput",
                            engine_core_timestamp: float, is_prefilling: bool,
-                           prompt_len: int, req_stats: RequestGenerationStateStats,
+                           prompt_len: int, req_stats: RequestStateStats,
                            lora_stats: Optional[LoRAStats]):
         num_new_generation_tokens = len(output.new_token_ids)
 
@@ -129,7 +129,7 @@ class IterationStats:
         req_stats.last_token_ts = engine_core_timestamp
 
     def update_from_events(self, req_id: str, events: list["EngineCoreEvent"],
-                           is_prefilling: bool, req_stats: RequestGenerationStateStats,
+                           is_prefilling: bool, req_stats: RequestStateStats,
                            lora_stats: Optional[LoRAStats]):
         # Avoid circular dependency
         from vllm.v1.engine import EngineCoreEventType
@@ -141,15 +141,15 @@ class IterationStats:
             elif event.type == EngineCoreEventType.SCHEDULED:
                 if req_stats.scheduled_ts == 0.0:  # ignore preemptions
                     req_stats.scheduled_ts = event.timestamp
-                LoRARequestGenerationStates.scheduled_request(lora_stats, req_id)
+                LoRARequestStates.scheduled_request(lora_stats, req_id)
             elif event.type == EngineCoreEventType.PREEMPTED:
                 self.num_preempted_reqs += 1
-                LoRARequestGenerationStates.preempted_request(lora_stats, req_id)
+                LoRARequestStates.preempted_request(lora_stats, req_id)
 
     def update_from_finished_request(self, finish_reason: "FinishReason",
                                      num_prompt_tokens: int,
                                      max_tokens_param: Optional[int],
-                                     req_stats: RequestGenerationStateStats):
+                                     req_stats: RequestStateStats):
         e2e_latency = self._time_since(req_stats.arrival_time)
 
         # Queued interval is from first QUEUED event to first SCHEDULED
@@ -180,7 +180,7 @@ class IterationStats:
         self.finished_requests.append(finished_req)
 
 
-class LoRARequestGenerationStates:
+class LoRARequestStates:
     """Per-LoRA request state stats."""
 
     def __init__(self):

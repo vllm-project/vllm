@@ -14,8 +14,8 @@ from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
 from vllm.v1.engine.detokenizer import IncrementalDetokenizer
 from vllm.v1.engine.logprobs import LogprobsProcessor
 from vllm.v1.engine.parallel_sampling import ParentRequest
-from vllm.v1.metrics.stats import (IterationStats, LoRARequestGenerationStates,
-                                   RequestGenerationStateStats)
+from vllm.v1.metrics.stats import (IterationStats, LoRARequestStates,
+                                   RequestStateStats)
 
 
 class RequestOutputCollector:
@@ -102,7 +102,7 @@ class RequestGenerationState:
         self.is_prefilling = True
         self.queue = queue
 
-        self.stats = RequestGenerationStateStats(
+        self.stats = RequestStateStats(
             arrival_time=arrival_time) if log_stats else None
 
     @classmethod
@@ -241,7 +241,7 @@ class OutputProcessor:
         self.tokenizer = tokenizer
         self.request_states: dict[str, RequestGenerationState] = {}
         self.parent_requests: dict[str, ParentRequest] = {}
-        self.lora_states = LoRARequestGenerationStates()
+        self.lora_states = LoRARequestStates()
 
     def get_num_unfinished_requests(self):
         return len(self.request_states)
