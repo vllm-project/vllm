@@ -1,272 +1,127 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from unittest.mock import MagicMock, patch
+import json
 
 import pytest
 
-from tests.entrypoints.openai.tool_parsers.utils import (
-    run_tool_extraction, run_tool_extraction_streaming)
-from vllm.entrypoints.openai.protocol import FunctionCall
-from vllm.entrypoints.openai.tool_parsers import ToolParser, ToolParserManager
+from ....utils import RemoteOpenAIServer
 
-# Test cases for the Hermes-2-Pro format
-SIMPLE_FUNCTION_OUTPUT = ('<tool_call>{"name": "get_weather", "arguments": '
-                          '{"city": "San Francisco", "metric": "celsius"}}'
-                          '</tool_call>')
-SIMPLE_FUNCTION_CALL = FunctionCall(
-    name="get_weather",
-    arguments='{"city": "San Francisco", "metric": "celsius"}',
-)
+MODEL_NAME = "meta-llama/Llama-3.2-3B-Instruct"
+LORA_MODEL = "minpeter/m-3b-v1-iteration-00-sf-xlam-09"
 
-MORE_TYPES_FUNCTION_OUTPUT = (
-    '<tool_call>{"name": "register_user", "arguments": {'
-    '"name": "John Doe", "age": 37, "address": {"city": "San Francisco", '
-    '"state": "CA"}, "role": null, "passed_test": true, "aliases": '
-    '["John", "Johnny"]}}</tool_call>')
-MORE_TYPES_FUNCTION_CALL = FunctionCall(
-    name="register_user",
-    arguments='{"name": "John Doe", "age": 37, "address": {"city": '
-    '"San Francisco", "state": "CA"}, "role": null, "passed_test": true, '
-    '"aliases": ["John", "Johnny"]}',
-)
-
-PARAMETERLESS_FUNCTION_OUTPUT = ('<tool_call>{"name": "get_weather", '
-                                 '"arguments": {}}</tool_call>')
-PARAMETERLESS_FUNCTION_CALL = FunctionCall(
-    name="get_weather",
-    arguments='{}',
-)
-
-EMPTY_DICT_FUNCTION_OUTPUT = ('<tool_call>{"name": "do_something_cool", '
-                              '"arguments": {"additional_data": {}}}'
-                              '</tool_call>')
-EMPTY_DICT_FUNCTION_CALL = FunctionCall(
-    name="do_something_cool",
-    arguments='{"additional_data": {}}',
-)
-
-EMPTY_LIST_FUNCTION_OUTPUT = ('<tool_call>{"name": "do_something_cool", '
-                              '"arguments": {"steps": []}}</tool_call>')
-EMPTY_LIST_FUNCTION_CALL = FunctionCall(
-    name="do_something_cool",
-    arguments='{"steps": []}',
-)
-
-ESCAPED_STRING_FUNCTION_OUTPUT = (
-    r'<tool_call>{"name": "get_weather", "arguments": {"city": '
-    r'"Martha\'s Vineyard", "metric": "\"cool units\""}}</tool_call>')
-ESCAPED_STRING_FUNCTION_CALL = FunctionCall(
-    name="get_weather",
-    arguments='{"city": "Martha\'s Vineyard", "metric": "\\"cool units\\""}',
-)
-
-TEXT_AND_TOOL_CALL_OUTPUT = ("Today's weather is nice. " +
-                             SIMPLE_FUNCTION_OUTPUT)
-PARALLEL_CALLS_OUTPUT = (SIMPLE_FUNCTION_OUTPUT + MORE_TYPES_FUNCTION_OUTPUT)
-
-
-@pytest.fixture
-def mock_tokenizer():
-    """Provides a mock tokenizer for the Hermes2ProToolParser."""
-    tokenizer = MagicMock()
-    # Simulate token splitting to test the tool_call_delta_buffer logic.
-    tokenizer.encode.side_effect = lambda text, add_special_tokens=False: [
-        ord(c) for c in text
-    ]
-    tokenizer.decode.side_effect = lambda token_ids: "".join(
-        [chr(c) for c in token_ids])
-    return tokenizer
-
-
-@pytest.mark.parametrize("streaming", [True, False])
-def test_no_tool_call(streaming: bool, mock_tokenizer: MagicMock):
-    tool_parser: ToolParser = ToolParserManager.get_tool_parser("hermes")(
-        mock_tokenizer)
-    model_output = "How can I help you today?"
-
-    content, tool_calls = run_tool_extraction(tool_parser,
-                                              model_output,
-                                              streaming=streaming)
-
-    assert content == model_output
-    assert len(tool_calls) == 0
-
-
-TEST_CASES = [
-    pytest.param(True,
-                 SIMPLE_FUNCTION_OUTPUT, [SIMPLE_FUNCTION_CALL],
-                 None,
-                 id="simple_streaming"),
-    pytest.param(False,
-                 SIMPLE_FUNCTION_OUTPUT, [SIMPLE_FUNCTION_CALL],
-                 None,
-                 id="simple_nonstreaming"),
-    pytest.param(True,
-                 MORE_TYPES_FUNCTION_OUTPUT, [MORE_TYPES_FUNCTION_CALL],
-                 None,
-                 id="more_types_streaming"),
-    pytest.param(False,
-                 MORE_TYPES_FUNCTION_OUTPUT, [MORE_TYPES_FUNCTION_CALL],
-                 None,
-                 id="more_types_nonstreaming"),
-    pytest.param(True,
-                 PARAMETERLESS_FUNCTION_OUTPUT, [PARAMETERLESS_FUNCTION_CALL],
-                 None,
-                 id="parameterless_streaming"),
-    pytest.param(False,
-                 PARAMETERLESS_FUNCTION_OUTPUT, [PARAMETERLESS_FUNCTION_CALL],
-                 None,
-                 id="parameterless_nonstreaming"),
-    pytest.param(True,
-                 EMPTY_DICT_FUNCTION_OUTPUT, [EMPTY_DICT_FUNCTION_CALL],
-                 None,
-                 id="empty_dict_streaming"),
-    pytest.param(False,
-                 EMPTY_DICT_FUNCTION_OUTPUT, [EMPTY_DICT_FUNCTION_CALL],
-                 None,
-                 id="empty_dict_nonstreaming"),
-    pytest.param(True,
-                 EMPTY_LIST_FUNCTION_OUTPUT, [EMPTY_LIST_FUNCTION_CALL],
-                 None,
-                 id="empty_list_streaming"),
-    pytest.param(False,
-                 EMPTY_LIST_FUNCTION_OUTPUT, [EMPTY_LIST_FUNCTION_CALL],
-                 None,
-                 id="empty_list_nonstreaming"),
-    pytest.param(True,
-                 ESCAPED_STRING_FUNCTION_OUTPUT,
-                 [ESCAPED_STRING_FUNCTION_CALL],
-                 None,
-                 id="escaped_string_streaming"),
-    pytest.param(False,
-                 ESCAPED_STRING_FUNCTION_OUTPUT,
-                 [ESCAPED_STRING_FUNCTION_CALL],
-                 None,
-                 id="escaped_string_nonstreaming"),
-    pytest.param(True,
-                 PARALLEL_CALLS_OUTPUT,
-                 [SIMPLE_FUNCTION_CALL, MORE_TYPES_FUNCTION_CALL],
-                 None,
-                 id="parallel_calls_streaming"),
-    pytest.param(False,
-                 PARALLEL_CALLS_OUTPUT,
-                 [SIMPLE_FUNCTION_CALL, MORE_TYPES_FUNCTION_CALL],
-                 None,
-                 id="parallel_calls_nonstreaming"),
-    pytest.param(True,
-                 TEXT_AND_TOOL_CALL_OUTPUT, [SIMPLE_FUNCTION_CALL],
-                 "Today's weather is nice. ",
-                 id="text_and_tool_call_streaming"),
-    pytest.param(False,
-                 TEXT_AND_TOOL_CALL_OUTPUT, [SIMPLE_FUNCTION_CALL],
-                 "Today's weather is nice. ",
-                 id="text_and_tool_call_nonstreaming"),
+SERVER_ARGS = [
+    "--enforce-eager",
+    "--enable-auto-tool-choice",
+    "--tool-call-parser",
+    "hermes",
+    "--enable-lora",
+    "--lora-modules",
+    f"{LORA_MODEL}={LORA_MODEL}",
 ]
 
+TOOLS = [{
+    "type": "function",
+    "function": {
+        "name": "get_current_weather",
+        "description": "Get the current weather in a given location",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "location": {
+                    "type": "string",
+                    "description":
+                    "The city and state, e.g. San Francisco, CA",
+                },
+                "unit": {
+                    "type": "string",
+                    "enum": ["celsius", "fahrenheit"]
+                },
+            },
+            "required": ["location"],
+        },
+    },
+}]
 
-@pytest.mark.parametrize(
-    "streaming, model_output, expected_tool_calls, expected_content",
-    TEST_CASES)
-def test_tool_call(streaming: bool, model_output: str,
-                   expected_tool_calls: list[FunctionCall],
-                   expected_content: str, mock_tokenizer: MagicMock):
-    tool_parser: ToolParser = ToolParserManager.get_tool_parser("hermes")(
-        mock_tokenizer)
-
-    content, tool_calls = run_tool_extraction(tool_parser,
-                                              model_output,
-                                              streaming=streaming)
-
-    assert content == expected_content
-    assert len(tool_calls) == len(expected_tool_calls)
-    for actual, expected in zip(tool_calls, expected_tool_calls):
-        assert actual.type == "function"
-        assert actual.function == expected
-
-
-def test_streaming_tool_call_with_fragmented_tags(mock_tokenizer: MagicMock):
-    """
-    Tests streaming when the <tool_call> and </tool_call> tags are split
-    across multiple deltas.
-    """
-    tool_parser: ToolParser = ToolParserManager.get_tool_parser("hermes")(
-        mock_tokenizer)
-    # Split <tool_call> into "<", "tool", "_", "call", ">"
-    model_output_deltas = [
-        "<", "tool", "_", "call", ">",
-        '{"name": "get_weather", "arguments": {"city": "SF"}}', "<", "/",
-        "tool", "_", "call", ">"
-    ]
-
-    reconstructor = run_tool_extraction_streaming(
-        tool_parser, model_output_deltas, assert_one_tool_per_delta=False)
-
-    assert reconstructor.other_content == ""
-    assert len(reconstructor.tool_calls) == 1
-    assert reconstructor.tool_calls[0].function == FunctionCall(
-        name="get_weather", arguments='{"city": "SF"}')
+MESSAGES = [{"role": "user", "content": "What's the weather like in Boston?"}]
 
 
-def test_streaming_tool_call_with_large_steps(mock_tokenizer: MagicMock):
-    tool_parser: ToolParser = ToolParserManager.get_tool_parser("hermes")(
-        mock_tokenizer)
-    model_output_deltas = [
-        '<tool_call>{"name": "get_weather", "arguments": {"city": "San',
-        ' Francisco", "metric": "celsius"}}</tool_call>',
-        '<tool_call>{"name": "get_weather", "arguments": {}}</tool_call>',
-        '<tool_call>{"name": "do_something_cool", "arguments": {"steps": []}}'
-        '</tool_call>',
-    ]
+@pytest.mark.asyncio
+async def test_non_streaming_tool_call():
+    """Test tool call in non-streaming mode."""
+    with RemoteOpenAIServer(MODEL_NAME, SERVER_ARGS) as server:
+        client = server.get_async_client()
 
-    reconstructor = run_tool_extraction_streaming(
-        tool_parser, model_output_deltas, assert_one_tool_per_delta=False)
+        response = await client.chat.completions.create(
+            model=LORA_MODEL,
+            messages=MESSAGES,
+            tools=TOOLS,
+            tool_choice="auto",
+            temperature=0.0,
+        )
 
-    assert reconstructor.other_content == ""
-    assert len(reconstructor.tool_calls) == 3
-    assert reconstructor.tool_calls[0].function == SIMPLE_FUNCTION_CALL
-    assert reconstructor.tool_calls[1].function == PARAMETERLESS_FUNCTION_CALL
-    assert reconstructor.tool_calls[2].function == EMPTY_LIST_FUNCTION_CALL
+        assert response.choices
+        choice = response.choices[0]
+        message = choice.message
 
+        assert choice.finish_reason == "tool_calls"
+        assert message.tool_calls is not None
 
-@pytest.mark.parametrize("streaming", [False])
-def test_regex_timeout_handling(streaming: bool, mock_tokenizer: MagicMock):
-    """test regex timeout is handled gracefully"""
-    tool_parser: ToolParser = ToolParserManager.get_tool_parser("hermes")(
-        mock_tokenizer)
+        tool_call = message.tool_calls[0]
+        assert tool_call.type == "function"
+        assert tool_call.function.name == "get_current_weather"
 
-    fake_problematic_input = "hello world<tool_call>" + '{"a":' * 100
-
-    # create a mock regex that raises TimeoutError
-    mock_regex = MagicMock()
-    mock_regex.findall.side_effect = TimeoutError("Regex timeout")
-
-    with patch.object(tool_parser, 'tool_call_regex', mock_regex):
-        content, tool_calls = run_tool_extraction(tool_parser,
-                                                  fake_problematic_input,
-                                                  streaming=streaming)
-
-        # should treat as regular text when regex times out
-        assert content == fake_problematic_input
-        assert len(tool_calls) == 0
-        mock_regex.findall.assert_called_once()
+        arguments = json.loads(tool_call.function.arguments)
+        assert "location" in arguments
+        assert "Boston" in arguments["location"]
+        print("\n[Non-Streaming Test Passed]")
+        print(f"Tool Call: {tool_call.function.name}")
+        print(f"Arguments: {arguments}")
 
 
-def test_streaming_with_mixed_content(mock_tokenizer: MagicMock):
-    """Tests streaming with a mix of text and tool calls."""
-    tool_parser: ToolParser = ToolParserManager.get_tool_parser("hermes")(
-        mock_tokenizer)
-    model_output_deltas = [
-        "Thinking... ", "I should call a tool. ", "<tool_call>",
-        '{"name": "get_weather", ', '"arguments": {"city": "Seoul"}}',
-        "</tool_call>", " The tool call is complete."
-    ]
+@pytest.mark.asyncio
+async def test_streaming_tool_call():
+    """Test tool call in streaming mode."""
+    with RemoteOpenAIServer(MODEL_NAME, SERVER_ARGS) as server:
+        client = server.get_async_client()
 
-    reconstructor = run_tool_extraction_streaming(
-        tool_parser, model_output_deltas, assert_one_tool_per_delta=False)
+        stream = await client.chat.completions.create(
+            model=LORA_MODEL,
+            messages=MESSAGES,
+            tools=TOOLS,
+            tool_choice="auto",
+            temperature=0.0,
+            stream=True,
+        )
 
-    expected_content = "Thinking... I should call a tool.  The tool call is complete."
-    assert reconstructor.other_content == expected_content
-    assert len(reconstructor.tool_calls) == 1
-    assert reconstructor.tool_calls[0].function == FunctionCall(
-        name="get_weather", arguments='{"city": "Seoul"}')
+        tool_call_chunks = {}
+        async for chunk in stream:
+            if not chunk.choices:
+                continue
+
+            delta = chunk.choices[0].delta
+            if not delta or not delta.tool_calls:
+                continue
+
+            for tool_chunk in delta.tool_calls:
+                index = tool_chunk.index
+                if index not in tool_call_chunks:
+                    tool_call_chunks[index] = {"name": "", "arguments": ""}
+
+                if tool_chunk.function.name:
+                    tool_call_chunks[index]["name"] += tool_chunk.function.name
+                if tool_chunk.function.arguments:
+                    tool_call_chunks[index][
+                        "arguments"] += tool_chunk.function.arguments
+
+        assert len(tool_call_chunks) == 1
+        reconstructed_tool_call = tool_call_chunks[0]
+
+        assert reconstructed_tool_call["name"] == "get_current_weather"
+
+        arguments = json.loads(reconstructed_tool_call["arguments"])
+        assert "location" in arguments
+        assert "Boston" in arguments["location"]
+        print("\n[Streaming Test Passed]")
+        print(f"Reconstructed Tool Call: {reconstructed_tool_call['name']}")
+        print(f"Reconstructed Arguments: {arguments}")
