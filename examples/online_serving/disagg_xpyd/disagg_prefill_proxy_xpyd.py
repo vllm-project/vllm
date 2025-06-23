@@ -19,7 +19,7 @@ decode_instances: dict[str, Any] = {}  # http_address: (zmq_address, stamp)
 prefill_cv = threading.Condition()
 decode_cv = threading.Condition()
 
-DEFAULT_PING_SECONDS = 3
+DEFAULT_PING_SECONDS = 5
 
 
 def _listen_for_register(poller, router_socket):
@@ -133,12 +133,14 @@ async def handle_request():
         with prefill_cv:
             prefill_list = list(prefill_instances.items())
             prefill_addr, prefill_zmq_addr = prefill_list[count % len(prefill_list)]
+            prefill_zmq_addr = prefill_zmq_addr[0]
 
         global decode_instances
         global decode_cv
         with decode_cv:
             decode_list = list(decode_instances.items())
             decode_addr, decode_zmq_addr = decode_list[count % len(decode_list)]
+            decode_zmq_addr = decode_zmq_addr[0]
 
         print(
             f"handle_request count: {count}, [HTTP:{prefill_addr}, "
