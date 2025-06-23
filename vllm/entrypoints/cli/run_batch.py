@@ -1,37 +1,42 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from __future__ import annotations
+
 import argparse
 import asyncio
-
-from prometheus_client import start_http_server
+import importlib.metadata
+import typing
 
 from vllm.entrypoints.cli.types import CLISubcommand
-from vllm.entrypoints.logger import logger
-from vllm.entrypoints.openai.run_batch import main as run_batch_main
-from vllm.entrypoints.openai.run_batch import make_arg_parser
 from vllm.entrypoints.utils import (VLLM_SUBCMD_PARSER_EPILOG,
                                     show_filtered_argument_or_group_from_help)
-from vllm.utils import FlexibleArgumentParser
-from vllm.version import __version__ as VLLM_VERSION
+from vllm.logger import init_logger
+
+if typing.TYPE_CHECKING:
+    from vllm.utils import FlexibleArgumentParser
+
+logger = init_logger(__name__)
 
 
 class RunBatchSubcommand(CLISubcommand):
     """The `run-batch` subcommand for vLLM CLI."""
-
-    def __init__(self):
-        self.name = "run-batch"
-        super().__init__()
+    name = "run-batch"
 
     @staticmethod
     def cmd(args: argparse.Namespace) -> None:
-        logger.info("vLLM batch processing API version %s", VLLM_VERSION)
+        from vllm.entrypoints.openai.run_batch import main as run_batch_main
+
+        logger.info("vLLM batch processing API version %s",
+                    importlib.metadata.version("vllm"))
         logger.info("args: %s", args)
 
         # Start the Prometheus metrics server.
         # LLMEngine uses the Prometheus client
         # to publish metrics at the /metrics endpoint.
         if args.enable_metrics:
+            from prometheus_client import start_http_server
+
             logger.info("Prometheus metrics enabled")
             start_http_server(port=args.port, addr=args.url)
         else:
@@ -42,6 +47,8 @@ class RunBatchSubcommand(CLISubcommand):
     def subparser_init(
             self,
             subparsers: argparse._SubParsersAction) -> FlexibleArgumentParser:
+        from vllm.entrypoints.openai.run_batch import make_arg_parser
+
         run_batch_parser = subparsers.add_parser(
             "run-batch",
             help="Run batch prompts and write results to file.",
