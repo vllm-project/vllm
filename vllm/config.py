@@ -1773,7 +1773,12 @@ class ParallelConfig:
     eplb_window_size: int = 1000
     """Window size for expert load recording."""
     eplb_step_interval: int = 3000
-    """Interval for rearranging experts in expert parallelism."""
+    """
+    Interval for rearranging experts in expert parallelism.
+    
+    Note that if this is greater than the EPLB window size, only the metrics
+    of the last `eplb_window_size` steps will be used for rearranging experts.
+    """
 
     max_parallel_loading_workers: Optional[int] = None
     """Maximum number of parallel loading workers when loading model
