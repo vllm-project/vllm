@@ -22,6 +22,7 @@ logger = init_logger(__name__)
 class NeuronFramework(enum.Enum):
     TRANSFORMERS_NEURONX = "transformers-neuronx"
     NEURONX_DISTRIBUTED_INFERENCE = "neuronx-distributed-inference"
+    OPTIMUM_NEURON = "optimum-neuron"
 
 
 class NeuronPlatform(Platform):
@@ -99,6 +100,15 @@ class NeuronPlatform(Platform):
             transformers_neuronx = None
         return transformers_neuronx is not None
 
+    @classmethod
+    @lru_cache
+    def is_optimum_neuron(cls) -> bool:
+        try:
+            import optimum.neuron as optimum_neuron
+        except ImportError:
+            optimum_neuron = None
+        return optimum_neuron is not None
+
     def get_neuron_framework_to_use(self):
         """Return the specified framework if corresponding installations are
         available.
@@ -113,10 +123,12 @@ class NeuronPlatform(Platform):
 
         tnx_installed = self.is_transformers_neuronx()
         nxd_installed = self.is_neuronx_distributed_inference()
+        on_installed = self.is_optimum_neuron()
 
         specified_framework = os.environ.get("VLLM_NEURON_FRAMEWORK")
         tnx_framework = NeuronFramework.TRANSFORMERS_NEURONX.value
         nxd_framework = NeuronFramework.NEURONX_DISTRIBUTED_INFERENCE.value
+        on_framework = NeuronFramework.OPTIMUM_NEURON.value
         if specified_framework == tnx_framework and tnx_installed:
             return self.TRANSFORMERS_NEURONX
 
@@ -126,6 +138,10 @@ class NeuronPlatform(Platform):
 
         if specified_framework is None and tnx_installed:
             return NeuronFramework.TRANSFORMERS_NEURONX
+
+        if ((specified_framework == on_framework and on_installed)
+                or (specified_framework is None and on_installed)):
+            return NeuronFramework.OPTIMUM_NEURON
 
         return None
 
@@ -148,3 +164,13 @@ class NeuronPlatform(Platform):
         """
         return self.get_neuron_framework_to_use(
         ) == NeuronFramework.TRANSFORMERS_NEURONX
+
+    def use_optimum_neuron(self):
+        """
+        Return True if the framework determined in get_neuron_framework_to_use()
+        is NeuronFramework.OPTIMUM_NEURON, False otherwise. This is used
+        to select the Neuron model framework and framework-specific
+        configuration to apply during model compilation.
+        """
+        return self.get_neuron_framework_to_use(
+        ) == NeuronFramework.OPTIMUM_NEURON

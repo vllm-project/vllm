@@ -52,6 +52,9 @@ class NeuronWorker(LocalOrDistributedWorkerBase):
         elif neuron_framework == NeuronFramework.NEURONX_DISTRIBUTED_INFERENCE:
             self.model_runner = self.get_neuronx_distributed_model_runner(
                 vllm_config)
+        elif neuron_framework == NeuronFramework.OPTIMUM_NEURON:
+            self.model_runner = self.get_optimum_neuron_model_runner(
+                vllm_config)
         else:
             raise NotImplementedError(
                 "Specified framework" +
@@ -83,6 +86,17 @@ class NeuronWorker(LocalOrDistributedWorkerBase):
                 vllm_config=vllm_config)
         else:
             return NeuronxDistributedModelRunner(vllm_config=vllm_config)
+
+    def get_optimum_neuron_model_runner(self, vllm_config):
+        assert (self.lora_config
+                is None), ("LoRA is not supported for optimum-neuron "
+                           "framework.")
+        assert (self.speculative_config is None), (
+            "Speculative decoding is not supported for optimum-neuron "
+            "framework.")
+        from vllm.worker.optimum_neuron_model_runner import (
+            OptimumNeuronModelRunner)
+        return OptimumNeuronModelRunner(vllm_config=vllm_config)
 
     def init_device(self) -> None:
         self.init_distributed_environment()
