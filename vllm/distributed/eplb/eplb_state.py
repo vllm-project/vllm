@@ -82,7 +82,12 @@ class EplbState:
     Shape: (window_size, num_moe_layers, num_local_physical_experts)
     """
     expert_load_window_step: int = 0
-    """Current step in the sliding window."""
+    """
+    Current step in the sliding window.
+
+    Different from `expert_rearrangement_step`, each EP rank may have its own
+    `expert_load_window_step`.
+    """
     expert_load_window_size: int = 0
     """
     Size of the expert load sliding window.
@@ -93,6 +98,11 @@ class EplbState:
     """
     Steps after last rearrangement.
     Will trigger a rearrangement if it exceeds the threshold.
+
+    NOTE: Keep in mind that all EP ranks need to have the same
+    `expert_rearrangement_step` value to ensure synchronization.
+    Otherwise, the rearrangement will hang at collective
+    communication calls.
     """
     expert_rearrangement_step_interval: int = 0
     """
