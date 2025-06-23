@@ -23,7 +23,7 @@ The FP8 types typically supported in hardware have two distinct representations,
 
 To produce performant FP8 quantized models with vLLM, you'll need to install the [llm-compressor](https://github.com/vllm-project/llm-compressor/) library:
 
-```console
+```bash
 pip install llmcompressor
 ```
 
@@ -81,7 +81,7 @@ Since simple RTN does not require data for weight quantization and the activatio
 
 Install `vllm` and `lm-evaluation-harness` for evaluation:
 
-```console
+```bash
 pip install vllm lm-eval==0.4.4
 ```
 
@@ -99,9 +99,9 @@ Evaluate accuracy with `lm_eval` (for example on 250 samples of `gsm8k`):
 !!! note
     Quantized models can be sensitive to the presence of the `bos` token. `lm_eval` does not add a `bos` token by default, so make sure to include the `add_bos_token=True` argument when running your evaluations.
 
-```console
-$ MODEL=$PWD/Meta-Llama-3-8B-Instruct-FP8-Dynamic
-$ lm_eval \
+```bash
+MODEL=$PWD/Meta-Llama-3-8B-Instruct-FP8-Dynamic
+lm_eval \
   --model vllm \
   --model_args pretrained=$MODEL,add_bos_token=True \
   --tasks gsm8k  --num_fewshot 5 --batch_size auto --limit 250

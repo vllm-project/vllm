@@ -78,13 +78,13 @@ Currently, there are no pre-built CPU wheels.
 
 ??? Commands
 
-    ```console
-    $ docker build -f docker/Dockerfile.cpu \
+    ```bash
+    docker build -f docker/Dockerfile.cpu \
             --tag vllm-cpu-env \
             --target vllm-openai .
 
-    # Launching OpenAI server 
-    $ docker run --rm \
+    # Launching OpenAI server
+    docker run --rm \
                 --privileged=true \
                 --shm-size=4g \
                 -p 8000:8000 \
@@ -123,7 +123,7 @@ vLLM CPU backend supports the following vLLM features:
 
 - We highly recommend to use TCMalloc for high performance memory allocation and better cache locality. For example, on Ubuntu 22.4, you can run:
 
-```console
+```bash
 sudo apt-get install libtcmalloc-minimal4 # install TCMalloc library
 find / -name *libtcmalloc* # find the dynamic link library path
 export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4:$LD_PRELOAD # prepend the library to LD_PRELOAD
@@ -132,7 +132,7 @@ python examples/offline_inference/basic/basic.py # run vLLM
 
 - When using the online serving, it is recommended to reserve 1-2 CPU cores for the serving framework to avoid CPU oversubscription. For example, on a platform with 32 physical CPU cores, reserving CPU 30 and 31 for the framework and using CPU 0-29 for OpenMP:
 
-```console
+```bash
 export VLLM_CPU_KVCACHE_SPACE=40
 export VLLM_CPU_OMP_THREADS_BIND=0-29
 vllm serve facebook/opt-125m
@@ -140,7 +140,7 @@ vllm serve facebook/opt-125m
 
  or using default auto thread binding:
 
-```console
+```bash
 export VLLM_CPU_KVCACHE_SPACE=40
 export VLLM_CPU_NUM_OF_RESERVED_CPU=2
 vllm serve facebook/opt-125m
@@ -189,7 +189,7 @@ vllm serve facebook/opt-125m
 
   - Tensor Parallel is supported for serving and offline inferencing. In general each NUMA node is treated as one GPU card. Below is the example script to enable Tensor Parallel = 2 for serving:
 
-    ```console
+    ```bash
     VLLM_CPU_KVCACHE_SPACE=40 VLLM_CPU_OMP_THREADS_BIND="0-31|32-63" \
         vllm serve meta-llama/Llama-2-7b-chat-hf \
         -tp=2 \
@@ -198,7 +198,7 @@ vllm serve facebook/opt-125m
 
     or using default auto thread binding:
 
-    ```console
+    ```bash
     VLLM_CPU_KVCACHE_SPACE=40 \
         vllm serve meta-llama/Llama-2-7b-chat-hf \
         -tp=2 \

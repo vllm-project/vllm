@@ -7,7 +7,7 @@ vLLM is also available via [LlamaIndex](https://github.com/run-llama/llama_index
 
 To install LlamaIndex, run
 
-```console
+```bash
 pip install llama-index-llms-vllm -q
 ```
 

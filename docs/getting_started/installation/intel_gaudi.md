@@ -24,7 +24,7 @@ please follow the methods outlined in the
 
 To verify that the Intel Gaudi software was correctly installed, run:
 
-```console
+```bash
 hl-smi # verify that hl-smi is in your PATH and each Gaudi accelerator is visible
 apt list --installed | grep habana # verify that habanalabs-firmware-tools, habanalabs-graph, habanalabs-rdma-core, habanalabs-thunk and habanalabs-container-runtime are installed
 pip list | grep habana # verify that habana-torch-plugin, habana-torch-dataloader, habana-pyhlml and habana-media-loader are installed
@@ -42,7 +42,7 @@ for more details.
 
 Use the following commands to run a Docker image:
 
-```console
+```bash
 docker pull vault.habana.ai/gaudi-docker/1.18.0/ubuntu22.04/habanalabs/pytorch-installer-2.4.0:latest
 docker run \
   -it \
@@ -65,7 +65,7 @@ Currently, there are no pre-built Intel Gaudi wheels.
 
 To build and install vLLM from source, run:
 
-```console
+```bash
 git clone https://github.com/vllm-project/vllm.git
 cd vllm
 pip install -r requirements/hpu.txt
@@ -74,7 +74,7 @@ python setup.py develop
 
 Currently, the latest features and performance optimizations are developed in Gaudi's [vLLM-fork](https://github.com/HabanaAI/vllm-fork) and we periodically upstream them to vLLM main repo. To install latest [HabanaAI/vLLM-fork](https://github.com/HabanaAI/vllm-fork), run the following:
 
-```console
+```bash
 git clone https://github.com/HabanaAI/vllm-fork.git
 cd vllm-fork
 git checkout habana_main
@@ -90,7 +90,7 @@ Currently, there are no pre-built Intel Gaudi images.
 
 ### Build image from source
 
-```console
+```bash
 docker build -f docker/Dockerfile.hpu -t vllm-hpu-env  .
 docker run \
   -it \

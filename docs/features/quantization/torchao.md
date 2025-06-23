@@ -4,7 +4,7 @@ TorchAO is an architecture optimization library for PyTorch, it provides high pe
 
 We recommend installing the latest torchao nightly with
 
-```console
+```bash
 # Install the latest TorchAO nightly build
 # Choose the CUDA version that matches your system (cu126, cu128, etc.)
 pip install \

@@ -10,7 +10,7 @@ title: Using Docker
 vLLM offers an official Docker image for deployment.
 The image can be used to run OpenAI compatible server and is available on Docker Hub as [vllm/vllm-openai](https://hub.docker.com/r/vllm/vllm-openai/tags).
 
-```console
+```bash
 docker run --runtime nvidia --gpus all \
     -v ~/.cache/huggingface:/root/.cache/huggingface \
     --env "HUGGING_FACE_HUB_TOKEN=<secret>" \
@@ -22,7 +22,7 @@ docker run --runtime nvidia --gpus all \
 
 This image can also be used with other container engines such as [Podman](https://podman.io/).
 
-```console
+```bash
 podman run --gpus all \
   -v ~/.cache/huggingface:/root/.cache/huggingface \
   --env "HUGGING_FACE_HUB_TOKEN=$HF_TOKEN" \
@@ -71,7 +71,7 @@ You can add any other [engine-args][engine-args] you need after the image tag (`
 
 You can build and run vLLM from source via the provided <gh-file:docker/Dockerfile>. To build vLLM:
 
-```console
+```bash
 # optionally specifies: --build-arg max_jobs=8 --build-arg nvcc_threads=2
 DOCKER_BUILDKIT=1 docker build . \
     --target vllm-openai \
@@ -99,7 +99,7 @@ of PyTorch Nightly and should be considered **experimental**. Using the flag `--
 
 ??? Command
 
-    ```console
+    ```bash
     # Example of building on Nvidia GH200 server. (Memory usage: ~15GB, Build time: ~1475s / ~25 min, Image size: 6.93GB)
     python3 use_existing_torch.py
     DOCKER_BUILDKIT=1 docker build . \
@@ -118,7 +118,7 @@ of PyTorch Nightly and should be considered **experimental**. Using the flag `--
 
     Run the following command on your host machine to register QEMU user static handlers:
 
-    ```console
+    ```bash
     docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
     ```
 
@@ -128,7 +128,7 @@ of PyTorch Nightly and should be considered **experimental**. Using the flag `--
 
 To run vLLM with the custom-built Docker image:
 
-```console
+```bash
 docker run --runtime nvidia --gpus all \
     -v ~/.cache/huggingface:/root/.cache/huggingface \
     -p 8000:8000 \
