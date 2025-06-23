@@ -127,13 +127,13 @@ If GPU/CPU communication cannot be established, you can use the following Python
 
 If you are testing with a single node, adjust `--nproc-per-node` to the number of GPUs you want to use:
 
-```console
+```bash
 NCCL_DEBUG=TRACE torchrun --nproc-per-node=<number-of-GPUs> test.py
 ```
 
 If you are testing with multi-nodes, adjust `--nproc-per-node` and `--nnodes` according to your setup and set `MASTER_ADDR` to the correct IP address of the master node, reachable from all nodes. Then, run:
 
-```console
+```bash
 NCCL_DEBUG=TRACE torchrun --nnodes 2 \
     --nproc-per-node=2 \
     --rdzv_backend=c10d \

@@ -18,7 +18,7 @@ And LiteLLM supports all models on VLLM.
 
 - Setup vLLM and litellm environment
 
-```console
+```bash
 pip install vllm litellm
 ```
 
@@ -28,7 +28,7 @@ pip install vllm litellm
 
 - Start the vLLM server with the supported chat completion model, e.g.
 
-```console
+```bash
 vllm serve qwen/Qwen1.5-0.5B-Chat
 ```
 
@@ -56,7 +56,7 @@ vllm serve qwen/Qwen1.5-0.5B-Chat
 
 - Start the vLLM server with the supported embedding model, e.g.
 
-```console
+```bash
 vllm serve BAAI/bge-base-en-v1.5
 ```
 

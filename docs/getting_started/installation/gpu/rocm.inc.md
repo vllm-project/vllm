@@ -31,17 +31,17 @@ Currently, there are no pre-built ROCm wheels.
 
     Alternatively, you can install PyTorch using PyTorch wheels. You can check PyTorch installation guide in PyTorch [Getting Started](https://pytorch.org/get-started/locally/). Example:
 
-    ```console
+    ```bash
     # Install PyTorch
-    $ pip uninstall torch -y
-    $ pip install --no-cache-dir --pre torch --index-url https://download.pytorch.org/whl/nightly/rocm6.3
+    pip uninstall torch -y
+    pip install --no-cache-dir --pre torch --index-url https://download.pytorch.org/whl/nightly/rocm6.3
     ```
 
 1. Install [Triton flash attention for ROCm](https://github.com/ROCm/triton)
 
     Install ROCm's Triton flash attention (the default triton-mlir branch) following the instructions from [ROCm/triton](https://github.com/ROCm/triton/blob/triton-mlir/README.md)
 
-    ```console
+    ```bash
     python3 -m pip install ninja cmake wheel pybind11
     pip uninstall -y triton
     git clone https://github.com/OpenAI/triton.git
@@ -62,7 +62,7 @@ Currently, there are no pre-built ROCm wheels.
 
     For example, for ROCm 6.3, suppose your gfx arch is `gfx90a`. To get your gfx architecture, run `rocminfo |grep gfx`.
 
-    ```console
+    ```bash
     git clone https://github.com/ROCm/flash-attention.git
     cd flash-attention
     git checkout b7d29fb
@@ -76,7 +76,7 @@ Currently, there are no pre-built ROCm wheels.
 
 3. If you choose to build AITER yourself to use a certain branch or commit, you can build AITER using the following steps:
 
-    ```console
+    ```bash
     python3 -m pip uninstall -y aiter
     git clone --recursive https://github.com/ROCm/aiter.git
     cd aiter
@@ -148,7 +148,7 @@ If you choose to build this rocm_base image yourself, the steps are as follows.
 
 It is important that the user kicks off the docker build using buildkit. Either the user put DOCKER_BUILDKIT=1 as environment variable when calling docker build command, or the user needs to setup buildkit in the docker daemon configuration /etc/docker/daemon.json as follows and restart the daemon:
 
-```console
+```json
 {
     "features": {
         "buildkit": true
@@ -158,7 +158,7 @@ It is important that the user kicks off the docker build using buildkit. Either 
 
 To build vllm on ROCm 6.3 for MI200 and MI300 series, you can use the default:
 
-```console
+```bash
 DOCKER_BUILDKIT=1 docker build \
     -f docker/Dockerfile.rocm_base \
     -t rocm/vllm-dev:base .
@@ -169,7 +169,7 @@ DOCKER_BUILDKIT=1 docker build \
 First, build a docker image from <gh-file:docker/Dockerfile.rocm> and launch a docker container from the image.
 It is important that the user kicks off the docker build using buildkit. Either the user put `DOCKER_BUILDKIT=1` as environment variable when calling docker build command, or the user needs to setup buildkit in the docker daemon configuration /etc/docker/daemon.json as follows and restart the daemon:
 
-```console
+```bash
 {
     "features": {
         "buildkit": true
@@ -187,13 +187,13 @@ Their values can be passed in when running `docker build` with `--build-arg` opt
 
 To build vllm on ROCm 6.3 for MI200 and MI300 series, you can use the default:
 
-```console
+```bash
 DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile.rocm -t vllm-rocm .
 ```
 
 To build vllm on ROCm 6.3 for Radeon RX7900 series (gfx1100), you should pick the alternative base image:
 
-```console
+```bash
 DOCKER_BUILDKIT=1 docker build \
     --build-arg BASE_IMAGE="rocm/vllm-dev:navi_base" \
     -f docker/Dockerfile.rocm \
@@ -205,7 +205,7 @@ To run the above docker image `vllm-rocm`, use the below command:
 
 ??? Command
 
-    ```console
+    ```bash
     docker run -it \
     --network=host \
     --group-add=video \

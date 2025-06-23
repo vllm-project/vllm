@@ -15,13 +15,13 @@ Please visit the HF collection of [quantized INT8 checkpoints of popular LLMs re
 
 To use INT8 quantization with vLLM, you'll need to install the [llm-compressor](https://github.com/vllm-project/llm-compressor/) library:
 
-```console
+```bash
 pip install llmcompressor
 ```
 
 Additionally, install `vllm` and `lm-evaluation-harness` for evaluation:
 
-```console
+```bash
 pip install vllm lm-eval==0.4.4
 ```
 
@@ -122,8 +122,8 @@ model = LLM("./Meta-Llama-3-8B-Instruct-W8A8-Dynamic-Per-Token")
 
 To evaluate accuracy, you can use `lm_eval`:
 
-```console
-$ lm_eval --model vllm \
+```bash
+lm_eval --model vllm \
   --model_args pretrained="./Meta-Llama-3-8B-Instruct-W8A8-Dynamic-Per-Token",add_bos_token=true \
   --tasks gsm8k \
   --num_fewshot 5 \

@@ -15,7 +15,7 @@ It allows you to deploy a large language model (LLM) server with vLLM as the bac
 
 - Start the vLLM server with the supported chat completion model, e.g.
 
-```console
+```bash
 vllm serve Qwen/Qwen1.5-32B-Chat-AWQ --max-model-len 4096
 ```
 

@@ -19,7 +19,7 @@ If you are using NVIDIA GPUs, you can install vLLM using [pip](https://pypi.org/
 
 It's recommended to use [uv](https://docs.astral.sh/uv/), a very fast Python environment manager, to create and manage Python environments. Please follow the [documentation](https://docs.astral.sh/uv/#getting-started) to install `uv`. After installing `uv`, you can create a new Python environment and install vLLM using the following commands:
 
-```console
+```bash
 uv venv --python 3.12 --seed
 source .venv/bin/activate
 uv pip install vllm --torch-backend=auto
@@ -29,13 +29,13 @@ uv pip install vllm --torch-backend=auto
 
 Another delightful way is to use `uv run` with `--with [dependency]` option, which allows you to run commands such as `vllm serve` without creating any permanent environment:
 
-```console
+```bash
 uv run --with vllm vllm --help
 ```
 
 You can also use [conda](https://docs.conda.io/projects/conda/en/latest/user-guide/getting-started.html) to create and manage Python environments. You can install `uv` to the conda environment through `pip` if you want to manage it within the environment.
 
-```console
+```bash
 conda create -n myenv python=3.12 -y
 conda activate myenv
 pip install --upgrade uv
@@ -110,7 +110,7 @@ By default, it starts the server at `http://localhost:8000`. You can specify the
 
 Run the following command to start the vLLM server with the [Qwen2.5-1.5B-Instruct](https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct) model:
 
-```console
+```bash
 vllm serve Qwen/Qwen2.5-1.5B-Instruct
 ```
 
@@ -124,7 +124,7 @@ vllm serve Qwen/Qwen2.5-1.5B-Instruct
 
 This server can be queried in the same format as OpenAI API. For example, to list the models:
 
-```console
+```bash
 curl http://localhost:8000/v1/models
 ```
 
@@ -134,7 +134,7 @@ You can pass in the argument `--api-key` or environment variable `VLLM_API_KEY` 
 
 Once your server is started, you can query the model with input prompts:
 
-```console
+```bash
 curl http://localhost:8000/v1/completions \
     -H "Content-Type: application/json" \
     -d '{
@@ -172,7 +172,7 @@ vLLM is designed to also support the OpenAI Chat Completions API. The chat inter
 
 You can use the [create chat completion](https://platform.openai.com/docs/api-reference/chat/completions/create) endpoint to interact with the model:
 
-```console
+```bash
 curl http://localhost:8000/v1/chat/completions \
     -H "Content-Type: application/json" \
     -d '{

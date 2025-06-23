@@ -12,7 +12,7 @@ vLLM now supports [BitBLAS](https://github.com/microsoft/BitBLAS) for more effic
 
 Below are the steps to utilize BitBLAS with vLLM.
 
-```console
+```bash
 pip install bitblas>=0.1.0
 ```
 

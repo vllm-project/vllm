@@ -9,7 +9,7 @@ The main benefits are lower latency and memory usage.
 
 You can quantize your own models by installing AutoAWQ or picking one of the [6500+ models on Huggingface](https://huggingface.co/models?search=awq).
 
-```console
+```bash
 pip install autoawq
 ```
 
@@ -43,7 +43,7 @@ After installing AutoAWQ, you are ready to quantize a model. Please refer to the
 
 To run an AWQ model with vLLM, you can use [TheBloke/Llama-2-7b-Chat-AWQ](https://huggingface.co/TheBloke/Llama-2-7b-Chat-AWQ) with the following command:
 
-```console
+```bash
 python examples/offline_inference/llm_engine_example.py \
     --model TheBloke/Llama-2-7b-Chat-AWQ \
     --quantization awq

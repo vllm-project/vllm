@@ -4,7 +4,7 @@ The [NVIDIA TensorRT Model Optimizer](https://github.com/NVIDIA/TensorRT-Model-O
 
 We recommend installing the library with:
 
-```console
+```bash
 pip install nvidia-modelopt
 ```
 

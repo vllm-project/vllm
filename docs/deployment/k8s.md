@@ -115,7 +115,7 @@ Next, start the vLLM server as a Kubernetes Deployment and Service:
 
 We can verify that the vLLM server has started successfully via the logs (this might take a couple of minutes to download the model):
 
-```console
+```bash
 kubectl logs -l app.kubernetes.io/name=vllm
 ...
 INFO:     Started server process [1]
@@ -358,14 +358,14 @@ INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
 
       Apply the deployment and service configurations using `kubectl apply -f <filename>`:
 
-      ```console
+      ```bash
       kubectl apply -f deployment.yaml
       kubectl apply -f service.yaml
       ```
 
       To test the deployment, run the following `curl` command:
 
-      ```console
+      ```bash
       curl http://mistral-7b.default.svc.cluster.local/v1/completions \
         -H "Content-Type: application/json" \
         -d '{

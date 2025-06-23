@@ -6,7 +6,7 @@ OpenAI compatible API server.
 
 You can start the server using Python, or using [Docker][deployment-docker]:
 
-```console
+```bash
 vllm serve unsloth/Llama-3.2-1B-Instruct
 ```
 
