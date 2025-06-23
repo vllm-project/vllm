@@ -577,6 +577,9 @@ class P2pNcclEngine:
         def timeout_watcher():
             nonlocal result_code
             if not abort_triggered.wait(timeout):
+                logger.error(
+                    "🔴ncclCommAbort, %d failed, remote_address:%s, timeout:%d",
+                    op_name, remote_address, timeout)
                 try:
                     self.nccl.ncclCommAbort(comm)
                 except Exception as e:
