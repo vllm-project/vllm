@@ -489,6 +489,12 @@ def supports_cross_encoding(
     return is_pooling_model(model) and _supports_cross_encoding(model)
 
 
+def has_step_pooler(model: Union[type[object], object]) -> bool:
+    """Check if the model uses step pooler."""
+    return is_pooling_model(model) and any(
+        type(module).__name__ == "StepPool" for module in model.modules())
+
+
 class SupportsQuant:
     """The interface required for all models that support quantization."""
 

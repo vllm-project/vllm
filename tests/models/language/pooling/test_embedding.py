@@ -89,7 +89,7 @@ def test_models(
                      task="embed",
                      max_model_len=512,
                      **vllm_extra_kwargs) as vllm_model:
-        vllm_outputs = vllm_model.encode(example_prompts)
+        vllm_outputs = vllm_model.embed(example_prompts)
 
     check_embeddings_close(
         embeddings_0_lst=hf_outputs,
