@@ -121,5 +121,5 @@ body[data-md-color-scheme="slate"] .md-nav__item--section > label.md-nav__link .
   font-size: .8rem;
   border: .05rem solid var(--md-primary-bg-color);
   border-radius: .1rem;
-  content: var(--md-search-extension-shortcut);
+  content: '⌘+k';
 }
