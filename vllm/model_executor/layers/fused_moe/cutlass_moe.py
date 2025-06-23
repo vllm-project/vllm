@@ -42,6 +42,7 @@ def verify_mul(mul_res, w_q, w_scale, a_q, a_scale, block_size, dtype,
 
 
 def run_blocked_cutlass_moe_fp8(
+    output: torch.Tensor,
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
     w2: torch.Tensor,
@@ -291,7 +292,7 @@ def run_blocked_cutlass_moe_fp8(
 
     # print("**********************")
 
-    return c3[c_map].view(M, topk, K)
+    output.copy_(c3[c_map].view(M * topk, K), non_blocking=True)
 
 
 class CutlassExpertsBlockedFp8(mk.FusedMoEPermuteExpertsUnpermute):
@@ -315,15 +316,21 @@ class CutlassExpertsBlockedFp8(mk.FusedMoEPermuteExpertsUnpermute):
         N: int,
         K: int,
         topk: int,
-        num_experts: int,
+        global_num_experts: int,
+        local_num_experts: int,
     ) -> tuple[int, int, torch.dtype]:
-        padded_M = aq.shape[1]
-        workspace1 = self.max_experts_per_worker * padded_M * max(N, K)
-        workspace2 = self.max_experts_per_worker * padded_M * (N // 2)
-        return (workspace1, workspace2, self.out_dtype)
+        workspace1 = (M * topk, max(N * 2, K))
+        workspace2 = (M * topk, N)
+        output = (M * topk, K)
+        return (workspace1, workspace2, output, self.out_dtype)
+
+    # TODO: check if we can add support for chunking
+    def supports_chunking(self) -> bool:
+        return False
 
     def apply(
         self,
+        output: torch.Tensor,
         hidden_states: torch.Tensor,
         w1: torch.Tensor,
         w2: torch.Tensor,
@@ -345,7 +352,7 @@ class CutlassExpertsBlockedFp8(mk.FusedMoEPermuteExpertsUnpermute):
         assert w2_zp is None, "w2_zp is not supported in CUTLASS MoE"
         activation_callable = lambda i, o: self.activation(activation, i, o)
         assert expert_num_tokens is None, "PPLX is not supported in blocked CUTLASS MoE" # noqa: E501
-        return run_blocked_cutlass_moe_fp8(hidden_states, w1, w2, topk_ids,
+        return run_blocked_cutlass_moe_fp8(output, hidden_states, w1, w2, topk_ids,
                                            activation_callable,
                                            global_num_experts, expert_map, w1_scale,
                                            w2_scale, a1q_scale, a2_scale,
@@ -434,6 +441,7 @@ def cutlass_moe_blocked_fp8(
 
 
 def run_cutlass_moe_fp8(
+    output: torch.Tensor,
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
     w2: torch.Tensor,
@@ -451,7 +459,8 @@ def run_cutlass_moe_fp8(
     out_dtype: torch.dtype,
     per_act_token: bool,
     per_out_ch: bool,
-) -> torch.Tensor:
+    use_batched_format: bool,
+):
     a1q = hidden_states
 
     assert w1_scale is not None
@@ -481,23 +490,20 @@ def run_cutlass_moe_fp8(
     if expert_map is not None:
         assert expert_num_tokens is None
 
-    # We have two modes: PPLX and non-PPLX. We differentiate them by checking
-    # if expert_num_tokens is None (expert_num_tokens is a tensor which PPLX
-    # uses to track the number of tokens per expert).
-    # In the non-PPLX mode, the input tokens are not padded: thus, the shape
+    # We have two modes: batched experts and non-batched experts.
+    # In the non-batched mode, the input tokens are not padded: thus, the shape
     # of the input is [total_num_tokens, hidden_size]. The input and output
     # require shuffling by a_map and c_map such that the tokens assigned to
     # each expert are contiguous.
-    # In the PPLX mode, the input tokens are padded per expert to ensure that
-    # the PPLX dispatch and combine functions work correctly: thus, the shape
+    # In the batched mode, the input tokens are padded per expert to ensure that
+    # the batched dispatch and combine functions work correctly: thus, the shape
     # of the input is [num_experts, max_num_tokens_per_expert, hidden_size].
-    # The PPLX input and output require no shuffling by a_map and c_map since
+    # The batched input and output require no shuffling by a_map and c_map since
     # their tokens are already contiguous for each expert as a result of
     # the dispatch function.
-    is_pplx = expert_num_tokens is not None
 
-    M = a1q.shape[0]  # no pplx
-    padded_M = a1q.shape[1]  # pplx
+    M = a1q.shape[0]  # non batched expert M
+    padded_M = a1q.shape[1]  # batched expert M
     _, K, N = w2.shape
     device = a1q.device
 
@@ -515,7 +521,9 @@ def run_cutlass_moe_fp8(
     topk = local_topk_ids.shape[1]
     local_E = w1.shape[0]
 
-    if is_pplx:
+    if use_batched_format:
+        assert expert_num_tokens is not None
+
         expert_offsets = torch.empty((local_E),
                                      dtype=torch.int32,
                                      device=device)
@@ -587,7 +595,7 @@ def run_cutlass_moe_fp8(
                             device=device,
                             dtype=torch.int64)
 
-    if is_pplx:
+    if use_batched_format:
         c1 = _resize_cache(workspace13, (local_E * padded_M, N * 2))
         c2 = _resize_cache(workspace2, (local_E * padded_M, N))
         c3 = _resize_cache(workspace13, (local_E * padded_M, K))
@@ -612,12 +620,15 @@ def run_cutlass_moe_fp8(
                        problem_sizes2, ab_strides2, ab_strides2, c_strides2,
                        per_act_token, per_out_ch)
 
-    if is_pplx:
-        return c3.reshape(local_E, padded_M, K)
+    if use_batched_format:
+        output.copy_(c3.reshape(local_E, padded_M, K), non_blocking=True)
     else:
-        return c3[c_map].view(M, topk, K)
+        # We can't do this inplace because output may point to the same tensor
+        # as c3.
+        output.copy_(c3[c_map].view(M * topk, K), non_blocking=True)
 
 
+# TODO (bnell): split class batched vs. non-batched?
 class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
 
     def __init__(
@@ -626,12 +637,17 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
         out_dtype: torch.dtype,
         per_act_token: bool,
         per_out_ch: bool,
+        use_batched_format: bool = False,
     ):
         super().__init__()
         self.max_experts_per_worker = max_experts_per_worker
         self.out_dtype = out_dtype
         self.per_act_token = per_act_token
         self.per_out_ch = per_out_ch
+        self.use_batched_format = use_batched_format
+
+    def supports_chunking(self) -> bool:
+        return not self.use_batched_format
 
     def workspace_shapes(
         self,
@@ -641,16 +657,26 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
         N: int,
         K: int,
         topk: int,
-        num_experts: int,
-    ) -> tuple[int, int, torch.dtype]:
-        padded_M = aq.shape[1]
-        print("max_experts_per_worker:", self.max_experts_per_worker)
-        workspace1 = self.max_experts_per_worker * padded_M * max(N, K)
-        workspace2 = self.max_experts_per_worker * padded_M * (N // 2)
-        return (workspace1, workspace2, self.out_dtype)
+        global_num_experts: int,
+        local_num_experts: int,
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
+        workspace1: tuple[int, ...] = ()
+        workspace2: tuple[int, ...] = ()
+        output: tuple[int, ...] = ()
+        if self.use_batched_format:
+            padded_M = aq.shape[1]
+            workspace1 = (self.max_experts_per_worker, padded_M, max(N, K))
+            workspace2 = (self.max_experts_per_worker, padded_M, (N // 2))
+            output = (self.max_experts_per_worker, padded_M, K)
+        else:
+            workspace1 = (M * topk, max(2 * N, K))
+            workspace2 = (M * topk, N)
+            output = (M * topk, K)
+        return (workspace1, workspace2, output, self.out_dtype)
 
     def apply(
         self,
+        output: torch.Tensor,
         hidden_states: torch.Tensor,
         w1: torch.Tensor,
         w2: torch.Tensor,
@@ -667,16 +693,17 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
         workspace13: torch.Tensor,
         workspace2: torch.Tensor,
         expert_num_tokens: Optional[torch.Tensor],
-    ) -> torch.Tensor:
+    ):
         assert w1_zp is None, "w1_zp is not supported in CUTLASS MoE"
         assert w2_zp is None, "w2_zp is not supported in CUTLASS MoE"
         activation_callable = lambda i, o: self.activation(activation, i, o)
-        return run_cutlass_moe_fp8(hidden_states, w1, w2, topk_ids,
-                                   activation_callable, global_num_experts,
-                                   expert_map, w1_scale, w2_scale, a1q_scale,
-                                   a2_scale, workspace13, workspace2,
-                                   expert_num_tokens, self.out_dtype,
-                                   self.per_act_token, self.per_out_ch)
+        run_cutlass_moe_fp8(output, hidden_states, w1, w2, topk_ids,
+                            activation_callable, global_num_experts,
+                            expert_map, w1_scale, w2_scale, a1q_scale,
+                            a2_scale, workspace13, workspace2,
+                            expert_num_tokens, self.out_dtype,
+                            self.per_act_token, self.per_out_ch,
+                            self.use_batched_format)
 
 
 def cutlass_moe_fp8(
@@ -747,6 +774,7 @@ def cutlass_moe_fp8(
             out_dtype=out_dtype,
             per_act_token=per_act_token,
             per_out_ch=per_out_ch,
+            use_batched_format=False,
         ),
     )
 

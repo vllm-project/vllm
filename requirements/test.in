@@ -28,15 +28,15 @@ torchvision==0.22.0
 transformers_stream_generator # required for qwen-vl test
 mamba_ssm # required for plamo2 test
 matplotlib # required for qwen-vl test
-mistral_common[opencv] >= 1.5.4 # required for pixtral test
+mistral_common[opencv] >= 1.6.2 # required for pixtral test
 num2words # required for smolvlm test
 opencv-python-headless >= 4.11.0 # required for video test
 datamodel_code_generator # required for minicpm3 test
 lm-eval[api]==0.4.8 # required for model evaluation test
-mteb>=1.38.11, <2 # required for mteb test
+mteb[bm25s]>=1.38.11, <2 # required for mteb test
 transformers==4.52.4
 tokenizers==0.21.1
-huggingface-hub[hf_xet]>=0.30.0  # Required for Xet downloads.
+huggingface-hub[hf_xet]>=0.33.0  # Required for Xet downloads.
 schemathesis>=3.39.15 # Required for openai schema test.
 # quantization
 bitsandbytes>=0.45.3
