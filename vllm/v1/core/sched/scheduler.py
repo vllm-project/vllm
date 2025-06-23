@@ -24,7 +24,7 @@ from vllm.v1.core.sched.output import (CachedRequestData, NewRequestData,
                                        SchedulerOutput)
 from vllm.v1.core.sched.request_queue import (SchedulingPolicy,
                                               create_request_queue)
-from vllm.v1.core.sched.utils import check_stop
+from vllm.v1.core.sched.utils import check_length, check_stop
 from vllm.v1.engine import (EngineCoreEventType, EngineCoreOutput,
                             EngineCoreOutputs)
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -165,6 +165,8 @@ class Scheduler(SchedulerInterface):
             enable_kv_cache_events=self.enable_kv_cache_events,
         )
 
+        self.is_async = False
+
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
@@ -206,6 +208,12 @@ class Scheduler(SchedulerInterface):
         req_index = 0
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
+            if self.is_async and not check_length(request, self.max_model_len):
+                # The request cannot be scheduled because it has reached its
+                # maximum length (either the max model len or its own max
+                # tokens).
+                req_index += 1
+                continue
 
             num_new_tokens = (request.num_tokens_with_spec -
                               request.num_computed_tokens)
@@ -253,7 +261,9 @@ class Scheduler(SchedulerInterface):
                     request,
                     num_new_tokens,
                     num_draft_tokens=num_draft_tokens,
-                    num_lookahead_tokens=self.num_lookahead_tokens)
+                    num_lookahead_tokens=self.num_lookahead_tokens,
+                    delay_cache_blocks=self.is_async,
+                )
                 if new_blocks is None:
                     # The request cannot be scheduled.
                     # Preempt the lowest-priority request.
@@ -596,6 +606,14 @@ class Scheduler(SchedulerInterface):
             batch = KVEventBatch(ts=time.time(), events=events)
             self.kv_event_publisher.publish(batch)
 
+        self.update_before_output(scheduler_output)
+        self.finished_req_ids = set()
+        return scheduler_output
+
+    def update_before_output(
+        self,
+        scheduler_output: SchedulerOutput,
+    ) -> None:
         # Advance the number of computed tokens for the request AFTER
         # the request is scheduled.
         # 1. The scheduler_output of the current step has to include the
@@ -605,11 +623,10 @@ class Scheduler(SchedulerInterface):
         #    scheduling step.
         # 3. If some tokens (e.g. spec tokens) are rejected later, the number of
         #    computed tokens will be adjusted in update_from_output.
+        num_scheduled_tokens = scheduler_output.num_scheduled_tokens
         for req_id, num_scheduled_token in num_scheduled_tokens.items():
-            self.requests[req_id].num_computed_tokens += num_scheduled_token
-
-        self.finished_req_ids = set()
-        return scheduler_output
+            request = self.requests[req_id]
+            request.num_computed_tokens += num_scheduled_token
 
     def _make_cached_request_data(
         self,
@@ -623,8 +640,11 @@ class Scheduler(SchedulerInterface):
         # them at each scheduling step.
         num_computed_tokens = request.num_computed_tokens
         num_regular_tokens = num_scheduled_tokens - num_scheduled_spec_tokens
-        new_token_ids = request.all_token_ids[
-            num_computed_tokens:num_computed_tokens + num_regular_tokens]
+        if not self.is_async:
+            new_token_ids = request.all_token_ids[
+                num_computed_tokens:num_computed_tokens + num_regular_tokens]
+        else:
+            new_token_ids = []
 
         req_data_queue = self._cached_reqs_data.get(request.request_id)
         if req_data_queue:
@@ -774,46 +794,25 @@ class Scheduler(SchedulerInterface):
                     num_draft_tokens=len(scheduled_spec_token_ids),
                     num_accepted_tokens=len(generated_token_ids) - 1)
 
-            cached_encoder_input_ids = (
-                self.encoder_cache_manager.get_cached_input_ids(request))
-            # OPTIMIZATION: Avoid list(set) if the set is empty.
-            if cached_encoder_input_ids:
-                for input_id in list(cached_encoder_input_ids):
-                    mm_positions = request.mm_positions[input_id]
-                    start_pos = mm_positions.offset
-                    num_tokens = mm_positions.length
-                    if start_pos + num_tokens <= request.num_computed_tokens:
-                        # The encoder output is already processed and stored
-                        # in the decoder's KV cache.
-                        self.encoder_cache_manager.free_encoder_input(
-                            request, input_id)
+            # NOTE(woosuk): This has to be executed after updating
+            # `request.num_computed_tokens`.
+            self._free_encoder_inputs(request)
 
             stopped = False
             new_logprobs = None
             new_token_ids = generated_token_ids
             kv_transfer_params = None
 
-            # Append generated tokens and check for stop. Note that if
-            # a request is still being prefilled, we expect the model runner
-            # to return empty token ids for the request.
-            for num_new, output_token_id in enumerate(new_token_ids, 1):
-                request.append_output_token_ids(output_token_id)
-
-                # Check for stop and update request state.
-                # This must be called before we make the EngineCoreOutput.
-                stopped = check_stop(request, self.max_model_len)
-                if stopped:
-                    kv_transfer_params = self._free_request(request)
-                    del new_token_ids[num_new:]  # Trim new tokens if needed.
-                    break
+            new_token_ids, stopped = self.update_request(
+                request, new_token_ids)
 
             pooler_output = None
             if pooler_outputs:
                 pooler_output = pooler_outputs[req_index]
                 stopped = check_stop(request, self.max_model_len,
                                      pooler_output)
-                if stopped:
-                    kv_transfer_params = self._free_request(request)
+            if stopped:
+                kv_transfer_params = self._free_request(request)
 
             # Extract sample logprobs if needed.
             if request.sampling_params is not None \
@@ -909,6 +908,41 @@ class Scheduler(SchedulerInterface):
                 self.make_stats(spec_decoding_stats))
 
         return engine_core_outputs
+
+    def _free_encoder_inputs(self, request: Request) -> None:
+        cached_encoder_input_ids = (
+            self.encoder_cache_manager.get_cached_input_ids(request))
+        # OPTIMIZATION: Avoid list(set) if the set is empty.
+        if cached_encoder_input_ids:
+            for input_id in list(cached_encoder_input_ids):
+                mm_positions = request.mm_positions[input_id]
+                start_pos = mm_positions.offset
+                num_tokens = mm_positions.length
+                if start_pos + num_tokens <= request.num_computed_tokens:
+                    # The encoder output is already processed and stored
+                    # in the decoder's KV cache.
+                    self.encoder_cache_manager.free_encoder_input(
+                        request, input_id)
+
+    def update_request(
+        self,
+        request: Request,
+        new_token_ids: list[int],
+    ) -> tuple[list[int], bool]:
+        # Append generated tokens and check for stop. Note that if
+        # a request is still being prefilled, we expect the model runner
+        # to return empty token ids for the request.
+        stopped = False
+        for num_new, output_token_id in enumerate(new_token_ids, 1):
+            request.append_output_token_ids(output_token_id)
+
+            # Check for stop and update request state.
+            # This must be called before we make the EngineCoreOutput.
+            stopped = check_stop(request, self.max_model_len)
+            if stopped:
+                del new_token_ids[num_new:]  # Trim new tokens if needed.
+                break
+        return new_token_ids, stopped
 
     def get_request_counts(self) -> tuple[int, int]:
         """Returns (num_running_reqs, num_waiting_reqs)."""

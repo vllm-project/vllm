@@ -1942,7 +1942,8 @@ class ParallelConfig:
                         backend)
 
         if self.distributed_executor_backend is None and self.world_size == 1:
-            self.distributed_executor_backend = "uni"
+            # FIXME
+            self.distributed_executor_backend = "mp"
 
     @property
     def use_ray(self) -> bool:
@@ -2116,6 +2117,9 @@ class SchedulerConfig:
     like full attention and sliding window attention.
     """
 
+    async_scheduling: bool = False
+    """If set to True, perform async scheduling."""
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -2201,6 +2205,10 @@ class SchedulerConfig:
                 "long_prefill_token_threshold=%d",
                 self.max_num_partial_prefills, self.max_long_partial_prefills,
                 self.long_prefill_token_threshold)
+
+        if self.async_scheduling:
+            self.scheduler_cls = (
+                "vllm.v1.core.sched.async_scheduler.AsyncScheduler")
 
     @model_validator(mode='after')
     def _verify_args(self) -> Self:
