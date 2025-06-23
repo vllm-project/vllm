@@ -28,7 +28,7 @@ from pydantic.dataclasses import dataclass
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 from torch.distributed import ProcessGroup, ReduceOp
 from transformers import PretrainedConfig
-from typing_extensions import deprecated, runtime_checkable
+from typing_extensions import Self, deprecated, runtime_checkable
 
 import vllm.envs as envs
 from vllm import version
@@ -1506,6 +1506,8 @@ class CacheConfig:
     """This enables dynamic calculation of `k_scale` and `v_scale` when
     kv_cache_dtype is fp8. If `False`, the scales will be loaded from the model
     checkpoint if available. Otherwise, the scales will default to 1.0."""
+    cpu_kvcache_space_bytes: Optional[int] = None
+    """(CPU backend only) CPU key-value cache space."""
 
     # Will be set after profiling.
     num_gpu_blocks: Optional[int] = field(default=None, init=False)
@@ -1535,7 +1537,6 @@ class CacheConfig:
     def __post_init__(self) -> None:
         self.swap_space_bytes = self.swap_space * GiB_bytes
 
-        self._verify_args()
         self._verify_cache_dtype()
         self._verify_prefix_caching()
 
@@ -1544,7 +1545,8 @@ class CacheConfig:
         # metrics info
         return {key: str(value) for key, value in self.__dict__.items()}
 
-    def _verify_args(self) -> None:
+    @model_validator(mode='after')
+    def _verify_args(self) -> Self:
         if self.cpu_offload_gb < 0:
             raise ValueError("CPU offload space must be non-negative"
                              f", but got {self.cpu_offload_gb}")
@@ -1553,6 +1555,8 @@ class CacheConfig:
             raise ValueError(
                 "GPU memory utilization must be less than 1.0. Got "
                 f"{self.gpu_memory_utilization}.")
+
+        return self
 
     def _verify_cache_dtype(self) -> None:
         if self.cache_dtype == "auto":
@@ -1909,17 +1913,6 @@ class ParallelConfig:
             os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
             logger.info("Disabling V1 multiprocessing for external launcher.")
 
-        ray_only_devices: list[str] = []
-        from vllm.platforms import current_platform
-        if (current_platform.device_type in ray_only_devices
-                and self.world_size > 1):
-            if self.distributed_executor_backend is None:
-                self.distributed_executor_backend = "ray"
-            if self.distributed_executor_backend != "ray":
-                raise ValueError(
-                    f"{current_platform.device_type.upper()} backend only "
-                    "supports Ray for distributed inference.")
-
         if self.enable_eplb:
             if not current_platform.is_cuda():
                 raise ValueError(
@@ -1933,7 +1926,6 @@ class ParallelConfig:
             if self.num_extra_experts != 0:
                 raise ValueError("num_extra_experts should be used with EPLB."
                                  f"{self.num_extra_experts}.")
-
         if self.distributed_executor_backend is None and self.world_size > 1:
             # We use multiprocessing by default if world_size fits on the
             # current node and we aren't in a ray placement group.
@@ -1974,15 +1966,14 @@ class ParallelConfig:
         if self.distributed_executor_backend is None and self.world_size == 1:
             self.distributed_executor_backend = "uni"
 
-        self._verify_args()
-
     @property
     def use_ray(self) -> bool:
         return self.distributed_executor_backend == "ray" or (
             isinstance(self.distributed_executor_backend, type)
             and self.distributed_executor_backend.uses_ray)
 
-    def _verify_args(self) -> None:
+    @model_validator(mode='after')
+    def _verify_args(self) -> Self:
         # Lazy import to avoid circular import
         from vllm.executor.executor_base import ExecutorBase
         from vllm.platforms import current_platform
@@ -2002,15 +1993,14 @@ class ParallelConfig:
 
         if not current_platform.use_custom_allreduce():
             self.disable_custom_all_reduce = True
-            logger.info(
+            logger.debug(
                 "Disabled the custom all-reduce kernel because it is not "
                 "supported on current platform.")
         if self.ray_workers_use_nsight and not self.use_ray:
             raise ValueError("Unable to use nsight profiling unless workers "
                              "run with Ray.")
 
-        assert isinstance(self.worker_extension_cls, str), (
-            "worker_extension_cls must be a string (qualified class name).")
+        return self
 
 
 PreemptionMode = Literal["swap", "recompute"]
@@ -2234,9 +2224,8 @@ class SchedulerConfig:
                 self.max_num_partial_prefills, self.max_long_partial_prefills,
                 self.long_prefill_token_threshold)
 
-        self._verify_args()
-
-    def _verify_args(self) -> None:
+    @model_validator(mode='after')
+    def _verify_args(self) -> Self:
         if (self.max_num_batched_tokens < self.max_model_len
                 and not self.chunked_prefill_enabled):
             raise ValueError(
@@ -2294,6 +2283,8 @@ class SchedulerConfig:
                 f"max_long_partial_prefills ({self.max_long_partial_prefills}) "
                 "must be greater than or equal to 1 and less than or equal to "
                 f"max_num_partial_prefills ({self.max_num_partial_prefills}).")
+
+        return self
 
     @property
     def is_multi_step(self) -> bool:
@@ -2701,8 +2692,6 @@ class SpeculativeConfig:
             if self.posterior_alpha is None:
                 self.posterior_alpha = 0.3
 
-        self._verify_args()
-
     @staticmethod
     def _maybe_override_draft_max_model_len(
         speculative_max_model_len: Optional[int],
@@ -2793,7 +2782,8 @@ class SpeculativeConfig:
 
         return draft_parallel_config
 
-    def _verify_args(self) -> None:
+    @model_validator(mode='after')
+    def _verify_args(self) -> Self:
         if self.num_speculative_tokens is None:
             raise ValueError(
                 "num_speculative_tokens must be provided with "
@@ -2843,6 +2833,8 @@ class SpeculativeConfig:
             raise ValueError(
                 "Eagle3 is only supported for Llama models. "
                 f"Got {self.target_model_config.hf_text_config.model_type=}")
+
+        return self
 
     @property
     def num_lookahead_slots(self) -> int:
@@ -3832,11 +3824,11 @@ class PassConfig:
     its own stages (before, after, maybe in-between)."""
     dump_graph_dir: Path = Path(".")
     """Directory to dump the graphs."""
-    enable_fusion: bool = True
+    enable_fusion: bool = field(default_factory=lambda: not envs.VLLM_USE_V1)
     """Whether to enable the custom fusion (RMSNorm/SiluMul+quant) pass."""
     enable_attn_fusion: bool = False
     """Whether to enable the custom attention+quant fusion pass."""
-    enable_noop: bool = True
+    enable_noop: bool = field(default_factory=lambda: not envs.VLLM_USE_V1)
     """Whether to enable the custom no-op elimination pass."""
     enable_sequence_parallelism: bool = False
     """Whether to enable sequence parallelism."""
@@ -4481,8 +4473,6 @@ class VllmConfig:
             # By default, V1 uses piecewise CUDA graphs. If full_cuda_graph
             # is set to True, full CUDA graphs will be used.
             self.compilation_config.cudagraph_num_of_warmups = 1
-            self.compilation_config.pass_config.enable_fusion = False
-            self.compilation_config.pass_config.enable_noop = False
             self.compilation_config.level = CompilationLevel.PIECEWISE
             self.compilation_config.set_splitting_ops_for_v1()
 
@@ -4519,10 +4509,30 @@ class VllmConfig:
 
         if self.compilation_config.full_cuda_graph and \
             not self.model_config.disable_cascade_attn:
-            logger.warning_once(
-                "full_cuda_graph is not supported with "
-                "cascade attention. Disabling cascade attention.")
+            logger.info("full_cuda_graph is not supported with "
+                        "cascade attention. Disabling cascade attention.")
             self.model_config.disable_cascade_attn = True
+
+        disable_chunked_prefill_reasons: list[str] = []
+
+        if self.model_config and self.model_config.pooler_config:
+            pooling_type = self.model_config.pooler_config.pooling_type
+            if pooling_type is None or pooling_type.lower() != "last":
+                disable_chunked_prefill_reasons.append(
+                    "Only \"last\" pooling supports chunked "
+                    "prefill and prefix caching; disabling both.")
+
+        if disable_chunked_prefill_reasons:
+            for reason in disable_chunked_prefill_reasons:
+                logger.info(reason)
+            self.scheduler_config.chunked_prefill_enabled = False
+            self.scheduler_config.long_prefill_token_threshold = 0
+            self.scheduler_config.max_num_batched_tokens = max(
+                self.scheduler_config.max_model_len,
+                DEFAULT_MAX_NUM_BATCHED_TOKENS)
+
+            if self.cache_config is not None:
+                self.cache_config.enable_prefix_caching = False
 
         if (self.kv_events_config is not None
                 and self.kv_events_config.enable_kv_cache_events
