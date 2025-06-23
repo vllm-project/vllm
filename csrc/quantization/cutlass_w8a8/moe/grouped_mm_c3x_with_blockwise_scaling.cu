@@ -46,9 +46,6 @@ void run_cutlass_moe_blockwise_mm_sm90(
   TORCH_CHECK(b_tensors.dtype() == torch::kFloat8_e4m3fn,
               "B tensors must be of type float8_e4m3fn.");
 
-  TORCH_CHECK(a_tensors.dtype() == torch::kFloat8_e4m3fn);
-  TORCH_CHECK(b_tensors.dtype() == torch::kFloat8_e4m3fn);
-
   using Cutlass3xGemmDefault = typename sm90_fp8_config_default<
       InType, OutType, vllm::c3x::ScaledEpilogueArray>::Cutlass3xGemm;
 
