@@ -164,7 +164,7 @@ class P2pNcclEngine:
 
         self.max_num_timers = self.config.get_from_extra_config(
             "max_num_timers", "64")
-        self.timers = ThreadPoolExecutor(max_workers=max_num_timers)
+        self.timers = ThreadPoolExecutor(max_workers=self.max_num_timers)
 
         logger.info(
             "💯P2pNcclEngine init, rank:%d, local_rank:%d, http_address:%s, "
