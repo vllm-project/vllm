@@ -506,6 +506,8 @@ class FusedMoE(torch.nn.Module):
         self.scoring_func = scoring_func
         self.e_score_correction_bias = e_score_correction_bias
         self.activation = activation
+        self.multicast_fn = self.hpu_multicast if is_hpu\
+            else self.naive_multicast
 
         if self.scoring_func != "softmax" and not self.use_grouped_topk:
             raise ValueError("Only softmax scoring function is supported for "
@@ -879,9 +881,34 @@ class FusedMoE(torch.nn.Module):
 
         return topk_weights, topk_ids
 
-    def naive_multicast(self, x: torch.Tensor,
-                        cu_tokens_across_dp_cpu: torch.Tensor):
-        assert (len(x.shape) == 2)
+    def hpu_multicast(self,
+                      x: torch.Tensor,
+                      cu_tokens_across_dp_cpu: torch.Tensor,
+                      output_tensor: Optional[torch.Tensor] = None):
+        if output_tensor is None:
+            world_size = get_dp_group().world_size
+            input_size = x.size()
+            # Allocate output tensor.
+            output_size = list(input_size)
+            output_size[0] *= world_size
+            output_tensor = torch.empty(output_size,
+                                        dtype=x.dtype,
+                                        device=x.device)
+        else:
+            if output_tensor.ndim == 3 and x.ndim == 2:
+                output_tensor.view(-1, x.size(1))
+        # All-gather.
+        torch.distributed.all_gather_into_tensor(
+            output_tensor, x, group=get_dp_group().device_group)
+        return output_tensor
+
+    def naive_multicast(self,
+                        x: torch.Tensor,
+                        cu_tokens_across_dp_cpu: torch.Tensor,
+                        output_tensor: Optional[torch.Tensor] = None):
+        assert (len(x.shape) in [2, 3])
+        if len(x.shape) == 3:
+            x = x.view(-1, x.size(2))
         buffer = torch.empty((cu_tokens_across_dp_cpu[-1], x.size(1)),
                              device=x.device,
                              dtype=x.dtype)
@@ -912,11 +939,17 @@ class FusedMoE(torch.nn.Module):
         if self.dp_size > 1:
             cu_tokens_across_dp_cpu = get_forward_context(
             ).dp_metadata.cu_tokens_across_dp_cpu
+            hidden_states_across_dp = get_forward_context(
+            ).dp_metadata.hidden_states_across_dp
+            router_logits_across_dp = get_forward_context(
+            ).dp_metadata.router_logits_across_dp
 
-            hidden_states = self.naive_multicast(hidden_states,
-                                                 cu_tokens_across_dp_cpu)
-            router_logits = self.naive_multicast(router_logits,
-                                                 cu_tokens_across_dp_cpu)
+            hidden_states = self.multicast_fn(hidden_states,
+                                              cu_tokens_across_dp_cpu,
+                                              hidden_states_across_dp)
+            router_logits = self.multicast_fn(router_logits,
+                                              cu_tokens_across_dp_cpu,
+                                              router_logits_across_dp)
 
         # Matrix multiply.
         final_hidden_states = self.quant_method.apply(
@@ -938,6 +971,9 @@ class FusedMoE(torch.nn.Module):
         )
 
         if self.dp_size > 1:
+            if final_hidden_states.ndim == 3:
+                final_hidden_states = final_hidden_states.view(
+                    -1, final_hidden_states.size(2))
             start = 0 if self.dp_rank == 0 else cu_tokens_across_dp_cpu[
                 self.dp_rank - 1]
             end = cu_tokens_across_dp_cpu[self.dp_rank]

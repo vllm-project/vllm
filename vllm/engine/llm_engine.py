@@ -237,6 +237,14 @@ class LLMEngine:
         self.observability_config = vllm_config.observability_config or ObservabilityConfig(  # noqa
         )
 
+        # Data Parallel Group
+        self.need_to_sync_across_dp = self.parallel_config.data_parallel_size > 1  # noqa
+        if self.need_to_sync_across_dp:
+            self.dp_group = self.parallel_config.stateless_init_dp_group()
+        # Data Parallel Ranks should execute the dummy batch if no real batch
+        # is scheduled.
+        self.should_execute_dummy_batch = False
+
         logger.info(
             "Initializing a V0 LLM engine (v%s) with config: %s, "
             "use_cached_outputs=%s, ",
@@ -897,17 +905,31 @@ class LLMEngine:
         return sum(scheduler.get_num_unfinished_seq_groups()
                    for scheduler in self.scheduler)
 
-    def has_unfinished_requests(self) -> bool:
+    def has_unfinished_requests(self,
+                                virtual_engine: Optional[int] = None) -> bool:
         """Returns True if there are unfinished requests."""
-        return any(scheduler.has_unfinished_seqs()
-                   for scheduler in self.scheduler)
+        if virtual_engine is not None:
+            schedulers = [self.scheduler[virtual_engine]]
+        else:
+            schedulers = self.scheduler
+        has_unfinished = any(scheduler.has_unfinished_seqs()
+                             for scheduler in schedulers)
+        if not self.need_to_sync_across_dp:
+            return has_unfinished
+        aggregated_has_unfinished = ParallelConfig.\
+            has_unfinished_dp(self.dp_group, has_unfinished)
+        if not has_unfinished and aggregated_has_unfinished:
+            # current rank has no unfinished seqs, but other ranks do,
+            # so we should execute a dummy batch to sync across ranks
+            self.should_execute_dummy_batch = True
+        return aggregated_has_unfinished
 
     def has_unfinished_requests_for_virtual_engine(
             self, virtual_engine: int) -> bool:
         """
         Returns True if there are unfinished requests for the virtual engine.
         """
-        return self.scheduler[virtual_engine].has_unfinished_seqs()
+        return self.has_unfinished_requests(virtual_engine)
 
     def reset_prefix_cache(self, device: Optional[Device] = None) -> bool:
         """Reset prefix cache for all devices."""
@@ -1307,6 +1329,22 @@ class LLMEngine:
             raise NotImplementedError(
                 "Pipeline parallelism is only supported through AsyncLLMEngine "
                 "as performance will be severely degraded otherwise.")
+
+        if self.should_execute_dummy_batch:
+            self.should_execute_dummy_batch = False
+            outputs = self.model_executor.execute_model(
+                execute_model_req=ExecuteModelRequest(
+                    seq_group_metadata_list=[], is_dummy_batch=True))
+            if not self.has_unfinished_requests():
+                # Stop the execute model loop in parallel workers until there
+                # are more requests to process. This avoids waiting indefinitely
+                # in torch.distributed ops which may otherwise timeout, and
+                # unblocks the RPC thread in the workers so that they can
+                # process any other queued control plane messages, such as
+                # add/remove lora adapters.
+                logger.debug("Stopping remote worker execution loop.")
+                self.model_executor.stop_remote_worker_execution_loop()
+            return []
 
         # For llm_engine, there is no pipeline parallel support, so the engine
         # used is always 0.
