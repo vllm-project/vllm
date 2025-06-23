@@ -345,8 +345,8 @@ class FusedAddRMSNormStaticQuantPattern(RMSNormQuantPattern):
                 # 0 is always None
                 fused_return_mapping = {1: (quant_node, 1), 2: (rms_node, 2)}
                 self.insert_fused_node(fused_return_mapping,
-                                       epsilon=rms_node.kwargs["epsilon"],
-                                       **kwargs)
+                                       **kwargs,
+                                       epsilon=rms_node.kwargs["epsilon"])
 
 
 class RMSNormDynamicQuantPattern(RMSNormQuantPattern):
