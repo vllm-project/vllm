@@ -27,33 +27,35 @@ All vLLM modules within the model must include a `prefix` argument in their cons
 
 The initialization code should look like this:
 
-```python
-from torch import nn
-from vllm.config import VllmConfig
-from vllm.attention import Attention
+??? Code
 
-class MyAttention(nn.Module):
-    def __init__(self, vllm_config: VllmConfig, prefix: str):
-        super().__init__()
-        self.attn = Attention(prefix=f"{prefix}.attn")
+    ```python
+    from torch import nn
+    from vllm.config import VllmConfig
+    from vllm.attention import Attention
 
-class MyDecoderLayer(nn.Module):
-    def __init__(self, vllm_config: VllmConfig, prefix: str):
-        super().__init__()
-        self.self_attn = MyAttention(prefix=f"{prefix}.self_attn")
+    class MyAttention(nn.Module):
+        def __init__(self, vllm_config: VllmConfig, prefix: str):
+            super().__init__()
+            self.attn = Attention(prefix=f"{prefix}.attn")
 
-class MyModel(nn.Module):
-    def __init__(self, vllm_config: VllmConfig, prefix: str):
-        super().__init__()
-        self.layers = nn.ModuleList(
-            [MyDecoderLayer(vllm_config, prefix=f"{prefix}.layers.{i}") for i in range(vllm_config.model_config.hf_config.num_hidden_layers)]
-        )
+    class MyDecoderLayer(nn.Module):
+        def __init__(self, vllm_config: VllmConfig, prefix: str):
+            super().__init__()
+            self.self_attn = MyAttention(prefix=f"{prefix}.self_attn")
 
-class MyModelForCausalLM(nn.Module):
-    def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__()
-        self.model = MyModel(vllm_config, prefix=f"{prefix}.model")
-```
+    class MyModel(nn.Module):
+        def __init__(self, vllm_config: VllmConfig, prefix: str):
+            super().__init__()
+            self.layers = nn.ModuleList(
+                [MyDecoderLayer(vllm_config, prefix=f"{prefix}.layers.{i}") for i in range(vllm_config.model_config.hf_config.num_hidden_layers)]
+            )
+
+    class MyModelForCausalLM(nn.Module):
+        def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
+            super().__init__()
+            self.model = MyModel(vllm_config, prefix=f"{prefix}.model")
+    ```
 
 ### Computation Code
 

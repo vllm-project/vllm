@@ -17,99 +17,101 @@ vLLM can be deployed with [LWS](https://github.com/kubernetes-sigs/lws) on Kuber
 
 Deploy the following yaml file `lws.yaml`
 
-```yaml
-apiVersion: leaderworkerset.x-k8s.io/v1
-kind: LeaderWorkerSet
-metadata:
-  name: vllm
-spec:
-  replicas: 2
-  leaderWorkerTemplate:
-    size: 2
-    restartPolicy: RecreateGroupOnPodRestart
-    leaderTemplate:
-      metadata:
-        labels:
-          role: leader
-      spec:
-        containers:
-          - name: vllm-leader
-            image: docker.io/vllm/vllm-openai:latest
-            env:
-              - name: HUGGING_FACE_HUB_TOKEN
-                value: <your-hf-token>
-            command:
-              - sh
-              - -c
-              - "bash /vllm-workspace/examples/online_serving/multi-node-serving.sh leader --ray_cluster_size=$(LWS_GROUP_SIZE); 
-                 python3 -m vllm.entrypoints.openai.api_server --port 8080 --model meta-llama/Meta-Llama-3.1-405B-Instruct --tensor-parallel-size 8 --pipeline_parallel_size 2"
-            resources:
-              limits:
-                nvidia.com/gpu: "8"
-                memory: 1124Gi
-                ephemeral-storage: 800Gi
-              requests:
-                ephemeral-storage: 800Gi
-                cpu: 125
-            ports:
-              - containerPort: 8080
-            readinessProbe:
-              tcpSocket:
-                port: 8080
-              initialDelaySeconds: 15
-              periodSeconds: 10
-            volumeMounts:
-              - mountPath: /dev/shm
-                name: dshm
-        volumes:
-        - name: dshm
-          emptyDir:
-            medium: Memory
-            sizeLimit: 15Gi
-    workerTemplate:
-      spec:
-        containers:
-          - name: vllm-worker
-            image: docker.io/vllm/vllm-openai:latest
-            command:
-              - sh
-              - -c
-              - "bash /vllm-workspace/examples/online_serving/multi-node-serving.sh worker --ray_address=$(LWS_LEADER_ADDRESS)"
-            resources:
-              limits:
-                nvidia.com/gpu: "8"
-                memory: 1124Gi
-                ephemeral-storage: 800Gi
-              requests:
-                ephemeral-storage: 800Gi
-                cpu: 125
-            env:
-              - name: HUGGING_FACE_HUB_TOKEN
-                value: <your-hf-token>
-            volumeMounts:
-              - mountPath: /dev/shm
-                name: dshm   
-        volumes:
-        - name: dshm
-          emptyDir:
-            medium: Memory
-            sizeLimit: 15Gi
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: vllm-leader
-spec:
-  ports:
-    - name: http
-      port: 8080
-      protocol: TCP
-      targetPort: 8080
-  selector:
-    leaderworkerset.sigs.k8s.io/name: vllm
-    role: leader
-  type: ClusterIP
-```
+??? Yaml
+
+    ```yaml
+    apiVersion: leaderworkerset.x-k8s.io/v1
+    kind: LeaderWorkerSet
+    metadata:
+      name: vllm
+    spec:
+      replicas: 2
+      leaderWorkerTemplate:
+        size: 2
+        restartPolicy: RecreateGroupOnPodRestart
+        leaderTemplate:
+          metadata:
+            labels:
+              role: leader
+          spec:
+            containers:
+              - name: vllm-leader
+                image: docker.io/vllm/vllm-openai:latest
+                env:
+                  - name: HUGGING_FACE_HUB_TOKEN
+                    value: <your-hf-token>
+                command:
+                  - sh
+                  - -c
+                  - "bash /vllm-workspace/examples/online_serving/multi-node-serving.sh leader --ray_cluster_size=$(LWS_GROUP_SIZE); 
+                    python3 -m vllm.entrypoints.openai.api_server --port 8080 --model meta-llama/Meta-Llama-3.1-405B-Instruct --tensor-parallel-size 8 --pipeline_parallel_size 2"
+                resources:
+                  limits:
+                    nvidia.com/gpu: "8"
+                    memory: 1124Gi
+                    ephemeral-storage: 800Gi
+                  requests:
+                    ephemeral-storage: 800Gi
+                    cpu: 125
+                ports:
+                  - containerPort: 8080
+                readinessProbe:
+                  tcpSocket:
+                    port: 8080
+                  initialDelaySeconds: 15
+                  periodSeconds: 10
+                volumeMounts:
+                  - mountPath: /dev/shm
+                    name: dshm
+            volumes:
+            - name: dshm
+              emptyDir:
+                medium: Memory
+                sizeLimit: 15Gi
+        workerTemplate:
+          spec:
+            containers:
+              - name: vllm-worker
+                image: docker.io/vllm/vllm-openai:latest
+                command:
+                  - sh
+                  - -c
+                  - "bash /vllm-workspace/examples/online_serving/multi-node-serving.sh worker --ray_address=$(LWS_LEADER_ADDRESS)"
+                resources:
+                  limits:
+                    nvidia.com/gpu: "8"
+                    memory: 1124Gi
+                    ephemeral-storage: 800Gi
+                  requests:
+                    ephemeral-storage: 800Gi
+                    cpu: 125
+                env:
+                  - name: HUGGING_FACE_HUB_TOKEN
+                    value: <your-hf-token>
+                volumeMounts:
+                  - mountPath: /dev/shm
+                    name: dshm   
+            volumes:
+            - name: dshm
+              emptyDir:
+                medium: Memory
+                sizeLimit: 15Gi
+    ---
+    apiVersion: v1
+    kind: Service
+    metadata:
+      name: vllm-leader
+    spec:
+      ports:
+        - name: http
+          port: 8080
+          protocol: TCP
+          targetPort: 8080
+      selector:
+        leaderworkerset.sigs.k8s.io/name: vllm
+        role: leader
+      type: ClusterIP
+    ```
 
 ```bash
 kubectl apply -f lws.yaml
@@ -175,25 +177,27 @@ curl http://localhost:8080/v1/completions \
 
 The output should be similar to the following
 
-```text
-{
-  "id": "cmpl-1bb34faba88b43f9862cfbfb2200949d",
-  "object": "text_completion",
-  "created": 1715138766,
-  "model": "meta-llama/Meta-Llama-3.1-405B-Instruct",
-  "choices": [
+??? Output
+
+    ```text
     {
-      "index": 0,
-      "text": " top destination for foodies, with",
-      "logprobs": null,
-      "finish_reason": "length",
-      "stop_reason": null
+      "id": "cmpl-1bb34faba88b43f9862cfbfb2200949d",
+      "object": "text_completion",
+      "created": 1715138766,
+      "model": "meta-llama/Meta-Llama-3.1-405B-Instruct",
+      "choices": [
+        {
+          "index": 0,
+          "text": " top destination for foodies, with",
+          "logprobs": null,
+          "finish_reason": "length",
+          "stop_reason": null
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 5,
+        "total_tokens": 12,
+        "completion_tokens": 7
+      }
     }
-  ],
-  "usage": {
-    "prompt_tokens": 5,
-    "total_tokens": 12,
-    "completion_tokens": 7
-  }
-}
-```
+    ```

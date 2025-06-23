@@ -33,39 +33,43 @@ text.
 
 Now let´s see an example for each of the cases, starting with the `guided_choice`, as it´s the easiest one:
 
-```python
-from openai import OpenAI
-client = OpenAI(
-    base_url="http://localhost:8000/v1",
-    api_key="-",
-)
-model = client.models.list().data[0].id
+??? Code
 
-completion = client.chat.completions.create(
-    model=model,
-    messages=[
-        {"role": "user", "content": "Classify this sentiment: vLLM is wonderful!"}
-    ],
-    extra_body={"guided_choice": ["positive", "negative"]},
-)
-print(completion.choices[0].message.content)
-```
+    ```python
+    from openai import OpenAI
+    client = OpenAI(
+        base_url="http://localhost:8000/v1",
+        api_key="-",
+    )
+    model = client.models.list().data[0].id
+
+    completion = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "user", "content": "Classify this sentiment: vLLM is wonderful!"}
+        ],
+        extra_body={"guided_choice": ["positive", "negative"]},
+    )
+    print(completion.choices[0].message.content)
+    ```
 
 The next example shows how to use the `guided_regex`. The idea is to generate an email address, given a simple regex template:
 
-```python
-completion = client.chat.completions.create(
-    model=model,
-    messages=[
-        {
-            "role": "user",
-            "content": "Generate an example email address for Alan Turing, who works in Enigma. End in .com and new line. Example result: alan.turing@enigma.com\n",
-        }
-    ],
-    extra_body={"guided_regex": r"\w+@\w+\.com\n", "stop": ["\n"]},
-)
-print(completion.choices[0].message.content)
-```
+??? Code
+
+    ```python
+    completion = client.chat.completions.create(
+        model=model,
+        messages=[
+            {
+                "role": "user",
+                "content": "Generate an example email address for Alan Turing, who works in Enigma. End in .com and new line. Example result: alan.turing@enigma.com\n",
+            }
+        ],
+        extra_body={"guided_regex": r"\w+@\w+\.com\n", "stop": ["\n"]},
+    )
+    print(completion.choices[0].message.content)
+    ```
 
 One of the most relevant features in structured text generation is the option to generate a valid JSON with pre-defined fields and formats.
 For this we can use the `guided_json` parameter in two different ways:
@@ -75,41 +79,43 @@ For this we can use the `guided_json` parameter in two different ways:
 
 The next example shows how to use the `guided_json` parameter with a Pydantic model:
 
-```python
-from pydantic import BaseModel
-from enum import Enum
+??? Code
 
-class CarType(str, Enum):
-    sedan = "sedan"
-    suv = "SUV"
-    truck = "Truck"
-    coupe = "Coupe"
+    ```python
+    from pydantic import BaseModel
+    from enum import Enum
 
-class CarDescription(BaseModel):
-    brand: str
-    model: str
-    car_type: CarType
+    class CarType(str, Enum):
+        sedan = "sedan"
+        suv = "SUV"
+        truck = "Truck"
+        coupe = "Coupe"
 
-json_schema = CarDescription.model_json_schema()
+    class CarDescription(BaseModel):
+        brand: str
+        model: str
+        car_type: CarType
 
-completion = client.chat.completions.create(
-    model=model,
-    messages=[
-        {
-            "role": "user",
-            "content": "Generate a JSON with the brand, model and car_type of the most iconic car from the 90's",
-        }
-    ],
-    "response_format": {
-        "type": "json_schema",
-        "json_schema": {
-            "name": "car-description",
-            "schema": CarDescription.model_json_schema()
+    json_schema = CarDescription.model_json_schema()
+
+    completion = client.chat.completions.create(
+        model=model,
+        messages=[
+            {
+                "role": "user",
+                "content": "Generate a JSON with the brand, model and car_type of the most iconic car from the 90's",
+            }
+        ],
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "car-description",
+                "schema": CarDescription.model_json_schema()
+            },
         },
-    },
-)
-print(completion.choices[0].message.content)
-```
+    )
+    print(completion.choices[0].message.content)
+    ```
 
 !!! tip
     While not strictly necessary, normally it´s better to indicate in the prompt the
@@ -121,33 +127,35 @@ difficult to use, but it´s really powerful. It allows us to define complete
 languages like SQL queries. It works by using a context free EBNF grammar.
 As an example, we can use to define a specific format of simplified SQL queries:
 
-```python
-simplified_sql_grammar = """
-    root ::= select_statement
+??? Code
 
-    select_statement ::= "SELECT " column " from " table " where " condition
+    ```python
+    simplified_sql_grammar = """
+        root ::= select_statement
 
-    column ::= "col_1 " | "col_2 "
+        select_statement ::= "SELECT " column " from " table " where " condition
 
-    table ::= "table_1 " | "table_2 "
+        column ::= "col_1 " | "col_2 "
 
-    condition ::= column "= " number
+        table ::= "table_1 " | "table_2 "
 
-    number ::= "1 " | "2 "
-"""
+        condition ::= column "= " number
 
-completion = client.chat.completions.create(
-    model=model,
-    messages=[
-        {
-            "role": "user",
-            "content": "Generate an SQL query to show the 'username' and 'email' from the 'users' table.",
-        }
-    ],
-    extra_body={"guided_grammar": simplified_sql_grammar},
-)
-print(completion.choices[0].message.content)
-```
+        number ::= "1 " | "2 "
+    """
+
+    completion = client.chat.completions.create(
+        model=model,
+        messages=[
+            {
+                "role": "user",
+                "content": "Generate an SQL query to show the 'username' and 'email' from the 'users' table.",
+            }
+        ],
+        extra_body={"guided_grammar": simplified_sql_grammar},
+    )
+    print(completion.choices[0].message.content)
+    ```
 
 See also: [full example](https://docs.vllm.ai/en/latest/examples/online_serving/structured_outputs.html)
 
@@ -161,34 +169,36 @@ vllm serve deepseek-ai/DeepSeek-R1-Distill-Qwen-7B --reasoning-parser deepseek_r
 
 Note that you can use reasoning with any provided structured outputs feature. The following uses one with JSON schema:
 
-```python
-from pydantic import BaseModel
+??? Code
+
+    ```python
+    from pydantic import BaseModel
 
 
-class People(BaseModel):
-    name: str
-    age: int
+    class People(BaseModel):
+        name: str
+        age: int
 
 
-completion = client.chat.completions.create(
-    model=model,
-    messages=[
-        {
-            "role": "user",
-            "content": "Generate a JSON with the name and age of one random person.",
-        }
-    ],
-    response_format={
-        "type": "json_schema",
-        "json_schema": {
-            "name": "people",
-            "schema": People.model_json_schema()
-        }
-    },
-)
-print("reasoning_content: ", completion.choices[0].message.reasoning_content)
-print("content: ", completion.choices[0].message.content)
-```
+    completion = client.chat.completions.create(
+        model=model,
+        messages=[
+            {
+                "role": "user",
+                "content": "Generate a JSON with the name and age of one random person.",
+            }
+        ],
+        response_format={
+            "type": "json_schema",
+            "json_schema": {
+                "name": "people",
+                "schema": People.model_json_schema()
+            }
+        },
+    )
+    print("reasoning_content: ", completion.choices[0].message.reasoning_content)
+    print("content: ", completion.choices[0].message.content)
+    ```
 
 See also: [full example](https://docs.vllm.ai/en/latest/examples/online_serving/structured_outputs.html)
 
@@ -202,33 +212,33 @@ For the following examples, vLLM was setup using `vllm serve meta-llama/Llama-3.
 
 Here is a simple example demonstrating how to get structured output using Pydantic models:
 
-```python
-from pydantic import BaseModel
-from openai import OpenAI
+??? Code
 
-class Info(BaseModel):
-    name: str
-    age: int
+    ```python
+    from pydantic import BaseModel
+    from openai import OpenAI
 
-client = OpenAI(base_url="http://0.0.0.0:8000/v1", api_key="dummy")
-model = client.models.list().data[0].id
-completion = client.beta.chat.completions.parse(
-    model=model,
-    messages=[
-        {"role": "system", "content": "You are a helpful assistant."},
-        {"role": "user", "content": "My name is Cameron, I'm 28. What's my name and age?"},
-    ],
-    response_format=Info,
-)
+    class Info(BaseModel):
+        name: str
+        age: int
 
-message = completion.choices[0].message
-print(message)
-assert message.parsed
-print("Name:", message.parsed.name)
-print("Age:", message.parsed.age)
-```
+    client = OpenAI(base_url="http://0.0.0.0:8000/v1", api_key="dummy")
+    model = client.models.list().data[0].id
+    completion = client.beta.chat.completions.parse(
+        model=model,
+        messages=[
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": "My name is Cameron, I'm 28. What's my name and age?"},
+        ],
+        response_format=Info,
+    )
 
-Output:
+    message = completion.choices[0].message
+    print(message)
+    assert message.parsed
+    print("Name:", message.parsed.name)
+    print("Age:", message.parsed.age)
+    ```
 
 ```console
 ParsedChatCompletionMessage[Testing](content='{"name": "Cameron", "age": 28}', refusal=None, role='assistant', audio=None, function_call=None, tool_calls=[], parsed=Testing(name='Cameron', age=28))
@@ -238,35 +248,37 @@ Age: 28
 
 Here is a more complex example using nested Pydantic models to handle a step-by-step math solution:
 
-```python
-from typing import List
-from pydantic import BaseModel
-from openai import OpenAI
+??? Code
 
-class Step(BaseModel):
-    explanation: str
-    output: str
+    ```python
+    from typing import List
+    from pydantic import BaseModel
+    from openai import OpenAI
 
-class MathResponse(BaseModel):
-    steps: list[Step]
-    final_answer: str
+    class Step(BaseModel):
+        explanation: str
+        output: str
 
-completion = client.beta.chat.completions.parse(
-    model=model,
-    messages=[
-        {"role": "system", "content": "You are a helpful expert math tutor."},
-        {"role": "user", "content": "Solve 8x + 31 = 2."},
-    ],
-    response_format=MathResponse,
-)
+    class MathResponse(BaseModel):
+        steps: list[Step]
+        final_answer: str
 
-message = completion.choices[0].message
-print(message)
-assert message.parsed
-for i, step in enumerate(message.parsed.steps):
-    print(f"Step #{i}:", step)
-print("Answer:", message.parsed.final_answer)
-```
+    completion = client.beta.chat.completions.parse(
+        model=model,
+        messages=[
+            {"role": "system", "content": "You are a helpful expert math tutor."},
+            {"role": "user", "content": "Solve 8x + 31 = 2."},
+        ],
+        response_format=MathResponse,
+    )
+
+    message = completion.choices[0].message
+    print(message)
+    assert message.parsed
+    for i, step in enumerate(message.parsed.steps):
+        print(f"Step #{i}:", step)
+    print("Answer:", message.parsed.final_answer)
+    ```
 
 Output:
 
@@ -296,19 +308,21 @@ These parameters can be used in the same way as the parameters from the Online
 Serving examples above. One example for the usage of the `choice` parameter is
 shown below:
 
-```python
-from vllm import LLM, SamplingParams
-from vllm.sampling_params import GuidedDecodingParams
+??? Code
 
-llm = LLM(model="HuggingFaceTB/SmolLM2-1.7B-Instruct")
+    ```python
+    from vllm import LLM, SamplingParams
+    from vllm.sampling_params import GuidedDecodingParams
 
-guided_decoding_params = GuidedDecodingParams(choice=["Positive", "Negative"])
-sampling_params = SamplingParams(guided_decoding=guided_decoding_params)
-outputs = llm.generate(
-    prompts="Classify this sentiment: vLLM is wonderful!",
-    sampling_params=sampling_params,
-)
-print(outputs[0].outputs[0].text)
-```
+    llm = LLM(model="HuggingFaceTB/SmolLM2-1.7B-Instruct")
+
+    guided_decoding_params = GuidedDecodingParams(choice=["Positive", "Negative"])
+    sampling_params = SamplingParams(guided_decoding=guided_decoding_params)
+    outputs = llm.generate(
+        prompts="Classify this sentiment: vLLM is wonderful!",
+        sampling_params=sampling_params,
+    )
+    print(outputs[0].outputs[0].text)
+    ```
 
 See also: [full example](https://docs.vllm.ai/en/latest/examples/online_serving/structured_outputs.html)
