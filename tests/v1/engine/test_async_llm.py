@@ -383,7 +383,8 @@ async def test_check_health(monkeypatch: pytest.MonkeyPatch):
     with monkeypatch.context() as m, ExitStack() as after:
         m.setenv("VLLM_USE_V1", "1")
 
-        engine = AsyncLLM.from_engine_args(TEXT_ENGINE_ARGS)
+        with set_default_torch_num_threads(1):
+            engine = AsyncLLM.from_engine_args(TEXT_ENGINE_ARGS)
         after.callback(engine.shutdown)
 
         # Test 1: Healthy engine should not raise any exception

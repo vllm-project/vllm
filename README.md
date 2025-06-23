@@ -154,11 +154,13 @@ If you use vLLM for your research, please cite our [paper](https://arxiv.org/abs
 
 ## Contact Us
 
+<!-- --8<-- [start:contact-us] -->
 - For technical questions and feature requests, please use GitHub [Issues](https://github.com/vllm-project/vllm/issues) or [Discussions](https://github.com/vllm-project/vllm/discussions)
 - For discussing with fellow users, please use the [vLLM Forum](https://discuss.vllm.ai)
 - For coordinating contributions and development, please use [Slack](https://slack.vllm.ai)
 - For security disclosures, please use GitHub's [Security Advisories](https://github.com/vllm-project/vllm/security/advisories) feature
 - For collaborations and partnerships, please contact us at [vllm-questions@lists.berkeley.edu](mailto:vllm-questions@lists.berkeley.edu)
+<!-- --8<-- [end:contact-us] -->
 
 ## Media Kit
 
