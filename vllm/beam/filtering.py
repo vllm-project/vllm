@@ -21,9 +21,7 @@ def format_filter(filter_params_list):
     return [dict(zip(keys, vals)) for vals in filter_params_list]
 
 
-DEFAULT_CHAR_SERVER_FILTER = format_filter(
-    [{"name": "annotations_porn", "threshold": 0.5156}, {"name": "annotations_racist", "threshold": 0.9763}, {"name": "annotations_disturbing", "threshold": 0.5472}, {"name": "annotations_harmful_promotes_selfharm", "threshold": 0.0657}]
-)
+DEFAULT_CHAR_SERVER_FILTER = [{"name": "annotations_porn", "threshold": 0.5156}, {"name": "annotations_racist", "threshold": 0.9763}, {"name": "annotations_disturbing", "threshold": 0.5472}, {"name": "annotations_harmful_promotes_selfharm", "threshold": 0.0657}]
 
 MAX_GENERATIONS = 10
 _CHUNK_SIZE = 16
@@ -113,6 +111,8 @@ class BeamValidator:
             if p["name"] in self.classifier_names
         ]
 
+        print(f"prob_C: {prob_C}")
+        print(f"relevant_filters: {relevant_filters}")
         if not relevant_filters:
             return []
 
