@@ -58,7 +58,7 @@ from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.spec_decode.utils import is_spec_decode_supported
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.block_table import BlockTable
-from vllm.v1.worker.gpu_input_batch import CachedRequestGenerationState, InputBatch
+from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
 from .utils import (gather_mm_placeholders, initialize_kv_cache_for_kv_sharing,
@@ -172,7 +172,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.rejection_sampler = RejectionSampler()
 
         # Request states.
-        self.requests: dict[str, CachedRequestGenerationState] = {}
+        self.requests: dict[str, CachedRequestState] = {}
 
         # Input Batch
         # NOTE(Chen): Ideally, we should initialize the input batch inside
@@ -389,7 +389,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             else:
                 generator = None
 
-            self.requests[req_id] = CachedRequestGenerationState(
+            self.requests[req_id] = CachedRequestState(
                 req_id=req_id,
                 prompt_token_ids=new_req_data.prompt_token_ids,
                 mm_inputs=new_req_data.mm_inputs,
