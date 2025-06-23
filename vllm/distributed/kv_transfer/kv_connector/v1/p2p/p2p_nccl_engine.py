@@ -26,6 +26,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 DEFAULT_MEM_POOL_SIZE_GB = 32
+DEFAULT_PING_SECONDS = 3
 
 
 @contextmanager
@@ -495,7 +496,7 @@ class P2pNcclEngine:
         }
         while True:
             sock.send(msgpack.dumps(data))
-            time.sleep(3)
+            time.sleep(DEFAULT_PING_SECONDS)
 
     def _send(self, comm, tensor: torch.Tensor, dst: int, stream=None):
         assert tensor.device == self.device, (

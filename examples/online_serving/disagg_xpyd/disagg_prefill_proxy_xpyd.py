@@ -3,16 +3,20 @@
 import os
 import socket
 import threading
+import time
 import uuid
 
 import aiohttp
 import msgpack
 import zmq
 from quart import Quart, make_response, request
+from typing import Any
+from vllm.distributed.kv_transfer.kv_connector.v1.p2p.p2p_nccl_engine import (
+    DEFAULT_PING_SECONDS)
 
 count = 0
-prefill_instances: dict[str, str] = {}  # http_address: zmq_address
-decode_instances: dict[str, str] = {}  # http_address: zmq_address
+prefill_instances: dict[str, Any] = {}  # http_address: (zmq_address, stamp)
+decode_instances: dict[str, Any] = {}  # http_address: (zmq_address, stamp)
 
 prefill_cv = threading.Condition()
 decode_cv = threading.Condition()
@@ -30,12 +34,36 @@ def _listen_for_register(poller, router_socket):
                 global prefill_instances
                 global prefill_cv
                 with prefill_cv:
-                    prefill_instances[data["http_address"]] = data["zmq_address"]
+                    prefill_instances.pop(data["http_address"], None)
+                    prefill_instances[data["http_address"]] = (
+                        data["zmq_address"],
+                        time.time() + DEFAULT_PING_SECONDS)
+                    oldest_key = next(iter(prefill_instances), None)
+                    while oldest_key is not None:
+                        key, value = oldest_item
+                        if value[1] > time.time():
+                            break
+                        print(f"Warn remove [HTTP:{key}, ZMQ:{value[0]}, "
+                              f"stamp:{value[1]}]")
+                        prefill_instances.pop(key, None)
+                        oldest_key = next(iter(prefill_instances), None)
             elif data["type"] == "D":
                 global decode_instances
                 global decode_cv
                 with decode_cv:
-                    decode_instances[data["http_address"]] = data["zmq_address"]
+                    decode_instances.pop(data["http_address"], None)
+                    decode_instances[data["http_address"]] = (
+                        data["zmq_address"],
+                        time.time() + DEFAULT_PING_SECONDS)
+                    oldest_key = next(iter(decode_instances), None)
+                    while oldest_key is not None:
+                        key, value = oldest_item
+                        if value[1] > time.time():
+                            break
+                        print(f"Warn remove [HTTP:{key}, ZMQ:{value[0]}, "
+                              f"stamp:{value[1]}]")
+                        decode_instances.pop(key, None)
+                        oldest_key = next(iter(decode_instances), None)
             else:
                 print(
                     "Unexpected, Received message from %s, data: %s",
