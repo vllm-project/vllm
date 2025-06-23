@@ -108,8 +108,9 @@ class PyNcclCommunicator:
             del data
 
     def __del__(self):
-        with torch.cuda.device(self.device):
-            self.nccl.ncclCommDestroy(self.comm)
+        if hasattr(self, "comm"):
+            with torch.cuda.device(self.device):
+                self.nccl.ncclCommDestroy(self.comm)
 
     def all_reduce(self,
                    in_tensor: torch.Tensor,
