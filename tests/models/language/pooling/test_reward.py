@@ -63,7 +63,7 @@ def step_reward_patch_hf_model(hf_model: HfRunner):
         token_masks = (input_ids == step_sep_id)
         return make_step_rewards(outputs[0], token_masks)
 
-    hf_model.reward = reward
+    hf_model.reward = reward  # type: ignore[attr-defined]
 
     return hf_model
 
@@ -90,7 +90,7 @@ def test_prm_models(
         monkeypatch.setenv("VLLM_USE_TRITON_FLASH_ATTN", "False")
 
     with vllm_runner(model, max_model_len=1024, dtype=dtype) as vllm_model:
-        vllm_outputs = vllm_model.reward(math_step_prompts)
+        vllm_outputs = vllm_model.encode(math_step_prompts)
 
     with hf_runner(model, dtype=dtype, auto_cls=AutoModel) as hf_model:
         hf_model = step_reward_patch_hf_model(hf_model)

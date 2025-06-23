@@ -98,11 +98,11 @@ def test_matryoshka(
 
         if dimensions not in matryoshka_dimensions:
             with pytest.raises(ValueError):
-                vllm_model.encode(
+                vllm_model.embed(
                     example_prompts,
                     pooling_params=PoolingParams(dimensions=dimensions))
         else:
-            vllm_outputs = vllm_model.encode(
+            vllm_outputs = vllm_model.embed(
                 example_prompts,
                 pooling_params=PoolingParams(dimensions=dimensions))
 
