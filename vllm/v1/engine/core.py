@@ -17,6 +17,7 @@ from typing import Any, Callable, Optional, TypeVar, Union
 import msgspec
 import zmq
 
+import vllm.envs as envs
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import stateless_destroy_torch_distributed_process_group
 from vllm.executor.multiproc_worker_utils import _add_prefix
@@ -25,7 +26,8 @@ from vllm.logging_utils.dump_input import dump_engine_exception
 from vllm.lora.request import LoRARequest
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
-from vllm.utils import make_zmq_socket, resolve_obj_by_qualname
+from vllm.utils import (make_zmq_socket, resolve_obj_by_qualname,
+                        set_default_torch_num_threads)
 from vllm.v1.core.kv_cache_utils import (get_kv_cache_config,
                                          unify_kv_cache_configs)
 from vllm.v1.core.sched.interface import SchedulerInterface
@@ -72,7 +74,9 @@ class EngineCore:
         self.log_stats = log_stats
 
         # Setup Model.
-        self.model_executor = executor_class(vllm_config)
+        disable_omp = envs.VLLM_WORKER_MULTIPROC_METHOD == "fork"
+        with set_default_torch_num_threads(1 if disable_omp else -1):
+            self.model_executor = executor_class(vllm_config)
         if executor_fail_callback is not None:
             self.model_executor.register_failure_callback(
                 executor_fail_callback)
