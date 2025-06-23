@@ -1948,14 +1948,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             skip_attention_cuda_graphs = not attention_cuda_graphs \
                 if self.full_cuda_graph else True
 
-            for kv_cache_group_id, kv_cache_group_spec in enumerate(
-                    self.kv_cache_config.kv_cache_groups):
+            if not skip_attention_cuda_graphs:
+                for kv_cache_group_id, kv_cache_group_spec in enumerate(
+                        self.kv_cache_config.kv_cache_groups):
 
-                attn_metadata_i = self.attn_metadata_builders[
-                    kv_cache_group_id].build_for_cudagraph_capture(
-                        common_attn_metadata)
-                for layer_name in kv_cache_group_spec.layer_names:
-                    attn_metadata[layer_name] = attn_metadata_i
+                    attn_metadata_i = self.attn_metadata_builders[
+                        kv_cache_group_id].build_for_cudagraph_capture(
+                            common_attn_metadata)
+                    for layer_name in kv_cache_group_spec.layer_names:
+                        attn_metadata[layer_name] = attn_metadata_i
+            else:
+                attn_metadata = None # reset to None other than empty dict
 
         with self.maybe_dummy_run_with_lora(self.lora_config,
                                             num_scheduled_tokens):
