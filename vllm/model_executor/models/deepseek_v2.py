@@ -130,16 +130,14 @@ class DeepseekV2MoE(nn.Module):
             self.gate.e_score_correction_bias = None
 
         # Load balancing settings.
-        # Currently, `n_redundant_experts` equals to `n_extra_experts`.
         vllm_config = get_current_vllm_config()
         parallel_config = vllm_config.parallel_config
         self.enable_eplb = enable_eplb
 
-        self.n_extra_experts = parallel_config.num_extra_experts
-        self.n_physical_experts = self.n_routed_experts + self.n_extra_experts
+        self.n_redundant_experts = parallel_config.num_redundant_experts
         self.n_logical_experts = self.n_routed_experts
-        self.n_redundant_experts = (self.n_physical_experts -
-                                    self.n_logical_experts)
+        self.n_physical_experts = (self.n_logical_experts +
+                                   self.n_redundant_experts)
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
 
         self.physical_expert_start = (self.ep_rank *

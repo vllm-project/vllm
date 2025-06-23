@@ -1768,7 +1768,7 @@ class ParallelConfig:
     """Use expert parallelism instead of tensor parallelism for MoE layers."""
     enable_eplb: bool = False
     """Enable expert parallelism load balancing for MoE layers."""
-    num_extra_experts: int = 0
+    num_redundant_experts: int = 0
     """Number of redundant experts to use for expert parallelism."""
     eplb_window_size: int = 1000
     """Window size for expert load recording."""
@@ -1918,14 +1918,15 @@ class ParallelConfig:
                 raise ValueError(
                     "Expert parallelism load balancing is only supported on "
                     "CUDA devices now.")
-            if self.num_extra_experts < 0:
+            if self.num_redundant_experts < 0:
                 raise ValueError(
-                    "num_extra_experts must be non-negative, but got "
-                    f"{self.num_extra_experts}.")
+                    "num_redundant_experts must be non-negative, but got "
+                    f"{self.num_redundant_experts}.")
         else:
-            if self.num_extra_experts != 0:
-                raise ValueError("num_extra_experts should be used with EPLB."
-                                 f"{self.num_extra_experts}.")
+            if self.num_redundant_experts != 0:
+                raise ValueError(
+                    "num_redundant_experts should be used with EPLB."
+                    f"{self.num_redundant_experts}.")
         if self.distributed_executor_backend is None and self.world_size > 1:
             # We use multiprocessing by default if world_size fits on the
             # current node and we aren't in a ray placement group.
