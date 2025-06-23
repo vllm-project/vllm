@@ -744,6 +744,7 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
             if isinstance(layer.mlp, DeepseekV2MoE):
                 self.moe_layers.append(layer.mlp.experts)
 
+        # Pick last one layer since the first ones may be dense layers.
         example_moe = typing.cast(
             DeepseekV2MoE, self.model.layers[config.num_hidden_layers - 1].mlp)
         self.num_logical_experts = example_moe.n_logical_experts
