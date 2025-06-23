@@ -8,6 +8,7 @@ import time
 import uuid
 from collections import defaultdict
 from collections.abc import Iterator
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -103,7 +104,7 @@ class NixlConnector(KVConnectorBase_V1):
         self.engine_id: EngineId = vllm_config.kv_transfer_config.engine_id
 
         if role == KVConnectorRole.SCHEDULER:
-            self.connector_scheduler : Optional[NixlConnectorScheduler] = \
+            self.connector_scheduler: Optional[NixlConnectorScheduler] = \
                 NixlConnectorScheduler(vllm_config, self.engine_id)
             self.connector_worker: Optional[NixlConnectorWorker] = None
         elif role == KVConnectorRole.WORKER:
@@ -336,9 +337,6 @@ class NixlConnectorWorker:
         # Agent.
         self.nixl_wrapper = NixlWrapper(str(uuid.uuid4()), None)
         # Map of engine_id -> {rank0: agent_name0, rank1: agent_name1..}.
-        # TODO(lk-chen): This field is accessed from multiple threads, and we
-        # don't have a proper lock to protect it yet. We seem fine for now
-        # because we don't have eviction logic.
         self._remote_agents: dict[EngineId, dict[int, str]] = defaultdict(dict)
 
         # NIXL handshake port.
@@ -393,13 +391,14 @@ class NixlConnectorWorker:
         # Background thread for handling new handshake requests.
         self._nixl_handshake_listener_t: Optional[threading.Thread] = None
         # Background thread for initializing new NIXL handshakes.
-        self._nixl_handshake_initiator_t: threading.Thread = threading.Thread(
-            target=self._nixl_handshake_in_sequence,
-            daemon=True,
-            name="vllm-nixl-handshake-initiator")
-        self._pending_handshake = queue.Queue[tuple[ReqId, ReqMeta]]()
+        self._handshake_initiation_executor = ThreadPoolExecutor(
+            # NIXL is not guaranteed to be thread-safe, limit 1 worker.
+            max_workers=1,
+            thread_name_prefix="vllm-nixl-handshake-initiator")
         self._ready_requests = queue.Queue[tuple[ReqId, ReqMeta]]()
-        self._nixl_handshake_initiator_t.start()
+        self._handshake_futures: dict[EngineId, Future[dict[int, str]]] = {}
+        # Protects _handshake_futures and _remote_agents.
+        self._handshake_lock = threading.RLock()
 
         self.vllm_config = vllm_config
         self.block_size = vllm_config.cache_config.block_size
@@ -430,7 +429,7 @@ class NixlConnectorWorker:
 
     def __del__(self):
         """Cleanup background threads on destruction."""
-        self._nixl_handshake_initiator_t.join(timeout=0)
+        self._handshake_initiation_executor.shutdown(wait=False)
         if self._nixl_handshake_listener_t:
             self._nixl_handshake_listener_t.join(timeout=0)
 
@@ -460,19 +459,6 @@ class NixlConnectorWorker:
                     logger.warning(
                         "Connection listener got unexpected message %s", msg)
                 sock.send_multipart((identity, b"", encoded_data))
-
-    def _nixl_handshake_in_sequence(self):
-        """
-        Call _nixl_handshake for each pending handshake in sequence, since nixl
-        API is not thread-safe.
-        """
-        while True:
-            req_id, meta = self._pending_handshake.get()
-            rank_to_agent_name = self._nixl_handshake(meta.remote_host,
-                                                      meta.remote_port)
-            # Only add to _remote_agents dict once we've finished successfully.
-            self._remote_agents[meta.remote_engine_id] = rank_to_agent_name
-            self._ready_requests.put((req_id, meta))
 
     def _nixl_handshake(self, host: str, port: int) -> dict[int, str]:
         """Do a NIXL handshake with a remote instance."""
@@ -910,9 +896,35 @@ class NixlConnectorWorker:
                 remote_engine_id, len(meta.local_block_ids),
                 len(meta.remote_block_ids))
             if remote_engine_id not in self._remote_agents:
-                self._pending_handshake.put((req_id, meta))
-            else:
-                self._read_blocks_for_req(req_id, meta)
+                # Being optimistic to assume engine is usually ready, apply
+                # lock only when the optimistic check fails.
+                with self._handshake_lock:
+                    if remote_engine_id not in self._remote_agents:
+                        fut = self._handshake_futures.get(remote_engine_id)
+                        if fut is None:
+                            fut = self._handshake_initiation_executor.submit(
+                                self._nixl_handshake, meta.remote_host,
+                                meta.remote_port)
+                            self._handshake_futures[remote_engine_id] = fut
+
+                            def done_callback(f: Future[dict[int, str]],
+                                              eid=remote_engine_id):
+                                with self._handshake_lock:
+                                    del self._handshake_futures[eid]
+                                    try:
+                                        self._remote_agents[eid] = f.result()
+                                    except Exception:
+                                        logger.exception(
+                                            "Handshake with %s failed", eid)
+
+                            fut.add_done_callback(done_callback)
+
+                        # TODO(lk-chen): handle failure state of f in the
+                        # callback, we want to fail the request in this case.
+                        fut.add_done_callback(lambda f, entry=(req_id, meta):
+                                              self._ready_requests.put(entry))
+                        continue
+            self._read_blocks_for_req(req_id, meta)
 
         # Start transfers for requests whose handshakes have now finished.
         while not self._ready_requests.empty():
