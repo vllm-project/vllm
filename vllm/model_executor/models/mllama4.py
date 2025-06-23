@@ -921,15 +921,15 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
         params_dict = dict(self.named_parameters())
         updated_params: set[str] = set()
 
-        # Debug: Print first 30 parameter names from initialized model
-        print("=== INITIALIZED MODEL PARAMETERS ===")
-        print("First 30 parameter names containing 'scale':")
-        scale_params = [name for name in params_dict.keys() if "scale" in name]
-        for i, name in enumerate(scale_params[:30]):
-            print(f"  {i+1:2d}. {name}")
-        print(f"Total parameters with 'scale': {len(scale_params)}")
-        print(f"Total model parameters: {len(params_dict)}")
-        print("=== END DEBUG ===\n")
+        # # Debug: Print first 30 parameter names from initialized model
+        # print("=== INITIALIZED MODEL PARAMETERS ===")
+        # print("First 30 parameter names containing 'scale':")
+        # scale_params = [name for name in params_dict.keys() if "scale" in name]
+        # for i, name in enumerate(scale_params[:30]):
+        #     print(f"  {i+1:2d}. {name}")
+        # print(f"Total parameters with 'scale': {len(scale_params)}")
+        # print(f"Total model parameters: {len(params_dict)}")
+        # print("=== END DEBUG ===\n")
 
         # Combine renaming and separation logic in a single pass
         def process_and_separate_weights():
@@ -969,15 +969,8 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
                         # Standard model.* to language_model.model.* renaming
                         renamed = name.replace("model.", "language_model.model.", 1)
 
-                        # Handle FP8 scale parameters: k_proj.k_scale -> attn.k_scale, v_proj.v_scale -> attn.v_scale
-                        if ".k_proj.k_scale" in renamed:
-                            original_renamed = renamed
-                            renamed = renamed.replace(".k_proj.k_scale", ".attn.k_scale")
-                            print(f"Remapped FP8 k_scale: {original_renamed} -> {renamed}")
-                        elif ".v_proj.v_scale" in renamed:
-                            original_renamed = renamed
-                            renamed = renamed.replace(".v_proj.v_scale", ".attn.v_scale")
-                            print(f"Remapped FP8 v_scale: {original_renamed} -> {renamed}")
+                        # Don't do FP8 scale parameter remapping here - let Llama4Model.load_weights() handle it
+                        # The existing logic in Llama4Model.load_weights() already has proper scale remapping via maybe_remap_kv_scale_name
                     # Track renamed scale parameters
                     if "scale" in renamed:
                         renamed_scales.append(renamed)
@@ -998,34 +991,34 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
                 else:
                     other_weights.append((renamed, weight))
 
-            # Debug scale parameter mapping
-            print("=== SCALE PARAMETER MAPPING DEBUG ===")
-            print(f"Total scale parameters in checkpoint: {len(checkpoint_scales)}")
-            print(f"Total renamed scale parameters: {len(renamed_scales)}")
+            # # Debug scale parameter mapping
+            # print("=== SCALE PARAMETER MAPPING DEBUG ===")
+            # print(f"Total scale parameters in checkpoint: {len(checkpoint_scales)}")
+            # print(f"Total renamed scale parameters: {len(renamed_scales)}")
 
-            # Categorize scale parameters
-            self_attn_scales = [s for s in checkpoint_scales if "self_attn" in s]
-            expert_scales = [s for s in checkpoint_scales if "experts" in s and "shared_expert" not in s]
-            shared_expert_scales = [s for s in checkpoint_scales if "shared_expert" in s]
-            other_scales = [s for s in checkpoint_scales if s not in self_attn_scales + expert_scales + shared_expert_scales]
+            # # Categorize scale parameters
+            # self_attn_scales = [s for s in checkpoint_scales if "self_attn" in s]
+            # expert_scales = [s for s in checkpoint_scales if "experts" in s and "shared_expert" not in s]
+            # shared_expert_scales = [s for s in checkpoint_scales if "shared_expert" in s]
+            # other_scales = [s for s in checkpoint_scales if s not in self_attn_scales + expert_scales + shared_expert_scales]
 
-            print(f"\nScale parameter categories from checkpoint:")
-            print(f"  Self-attention scales: {len(self_attn_scales)}")
-            print(f"  Expert scales: {len(expert_scales)}")
-            print(f"  Shared expert scales: {len(shared_expert_scales)}")
-            print(f"  Other scales: {len(other_scales)}")
+            # print(f"\nScale parameter categories from checkpoint:")
+            # print(f"  Self-attention scales: {len(self_attn_scales)}")
+            # print(f"  Expert scales: {len(expert_scales)}")
+            # print(f"  Shared expert scales: {len(shared_expert_scales)}")
+            # print(f"  Other scales: {len(other_scales)}")
 
-            if expert_scales:
-                print(f"\nFirst 5 expert scale parameters (original):")
-                for i, name in enumerate(expert_scales[:5]):
-                    print(f"  {i+1}. {name}")
+            # if expert_scales:
+            #     print(f"\nFirst 5 expert scale parameters (original):")
+            #     for i, name in enumerate(expert_scales[:5]):
+            #         print(f"  {i+1}. {name}")
 
-                print(f"\nFirst 5 expert scale parameters (renamed):")
-                expert_renamed = [s for s in renamed_scales if "experts" in s and "shared_expert" not in s]
-                for i, name in enumerate(expert_renamed[:5]):
-                    print(f"  {i+1}. {name}")
+            #     print(f"\nFirst 5 expert scale parameters (renamed):")
+            #     expert_renamed = [s for s in renamed_scales if "experts" in s and "shared_expert" not in s]
+            #     for i, name in enumerate(expert_renamed[:5]):
+            #         print(f"  {i+1}. {name}")
 
-            print("=== END SCALE DEBUG ===\n")
+            # print("=== END SCALE DEBUG ===\n")
 
             return language_model_weights, other_weights
 
