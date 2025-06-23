@@ -2238,9 +2238,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # to capture the attention for the mix prefill-decode (general) phase,
             # based on the attention backends.
             capture_attn_cudagraph_general = "auto" if full_cg else False
-            
+
+            # Skip capturing batch sizes of 1 in mix prefill-decode if 
+            # separate_attention_routine is on. As bs=1 can treat as a 
+            # pure decode. 
+            start_idx = 1 if self.vllm_config.compilation_config.separate_attention_routine \
+                   and len(self.cudagraph_batch_sizes) > 0 and self.cudagraph_batch_sizes[0] == 1 \
+                   else 0
+
             # Capture the mix prefill-decode (general usage) cudagraphs
-            for num_tokens in tqdm(reversed(self.cudagraph_batch_sizes),
+            for num_tokens in tqdm(reversed(self.cudagraph_batch_sizes[start_idx:]),
                                    desc="Capturing CUDA graphs (mix prefill-decode)",
                                    total=len(self.cudagraph_batch_sizes)):
                 for _ in range(
