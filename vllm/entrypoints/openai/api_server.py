@@ -112,7 +112,8 @@ _running_tasks: set[asyncio.Task] = set()
 
 def setup_otel(app: FastAPI, observability_config: ObservabilityConfig):
     from opentelemetry import trace
-    from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+    from opentelemetry.exporter.otlp.proto.grpc.trace_exporter
+        import OTLPSpanExporter
     from opentelemetry.sdk.trace import TracerProvider
     from opentelemetry.sdk.trace.export import BatchSpanProcessor
     from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
@@ -120,7 +121,9 @@ def setup_otel(app: FastAPI, observability_config: ObservabilityConfig):
 
     trace.set_tracer_provider(TracerProvider(resource=Resource.create()))
 
-    otlp_exporter = OTLPSpanExporter(endpoint=observability_config.otlp_traces_endpoint)
+    otlp_exporter = OTLPSpanExporter(
+        endpoint=observability_config.otlp_traces_endpoint
+    )
     trace.get_tracer_provider().add_span_processor(
         BatchSpanProcessor(otlp_exporter)
     )

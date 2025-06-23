@@ -8,7 +8,7 @@ from typing import Any, Optional, Union
 import numpy as np
 
 import vllm.envs as envs
-from vllm.config import ModelConfig, VllmConfig
+from vllm.config import ModelConfig, VllmConfig, ObservabilityConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
 from vllm.envs import VLLM_V1_OUTPUT_PROC_CHUNK_SIZE
@@ -93,6 +93,7 @@ class AsyncLLM(EngineClient):
         self.vllm_config = vllm_config
         self.log_requests = log_requests
         self.log_stats = log_stats
+        self.observability_config = vllm_config.observability_config
 
         # Set up stat loggers; independent set for each DP rank.
         self.stat_loggers: list[list[StatLoggerBase]] = setup_default_loggers(
@@ -525,6 +526,9 @@ class AsyncLLM(EngineClient):
 
     async def get_model_config(self) -> ModelConfig:
         return self.model_config
+
+    async def get_observability_config(self) -> ObservabilityConfig:
+        return self.observability_config
 
     async def get_decoding_config(self):
         raise ValueError("Not Supported on V1 yet.")
