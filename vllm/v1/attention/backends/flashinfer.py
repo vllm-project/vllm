@@ -328,9 +328,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 self._get_workspace_buffer(), get_kv_cache_layout())
         return self._prefill_wrapper
 
-    def _get_decode_wrapper(self, batch_size: int, pure_decode: bool = False):
-        use_cudagraph = (self.enable_cuda_graph and pure_decode
-                        and batch_size <= self._decode_cudagraph_max_bs)
+    def _get_decode_wrapper(self, batch_size: int, use_cudagraph: bool = False):
 
         if use_cudagraph:
             decode_wrapper = self._decode_wrappers_cudagraph.get(batch_size, None)
@@ -446,24 +444,25 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             if self._num_decodes > 0:
                 pure_decode = self._num_prefills == 0
                 # possible required padding for cudagraph replay
-                if self.enable_cuda_graph and pure_decode and \
-                        self._num_decodes <= self._decode_cudagraph_max_bs:
+                use_cudagraph = (self.enable_cuda_graph and pure_decode and \
+                        self._num_decodes <= self._decode_cudagraph_max_bs)
+                if use_cudagraph:
                     num_input_tokens_decode = self.vllm_config.pad_for_cudagraph(
                         self._num_decodes)
                 else:
                     num_input_tokens_decode = self._num_decodes
 
                 attn_metadata.decode_wrapper = self._get_decode_wrapper(
-                                    num_input_tokens_decode, pure_decode)
+                                    num_input_tokens_decode, use_cudagraph)
                 # TODO: Override flashinfer's plan function to avoid some
                 # host-to-device copy overhead. 
                 attn_metadata.decode_wrapper.plan(
                     # NOTE: Use the persistent buffer with padding length,
-                    # instead of the chunked length buffers in the atten_metadata.
-                    # This is to compatible with FlashInfer's decode_wrapper
-                    # cudagraph requirement.
+                    # instead of the same address but chunked length buffers in
+                    # the atten_metadata. This is to be compatible with
+                    # FlashInfer's decode_wrapper when using cudagraph.
                     self.paged_kv_indptr[:num_input_tokens_decode + 1],
-                    self.paged_kv_indices,
+                    self.paged_kv_indices if use_cudagraph else attn_metadata.paged_kv_indices,
                     self.paged_kv_last_page_len[:num_input_tokens_decode],
                     attn_metadata.num_qo_heads,
                     attn_metadata.num_kv_heads,
@@ -556,8 +555,10 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                                              page_size, paged_kv_last_page_len)
         self.paged_kv_last_page_len[:num_reqs].copy_(
             paged_kv_last_page_len, non_blocking=True)
+        # Fill the remaining paged_kv_last_page_len with 1. This is because
+        # flashinfer treats 0 as a full page instead of empty.
         self.paged_kv_last_page_len[num_reqs:].fill_(
-            0)
+            1)
 
         attn_metadata = FlashInferMetadata(
             num_actual_tokens=num_actual_tokens,
