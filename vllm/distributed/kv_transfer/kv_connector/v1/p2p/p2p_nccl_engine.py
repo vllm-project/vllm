@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MEM_POOL_SIZE_GB = 32
 DEFAULT_PING_SECONDS = 3
+DEFAULT_TIMEOUT_SECONDS = 3
 
 
 @contextmanager
@@ -139,6 +140,7 @@ class P2pNcclEngine:
         self.recv_request_id_to_tensor_ids: dict[str, set[str]] = {}
         self.socks: dict[str, Any] = {}  # remote_address: client socket
         self.comms: dict[str, Any] = {}  # remote_address: (ncclComm_t, rank)
+        self.address_black_list: dict[str, float] = {}  # remote_address: stamp
 
         self.buffer_size = 0
         self.buffer_size_threshold = float(self.config.kv_buffer_size)
@@ -156,8 +158,8 @@ class P2pNcclEngine:
                                                  daemon=True)
             self._ping_thread.start()
 
-        self.nccl_timeout_s = self.config.get_from_extra_config(
-            "nccl_timeout_s", "3")
+        self.nccl_timeout_s = float(self.config.get_from_extra_config(
+            "nccl_timeout_s", DEFAULT_TIMEOUT_SECONDS))
 
         self.max_num_timers = self.config.get_from_extra_config(
             "max_num_timers", "64")
@@ -170,11 +172,21 @@ class P2pNcclEngine:
             self.http_address, self.zmq_address, self.proxy_address,
             self.send_type, self.buffer_size_threshold, self.nccl_num_channels)
 
-    def _create_connect(self, remote_address: typing.Optional[str] = None):
+    def _get_connect(self, remote_address: typing.Optional[str] = None):
         assert remote_address is not None
+        # To avoid the frequent and ineffective establishment of connections,
+        # because the transmission of KV Cache is layered. If the transmission
+        # of one layer fails, then the other layers do not need to be
+        # transmitted anymore.
+        if remote_address in self.address_black_list:
+            if self.address_black_list[remote_address] > time.time():
+                return None, None
+            self.address_black_list.pop(remote_address, None)
+
         if remote_address not in self.socks:
             sock = self.context.socket(zmq.DEALER)
             sock.setsockopt_string(zmq.IDENTITY, self.zmq_address)
+            sock.setsockopt(zmq.SNDTIMEO, self.nccl_timeout_s * 1000)
             sock.connect(f"tcp://{remote_address}")
             self.socks[remote_address] = sock
             if remote_address in self.comms:
@@ -184,7 +196,13 @@ class P2pNcclEngine:
 
             unique_id = self.nccl.ncclGetUniqueId()
             data = {"cmd": "NEW", "unique_id": bytes(unique_id.internal)}
-            sock.send(msgpack.dumps(data))
+            try:
+                sock.send(msgpack.dumps(data))
+            except zmq.Again:
+                logger.error(
+                    "⛔ncclCommInitRank timeout, %s👉%s", self.zmq_address,
+                    remote_address)
+                return None, None
 
             with torch.cuda.device(self.device):
                 rank = 0
@@ -274,11 +292,12 @@ class P2pNcclEngine:
         if remote_address is None:
             return None
 
-        if remote_address not in self.socks:
-            self._create_connect(remote_address)
+        sock, comm_rank = self._get_connect(remote_address)
+        if sock is None:
+            return None
 
         sock = self.socks[remote_address]
-        comm, rank = self.comms[remote_address]
+        comm, rank = comm_rank
 
         data = {"cmd": "GET", "tensor_id": tensor_id}
         sock.send(msgpack.dumps(data))
@@ -327,7 +346,7 @@ class P2pNcclEngine:
                             [remote_address, b"0"])
                         comm, rank = self.comms[remote_address.decode()]
                         # self._recv(comm, tensor, rank ^ 1, self.recv_stream)
-                        ret = self.recv_with_timeout(comm, tensor, rank ^ 1, self.nccl_timeout_s, self.recv_stream)
+                        ret = self.recv_with_timeout(remote_address, comm, tensor, rank ^ 1, self.nccl_timeout_s, self.recv_stream)
                         if ret == 0:
                             tensor_size = tensor.element_size() * tensor.numel()
                             if (self.buffer_size + tensor_size
@@ -431,11 +450,12 @@ class P2pNcclEngine:
     ) -> bool:
         if remote_address is None:
             return False
-        if remote_address not in self.socks:
-            self._create_connect(remote_address)
 
-        sock = self.socks[remote_address]
-        comm, rank = self.comms[remote_address]
+        sock, comm_rank = self._get_connect(remote_address)
+        if sock is None:
+            return False
+
+        comm, rank = comm_rank
         data = {
             "cmd": "PUT",
             "tensor_id": tensor_id,
@@ -455,7 +475,7 @@ class P2pNcclEngine:
             return False
 
         # self._send(comm, tensor.to(self.device), rank ^ 1, self.send_stream)
-        self.send_with_timeout(comm, tensor.to(self.device), rank ^ 1, self.nccl_timeout_s, self.send_stream)
+        self.send_with_timeout(remote_address, comm, tensor.to(self.device), rank ^ 1, self.nccl_timeout_s, self.send_stream)
 
         if self.send_type == "PUT_ASYNC":
             self._have_sent_tensor_id(tensor_id)
@@ -542,6 +562,7 @@ class P2pNcclEngine:
 
     def _with_timeout(
             self,
+            remote_address,
             op_name: str,
             comm,
             func: Callable,
@@ -550,15 +571,18 @@ class P2pNcclEngine:
             timeout=10,
             stream=None
     ) -> int:
-        abort_triggered = threading.Event()
         result_code = 2
+        if remote_address not in self.socks:
+            return result_code
+
+        abort_triggered = threading.Event()
 
         def timeout_watcher():
             nonlocal result_code
             if not abort_triggered.wait(timeout):
                 logger.warning(f"[{time.strftime('%X')}] Timeout reached. Aborting comm.")
                 try:
-                    ncclCommAbort(comm)
+                    self.nccl.ncclCommAbort(comm)
                 except Exception as e:
                     logger.error(f"ncclCommAbort error: {e}")
                 result_code = 1
@@ -575,13 +599,19 @@ class P2pNcclEngine:
         finally:
             abort_triggered.set()
 
+        if result_code != 0:
+            self.socks.pop(remote_address, None)
+            self.comms.pop(remote_address, None)
+            self.address_black_list[remote_address] = (time.time()
+                                                       + self.nccl_timeout_s)
+
         return result_code
 
-    def send_with_timeout(self, comm, tensor: torch.Tensor, dst: int, timeout: float, stream=None):
-        return self._with_timeout("send", comm, self._send, tensor, dst, timeout, stream)
+    def send_with_timeout(self, remote_address, comm, tensor: torch.Tensor, dst: int, timeout: float, stream=None):
+        return self._with_timeout("send", remote_address, comm, self._send, tensor, dst, timeout, stream)
 
-    def recv_with_timeout(self, comm, tensor: torch.Tensor, src: int, timeout: float, stream=None):
-        return self._with_timeout("recv", comm, self._recv, tensor, src, timeout, stream)
+    def recv_with_timeout(self, remote_address, comm, tensor: torch.Tensor, src: int, timeout: float, stream=None):
+        return self._with_timeout("recv", remote_address, comm, self._recv, tensor, src, timeout, stream)
 
     def close(self) -> None:
         self._listener_thread.join()
