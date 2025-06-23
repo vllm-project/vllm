@@ -205,8 +205,11 @@ class NCCLLibrary:
         # processes in the communicator have called this function.
         # because Python object destruction can happen in random order,
         # it is better not to call it at all.
-        # ncclResult_t  ncclCommDestroy(ncclComm_t comm);
+        # ncclResult_t ncclCommDestroy(ncclComm_t comm);
         Function("ncclCommDestroy", ncclResult_t, [ncclComm_t]),
+
+        # ncclResult_t ncclCommAbort(ncclComm_t comm);
+        Function("ncclCommAbort", ncclResult_t, [ncclComm_t]),
     ]
 
     # class attribute to store the mapping from the path to the library
@@ -341,6 +344,9 @@ class NCCLLibrary:
 
     def ncclCommDestroy(self, comm: ncclComm_t) -> None:
         self.NCCL_CHECK(self._funcs["ncclCommDestroy"](comm))
+
+    def ncclCommAbort(self, comm: ncclComm_t) -> None:
+        self.NCCL_CHECK(self._funcs["ncclCommAbort"](comm))
 
 
 __all__ = [
