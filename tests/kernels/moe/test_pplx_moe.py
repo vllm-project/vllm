@@ -20,6 +20,7 @@ except ImportError:
 
 from tests.kernels.moe.utils import make_test_weights, naive_batched_moe
 from tests.kernels.utils import torch_experts
+from tests.kernels.quant_utils import dequant
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe import fused_topk, override_config
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
@@ -40,8 +41,14 @@ requires_pplx = pytest.mark.skipif(
     reason="Requires PPLX kernels",
 )
 
-PPLX_PREPARE_COMBOS = [(4, 128, 128), (32, 1024, 512), (64, 1024, 512),
-                       (222, 2048, 1024)]
+PPLX_PREPARE_COMBOS = [
+#    (1, 128, 128),
+    (4, 128, 128),
+    (32, 1024, 512),
+#    (45, 512, 2048),
+    (64, 1024, 512),
+    (222, 2048, 1024),
+]
 
 PPLX_MOE_COMBOS = [
     (1, 128, 128),
@@ -195,18 +202,24 @@ def chunk_by_rank(t: torch.Tensor, r: int, w: int) -> torch.Tensor:
     return t[(r * chunk):(r + 1) * chunk]
 
 
+def dummy_work(a: torch.Tensor) -> torch.Tensor:
+    return a # * 1.5
+
+
 def pplx_prepare_finalize(
     pgi: ProcessGroupInfo,
     dp_size: int,
     a: torch.Tensor,
-    a_scale: Optional[torch.Tensor],
     topk_weight: torch.Tensor,
     topk_ids: torch.Tensor,
     num_experts: int,
+    quant_dtype: Optional[torch.dtype],
+    block_shape: Optional[list[int]],
+    per_act_token_quant: bool,
     group_name: Optional[str],
 ) -> torch.Tensor:
     from vllm.model_executor.layers.fused_moe.pplx_prepare_finalize import (
-        PplxPrepareAndFinalize)
+        PplxPrepareAndFinalize, pplx_hidden_dim_scale_bytes)
 
     assert torch.cuda.current_device() == pgi.local_rank
 
@@ -215,7 +228,16 @@ def pplx_prepare_finalize(
     device = pgi.device
     rank = pgi.rank
     world_size = pgi.world_size
-    max_num_tokens = rank_chunk(num_tokens, 0, world_size)
+    max_num_tokens = max(rank_chunk(num_tokens, 0, world_size), 1)
+
+    hidden_dim_bytes, scale_bytes = pplx_hidden_dim_scale_bytes(
+        max_num_tokens,
+        hidden_dim,
+        a.dtype,
+        quant_dtype,
+        per_act_token_quant=per_act_token_quant,
+        block_shape=block_shape,
+    )
 
     args = dict(
         max_num_tokens=max_num_tokens,
@@ -225,8 +247,8 @@ def pplx_prepare_finalize(
         world_size=world_size,
         dp_size=dp_size,
         hidden_dim=hidden_dim,
-        hidden_dim_bytes=hidden_dim * a.dtype.itemsize,
-        hidden_dim_scale_bytes=0,
+        hidden_dim_bytes=hidden_dim_bytes,
+        hidden_dim_scale_bytes=scale_bytes,
     )
 
     if group_name is None:
@@ -258,10 +280,17 @@ def pplx_prepare_finalize(
         num_experts,
         None,
         False,
-        FusedMoEQuantConfig(),
+        FusedMoEQuantConfig(
+            quant_dtype,
+            per_act_token_quant,
+            False,
+            block_shape,
+        ),
     )
 
-    b_a = b_a * 1.5
+    # Do some fake work
+    #print(f"INTER {b_a.shape} {b_a_scale.shape if b_a_scale is not None else None}")
+    b_a = dummy_work(dequant(b_a, b_a_scale, block_shape, per_act_token_quant, a.dtype))
 
     out = torch.full(
         (max_num_tokens, hidden_dim),
@@ -291,10 +320,12 @@ def _pplx_prepare_finalize(
     pgi: ProcessGroupInfo,
     dp_size: int,
     a: torch.Tensor,
-    a_scale: Optional[torch.Tensor],
     score: torch.Tensor,
     topk: torch.Tensor,
     num_experts: int,
+    quant_dtype: Optional[torch.dtype],
+    block_shape: Optional[list[int]],
+    per_act_token_quant: bool,
     use_internode: bool,
 ):
     if use_internode:
@@ -308,24 +339,35 @@ def _pplx_prepare_finalize(
         cpu_group = torch.distributed.new_group(group_ranks, backend="gloo")
         group_name = cpu_group.group_name
 
-    device = pgi.device
+    #device = pgi.device
 
     topk_weight, topk_ids, _ = fused_topk(a, score, topk, False)
-    k = a.shape[1]
+    m, k = a.shape
 
-    a_rep = torch.repeat_interleave(a, topk, dim=0).to(device)
+    a_rep = torch.repeat_interleave(dummy_work(a), topk, dim=0) #.to(device)
 
-    torch_output = (a_rep.view(-1, topk, k) * 1.5 *
-                    topk_weight.view(-1, topk, 1).to(device)).sum(dim=1).to(
-                        a.dtype)
+    if True:
+        torch_output = (a_rep.view(m, topk, k) *
+                        topk_weight.view(m, topk, 1).to(a_rep.dtype)).sum(dim=1)
+    else:
+        import vllm._custom_ops as ops
+        a_rep = a_rep.view(m, topk, k)
+        a_rep.mul_(topk_weight.view(m, topk, 1).to(a_rep.dtype))
+        torch_output = torch.empty_like(a)
+        ops.moe_sum(a_rep, torch_output)
 
-    pplx_output = pplx_prepare_finalize(pgi, dp_size, a, a_scale, topk_weight, topk_ids,
-                                        num_experts, group_name)
+    pplx_output = pplx_prepare_finalize(pgi, dp_size, a, topk_weight, topk_ids,
+                                        num_experts, quant_dtype, block_shape,
+                                        per_act_token_quant, group_name)
 
     torch_output = chunk_by_rank(torch_output, pgi.rank,
                                  pgi.world_size).to(pplx_output.device)
 
-    torch.testing.assert_close(pplx_output, torch_output, atol=2e-2, rtol=0)
+    #torch.set_printoptions(profile="full")
+    #print(f"PPLX {pplx_output.shape}\n{pplx_output.shape}")
+    #print(f"TORCH {torch_output.shape}\n{torch_output.shape}")
+
+    torch.testing.assert_close(pplx_output, torch_output, atol=3e-2, rtol=3e-2)
 
     if use_internode:
         nvshmem_finalize()
@@ -334,7 +376,6 @@ def _pplx_prepare_finalize(
 # TODO (bnell): this test point does not work for odd M due to how the test is
 # written, not due to limitations of the pplx kernels.  The pplx_moe
 # test below is able to deal with odd M.
-# TODO (bnell) add fp8 tests
 @pytest.mark.parametrize("mnk", PPLX_PREPARE_COMBOS)
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
@@ -357,28 +398,31 @@ def test_pplx_prepare_finalize(
     if dtype == torch.float8_e4m3fn:
         use_fp8_w8a8 = True
         act_dtype = torch.bfloat16
+        quant_dtype = dtype
     else:
         use_fp8_w8a8 = False
         act_dtype = dtype
+        quant_dtype = None
 
     if not use_fp8_w8a8 and (per_act_token_quant or block_shape is not None):
         pytest.skip("Skip quantization test for non-quantized type")
 
     if per_act_token_quant and block_shape is not None:
-        pytest.skip("Skip illgal quantization combination")
+        pytest.skip("Skip illegal quantization combination")
 
     current_platform.seed_everything(7)
     m, n, k = mnk
     world_size, dp_size = world_dp_size
     device = "cuda"
 
+    #print(f"MNK = {mnk}")
+
     a = torch.randn((m, k), device=device, dtype=act_dtype) / 10
     score = torch.randn((m, e), device=device, dtype=act_dtype)
 
-    a, a_scale = moe_kernel_quantize_input(a, None, dtype, False, block_shape)
-
-    parallel_launch(world_size, _pplx_prepare_finalize, dp_size, a, a_scale, score,
-                    topk, e, use_internode)
+    parallel_launch(world_size, _pplx_prepare_finalize, dp_size,
+                    a, score, topk, e, quant_dtype, block_shape,
+                    per_act_token_quant, use_internode)
 
 
 def pplx_moe(
@@ -661,7 +705,7 @@ def test_pplx_moe(
         pytest.skip("Skip quantization test for non-quantized type")
 
     if per_act_token_quant and block_shape is not None:
-        pytest.skip("Skip illgal quantization combination")
+        pytest.skip("Skip illegal quantization combination")
 
     a = torch.randn((m, k), device="cuda", dtype=torch.bfloat16) / 10
     score = torch.randn((m, e), device="cuda", dtype=torch.bfloat16)

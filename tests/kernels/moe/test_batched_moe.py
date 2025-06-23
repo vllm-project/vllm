@@ -206,7 +206,7 @@ def test_batched_mm(num_experts: int, max_tokens_per_expert: int, K: int,
 
     torch.testing.assert_close(ref_output, q_ref_output, atol=atol, rtol=rtol)
     #torch.testing.assert_close(ref_output, test_output, atol=atol, rtol=rtol)
-    #torch.testing.assert_close(test_output, q_ref_output, atol=atol, rtol=rtol)
+    torch.testing.assert_close(test_output, q_ref_output, atol=atol, rtol=rtol)
 
 
 @pytest.mark.parametrize(("m", "n", "k"), MNK_FACTORS)

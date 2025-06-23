@@ -120,6 +120,17 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             per_act_token_quant=quant_config.per_act_token_quant,
             block_shape=quant_config.block_shape)
 
+        if quant_config.quant_dtype is not None:
+            if quant_config.is_per_tensor:
+                assert a1q_scale.numel() == 1
+            elif quant_config.is_per_act_token:
+                assert a1q_scale.numel() == a1.numel()
+                assert a1q_scale.shape == a1.shape
+            else:
+                assert a1q_scale.numel() == a1.shape[0] * cdiv(a1.shape[1], quant_config.block_shape[1])
+                assert a1q_scale.shape == (a1.shape[0], cdiv(a1.shape[1], quant_config.block_shape[1]))
+                #a1q_scale = group_broadcast(scale, a1q.shape)
+
         if a1q_scale is not None:
             scalar_scales = a1q_scale.numel() == 1
 
@@ -131,14 +142,20 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             orig_a_scale_block_shape = a1q_scale.shape[-1]
 
             # pad out scales if needed. TODO (bnell): do for non-scalar scales?
-            if False and scalar_scales:
-                print(f"a1q_scale {a1q.shape}, {a1q_scale.shape}")
-                a1q_scale = a1q_scale.repeat(a1q.shape[1],
-                                             4 * torch.float32.itemsize)
+            if False and (scalar_scales or quant_config.is_per_tensor):
+                #print(f"a1q_scale {a1q.shape}, {a1q_scale.shape}")
+                a1q_scale = a1q_scale.repeat(1, 4 * torch.float32.itemsize)
+            else:
+                #a1q_scale = torch.repeat_interleave(a1q_scale, round_up(a1q_scale.shape[1], 16), dim=1)
+                #a1q_scale = torch.nn.functional.pad(a1q_scale, pad=(0, 16-a1q_scale.shape[1]), mode='replicate')
+                pass
 
-            a1q_scale = a1q_scale.repeat(repeat_rows, repeat_cols)
+            if not quant_config.is_grouped:
+                a1q_scale = a1q_scale.repeat(repeat_rows, repeat_cols)
 
             #assert a1_scale is None or a1_scale.shape[0] == a1q.shape[1], f"{a1_scale.shape}, {a1q_scale.shape}"
+
+            #print(f"FINAL SCALE SHAPE {a1q_scale.shape}")
 
         assert a1q_scale is None or a1q_scale.ndim == 2, \
             f"{0 if a1q_scale is None else (a1q_scale.ndim, a1q_scale.shape)}"
@@ -166,16 +183,23 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         expert_x_scale: Optional[torch.Tensor] = None
         if a1q.dtype.itemsize == 1:
             float32_size = torch.float32.itemsize
-            block_size = (quant_config.block_shape[1] if quant_config.
-                          block_shape is not None else 1) * float32_size
+
+            if quant_config.is_per_act_token:
+                final_dim = expert_x.size(2)
+                assert final_dim % 4 == 0 #?
+            elif quant_config.is_per_tensor:
+                final_dim = 4
+            else:
+                num_blocks = cdiv(expert_x.size(2), quant_config.block_shape[1])
+                final_dim = round_up(num_blocks, 4)
 
             expert_x_scale_shape = (
                 num_local_experts,
                 expert_x.size(1),
-                cdiv(expert_x.size(2), block_size) if not scalar_scales else 1,
+                final_dim,
             )
 
-            print(f"EXPERT_X_SCALE {expert_x_scale_shape}")
+            #print(f"EXPERT_X_SCALE {expert_x_scale_shape}")
 
             expert_x_scale = torch.zeros(
                 expert_x_scale_shape,
@@ -199,9 +223,6 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             bound_m=bound_m,
         )
         #print(f"DISPATCH DONE {device}")
-
-        if expert_x_scale is not None:
-            expert_x_scale = expert_x_scale[:, :, :orig_a_scale_block_shape]
 
         if expert_x_scale is not None:
             expert_x_scale = expert_x_scale[:, :, :orig_a_scale_block_shape]
