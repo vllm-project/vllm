@@ -84,7 +84,10 @@ class EplbState:
     expert_load_window_step: int = 0
     """Current step in the sliding window."""
     expert_load_window_size: int = 0
-    """Size of the expert load sliding window."""
+    """
+    Size of the expert load sliding window.
+    This is a constant and is taken from the config.
+    """
 
     expert_rearrangement_step: int = 0
     """
@@ -92,7 +95,10 @@ class EplbState:
     Will trigger a rearrangement if it exceeds the threshold.
     """
     expert_rearrangement_step_interval: int = 0
-    """Interval for expert rearrangement steps."""
+    """
+    Interval for expert rearrangement steps.
+    This is a constant and is taken from the config.
+    """
 
     @staticmethod
     def build_initial_global_physical_to_logical_map(
