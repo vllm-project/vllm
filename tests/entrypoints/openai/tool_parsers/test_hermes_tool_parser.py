@@ -7,8 +7,8 @@ import pytest
 
 from ....utils import RemoteOpenAIServer
 
-MODEL_NAME = "meta-llama/Llama-3.2-3B-Instruct"
-LORA_MODEL = "minpeter/m-3b-v1-iteration-00-sf-xlam-09"
+MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
+LORA_MODEL = "minpeter/LoRA-Llama-3.2-1B-tool-vllm-ci"
 
 SERVER_ARGS = [
     "--enforce-eager",
