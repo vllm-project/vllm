@@ -49,6 +49,7 @@ class EngineCoreRequest(
 
     request_id: str
     prompt_token_ids: list[int]
+    token_type_ids: Optional[list[int]]
     mm_inputs: Optional[Sequence[Optional[MultiModalKwargs]]]
     mm_hashes: Optional[list[str]]
     mm_placeholders: Optional[list[PlaceholderRange]]

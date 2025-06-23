@@ -22,7 +22,7 @@ from vllm.transformers_utils.config import (
     get_cross_encoder_activation_function)
 
 from .bert_with_rope import BertWithRope, JinaRobertaModel
-from .interfaces import SupportsCrossEncoding, SupportsV0Only
+from .interfaces import SupportsCrossEncoding
 
 
 class RobertaEmbedding(nn.Module):
@@ -52,12 +52,18 @@ class RobertaEmbedding(nn.Module):
     def forward(
         self,
         input_ids: torch.Tensor,
-        seq_lens: torch.Tensor,
         position_ids: torch.Tensor,
         token_type_ids: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+
         input_shape = input_ids.size()
         inputs_embeds = self.word_embeddings(input_ids)
+
+        zero_pos = torch.where(position_ids == 0)[0]
+        end_pos = torch.cat((zero_pos[1:],
+                             torch.tensor([position_ids.shape[0]],
+                                          device=zero_pos.device)))
+        seq_lens = end_pos - zero_pos
 
         # Replace position ids because in RoBERTa models
         # they have to start at padding_idx + 1 and ignore
@@ -65,28 +71,17 @@ class RobertaEmbedding(nn.Module):
         # References:
         # - https://github.com/huggingface/transformers/blob/a3d69a8994d673899608a7c17fbf4f953f50474e/src/transformers/models/roberta/modeling_roberta.py#L133
         # - https://github.com/huggingface/transformers/blob/a3d69a8994d673899608a7c17fbf4f953f50474e/src/transformers/models/roberta/modeling_roberta.py#L1669
-        pos_list = []
-        token_list = []
-        offset = 0
-        for seq_len in seq_lens:
-            pos_list.append(position_ids[offset:offset + seq_len])
-            token_list.append(input_ids[offset:offset + seq_len])
-            offset += seq_len
+        token_list = torch.split(input_ids, seq_lens.tolist())
 
-        new_pos_list = []
-        for positions, tokens in zip(pos_list, token_list):
-            # Verify assumption that incoming position are
-            # always a sequence from 0 to N.
-            expected_pos = torch.arange(positions.size()[0],
-                                        dtype=torch.long,
-                                        device=inputs_embeds.device)
-            assert torch.equal(positions, expected_pos)
-            new_pos_list.append(
+        pos_list = []
+        for tokens in token_list:
+            pos_list.append(
                 create_position_ids_from_input_ids(tokens, self.padding_idx))
-        position_ids = torch.cat(new_pos_list)
+
+        corrected_positions = torch.cat(pos_list)
 
         # Position embeddings.
-        position_embeddings = self.position_embeddings(position_ids)
+        position_embeddings = self.position_embeddings(corrected_positions)
         if token_type_ids is None:
             token_type_ids = torch.zeros(input_shape,
                                          dtype=torch.long,
@@ -150,8 +145,7 @@ class RobertaEmbeddingModel(BertEmbeddingModel):
         assert len(loaded), "Unable to load RobertaEmbeddingModel"
 
 
-class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding,
-                                       SupportsV0Only):
+class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding):
     """A model that uses Roberta to provide embedding functionalities.
 
    This class encapsulates the BertModel and provides an interface for

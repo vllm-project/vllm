@@ -38,19 +38,13 @@ def v1(run_with_both_engines):
                      marks=[pytest.mark.skip_v0, pytest.mark.cpu_model]),
         # [Encoder-only]
         pytest.param("BAAI/bge-base-en-v1.5",
-                     marks=[
-                         pytest.mark.core_model, pytest.mark.cpu_model,
-                         pytest.mark.skip_v1
-                     ]),
-        pytest.param("sentence-transformers/all-MiniLM-L12-v2",
-                     marks=[pytest.mark.skip_v1]),
-        pytest.param("intfloat/multilingual-e5-small",
-                     marks=[pytest.mark.skip_v1]),
+                     marks=[pytest.mark.core_model, pytest.mark.cpu_model]),
+        pytest.param("sentence-transformers/all-MiniLM-L12-v2"),
+        pytest.param("intfloat/multilingual-e5-small"),
         pytest.param("Alibaba-NLP/gte-Qwen2-1.5B-instruct",
-                     marks=[pytest.mark.skip_v1]),
+                     marks=[pytest.mark.skip_v0]),
         # [Cross-Encoder]
-        pytest.param("sentence-transformers/stsb-roberta-base-v2",
-                     marks=[pytest.mark.skip_v1]),
+        pytest.param("sentence-transformers/stsb-roberta-base-v2"),
     ],
 )
 def test_models(

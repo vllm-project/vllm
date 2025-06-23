@@ -24,6 +24,7 @@ class Request:
         self,
         request_id: str,
         prompt_token_ids: list[int],
+        token_type_ids: Optional[list[int]],
         multi_modal_inputs: Optional[list[MultiModalKwargs]],
         multi_modal_hashes: Optional[list[str]],
         multi_modal_placeholders: Optional[list[PlaceholderRange]],
@@ -74,6 +75,7 @@ class Request:
                 "sampling_params and pooling_params can't both be unset")
 
         self.prompt_token_ids = prompt_token_ids
+        self.token_type_ids = token_type_ids
         self.num_prompt_tokens = len(self.prompt_token_ids)
         self._output_token_ids: list[int] = []
         self._all_token_ids: list[int] = self.prompt_token_ids.copy()
@@ -118,6 +120,7 @@ class Request:
             request_id=request.request_id,
             client_index=request.client_index,
             prompt_token_ids=request.prompt_token_ids,
+            token_type_ids=request.token_type_ids,
             multi_modal_inputs=request.mm_inputs,
             multi_modal_hashes=request.mm_hashes,
             multi_modal_placeholders=request.mm_placeholders,

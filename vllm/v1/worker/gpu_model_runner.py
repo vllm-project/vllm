@@ -6,7 +6,7 @@ import gc
 import time
 import weakref
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any, Optional, Union
+from typing import TYPE_CHECKING, Any, Optional, Union, cast
 
 import numpy as np
 import torch
@@ -237,7 +237,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.slot_mapping = torch.zeros(self.max_num_tokens,
                                         dtype=torch.int64,
                                         device=self.device)
-
+        self.token_type_ids = None
         # None in the first PP rank. The rest are set after load_model.
         self.intermediate_tensors: Optional[IntermediateTensors] = None
 
@@ -304,6 +304,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # means this layer will perform attention using the keys and values
         # from the KV cache of `shared_kv_cache_layers[layer_name]`.
         self.shared_kv_cache_layers: dict[str, str] = {}
+
+    def get_token_type_ids(self) -> Optional[torch.Tensor]:
+        if self.token_type_ids is None:
+            self.token_type_ids = torch.zeros(self.max_num_tokens,
+                                              dtype=torch.int8,
+                                              device=self.device)
+        return self.token_type_ids
 
     def _may_reorder_batch(self, scheduler_output: "SchedulerOutput") -> bool:
         """
@@ -408,6 +415,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.requests[req_id] = CachedRequestState(
                 req_id=req_id,
                 prompt_token_ids=new_req_data.prompt_token_ids,
+                token_type_ids=new_req_data.token_type_ids,
                 mm_inputs=new_req_data.mm_inputs,
                 mm_positions=new_req_data.mm_positions,
                 sampling_params=sampling_params,
@@ -627,6 +635,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                            0,
                            torch.from_numpy(token_indices),
                            out=self.input_ids_cpu[:total_num_scheduled_tokens])
+        if self.input_batch.token_type_ids_cpu_tensor is not None:
+            token_type_ids = torch.index_select(
+                self.input_batch.token_type_ids_cpu_tensor.flatten(), 0,
+                torch.from_numpy(token_indices))
+            # Copy the tensors to the GPU.
+            self.get_token_type_ids()[:total_num_scheduled_tokens]\
+                .copy_(token_type_ids, non_blocking=True)
 
         # Calculate the slot mapping for each KV cache group.
         for kv_cache_group_id, kv_cache_group_spec in enumerate(
@@ -1299,11 +1314,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         else:
             mm_embeds = []
 
+        has_token_types = self.token_type_ids is not None
+        model_kwargs = {}
+
         if self.is_multimodal_model and get_pp_group().is_first_rank:
             # NOTE(woosuk): To unify token ids and soft tokens (vision
             # embeddings), we always use embeddings (rather than token ids)
             # as input to the multimodal model, even when the input is text.
             input_ids = self.input_ids[:num_scheduled_tokens]
+            if has_token_types:
+                model_kwargs["token_type_ids"] = cast(
+                    torch.Tensor, self.token_type_ids)[:num_scheduled_tokens]
             if mm_embeds:
                 inputs_embeds = self.model.get_input_embeddings(
                     input_ids, mm_embeds)
@@ -1319,6 +1340,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # multimodal models, it is not desirable for performance since
             # then the embedding layer is not included in the CUDA graph.
             input_ids = self.input_ids[:num_input_tokens]
+            if has_token_types:
+                model_kwargs["token_type_ids"] = cast(
+                    torch.Tensor, self.token_type_ids)[:num_input_tokens]
             inputs_embeds = None
         if self.uses_mrope:
             positions = self.mrope_positions[:, :num_input_tokens]
@@ -1352,6 +1376,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 positions=positions,
                 intermediate_tensors=intermediate_tensors,
                 inputs_embeds=inputs_embeds,
+                **model_kwargs,
             )
 
             self.maybe_wait_for_kv_save()
@@ -1907,7 +1932,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         attn_metadata: Optional[dict[str, Any]] = None
         if capture_attn_cudagraph:
-            attn_metadata = {}
 
             query_start_loc = self.query_start_loc[:num_reqs + 1]
             # Make sure max_model_len is used at the graph capture time.
@@ -1925,6 +1949,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 max_query_len=num_tokens,
             )
 
+            attn_metadata = {}
             for kv_cache_group_id, kv_cache_group_spec in enumerate(
                     self.kv_cache_config.kv_cache_groups):
 
@@ -1972,6 +1997,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     intermediate_tensors=intermediate_tensors,
                     inputs_embeds=inputs_embeds,
                 )
+
             if self.use_aux_hidden_state_outputs:
                 hidden_states, _ = outputs
             else:
@@ -2482,7 +2508,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 continue
 
             # TODO: Support other attention modules, e.g., cross-attention
-            if attn_module.attn_type == AttentionType.DECODER:
+            # encoder only can also benefit from KV cache for prefix caching
+            if attn_module.attn_type in (AttentionType.DECODER,
+                                         AttentionType.ENCODER_ONLY):
                 if attn_module.sliding_window is not None:
                     kv_cache_spec[layer_name] = SlidingWindowSpec(
                         block_size=block_size,
@@ -2490,17 +2518,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         head_size=attn_module.head_size,
                         dtype=self.kv_cache_dtype,
                         sliding_window=attn_module.sliding_window,
-                        use_mla=use_mla)
+                        use_mla=use_mla,
+                        attn_type=str(attn_module.attn_type))
                 else:
                     kv_cache_spec[layer_name] = FullAttentionSpec(
                         block_size=block_size,
                         num_kv_heads=attn_module.num_kv_heads,
                         head_size=attn_module.head_size,
                         dtype=self.kv_cache_dtype,
-                        use_mla=use_mla)
-            elif attn_module.attn_type in (AttentionType.ENCODER,
-                                           AttentionType.ENCODER_ONLY):
-                # encoder-only attention does not need KV cache.
+                        use_mla=use_mla,
+                        attn_type=str(attn_module.attn_type))
+            elif attn_module.attn_type == AttentionType.ENCODER:
+                # encoder attention does not need KV cache.
                 continue
             elif attn_module.attn_type == AttentionType.ENCODER_DECODER:
                 raise NotImplementedError
