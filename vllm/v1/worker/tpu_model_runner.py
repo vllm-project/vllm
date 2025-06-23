@@ -37,8 +37,8 @@ from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.kv_cache_interface import (AttentionSpec, FullAttentionSpec,
                                         KVCacheConfig, KVCacheSpec,
                                         SlidingWindowSpec)
-from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
-                             ModelRunnerOutput)
+from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsLists,
+                             LogprobsTensors, ModelRunnerOutput)
 from vllm.v1.sample.tpu.metadata import TPUSupportedSamplingMetadata
 from vllm.v1.sample.tpu.sampler import Sampler as TPUSampler
 from vllm.v1.utils import bind_kv_cache
@@ -900,8 +900,8 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         # Prepare inputs, the requests might be splitted into multiple
         # executions, combine the result of each execution.
         start_index = 0
-        combined_selected_tokens = []
-        combined_logprobs = []
+        combined_selected_tokens: list[torch.Tensor] = []
+        combined_logprobs: list[LogprobsLists] = []
         while start_index < self.input_batch.num_reqs:
             attn_metadata, logits_indices, padded_num_reqs, num_reqs,\
                 end_index = self._prepare_inputs(scheduler_output, start_index)
@@ -943,20 +943,30 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             selected_token_ids = selected_token_ids.cpu()[:num_reqs]
 
             combined_selected_tokens.append(selected_token_ids)
-            combined_logprobs.append(logprobs)
+            if tpu_sampling_metadata.logprobs:
+                combined_logprobs.append(logprobs.tolists())
 
             start_index = end_index
 
         selected_token_ids = torch.cat(combined_selected_tokens, dim=0)
         if tpu_sampling_metadata.logprobs:
-            logprobs = LogprobsTensors(
-                torch.cat([lp.logprobs for lp in combined_logprobs], dim=0),
-                torch.cat([lp.logprob_token_ids for lp in combined_logprobs],
-                          dim=0),
-                torch.cat(
-                    [lp.selected_token_ranks for lp in combined_logprobs],
-                    dim=0))
-            logprobs_lists = logprobs.tolist()
+
+            def concat_lists(input_lists):
+                result = []
+                for input_list in input_lists:
+                    result.extend(input_list)
+                return result
+
+            logprobs_lists = LogprobsLists(logprob_token_ids=concat_lists(
+                [lp.logprob_token_ids for lp in combined_logprobs]),
+                                           logprobs=concat_lists([
+                                               lp.logprobs
+                                               for lp in combined_logprobs
+                                           ]),
+                                           sampled_token_ranks=concat_lists([
+                                               lp.sampled_token_ranks
+                                               for lp in combined_logprobs
+                                           ]))
         else:
             logprobs_lists = None
 
