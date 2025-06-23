@@ -6,6 +6,7 @@ import pytest
 from vllm.attention.layer import Attention
 from vllm.config import (CacheConfig, ModelConfig, SchedulerConfig, VllmConfig,
                          set_current_vllm_config)
+from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.utils import GiB_bytes
 from vllm.v1.core.kv_cache_utils import (estimate_max_model_len,
@@ -71,6 +72,7 @@ def _schedule_new_request(*req_ids: str) -> SchedulerOutput:
                 mm_hashes=[],
                 mm_positions=[],
                 sampling_params=SamplingParams(),
+                pooling_params=PoolingParams(),
                 block_ids=([0], ),  # block_ids should be tuple[list[int]]
                 num_computed_tokens=0,
                 lora_request=None,
