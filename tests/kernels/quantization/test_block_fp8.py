@@ -18,6 +18,7 @@ from vllm.model_executor.layers.fused_moe.fused_moe import (
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_align_block_size)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    native_per_token_group_quant_fp8, per_block_cast_to_fp8,
     per_token_group_quant_fp8, w8a8_block_fp8_matmul)
 from vllm.platforms import current_platform
 
@@ -55,31 +56,6 @@ E = [2, 8, 16, 24]  # [128, 256]
 TOP_KS = [1, 2, 6]
 OUT_DTYPES = [torch.bfloat16]  # [torch.float32, torch.half, torch.bfloat16]
 SEEDS = [0]
-
-
-def native_per_token_group_quant_fp8(x,
-                                     group_size,
-                                     eps=1e-10,
-                                     dtype=torch.float8_e4m3fn):
-    """Function to perform per-token-group quantization on an input tensor
-    `x` using native torch."""
-    assert x.shape[-1] % group_size == 0, ("the last dimension of `x` cannot "
-                                           "be divisible by `group_size`")
-    assert x.is_contiguous(), "`x` is not contiguous"
-
-    finfo = torch.finfo(dtype)
-    fp8_min = finfo.min
-    fp8_max = finfo.max
-
-    x_ = x.reshape(x.numel() // group_size, group_size)
-    amax = x_.abs().max(dim=-1,
-                        keepdim=True)[0].clamp(min=eps).to(torch.float32)
-    x_s = amax / fp8_max
-    x_q = (x_ / x_s).clamp(min=fp8_min, max=fp8_max).to(dtype)
-    x_q = x_q.reshape(x.shape)
-    x_s = x_s.reshape(x.shape[:-1] + (x.shape[-1] // group_size, ))
-
-    return x_q, x_s
 
 
 def torch_w8a8_block_fp8_moe(a, w1, w2, w1_s, w2_s, score, topk, block_shape):
@@ -261,25 +237,6 @@ def test_w8a8_block_fp8_fused_moe(M, N, K, E, topk, block_size, dtype, seed):
         torch.abs(m_out.to(torch.float32) - ref_out.to(torch.float32))) /
                 torch.mean(torch.abs(ref_out.to(torch.float32))))
     assert rel_diff < 0.03
-
-
-def per_block_cast_to_fp8(
-        x: torch.Tensor,
-        block_size_n: int = 128) -> tuple[torch.Tensor, torch.Tensor]:
-    assert x.dim() == 2
-    m, n = x.shape
-    x_padded = torch.zeros(
-        (deep_gemm.ceil_div(m, 128) * 128,
-         deep_gemm.ceil_div(n, block_size_n) * block_size_n),
-        dtype=x.dtype,
-        device=x.device)
-    x_padded[:m, :n] = x
-    x_view = x_padded.view(-1, 128, x_padded.size(1) // 128, block_size_n)
-    x_amax = x_view.abs().float().amax(dim=(1, 3), keepdim=True).clamp(1e-4)
-    x_scaled = (x_view * (448.0 / x_amax)).to(torch.float8_e4m3fn)
-    x_scaled_sub = x_scaled.view_as(x_padded)[:m, :n].contiguous()
-    scales = (x_amax / 448.0).view(x_view.size(0), x_view.size(2))
-    return x_scaled_sub, scales
 
 
 @pytest.mark.parametrize(

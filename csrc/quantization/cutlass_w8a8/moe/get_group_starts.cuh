@@ -8,8 +8,6 @@
 #include "cutlass/bfloat16.h"
 #include "cutlass/float8.h"
 
-#include <iostream>
-
 template <typename ElementAB, typename ElementC, typename ElementAccumulator>
 __global__ void get_group_gemm_starts(
     int32_t* expert_offsets, ElementAB** a_offsets, ElementAB** b_offsets,
@@ -76,37 +74,37 @@ __global__ void __get_group_gemm_starts_blockscale_fp8(
   b_scales_offsets[expert_id] =
       b_scales_base_as_int + n_scale * expert_id * k_scale;
 
-  layout_sfa_base_as_int[expert_id] = ScaleConfig::tile_atom_to_shape_SFA(
-    cute::make_shape(
-      static_cast<int>(m), static_cast<int>(n), static_cast<int>(k), 1));
-  layout_sfb_base_as_int[expert_id] = ScaleConfig::tile_atom_to_shape_SFB(
-     cute::make_shape(
-      static_cast<int>(m), static_cast<int>(n), static_cast<int>(k), 1));
+  layout_sfa_base_as_int[expert_id] =
+      ScaleConfig::tile_atom_to_shape_SFA(cute::make_shape(
+          static_cast<int>(m), static_cast<int>(n), static_cast<int>(k), 1));
+  layout_sfb_base_as_int[expert_id] =
+      ScaleConfig::tile_atom_to_shape_SFB(cute::make_shape(
+          static_cast<int>(m), static_cast<int>(n), static_cast<int>(k), 1));
 }
 
-#define __CALL_GET_STARTS_KERNEL_BLOCKSCALE_FP8(                             \
-    TENSOR_C_TYPE, C_TYPE, LayoutSFA, LayoutSFB, ScaleConfig)                \
-  else if (out_tensors.dtype() == TENSOR_C_TYPE) {                           \
-    __get_group_gemm_starts_blockscale_fp8<cutlass::float_e4m3_t, C_TYPE, float, \
-                                       float, LayoutSFA, LayoutSFB,          \
-                                       ScaleConfig>                          \
-        <<<1, num_experts, 0, stream>>>(                                     \
-            static_cast<int32_t*>(expert_offsets.data_ptr()),                \
-            static_cast<int32_t*>(problem_sizes.data_ptr()),                 \
-            static_cast<cutlass::float_e4m3_t**>(a_ptrs.data_ptr()),         \
-            static_cast<cutlass::float_e4m3_t**>(b_ptrs.data_ptr()),         \
-            static_cast<C_TYPE**>(out_ptrs.data_ptr()),                      \
-            static_cast<float**>(a_scales_ptrs.data_ptr()),                  \
-            static_cast<float**>(b_scales_ptrs.data_ptr()),                  \
-            static_cast<cutlass::float_e4m3_t*>(a_tensors.data_ptr()),       \
-            static_cast<cutlass::float_e4m3_t*>(b_tensors.data_ptr()),       \
-            static_cast<C_TYPE*>(out_tensors.data_ptr()),                    \
-            static_cast<float*>(a_scales.data_ptr()),                        \
-            static_cast<float*>(b_scales.data_ptr()),                        \
-            static_cast<LayoutSFA*>(layout_SFA.data_ptr()),             \
-            static_cast<LayoutSFB*>(layout_SFB.data_ptr()),             \
-            out_tensors.size(1), a_tensors.size(1), n_scale_size,            \
-            k_scale_size, per_act_block);                                    \
+#define __CALL_GET_STARTS_KERNEL_BLOCKSCALE_FP8(                               \
+    TENSOR_C_TYPE, C_TYPE, LayoutSFA, LayoutSFB, ScaleConfig)                  \
+  else if (out_tensors.dtype() == TENSOR_C_TYPE) {                             \
+    __get_group_gemm_starts_blockscale_fp8<cutlass::float_e4m3_t, C_TYPE,      \
+                                           float, float, LayoutSFA, LayoutSFB, \
+                                           ScaleConfig>                        \
+        <<<1, num_experts, 0, stream>>>(                                       \
+            static_cast<int32_t*>(expert_offsets.data_ptr()),                  \
+            static_cast<int32_t*>(problem_sizes.data_ptr()),                   \
+            static_cast<cutlass::float_e4m3_t**>(a_ptrs.data_ptr()),           \
+            static_cast<cutlass::float_e4m3_t**>(b_ptrs.data_ptr()),           \
+            static_cast<C_TYPE**>(out_ptrs.data_ptr()),                        \
+            static_cast<float**>(a_scales_ptrs.data_ptr()),                    \
+            static_cast<float**>(b_scales_ptrs.data_ptr()),                    \
+            static_cast<cutlass::float_e4m3_t*>(a_tensors.data_ptr()),         \
+            static_cast<cutlass::float_e4m3_t*>(b_tensors.data_ptr()),         \
+            static_cast<C_TYPE*>(out_tensors.data_ptr()),                      \
+            static_cast<float*>(a_scales.data_ptr()),                          \
+            static_cast<float*>(b_scales.data_ptr()),                          \
+            static_cast<LayoutSFA*>(layout_SFA.data_ptr()),                    \
+            static_cast<LayoutSFB*>(layout_SFB.data_ptr()),                    \
+            out_tensors.size(1), a_tensors.size(1), n_scale_size,              \
+            k_scale_size, per_act_block);                                      \
   }
 
 namespace {
@@ -151,15 +149,15 @@ void run_get_group_gemm_starts_blockscale_fp8(
   int num_experts = (int)expert_offsets.size(0);
   auto stream = at::cuda::getCurrentCUDAStream(a_tensors.device().index());
 
-    if (false) {
-    }
-    __CALL_GET_STARTS_KERNEL_BLOCKSCALE_FP8(torch::kBFloat16,
-                cutlass::bfloat16_t, LayoutSFA, LayoutSFB, ScaleConfig)
-    __CALL_GET_STARTS_KERNEL_BLOCKSCALE_FP8(torch::kFloat16, half,
-                LayoutSFA, LayoutSFB, ScaleConfig)
-    else {
-        TORCH_CHECK(false, "Invalid output type (must be float16 or bfloat16)");
-    }
+  if (false) {
+  }
+  __CALL_GET_STARTS_KERNEL_BLOCKSCALE_FP8(torch::kBFloat16, cutlass::bfloat16_t,
+                                          LayoutSFA, LayoutSFB, ScaleConfig)
+  __CALL_GET_STARTS_KERNEL_BLOCKSCALE_FP8(torch::kFloat16, half, LayoutSFA,
+                                          LayoutSFB, ScaleConfig)
+  else {
+    TORCH_CHECK(false, "Invalid output type (must be float16 or bfloat16)");
+  }
 }
 
 }  // namespace

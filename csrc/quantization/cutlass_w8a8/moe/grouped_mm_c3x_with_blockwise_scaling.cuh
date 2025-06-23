@@ -83,8 +83,8 @@ struct cutlass_3x_blockwise_group_gemm {
   using CollectiveMainloop =
       typename cutlass::gemm::collective::CollectiveBuilder<
           ArchTag, OperatorClass, ElementAB, cute::tuple<LayoutA*, LayoutSFA*>,
-          AlignmentAB, ElementAB, cute::tuple<LayoutB*, LayoutSFB*>, AlignmentAB,
-          ElementAccumulator, TileShape, ClusterShape, Stages,
+          AlignmentAB, ElementAB, cute::tuple<LayoutB*, LayoutSFB*>,
+          AlignmentAB, ElementAccumulator, TileShape, ClusterShape, Stages,
           KernelSchedule>::CollectiveOp;
 
   using KernelType = enable_sm90_only<cutlass::gemm::kernel::GemmUniversal<
@@ -154,8 +154,6 @@ void cutlass_blockwise_group_gemm_caller(
       static_cast<const ElementScale**>(b_scales_ptrs.data_ptr()),
       reinterpret_cast<LayoutSFB*>(layout_SFB.data_ptr())};
 
-  // Currently, we are only able to do broadcast on either all or none
-  // a_scales and on either all or none b_scales
   typename GemmKernel::EpilogueArguments epilogue_args{
       {},
       nullptr,
@@ -180,4 +178,4 @@ void cutlass_blockwise_group_gemm_caller(
   CUTLASS_CHECK(status);
 }
 
-}  // namespace
+}  // namespace vllm::cutlass_moe::blockwise_scaling

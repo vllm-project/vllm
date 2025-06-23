@@ -644,6 +644,7 @@ def test_cutlass_fp8_group_gemm(num_experts: int, per_act_token: bool,
         print("*")
         torch.testing.assert_close(c, baseline, rtol=1e-2, atol=5e-4)
 
+
 @pytest.mark.parametrize("num_experts", [8, 40])
 @pytest.mark.parametrize("per_act_block", [True, False])
 @pytest.mark.skipif(
@@ -710,15 +711,13 @@ def test_cutlass_fp8_blockwise_group_gemm(num_experts: int,
                               dtype=torch.float32)
         b_scales_tensors.append(scale_b)
 
-        ground_scale_b = scale_b.repeat_interleave(block_size_k, dim=0).repeat_interleave(
-            block_size_n, dim=1)
+        ground_scale_b = scale_b.repeat_interleave(
+            block_size_k, dim=0).repeat_interleave(block_size_n, dim=1)
 
         if per_act_block:
             scale_a = torch.randn((m_a_scales, 1),
                                   device=device,
                                   dtype=torch.float32)
-            # for mm in range(m_a_scales):
-            #     scale_a[mm] = 2 * g + mm + 1
             ground_scale_a = scale_a.clone()
             scale_a = scale_a.repeat_interleave(k_b_scales, dim=1)
             a_scales_tensors.append(scale_a)
@@ -726,8 +725,6 @@ def test_cutlass_fp8_blockwise_group_gemm(num_experts: int,
             ground_scale_a = one_scale_a.clone()
             scale_a = one_scale_a.repeat_interleave(
                 m_g, dim=0).repeat_interleave(k_b_scales, dim=1)
-
-        # print("ground_scale_a:", ground_scale_a)
 
         # Compute baseline result for this group
         baseline_g = baseline_scaled_mm(a_g, b_g, ground_scale_a,
@@ -750,22 +747,20 @@ def test_cutlass_fp8_blockwise_group_gemm(num_experts: int,
     if per_act_block:
         a_scales_tensors_stacked = torch.empty(
             (k_b_scales * expert_offsets[num_experts]),
-            # (expert_offsets[num_experts], k_b_scales),
             device=device,
             dtype=torch.float32)
         for g in range(num_experts):
-            # a_scales_tensors_stacked[:,
-            #     expert_offsets[g]:expert_offsets[g + 1]] = a_scales_tensors[g].t()
-            a_scales_tensors_stacked[
-                    expert_offsets[g]*k_b_scales:expert_offsets[g + 1]*k_b_scales] = a_scales_tensors[g].t().flatten()
+            a_scales_tensors_stacked[expert_offsets[g] *
+                                     k_b_scales:expert_offsets[g + 1] *
+                                     k_b_scales] = a_scales_tensors[g].t(
+                                     ).flatten()
     else:
         a_scales_tensors_stacked = scale_a.t().repeat_interleave(g, dim=0)
 
-    # for g in range(num_experts): transpose a_scales_tensors_stacked
-
-    b_scales_tensors_stacked = torch.empty((num_experts, k_b_scales, n_b_scales),
-                                           device=device,
-                                           dtype=torch.float32)
+    b_scales_tensors_stacked = torch.empty(
+        (num_experts, k_b_scales, n_b_scales),
+        device=device,
+        dtype=torch.float32)
     for g in range(num_experts):
         b_scales_tensors_stacked[g] = b_scales_tensors[g]
 
@@ -783,17 +778,14 @@ def test_cutlass_fp8_blockwise_group_gemm(num_experts: int,
                            dtype=torch.int64)
 
     ops.cutlass_moe_blockwise_mm(out_tensors_stacked, a_tensors_stacked,
-                       b_tensors_stacked, a_scales_tensors_stacked.contiguous(),
-                       b_scales_tensors_stacked, expert_offsets[:-1],
-                       problem_sizes, ab_strides, ab_strides, c_strides,
-                       per_act_block)
+                                 b_tensors_stacked,
+                                 a_scales_tensors_stacked.contiguous(),
+                                 b_scales_tensors_stacked, expert_offsets[:-1],
+                                 problem_sizes, ab_strides, ab_strides,
+                                 c_strides, per_act_block)
 
     # Validate each group's result against the baseline
     for g in range(num_experts):
         baseline = baseline_tensors[g]
         c = out_tensors_stacked[expert_offsets[g]:expert_offsets[g + 1]]
-        print("results:")
-        print("baseline:", baseline)
-        print("c:", c)
-        print("*")
         torch.testing.assert_close(c, baseline, rtol=1e-2, atol=5e-4)
