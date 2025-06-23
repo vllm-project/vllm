@@ -254,7 +254,8 @@ class EplbState:
     def step(self,
              model: MixtureOfExperts,
              is_dummy: bool = False,
-             is_profile: bool = False) -> tuple[float, float, float]:
+             is_profile: bool = False,
+             log_stats: bool = False) -> None:
         """
         Step the EPLB state.
 
@@ -266,10 +267,10 @@ class EplbState:
             is_profile (bool): If `True`, perform a dummy rearrangement
               with maximum communication cost. This is used in `profile_run`
               to reserve enough memory for the communication buffer.
+            log_stats (bool): If `True`, log the expert load metrics.
 
-        Returns:
-            (avg_tokens, max_tokens, balancedness) (tuple[float, float, float]):
-            The returned metrics are all summed up across layers.
+        # Stats
+            The metrics are all summed up across layers.
             - `avg_tokens`: The average load across ranks.
             - `max_tokens`: The maximum load across ranks.
             - `balancedness`: The ratio of average load to maximum load.
@@ -277,34 +278,42 @@ class EplbState:
 
         if is_profile:
             self.rearrange(model, is_profile=True)
-            return 0.0, 0.0, 0.0
+            return
 
         if is_dummy:
             # Do not record load metrics for dummy steps
             self.expert_load_pass.zero_()
-        # `num_tokens`: (num_moe_layers,)
-        num_tokens = self.expert_load_pass.sum(dim=-1)
 
-        # Collect load metrics from all ranks
-        ep_group = get_ep_group().device_group
-        num_tokens_list = [
-            torch.empty_like(num_tokens) for _ in range(ep_group.size())
-        ]
-        all_gather(num_tokens_list, num_tokens, group=ep_group)
-        # Stack to get (num_ranks, num_moe_layers)
-        num_tokens_per_rank = torch.stack(num_tokens_list).float()
+        if log_stats:
+            # `num_tokens`: (num_moe_layers,)
+            num_tokens = self.expert_load_pass.sum(dim=-1)
 
-        # Compute balancedness ratio:
-        # for each layer:
-        #   (mean load across ranks) / (max load across ranks)
-        avg_tokens_tensor = num_tokens_per_rank.mean(dim=0).sum(dim=0)
-        max_tokens_tensor = num_tokens_per_rank.max(dim=0).values.sum(dim=0)
+            # Collect load metrics from all ranks
+            ep_group = get_ep_group().device_group
+            num_tokens_list = [
+                torch.empty_like(num_tokens) for _ in range(ep_group.size())
+            ]
+            all_gather(num_tokens_list, num_tokens, group=ep_group)
+            # Stack to get (num_ranks, num_moe_layers)
+            num_tokens_per_rank = torch.stack(num_tokens_list).float()
 
-        # Just to make type checker happy
-        tokens_tensors: list[float] = torch.stack(
-            [avg_tokens_tensor, max_tokens_tensor]).tolist()
-        avg_tokens, max_tokens = tokens_tensors
-        balancedness = avg_tokens / max_tokens if max_tokens > 0 else 0.0
+            # Compute balancedness ratio:
+            # for each layer:
+            #   (mean load across ranks) / (max load across ranks)
+            avg_tokens_tensor = num_tokens_per_rank.mean(dim=0).sum(dim=0)
+            max_tokens_tensor = num_tokens_per_rank.max(dim=0).values.sum(
+                dim=0)
+
+            # Just to make type checker happy
+            tokens_tensors: list[float] = torch.stack(
+                [avg_tokens_tensor, max_tokens_tensor]).tolist()
+            avg_tokens, max_tokens = tokens_tensors
+            balancedness = avg_tokens / max_tokens if max_tokens > 0 else 0.0
+
+            if ep_group.rank() == 0:
+                logger.info(
+                    "EPLB step: avg_tokens=%.2f, max_tokens=%d, "
+                    "balancedness=%.4f", avg_tokens, max_tokens, balancedness)
 
         # Update the expert load sliding window
         if not is_dummy:
@@ -324,8 +333,6 @@ class EplbState:
                 >= self.expert_rearrangement_step_interval):
             self.expert_rearrangement_step = 0
             self.rearrange(model)
-
-        return avg_tokens, max_tokens, balancedness
 
     def rearrange(self,
                   model: MixtureOfExperts,

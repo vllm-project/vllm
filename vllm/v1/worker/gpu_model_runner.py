@@ -26,7 +26,7 @@ from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
 from vllm.distributed.parallel_state import (
-    get_ep_group, get_pp_group, get_tp_group, graph_capture,
+    get_pp_group, get_tp_group, graph_capture,
     prepare_communication_buffer_for_model)
 from vllm.forward_context import (DPMetadata, get_forward_context,
                                   set_forward_context)
@@ -1199,13 +1199,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         assert self.eplb_state is not None
         assert is_mixture_of_experts(self.model)
-        avg_tokens, max_tokens, balancedness = \
-            self.eplb_state.step(self.model, is_dummy, is_profile)
-
-        if get_ep_group().is_first_rank:
-            logger.debug(
-                "Model step: avg_tokens=%.2f, max_tokens=%d, "
-                "balancedness=%.4f", avg_tokens, max_tokens, balancedness)
+        self.eplb_state.step(
+            self.model,
+            is_dummy,
+            is_profile,
+            log_stats=self.parallel_config.eplb_log_balancedness,
+        )
 
     def get_dp_padding(self,
                        num_tokens: int) -> tuple[int, Optional[torch.Tensor]]:

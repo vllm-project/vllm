@@ -1779,6 +1779,11 @@ class ParallelConfig:
     Note that if this is greater than the EPLB window size, only the metrics
     of the last `eplb_window_size` steps will be used for rearranging experts.
     """
+    eplb_log_balancedness: bool = False
+    """
+    Log the balancedness each step of expert parallelism.
+    This is turned off by default since it will cause communication overhead.
+    """
 
     max_parallel_loading_workers: Optional[int] = None
     """Maximum number of parallel loading workers when loading model
