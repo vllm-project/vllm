@@ -68,7 +68,8 @@ class CustomAllreduce:
     _QR_SUPPORTED_WORLD_SIZES = [2, 4, 8]
     _QR_SUPPORTED_DTYPES = [torch.float16, torch.bfloat16]
 
-    # TODO: We should set a reasonable range for FP.
+    # The following data is based on kernel tests.
+    # In this order [FP, INT8, INT6, INT4].
     MB = 1024 * 1024
     _QR_MIN_SIZE = {
         (torch.float16, 2): [1 * MB, 2 * MB, 2 * MB, 1 * MB],
