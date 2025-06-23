@@ -717,6 +717,7 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
                                      SupportsPP):
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
     @classmethod
@@ -910,6 +911,12 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
             (".self_attn.qkv_proj", ".self_attn.q_proj", "q"),
             (".self_attn.qkv_proj", ".self_attn.k_proj", "k"),
             (".self_attn.qkv_proj", ".self_attn.v_proj", "v"),
+            # Shared expert gate_up_proj stacking
+            (".shared_expert.gate_up_proj", ".shared_expert.gate_proj", 0),
+            (".shared_expert.gate_up_proj", ".shared_expert.up_proj", 1),
+            # Feed forward gate_up_proj stacking (for non-MoE layers if any)
+            (".feed_forward.gate_up_proj", ".feed_forward.gate_proj", 0),
+            (".feed_forward.gate_up_proj", ".feed_forward.up_proj", 1),
         ]
         params_dict = dict(self.named_parameters())
         updated_params: set[str] = set()
@@ -929,11 +936,38 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
             language_model_weights = []
             other_weights = []
 
+            # Track scale parameters for debugging
+            checkpoint_scales = []
+            renamed_scales = []
+
             for name, weight in weights:
+                # Track scale parameters from checkpoint
+                if "scale" in name:
+                    checkpoint_scales.append(name)
+
                 # Apply renaming logic
                 if name.startswith("model."):
-                    # Rename model.* to language_model.model.*
-                    renamed = name.replace("model.", "language_model.model.", 1)
+                    # Handle expert scale parameters with flat naming
+                    if "feed_forward.experts." in name and ("_input_scale" in name or "_weight_scale" in name):
+                        # Expert scales in checkpoint are single values for all experts
+                        # e.g., "model.layers.0.feed_forward.experts.down_proj_input_scale"
+                        # should map to "language_model.model.layers.0.feed_forward.experts.w2_input_scale"
+
+                        renamed = name.replace("model.", "language_model.model.", 1)
+
+                        # Map checkpoint naming to vLLM's expected naming
+                        if "down_proj_input_scale" in renamed:
+                            renamed = renamed.replace("down_proj_input_scale", "w2_input_scale")
+                        elif "down_proj_weight_scale" in renamed:
+                            renamed = renamed.replace("down_proj_weight_scale", "w2_weight_scale")
+                        elif "gate_up_proj_input_scale" in renamed:
+                            renamed = renamed.replace("gate_up_proj_input_scale", "w13_input_scale")
+                        elif "gate_up_proj_weight_scale" in renamed:
+                            renamed = renamed.replace("gate_up_proj_weight_scale", "w13_weight_scale")
+                        # If none of the above patterns match, keep the renamed version as is
+                    else:
+                        # Standard model.* to language_model.model.* renaming
+                        renamed = name.replace("model.", "language_model.model.", 1)
                 elif name.startswith("lm_head.weight"):
                     # Rename lm_head.weight to language_model.lm_head.weight
                     renamed = name.replace("lm_head.weight", "language_model.lm_head.weight")
@@ -941,11 +975,44 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
                     # Keep other weights as is
                     renamed = name
 
+                # Track renamed scale parameters
+                if "scale" in renamed:
+                    renamed_scales.append(renamed)
+
                 # Separate into language_model and other weights
                 if renamed.startswith("language_model."):
                     language_model_weights.append((renamed, weight))
                 else:
                     other_weights.append((renamed, weight))
+
+            # Debug scale parameter mapping
+            print("=== SCALE PARAMETER MAPPING DEBUG ===")
+            print(f"Total scale parameters in checkpoint: {len(checkpoint_scales)}")
+            print(f"Total renamed scale parameters: {len(renamed_scales)}")
+
+            # Categorize scale parameters
+            self_attn_scales = [s for s in checkpoint_scales if "self_attn" in s]
+            expert_scales = [s for s in checkpoint_scales if "experts" in s and "shared_expert" not in s]
+            shared_expert_scales = [s for s in checkpoint_scales if "shared_expert" in s]
+            other_scales = [s for s in checkpoint_scales if s not in self_attn_scales + expert_scales + shared_expert_scales]
+
+            print(f"\nScale parameter categories from checkpoint:")
+            print(f"  Self-attention scales: {len(self_attn_scales)}")
+            print(f"  Expert scales: {len(expert_scales)}")
+            print(f"  Shared expert scales: {len(shared_expert_scales)}")
+            print(f"  Other scales: {len(other_scales)}")
+
+            if expert_scales:
+                print(f"\nFirst 5 expert scale parameters (original):")
+                for i, name in enumerate(expert_scales[:5]):
+                    print(f"  {i+1}. {name}")
+
+                print(f"\nFirst 5 expert scale parameters (renamed):")
+                expert_renamed = [s for s in renamed_scales if "experts" in s and "shared_expert" not in s]
+                for i, name in enumerate(expert_renamed[:5]):
+                    print(f"  {i+1}. {name}")
+
+            print("=== END SCALE DEBUG ===\n")
 
             return language_model_weights, other_weights
 
