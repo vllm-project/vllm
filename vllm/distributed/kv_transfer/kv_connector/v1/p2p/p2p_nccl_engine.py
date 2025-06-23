@@ -346,8 +346,7 @@ class P2pNcclEngine:
                         self.router_socket.send_multipart(
                             [remote_address, b"0"])
                         comm, rank = self.comms[remote_address.decode()]
-                        # self._recv(comm, tensor, rank ^ 1, self.recv_stream)
-                        ret = self.recv_with_timeout(remote_address, comm, tensor, rank ^ 1, self.nccl_timeout_s, self.recv_stream)
+                        ret = self.recv_with_timeout(remote_address.decode(), comm, tensor, rank ^ 1, self.nccl_timeout_s, self.recv_stream)
                         if ret == 0:
                             tensor_size = tensor.element_size() * tensor.numel()
                             if (self.buffer_size + tensor_size
@@ -563,25 +562,21 @@ class P2pNcclEngine:
 
     def _with_timeout(
             self,
-            remote_address,
             op_name: str,
+            remote_address,
             comm,
             func: Callable,
             tensor,
             peer_rank: int,
-            timeout=10,
+            timeout=DEFAULT_TIMEOUT_SECONDS,
             stream=None
     ) -> int:
         result_code = 2
-        if remote_address not in self.socks:
-            return result_code
-
         abort_triggered = threading.Event()
 
         def timeout_watcher():
             nonlocal result_code
             if not abort_triggered.wait(timeout):
-                logger.warning(f"[{time.strftime('%X')}] Timeout reached. Aborting comm.")
                 try:
                     self.nccl.ncclCommAbort(comm)
                 except Exception as e:
@@ -592,7 +587,6 @@ class P2pNcclEngine:
 
         try:
             func(comm, tensor, peer_rank, stream)
-            logger.info(f"[{time.strftime('%X')}] {op_name} finished successfully")
             result_code = 0
         except Exception as e:
             logger.error(f"{op_name} failed: {e}")
@@ -605,7 +599,6 @@ class P2pNcclEngine:
             self.comms.pop(remote_address, None)
             self.address_black_list[remote_address] = (time.time()
                                                        + self.nccl_timeout_s)
-
         return result_code
 
     def send_with_timeout(self, remote_address, comm, tensor: torch.Tensor, dst: int, timeout: float, stream=None):
