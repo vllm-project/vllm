@@ -21,7 +21,7 @@ for more details on this and other advanced features.
 
 You can quantize your own models by installing [GPTQModel](https://github.com/ModelCloud/GPTQModel) or picking one of the [5000+ models on Huggingface](https://huggingface.co/models?search=gptq).
 
-```console
+```bash
 pip install -U gptqmodel --no-build-isolation -v
 ```
 
@@ -60,7 +60,7 @@ Here is an example of how to quantize `meta-llama/Llama-3.2-1B-Instruct`:
 
 To run an GPTQModel quantized model with vLLM, you can use [DeepSeek-R1-Distill-Qwen-7B-gptqmodel-4bit-vortex-v2](https://huggingface.co/ModelCloud/DeepSeek-R1-Distill-Qwen-7B-gptqmodel-4bit-vortex-v2) with the following command:
 
-```console
+```bash
 python examples/offline_inference/llm_engine_example.py \
     --model ModelCloud/DeepSeek-R1-Distill-Qwen-7B-gptqmodel-4bit-vortex-v2
 ```
