@@ -81,10 +81,6 @@ class WorkerBase:
     ) -> Optional[List[SamplerOutput]]:
         raise NotImplementedError
 
-    def shutdown(self) -> None:
-        """Shutdown the worker."""
-        return
-
     def start_worker_execution_loop(self) -> None:
         """Execute model loop in parallel worker.
 

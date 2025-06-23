@@ -169,6 +169,8 @@ def get_type_hints(type_hint: TypeHint) -> set[TypeHint]:
 
     return type_hints
 
+def is_online_quantization(quantization: str) -> bool:
+    return quantization in ["inc"]
 
 @functools.lru_cache(maxsize=30)
 def _compute_kwargs(cls: ConfigType) -> dict[str, Any]:
@@ -973,7 +975,7 @@ class EngineArgs:
         return LoadConfig(
             load_format=self.load_format,
             download_dir=self.download_dir,
-            device="cpu" if self.quantization == "inc" else None,
+            device="cpu" if is_online_quantization(self.quantization) else None,
             model_loader_extra_config=self.model_loader_extra_config,
             ignore_patterns=self.ignore_patterns,
             use_tqdm_on_load=self.use_tqdm_on_load,

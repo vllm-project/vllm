@@ -47,7 +47,6 @@ class UniProcExecutor(ExecutorBase):
         self.collective_rpc("init_device")
         self.collective_rpc("load_model")
 
-        self.shutdown_worker = True
 
     def collective_rpc(self,
                        method: Union[str, Callable],
@@ -63,11 +62,6 @@ class UniProcExecutor(ExecutorBase):
         # UniProcExecutor will always be healthy as long as
         # it's running.
         return
-
-    def shutdown(self):
-        if getattr(self, 'shutdown_worker', False):
-            self.shutdown_worker = False
-            getattr(self.driver_worker, 'shutdown', lambda: None)()
 
 
 UniProcExecutorAsync = UniProcExecutor
@@ -126,7 +120,6 @@ class ExecutorWithExternalLauncher(UniProcExecutor):
         self.collective_rpc("init_device")
         self.collective_rpc("load_model")
 
-        self.shutdown_worker = True
 
     def determine_num_available_blocks(self) -> Tuple[int, int]:
         """
