@@ -547,7 +547,7 @@ class WorkerWrapperBase:
         Arguments are passed to the worker class constructor.
         """
         kwargs = all_kwargs[self.rpc_rank]
-        self.vllm_config: VllmConfig = kwargs.get("vllm_config")
+        self.vllm_config = kwargs.get("vllm_config")
         assert self.vllm_config is not None, (
             "vllm_config is required to initialize the worker")
 

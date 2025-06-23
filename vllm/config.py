@@ -453,41 +453,6 @@ class ModelConfig:
         assert_hashable(str_factors)
         return hashlib.sha256(str(factors).encode()).hexdigest()
 
-    def try_resolve_dtype_with_ray(self):
-        from vllm.executor.ray_utils import ray
-        from vllm.platforms import current_platform
-
-        device_key = current_platform.ray_device_key
-        if not device_key:
-            raise RuntimeError("current platform %s does not support ray.",
-                               current_platform.device_name)
-
-        gpu_ids = ray.get_runtime_context().get_accelerator_ids()
-
-        # There are other nodes with GPUs, but not this one
-        if len(gpu_ids) > 1 and gpu_ids[device_key] == 0:
-
-            @ray.remote(num_gpus=1)
-            def resolve_config_dtype() -> torch.dtype:
-                return _get_and_verify_dtype(
-                    self.model,
-                    self.hf_config,
-                    self.dtype,
-                    is_pooling_model=self.runner_type == "pooling",
-                    revision=self.revision,
-                )
-
-            return ray.get(resolve_config_dtype.remote())
-
-        # Try resolving dtype on the head node
-        return _get_and_verify_dtype(
-            self.model,
-            self.hf_config,
-            self.dtype,
-            is_pooling_model=self.runner_type == "pooling",
-            revision=self.revision,
-        )
-
     def __post_init__(self) -> None:
         # Set the default seed to 0 in V1.
         # NOTE(woosuk): In V0, we set the default seed to None because the
@@ -598,18 +563,13 @@ class ModelConfig:
 
         self.pooler_config = self._init_pooler_config()
 
-        from vllm.executor import ray_utils
-        if ray_utils.ray_is_available():
-            # Support multi-node setups where the head node does not have GPUs
-            self.dtype = self.try_resolve_dtype_with_ray()
-        else:
-            self.dtype = _get_and_verify_dtype(
-                self.model,
-                self.hf_config,
-                self.dtype,
-                is_pooling_model=self.runner_type == "pooling",
-                revision=self.revision,
-            )
+        self.dtype = _get_and_verify_dtype(
+            self.model,
+            self.hf_config,
+            self.dtype,
+            is_pooling_model=self.runner_type == "pooling",
+            revision=self.revision,
+        )
 
         # Workaround for Gemma 2 which uses interleaved sliding window
         # attention, but it's not specified in its config. TODO: remove this
@@ -4440,6 +4400,9 @@ class VllmConfig:
             This method should be called during initialization of a worker with
             access to accelerator hardware, if it exists.
         """
+        # Lazy import to ensure current_platform is fully initialized on use
+        from vllm.platforms import current_platform
+
         # Resolve model config dtype
         model_config = self.model_config
 
@@ -4461,8 +4424,6 @@ class VllmConfig:
         # Resolve quantization config against model config
         quant_config = self.quant_config
         if quant_config:
-            from vllm.platforms import current_platform
-
             capability_tuple = current_platform.get_device_capability()
             if capability_tuple is not None:
                 capability = capability_tuple.to_int()
