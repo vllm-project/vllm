@@ -15,7 +15,7 @@ from tqdm import tqdm
 
 from vllm.engine.arg_utils import AsyncEngineArgs, optional_type
 from vllm.engine.async_llm_engine import AsyncLLMEngine
-from vllm.entrypoints.logger import RequestLogger, logger
+from vllm.entrypoints.logger import RequestLogger
 # yapf: disable
 from vllm.entrypoints.openai.protocol import (BatchRequestInput,
                                               BatchRequestOutput,
@@ -29,9 +29,12 @@ from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
 from vllm.entrypoints.openai.serving_models import (BaseModelPath,
                                                     OpenAIServingModels)
 from vllm.entrypoints.openai.serving_score import ServingScores
+from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import FlexibleArgumentParser, random_uuid
 from vllm.version import __version__ as VLLM_VERSION
+
+logger = init_logger(__name__)
 
 
 def make_arg_parser(parser: FlexibleArgumentParser):
@@ -201,13 +204,16 @@ async def upload_data(output_url: str, data_or_file: str,
         except Exception as e:
             if attempt < max_retries:
                 logger.error(
-                    f"Failed to upload data (attempt {attempt}). "
-                    f"Error message: {str(e)}.\nRetrying in {delay} seconds..."
+                    "Failed to upload data (attempt %d). Error message: %s.\nRetrying in %d seconds...",  # noqa: E501
+                    attempt,
+                    e,
+                    delay,
                 )
                 await asyncio.sleep(delay)
             else:
-                raise Exception(f"Failed to upload data (attempt {attempt}). "
-                                f"Error message: {str(e)}.") from e
+                raise Exception(
+                    f"Failed to upload data (attempt {attempt}). Error message: {str(e)}."  # noqa: E501
+                ) from e
 
 
 async def write_file(path_or_url: str, batch_outputs: list[BatchRequestOutput],
