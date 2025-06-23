@@ -10,7 +10,8 @@ import torch
 from compressed_tensors import CompressionFormat
 from compressed_tensors.quantization import (ActivationOrdering,
                                              QuantizationStrategy)
-
+from vllm.model_executor.parameter import (ModelWeightParameter,
+                                           PerTensorScaleParameter)
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
@@ -29,7 +30,9 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
-
+from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
+    apply_fp4_marlin_linear, is_fp4_marlin_supported,
+    prepare_fp4_layer_for_marlin, prepare_moe_fp4_layer_for_marlin)
 has_pplx = importlib.util.find_spec("pplx_kernels") is not None
 
 if current_platform.is_cuda_alike():
@@ -54,6 +57,7 @@ __all__ = [
     "CompressedTensorsW8A8Int8MoEMethod",
     "CompressedTensorsWNA16MarlinMoEMethod",
     "CompressedTensorsWNA16MoEMethod",
+    "CompressedTensorsW4A4MoeMethod"
 ]
 
 
@@ -86,6 +90,8 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
             else:
                 logger.info_once("Using CompressedTensorsWNA16MarlinMoEMethod")
                 return CompressedTensorsWNA16MarlinMoEMethod(quant_config)
+        elif quant_config._is_fp4a4_nvfp4(weight_quant, input_quant):
+            return CompressedTensorsW4A4MoeMethod()
         elif quant_config._is_fp8_w8a8_sm90(weight_quant, input_quant):
             return CompressedTensorsW8A8Fp8MoECutlassMethod(quant_config)
         elif quant_config._is_fp8_w8a8(weight_quant, input_quant):
@@ -96,6 +102,248 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
             raise RuntimeError(
                 f"Unsupported FusedMoe scheme: {weight_quant}, {input_quant}")
 
+
+class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
+    def __init__(self):
+        self.use_marlin = True
+
+    def create_weights(self, layer: torch.nn.Module, num_experts: int,
+                       hidden_size: int, intermediate_size_per_partition: int,
+                       params_dtype: torch.dtype, **extra_weight_attrs):
+        if not self.quant_config.is_checkpoint_nvfp4_serialized:
+            raise ValueError("NVFP4 quantization was selected, "
+                             " dynamic quantization is not supported.")
+
+        layer.num_experts = num_experts
+        layer.params_dtype = params_dtype
+        layer.quant_config = self.quant_config
+        weight_dtype = torch.uint8
+        weight_scale_dtype = torch.float8_e4m3fn
+        weight_loader = extra_weight_attrs.get("weight_loader")
+        breakpoint()
+        # GEMM 1
+        w13_weight = ModelWeightParameter(
+            data=torch.empty(
+                num_experts,
+                2 * intermediate_size_per_partition,
+                # 2 fp4 items are packed in the input dimension
+                hidden_size // 2,
+                dtype=weight_dtype),
+            input_dim=1,
+            output_dim=2,
+            weight_loader=weight_loader)
+        layer.register_parameter("w13_weight", w13_weight)
+
+        # GEMM 2
+        w2_weight = ModelWeightParameter(
+            data=torch.empty(
+                num_experts,
+                hidden_size,
+                # 2 fp4 items are packed in the input dimension
+                intermediate_size_per_partition // 2,
+                dtype=weight_dtype),
+            input_dim=1,
+            output_dim=2,
+            weight_loader=weight_loader)
+        layer.register_parameter("w2_weight", w2_weight)
+
+        w13_weight_scale = ModelWeightParameter(
+            data=torch.empty(
+                num_experts,
+                2 * intermediate_size_per_partition,
+                # 2 fp4 items are packed in the input dimension
+                hidden_size // self.quant_config.group_size,
+                dtype=weight_scale_dtype),
+            input_dim=1,
+            output_dim=2,
+            weight_loader=weight_loader)
+        layer.register_parameter("w13_weight_scale", w13_weight_scale)
+
+        w2_weight_scale = ModelWeightParameter(
+            data=torch.empty(
+                num_experts,
+                hidden_size,
+                # 2 fp4 items are packed in the input dimension
+                intermediate_size_per_partition //
+                self.quant_config.group_size,
+                dtype=weight_scale_dtype),
+            input_dim=1,
+            output_dim=2,
+            weight_loader=weight_loader)
+        layer.register_parameter("w2_weight_scale", w2_weight_scale)
+
+        w13_weight_scale_2 = PerTensorScaleParameter(
+            data=torch.empty(num_experts, 2, dtype=torch.float32),
+            weight_loader=weight_loader)
+        layer.register_parameter("w13_weight_global_scale", w13_weight_scale_2)
+
+        w2_weight_scale_2 = PerTensorScaleParameter(
+            data=torch.empty(num_experts, dtype=torch.float32),
+            weight_loader=weight_loader)
+        layer.register_parameter("w2_weight_global_scale", w2_weight_scale_2)
+
+        w13_input_scale = PerTensorScaleParameter(data=torch.empty(
+            num_experts, 2, dtype=torch.float32),
+                                                  weight_loader=weight_loader)
+        layer.register_parameter("w13_input_global_scale", w13_input_scale)
+
+        w2_input_scale = PerTensorScaleParameter(data=torch.empty(
+            num_experts, dtype=torch.float32),
+                                                 weight_loader=weight_loader)
+        layer.register_parameter("w2_input_global_scale", w2_input_scale)
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+
+        # GEMM 1
+        if not torch.allclose(layer.w13_weight_scale_2[:, 0],
+                              layer.w13_weight_scale_2[:, 1]):
+            logger.warning_once(
+                "w1_weight_scale_2 must match w3_weight_scale_2. "
+                "Accuracy may be affected.")
+
+        w13_weight_scale_2 = layer.w13_weight_scale_2[:, 0]
+        layer.w13_weight_scale_2 = torch.nn.Parameter(w13_weight_scale_2,
+                                             requires_grad=False)
+
+        w13_input_scale = layer.w13_input_scale.max(dim=1).values.to(
+            torch.float32)
+        layer.g1_alphas = torch.nn.Parameter(
+            (w13_input_scale * w13_weight_scale_2).to(torch.float32),
+            requires_grad=False)
+
+        assert (layer.w13_weight_scale.shape[2] % 16 == 0), (
+            "Expected weight_scale.dim(1) to be divisible by 16")
+        assert (layer.w13_weight_scale.dtype == torch.float8_e4m3fn), (
+            "Weight Blockscale must be represented as FP8-E4M3")
+        w13_blockscale_swizzled = self.swizzle_blockscale(
+            layer.w13_weight_scale)
+
+        layer.w13_blockscale_swizzled = torch.nn.Parameter(w13_blockscale_swizzled,
+                                                  requires_grad=False)
+
+        # This is for quantization, so we need to invert it.
+        layer.w13_input_scale_quant = torch.nn.Parameter(
+            (1 / w13_input_scale).to(torch.float32), requires_grad=False)
+
+        layer.w13_weight = torch.nn.Parameter(layer.w13_weight.data,
+                                     requires_grad=False)
+
+        # GEMM 2
+        layer.g2_alphas = torch.nn.Parameter(
+            (layer.w2_input_scale * layer.w2_weight_scale_2).to(torch.float32),
+            requires_grad=False)
+
+        # This is for quantization, so we need to invert it.
+        layer.w2_input_scale_quant = torch.nn.Parameter(
+            (1 / layer.w2_input_scale).to(torch.float32), requires_grad=False)
+
+        assert (layer.w2_weight_scale.shape[2] % 16 == 0), (
+            "Expected weight_scale.dim(1) to be divisible by 16")
+        assert (layer.w2_weight_scale.dtype == torch.float8_e4m3fn), (
+            "Weight Blockscale must be represented as FP8-E4M3")
+        w2_blockscale_swizzled = self.swizzle_blockscale(layer.w2_weight_scale)
+
+        layer.w2_blockscale_swizzled = torch.nn.Parameter(w2_blockscale_swizzled,
+                                                 requires_grad=False)
+        layer.w2_weight = torch.nn.Parameter(layer.w2_weight.data, requires_grad=False)
+
+        if self.use_marlin:
+            prepare_moe_fp4_layer_for_marlin(layer)
+            del layer.g1_alphas
+            del layer.g2_alphas
+            del layer.w13_input_scale_quant
+            del layer.w2_input_scale_quant
+            del layer.w13_blockscale_swizzled
+            del layer.w2_blockscale_swizzled
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        router_logits: torch.Tensor,
+        top_k: int,
+        renormalize: bool,
+        use_grouped_topk: bool = False,
+        topk_group: Optional[int] = None,
+        num_expert_group: Optional[int] = None,
+        global_num_experts: int = -1,
+        expert_map: Optional[torch.Tensor] = None,
+        custom_routing_function: Optional[Callable] = None,
+        scoring_func: str = "softmax",
+        e_score_correction_bias: Optional[torch.Tensor] = None,
+        apply_router_weight_on_input: bool = False,
+        activation: str = "silu",
+    ):
+        if self.use_marlin:
+            topk_weights, topk_ids = FusedMoE.select_experts(
+                hidden_states=x,
+                router_logits=router_logits,
+                use_grouped_topk=use_grouped_topk,
+                top_k=top_k,
+                renormalize=renormalize,
+                topk_group=topk_group,
+                num_expert_group=num_expert_group,
+                custom_routing_function=custom_routing_function,
+                scoring_func=scoring_func,
+                e_score_correction_bias=e_score_correction_bias,
+            )
+
+            return torch.ops.vllm.fused_marlin_moe(
+                x,
+                layer.w13_weight,
+                layer.w2_weight,
+                layer.w13_weight_scale,
+                layer.w2_weight_scale,
+                router_logits,
+                topk_weights,
+                topk_ids,
+                global_scale1=layer.w13_weight_scale_2,
+                global_scale2=layer.w2_weight_scale_2,
+                quant_type_id=scalar_types.float4_e2m1f.id,
+                global_num_experts=global_num_experts,
+                expert_map=expert_map)
+
+        assert activation == "silu", "Only SiLU activation is supported."
+        assert not apply_router_weight_on_input, (
+            "Router weight on input is not "
+            "supported for ModelOptNvFp4FusedMoE.")
+        assert expert_map is None, ("Expert Parallelism / expert_map "
+                                    "is currently not supported for "
+                                    "ModelOptNvFp4FusedMoE.")
+
+        topk_weights, topk_ids = FusedMoE.select_experts(
+            hidden_states=x,
+            router_logits=router_logits,
+            use_grouped_topk=use_grouped_topk,
+            top_k=top_k,
+            renormalize=renormalize,
+            topk_group=topk_group,
+            num_expert_group=num_expert_group,
+            custom_routing_function=custom_routing_function,
+            scoring_func=scoring_func,
+            e_score_correction_bias=e_score_correction_bias)
+
+        from vllm.model_executor.layers.fused_moe.cutlass_moe import (
+            cutlass_moe_fp4)
+
+        # Cutlass moe takes in activations in BF16/Half precision
+        # and fp4 quantized weights loaded from the checkpoint
+        return cutlass_moe_fp4(a=x,
+                               w1_fp4=layer.w13_weight,
+                               w1_blockscale=layer.w13_blockscale_swizzled,
+                               w1_alphas=layer.g1_alphas,
+                               w2_fp4=layer.w2_weight,
+                               w2_blockscale=layer.w2_blockscale_swizzled,
+                               w2_alphas=layer.g2_alphas,
+                               topk_weights=topk_weights,
+                               topk_ids=topk_ids,
+                               m=x.shape[0],
+                               n=layer.w2_weight.shape[2] * 2,
+                               k=x.shape[1],
+                               e=layer.w13_weight.shape[0],
+                               a1_gscale=layer.w13_input_scale_quant,
+                               a2_gscale=layer.w2_input_scale_quant,
+                               device=x.device).to(x.dtype)
 
 class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
 

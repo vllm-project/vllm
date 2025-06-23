@@ -1176,7 +1176,7 @@ class FusedMoE(torch.nn.Module):
         full_load = len(loaded_weight.shape) == 3
         if full_load:
             shard_dim += 1
-
+        """
         # Materialize GGUF UninitializedParameter
         if is_gguf_weight and isinstance(param, UninitializedParameter):
             final_shape = list(loaded_weight.shape)
@@ -1212,10 +1212,10 @@ class FusedMoE(torch.nn.Module):
                              expert_data=expert_data,
                              tp_rank=self.tp_rank)
             return
-
-        if "ModelOpt" in quant_method_name:
-            if ('weight_scale_2' in weight_name
-                    or 'input_scale' in weight_name):
+        """
+        if "ModelOpt" in quant_method_name or "compressed" in quant_method_name:
+            if ('weight_scale_2' in weight_name or 'input_scale' in weight_name
+                    or "global" in weight_name):
                 self._load_per_tensor_weight_scale(shard_id=shard_id,
                                                    param=param,
                                                    loaded_weight=loaded_weight,
@@ -1228,7 +1228,7 @@ class FusedMoE(torch.nn.Module):
                     expert_data=expert_data,
                     tp_rank=self.tp_rank)
             return
-
+        """
         # Case weight scales, zero_points and offset
         if ("scale" in weight_name or "zero" in weight_name
                 or "offset" in weight_name):
@@ -1283,6 +1283,7 @@ class FusedMoE(torch.nn.Module):
                 expert_data=expert_data,
                 tp_rank=self.tp_rank)
             return
+        """
 
     @staticmethod
     def select_experts(hidden_states: torch.Tensor,
