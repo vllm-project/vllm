@@ -1042,6 +1042,10 @@ class VllmRunner:
         req_outputs = self.model.embed(inputs, *args, **kwargs)
         return [req_output.outputs.embedding for req_output in req_outputs]
 
+    def reward(self, prompts: list[str]) -> list[list[float]]:
+        req_outputs = self.model.encode(prompts)
+        return [req_output.outputs.data for req_output in req_outputs]
+
     def score(
         self,
         text_1: Union[str, list[str]],
