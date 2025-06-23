@@ -10,6 +10,7 @@
 # 3. Set variables (ALL REQUIRED)
 #   BASE: your directory for vllm repo
 #   MODEL: the model served by vllm
+#   SYSTEM: the hardware, choice TPU or GPU, for other systems, "get best profile" might not support.
 #   TP: ways of tensor parallelism
 #   DOWNLOAD_DIR: directory to download and load model weights.
 #   INPUT_LEN: request input len
@@ -34,6 +35,7 @@
 TAG=$(date +"%Y_%m_%d_%H_%M")
 BASE=""
 MODEL="meta-llama/Llama-3.1-8B-Instruct"
+SYSTEM="TPU"
 TP=1
 DOWNLOAD_DIR=""
 INPUT_LEN=4000
@@ -110,10 +112,16 @@ start_server() {
 }
 
 update_best_profile() {
-    local profile_dir="$1/plugins/profile"
+    local profile_dir=$1
     local profile_index=$2
-    sorted_folders=($(find "$profile_dir" -maxdepth 1 -type d -not -path "$profile_dir" | sort))
-    selected_profile_file="${sorted_folders[$profile_index]}/*.xplane.pb"
+    sorted_paths=($(find "$profile_dir" -maxdepth 1 -not -path "$profile_dir" | sort))
+    selected_profile_file=
+    if [[ "$SYSTEM" == "TPU" ]]; then
+        selected_profile_file="${sorted_paths[$profile_index]}/*.xplane.pb"
+    fi 
+    if [[ "$SYSTEM" == "GPU" ]]; then
+        selected_profile_file="${sorted_paths[$profile_index]}"
+    fi 
     rm -f $PROFILE_PATH/*
     cp $selected_profile_file $PROFILE_PATH
 }
@@ -213,7 +221,12 @@ run_benchmark() {
             best_max_num_seqs=$max_num_seqs
             best_num_batched_tokens=$max_num_batched_tokens
             best_goodput=$goodput
-            update_best_profile $profile_dir $profile_index
+            if [[ "$SYSTEM" == "TPU" ]]; then
+                update_best_profile "$profile_dir/plugins/profile" $profile_index
+            fi
+            if [[ "$SYSTEM" == "GPU" ]]; then
+                update_best_profile "$profile_dir" $profile_index
+            fi
         fi
     else
         echo "max_num_seqs: $max_num_seqs, max_num_batched_tokens: $max_num_batched_tokens does not meet latency requirement ${MAX_LATENCY_ALLOWED_MS}"
