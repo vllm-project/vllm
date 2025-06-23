@@ -38,15 +38,15 @@ def _listen_for_register(poller, router_socket):
                     prefill_instances[data["http_address"]] = (
                         data["zmq_address"],
                         time.time() + DEFAULT_PING_SECONDS)
-                    oldest_key = next(iter(prefill_instances), None)
-                    while oldest_key is not None:
+                    oldest_item = next(iter(prefill_instances), None)
+                    while oldest_item is not None:
                         key, value = oldest_item
                         if value[1] > time.time():
                             break
                         print(f"Warn remove [HTTP:{key}, ZMQ:{value[0]}, "
                               f"stamp:{value[1]}]")
                         prefill_instances.pop(key, None)
-                        oldest_key = next(iter(prefill_instances), None)
+                        oldest_item = next(iter(prefill_instances), None)
             elif data["type"] == "D":
                 global decode_instances
                 global decode_cv
@@ -55,15 +55,15 @@ def _listen_for_register(poller, router_socket):
                     decode_instances[data["http_address"]] = (
                         data["zmq_address"],
                         time.time() + DEFAULT_PING_SECONDS)
-                    oldest_key = next(iter(decode_instances), None)
-                    while oldest_key is not None:
+                    oldest_item = next(iter(decode_instances), None)
+                    while oldest_item is not None:
                         key, value = oldest_item
                         if value[1] > time.time():
                             break
                         print(f"Warn remove [HTTP:{key}, ZMQ:{value[0]}, "
                               f"stamp:{value[1]}]")
                         decode_instances.pop(key, None)
-                        oldest_key = next(iter(decode_instances), None)
+                        oldest_item = next(iter(decode_instances), None)
             else:
                 print(
                     "Unexpected, Received message from %s, data: %s",
