@@ -67,7 +67,7 @@ class InputBatch:
         pin_memory: bool,
         vocab_size: int,
         block_sizes: list[int],  # The block_size of each kv cache group
-        sampling_needs_token_ids: bool = False,
+        logits_processing_needs_token_ids: bool = False,
     ):
         self.max_num_reqs = max_num_reqs
         self.max_model_len = max_model_len
@@ -75,7 +75,8 @@ class InputBatch:
         self.device = device
         self.pin_memory = pin_memory
         self.vocab_size = vocab_size
-        self.sampling_needs_token_ids = sampling_needs_token_ids
+        self.logits_processing_needs_token_ids = (
+            logits_processing_needs_token_ids)
 
         self._req_ids: list[Optional[str]] = []
         self.req_id_to_index: dict[str, int] = {}
@@ -581,9 +582,9 @@ class InputBatch:
             copy_slice(self.repetition_penalties_cpu_tensor,
                        self.repetition_penalties, num_reqs)
 
-        needs_prompt_token_ids = (not self.no_penalties
-                                  or (self.num_reqs > 0
-                                      and self.sampling_needs_token_ids))
+        needs_prompt_token_ids = (not self.no_penalties or
+                                  (self.num_reqs > 0
+                                   and self.logits_processing_needs_token_ids))
         if needs_prompt_token_ids:
             # The prompt tokens are used only for applying penalties or
             # step pooling during the sampling/pooling process.
