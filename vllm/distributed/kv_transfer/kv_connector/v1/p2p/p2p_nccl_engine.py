@@ -568,7 +568,7 @@ class P2pNcclEngine:
             func: Callable,
             tensor,
             peer_rank: int,
-            timeout=DEFAULT_TIMEOUT_SECONDS,
+            timeout=5,
             stream=None
     ) -> int:
         result_code = 2
@@ -577,11 +577,11 @@ class P2pNcclEngine:
         def timeout_watcher():
             nonlocal result_code
             if not abort_triggered.wait(timeout):
-                logger.error(
-                    "🔴ncclCommAbort, %s failed, remote_address:%s, timeout:%d",
-                    op_name, remote_address, timeout)
                 try:
                     self.nccl.ncclCommAbort(comm)
+                    logger.error(
+                        "🔴ncclCommAbort, %s failed, remote_address:%s, "
+                        "timeout:%d", op_name, remote_address, timeout)
                 except Exception as e:
                     logger.error(f"ncclCommAbort error: {e}")
                 result_code = 1
