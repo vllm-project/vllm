@@ -395,11 +395,18 @@ class Llama4Model(LlamaModel):
                                                    torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
-            (".qkv_proj", ".q_proj", "q"),
-            (".qkv_proj", ".k_proj", "k"),
-            (".qkv_proj", ".v_proj", "v"),
-            (".gate_up_proj", ".gate_proj", 0),
-            (".gate_up_proj", ".up_proj", 1),
+            # (".qkv_proj", ".q_proj", "q"),
+            # (".qkv_proj", ".k_proj", "k"),
+            # (".qkv_proj", ".v_proj", "v"),
+            # (".gate_up_proj", ".gate_proj", 0),
+            # (".gate_up_proj", ".up_proj", 1),
+            (".self_attn.qkv_proj", ".self_attn.q_proj", "q"),
+            (".self_attn.qkv_proj", ".self_attn.k_proj", "k"),
+            (".self_attn.qkv_proj", ".self_attn.v_proj", "v"),
+            (".shared_expert.gate_up_proj", ".shared_expert.gate_proj", 0),
+            (".shared_expert.gate_up_proj", ".shared_expert.up_proj", 1),
+            (".feed_forward.gate_up_proj", ".feed_forward.gate_proj", 0),
+            (".feed_forward.gate_up_proj", ".feed_forward.up_proj", 1),
         ]
         fused_experts_params = False
         expert_params_mapping = FusedMoE.make_expert_params_mapping(
@@ -432,17 +439,25 @@ class Llama4Model(LlamaModel):
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name or "experts" in name:
                     continue
-                name = name.replace(weight_name, param_name)
+                # Don't transform k_scale/v_scale parameter names with stacked parameter mapping
+                # but allow other scale parameters (input_scale, weight_scale) to be processed
+                if not (name.endswith((".k_scale", ".v_scale")) and "self_attn" in name):
+                    name = name.replace(weight_name, param_name)
                 if is_pp_missing_parameter(name, self):
                     continue
                 if name.endswith("scale") and "expert" not in name:
                     # Remapping the name of FP8 kv-scale.
                     name = maybe_remap_kv_scale_name(name, params_dict)
                     if name is None:
-                        continue
+                        continue  # Skip this parameter if remapping failed
                 param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                if weight_loader == default_weight_loader:
+                    # default_weight_loader doesn't support shard_id, just load the weight directly
+                    weight_loader(param, loaded_weight)
+                else:
+                    # Custom weight loader that supports shard_id
+                    weight_loader(param, loaded_weight, shard_id)
                 loaded_params.add(name)
                 break
             else:
@@ -499,8 +514,7 @@ class Llama4Model(LlamaModel):
                         continue
 
                     param = params_dict[name]
-                    weight_loader = getattr(param, "weight_loader",
-                                            default_weight_loader)
+                    weight_loader = getattr(param, "weight_loader", default_weight_loader)
                     weight_loader(param, loaded_weight)
                     loaded_params.add(name)
         return loaded_params
