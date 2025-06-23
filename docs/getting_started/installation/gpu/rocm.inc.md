@@ -90,24 +90,26 @@ Currently, there are no pre-built ROCm wheels.
 
 4. Build vLLM. For example, vLLM on ROCM 6.3 can be built with the following steps:
 
-    ```bash
-    pip install --upgrade pip
+    ??? Commands
 
-    # Build & install AMD SMI
-    pip install /opt/rocm/share/amd_smi
+        ```bash
+        pip install --upgrade pip
 
-    # Install dependencies
-    pip install --upgrade numba \
-        scipy \
-        huggingface-hub[cli,hf_transfer] \
-        setuptools_scm
-    pip install "numpy<2"
-    pip install -r requirements/rocm.txt
+        # Build & install AMD SMI
+        pip install /opt/rocm/share/amd_smi
 
-    # Build vLLM for MI210/MI250/MI300.
-    export PYTORCH_ROCM_ARCH="gfx90a;gfx942"
-    python3 setup.py develop
-    ```
+        # Install dependencies
+        pip install --upgrade numba \
+            scipy \
+            huggingface-hub[cli,hf_transfer] \
+            setuptools_scm
+        pip install "numpy<2"
+        pip install -r requirements/rocm.txt
+
+        # Build vLLM for MI210/MI250/MI300.
+        export PYTORCH_ROCM_ARCH="gfx90a;gfx942"
+        python3 setup.py develop
+        ```
 
     This may take 5-10 minutes. Currently, `pip install .` does not work for ROCm installation.
 
@@ -201,19 +203,21 @@ DOCKER_BUILDKIT=1 docker build \
 
 To run the above docker image `vllm-rocm`, use the below command:
 
-```console
-docker run -it \
-   --network=host \
-   --group-add=video \
-   --ipc=host \
-   --cap-add=SYS_PTRACE \
-   --security-opt seccomp=unconfined \
-   --device /dev/kfd \
-   --device /dev/dri \
-   -v <path/to/model>:/app/model \
-   vllm-rocm \
-   bash
-```
+??? Command
+
+    ```console
+    docker run -it \
+    --network=host \
+    --group-add=video \
+    --ipc=host \
+    --cap-add=SYS_PTRACE \
+    --security-opt seccomp=unconfined \
+    --device /dev/kfd \
+    --device /dev/dri \
+    -v <path/to/model>:/app/model \
+    vllm-rocm \
+    bash
+    ```
 
 Where the `<path/to/model>` is the location where the model is stored, for example, the weights for llama2 or llama3 models.
 

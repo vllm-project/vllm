@@ -34,21 +34,23 @@ vllm serve qwen/Qwen1.5-0.5B-Chat
 
 - Call it with litellm:
 
-```python
-import litellm 
+??? Code
 
-messages = [{ "content": "Hello, how are you?","role": "user"}]
+    ```python
+    import litellm 
 
-# hosted_vllm is prefix key word and necessary
-response = litellm.completion(
-            model="hosted_vllm/qwen/Qwen1.5-0.5B-Chat", # pass the vllm model name
-            messages=messages,
-            api_base="http://{your-vllm-server-host}:{your-vllm-server-port}/v1",
-            temperature=0.2,
-            max_tokens=80)
+    messages = [{ "content": "Hello, how are you?","role": "user"}]
 
-print(response)
-```
+    # hosted_vllm is prefix key word and necessary
+    response = litellm.completion(
+                model="hosted_vllm/qwen/Qwen1.5-0.5B-Chat", # pass the vllm model name
+                messages=messages,
+                api_base="http://{your-vllm-server-host}:{your-vllm-server-port}/v1",
+                temperature=0.2,
+                max_tokens=80)
+
+    print(response)
+    ```
 
 ### Embeddings
 
