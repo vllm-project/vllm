@@ -1115,6 +1115,10 @@ class AsyncLLMEngine(EngineClient):
         """Get the model configuration of the vLLM engine."""
         return self.engine.get_model_config()
 
+    async def get_observability_config(self) -> "ObservabilityConfig":
+        """Get the observability configuration of the vLLM engine."""
+        return self.engine.get_observability_config()
+
     async def get_parallel_config(self) -> ParallelConfig:
         """Get the parallel configuration of the vLLM engine."""
         return self.engine.get_parallel_config()
