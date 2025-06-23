@@ -29,24 +29,26 @@ We can now submit the prompts and call `llm.generate` with the `lora_request` pa
 of `LoRARequest` is a human identifiable name, the second parameter is a globally unique ID for the adapter and
 the third parameter is the path to the LoRA adapter.
 
-```python
-sampling_params = SamplingParams(
-    temperature=0,
-    max_tokens=256,
-    stop=["[/assistant]"]
-)
+??? Code
 
-prompts = [
-     "[user] Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE table_name_74 (icao VARCHAR, airport VARCHAR)\n\n question: Name the ICAO for lilongwe international airport [/user] [assistant]",
-     "[user] Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE table_name_11 (nationality VARCHAR, elector VARCHAR)\n\n question: When Anchero Pantaleone was the elector what is under nationality? [/user] [assistant]",
-]
+    ```python
+    sampling_params = SamplingParams(
+        temperature=0,
+        max_tokens=256,
+        stop=["[/assistant]"]
+    )
 
-outputs = llm.generate(
-    prompts,
-    sampling_params,
-    lora_request=LoRARequest("sql_adapter", 1, sql_lora_path)
-)
-```
+    prompts = [
+        "[user] Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE table_name_74 (icao VARCHAR, airport VARCHAR)\n\n question: Name the ICAO for lilongwe international airport [/user] [assistant]",
+        "[user] Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE table_name_11 (nationality VARCHAR, elector VARCHAR)\n\n question: When Anchero Pantaleone was the elector what is under nationality? [/user] [assistant]",
+    ]
+
+    outputs = llm.generate(
+        prompts,
+        sampling_params,
+        lora_request=LoRARequest("sql_adapter", 1, sql_lora_path)
+    )
+    ```
 
 Check out <gh-file:examples/offline_inference/multilora_inference.py> for an example of how to use LoRA adapters with the async engine and how to use more advanced configuration options.
 
@@ -68,24 +70,26 @@ The server entrypoint accepts all other LoRA configuration parameters (`max_lora
 etc.), which will apply to all forthcoming requests. Upon querying the `/models` endpoint, we should see our LoRA along
 with its base model (if `jq` is not installed, you can follow [this guide](https://jqlang.org/download/) to install it.):
 
-```bash
-curl localhost:8000/v1/models | jq .
-{
-    "object": "list",
-    "data": [
-        {
-            "id": "meta-llama/Llama-2-7b-hf",
-            "object": "model",
-            ...
-        },
-        {
-            "id": "sql-lora",
-            "object": "model",
-            ...
-        }
-    ]
-}
-```
+??? Command
+
+    ```bash
+    curl localhost:8000/v1/models | jq .
+    {
+        "object": "list",
+        "data": [
+            {
+                "id": "meta-llama/Llama-2-7b-hf",
+                "object": "model",
+                ...
+            },
+            {
+                "id": "sql-lora",
+                "object": "model",
+                ...
+            }
+        ]
+    }
+    ```
 
 Requests can specify the LoRA adapter as if it were any other model via the `model` request parameter. The requests will be
 processed according to the server-wide LoRA configuration (i.e. in parallel with base model requests, and potentially other
@@ -168,36 +172,36 @@ Alternatively, follow these example steps to implement your own plugin:
 
 1. Implement the LoRAResolver interface.
 
-    Example of a simple S3 LoRAResolver implementation:
+    ??? Example of a simple S3 LoRAResolver implementation
 
-    ```python
-    import os
-    import s3fs
-    from vllm.lora.request import LoRARequest
-    from vllm.lora.resolver import LoRAResolver
+        ```python
+        import os
+        import s3fs
+        from vllm.lora.request import LoRARequest
+        from vllm.lora.resolver import LoRAResolver
 
-    class S3LoRAResolver(LoRAResolver):
-        def __init__(self):
-            self.s3 = s3fs.S3FileSystem()
-            self.s3_path_format = os.getenv("S3_PATH_TEMPLATE")
-            self.local_path_format = os.getenv("LOCAL_PATH_TEMPLATE")
+        class S3LoRAResolver(LoRAResolver):
+            def __init__(self):
+                self.s3 = s3fs.S3FileSystem()
+                self.s3_path_format = os.getenv("S3_PATH_TEMPLATE")
+                self.local_path_format = os.getenv("LOCAL_PATH_TEMPLATE")
 
-        async def resolve_lora(self, base_model_name, lora_name):
-            s3_path = self.s3_path_format.format(base_model_name=base_model_name, lora_name=lora_name)
-            local_path = self.local_path_format.format(base_model_name=base_model_name, lora_name=lora_name)
+            async def resolve_lora(self, base_model_name, lora_name):
+                s3_path = self.s3_path_format.format(base_model_name=base_model_name, lora_name=lora_name)
+                local_path = self.local_path_format.format(base_model_name=base_model_name, lora_name=lora_name)
 
-            # Download the LoRA from S3 to the local path
-            await self.s3._get(
-                s3_path, local_path, recursive=True, maxdepth=1
-            )
+                # Download the LoRA from S3 to the local path
+                await self.s3._get(
+                    s3_path, local_path, recursive=True, maxdepth=1
+                )
 
-            lora_request = LoRARequest(
-                lora_name=lora_name,
-                lora_path=local_path,
-                lora_int_id=abs(hash(lora_name))
-            )
-            return lora_request
-    ```
+                lora_request = LoRARequest(
+                    lora_name=lora_name,
+                    lora_path=local_path,
+                    lora_int_id=abs(hash(lora_name))
+                )
+                return lora_request
+        ```
 
 2. Register `LoRAResolver` plugin.
 
@@ -234,38 +238,40 @@ The new format of `--lora-modules` is mainly to support the display of parent mo
 - The `parent` field of LoRA model `sql-lora` now links to its base model `meta-llama/Llama-2-7b-hf`. This correctly reflects the hierarchical relationship between the base model and the LoRA adapter.
 - The `root` field points to the artifact location of the lora adapter.
 
-```bash
-$ curl http://localhost:8000/v1/models
+??? Command output
 
-{
-    "object": "list",
-    "data": [
-        {
-        "id": "meta-llama/Llama-2-7b-hf",
-        "object": "model",
-        "created": 1715644056,
-        "owned_by": "vllm",
-        "root": "~/.cache/huggingface/hub/models--meta-llama--Llama-2-7b-hf/snapshots/01c7f73d771dfac7d292323805ebc428287df4f9/",
-        "parent": null,
-        "permission": [
+    ```bash
+    $ curl http://localhost:8000/v1/models
+
+    {
+        "object": "list",
+        "data": [
             {
-            .....
+            "id": "meta-llama/Llama-2-7b-hf",
+            "object": "model",
+            "created": 1715644056,
+            "owned_by": "vllm",
+            "root": "~/.cache/huggingface/hub/models--meta-llama--Llama-2-7b-hf/snapshots/01c7f73d771dfac7d292323805ebc428287df4f9/",
+            "parent": null,
+            "permission": [
+                {
+                .....
+                }
+            ]
+            },
+            {
+            "id": "sql-lora",
+            "object": "model",
+            "created": 1715644056,
+            "owned_by": "vllm",
+            "root": "~/.cache/huggingface/hub/models--yard1--llama-2-7b-sql-lora-test/snapshots/0dfa347e8877a4d4ed19ee56c140fa518470028c/",
+            "parent": meta-llama/Llama-2-7b-hf,
+            "permission": [
+                {
+                ....
+                }
+            ]
             }
         ]
-        },
-        {
-        "id": "sql-lora",
-        "object": "model",
-        "created": 1715644056,
-        "owned_by": "vllm",
-        "root": "~/.cache/huggingface/hub/models--yard1--llama-2-7b-sql-lora-test/snapshots/0dfa347e8877a4d4ed19ee56c140fa518470028c/",
-        "parent": meta-llama/Llama-2-7b-hf,
-        "permission": [
-            {
-            ....
-            }
-        ]
-        }
-    ]
-}
-```
+    }
+    ```

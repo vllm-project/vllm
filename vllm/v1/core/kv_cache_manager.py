@@ -146,7 +146,8 @@ class KVCacheManager:
         # Prefix caching is disabled or
         # When the request requires prompt logprobs, we skip prefix caching.
         if (not self.enable_caching
-                or request.sampling_params.prompt_logprobs is not None):
+                or (request.sampling_params is not None
+                    and request.sampling_params.prompt_logprobs is not None)):
             return self.create_empty_block_list(), 0
 
         # The block hashes for the request may already be computed
@@ -381,10 +382,11 @@ class KVCacheManager:
             self.coordinator.get_blocks(request_id)).get_block_ids()
 
     def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
-        """Cache the blocks for the request."""
-        block_hashes = self.req_to_block_hashes[request.request_id]
-        self.coordinator.cache_blocks(request, block_hashes,
-                                      num_computed_tokens)
+        """Cache the blocks for the request, if enabled."""
+        if self.enable_caching:
+            block_hashes = self.req_to_block_hashes[request.request_id]
+            self.coordinator.cache_blocks(request, block_hashes,
+                                          num_computed_tokens)
 
     def create_empty_block_list(self) -> KVCacheBlocks:
         """Creates a new KVCacheBlocks instance with no blocks."""

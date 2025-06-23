@@ -93,25 +93,27 @@ For additional features and advanced configurations, refer to the official [MkDo
 
 ## Testing
 
-```bash
-pip install -r requirements/dev.txt
+??? note "Commands"
 
-# Linting, formatting and static type checking
-pre-commit install --hook-type pre-commit --hook-type commit-msg
+    ```bash
+    pip install -r requirements/dev.txt
 
-# You can manually run pre-commit with
-pre-commit run --all-files
+    # Linting, formatting and static type checking
+    pre-commit install --hook-type pre-commit --hook-type commit-msg
 
-# To manually run something from CI that does not run
-# locally by default, you can run:
-pre-commit run mypy-3.9 --hook-stage manual --all-files
+    # You can manually run pre-commit with
+    pre-commit run --all-files
 
-# Unit tests
-pytest tests/
+    # To manually run something from CI that does not run
+    # locally by default, you can run:
+    pre-commit run mypy-3.9 --hook-stage manual --all-files
 
-# Run tests for a single test file with detailed output
-pytest -s -v tests/test_logger.py
-```
+    # Unit tests
+    pytest tests/
+
+    # Run tests for a single test file with detailed output
+    pytest -s -v tests/test_logger.py
+    ```
 
 !!! tip
     Since the <gh-file:docker/Dockerfile> ships with Python 3.12, all tests in CI (except `mypy`) are run with Python 3.12.
@@ -130,7 +132,7 @@ pytest -s -v tests/test_logger.py
 
 If you encounter a bug or have a feature request, please [search existing issues](https://github.com/vllm-project/vllm/issues?q=is%3Aissue) first to see if it has already been reported. If not, please [file a new issue](https://github.com/vllm-project/vllm/issues/new/choose), providing as much relevant information as possible.
 
-!!! warning
+!!! important
     If you discover a security vulnerability, please follow the instructions [here](gh-file:SECURITY.md#reporting-a-vulnerability).
 
 ## Pull Requests & Code Reviews
