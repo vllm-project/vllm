@@ -1,6 +1,28 @@
 # SPDX-License-Identifier: Apache-2.0
 """
 Expert parallelism load balancer (EPLB) metrics and states.
+
+# Glossary
+
+- **Logical Expert**: An expert that is part of the model's logical structure.
+  It holds a set of weights and is replicated across multiple physical
+  experts.
+- **Redundant Expert**: To achieve load balancing, for some popular logical
+  experts, we create additional copies of the expert weights. During inference,
+  each of these copies can be routed to by the same set of tokens.
+- **Physical Expert**: An expert that is instantiated on a specific device.
+  It is a replica of a logical expert and can be rearranged across devices.
+  I.e., one logical expert may have multiple sets of weights initialized on
+  different devices, and each of these sets is a physical expert.
+- **Local Physical Expert**: A physical expert that is instantiated on the
+  current device.
+
+For example: DeepSeek-R1 has 256 logical experts, so each MoE layer
+has 256 sets of linear layer weights in the model parameters. If we add 32
+redundant experts, DeepSeek-R1 will have 256 + 32 = 288 physical experts in
+total. And when deploying, we'll have 288 sets of linear layer weights for each
+MoE layer. If we have 32 EP ranks, then each GPU will hold 288 / 32 = 9 local
+physical experts.
 """
 
 import time
