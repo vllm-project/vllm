@@ -41,7 +41,7 @@ struct cutlass_3x_blockwise_group_gemm {
   using StrideC =
       cute::remove_pointer_t<cute::Stride<int64_t, cute::Int<1>, cute::Int<0>>>;
 
-  // TODO should not be fixed
+  // For now, support only 128x128 blocks
   static constexpr int ScaleGranularityM = 1;
   static constexpr int ScaleGranularityN = 128;
   static constexpr int ScaleGranularityK = 128;

@@ -99,7 +99,6 @@ class MOETensors8Bit(MOETensors):
         # a -> a_q, w1 -> w1_q, w2 -> w2_q
         n_b_scales = 2 * n if per_out_channel else 1
         k_b_scales = k if per_out_channel else 1
-
         # Get the right scale for tests.
         _, a_scale = ops.scaled_fp8_quant(
             moe_tensors_fp16.a, use_per_token_if_dynamic=per_act_token)

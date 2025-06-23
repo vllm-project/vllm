@@ -570,6 +570,8 @@ def get_w8a8_block_fp8_configs(N: int, K: int, block_n: int,
     return None
 
 
+# Copied and adapted from
+# https://github.com/deepseek-ai/DeepGEMM/blob/78cacf70d41d15d688bd493ebc85845f7f2a3d5d/tests/test_core.py#L17
 def per_block_cast_to_fp8(
         x: torch.Tensor,
         block_size_n: int = 128) -> tuple[torch.Tensor, torch.Tensor]:
