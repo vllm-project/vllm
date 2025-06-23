@@ -833,7 +833,7 @@ class LLMEngine:
         return self.model_config
 
     def get_observability_config(self) -> ObservabilityConfig:
-        """Gets the model configuration."""
+        """Gets the observability configuration."""
         return self.observability_config
 
     def get_parallel_config(self) -> ParallelConfig:
