@@ -51,14 +51,14 @@ class PostGradPassManager(CustomGraphPass):
         if self.pass_config.enable_noop:
             self.passes += [NoOpEliminationPass(config)]
 
-        if self.pass_config.enable_fusion:
-            self.passes += [FusionPass.instance(config)]
-            self.passes += [ActivationQuantFusionPass(config)]
-
         if self.pass_config.enable_sequence_parallelism:
             self.passes += [SequenceParallelismPass(config)]
             if self.pass_config.enable_async_tp:
                 self.passes += [AsyncTPPass(config)]
+
+        if self.pass_config.enable_fusion:
+            self.passes += [FusionPass.instance(config)]
+            self.passes += [ActivationQuantFusionPass(config)]
 
         if self.pass_config.enable_attn_fusion:
             self.passes += [AttnFusionPass(config)]
