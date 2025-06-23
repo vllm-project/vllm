@@ -38,15 +38,16 @@ def _listen_for_register(poller, router_socket):
                     prefill_instances[data["http_address"]] = (
                         data["zmq_address"],
                         time.time() + DEFAULT_PING_SECONDS)
-                    oldest_item = next(iter(prefill_instances), None)
-                    while oldest_item is not None:
-                        key, value = oldest_item
+                    oldest_key = next(iter(prefill_instances), None)
+                    while oldest_key is not None:
+                        value = prefill_instances[oldest_key]
                         if value[1] > time.time():
                             break
-                        print(f"Warn remove [HTTP:{key}, ZMQ:{value[0]}, "
+                        print(f"Warn remove [HTTP:{oldest_key}, ZMQ:{value[0]}, "
                               f"stamp:{value[1]}]")
-                        prefill_instances.pop(key, None)
-                        oldest_item = next(iter(prefill_instances), None)
+                        prefill_instances.pop(oldest_key, None)
+                        oldest_key = next(iter(prefill_instances), None)
+
             elif data["type"] == "D":
                 global decode_instances
                 global decode_cv
@@ -55,15 +56,15 @@ def _listen_for_register(poller, router_socket):
                     decode_instances[data["http_address"]] = (
                         data["zmq_address"],
                         time.time() + DEFAULT_PING_SECONDS)
-                    oldest_item = next(iter(decode_instances), None)
-                    while oldest_item is not None:
-                        key, value = oldest_item
+                    oldest_key = next(iter(decode_instances), None)
+                    while oldest_key is not None:
+                        value = decode_instances[oldest_key]
                         if value[1] > time.time():
                             break
-                        print(f"Warn remove [HTTP:{key}, ZMQ:{value[0]}, "
+                        print(f"Warn remove [HTTP:{oldest_key}, ZMQ:{value[0]}, "
                               f"stamp:{value[1]}]")
-                        decode_instances.pop(key, None)
-                        oldest_item = next(iter(decode_instances), None)
+                        decode_instances.pop(oldest_key, None)
+                        oldest_key = next(iter(decode_instances), None)
             else:
                 print(
                     "Unexpected, Received message from %s, data: %s",
@@ -178,5 +179,5 @@ async def handle_request():
 
 if __name__ == "__main__":
     t = start_service_discovery("0.0.0.0", 30001)
-    app.run(host="0.0.0.0", port=10001)
+    app.run(host="0.0.0.0", port=10201)
     t.join()
