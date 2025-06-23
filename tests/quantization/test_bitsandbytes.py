@@ -159,6 +159,7 @@ def test_4bit_bnb_embedding_model(
     with vllm_runner(model_name,
                      task="embed",
                      dtype=dtype,
+                     gpu_memory_utilization=0.5,
                      quantization="bitsandbytes") as vllm_model:
         vllm_outputs = vllm_model.encode(example_prompts)
     check_embeddings_close(
