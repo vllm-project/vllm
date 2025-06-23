@@ -54,54 +54,60 @@ When quantizing activations to INT8, you need sample data to estimate the activa
 It's best to use calibration data that closely matches your deployment data.
 For a general-purpose instruction-tuned model, you can use a dataset like `ultrachat`:
 
-```python
-from datasets import load_dataset
+??? Code
 
-NUM_CALIBRATION_SAMPLES = 512
-MAX_SEQUENCE_LENGTH = 2048
+    ```python
+    from datasets import load_dataset
 
-# Load and preprocess the dataset
-ds = load_dataset("HuggingFaceH4/ultrachat_200k", split="train_sft")
-ds = ds.shuffle(seed=42).select(range(NUM_CALIBRATION_SAMPLES))
+    NUM_CALIBRATION_SAMPLES = 512
+    MAX_SEQUENCE_LENGTH = 2048
 
-def preprocess(example):
-    return {"text": tokenizer.apply_chat_template(example["messages"], tokenize=False)}
-ds = ds.map(preprocess)
+    # Load and preprocess the dataset
+    ds = load_dataset("HuggingFaceH4/ultrachat_200k", split="train_sft")
+    ds = ds.shuffle(seed=42).select(range(NUM_CALIBRATION_SAMPLES))
 
-def tokenize(sample):
-    return tokenizer(sample["text"], padding=False, max_length=MAX_SEQUENCE_LENGTH, truncation=True, add_special_tokens=False)
-ds = ds.map(tokenize, remove_columns=ds.column_names)
-```
+    def preprocess(example):
+        return {"text": tokenizer.apply_chat_template(example["messages"], tokenize=False)}
+    ds = ds.map(preprocess)
+
+    def tokenize(sample):
+        return tokenizer(sample["text"], padding=False, max_length=MAX_SEQUENCE_LENGTH, truncation=True, add_special_tokens=False)
+    ds = ds.map(tokenize, remove_columns=ds.column_names)
+    ```
+
+</details>
 
 ### 3. Applying Quantization
 
 Now, apply the quantization algorithms:
 
-```python
-from llmcompressor.transformers import oneshot
-from llmcompressor.modifiers.quantization import GPTQModifier
-from llmcompressor.modifiers.smoothquant import SmoothQuantModifier
+??? Code
 
-# Configure the quantization algorithms
-recipe = [
-    SmoothQuantModifier(smoothing_strength=0.8),
-    GPTQModifier(targets="Linear", scheme="W8A8", ignore=["lm_head"]),
-]
+    ```python
+    from llmcompressor.transformers import oneshot
+    from llmcompressor.modifiers.quantization import GPTQModifier
+    from llmcompressor.modifiers.smoothquant import SmoothQuantModifier
 
-# Apply quantization
-oneshot(
-    model=model,
-    dataset=ds,
-    recipe=recipe,
-    max_seq_length=MAX_SEQUENCE_LENGTH,
-    num_calibration_samples=NUM_CALIBRATION_SAMPLES,
-)
+    # Configure the quantization algorithms
+    recipe = [
+        SmoothQuantModifier(smoothing_strength=0.8),
+        GPTQModifier(targets="Linear", scheme="W8A8", ignore=["lm_head"]),
+    ]
 
-# Save the compressed model: Meta-Llama-3-8B-Instruct-W8A8-Dynamic-Per-Token
-SAVE_DIR = MODEL_ID.split("/")[1] + "-W8A8-Dynamic-Per-Token"
-model.save_pretrained(SAVE_DIR, save_compressed=True)
-tokenizer.save_pretrained(SAVE_DIR)
-```
+    # Apply quantization
+    oneshot(
+        model=model,
+        dataset=ds,
+        recipe=recipe,
+        max_seq_length=MAX_SEQUENCE_LENGTH,
+        num_calibration_samples=NUM_CALIBRATION_SAMPLES,
+    )
+
+    # Save the compressed model: Meta-Llama-3-8B-Instruct-W8A8-Dynamic-Per-Token
+    SAVE_DIR = MODEL_ID.split("/")[1] + "-W8A8-Dynamic-Per-Token"
+    model.save_pretrained(SAVE_DIR, save_compressed=True)
+    tokenizer.save_pretrained(SAVE_DIR)
+    ```
 
 This process creates a W8A8 model with weights and activations quantized to 8-bit integers.
 
