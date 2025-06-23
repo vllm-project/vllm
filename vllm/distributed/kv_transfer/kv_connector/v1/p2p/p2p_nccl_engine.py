@@ -334,7 +334,7 @@ class P2pNcclEngine:
                                 2, unique_id, rank)
                         self.comms[remote_address.decode()] = (comm, rank)
                         logger.info(
-                            "🤝ncclCommInitRank Success, %s👈%s, MyRank:%s",
+                            "🤝ncclCommInitRank Success, %s👈%s, MyRank: %s",
                             self.zmq_address, remote_address.decode(), rank)
                 elif data["cmd"] == "PUT":
                     tensor_id = data["tensor_id"]
@@ -578,7 +578,7 @@ class P2pNcclEngine:
             nonlocal result_code
             if not abort_triggered.wait(timeout):
                 logger.error(
-                    "🔴ncclCommAbort, %d failed, remote_address:%s, timeout:%d",
+                    "🔴ncclCommAbort, %s failed, remote_address:%s, timeout:%d",
                     op_name, remote_address, timeout)
                 try:
                     self.nccl.ncclCommAbort(comm)
