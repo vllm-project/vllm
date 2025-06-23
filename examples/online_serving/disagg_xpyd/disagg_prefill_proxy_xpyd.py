@@ -11,8 +11,6 @@ import msgpack
 import zmq
 from quart import Quart, make_response, request
 from typing import Any
-from vllm.distributed.kv_transfer.kv_connector.v1.p2p.p2p_nccl_engine import (
-    DEFAULT_PING_SECONDS)
 
 count = 0
 prefill_instances: dict[str, Any] = {}  # http_address: (zmq_address, stamp)
@@ -20,6 +18,8 @@ decode_instances: dict[str, Any] = {}  # http_address: (zmq_address, stamp)
 
 prefill_cv = threading.Condition()
 decode_cv = threading.Condition()
+
+DEFAULT_PING_SECONDS = 3
 
 
 def _listen_for_register(poller, router_socket):
