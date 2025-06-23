@@ -510,7 +510,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             if weights_not_loaded:
                 raise ValueError("Following weights were not initialized from "
                                  f"checkpoint: {weights_not_loaded}")
-
+        fuse_moe_quant_states(model,quant_state_dict)
         param_dict = dict(model.named_parameters())
         stacked_quant_state_dict: dict[str, dict[int, Any]] = {}
         # TODO: Change this lazy import to normal import
@@ -597,15 +597,95 @@ def dequantize_dq(quant_states: dict) -> None:
     at the cost of increased memory usage.
     """
     from bitsandbytes.functional import QuantState, dequantize_blockwise
-    for _, quant_state in quant_states.items():
-        # Copied from: https://github.com/bitsandbytes-foundation/bitsandbytes/blob/0.45.3/bitsandbytes/functional.py#L1352-#L1356
-        if isinstance(quant_state, QuantState) and quant_state.nested:
-            absmax = dequantize_blockwise(quant_state.absmax,
-                                          quant_state.state2)
-            absmax += quant_state.offset
-            if absmax.dtype != torch.float32:
-                absmax = absmax.float()
-            quant_state.absmax = absmax
-            quant_state.nested = False
-            quant_state.offset = None
-            quant_state.state2 = None
+    if isinstance(quant_states,dict):
+        for _, quant_state in quant_states.items():
+            # Copied from: https://github.com/bitsandbytes-foundation/bitsandbytes/blob/0.45.3/bitsandbytes/functional.py#L1352-#L1356
+            if isinstance(quant_states,QuantState) and quant_states.nested:
+                absmax = dequantize_blockwise(quant_state.absmax,
+                                            quant_state.state2)
+                absmax += quant_state.offset
+                if absmax.dtype != torch.float32:
+                    absmax = absmax.float()
+                quant_state.absmax = absmax
+                quant_state.nested = False
+                quant_state.offset = None
+                quant_state.state2 = None
+    elif isinstance(quant_states,QuantState) and quant_states.nested:
+        absmax = dequantize_blockwise(quant_states.absmax,
+                                    quant_states.state2)
+        absmax += quant_states.offset
+        if absmax.dtype != torch.float32:
+            absmax = absmax.float()
+        quant_states.absmax = absmax
+        quant_states.nested = False
+        quant_states.offset = None
+        quant_states.state2 = None
+    return quant_states
+
+
+def fuse_moe_quant_states(model: nn.Module, quant_states_dict: dict):
+    from bitsandbytes.functional import QuantState
+
+    # moe_quant_states_dict = {}
+    expert_mapping = model.get_expert_mapping()
+    for name, module in model.named_modules():
+        if isinstance(module, FusedMoE):
+            w1_states_lst = []
+            w2_states_lst = []
+            w3_states_lst = []
+            for mapping in expert_mapping:
+                layer_prefix = name.split("experts")[0]
+                weight_name = layer_prefix + mapping[1] + "weight"
+                quant_state = dequantize_dq(quant_states_dict[weight_name])
+                if mapping[-1] == "w1":
+                    w1_states_lst.append(quant_state)
+                elif mapping[-1] == "w2":
+                    w2_states_lst.append(quant_state)
+                else:
+                    w3_states_lst.append(quant_state)
+                del quant_states_dict[weight_name]
+            assert (
+                len(w1_states_lst)
+                == len(w2_states_lst)
+                == len(w3_states_lst)
+            )
+            w13_absmax_lst = []
+            w2_absmax_lst = []
+            for w1_qs,w2_qs,w3_qs in zip(w1_states_lst,w2_states_lst,
+                                         w3_states_lst):
+                w13_absmax_lst.append(w1_qs.absmax)
+                w13_absmax_lst.append(w3_qs.absmax)
+                w2_absmax_lst.append(w2_qs.absmax)
+                assert (
+                   w1_qs.blocksize
+                    == w2_qs.blocksize
+                    == w3_qs.blocksize
+                )
+                assert (
+                   w1_qs.dtype
+                    == w2_qs.dtype
+                    == w3_qs.dtype
+                )
+
+            w13_absmax = torch.cat(w13_absmax_lst)
+            w2_absmax = torch.cat(w2_absmax_lst)
+            w13_qs = QuantState(
+                absmax=w13_absmax,
+                shape=10, # FIXME Get the correct shape
+                code=w1_states_lst[0].code,
+                blocksize=w1_states_lst[0].blocksize,
+                dtype=w1_states_lst[0].dtype,
+
+            )
+            w2_qs = quant_state = QuantState(
+                absmax=w2_absmax,
+                shape=10, # DITTO
+                code=w2_states_lst[0].code,
+                blocksize=w2_states_lst[0].blocksize,
+                dtype=w2_states_lst[0].dtype,
+            )
+            w13_weight_name = name + ".w13_weight"
+            w2_weight_name = name + ".w2_weight"
+            quant_states_dict[w13_weight_name] = w13_qs
+            quant_states_dict[w2_weight_name]=w2_qs
+    # pass

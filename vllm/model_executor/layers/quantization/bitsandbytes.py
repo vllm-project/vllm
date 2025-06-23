@@ -449,6 +449,13 @@ class BitsAndBytesMoEMethod(FusedMoEMethodBase):
             )
             layer.register_parameter("w13_weight", w13_qweight)
             set_weight_attrs(w13_qweight, extra_weight_attrs)
+            set_weight_attrs(
+                w13_qweight, {
+                    "input_dim": 0,
+                    "output_dim": 0,
+                    "pack_factor": 2,
+                    "use_bitsandbytes_4bit": True
+                })
             # down_proj (row parallel)
             w2_total_size = (hidden_size *
                              intermediate_size_per_partition) // quant_ratio
@@ -461,6 +468,13 @@ class BitsAndBytesMoEMethod(FusedMoEMethodBase):
                 ),
                 requires_grad=False,
             )
+            set_weight_attrs(
+                w2_qweight, {
+                    "input_dim": 0,
+                    "output_dim": 0,
+                    "pack_factor": 2,
+                    "use_bitsandbytes_4bit": True
+                })
             layer.register_parameter("w2_weight", w2_qweight)
             set_weight_attrs(w2_qweight, extra_weight_attrs)
 
