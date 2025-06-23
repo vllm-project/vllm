@@ -28,12 +28,16 @@ def launch_lm_eval(eval_config, tp_size):
         f"max_model_len={max_model_len}"
     )
     results = lm_eval.simple_evaluate(
-        model="vllm",
+        model=eval_config["backend"],
         model_args=model_args,
         tasks=[task["name"] for task in eval_config["tasks"]],
         num_fewshot=eval_config["num_fewshot"],
         limit=eval_config["limit"],
         batch_size="auto",
+        # TODO(yeq): using chat template w/ fewshot_as_multiturn is supposed help
+        # text models. however, this is regressing measured strict-match for
+        # existing text models in CI, so only apply it for mm.
+        apply_chat_template=eval_config["backend"] == "vllm-vlm",
     )
     return results
 
