@@ -45,6 +45,7 @@ pull_request_rules:
       - files~=^vllm/entrypoints/openai/tool_parsers/llama.*\.py
       - files~=^vllm/model_executor/models/.*llama.*\.py
       - files~=^vllm/transformers_utils/configs/.*llama.*\.py
+      - title~=(?i)llama
   actions:
     label:
       add:
@@ -65,6 +66,19 @@ pull_request_rules:
       add:
         - multi-modality
 
+- name: label-performance
+  description: Automatically apply performance label
+  conditions:
+    - or:
+      - files~=^benchmarks/
+      - files~=^vllm/benchmarks/
+      - files~=^tests/benchmarks/
+      - files~=^\.buildkite/nightly-benchmarks/
+  actions:
+    label:
+      add:
+        - performance
+
 - name: label-qwen
   description: Automatically apply qwen label
   conditions:
@@ -74,7 +88,6 @@ pull_request_rules:
       - files~=^vllm/model_executor/models/.*qwen.*\.py
       - files~=^vllm/reasoning/.*qwen.*\.py
       - title~=(?i)Qwen
-      - body~=(?i)Qwen
   actions:
     label:
       add:
