@@ -70,7 +70,10 @@ To make your model compatible with the Transformers backend, it needs:
 2. `MyAttention` must use `ALL_ATTENTION_FUNCTIONS` to call attention.
 3. `MyModel` must contain `_supports_attention_backend = True`.
 
-```python title="modeling_my_model.py"
+<details>
+<summary>modeling_my_model.py</summary>
+
+```python
 
 from transformers import PreTrainedModel
 from torch import nn
@@ -93,6 +96,8 @@ class MyModel(PreTrainedModel):
     _supports_attention_backend = True
 ```
 
+</details>
+
 Here is what happens in the background when this model is loaded:
 
 1. The config is loaded.
@@ -103,7 +108,10 @@ That's it!
 
 For your model to be compatible with vLLM's tensor parallel and/or pipeline parallel features, you must add `base_model_tp_plan` and/or `base_model_pp_plan` to your model's config class:
 
-```python title="configuration_my_model.py"
+<details>
+<summary>configuration_my_model.py</summary>
+
+```python
 
 from transformers import PretrainedConfig
 
@@ -122,6 +130,8 @@ class MyConfig(PretrainedConfig):
         "norm": (["hidden_states"], ["hidden_states"]),
     }
 ```
+
+</details>
 
 - `base_model_tp_plan` is a `dict` that maps fully qualified layer name patterns to tensor parallel styles (currently only `"colwise"` and `"rowwise"` are supported).
 - `base_model_pp_plan` is a `dict` that maps direct child layer names to `tuple`s of `list`s of `str`s:
@@ -198,6 +208,9 @@ huggingface-cli scan-cache --dir ~/.cache/huggingface/hub
 
 Use the Hugging Face CLI to interactively [delete downloaded model](https://huggingface.co/docs/huggingface_hub/guides/manage-cache#clean-your-cache) from the cache:
 
+<details>
+<summary>Commands</summary>
+
 ```console
 # The `delete-cache` command requires extra dependencies to work with the TUI.
 # Please run `pip install huggingface_hub[cli]` to install them.
@@ -223,6 +236,8 @@ Press <space> to select, <enter> to validate and <ctrl+c> to quit without modifi
 Start deletion.
 Done. Deleted 1 repo(s) and 0 revision(s) for a total of 438.9M.
 ```
+
+</details>
 
 #### Using a proxy
 
@@ -370,6 +385,7 @@ Specified using `--task generate`.
 | `TeleChat2ForCausalLM`                            | TeleChat2                                           | `Tele-AI/TeleChat2-3B`, `Tele-AI/TeleChat2-7B`, `Tele-AI/TeleChat2-35B`, etc.                                                                                                | ✅︎                     | ✅︎                          | ✅︎                     |
 | `TeleFLMForCausalLM`                              | TeleFLM                                             | `CofeAI/FLM-2-52B-Instruct-2407`, `CofeAI/Tele-FLM`, etc.                                                                                                                    | ✅︎                     | ✅︎                          | ✅︎                     |
 | `XverseForCausalLM`                               | XVERSE                                              | `xverse/XVERSE-7B-Chat`, `xverse/XVERSE-13B-Chat`, `xverse/XVERSE-65B-Chat`, etc.                                                                                            | ✅︎                     | ✅︎                          | ✅︎                     |
+| `MiniMaxM1ForCausalLM`                        | MiniMax-Text                                        | `MiniMaxAI/MiniMax-M1-40k`, `MiniMaxAI/MiniMax-M1-80k`etc.                                                                                                                                  |                        |                             |                       |
 | `MiniMaxText01ForCausalLM`                        | MiniMax-Text                                        | `MiniMaxAI/MiniMax-Text-01`, etc.                                                                                                                                            |                        |                             |                       |
 | `Zamba2ForCausalLM`                               | Zamba2                                              | `Zyphra/Zamba2-7B-instruct`, `Zyphra/Zamba2-2.7B-instruct`, `Zyphra/Zamba2-1.2B-instruct`, etc.                                                                              |                        |                             |                       |
 
@@ -444,7 +460,7 @@ Specified using `--task classify`.
 | Architecture                     | Models   | Example HF Models                      | [LoRA][lora-adapter]   | [PP][distributed-serving]   | [V1](gh-issue:8779)   |
 |----------------------------------|----------|----------------------------------------|------------------------|-----------------------------|-----------------------|
 | `JambaForSequenceClassification` | Jamba    | `ai21labs/Jamba-tiny-reward-dev`, etc. | ✅︎                     | ✅︎                          |                       |
-
+| `GPT2ForSequenceClassification`  | GPT2     | `nie3e/sentiment-polish-gpt2-small`    |                        |                             |                       |
 If your model is not in the above list, we will try to automatically convert the model using
 [as_classification_model][vllm.model_executor.models.adapters.as_classification_model]. By default, the class probabilities are extracted from the softmaxed hidden state corresponding to the last token.
 
@@ -561,6 +577,7 @@ Specified using `--task generate`.
 | `SkyworkR1VChatModel`                        | Skywork-R1V-38B                                                          | T + I                                                                 | `Skywork/Skywork-R1V-38B`                                                                                                                               |                        | ✅︎                          | ✅︎                    |
 | `SmolVLMForConditionalGeneration`            | SmolVLM2                                                                 | T + I                                                                 | `SmolVLM2-2.2B-Instruct`                                                                                                                                | ✅︎                     |                             | ✅︎                    |
 | `TarsierForConditionalGeneration`            | Tarsier                                                                  | T + I<sup>E+</sup>                                                    | `omni-search/Tarsier-7b`,`omni-search/Tarsier-34b`                                                                                                      |                        | ✅︎                          | ✅︎                    |
+| `Tarsier2ForConditionalGeneration`<sup>^</sup>            | Tarsier2                                                                  | T + I<sup>E+</sup> + V<sup>E+</sup>                                                    | `omni-research/Tarsier2-Recap-7b`,`omni-research/Tarsier2-7b-0115`                                                                                                      |                        | ✅︎                          | ✅︎                    |
 
 <sup>^</sup> You need to set the architecture name via `--hf-overrides` to match the one in vLLM.  
 &nbsp;&nbsp;&nbsp;&nbsp;• For example, to use DeepSeek-VL2 series models:  
@@ -599,27 +616,29 @@ Specified using `--task generate`.
 
     For the best results, we recommend using the following dependency versions (tested on A10 and L40):
 
-    ```text
-    # Core vLLM-compatible dependencies with Molmo accuracy setup (tested on L40)
-    torch==2.5.1
-    torchvision==0.20.1
-    transformers==4.48.1
-    tokenizers==0.21.0
-    tiktoken==0.7.0
-    vllm==0.7.0
+    ??? Dependency versions
 
-    # Optional but recommended for improved performance and stability
-    triton==3.1.0
-    xformers==0.0.28.post3
-    uvloop==0.21.0
-    protobuf==5.29.3
-    openai==1.60.2
-    opencv-python-headless==4.11.0.86
-    pillow==10.4.0
+        ```text
+        # Core vLLM-compatible dependencies with Molmo accuracy setup (tested on L40)
+        torch==2.5.1
+        torchvision==0.20.1
+        transformers==4.48.1
+        tokenizers==0.21.0
+        tiktoken==0.7.0
+        vllm==0.7.0
 
-    # Installed FlashAttention (for float16 only)
-    flash-attn>=2.5.6  # Not used in float32, but should be documented
-    ```
+        # Optional but recommended for improved performance and stability
+        triton==3.1.0
+        xformers==0.0.28.post3
+        uvloop==0.21.0
+        protobuf==5.29.3
+        openai==1.60.2
+        opencv-python-headless==4.11.0.86
+        pillow==10.4.0
+
+        # Installed FlashAttention (for float16 only)
+        flash-attn>=2.5.6  # Not used in float32, but should be documented
+        ```
 
     **Note:** Make sure you understand the security implications of using outdated packages.
 

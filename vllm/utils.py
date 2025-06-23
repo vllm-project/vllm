@@ -67,9 +67,6 @@ from torch.library import Library
 from typing_extensions import Never, ParamSpec, TypeIs, assert_never
 
 import vllm.envs as envs
-# NOTE: import triton_utils to make TritonPlaceholderModule work
-#       if triton is unavailable
-import vllm.triton_utils  # noqa: F401
 from vllm.logger import enable_trace_function_call, init_logger
 
 if TYPE_CHECKING:
@@ -189,6 +186,16 @@ TORCH_DTYPE_TO_NUMPY_DTYPE = {
     torch.int32: np.int32,
     torch.int64: np.int64,
 }
+
+
+@contextlib.contextmanager
+def set_default_torch_num_threads(num_threads: int):
+    """Sets the default number of threads for PyTorch to the given value."""
+    old_num_threads = torch.get_num_threads()
+    torch.set_num_threads(num_threads)
+    yield
+    torch.set_num_threads(old_num_threads)
+
 
 P = ParamSpec('P')
 T = TypeVar("T")
