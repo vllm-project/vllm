@@ -568,7 +568,7 @@ class P2pNcclEngine:
             func: Callable,
             tensor,
             peer_rank: int,
-            timeout=5,
+            timeout: int,
             stream=None
     ) -> int:
         result_code = 2
@@ -592,7 +592,8 @@ class P2pNcclEngine:
             func(comm, tensor, peer_rank, stream)
             result_code = 0
         except Exception as e:
-            logger.error(f"{op_name} failed: {e}")
+            logger.error(
+                "🔴%s failed, remote_address:%s, e:%s", op_name, remote_address, e)
             result_code = 2
         finally:
             abort_triggered.set()
@@ -604,10 +605,10 @@ class P2pNcclEngine:
                                                        + self.nccl_timeout_s)
         return result_code
 
-    def send_with_timeout(self, remote_address, comm, tensor: torch.Tensor, dst: int, timeout: float, stream=None):
+    def send_with_timeout(self, remote_address, comm, tensor: torch.Tensor, dst: int, timeout: int, stream=None):
         return self._with_timeout("send", remote_address, comm, self._send, tensor, dst, timeout, stream)
 
-    def recv_with_timeout(self, remote_address, comm, tensor: torch.Tensor, src: int, timeout: float, stream=None):
+    def recv_with_timeout(self, remote_address, comm, tensor: torch.Tensor, src: int, timeout: int, stream=None):
         return self._with_timeout("recv", remote_address, comm, self._recv, tensor, src, timeout, stream)
 
     def close(self) -> None:
