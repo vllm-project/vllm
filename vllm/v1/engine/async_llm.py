@@ -8,7 +8,7 @@ from typing import Any, Optional, Union
 import numpy as np
 
 import vllm.envs as envs
-from vllm.config import ModelConfig, VllmConfig, ObservabilityConfig
+from vllm.config import ModelConfig, ObservabilityConfig, VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
 from vllm.envs import VLLM_V1_OUTPUT_PROC_CHUNK_SIZE

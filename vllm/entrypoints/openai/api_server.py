@@ -35,7 +35,7 @@ from starlette.routing import Mount
 from typing_extensions import assert_never
 
 import vllm.envs as envs
-from vllm.config import VllmConfig, ModelConfig, ObservabilityConfig
+from vllm.config import ObservabilityConfig, VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine  # type: ignore
 from vllm.engine.multiprocessing.client import MQLLMEngineClient
@@ -110,26 +110,25 @@ logger = init_logger('vllm.entrypoints.openai.api_server')
 
 _running_tasks: set[asyncio.Task] = set()
 
+
 def setup_otel(app: FastAPI, observability_config: ObservabilityConfig):
     from opentelemetry import trace
     from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
-        OTLPSpanExporter
-    )
+        OTLPSpanExporter)
+    from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+    from opentelemetry.sdk.resources import Resource
     from opentelemetry.sdk.trace import TracerProvider
     from opentelemetry.sdk.trace.export import BatchSpanProcessor
-    from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
-    from opentelemetry.sdk.resources import SERVICE_NAME, Resource
 
     trace.set_tracer_provider(TracerProvider(resource=Resource.create()))
 
     otlp_exporter = OTLPSpanExporter(
-        endpoint=observability_config.otlp_traces_endpoint
-    )
+        endpoint=observability_config.otlp_traces_endpoint)
     trace.get_tracer_provider().add_span_processor(
-        BatchSpanProcessor(otlp_exporter)
-    )
+        BatchSpanProcessor(otlp_exporter))
 
     FastAPIInstrumentor().instrument_app(app)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
