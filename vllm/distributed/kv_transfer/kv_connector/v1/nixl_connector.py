@@ -10,7 +10,7 @@ from collections import defaultdict
 from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import msgspec
 import torch
@@ -20,7 +20,7 @@ from vllm import envs
 from vllm.attention.selector import backend_name_to_enum, get_attn_backend
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-    KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
+    CopyBlocksOp, KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size,
     get_tp_group)
@@ -40,11 +40,6 @@ if TYPE_CHECKING:
 Transfer = tuple[int, float]  # (xfer_handle, start_time)
 EngineId = str
 ReqId = str
-
-# s_tensor_list, d_tensor_list, s_indices, d_indices, direction
-CopyBlocksOp = Callable[[
-    dict[str, torch.Tensor], dict[str, torch.Tensor], list[int], list[int], str
-], None]
 
 GET_META_MSG = b"get_meta_msg"
 
@@ -1132,6 +1127,7 @@ class NixlConnectorWorker:
                 "Num local_block_ids: %s. Num remote_block_ids: %s. ", req_id,
                 remote_engine_id, len(meta.local_block_ids),
                 len(meta.remote_block_ids))
+            self._recving_metadata[req_id] = meta
             if remote_engine_id not in self._remote_agents:
                 # Being optimistic to assume engine is usually ready, apply
                 # lock only when the optimistic check fails.
@@ -1165,7 +1161,6 @@ class NixlConnectorWorker:
                         fut.add_done_callback(request_ready)
                         continue
             self._read_blocks_for_req(req_id, meta)
-            self._recving_metadata[req_id] = meta
 
         # Start transfers for requests whose handshakes have now finished.
         while not self._ready_requests.empty():

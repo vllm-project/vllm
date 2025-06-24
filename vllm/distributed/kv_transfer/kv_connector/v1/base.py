@@ -46,6 +46,11 @@ if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.request import Request
 
+# s_tensor_list, d_tensor_list, s_indices, d_indices, direction
+CopyBlocksOp = Callable[[
+    dict[str, torch.Tensor], dict[str, torch.Tensor], list[int], list[int], str
+], None]
+
 logger = init_logger(__name__)
 
 
@@ -124,8 +129,7 @@ class KVConnectorBase_V1(ABC):
         """
         return
 
-    def set_host_xfer_buffer_ops(self, d2h_copy_blocks: Callable,
-                                 h2d_copy_blocks: Callable):
+    def set_host_xfer_buffer_ops(self, copy_operation: CopyBlocksOp):
         """
         Set the xPU-specific ops for copying KV between host and device.
         Needed when host buffer is used for kv transfer (e.g., in NixlConnector)
