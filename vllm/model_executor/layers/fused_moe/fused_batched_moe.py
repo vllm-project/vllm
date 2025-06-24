@@ -50,7 +50,7 @@ def moe_mmk(
     compute_type: tl.constexpr,
     use_w8a8: tl.constexpr,
     use_w8a16: tl.constexpr,
-    per_channel_quant: tl.constexpr,
+    per_act_token_quant: tl.constexpr,
 ):
 
     offs_k = tl.arange(0, BLOCK_K)
@@ -63,25 +63,33 @@ def moe_mmk(
     if use_w8a8:
         # block-wise
         if group_k > 0 and group_n > 0:
-            a_scale_ptrs = a_scale_ptr + offs_m * stride_asm #+ (expert_id * stride_ase)
+            a_scale_ptrs = a_scale_ptr + offs_m * stride_asm
             offs_bsn = offs_n // group_n
-            b_scale_ptrs = (b_scale_ptr + expert_id * stride_bse +
-                            offs_bsn * stride_bsn)
+            b_scale_ptrs = b_scale_ptr + offs_bsn * stride_bsn
 
-        # channel-wise
-        elif per_channel_quant:
-            # TODO: probably not correct
-            b_scale_ptrs = b_scale_ptr + expert_id * stride_bse + offs_n[None, :] * stride_bsn
+        # per act token
+        elif per_act_token_quant:
+            # Load per-token scale for activations
+            a_scale_ptrs = a_scale_ptr + offs_m * stride_asm
+            a_scale = tl.load(a_scale_ptrs, mask=mask_m, other=0.0)[:,None]
+
+            b_scale_ptrs = b_scale_ptr + offs_n[None, :] * stride_bsn
             b_scale = tl.load(b_scale_ptrs)
+
+
             # Load per-token scale for activations
             # + (expert_id * stride_ase)??
-            a_scale_ptrs = a_scale_ptr + offs_m * stride_asm
-            a_scale = tl.load(a_scale_ptrs, mask=mask_m, other=0.0)[:, None]
+            #a_scale_ptrs = a_scale_ptr + offs_m * stride_asm
+            #a_scale = tl.load(a_scale_ptrs, mask=mask_m, other=0.0)[:, None]
+
+            # TODO: probably not correct
+            #b_scale_ptrs = b_scale_ptr + expert_id * stride_bse #+ offs_n[None, :] * stride_bsn
+            #b_scale = tl.load(b_scale_ptrs)
 
         # tensor-wise
         else:
-            a_scale = tl.load(a_scale_ptr)  # + (expert_id * stride_ase)
-            b_scale = tl.load(b_scale_ptr + expert_id * stride_bse)
+            a_scale = tl.load(a_scale_ptr)
+            b_scale = tl.load(b_scale_ptr)
 
     # -----------------------------------------------------------
     # Iterate to compute a block of the C matrix.
@@ -108,26 +116,33 @@ def moe_mmk(
                                   other=0.0)
                 b_scale = tl.load(b_scale_ptrs + offs_ks * stride_bsk)
 
-                accumulator += tl.dot(a, b) * a_scale[:,
-                                                      None] * b_scale[None, :]
+                accumulator += tl.dot(a, b) * a_scale[:, None] * b_scale[None, :]
+            elif False and per_act_token_quant:
+                a_scale = tl.load(a_scale_ptrs + offs_k[None, :] * stride_ask,
+                                  mask=mask_m[:, None] & (offs_k[None, :] < K - k * BLOCK_K),
+                                  other=0.0)
+                b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_K, other=0.0)
+
+                accumulator += tl.dot(a, b) * a_scale[:, None] * b_scale[None, :]
             else:
-                if use_w8a8:
-                    # acc used to enable fp8_fast_accum
-                    accumulator = tl.dot(a, b, acc=accumulator)
-                else:
-                    accumulator += tl.dot(a, b)
+                accumulator = tl.dot(a, b, acc=accumulator)
         else:
             accumulator += tl.dot(a, b)
+
         # Advance the ptrs to the next K block.
         a_ptrs += BLOCK_K * stride_ak
         b_ptrs += BLOCK_K * stride_bk
+
+        if False and per_act_token_quant:
+            a_scale_ptrs += BLOCK_K * stride_ask
+            b_scale_ptrs += BLOCK_K * stride_bsk
 
     if use_w8a16:
         accumulator = (accumulator * b_scale).to(compute_type)
     elif use_w8a8:
         if group_k > 0 and group_n > 0:
             accumulator = accumulator.to(compute_type)
-        else:
+        elif True or not per_act_token_quant:
             accumulator = (accumulator * a_scale * b_scale).to(compute_type)
     else:
         accumulator = accumulator.to(compute_type)
@@ -169,7 +184,7 @@ def expert_triton_kernel(
     # Quantization schemes
     use_fp8_w8a8: tl.constexpr,
     use_int8_w8a16: tl.constexpr,
-    per_channel_quant: tl.constexpr,
+    per_act_token_quant: tl.constexpr,
     # Kernel config
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
@@ -181,6 +196,7 @@ def expert_triton_kernel(
     offs_k = tl.arange(0, BLOCK_K)
     mask_m = offs_m < M
 
+    # Make grids of a + b pointers
     a_ptrs = a_ptr + offs_m[:, None] * stride_am + offs_k[None, :] * stride_ak
     b_ptrs = b_ptr + offs_k[:, None] * stride_bk + offs_n[None, :] * stride_bn
 
@@ -217,7 +233,7 @@ def expert_triton_kernel(
         compute_type,
         use_fp8_w8a8,
         use_int8_w8a16,
-        per_channel_quant)
+        per_act_token_quant)
 
     # store in C
     offs_cn = tl.arange(0, BLOCK_N)
@@ -266,17 +282,19 @@ def batched_triton_kernel(
         # Quantization schemes
         use_fp8_w8a8: tl.constexpr,
         use_int8_w8a16: tl.constexpr,
-        per_channel_quant: tl.constexpr,
+        per_act_token_quant: tl.constexpr,
         # Kernel config
         BLOCK_M: tl.constexpr,
         BLOCK_N: tl.constexpr,
-        BLOCK_K: tl.constexpr):
+        BLOCK_K: tl.constexpr,
+):
     expert_id = tl.program_id(axis=0)
     e_num_tokens = tl.load(expert_num_tokens + expert_id)
     if e_num_tokens == 0:
         # Early exit
         return
 
+    # axis 1 is M_blocks * N_blocks
     pid_mn = tl.program_id(axis=1)
     #num_pid_m = tl.cdiv(max_num_tokens, BLOCK_M)
     num_pid_n = tl.cdiv(N, BLOCK_N)
@@ -298,14 +316,15 @@ def batched_triton_kernel(
              cta_n_start * stride_cn)
 
     if use_fp8_w8a8:
-        a_scale_ptr = a_scale_ptr + (expert_id * stride_ase)
+        a_scale_ptr = a_scale_ptr + expert_id * stride_ase
+        b_scale_ptr = b_scale_ptr + expert_id * stride_bse
         # block-wise
         if group_k > 0 and group_n > 0:
             a_scale_ptr = a_scale_ptr + cta_m_start * stride_asm
-            b_scale_ptr = b_scale_ptr + (expert_id * stride_bse)
-        elif per_channel_quant:
+            # b group advancement?
+        elif False and per_act_token_quant:
             a_scale_ptr = a_scale_ptr + cta_m_start * stride_asm
-            b_scale_ptr = b_scale_ptr + (expert_id * stride_bse) + cta_n_start * stride_bsn
+            b_scale_ptr = b_scale_ptr + cta_n_start * stride_bsn
 
     expert_triton_kernel(
         a_ptr,
@@ -338,7 +357,7 @@ def batched_triton_kernel(
         # Quantization schemes
         use_fp8_w8a8,
         use_int8_w8a16,
-        per_channel_quant,
+        per_act_token_quant,
         # Kernel config
         BLOCK_M,
         BLOCK_N,
