@@ -521,6 +521,7 @@ class CoreEngineActorManager:
         self.created_placement_groups = self.created_placement_groups[:new_dp_size]
         for pg in pgs_to_remove:
             ray.util.remove_placement_group(pg)
+        self.vllm_config.parallel_config.data_parallel_size = new_dp_size
 
     def scale_up(self, new_dp_size: int, new_port: int, new_worker_port: int):
         import copy

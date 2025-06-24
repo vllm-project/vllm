@@ -1175,3 +1175,4 @@ class RayDPClient(DPAsyncMPClient):
         else:
             self.core_engines = self.core_engines[:dp_size]
         self.resources.coordinator.reinit(dp_size)
+        self.vllm_config.parallel_config.data_parallel_size = dp_size
