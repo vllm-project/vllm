@@ -114,3 +114,15 @@ class AITERPagedAttention(PagedAttention):
                                      K_QScale=k_scale,
                                      max_qlen=1,
                                      V_QScale=v_scale)
+        rocm_aiter.pa_fwd_asm(
+            Q=query,
+            K=key_cache,
+            V=asm_V_shuffle(value_cache),
+            block_tables=block_tables,
+            context_lens=seq_lens,
+            max_num_blocks=max_num_blocks_per_seq,
+            K_QScale=k_scale,
+            V_QScale=v_scale,
+            out_=output,
+        )
+        return output
