@@ -131,3 +131,8 @@ class StableLMAlphaConfig(PretrainedConfig):
             tie_word_embeddings=tie_word_embeddings,
             **kwargs,
         )
+
+
+# Register the config class with transformers for the StableLM-Alpha model type
+from transformers import CONFIG_MAPPING
+CONFIG_MAPPING.register("stablelm_alpha", StableLMAlphaConfig)
