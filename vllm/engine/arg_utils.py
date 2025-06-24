@@ -170,7 +170,7 @@ def get_type_hints(type_hint: TypeHint) -> set[TypeHint]:
     return type_hints
 
 
-def is_online_quantization(quantization: str) -> bool:
+def is_online_quantization(quantization: Any) -> bool:
     return quantization in ["inc"]
 
 
