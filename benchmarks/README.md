@@ -269,6 +269,21 @@ python3 vllm/benchmarks/benchmark_serving.py \
   --num-prompts 10
 ```
 
+### Running With Ramp-Up Request Rate
+
+The benchmark tool also supports ramping up the request rate over the
+duration of the benchmark run. This can be useful for stress testing the
+server or finding the maximum throughput that it can handle, given some latency budget.
+
+Two ramp-up strategies are supported:
+- `linear`: Increases the request rate linearly from a start value to an end value.
+- `exponential`: Increases the request rate exponentially.
+
+The following arguments can be used to control the ramp-up:
+- `--ramp-up-strategy`: The ramp-up strategy to use (`linear` or `exponential`).
+- `--ramp-up-start-rps`: The request rate at the beginning of the benchmark.
+- `--ramp-up-end-rps`: The request rate at the end of the benchmark.
+
 ---
 ## Example - Offline Throughput Benchmark
 
