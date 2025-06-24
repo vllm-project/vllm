@@ -287,6 +287,9 @@ class Worker(WorkerBase):
         with context:
             self.model_runner.initialize_kv_cache(kv_cache_config, reinit)
 
+    def clear_kv_cache(self):
+        self.model_runner.clear_kv_cache()
+
     def compile_or_warm_up_model(self) -> None:
         # warm up sizes that are not in cudagraph capture sizes,
         # but users still want to compile for better performance,

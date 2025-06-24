@@ -2453,11 +2453,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.may_reinitialize_input_batch(kv_cache_config)
         if not reinit:
             self.initialize_attn_backend(kv_cache_config)
-        else:
-            del self.kv_caches
-            self.kv_caches = []
-            torch.cuda.empty_cache()
-            gc.collect()
         kv_caches = self.initialize_kv_cache_tensors(kv_cache_config)
 
         if self.speculative_config and self.speculative_config.use_eagle():
@@ -2468,6 +2463,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         if has_kv_transfer_group():
             get_kv_transfer_group().register_kv_caches(kv_caches)
+
+    def clear_kv_cache(self):
+        del self.kv_caches
+        self.kv_caches = []
+        torch.cuda.empty_cache()
+        gc.collect()
+        logger.info("KV cache cleared")
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         """

@@ -55,6 +55,9 @@ class Executor(ExecutorBase):
                              f"{distributed_executor_backend}")
         return executor_class
 
+    def clear_kv_cache(self) -> None:
+        self.collective_rpc("clear_kv_cache")
+
     def initialize_from_config(self,
                                kv_cache_configs: list[KVCacheConfig],
                                reinit: bool = False) -> None:

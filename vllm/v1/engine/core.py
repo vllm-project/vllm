@@ -1017,6 +1017,8 @@ class DPEngineCoreActor(DPEngineCoreProc):
         assert isinstance(self.model_executor, RayDistributedExecutor)
         self.model_executor.reinit_dp_states(new_dp_size, new_port, new_worker_port)
 
+        logger.info("Calling clear_kv_cache()")
+        self.model_executor.clear_kv_cache()
         # This is needed because we need to call get_dp_padding() on the old workers
         # so that the EngineCore.init()|get_dp_padding()|all_reduce() can proceed
         logger.info("Calling determine_available_memory()")
