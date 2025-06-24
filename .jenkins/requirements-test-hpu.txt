@@ -1,3 +1,3 @@
-lm_eval
+lm_eval==0.4.8
 pytest
 pytest_asyncio
