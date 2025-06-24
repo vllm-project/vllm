@@ -80,7 +80,7 @@ def _remove_requests(
 
 
 def _construct_expected_sampling_metadata(
-            reqs: list[CachedRequestState],
+    reqs: list[CachedRequestState],
     req_ids_retained: set[int],
     req_id_index_in_input_batch: dict[str, int],
     device: torch.device,
