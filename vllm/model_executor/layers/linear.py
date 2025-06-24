@@ -236,6 +236,8 @@ class LinearBase(torch.nn.Module):
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
         self.params_dtype = params_dtype
+        # Modified for ascend-prefill
+        self.prefix = prefix
         if quant_config is None:
             self.quant_method: Optional[
                 QuantizeMethodBase] = UnquantizedLinearMethod()
@@ -383,8 +385,15 @@ class ColumnParallelLinear(LinearBase):
         return_bias: bool = True,
     ):
         # Divide the weight matrix along the last dimension.
+        # Modified for ascend-prefill
+        self.prefix = prefix
         self.tp_size = get_tensor_model_parallel_world_size()
         self.input_size_per_partition = input_size
+        # Modified for ascend-prefill
+        current_layer = int(self.prefix.split(".")[2])
+        is_shared_experts = "shared_experts" in self.prefix 
+        if current_layer >= 3 and is_shared_experts:
+            self.tp_size = 1
         self.output_size_per_partition = divide(output_size, self.tp_size)
         self.output_partition_sizes = [self.output_size_per_partition]
         # If QKV or MergedColumn, use output size of each partition.
@@ -431,6 +440,11 @@ class ColumnParallelLinear(LinearBase):
 
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
         tp_rank = get_tensor_model_parallel_rank()
+        # Modified for ascend-prefill
+        current_layer = int(self.prefix.split(".")[2])
+        is_shared_experts = "shared_experts" in self.prefix 
+        if current_layer >= 3 and is_shared_experts:
+            tp_rank = 0
         output_dim = getattr(param, "output_dim", None)
 
         is_sharded_weight = getattr(param, "is_sharded_weight", False)
@@ -648,6 +662,12 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         assert loaded_shard_id < len(self.output_sizes)
         tp_rank = get_tensor_model_parallel_rank()
         tp_size = get_tensor_model_parallel_world_size()
+        # Modified for ascend-prefill 共享专家不切TP
+        current_layer = int(self.prefix.split(".")[2])
+        is_shared_experts = "shared_experts" in self.prefix 
+        if current_layer >= 3 and is_shared_experts:
+            tp_size = 1
+            tp_rank = 0
         if output_dim is not None:
             shard_offset = sum(self.output_sizes[:loaded_shard_id]) // tp_size
             shard_size = self.output_sizes[loaded_shard_id] // tp_size
@@ -1181,6 +1201,12 @@ class RowParallelLinear(LinearBase):
         # Divide the weight matrix along the first dimension.
         self.tp_rank = get_tensor_model_parallel_rank()
         self.tp_size = get_tensor_model_parallel_world_size()
+        # Modified for ascend-prefill 共享专家不切TP
+        current_layer = int(self.prefix.split(".")[2])
+        is_shared_experts = "shared_experts" in self.prefix 
+        if current_layer >= 3 and is_shared_experts:
+            self.tp_size = 1
+            self.tp_rank = 0
         self.input_size_per_partition = divide(input_size, self.tp_size)
         self.output_size_per_partition = output_size
         self.output_partition_sizes = [output_size]
@@ -1224,6 +1250,12 @@ class RowParallelLinear(LinearBase):
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
         tp_rank = get_tensor_model_parallel_rank()
         tp_size = get_tensor_model_parallel_world_size()
+        # Modified for ascend-prefill 共享专家不切TP
+        current_layer = int(self.prefix.split(".")[2])
+        is_shared_experts = "shared_experts" in self.prefix 
+        if current_layer >= 3 and is_shared_experts:
+            tp_size = 1
+            tp_rank = 0
         input_dim = getattr(param, "input_dim", None)
         use_bitsandbytes_4bit = getattr(param, "use_bitsandbytes_4bit", False)
         is_sharded_weight = getattr(param, "is_sharded_weight", False)
@@ -1273,6 +1305,9 @@ class RowParallelLinear(LinearBase):
     def forward(
         self, input_
     ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
+        # Modified for ascend-prefill 共享专家不切TP
+        current_layer = int(self.prefix.split(".")[2])
+        is_shared_experts = "shared_experts" in self.prefix 
         if self.input_is_parallel:
             input_parallel = input_
         else:
@@ -1289,7 +1324,8 @@ class RowParallelLinear(LinearBase):
         output_parallel = self.quant_method.apply(self,
                                                   input_parallel,
                                                   bias=bias_)
-        if self.reduce_results and self.tp_size > 1:
+        # Modifief for ascend-prefill 前3层要做allreduce
+        if self.reduce_results and self.tp_size > 1 and current_layer < 3:
             output = tensor_model_parallel_all_reduce(output_parallel)
         else:
             output = output_parallel
