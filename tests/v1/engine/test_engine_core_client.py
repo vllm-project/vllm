@@ -26,8 +26,8 @@ from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core import EngineCore
 from vllm.v1.engine.core_client import (AsyncMPClient, EngineCoreClient,
                                         SyncMPClient)
+from vllm.v1.engine.utils import CoreEngineProcManager
 from vllm.v1.executor.abstract import Executor
-from vllm.v1.utils import CoreEngineProcManager
 
 from ...distributed.conftest import MockSubscriber
 from ...utils import create_new_process_for_each_test

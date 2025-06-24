@@ -34,6 +34,7 @@ from vllm.v1.core.sched.scheduler import Scheduler as V1Scheduler
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
                             EngineCoreRequestType, UtilityOutput)
 from vllm.v1.engine.mm_input_cache import MirroredProcessingCache
+from vllm.v1.engine.utils import EngineHandshakeMetadata, EngineZmqAddresses
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import SchedulerStats
@@ -41,7 +42,6 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 from vllm.v1.structured_output import StructuredOutputManager
-from vllm.v1.utils import EngineHandshakeMetadata, EngineZmqAddresses
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
@@ -961,9 +961,9 @@ class DPEngineCoreProc(EngineCoreProc):
 
     def _has_global_unfinished_reqs(self, local_unfinished: bool) -> bool:
 
-        # Optimization - only perform finish-sync all-reduce every 24 steps.
+        # Optimization - only perform finish-sync all-reduce every 32 steps.
         self.counter += 1
-        if self.counter != 24:
+        if self.counter != 32:
             return True
         self.counter = 0
 
