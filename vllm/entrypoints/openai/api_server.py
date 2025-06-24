@@ -14,7 +14,7 @@ import socket
 import tempfile
 import uuid
 from argparse import Namespace
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
 from functools import partial
 from http import HTTPStatus
@@ -1078,28 +1078,23 @@ def build_app(args: Namespace) -> FastAPI:
             def __init__(self, app: ASGIApp) -> None:
                 self.app = app
 
-            async def __call__(self, scope: Scope, receive: Receive,
-                               send: Send) -> None:
+            def __call__(self, scope: Scope, receive: Receive,
+                         send: Send) -> Awaitable[None]:
                 if scope["type"] not in (
                         "http", "websocket") or scope["method"] == "OPTIONS":
                     # scope["type"] can be "lifespan" or "startup" for example,
                     # in which case we don't need to do anything
-                    await self.app(scope, receive, send)
-                    return
+                    return self.app(scope, receive, send)
                 root_path = scope.get("root_path", "")
                 url_path = URL(scope=scope).path.removeprefix(root_path)
                 headers = Headers(scope=scope)
-                if not url_path.startswith("/v1"):
-                    await self.app(scope, receive, send)
-                    return
                 # Type narrow to satisfy mypy.
-                if isinstance(token, str) and headers.get(
-                        "Authorization") != f"Bearer {token}":
+                if (isinstance(token, str) and url_path.startswith("/v1")
+                        and headers.get("Authorization") != f"Bearer {token}"):
                     response = JSONResponse(content={"error": "Unauthorized"},
                                             status_code=401)
-                    await response(scope, receive, send)
-                    return
-                await self.app(scope, receive, send)
+                    return response(scope, receive, send)
+                return self.app(scope, receive, send)
 
         app.add_middleware(AuthenticationMiddleware)
 
@@ -1115,11 +1110,10 @@ def build_app(args: Namespace) -> FastAPI:
             def __init__(self, app: ASGIApp) -> None:
                 self.app = app
 
-            async def __call__(self, scope: Scope, receive: Receive,
-                               send: Send) -> None:
+            def __call__(self, scope: Scope, receive: Receive,
+                         send: Send) -> Awaitable[None]:
                 if scope["type"] not in ("http", "websocket"):
-                    await self.app(scope, receive, send)
-                    return
+                    return self.app(scope, receive, send)
 
                 # Extract the request headers.
                 request_headers = Headers(scope=scope)
@@ -1138,7 +1132,7 @@ def build_app(args: Namespace) -> FastAPI:
                         response_headers.append("X-Request-Id", request_id)
                     await send(message)
 
-                await self.app(scope, receive, send_with_request_id)
+                return self.app(scope, receive, send_with_request_id)
 
         app.add_middleware(XRequestIdMiddleware)
 
