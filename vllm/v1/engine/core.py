@@ -139,7 +139,7 @@ class EngineCore:
             # is attention free.
             kv_cache_specs = []
             kv_cache_configs = [
-                    KVCacheConfig(num_blocks=0, tensors={}, kv_cache_groups=[])
+                    KVCacheConfig(num_blocks=0, kv_cache_tensors={}, kv_cache_groups=[])
                 ]
         else:
             # Get all kv cache needed by the model
