@@ -163,9 +163,20 @@ class LogitsProcessorManager:
         return self.nongreedy_list + self.greedy_list
 
 
-def init_hard_coded_logitsprocs(
-        pin_memory_available: bool, max_num_reqs: int,
-        device: torch.device) -> LogitsProcessorManager:
+def init_builtin_logitsprocs(pin_memory_available: bool, max_num_reqs: int,
+                             device: torch.device) -> LogitsProcessorManager:
+    """Construct 'builtin' vLLM logitsprocs which the engine
+    loads by default.
+    
+    Args:
+      pin_memory_available: pinned memory is available for use
+                            for use by logitsproc
+      max_num_reqs: ceiling on request count in persistent batch
+      device: inference device
+
+    Returns:
+      Data structure encapsulating loaded logitsprocs
+    """
     min_tokens_logitproc = MinTokensLogitsProcessor(
         pin_memory=pin_memory_available, device=device)
     logit_bias_logitproc = LogitBiasLogitsProcessor(
