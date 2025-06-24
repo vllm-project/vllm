@@ -22,8 +22,7 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.worker.utils import (STR_LOGITS_BIAS_LOGITPROC_ID,
                                   STR_MIN_P_LOGITPROC_ID,
                                   STR_MIN_TOKENS_LOGITPROC_ID,
-                                  STR_NO_LOGITPROC,
-                                  init_hard_coded_logitsprocs)
+                                  STR_NO_LOGITPROC, init_builtin_logitsprocs)
 
 PIN_MEMORY_AVAILABLE = is_pin_memory_available()
 MAX_NUM_REQS = 256
@@ -81,7 +80,7 @@ def _generate_fake_sampling_metadata(
                               vocab_size,
                               size=np.random.randint(
                                   1, MAX_NUM_PROMPT_TOKENS)).tolist())
-    logitsprocs = init_hard_coded_logitsprocs(
+    logitsprocs = init_builtin_logitsprocs(
         pin_memory_available=PIN_MEMORY_AVAILABLE,
         max_num_reqs=MAX_NUM_REQS + 1,
         device=device)

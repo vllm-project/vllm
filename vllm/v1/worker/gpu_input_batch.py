@@ -20,7 +20,7 @@ from vllm.v1.sample.logits_processor import (BatchUpdateBuilder,
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.utils import copy_slice
 from vllm.v1.worker.block_table import MultiGroupBlockTable
-from vllm.v1.worker.utils import init_hard_coded_logitsprocs
+from vllm.v1.worker.utils import init_builtin_logitsprocs
 
 
 @dataclass
@@ -204,8 +204,9 @@ class InputBatch:
         # To accumulate prompt logprobs tensor chunks across prefill steps.
         self.in_progress_prompt_logprobs_cpu: dict[str, LogprobsTensors] = {}
 
-        # Internal representation of per-step batch state changes.
-        # Should reset each step.
+        # Internal representation of per-step batch state changes, used for
+        # reordering persistent batch and generating logitsprocs batch state
+        # updates. Should reset each step.
         self.batch_update_builder = BatchUpdateBuilder()
 
         # Define logits processors. Note that Min-P logitsproc is returned
@@ -213,7 +214,7 @@ class InputBatch:
         # compatibility check) and also as part of logits_procs
         # TODO(andy): logits processor list should be extensible via engine
         # constructor argument; for now the list is fixed.
-        self.logitsprocs = init_hard_coded_logitsprocs(
+        self.logitsprocs = init_builtin_logitsprocs(
             pin_memory_available=pin_memory,
             max_num_reqs=max_num_reqs + 1,
             device=device)
