@@ -7,9 +7,9 @@
 #  - Chih-Chieh Yang <chih.chieh.yang@ibm.com>
 #  - Thomas Parnell <tpa@zurich.ibm.com>
 
+import aiter
 import torch
 
-from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
 from vllm.platforms.rocm import use_rocm_custom_paged_attention
 from vllm.triton_utils import tl, triton
@@ -305,7 +305,7 @@ def chunked_prefill_paged_decode(
         )
         max_logits = torch.empty_like(exp_sums)
 
-        ops.paged_attention_rocm(
+        aiter.paged_attention_rocm(
             output,
             exp_sums,
             max_logits,
@@ -316,10 +316,9 @@ def chunked_prefill_paged_decode(
             num_kv_heads,
             scale=sm_scale,
             block_tables=block_table,
-            seq_lens=seq_lens,
-            query_start_loc=query_start_loc,
+            context_lens=seq_lens,
             block_size=block_size,
-            max_seq_len=max_seq_len,
+            max_context_len=max_seq_len,
             alibi_slopes=alibi_slopes,
             kv_cache_dtype=kv_cache_dtype,
             k_scale=k_scale,
