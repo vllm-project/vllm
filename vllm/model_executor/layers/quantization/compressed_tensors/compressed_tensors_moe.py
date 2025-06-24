@@ -198,6 +198,29 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
             {"quant_method": FusedMoeWeightScaleSupported.TENSOR.value})
         set_weight_attrs(w2_input_scale, extra_weight_attrs)
 
+    def swizzle_blockscale(self, scale: torch.tensor):
+        assert (scale.dtype == torch.float8_e4m3fn)
+        # Pad and blockwise interleave weight_scale
+        scale_ndim = scale.ndim
+        if scale.ndim == 2:
+            scale = scale.unsqueeze(0)
+        assert scale.ndim == 3
+        B, M, K = scale.shape
+        round_up_multiple = lambda x, m: (x + m - 1) // m * m
+        M_padded = round_up_multiple(M, 128)
+        K_padded = round_up_multiple(K, 4)
+        padded_scale = torch.zeros((B, M_padded, K_padded), dtype=scale.dtype)
+        padded_scale[:B, :M, :K] = scale
+        batches, rows, cols = padded_scale.shape
+        assert rows % 128 == 0
+        assert cols % 4 == 0
+        padded_scale = padded_scale.reshape(batches, rows // 128, 4, 32,
+                                            cols // 4, 4)
+        swizzled_scale = padded_scale.permute((0, 1, 4, 3, 2, 5))
+        swizzled_scale = swizzled_scale.contiguous().cuda()
+        return (swizzled_scale.reshape(M, K)
+                if scale_ndim == 2 else swizzled_scale.reshape(B, M, K))
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
 
         # From packed to weight
@@ -214,43 +237,42 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
                 "Accuracy may be affected.")
 
         # Take inverse of global scale saved to disk
-        w13_weight_scale_2 = 1 / layer.w13_weight_global_scale[:, 0]
-
-        layer.w13_weight_scale_2 = torch.nn.Parameter(w13_weight_scale_2,
-                                                      requires_grad=False)
+        layer.w13_weight_scale_2 = torch.nn.Parameter(
+            1 / layer.w13_weight_global_scale[:, 0], requires_grad=False)
 
         layer.w2_weight_scale_2 = torch.nn.Parameter(
             1 / layer.w2_weight_global_scale.data, requires_grad=False)
 
         if not self.use_marlin:
-            # w13
-            w13_input_scale = 1 / layer.w13_input_scale.max(dim=1).values.to(
-                torch.float32)
-
-            layer.g1_alphas = torch.nn.Parameter(
-                (w13_input_scale * w13_weight_scale_2).to(torch.float32),
-                requires_grad=False)
-
+            # swizzle weight scales
             layer.w13_blockscale_swizzled = torch.nn.Parameter(
                 self.swizzle_blockscale(layer.w13_weight_scale),
                 requires_grad=False)
 
-            # This is for quantization, so we need to invert it.
-            layer.w13_input_scale_quant = torch.nn.Parameter(
-                (1 / w13_input_scale).to(torch.float32), requires_grad=False)
-
-            # w2
-            layer.g2_alphas = torch.nn.Parameter(
-                ((1 / layer.w2_input_scale) * layer.w2_weight_scale_2).to(
-                    torch.float32),
-                requires_grad=False)
-
-            layer.w2_input_scale_quant = torch.nn.Parameter(
-                (layer.w2_input_scale).to(torch.float32), requires_grad=False)
-
             layer.w2_blockscale_swizzled = torch.nn.Parameter(
                 self.swizzle_blockscale(layer.w2_weight_scale),
                 requires_grad=False)
+
+            # w13
+            layer.g1_alphas = torch.nn.Parameter(
+                ((1 / (layer.w13_input_global_scale.max(dim=1).values.to(
+                    torch.float32))) * layer.w13_weight_scale_2),
+                requires_grad=False)
+
+            # w2
+            layer.g2_alphas = torch.nn.Parameter(
+                ((1 / layer.w2_input_global_scale) *
+                 layer.w2_weight_scale_2).to(torch.float32),
+                requires_grad=False)
+
+            # Inverse Input Quant Scales
+            layer.w13_input_scale_quant = torch.nn.Parameter(
+                (layer.w13_input_global_scale.max(dim=1).values.to(
+                    torch.float32)),
+                requires_grad=False)
+
+            layer.w2_input_scale_quant = torch.nn.Parameter(
+                (layer.w2_input_global_scale), requires_grad=False)
 
         if self.use_marlin:
             prepare_moe_fp4_layer_for_marlin(layer)
