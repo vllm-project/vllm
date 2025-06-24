@@ -129,7 +129,6 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             else:
                 assert a1q_scale.numel() == a1.shape[0] * cdiv(a1.shape[1], quant_config.block_shape[1])
                 assert a1q_scale.shape == (a1.shape[0], cdiv(a1.shape[1], quant_config.block_shape[1]))
-                #a1q_scale = group_broadcast(scale, a1q.shape)
 
         if a1q_scale is not None:
             scalar_scales = a1q_scale.numel() == 1
@@ -201,6 +200,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
             #print(f"EXPERT_X_SCALE {expert_x_scale_shape}")
 
+            # empty?
             expert_x_scale = torch.zeros(
                 expert_x_scale_shape,
                 dtype=torch.float32,

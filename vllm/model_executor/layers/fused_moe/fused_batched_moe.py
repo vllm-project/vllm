@@ -63,17 +63,15 @@ def moe_mmk(
     if use_w8a8:
         # block-wise
         if group_k > 0 and group_n > 0:
-            a_scale_ptrs = a_scale_ptr + (offs_m * stride_asm
-                                          )  #+ (expert_id * stride_ase)
+            a_scale_ptrs = a_scale_ptr + offs_m * stride_asm #+ (expert_id * stride_ase)
             offs_bsn = offs_n // group_n
-            b_scale_ptrs = (b_scale_ptr +
-                            offs_bsn * stride_bsn) + expert_id * stride_bse
+            b_scale_ptrs = (b_scale_ptr + expert_id * stride_bse +
+                            offs_bsn * stride_bsn)
 
         # channel-wise
         elif per_channel_quant:
             # TODO: probably not correct
-            b_scale_ptrs = b_scale_ptr + expert_id * stride_bse + offs_n[
-                None, :] * stride_bsn
+            b_scale_ptrs = b_scale_ptr + expert_id * stride_bse + offs_n[None, :] * stride_bsn
             b_scale = tl.load(b_scale_ptrs)
             # Load per-token scale for activations
             # + (expert_id * stride_ase)??
@@ -300,16 +298,14 @@ def batched_triton_kernel(
              cta_n_start * stride_cn)
 
     if use_fp8_w8a8:
+        a_scale_ptr = a_scale_ptr + (expert_id * stride_ase)
         # block-wise
-        if (group_k > 0 and group_n > 0) or per_channel_quant:
-            a_scale_ptr = a_scale_ptr + (expert_id *
-                                         stride_ase) + cta_m_start * stride_asm
-            #b_scale_ptr = b_scale_ptr + (expert_id * stride_bse)
-            # (?) b_scale_ptr = b_scale_ptr + cta_n_start * stride_bsn
-        # channel-wise or tensor-wise
-        else:
-            a_scale_ptr = a_scale_ptr + (expert_id * stride_ase)
-            #b_scale_ptr = b_scale_ptr + (expert_id * stride_bse)
+        if group_k > 0 and group_n > 0:
+            a_scale_ptr = a_scale_ptr + cta_m_start * stride_asm
+            b_scale_ptr = b_scale_ptr + (expert_id * stride_bse)
+        elif per_channel_quant:
+            a_scale_ptr = a_scale_ptr + cta_m_start * stride_asm
+            b_scale_ptr = b_scale_ptr + (expert_id * stride_bse) + cta_n_start * stride_bsn
 
     expert_triton_kernel(
         a_ptr,
@@ -532,6 +528,7 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                                                            self.max_num_tokens,
                                                            hidden_dim)
 
+            # empty?
             b_a1_scale = torch.zeros(scale_shape,
                                      dtype=torch.float32,
                                      device=a1.device)
