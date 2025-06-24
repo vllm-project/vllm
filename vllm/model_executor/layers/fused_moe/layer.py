@@ -377,12 +377,12 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                 num_global_experts=moe.num_experts,
                 num_local_experts=moe.num_experts //
                 all2all_manager.world_size)
-            handle = all2all_manager.get_handle(all_to_all_args)
+            handles = all2all_manager.get_handles(all_to_all_args)
 
             # Note (varun): Whether to use FP8 dispatch or not needs some
             # profiling. Turning it off for now.
             prepare_finalize = DeepEPLLPrepareAndFinalize(
-                handle,
+                handles,
                 world_size=all2all_manager.world_size,
                 dp_size=all2all_manager.dp_world_size,
                 max_tokens_per_rank=moe.max_num_tokens,

@@ -1467,6 +1467,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         dtype=self.model_config.dtype,
                         device=self.device))
 
+            intermediate_tensors = self.sync_and_slice_intermediate_tensors(
+                    slice(0, num_tokens), None, False)
+
+
         return input_ids, positions, inputs_embeds, intermediate_tensors
 
     def _get_model_inputs(self, tokens_slice: slice,

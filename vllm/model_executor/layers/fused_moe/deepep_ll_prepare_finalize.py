@@ -7,6 +7,9 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.utils import (
     moe_kernel_quantize_input)
+from vllm.v1.worker.ubatching import (
+    get_current_ubatch_context, yield_and_switch_from_comm_to_compute_impl,
+    yield_and_switch_from_compute_to_comm_impl)
 
 # DeepEP kernels quantize dispatch inputs in 128 element chunks.
 DEEPEP_QUANT_BLOCK_SIZE = 128
@@ -38,7 +41,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     SUPPORTED_HIDDEN_SIZES = [2560, 4096, 5120, 7168]
 
     def __init__(self,
-                 buffer: deep_ep.Buffer,
+                 buffers: list[deep_ep.Buffer],
                  world_size: int,
                  dp_size: int,
                  max_tokens_per_rank: int,
@@ -47,7 +50,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                  use_fp8_dispatch: bool = False):
         super().__init__()
 
-        self.buffer = buffer
+        self.buffers = buffers
         self.world_size = world_size
         self.dp_size = dp_size
         self.quant_dtype = quant_dtype
@@ -127,9 +130,12 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                Optional[torch.Tensor], Optional[torch.Tensor]]:
 
         hidden_size = a1.size(1)
-        assert hidden_size in self.SUPPORTED_HIDDEN_SIZES, \
-            (f"Hidden Size {hidden_size} not in supported list of hidden sizes"
-            f"{self.SUPPORTED_HIDDEN_SIZES}")
+        ubatch_ctx = get_current_ubatch_context()
+        ubatch_id = ubatch_ctx.id if ubatch_ctx is not None else -1
+        a2a_idx = 0 if ubatch_id == -1 else ubatch_id
+        # assert hidden_size in self.SUPPORTED_HIDDEN_SIZES, \
+        #     (f"Hidden Size {hidden_size} not in supported list of hidden sizes"
+        #     f"{self.SUPPORTED_HIDDEN_SIZES}")
 
         if self.use_fp8_dispatch:
             assert hidden_size % 128 == 0, \
@@ -150,7 +156,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         # Dispatch
         expert_x, expert_num_tokens, self.handle, event, hook = \
-                self.buffer.low_latency_dispatch(a1,
+                self.buffers[a2a_idx].low_latency_dispatch(a1,
                                                 rank_topk_ids,
                                                 self.max_tokens_per_rank,
                                                 num_experts,
@@ -168,6 +174,9 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                  apply_router_weight_on_input: bool) -> None:
 
         assert self.handle is not None
+        ubatch_ctx = get_current_ubatch_context()
+        ubatch_id = ubatch_ctx.id if ubatch_ctx is not None else -1
+        a2a_idx = 0 if ubatch_id == -1 else ubatch_id
 
         combine_topk_weights = topk_weights
         if apply_router_weight_on_input:
@@ -175,7 +184,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             combine_topk_weights = torch.ones_like(topk_weights)
 
         # TODO (varun) : Enable zero copy mode
-        _, event, hook = self.buffer.low_latency_combine(
+        _, event, hook = self.buffers[a2a_idx].low_latency_combine(
             fused_expert_output,
             topk_ids,
             combine_topk_weights,
