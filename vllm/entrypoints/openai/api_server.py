@@ -972,6 +972,26 @@ if envs.VLLM_TORCH_PROFILER_DIR:
         return Response(status_code=200)
 
 
+if envs.VLLM_OBJ_GRAPH_DIR:
+    logger.warning(
+        "Object Graph is enabled in the API server. This should ONLY be "
+        "used for local development!")
+
+    @router.post("/start_object_graph")
+    async def start_object_graph(raw_request: Request):
+        logger.info("Starting object graph...")
+        await engine_client(raw_request).start_object_graph()
+        logger.info("Object graph started.")
+        return Response(status_code=200)
+
+    @router.post("/stop_object_graph")
+    async def stop_object_graph(raw_request: Request):
+        logger.info("Stopping object graph...")
+        await engine_client(raw_request).stop_object_graph()
+        logger.info("Object graph stopped.")
+        return Response(status_code=200)
+
+
 if envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING:
     logger.warning(
         "LoRA dynamic loading & unloading is enabled in the API server. "

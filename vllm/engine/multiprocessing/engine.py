@@ -26,7 +26,7 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          RPCResetMultiModalCacheRequest,
                                          RPCResetPrefixCacheRequest,
                                          RPCSleepRequest, RPCStartupRequest,
-                                         RPCStartupResponse,
+                                         RPCStartupResponse, RPCUObjectGraphRequest,
                                          RPCUProfileRequest, RPCWakeUpRequest)
 # yapf: enable
 from vllm.logger import init_logger
@@ -284,6 +284,11 @@ class MQLLMEngine:
                     self.wake_up(request.tags)
                 elif isinstance(request, RPCIsSleepingRequest):
                     self._handle_is_sleeping_request(request)
+                elif isinstance(request, RPCUObjectGraphRequest):
+                    if request == RPCUObjectGraphRequest.START_OBJECT_GRAPH:
+                        self.start_object_graph()
+                    else:
+                        self.stop_object_graph()
                 else:
                     raise ValueError("Unknown RPCRequest Type: "
                                      f"{type(request)}")
@@ -415,6 +420,12 @@ class MQLLMEngine:
 
     def stop_profile(self) -> None:
         self.engine.stop_profile()
+
+    def start_object_graph(self) -> None:
+        self.engine.start_object_graph()
+
+    def stop_object_graph(self) -> None:
+        self.engine.stop_object_graph()
 
     def reset_mm_cache(self) -> bool:
         return self.engine.reset_mm_cache()

@@ -11,6 +11,7 @@ import cloudpickle
 import torch
 import torch.nn as nn
 
+from vllm import envs
 from vllm.config import (ObservabilityConfig, VllmConfig,
                          set_current_vllm_config)
 from vllm.distributed import broadcast_tensor_dict, get_pp_group, get_tp_group
@@ -18,7 +19,7 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.sequence import ExecuteModelRequest, IntermediateTensors
-from vllm.utils import (enable_trace_function_call_for_thread,
+from vllm.utils import (GrowingMemoryObjGraph, enable_trace_function_call_for_thread,
                         resolve_obj_by_qualname, run_method,
                         update_environment_variables,
                         warn_for_unimplemented_methods)
@@ -55,6 +56,14 @@ class WorkerBase:
         self.compilation_config = vllm_config.compilation_config
         from vllm.platforms import current_platform
         self.current_platform = current_platform
+
+        if envs.VLLM_OBJ_GRAPH_DIR:
+            object_graph_dir = envs.VLLM_OBJ_GRAPH_DIR
+            logger.info("Object graph enabled. Traces will be saved to: %s",
+                        object_graph_dir)
+            self.obj_graph = GrowingMemoryObjGraph()
+        else:
+            self.obj_graph = None
 
     def init_device(self) -> None:
         """Initialize device state, such as loading the model or other on-device
@@ -129,6 +138,16 @@ class WorkerBase:
     def vocab_size(self) -> int:
         """Get vocabulary size from model configuration."""
         return self.model_config.get_vocab_size()
+        
+    def start_object_graph(self):
+        if self.obj_graph is None:
+            raise RuntimeError("Object graph is not enabled.")
+        return self.obj_graph.start()
+    
+    def stop_object_graph(self):
+        if self.obj_graph is None:
+            raise RuntimeError("Object graph is not enabled.")
+        return self.obj_graph.stop()
 
 
 class DelegateWorkerBase(WorkerBase):

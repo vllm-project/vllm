@@ -1854,6 +1854,12 @@ class LLMEngine:
     def stop_profile(self) -> None:
         self.model_executor.stop_profile()
 
+    def start_object_graph(self) -> None:
+        self.model_executor.start_object_graph()
+
+    def stop_object_graph(self) -> None:
+        self.model_executor.stop_object_graph()
+
     def sleep(self, level: int = 1) -> None:
         assert self.vllm_config.model_config.enable_sleep_mode, (
             "Sleep mode is not enabled in the model config")

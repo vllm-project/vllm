@@ -2924,3 +2924,89 @@ def is_torch_equal_or_newer(target: str) -> bool:
     except Exception:
         # Fallback to PKG-INFO to load the package info, needed by the doc gen.
         return Version(importlib.metadata.version('torch')) >= Version(target)
+
+class GrowingMemoryObjGraph:
+    def __init__(self):
+        from vllm import envs
+        if not envs.VLLM_OBJ_GRAPH_DIR:
+            raise RuntimeError("VLLM_OBJ_GRAPH_DIR is not set.")
+        self._obj_graph_dir = envs.VLLM_OBJ_GRAPH_DIR
+        os.makedirs(self._obj_graph_dir, exist_ok=True)
+
+        self._start_state = False
+
+
+    def start(self) -> str:
+        import objgraph
+
+        gc.collect()
+        objgraph.growth()
+        self._start_state = True
+        self.start_time = time.time()
+        return "start growing obj graph statistics"
+
+    def stop(self) -> str:
+        import objgraph
+        import gc
+
+        if not self._start_state:
+            msg = "obj graph statistics is not started"
+            logger.warning(msg)
+            return msg
+
+        # Generate output filename with date
+        current_date = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        # Create subdirectory for this analysis
+        analysis_dir = os.path.join(self._obj_graph_dir, f"analysis_{current_date}")
+        os.makedirs(analysis_dir, exist_ok=True)
+        
+        output_lines = []
+        current_time = time.time()
+        statistics_time = current_time - self.start_time
+        output_lines.append(f"{'='*50}\n start time {self.start_time}, Statistics time: {statistics_time} seconds\n{'='*50}\n")
+
+        gc.collect()
+        growth_info = objgraph.growth()
+
+        for gt in growth_info:
+            output_lines.append(f"Growth type: {gt[0]}, Count: {gt[1]}, Growth amount: {gt[2]}")
+
+        for gt in growth_info:
+            # Get the first object of this type
+            try:
+                obj = objgraph.by_type(gt[0])[0]
+            except IndexError:
+                logger.warning(f"Type {gt[0]} has no available objects")
+                continue
+
+            # Generate back reference graph
+            objgraph.show_backrefs(
+                obj, 
+                max_depth=10, 
+                too_many=5,
+                filename=os.path.join(analysis_dir, f"{gt[0]}_backrefs.dot")
+            )
+            
+            # Generate reference graph
+            objgraph.show_refs(
+                obj, 
+                max_depth=10, 
+                too_many=5,
+                filename=os.path.join(analysis_dir, f"{gt[0]}_refs.dot")
+            )
+            
+            # Generate reference chain to module
+            objgraph.show_chain(
+                objgraph.find_backref_chain(obj, objgraph.is_proper_module),
+                filename=os.path.join(analysis_dir, f"{gt[0]}_chain.dot")
+            )
+
+        output_file_path = os.path.join(analysis_dir, "growing_memory_stats.log")
+        with open(output_file_path, 'w', encoding='utf-8') as f:
+            for line in output_lines:
+                f.write(line + '\n')
+        
+        logger.info(f"obj graph statistics completed, output_lines: {output_lines}")
+        
+        return "obj graph statistics completed"

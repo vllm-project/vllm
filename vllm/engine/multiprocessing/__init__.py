@@ -82,6 +82,9 @@ class RPCUProfileRequest(Enum):
     START_PROFILE = 1
     STOP_PROFILE = 2
 
+class RPCUObjectGraphRequest(Enum):
+    START_OBJECT_GRAPH = 1
+    STOP_OBJECT_GRAPH = 2
 
 class RPCResetMultiModalCacheRequest(Enum):
     RESET = 1

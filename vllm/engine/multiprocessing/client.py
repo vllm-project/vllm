@@ -34,7 +34,7 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          RPCResetMultiModalCacheRequest,
                                          RPCResetPrefixCacheRequest,
                                          RPCSleepRequest, RPCStartupRequest,
-                                         RPCStartupResponse,
+                                         RPCStartupResponse, RPCUObjectGraphRequest,
                                          RPCUProfileRequest, RPCWakeUpRequest)
 from vllm.engine.protocol import EngineClient
 # yapf: enable
@@ -615,6 +615,18 @@ class MQLLMEngineClient(EngineClient):
 
         await self._send_one_way_rpc_request(
             request=RPCUProfileRequest.STOP_PROFILE, socket=self.input_socket)
+        
+    async def start_object_graph(self) -> None:
+        """Start object graph the engine"""
+
+        await self._send_one_way_rpc_request(
+            request=RPCUObjectGraphRequest.START_OBJECT_GRAPH, socket=self.input_socket)
+        
+    async def stop_object_graph(self) -> None:
+        """Stop object graph the engine"""
+
+        await self._send_one_way_rpc_request(
+            request=RPCUObjectGraphRequest.STOP_OBJECT_GRAPH, socket=self.input_socket)
 
     async def reset_mm_cache(self) -> None:
         """Reset the multi-modal cache"""

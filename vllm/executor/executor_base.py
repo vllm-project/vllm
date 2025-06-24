@@ -199,6 +199,12 @@ class ExecutorBase(ABC):
     def stop_profile(self) -> None:
         self.collective_rpc("stop_profile")
 
+    def start_object_graph(self) -> None:
+        self.collective_rpc("start_object_graph")
+
+    def stop_object_graph(self) -> None:
+        self.collective_rpc("stop_object_graph")
+
     def sleep(self, level: int = 1):
         if self.is_sleeping:
             logger.warning("Executor is already sleeping.")

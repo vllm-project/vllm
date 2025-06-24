@@ -295,6 +295,16 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
+    async def start_object_graph(self) -> None:
+        """Start object graph the engine"""
+        ...
+    
+    @abstractmethod
+    async def stop_object_graph(self) -> None:
+        """Stop object graph the engine"""
+        ...
+
+    @abstractmethod
     async def reset_mm_cache(self) -> None:
         """Reset the multi-modal cache"""
         ...

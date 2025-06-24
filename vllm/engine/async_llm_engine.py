@@ -1162,6 +1162,12 @@ class AsyncLLMEngine(EngineClient):
     async def stop_profile(self) -> None:
         self.engine.stop_profile()
 
+    async def start_object_graph(self) -> None:
+        self.engine.start_object_graph()
+
+    async def stop_object_graph(self) -> None:
+        self.engine.stop_object_graph()
+
     async def reset_mm_cache(self) -> None:
         self.engine.reset_mm_cache()
 
