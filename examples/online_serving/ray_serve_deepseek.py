@@ -3,10 +3,20 @@
 """
 Deploy DeepSeek R1 or V3 with Ray Serve LLM.
 
-Learn more about Ray Serve LLM:
-https://docs.ray.io/en/latest/serve/llm/serving-llms.html
+Ray Serve LLM is a scalable and production-grade model serving library built 
+on the Ray distributed computing framework and first-class support for the vLLM engine.
+ It manages model replicas,
 
-Execute `python3 ray_serve_deepseek.py` to deploy the model.
+
+Key features:
+- Automatic scaling, batching, buffering, and load balancing across a Ray cluster.
+- Unified multi-node multi-model deployment.
+- Exposes an OpenAI-compatible HTTP API.
+- Multi-LoRA support with shared base models.
+
+Run `python3 ray_serve_deepseek.py` to launch an endpoint.
+
+Learn more in the official documentation: https://docs.ray.io/en/latest/serve/llm/serving-llms.html
 """
 
 from ray import serve
