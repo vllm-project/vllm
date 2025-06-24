@@ -287,7 +287,7 @@ class P2pNcclEngine:
             with self.recv_store_cv:
                 while tensor_id not in self.recv_store:
                     self.recv_store_cv.wait()
-                tensor = self.recv_store[tensor_id]
+                tensor = self.recv_store.get(tensor_id)
 
             if tensor is not None:
                 if isinstance(tensor, tuple):
@@ -597,7 +597,7 @@ class P2pNcclEngine:
                       tensor,
                       peer_rank: int,
                       timeout: float,
-                      stream=None) -> int:
+                      stream=None) -> "CommunicationResult":
         result_code = CommunicationResult.EXCEPTION
         abort_triggered = threading.Event()
 
