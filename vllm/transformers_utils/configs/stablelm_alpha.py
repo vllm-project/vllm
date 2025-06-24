@@ -100,7 +100,6 @@ class StableLMAlphaConfig(PretrainedConfig):
         rotary_pct=0.25,
         rotary_emb_base=10000,
         rotary_scaling_factor=1.0,
-        use_qkv_bias=False,
         tie_word_embeddings=False,
         use_cache=True,
         pad_token_id=None,
@@ -119,7 +118,6 @@ class StableLMAlphaConfig(PretrainedConfig):
         self.rotary_pct = rotary_pct
         self.rotary_emb_base = rotary_emb_base
         self.rotary_scaling_factor = rotary_scaling_factor
-        self.use_qkv_bias = use_qkv_bias
         self.use_cache = use_cache
 
         # For compatibility with vLLM, provide these attributes

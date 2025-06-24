@@ -133,7 +133,7 @@ class StableLMAlphaAttention(nn.Module):
                                           self.head_dim,
                                           self.total_num_heads,
                                           self.total_num_key_value_heads,
-                                          bias=config.use_qkv_bias,
+                                          bias=False,
                                           quant_config=quant_config,
                                           prefix=f"{prefix}.qkv_proj")
 
