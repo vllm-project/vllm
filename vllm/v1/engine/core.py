@@ -877,12 +877,16 @@ class DPEngineCoreProc(EngineCoreProc):
                 local_unfinished_reqs)
 
             if not self.engines_running:
-                if self.dp_rank == 0:
+                if self.dp_rank == 0 or not self.has_coordinator:
                     # Notify client that we are pausing the loop.
                     logger.debug("Wave %d finished, pausing engine loop.",
                                  self.current_wave)
+                    # In the coordinator case, dp rank 0 sends updates to the
+                    # coordinator. Otherwise (offline spmd case), each rank
+                    # sends the update to its colocated front-end process.
+                    client_index = -1 if self.has_coordinator else 0
                     self.output_queue.put_nowait(
-                        (-1,
+                        (client_index,
                          EngineCoreOutputs(wave_complete=self.current_wave)))
                 self.current_wave += 1
 
