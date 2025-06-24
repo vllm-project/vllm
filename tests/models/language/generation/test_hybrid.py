@@ -34,16 +34,19 @@ HYBRID_MODELS = [
     "pfnet/plamo-2-1b",
     "Zyphra/Zamba2-1.2B-instruct",
     "hmellor/tiny-random-BambaForCausalLM",
-    "ibm-ai-platform/Bamba-9B-v1",
+    # too big for CI
+    #"ibm-ai-platform/Bamba-9B-v1",
 ]
 
 V1_SUPPORTED_MODELS = [
     "mistralai/Mamba-Codestral-7B-v0.1",
     "ibm-ai-platform/Bamba-9B-v1",
+    "Zyphra/Zamba2-1.2B-instruct",
 ]
 
 ATTN_BLOCK_SIZES = {
     "ibm-ai-platform/Bamba-9B-v1": 528,
+    "Zyphra/Zamba2-1.2B-instruct": 80,
 }
 
 # Avoid OOM
@@ -52,7 +55,7 @@ MAX_NUM_SEQS = 4
 
 @pytest.mark.parametrize("model", SSM_MODELS + HYBRID_MODELS)
 @pytest.mark.parametrize("max_tokens", [64])
-@pytest.mark.parametrize("num_logprobs", [10])
+@pytest.mark.parametrize("num_logprobs", [5])
 def test_models(
     hf_runner,
     vllm_runner,
@@ -74,13 +77,16 @@ def test_models(
             example_prompts, max_tokens, num_logprobs)
 
     if model in V1_SUPPORTED_MODELS:
+        if model in HYBRID_MODELS and model in ATTN_BLOCK_SIZES:
+            block_size = ATTN_BLOCK_SIZES[model]
+        else:
+            block_size = 16
+
         with monkeypatch.context() as m:
             m.setenv("VLLM_USE_V1", "1")
             if model in HYBRID_MODELS:
                 # required due to reorder_batch behaviour
                 m.setenv("VLLM_ATTENTION_BACKEND", "FLASHINFER")
-                # set attn block size to match mamba state
-                block_size = ATTN_BLOCK_SIZES.get(model, 16)
             with vllm_runner(model,
                              max_num_seqs=MAX_NUM_SEQS,
                              enforce_eager=True,
