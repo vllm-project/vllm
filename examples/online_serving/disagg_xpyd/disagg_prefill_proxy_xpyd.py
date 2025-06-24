@@ -5,12 +5,12 @@ import socket
 import threading
 import time
 import uuid
+from typing import Any
 
 import aiohttp
 import msgpack
 import zmq
 from quart import Quart, make_response, request
-from typing import Any
 
 count = 0
 prefill_instances: dict[str, Any] = {}  # http_address: (zmq_address, stamp)
@@ -37,14 +37,17 @@ def _listen_for_register(poller, router_socket):
                     prefill_instances.pop(data["http_address"], None)
                     prefill_instances[data["http_address"]] = (
                         data["zmq_address"],
-                        time.time() + DEFAULT_PING_SECONDS)
+                        time.time() + DEFAULT_PING_SECONDS,
+                    )
                     oldest_key = next(iter(prefill_instances), None)
                     while oldest_key is not None:
                         value = prefill_instances[oldest_key]
                         if value[1] > time.time():
                             break
-                        print(f"Warn remove [HTTP:{oldest_key}, ZMQ:{value[0]}, "
-                              f"stamp:{value[1]}]")
+                        print(
+                            f"Warn remove [HTTP:{oldest_key}, ZMQ:{value[0]}, "
+                            f"stamp:{value[1]}]"
+                        )
                         prefill_instances.pop(oldest_key, None)
                         oldest_key = next(iter(prefill_instances), None)
 
@@ -55,14 +58,17 @@ def _listen_for_register(poller, router_socket):
                     decode_instances.pop(data["http_address"], None)
                     decode_instances[data["http_address"]] = (
                         data["zmq_address"],
-                        time.time() + DEFAULT_PING_SECONDS)
+                        time.time() + DEFAULT_PING_SECONDS,
+                    )
                     oldest_key = next(iter(decode_instances), None)
                     while oldest_key is not None:
                         value = decode_instances[oldest_key]
                         if value[1] > time.time():
                             break
-                        print(f"Warn remove [HTTP:{oldest_key}, ZMQ:{value[0]}, "
-                              f"stamp:{value[1]}]")
+                        print(
+                            f"Warn remove [HTTP:{oldest_key}, ZMQ:{value[0]}, "
+                            f"stamp:{value[1]}]"
+                        )
                         decode_instances.pop(oldest_key, None)
                         oldest_key = next(iter(decode_instances), None)
             else:

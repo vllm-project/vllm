@@ -159,11 +159,12 @@ class P2pNcclEngine:
                                                  daemon=True)
             self._ping_thread.start()
 
-        self.nccl_timeout_s = float(self.config.get_from_extra_config(
-            "nccl_timeout_s", DEFAULT_TIMEOUT_SECONDS))
+        self.nccl_timeout_s = float(
+            self.config.get_from_extra_config("nccl_timeout_s",
+                                              DEFAULT_TIMEOUT_SECONDS))
 
-        self.max_num_timers = int(self.config.get_from_extra_config(
-            "max_num_timers", 64))
+        self.max_num_timers = int(
+            self.config.get_from_extra_config("max_num_timers", 64))
         self.timers = ThreadPoolExecutor(max_workers=self.max_num_timers)
 
         logger.info(
@@ -202,9 +203,8 @@ class P2pNcclEngine:
             try:
                 sock.send(msgpack.dumps(data))
             except zmq.Again:
-                logger.error(
-                    "⛔ncclCommInitRank timeout, %s👉%s", self.zmq_address,
-                    remote_address)
+                logger.error("⛔ncclCommInitRank timeout, %s👉%s",
+                             self.zmq_address, remote_address)
                 return None, None
 
             with torch.cuda.device(self.device):
@@ -347,9 +347,13 @@ class P2pNcclEngine:
                         self.router_socket.send_multipart(
                             [remote_address, b"0"])
                         comm, rank = self.comms[remote_address.decode()]
-                        ret = self.recv_with_timeout(remote_address.decode(), comm, tensor, rank ^ 1, self.nccl_timeout_s, self.recv_stream)
+                        ret = self.recv_with_timeout(remote_address.decode(),
+                                                     comm, tensor, rank ^ 1,
+                                                     self.nccl_timeout_s,
+                                                     self.recv_stream)
                         if ret == 0:
-                            tensor_size = tensor.element_size() * tensor.numel()
+                            tensor_size = tensor.element_size() * tensor.numel(
+                            )
                             if (self.buffer_size + tensor_size
                                     > self.buffer_size_threshold):
                                 # Store Tensor in memory pool
@@ -357,13 +361,15 @@ class P2pNcclEngine:
                                 tensor = (addr, tensor.dtype, tensor.shape)
                                 logger.warning(
                                     "🔴[PUT]Recv Tensor, Out Of Threshold, "
-                                    "%s👈%s, data:%s, addr:%d", self.zmq_address,
-                                    remote_address.decode(), data, addr)
+                                    "%s👈%s, data:%s, addr:%d",
+                                    self.zmq_address, remote_address.decode(),
+                                    data, addr)
                             else:
                                 self.buffer_size += tensor_size
                         else:
                             tensor = None
-                            logger.warning("🔴[PUT]Recv Tensor, Timeout, "
+                            logger.warning(
+                                "🔴[PUT]Recv Tensor, Timeout, "
                                 "%s👈%s, data:%s", self.zmq_address,
                                 remote_address.decode(), data)
 
@@ -475,7 +481,8 @@ class P2pNcclEngine:
                 response.decode())
             return False
 
-        self.send_with_timeout(remote_address, comm, tensor.to(self.device), rank ^ 1, self.nccl_timeout_s, self.send_stream)
+        self.send_with_timeout(remote_address, comm, tensor.to(self.device),
+                               rank ^ 1, self.nccl_timeout_s, self.send_stream)
 
         if self.send_type == "PUT_ASYNC":
             self._have_sent_tensor_id(tensor_id)
@@ -560,17 +567,15 @@ class P2pNcclEngine:
                                comm, cudaStream_t(stream.cuda_stream))
         stream.synchronize()
 
-    def _with_timeout(
-            self,
-            op_name: str,
-            remote_address,
-            comm,
-            func: Callable,
-            tensor,
-            peer_rank: int,
-            timeout: float,
-            stream=None
-    ) -> int:
+    def _with_timeout(self,
+                      op_name: str,
+                      remote_address,
+                      comm,
+                      func: Callable,
+                      tensor,
+                      peer_rank: int,
+                      timeout: float,
+                      stream=None) -> int:
         result_code = 2
         abort_triggered = threading.Event()
 
@@ -583,7 +588,7 @@ class P2pNcclEngine:
                         "🔴ncclCommAbort, %s failed, remote_address:%s, "
                         "timeout:%f", op_name, remote_address, timeout)
                 except Exception as e:
-                    logger.error(f"ncclCommAbort error: {e}")
+                    logger.error("🔴ncclCommAbort error: %s", e)
                 result_code = 1
 
         self.timers.submit(timeout_watcher)
@@ -592,8 +597,8 @@ class P2pNcclEngine:
             func(comm, tensor, peer_rank, stream)
             result_code = 0
         except Exception as e:
-            logger.error(
-                "🔴%s failed, remote_address:%s, e:%s", op_name, remote_address, e)
+            logger.error("🔴%s failed, remote_address:%s, e:%s", op_name,
+                         remote_address, e)
             result_code = 2
         finally:
             abort_triggered.set()
@@ -601,15 +606,29 @@ class P2pNcclEngine:
         if result_code != 0:
             self.socks.pop(remote_address, None)
             self.comms.pop(remote_address, None)
-            self.address_black_list[remote_address] = (time.time()
-                                                       + self.nccl_timeout_s)
+            self.address_black_list[remote_address] = (time.time() +
+                                                       self.nccl_timeout_s)
         return result_code
 
-    def send_with_timeout(self, remote_address, comm, tensor: torch.Tensor, dst: int, timeout: float, stream=None):
-        return self._with_timeout("send", remote_address, comm, self._send, tensor, dst, timeout, stream)
+    def send_with_timeout(self,
+                          remote_address,
+                          comm,
+                          tensor: torch.Tensor,
+                          dst: int,
+                          timeout: float,
+                          stream=None):
+        return self._with_timeout("send", remote_address, comm, self._send,
+                                  tensor, dst, timeout, stream)
 
-    def recv_with_timeout(self, remote_address, comm, tensor: torch.Tensor, src: int, timeout: float, stream=None):
-        return self._with_timeout("recv", remote_address, comm, self._recv, tensor, src, timeout, stream)
+    def recv_with_timeout(self,
+                          remote_address,
+                          comm,
+                          tensor: torch.Tensor,
+                          src: int,
+                          timeout: float,
+                          stream=None):
+        return self._with_timeout("recv", remote_address, comm, self._recv,
+                                  tensor, src, timeout, stream)
 
     def close(self) -> None:
         self._listener_thread.join()
