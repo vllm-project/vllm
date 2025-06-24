@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MEM_POOL_SIZE_GB = 32
 DEFAULT_PING_SECONDS = 3
+FIRST_TIMEOUT_SECONDS = 10
 DEFAULT_TIMEOUT_SECONDS = 3
 
 
@@ -217,7 +218,7 @@ class P2pNcclEngine:
             # timeout. To avoid this, we test by sending a small amount of
             # data and set the timeout duration slightly longer than usual.
             tensor = torch.empty(1, dtype=torch.float16, device=self.device)
-            self.send_with_timeout(remote_address, comm, tensor, rank ^ 1, 10, self.send_stream)
+            self.send_with_timeout(remote_address, comm, tensor, rank ^ 1, FIRST_TIMEOUT_SECONDS, self.send_stream)
 
         return self.socks[remote_address], self.comms[remote_address]
 
@@ -346,7 +347,7 @@ class P2pNcclEngine:
                     # slightly longer than normal to avoid issues during the
                     # initial (potentially slow) communication.
                     tensor = torch.empty(1, dtype=torch.float16, device=self.device)
-                    self.recv_with_timeout(remote_address.decode(), comm, tensor, rank ^ 1, 10, self.recv_stream)
+                    self.recv_with_timeout(remote_address.decode(), comm, tensor, rank ^ 1, FIRST_TIMEOUT_SECONDS, self.recv_stream)
                 elif data["cmd"] == "PUT":
                     tensor_id = data["tensor_id"]
                     try:
