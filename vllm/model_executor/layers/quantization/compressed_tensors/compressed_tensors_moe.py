@@ -182,23 +182,23 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
             {"quant_method": FusedMoeWeightScaleSupported.TENSOR.value})
         set_weight_attrs(w2_weight_scale_2, extra_weight_attrs)
 
-        if not self.use_marlin:
-            # Input Global Scales
-            w13_input_scale = torch.nn.Parameter(torch.empty(
-                num_experts, 2, dtype=torch.float32),
-                                                 requires_grad=False)
-            layer.register_parameter("w13_input_global_scale", w13_input_scale)
-            extra_weight_attrs.update(
-                {"quant_method": FusedMoeWeightScaleSupported.TENSOR.value})
-            set_weight_attrs(w13_input_scale, extra_weight_attrs)
+        # Input Global Scales
+        w13_input_scale = torch.nn.Parameter(torch.empty(num_experts,
+                                                         2,
+                                                         dtype=torch.float32),
+                                             requires_grad=False)
+        layer.register_parameter("w13_input_global_scale", w13_input_scale)
+        extra_weight_attrs.update(
+            {"quant_method": FusedMoeWeightScaleSupported.TENSOR.value})
+        set_weight_attrs(w13_input_scale, extra_weight_attrs)
 
-            w2_input_scale = torch.nn.Parameter(torch.empty(
-                num_experts, dtype=torch.float32),
-                                                requires_grad=False)
-            layer.register_parameter("w2_input_global_scale", w2_input_scale)
-            extra_weight_attrs.update(
-                {"quant_method": FusedMoeWeightScaleSupported.TENSOR.value})
-            set_weight_attrs(w2_input_scale, extra_weight_attrs)
+        w2_input_scale = torch.nn.Parameter(torch.empty(num_experts,
+                                                        dtype=torch.float32),
+                                            requires_grad=False)
+        layer.register_parameter("w2_input_global_scale", w2_input_scale)
+        extra_weight_attrs.update(
+            {"quant_method": FusedMoeWeightScaleSupported.TENSOR.value})
+        set_weight_attrs(w2_input_scale, extra_weight_attrs)
 
     def swizzle_blockscale(self, scale: torch.tensor):
         assert (scale.dtype == torch.float8_e4m3fn)
