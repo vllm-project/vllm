@@ -795,10 +795,10 @@ class DPEngineCoreProc(EngineCoreProc):
         from vllm.platforms import current_platform
         device_control_env_var = current_platform.device_control_env_var
         world_size = vllm_config.parallel_config.world_size
+        # prefill 优化先写死
         os.environ[device_control_env_var] = ",".join(
             str(current_platform.device_id_to_physical_device_id(i))
-            for i in range(local_dp_rank * world_size, (local_dp_rank + 1) *
-                           world_size))
+            for i in range(0,16))
 
         self.dp_rank = dp_rank
         self.dp_group = vllm_config.parallel_config.stateless_init_dp_group()
