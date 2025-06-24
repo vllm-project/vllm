@@ -42,8 +42,6 @@ class KVCacheCoordinator(ABC):
             ) for i, kv_cache_group in enumerate(
                 self.kv_cache_config.kv_cache_groups))
 
-        print("single_type_managers: ", self.single_type_managers)
-
     def get_num_blocks_to_allocate(
             self, request_id: str, num_tokens: int,
             new_computed_blocks: tuple[list[KVCacheBlock], ...]) -> int:
@@ -60,14 +58,10 @@ class KVCacheCoordinator(ABC):
         Returns:
             The number of blocks.
         """
-        print("request_id: ", request_id)
-        print("num_tokens: ", num_tokens)
-        print("new_computed_blocks: ", new_computed_blocks)
         num_blocks_to_allocate = 0
         for i, manager in enumerate(self.single_type_managers):
             num_blocks_to_allocate += manager.get_num_blocks_to_allocate(
                 request_id, num_tokens, new_computed_blocks[i])
-            print("i: ", i, " manager: ", manager, " num_blocks_to_allocate: ", num_blocks_to_allocate)
         return num_blocks_to_allocate
 
     def save_new_computed_blocks(
@@ -277,9 +271,10 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
 
         if self.enable_caching:
             # this requirement is only needed for the prefix caching logic
-            assert self.other_block_size % self.full_attention_block_size == 0, (
-                "KVCacheCoordinator assumes the block_size of full attention "
-                "layers is divisible by other layers now.")
+            divisible = self.other_block_size % self.full_attention_block_size
+            assert divisible == 0, (
+                "KVCacheCoordinator assumes the block_size of full "
+                "attention layers is divisible by other layers now.")
 
         if max(self.full_attention_group_ids) < min(self.other_group_ids):
             self.full_attn_first = True

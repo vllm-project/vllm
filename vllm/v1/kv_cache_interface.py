@@ -171,10 +171,8 @@ class MambaSpec(KVCacheSpec):
     @property
     def page_size_bytes(self) -> int:
         page_size = self.num_elements * get_dtype_size(self.dtype)
-        print("real_page_size: ", page_size)
         if self.multiple_of is not None:
             page_size = cdiv(page_size, self.multiple_of) * self.multiple_of
-            print("padded page size: ", page_size)
         return page_size
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:

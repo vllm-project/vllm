@@ -221,13 +221,6 @@ class Scheduler(SchedulerInterface):
                 num_new_tokens,
                 self.max_model_len - request.num_computed_tokens)
 
-            if num_new_tokens > 1:
-                logger.info("request_id:          %s", request.request_id)
-                logger.info("num_tokens:          %d", request.num_tokens)
-                logger.info("num_computed_tokens: %d",
-                            request.num_computed_tokens)
-                logger.info("num_new_tokens:      %d", num_new_tokens)
-
             # Schedule encoder inputs.
             encoder_inputs_to_schedule = None
             new_encoder_budget = encoder_budget
@@ -437,12 +430,6 @@ class Scheduler(SchedulerInterface):
 
                     num_new_tokens = min(num_new_tokens, token_budget)
                     assert num_new_tokens > 0
-
-                    if True:
-                        logger.info("request_id:          %s", request.request_id)
-                        logger.info("num_tokens:          %d", request.num_tokens)
-                        logger.info("num_computed_tokens: %d", num_computed_tokens)
-                        logger.info("num_new_tokens:      %d", num_new_tokens)
 
                     # Schedule encoder inputs.
                     if request.has_encoder_inputs:

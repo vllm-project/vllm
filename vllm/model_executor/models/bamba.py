@@ -37,7 +37,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils import LayerBlockType
 
 from .interfaces import (HasInnerState, IsHybrid, SupportsLoRA, SupportsPP,
-                         SupportsQuant, SupportsV0Only)
+                         SupportsQuant)
 from .utils import (AutoWeightsLoader, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
@@ -314,8 +314,6 @@ class BambaModel(nn.Module):
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
 
-        print("self.config.mamba_chunk_size: ", self.config.mamba_chunk_size)
-
         attn_metadata = get_forward_context().attn_metadata
 
         if not envs.VLLM_USE_V1:
@@ -346,7 +344,8 @@ class BambaModel(nn.Module):
                 num_attn += 1
 
             layer_mamba_cache_params = None
-            if isinstance(layer, BambaMixerDecoderLayer) and mamba_cache_params:
+            if isinstance(layer,
+                          BambaMixerDecoderLayer) and mamba_cache_params:
                 layer_mamba_cache_params = mamba_cache_params.at_layer_idx(
                     i - num_attn)
 
@@ -488,12 +487,15 @@ class BambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
         mamba_cache_params = None
         if not envs.VLLM_USE_V1:
             if self.mamba_cache is None:
-                num_mamba_layers = self.model_config.get_num_layers_by_block_type(
-                    self.vllm_config.parallel_config, LayerBlockType.mamba)
+                num_mamba_layers = \
+                    self.model_config.get_num_layers_by_block_type(
+                        self.vllm_config.parallel_config,
+                        LayerBlockType.mamba
+                    )
 
                 self.mamba_cache = MambaCacheManager(
-                    self.vllm_config, self.lm_head.weight.dtype, num_mamba_layers,
-                    *self._get_mamba_cache_shape())
+                    self.vllm_config, self.lm_head.weight.dtype,
+                    num_mamba_layers, *self._get_mamba_cache_shape())
 
             mamba_cache_params = self.mamba_cache.current_run_tensors(**kwargs)
 

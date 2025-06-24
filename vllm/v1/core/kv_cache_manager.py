@@ -85,6 +85,7 @@ class KVCacheManager:
         # FIXME: make prefix cache stats conditional on log_stats
         self.prefix_cache_stats = PrefixCacheStats() if log_stats else None
 
+        self.block_size: Optional[int] = None
         if self.enable_caching:
             assert len(
                 set(g.kv_cache_spec.block_size
@@ -92,11 +93,7 @@ class KVCacheManager:
             ) == 1, "Only one block size is supported for now"
             self.block_size = kv_cache_config.kv_cache_groups[
                 0].kv_cache_spec.block_size
-        else:
-            # not needed without caching
-            self.block_size = None
 
-        print("self.block_size: ", self.block_size)
         self.coordinator = get_kv_cache_coordinator(
             kv_cache_config=kv_cache_config,
             max_model_len=self.max_model_len,
@@ -160,6 +157,7 @@ class KVCacheManager:
         # if the scheduler has tried to schedule the request before.
         block_hashes = self.req_to_block_hashes[request.request_id]
         if not block_hashes:
+            assert self.block_size is not None
             block_hashes = hash_request_tokens(self.caching_hash_fn,
                                                self.block_size, request)
             self.req_to_block_hashes[request.request_id] = block_hashes

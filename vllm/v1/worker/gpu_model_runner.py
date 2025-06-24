@@ -320,18 +320,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         Returns:
             True if the batch was reordered, False otherwise.
         """
-
-        '''
-        for i in range(0, len(self.kv_cache_config.kv_cache_groups)):
-            print(self.attn_metadata_builders[i])
-            print(self.attn_metadata_builders[i].reorder_batch(
-                self.input_batch, scheduler_output))
-        '''
-
         batch_reordered = self.attn_metadata_builders[0].reorder_batch(
             self.input_batch, scheduler_output)
-
-        torch.cuda.synchronize()
 
         # For models with multiple KV cache groups, the groups should agree on
         # the same order of requests. We ensure this by only allowing the first
@@ -340,7 +330,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         for i in range(1, len(self.kv_cache_config.kv_cache_groups)):
             assert not self.attn_metadata_builders[i].reorder_batch(
                 self.input_batch, scheduler_output)
-
         return batch_reordered
 
     # Note: used for model runner override.
@@ -2301,7 +2290,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             kv_cache_group.kv_cache_spec.block_size
             for kv_cache_group in kv_cache_config.kv_cache_groups
         ]
-        print("[may_reinitialize_input_batch] block_sizes: ", block_sizes)
         if block_sizes != [self.cache_config.block_size]:
             assert self.cache_config.cpu_offload_gb == 0, (
                 "Cannot re-initialize the input batch when CPU weight "
@@ -2369,8 +2357,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 assert raw_tensor.numel() % kv_cache_spec.page_size_bytes == 0
                 num_blocks = (raw_tensor.numel() //
                               kv_cache_spec.page_size_bytes)
-                print("layer_name: ", layer_name)
-                print("num_blocks: ", num_blocks)
                 if isinstance(kv_cache_spec, AttentionSpec):
                     kv_cache_shape = self.attn_backends[i].get_kv_cache_shape(
                         num_blocks, kv_cache_spec.block_size,
@@ -2404,18 +2390,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     dtype = kv_cache_spec.dtype
                     state_tensors = []
                     start_pos = 0
-                    print("kv_cache_spec.shapes: ", kv_cache_spec.shapes)
                     for shape in kv_cache_spec.shapes:
                         target_shape = (num_blocks, *shape)
                         size_in_bytes = np.prod(shape) * get_dtype_size(
                             dtype) * num_blocks
-                        print("size_in_bytes: ", size_in_bytes)
                         tensor = raw_tensor[start_pos:start_pos +
                                             size_in_bytes]
                         tensor = tensor.view(dtype).view(target_shape)
                         state_tensors.append(tensor)
                         start_pos += size_in_bytes
-                    #assert start_pos == raw_tensor.numel()
+                    if kv_cache_spec.multiple_of is None:
+                        assert start_pos == raw_tensor.numel()
                     kv_caches[layer_name] = tuple(state_tensors)
                 else:
                     raise NotImplementedError
@@ -2529,9 +2514,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         mamba_layers = get_layers_from_vllm_config(self.vllm_config,
                                                    MambaMixer2)
         if len(mamba_layers) > 0:
-
-            #if len(attn_layers) > 0:
-            if True:
+            if len(attn_layers) > 0:
                 # Mamba state must be padded to an integer number of
                 # 16th tokens worth of attention pages
                 attn_layer_name = next(iter(attn_layers))
@@ -2561,9 +2544,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
             if len(attn_layers) > 0:
                 mamba_layer_name = next(iter(mamba_layers))
-                mamba_page_size = kv_cache_spec[mamba_layer_name].page_size_bytes
+                mamba_page_size = kv_cache_spec[
+                    mamba_layer_name].page_size_bytes
                 if attn_page_size < mamba_page_size:
-                    suggested_attn_block_size = cdiv(mamba_page_size, multiple_of)*16
-                    raise ValueError(f"Attention block size must be increased to {suggested_attn_block_size} in order to match mamba page size")
+                    required_attn_block_size = cdiv(mamba_page_size,
+                                                    multiple_of) * 16
+                    raise ValueError(
+                        "Attention block size must be increased to "
+                        f"{required_attn_block_size} in order to match "
+                        "the mamba page size")
 
         return kv_cache_spec
