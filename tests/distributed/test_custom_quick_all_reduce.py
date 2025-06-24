@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import os
 import random
 
 import pytest
@@ -98,7 +97,6 @@ def eager_quickreduce(
 ):
     with monkeypatch.context() as m:
         m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
-        os.environ["VLLM_ROCM_QUICK_REDUCE_QUANTIZATION"] = "FP"
         device = torch.device(f"cuda:{rank}")
         torch.cuda.set_device(device)
 

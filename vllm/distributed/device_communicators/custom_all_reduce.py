@@ -125,7 +125,6 @@ class CustomAllreduce:
 
         if quick_ar:
             self._SHOULD_INIT_QR = True
-            self.qr_max_size = ops.qr_max_size()
         else:
             self._SHOULD_INIT_QR = False
             logger.debug("Custom quick allreduce is disabled because "
@@ -306,7 +305,11 @@ class CustomAllreduce:
                     "to turn off.")
 
         self.qr_quant_level = QuickReduceRegime[regime_str]
-        self._qr_ptr = ops.init_custom_qr(self.rank, self.world_size)
+        qr_max_size = envs.VLLM_ROCM_QUICK_REDUCE_MAX_SIZE
+        self._qr_ptr = ops.init_custom_qr(self.rank, self.world_size,
+                                          qr_max_size)
+        self.qr_max_size = qr_max_size if qr_max_size != -1 \
+            else ops.qr_max_size()
         self.create_qr_shared_buffer()
         self.qr_disabled = False
 

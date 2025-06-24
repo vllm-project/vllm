@@ -137,6 +137,7 @@ if TYPE_CHECKING:
     VLLM_USE_NVFP4_CT_EMULATIONS: bool = False
     VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: str = "NONE"
     VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16: bool = True
+    VLLM_ROCM_QUICK_REDUCE_MAX_SIZE: int = -1
 
 
 def get_default_cache_root():
@@ -706,6 +707,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda:
     (os.getenv("VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16", "True").lower() in
      ("true", "1")),
+
+    # Custom quick allreduce kernel for MI3* cards.
+    # Sets the maximum allowed data size for custom allreduce communication.
+    # The default is 2GB (2,147,483,648 bytes).
+    # It is recommended that this size be a multiple of 16MB, depending
+    # on your GPU memory capacity. Data exceeding this size will use
+    # either custom allreduce or RCCL communication.
+    "VLLM_ROCM_QUICK_REDUCE_MAX_SIZE":
+    lambda: int(os.getenv("VLLM_ROCM_QUICK_REDUCE_MAX_SIZE", "-1")),
 
     # If set, when running in Quark emulation mode, do not dequantize the
     # weights at load time. Instead, dequantize weights on-the-fly during

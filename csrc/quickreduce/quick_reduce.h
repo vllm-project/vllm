@@ -67,9 +67,8 @@ enum QuickReduceQuantLevel {
 
 struct DeviceComms {
   // Max problem size is 2GB (in bytes) or half of uint32_t max value.
-  static int64_t constexpr kMaxProblemSize =
-      static_cast<int64_t>(std::numeric_limits<int32_t>::max());
-  static int64_t constexpr kMaxTiles = kMaxProblemSize / kTileSize;
+  int64_t kMaxProblemSize =
+      static_cast<int64_t>(std::numeric_limits<int32_t>::max()) + 1;
 
   // Max TP-8
   static int constexpr kMaxWorldSize = 8;
@@ -89,15 +88,17 @@ struct DeviceComms {
   DeviceComms() : initialized(false), world_size(1), rank(0) {}
   ~DeviceComms() { destroy(); }
 
-  void init(int world_size, int rank) {
+  void init(int world_size, int rank, int64_t max_problem_size = -1) {
     destroy();
     this->world_size = world_size;
     this->rank = rank;
-
+    if (max_problem_size > 0) {
+      this->kMaxProblemSize = max_problem_size;
+    }
     // Allocate buffer size for worst case: F16 2-stage buffer.
     uint32_t flags_buffer_size =
         2 * world_size * kMaxNumBlocks * sizeof(uint32_t);
-    static constexpr int64_t data_buffer_size = 2 * kMaxProblemSize;
+    static int64_t data_buffer_size = 2 * this->kMaxProblemSize;
     int64_t total_buffer_size = flags_buffer_size + data_buffer_size;
     data_offset = flags_buffer_size;
     HIP_CHECK(hipExtMallocWithFlags((void**)&dbuffer, total_buffer_size,

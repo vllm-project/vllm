@@ -1750,8 +1750,8 @@ def free_shared_buffer(ptr: int) -> None:
 
 
 # quick all reduce
-def init_custom_qr(rank: int, world_size: int) -> int:
-    return torch.ops._C_custom_ar.init_custom_qr(rank, world_size)
+def init_custom_qr(rank: int, world_size: int, qr_max_size: int = -1) -> int:
+    return torch.ops._C_custom_ar.init_custom_qr(rank, world_size, qr_max_size)
 
 
 def qr_destroy(fa: int) -> None:

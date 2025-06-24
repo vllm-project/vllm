@@ -7,7 +7,8 @@
 
   #include "quickreduce/quick_reduce.h"
 
-quickreduce::fptr_t init_custom_qr(int64_t rank, int64_t world_size) {
+quickreduce::fptr_t init_custom_qr(int64_t rank, int64_t world_size,
+                                   int64_t qr_max_size) {
   if (world_size > 8)
     throw std::invalid_argument("world size > 8 is not supported");
   if (world_size == 6)
@@ -17,7 +18,7 @@ quickreduce::fptr_t init_custom_qr(int64_t rank, int64_t world_size) {
   if (rank < 0 || rank >= world_size)
     throw std::invalid_argument("invalid rank passed in");
   quickreduce::DeviceComms* fptr = new quickreduce::DeviceComms();
-  fptr->init(world_size, rank);
+  fptr->init(world_size, rank, qr_max_size);
   return (quickreduce::fptr_t)fptr;
 }
 
@@ -62,7 +63,7 @@ void qr_all_reduce(quickreduce::fptr_t _fa, torch::Tensor& inp,
 
   TORCH_CHECK_EQ(inp.scalar_type(), out.scalar_type());
   TORCH_CHECK_EQ(inp.numel(), out.numel());
-  TORCH_CHECK_LE(out.numel(), quickreduce::DeviceComms::kMaxProblemSize);
+  TORCH_CHECK_LE(out.numel(), fa->kMaxProblemSize);
   if (out.scalar_type() == at::ScalarType::Half) {
     fa->allreduce<half, false>(reinterpret_cast<half*>(inp.data_ptr()),
                                reinterpret_cast<half*>(out.data_ptr()),
@@ -85,7 +86,8 @@ void qr_all_reduce(quickreduce::fptr_t _fa, torch::Tensor& inp,
 }
 
 int64_t qr_max_size() {
-  return static_cast<int64_t>(quickreduce::DeviceComms::kMaxProblemSize);
+  // The default is 2GB (2,147,483,648 bytes)
+  return static_cast<int64_t>(std::numeric_limits<int32_t>::max()) + 1;
 }
 
   #define INSTANTIATE_FOR_WORLDSIZE(T, Codec, cast_bf2half)       \
