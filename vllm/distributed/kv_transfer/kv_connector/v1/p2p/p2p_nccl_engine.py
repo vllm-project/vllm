@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MEM_POOL_SIZE_GB = 32
 DEFAULT_PING_SECONDS = 3
-DEFAULT_TIMEOUT_SECONDS = 10
+DEFAULT_TIMEOUT_SECONDS = 3
 
 
 @contextmanager
@@ -213,6 +213,11 @@ class P2pNcclEngine:
                 self.comms[remote_address] = (comm, rank)
                 logger.info("🤝ncclCommInitRank Success, %s👉%s, MyRank: %s",
                             self.zmq_address, remote_address, rank)
+            # The first communication takes a long time, which may cause a
+            # timeout. To avoid this, we test by sending a small amount of
+            # data and set the timeout duration slightly longer than usual.
+            tensor = torch.empty(1, dtype=torch.float16, device=self.device)
+            self.send_with_timeout(remote_address, comm, tensor, rank ^ 1, 10, self.send_stream)
 
         return self.socks[remote_address], self.comms[remote_address]
 
@@ -336,6 +341,12 @@ class P2pNcclEngine:
                         logger.info(
                             "🤝ncclCommInitRank Success, %s👈%s, MyRank: %s",
                             self.zmq_address, remote_address.decode(), rank)
+                    # Same as send_with_timeout, the idea is to send a small
+                    # piece of data for testing, with a timeout that is
+                    # slightly longer than normal to avoid issues during the
+                    # initial (potentially slow) communication.
+                    tensor = torch.empty(1, dtype=torch.float16, device=self.device)
+                    self.recv_with_timeout(remote_address.decode(), comm, tensor, rank ^ 1, 10, self.recv_stream)
                 elif data["cmd"] == "PUT":
                     tensor_id = data["tensor_id"]
                     try:
@@ -474,7 +485,6 @@ class P2pNcclEngine:
                 response.decode())
             return False
 
-        # self._send(comm, tensor.to(self.device), rank ^ 1, self.send_stream)
         self.send_with_timeout(remote_address, comm, tensor.to(self.device), rank ^ 1, self.nccl_timeout_s, self.send_stream)
 
         if self.send_type == "PUT_ASYNC":

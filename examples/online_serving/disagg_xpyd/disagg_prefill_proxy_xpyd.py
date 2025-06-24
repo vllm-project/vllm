@@ -181,5 +181,5 @@ async def handle_request():
 
 if __name__ == "__main__":
     t = start_service_discovery("0.0.0.0", 30001)
-    app.run(host="0.0.0.0", port=10201)
+    app.run(host="0.0.0.0", port=10001)
     t.join()
