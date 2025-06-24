@@ -2959,12 +2959,17 @@ class GrowingMemoryObjGraph:
         
         # Create subdirectory for this analysis
         analysis_dir = os.path.join(self._obj_graph_dir, f"analysis_{current_date}")
-        os.makedirs(analysis_dir, exist_ok=True)
-        
+        try:
+            os.makedirs(analysis_dir, exist_ok=True)
+        except OSError as e:
+            logger.error("Failed to create directory %s: %s", analysis_dir, e)
+            return f"Failed to create directory: {e}"
+                
         output_lines = []
         current_time = time.time()
         statistics_time = current_time - self.start_time
-        output_lines.append(f"{'='*50}\n start time {self.start_time}, Statistics time: {statistics_time} seconds\n{'='*50}\n")
+        start_time_formatted = datetime.datetime.fromtimestamp(self.start_time).strftime("%Y-%m-%d %H:%M:%S")
+        output_lines.append(f"{'='*50}\n start time {start_time_formatted}, Statistics time: {statistics_time} seconds\n{'='*50}\n")
 
         gc.collect()
         growth_info = objgraph.growth()
@@ -2977,7 +2982,7 @@ class GrowingMemoryObjGraph:
             try:
                 obj = objgraph.by_type(gt[0])[0]
             except IndexError:
-                logger.warning(f"Type {gt[0]} has no available objects")
+                logger.warning("Type %s has no available objects", gt[0])
                 continue
 
             # Generate back reference graph
@@ -3003,10 +3008,14 @@ class GrowingMemoryObjGraph:
             )
 
         output_file_path = os.path.join(analysis_dir, "growing_memory_stats.log")
-        with open(output_file_path, 'w', encoding='utf-8') as f:
-            for line in output_lines:
-                f.write(line + '\n')
+        try:
+            with open(output_file_path, 'w', encoding='utf-8') as f:
+                for line in output_lines:
+                    f.write(line + '\n')
+        except OSError as e:
+            logger.error("Failed to write to file %s: %s", output_file_path, e)
+            return f"Failed to write to file: {e}"
         
-        logger.info(f"obj graph statistics completed, output_lines: {output_lines}")
+        logger.info("obj graph statistics completed, output_lines: %s", output_lines)
         
         return "obj graph statistics completed"
