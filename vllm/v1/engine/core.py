@@ -134,8 +134,17 @@ class EngineCore:
             self, vllm_config: VllmConfig) -> tuple[int, int, KVCacheConfig]:
         start = time.time()
 
-        # Get all kv cache needed by the model
-        kv_cache_specs = self.model_executor.get_kv_cache_specs()
+        #TODO: CP start from here
+        if vllm_config.model_config.is_attention_free:
+            # No need for initializing anything related to KV cache if the model
+            # is attention free.
+            kv_cache_specs = []
+            kv_cache_configs = [
+                    KVCacheConfig(num_blocks=0, kv_cache_tensors={}, kv_cache_groups=[])
+                ]
+        else:
+            # Get all kv cache needed by the model
+            kv_cache_specs = self.model_executor.get_kv_cache_specs()
 
         # Profiles the peak memory usage of the model to determine how much
         # memory can be allocated for kv cache.
