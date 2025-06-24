@@ -56,6 +56,7 @@ logger = init_logger(__name__)
 INVALID_TOKEN_ID = -1
 # Smallest output size
 MIN_NUM_SEQS = 8
+# Block size used for kv cache updating kernel
 KV_CACHE_UPDATE_BLOCK_SIZE = 8
 
 
@@ -1796,9 +1797,8 @@ def _get_padded_token_len(paddings: list[int], x: int) -> int:
 
 def _get_padded_num_kv_cache_update_slices(num_tokens: int, max_num_reqs: int,
                                            page_size: int) -> int:
-    """ A fixed shape of slot_mapping_metadata tensor is required to avoid
-    recompilation.
-    """
+    """Calculates the padded number of KV cache update slices to avoid
+    recompilation."""
     padded_num_slices = 2 * max_num_reqs + num_tokens // page_size
     pagged_num_slices = min(padded_num_slices, num_tokens)
     pagged_num_slices = (

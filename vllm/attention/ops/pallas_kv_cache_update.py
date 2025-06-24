@@ -12,12 +12,12 @@ def _kv_cache_update_kernel(
     # Prefetch
     slices_ref,  # [num_slices, 3]
     # Input
-    new_kv_hbm_ref,  # [tokens, kv_head_num, head_dim]
+    new_kv_hbm_ref,  # [tokens, num_combined_kv_heads, head_dim]
     kv_cache_hbm_ref,
     # Output
-    _,  # [total_num_pages * page_size, kv_head_num, head_dim]
+    _,  # [total_num_pages * page_size, num_combined_kv_heads, head_dim]
     # Scratch
-    scratch,  # [block_size, page_size, kv_head_num, head_dim]
+    scratch,  # [block_size, page_size, num_combined_kv_heads, head_dim]
     sem,
 ):
     async_copies = []
@@ -62,17 +62,17 @@ def _kv_cache_update_kernel(
     static_argnames=["page_size", "block_size"],
 )
 def kv_cache_update(
-    new_kv: jax.Array,  # [total_num_token, kv_head_num, head_dim]
+    new_kv: jax.Array,  # [total_num_token, num_combined_kv_heads, head_dim]
     slices: jax.
     Array,  # [num_slices, 3], list of (kv_cache_start, new_kv_start, slice_len)
     kv_cache: jax.
-    Array,  # [total_num_pages * page_size, kv_head_num, head_dim]
+    Array,  # [total_num_pages * page_size, num_combined_kv_heads, head_dim]
     *,
     page_size: int = 32,
     block_size: int = 8,
 ):
     assert slices.shape[0] % block_size == 0
-    _, kv_head_num, head_dim = new_kv.shape
+    _, num_combined_kv_heads, head_dim = new_kv.shape
 
     in_specs = [
         pl.BlockSpec(memory_space=pltpu.TPUMemorySpace.ANY),
@@ -84,7 +84,7 @@ def kv_cache_update(
 
     scalar_prefetches = [slices]
     scratch = pltpu.VMEM(
-        (block_size, page_size, kv_head_num, head_dim),
+        (block_size, page_size, num_combined_kv_heads, head_dim),
         new_kv.dtype,
     )
 
