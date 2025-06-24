@@ -215,9 +215,6 @@ class MinPLogitsProcessor(LogitsProcessor):
         return float(self.min_p_cpu[index])
 
     def update_state(self, batch_update: BatchUpdate):
-        if not batch_update:
-            return
-
         needs_update = False
         # Process added requests.
         for index, params, _ in batch_update.added:
@@ -289,9 +286,6 @@ class LogitBiasLogitsProcessor(LogitsProcessor):
         return False
 
     def update_state(self, batch_update: BatchUpdate):
-        if not batch_update:
-            return
-
         needs_update = False
         # Process added requests.
         for index, params, _ in batch_update.added:

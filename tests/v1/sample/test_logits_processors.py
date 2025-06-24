@@ -124,7 +124,7 @@ def _generate_test_fakes(batch_size: int, device: str) -> LogitsprocsTestFakes:
 def _sampling_params_from_logitproc(logitproc_id: str) -> SamplingParams:
     """Customize request SamplingParams for a specified logitproc"""
     # SamplingParams for req with no logitproc
-    kwargs = {"min_p": 0, "logit_bias": None, "min_tokens": 0}
+    kwargs = {"min_p": 0.0, "logit_bias": None, "min_tokens": 0}
     if fxn := logitsprocs_test_mapping[logitproc_id].gen_request_fxn:
         fxn(kwargs)
     return SamplingParams(**kwargs)
