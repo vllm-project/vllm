@@ -58,9 +58,10 @@ class WeightsMapper:
 
         return key
 
-    def apply(self, values: Iterable[tuple[str,
-                                           Any]]) -> Iterable[tuple[str, Any]]:
-        return ((out_name, data) for name, data in values
+    def apply(
+        self, weights: Iterable[tuple[str, torch.Tensor]]
+    ) -> Iterable[tuple[str, torch.Tensor]]:
+        return ((out_name, data) for name, data in weights
                 if (out_name := self._map_name(name)) is not None)
 
     def apply_list(self, values: list[str]):

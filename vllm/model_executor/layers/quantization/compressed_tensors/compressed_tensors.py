@@ -81,11 +81,13 @@ class CompressedTensorsConfig(QuantizationConfig):
         return "compressed-tensors"
 
     def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
-        self.ignore = hf_to_vllm_mapper.apply_list(self.ignore)
         self.target_scheme_map = hf_to_vllm_mapper.apply_dict(
             self.target_scheme_map)
+        self.ignore = hf_to_vllm_mapper.apply_list(self.ignore)
         self.sparsity_scheme_map = hf_to_vllm_mapper.apply_dict(
             self.sparsity_scheme_map)
+        self.sparsity_ignore_list = hf_to_vllm_mapper.apply_list(
+            self.sparsity_ignore_list)
         if self.kv_cache_scheme is not None:
             self.kv_cache_scheme = hf_to_vllm_mapper.apply_dict(
                 self.kv_cache_scheme)
