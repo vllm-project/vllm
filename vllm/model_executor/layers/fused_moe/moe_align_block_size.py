@@ -5,9 +5,8 @@ from typing import Optional
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.model_executor.layers.quantization.utils.fp8_utils import ceil_div
 from vllm.triton_utils import tl, triton
-from vllm.utils import round_up
+from vllm.utils import cdiv, round_up
 
 
 @triton.jit
@@ -112,7 +111,7 @@ def moe_align_block_size_triton(
     cumsum = torch.zeros((num_experts + 1, ),
                          dtype=torch.int32,
                          device=topk_ids.device)
-    tokens_per_thread = ceil_div(numel, num_experts)
+    tokens_per_thread = cdiv(numel, num_experts)
 
     moe_align_block_size_stage1[grid](
         topk_ids,

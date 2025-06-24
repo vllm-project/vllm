@@ -19,7 +19,7 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     CUTLASS_BLOCK_FP8_SUPPORTED)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils import direct_register_custom_op
+from vllm.utils import cdiv, direct_register_custom_op
 
 logger = init_logger(__name__)
 has_deep_gemm = importlib.util.find_spec("deep_gemm") is not None
@@ -29,10 +29,6 @@ def is_fp8(x: Union[torch.dtype, torch.Tensor]) -> bool:
     if isinstance(x, torch.Tensor):
         x = x.dtype
     return x == torch.float8_e4m3fn or x == torch.float8_e4m3fnuz
-
-
-def ceil_div(x: int, y: int) -> int:
-    return (x + y - 1) // y
 
 
 def cutlass_scaled_mm(
@@ -163,8 +159,8 @@ def apply_w8a8_block_fp8_linear(
         if current_platform.has_device_capability(100):
 
             use_cutlass = cutlass_block_fp8_supported and (
-                ceil_div(weight.shape[0], 128) == weight_scale.shape[0]
-                and ceil_div(weight.shape[1], 128) == weight_scale.shape[1])
+                cdiv(weight.shape[0], 128) == weight_scale.shape[0]
+                and cdiv(weight.shape[1], 128) == weight_scale.shape[1])
         else:
             # TODO: update this after switching to public sm90 block scale gemm
             # as it also supports weight.shape % 128 != 0
