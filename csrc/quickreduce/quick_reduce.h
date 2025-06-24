@@ -68,7 +68,7 @@ enum QuickReduceQuantLevel {
 struct DeviceComms {
   // Max problem size is 2GB (in bytes) or half of uint32_t max value.
   static int64_t constexpr kMaxProblemSize =
-      static_cast<int64_t>(std::numeric_limits<int32_t>::max);
+      static_cast<int64_t>(std::numeric_limits<int32_t>::max());
   static int64_t constexpr kMaxTiles = kMaxProblemSize / kTileSize;
 
   // Max TP-8

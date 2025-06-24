@@ -84,7 +84,7 @@ class CustomAllreduce:
     def __init__(self,
                  group: ProcessGroup,
                  device: Union[int, str, torch.device],
-                 cr_max_size=8192 * 1024) -> None:
+                 ca_max_size=8192 * 1024) -> None:
         """
         Custom allreduce provides non-destructive acceleration and is 
         available for CUDA and ROCm MI300 series.
@@ -107,14 +107,14 @@ class CustomAllreduce:
                 default process group.
             device: the device to bind the CustomAllreduce to. If None,
                 it will be bind to f"cuda:{local_rank}".
-            cr_max_size: max supported size of custom allreduce.
+            ca_max_size: max supported size of custom allreduce.
         It is the caller's responsibility to make sure each communicator
         is bind to a unique device, and all communicators in this group
         are in the same node.
         """
         self._IS_CAPTURING = False
         self.disabled = True
-        self.cr_max_size = cr_max_size
+        self.ca_max_size = ca_max_size
         self.qr_disabled = True
 
         if not custom_ar:
@@ -241,12 +241,12 @@ class CustomAllreduce:
         # Meta data composes of two parts: meta data for synchronization and a
         # temporary buffer for storing intermediate allreduce results.
         self.meta_ptrs = self.create_shared_buffer(ops.meta_size() +
-                                                   self.cr_max_size,
+                                                   self.ca_max_size,
                                                    group=self.group,
                                                    uncached=True)
         # This is a pre-registered IPC buffer. In eager mode, input tensors
         # are first copied into this buffer before allreduce is performed
-        self.buffer_ptrs = self.create_shared_buffer(self.cr_max_size,
+        self.buffer_ptrs = self.create_shared_buffer(self.ca_max_size,
                                                      group=self.group)
         # This is a buffer for storing the tuples of pointers pointing to
         # IPC buffers from all ranks. Each registered tuple has size of
@@ -256,11 +256,11 @@ class CustomAllreduce:
         self.rank_data = torch.empty(8 * 1024 * 1024,
                                      dtype=torch.uint8,
                                      device=self.device)
-        self.cr_max_size = self.cr_max_size
+        self.ca_max_size = self.ca_max_size
 
-        self._cr_ptr = ops.init_custom_ar(self.meta_ptrs, self.rank_data,
+        self._ca_ptr = ops.init_custom_ar(self.meta_ptrs, self.rank_data,
                                           self.rank, self.fully_connected)
-        ops.register_buffer(self._cr_ptr, self.buffer_ptrs)
+        ops.register_buffer(self._ca_ptr, self.buffer_ptrs)
 
     def init_custom_quick_allreduce(self):
         """
@@ -326,7 +326,7 @@ class CustomAllreduce:
                 self.register_graph_buffers()
 
     def register_graph_buffers(self):
-        handle, offset = ops.get_graph_buffer_ipc_meta(self._cr_ptr)
+        handle, offset = ops.get_graph_buffer_ipc_meta(self._ca_ptr)
         logger.info("Registering %d cuda graph addresses", len(offset))
         # We cannot directly use `dist.all_gather_object` here
         # because it is incompatible with `gloo` backend under inference mode.
@@ -343,7 +343,7 @@ class CustomAllreduce:
         # Unpack list of tuples to tuple of lists.
         handles = [d[0] for d in all_data]  # type: ignore
         offsets = [d[1] for d in all_data]  # type: ignore
-        ops.register_graph_buffers(self._cr_ptr, handles, offsets)
+        ops.register_graph_buffers(self._ca_ptr, handles, offsets)
 
     def should_quick_allreduce(self, inp: torch.Tensor):
         """
@@ -380,7 +380,7 @@ class CustomAllreduce:
         # for 4 or more non NVLink-capable GPUs, custom allreduce provides
         # little performance improvement over NCCL.
         if self.world_size == 2 or self.fully_connected:
-            return inp_size < self.cr_max_size
+            return inp_size < self.ca_max_size
         return False
 
     def should_custom_ar(self, inp: torch.Tensor):
@@ -403,10 +403,10 @@ class CustomAllreduce:
         if out is None:
             out = torch.empty_like(inp)
         if registered:
-            ops.all_reduce(self._cr_ptr, inp, out, 0, 0)
+            ops.all_reduce(self._ca_ptr, inp, out, 0, 0)
         else:
-            ops.all_reduce(self._cr_ptr, inp, out, self.buffer_ptrs[self.rank],
-                           self.cr_max_size)
+            ops.all_reduce(self._ca_ptr, inp, out, self.buffer_ptrs[self.rank],
+                           self.ca_max_size)
         return out
 
     def qr_all_reduce(self, inp: torch.Tensor, *, out: torch.Tensor = None):
@@ -444,10 +444,10 @@ class CustomAllreduce:
         return None
 
     def close(self):
-        if not self.disabled and self._cr_ptr:
+        if not self.disabled and self._ca_ptr:
             if ops is not None:
-                ops.dispose(self._cr_ptr)
-            self._cr_ptr = 0
+                ops.dispose(self._ca_ptr)
+            self._ca_ptr = 0
             self.free_shared_buffer(self.meta_ptrs, rank=self.rank)
             self.free_shared_buffer(self.buffer_ptrs, rank=self.rank)
             self.disabled = True
