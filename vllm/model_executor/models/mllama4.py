@@ -40,7 +40,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.model_loader.utils import initialize_model
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader, maybe_remap_kv_scale_name
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
@@ -938,35 +938,42 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
                 # Apply renaming logic
                 if name.startswith("model."):
                     # Handle expert scale parameters with flat naming
-                    if "feed_forward.experts." in name and ("_input_scale" in name or "_weight_scale" in name):
-                        # Expert scales in checkpoint are single values for all experts
-                        # e.g., "model.layers.0.feed_forward.experts.down_proj_input_scale"
-                        # should map to "language_model.model.layers.0.feed_forward.experts.w2_input_scale"
+                    if "feed_forward.experts." in name and (
+                            "_input_scale" in name or "_weight_scale" in name):
+                        # Expert scales in checkpoint are single values for all
+                        # experts e.g., "model.layers.0.feed_forward.experts.
+                        # down_proj_input_scale" should map to "language_model.
+                        # model.layers.0.feed_forward.experts.w2_input_scale"
 
-                        renamed = name.replace("model.", "language_model.model.", 1)
+                        renamed = name.replace("model.",
+                                               "language_model.model.", 1)
 
                         # Map checkpoint naming to vLLM's expected naming
                         if "down_proj_input_scale" in renamed:
-                            renamed = renamed.replace("down_proj_input_scale", "w2_input_scale")
+                            renamed = renamed.replace("down_proj_input_scale",
+                                                      "w2_input_scale")
                         elif "down_proj_weight_scale" in renamed:
-                            renamed = renamed.replace("down_proj_weight_scale", "w2_weight_scale")
+                            renamed = renamed.replace("down_proj_weight_scale",
+                                                      "w2_weight_scale")
                         elif "gate_up_proj_input_scale" in renamed:
-                            renamed = renamed.replace("gate_up_proj_input_scale", "w13_input_scale")
+                            renamed = renamed.replace(
+                                "gate_up_proj_input_scale", "w13_input_scale")
                         elif "gate_up_proj_weight_scale" in renamed:
-                            renamed = renamed.replace("gate_up_proj_weight_scale", "w13_weight_scale")
-                        # If none of the above patterns match, keep the renamed version as is
+                            renamed = renamed.replace(
+                                "gate_up_proj_weight_scale",
+                                "w13_weight_scale")
                     else:
                         # Standard model.* to language_model.model.* renaming
-                        renamed = name.replace("model.", "language_model.model.", 1)
+                        renamed = name.replace("model.",
+                                               "language_model.model.", 1)
 
-                        # Don't do FP8 scale parameter remapping here - let Llama4Model.load_weights() handle it
-                        # The existing logic in Llama4Model.load_weights() already has proper scale remapping via maybe_remap_kv_scale_name
                     # Track renamed scale parameters
                     if "scale" in renamed:
                         renamed_scales.append(renamed)
                 elif name.startswith("lm_head.weight"):
                     # Rename lm_head.weight to language_model.lm_head.weight
-                    renamed = name.replace("lm_head.weight", "language_model.lm_head.weight")
+                    renamed = name.replace("lm_head.weight",
+                                           "language_model.lm_head.weight")
                 else:
                     # Keep other weights as is
                     renamed = name
@@ -981,14 +988,14 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
                 else:
                     other_weights.append((renamed, weight))
 
-
             return language_model_weights, other_weights
 
         language_model_weights, other_weights = process_and_separate_weights()
 
         # Load language model weights
         loader = AutoWeightsLoader(self)
-        loaded_language_model_params = loader.load_weights(language_model_weights)
+        loaded_language_model_params = loader.load_weights(
+            language_model_weights)
         assert loaded_language_model_params is not None
         updated_params.update(loaded_language_model_params)
 

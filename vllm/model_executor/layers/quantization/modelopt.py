@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any, Callable, Optional, Union, List
+from typing import Any, Callable, List, Optional, Union
 
 import torch
 from torch.nn import Module
@@ -73,12 +73,10 @@ class ModelOptFp8Config(QuantizationConfig):
     def from_config(cls, config: dict[str, Any]) -> "ModelOptFp8Config":
         quant_config = cls.get_from_keys(config, ["quantization"])
         quant_method = quant_config["quant_algo"]
-        kv_cache_quant_method = cls.get_from_keys(config, ["quantization"]).get(
-            "kv_cache_quant_algo"
-        )
-        exclude_modules = cls.get_from_keys(config, ["quantization"]).get(
-            "exclude_modules"
-        )
+        kv_cache_quant_method = cls.get_from_keys(
+            config, ["quantization"]).get("kv_cache_quant_algo")
+        exclude_modules = cls.get_from_keys(
+            config, ["quantization"]).get("exclude_modules")
 
         if quant_method not in QUANT_ALGOS:
             raise ValueError(f"ModelOpt currently only supports: {QUANT_ALGOS}"
@@ -87,15 +85,17 @@ class ModelOptFp8Config(QuantizationConfig):
                              "quant configuration.")
         is_checkpoint_fp8_serialized = ("FP8" in quant_method)
 
-        # Convert exclude_modules to handle the language_model prefix that gets added by mllama4.py
+        # Convert exclude_modules to handle the language_model prefix for llama4
         converted_exclude_modules = []
         if exclude_modules:
             for module in exclude_modules:
                 converted_exclude_modules.append(module)
                 if not module.startswith("language_model."):
-                    converted_exclude_modules.append(f"language_model.{module}")
+                    converted_exclude_modules.append(
+                        f"language_model.{module}")
 
-        return cls(is_checkpoint_fp8_serialized, kv_cache_quant_method, converted_exclude_modules)
+        return cls(is_checkpoint_fp8_serialized, kv_cache_quant_method,
+                   converted_exclude_modules)
 
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["QuantizeMethodBase"]:
@@ -191,6 +191,7 @@ class ModelOptFp8LinearMethod(LinearMethodBase):
                                      input_scale=layer.input_scale,
                                      bias=bias)
 
+
 class ModelOptFp8MoEMethod:
     """MoE method for ModelOpt FP8.
     Supports loading FP8 checkpoints with static weight scale and activation scale.
@@ -209,10 +210,13 @@ class ModelOptFp8MoEMethod:
             original_init = cls.__init__
             new_cls = type(
                 cls.__name__,
-                (FusedMoEMethodBase,),
+                (FusedMoEMethodBase, ),
                 {
                     "__init__": original_init,
-                    **{k: v for k, v in cls.__dict__.items() if k != "__dict__"},
+                    **{
+                        k: v
+                        for k, v in cls.__dict__.items() if k != "__dict__"
+                    },
                 },
             )
             obj = super(new_cls, new_cls).__new__(new_cls)
@@ -237,17 +241,16 @@ class ModelOptFp8MoEMethod:
     ):
 
         # Use FP8 dtype if checkpoint is serialized, otherwise use the default dtype
-        weight_dtype = (
-            torch.float8_e4m3fn
-            if self.quant_config.is_checkpoint_fp8_serialized
-            else params_dtype
-        )
+        weight_dtype = (torch.float8_e4m3fn
+                        if self.quant_config.is_checkpoint_fp8_serialized else
+                        params_dtype)
         weight_loader = extra_weight_attrs.get("weight_loader")
 
         w13_weight = ModelWeightParameter(
-            data=torch.empty(
-                num_experts, 2 * intermediate_size_per_partition, hidden_size, dtype=weight_dtype
-            ),
+            data=torch.empty(num_experts,
+                             2 * intermediate_size_per_partition,
+                             hidden_size,
+                             dtype=weight_dtype),
             input_dim=2,
             output_dim=1,
             weight_loader=weight_loader,
@@ -255,9 +258,10 @@ class ModelOptFp8MoEMethod:
         layer.register_parameter("w13_weight", w13_weight)
 
         w2_weight = ModelWeightParameter(
-            data=torch.empty(
-                num_experts, hidden_size, intermediate_size_per_partition, dtype=weight_dtype
-            ),
+            data=torch.empty(num_experts,
+                             hidden_size,
+                             intermediate_size_per_partition,
+                             dtype=weight_dtype),
             input_dim=2,
             output_dim=1,
             weight_loader=weight_loader,
@@ -278,7 +282,10 @@ class ModelOptFp8MoEMethod:
             )
             w2_weight_scale = PerTensorScaleParameter(
                 data=torch.full(
-                    (num_experts,), 1.0, dtype=torch.float32  # Initialize to reasonable default instead of -inf
+                    (num_experts, ),
+                    1.0,
+                    dtype=torch.
+                    float32  # Initialize to reasonable default instead of -inf
                 ),
                 weight_loader=weight_loader,
             )
@@ -287,16 +294,15 @@ class ModelOptFp8MoEMethod:
 
             # Set weight loader attributes for scales
             extra_weight_attrs.update(
-                {"quant_method": FusedMoeWeightScaleSupported.TENSOR.value}
-            )
+                {"quant_method": FusedMoeWeightScaleSupported.TENSOR.value})
 
             # INPUT SCALES - Per-tensor scaling for ModelOpt
             w13_input_scale = PerTensorScaleParameter(
-                data=torch.full((num_experts,), 1.0, dtype=torch.float32),
+                data=torch.full((num_experts, ), 1.0, dtype=torch.float32),
                 weight_loader=weight_loader,
             )
             w2_input_scale = PerTensorScaleParameter(
-                data=torch.full((num_experts,), 1.0, dtype=torch.float32),
+                data=torch.full((num_experts, ), 1.0, dtype=torch.float32),
                 weight_loader=weight_loader,
             )
             layer.register_parameter("w13_input_scale", w13_input_scale)
@@ -307,24 +313,27 @@ class ModelOptFp8MoEMethod:
         Only supports pre-quantized checkpoints with FP8 weights and scales.
         """
 
-        layer.w13_weight = Parameter(layer.w13_weight.data, requires_grad=False)
+        layer.w13_weight = Parameter(layer.w13_weight.data,
+                                     requires_grad=False)
         layer.w2_weight = Parameter(layer.w2_weight.data, requires_grad=False)
 
+        from vllm._custom_ops import scaled_fp8_quant
         from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
             per_tensor_dequantize)
-        from vllm._custom_ops import scaled_fp8_quant
 
         # Handle scale parameters
-        if hasattr(layer, "w13_weight_scale") and layer.w13_weight_scale is not None:
+        if hasattr(layer,
+                   "w13_weight_scale") and layer.w13_weight_scale is not None:
             # Fp8 moe kernel needs single weight scale for w13 per expert.
-            # We take the max of the w1 and w3 scales then dequant and requant each expert.
+            # We take the max of the w1 and w3 scales
+            # then dequant and requant each expert.
             if layer.w13_weight_scale.dim() == 2:  # Shape: (num_experts, 2)
 
                 # Get the maximum scale across w1 and w3 for each expert
                 max_w13_scales = layer.w13_weight_scale.max(dim=1).values
 
                 # Requantize each expert's weights using the combined scale
-                # w13_weight has shape (num_experts, 2 * intermediate_size, hidden_size)
+                # w13_weight (num_experts, 2 * intermediate_size, hidden_size)
                 # where the first intermediate_size rows are w1, the next are w3
                 intermediate_size = layer.w13_weight.shape[1] // 2
                 for expert_id in range(layer.w13_weight.shape[0]):
@@ -332,41 +341,40 @@ class ModelOptFp8MoEMethod:
                     for shard_id in range(2):  # w1 and w3
                         # Dequantize using the original scale for this shard
                         dq_weight = per_tensor_dequantize(
-                            layer.w13_weight[expert_id][
-                                start : start + intermediate_size, :
-                            ],
+                            layer.w13_weight[expert_id][start:start +
+                                                        intermediate_size, :],
                             layer.w13_weight_scale[expert_id][shard_id],
                         )
                         # Requantize using the combined max scale
 
                         (
-                            layer.w13_weight[expert_id][
-                                start : start + intermediate_size, :
-                            ],
+                            layer.w13_weight[expert_id][start:start +
+                                                        intermediate_size, :],
                             _,
-                        ) = scaled_fp8_quant(dq_weight, max_w13_scales[expert_id])
+                        ) = scaled_fp8_quant(dq_weight,
+                                             max_w13_scales[expert_id])
 
                         start += intermediate_size
 
-                # Update the scale parameter to be per-expert instead of per-shard
-                layer.w13_weight_scale = Parameter(max_w13_scales, requires_grad=False)
+                # Update the scale parameter to be per-expert
+                layer.w13_weight_scale = Parameter(max_w13_scales,
+                                                   requires_grad=False)
             else:
-                layer.w13_weight_scale = Parameter(
-                    layer.w13_weight_scale.data, requires_grad=False
-                )
+                layer.w13_weight_scale = Parameter(layer.w13_weight_scale.data,
+                                                   requires_grad=False)
 
-        if hasattr(layer, "w2_weight_scale") and layer.w2_weight_scale is not None:
-            layer.w2_weight_scale = Parameter(
-                layer.w2_weight_scale.data, requires_grad=False
-            )
-        if hasattr(layer, "w13_input_scale") and layer.w13_input_scale is not None:
-            layer.w13_input_scale = Parameter(
-                layer.w13_input_scale.max(), requires_grad=False
-            )
-        if hasattr(layer, "w2_input_scale") and layer.w2_input_scale is not None:
-            layer.w2_input_scale = Parameter(
-                layer.w2_input_scale.max(), requires_grad=False
-            )
+        if hasattr(layer,
+                   "w2_weight_scale") and layer.w2_weight_scale is not None:
+            layer.w2_weight_scale = Parameter(layer.w2_weight_scale.data,
+                                              requires_grad=False)
+        if hasattr(layer,
+                   "w13_input_scale") and layer.w13_input_scale is not None:
+            layer.w13_input_scale = Parameter(layer.w13_input_scale.max(),
+                                              requires_grad=False)
+        if hasattr(layer,
+                   "w2_input_scale") and layer.w2_input_scale is not None:
+            layer.w2_input_scale = Parameter(layer.w2_input_scale.max(),
+                                             requires_grad=False)
 
     def apply(
         self,
@@ -405,7 +413,8 @@ class ModelOptFp8MoEMethod:
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias,
         )
-        from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
+        from vllm.model_executor.layers.fused_moe.fused_moe import (
+            fused_experts)
         return fused_experts(
             x,
             layer.w13_weight,
@@ -424,6 +433,7 @@ class ModelOptFp8MoEMethod:
             a2_scale=layer.w2_input_scale,
             apply_router_weight_on_input=apply_router_weight_on_input,
         )
+
 
 class ModelOptNvFp4Config(QuantizationConfig):
     """Config class for ModelOpt FP4."""
