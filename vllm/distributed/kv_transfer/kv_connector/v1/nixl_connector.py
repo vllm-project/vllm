@@ -22,6 +22,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size,
     get_tp_group)
+from vllm.distributed.utils import divide
 from vllm.logger import init_logger
 from vllm.platforms import _Backend
 from vllm.utils import make_zmq_path, make_zmq_socket, round_down
@@ -35,6 +36,8 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 Transfer = tuple[int, float]  # (xfer_handle, start_time)
+EngineId = str
+ReqId = str
 GET_META_MSG = b"get_meta_msg"
 
 logger = init_logger(__name__)
@@ -74,7 +77,7 @@ class ReqMeta:
 class NixlConnectorMetadata(KVConnectorMetadata):
 
     def __init__(self):
-        self.requests: dict[str, ReqMeta] = {}
+        self.requests: dict[ReqId, ReqMeta] = {}
 
     def add_new_req(
         self,
@@ -95,16 +98,17 @@ class NixlConnector(KVConnectorBase_V1):
 
     def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole):
         assert vllm_config.kv_transfer_config is not None
-        self.engine_id = vllm_config.kv_transfer_config.engine_id
+        assert vllm_config.kv_transfer_config.engine_id is not None
+        self.engine_id: EngineId = vllm_config.kv_transfer_config.engine_id
 
         if role == KVConnectorRole.SCHEDULER:
             self.connector_scheduler : Optional[NixlConnectorScheduler] = \
-                NixlConnectorScheduler(vllm_config, str(self.engine_id))
+                NixlConnectorScheduler(vllm_config, self.engine_id)
             self.connector_worker: Optional[NixlConnectorWorker] = None
         elif role == KVConnectorRole.WORKER:
             self.connector_scheduler = None
             self.connector_worker = NixlConnectorWorker(
-                vllm_config, str(self.engine_id))
+                vllm_config, self.engine_id)
 
     ############################################################
     # Scheduler Side Methods
@@ -178,7 +182,7 @@ class NixlConnectorScheduler:
     def __init__(self, vllm_config: VllmConfig, engine_id: str):
         self.vllm_config = vllm_config
         self.block_size = vllm_config.cache_config.block_size
-        self.engine_id = engine_id
+        self.engine_id: EngineId = engine_id
         self.side_channel_host = envs.VLLM_NIXL_SIDE_CHANNEL_HOST
         self.side_channel_port = (
             envs.VLLM_NIXL_SIDE_CHANNEL_PORT +
@@ -189,7 +193,7 @@ class NixlConnectorScheduler:
         # Requests that need to start recv.
         # New requests are added by update_state_after_alloc in
         # the scheduler. Used to make metadata passed to Worker.
-        self._reqs_need_recv: dict[str, tuple[Request, list[int]]] = {}
+        self._reqs_need_recv: dict[ReqId, tuple[Request, list[int]]] = {}
 
     def get_num_new_matched_tokens(
             self, request: "Request",
@@ -331,19 +335,19 @@ class NixlConnectorWorker:
         # Agent.
         self.nixl_wrapper = NixlWrapper(str(uuid.uuid4()), None)
         # Map of engine_id -> {rank0: agent_name0, rank1: agent_name1..}.
-        self._remote_agents: dict[str, dict[int, str]] = defaultdict(dict)
+        self._remote_agents: dict[EngineId, dict[int, str]] = defaultdict(dict)
 
         # NIXL handshake port.
         # NOTE(rob): Within a DP group, each DP rank gets its own
         # base port (which is sent in the KVTransferParams).
         # Each TP rank listens/queries on the base_port + tp_rank.
-        self.side_channel_port = (
+        self.side_channel_port: int = (
             envs.VLLM_NIXL_SIDE_CHANNEL_PORT +
             vllm_config.parallel_config.data_parallel_rank_local *
             vllm_config.parallel_config.tensor_parallel_size)
 
         # Metadata.
-        self.engine_id = engine_id
+        self.engine_id: EngineId = engine_id
         self.tp_rank = get_tensor_model_parallel_rank()
         self.world_size = get_tensor_model_parallel_world_size()
         self.tp_group = get_tp_group()
@@ -353,7 +357,7 @@ class NixlConnectorWorker:
 
         # Map of engine_id -> kv_caches_base_addr. For TP case, each local
         # rank will still only pull from a single remote TP worker.
-        self.kv_caches_base_addr: dict[str, list[int]] = {}
+        self.kv_caches_base_addr: dict[EngineId, list[int]] = {}
 
         # Number of NIXL regions. Currently one region per cache
         # (so 1 per layer for MLA, otherwise 2 per layer)
@@ -363,23 +367,23 @@ class NixlConnectorWorker:
         # nixl_prepped_dlist_handle.
         self.src_xfer_side_handle: int = 0
         # Map of engine_id -> nixl_prepped_dlist_handle (int)].
-        self.dst_xfer_side_handles: dict[str, int] = {}
+        self.dst_xfer_side_handles: dict[EngineId, int] = {}
 
         # Map of engine_id -> num_blocks. All ranks in the same deployment will
         # have the same number of blocks.
-        self.dst_num_blocks: dict[str, int] = {}
+        self.dst_num_blocks: dict[EngineId, int] = {}
         self._registered_descs: list[Any] = []
 
         # In progress transfers.
         # [req_id -> list[handle]]
-        self._recving_transfers = defaultdict[str, list[Transfer]](list)
+        self._recving_transfers = defaultdict[ReqId, list[Transfer]](list)
 
         # Complete transfer tracker. Used by the rank 0 to track finished
         # transactions on ranks 1 to N-1.
         # [req_id -> count]
-        self._done_recving_count: defaultdict[str,
+        self._done_recving_count: defaultdict[ReqId,
                                               int] = defaultdict(lambda: 0)
-        self._done_sending_count: defaultdict[str,
+        self._done_sending_count: defaultdict[ReqId,
                                               int] = defaultdict(lambda: 0)
 
         # Background thread for establishing new connections.
@@ -407,10 +411,10 @@ class NixlConnectorWorker:
         self._use_flashinfer = attn_backend == _Backend.FLASHINFER_VLLM_V1
         logger.debug("Detected attention backend %s", self.backend_name)
 
-        self._tp_size: dict[str, int] = {self.engine_id: self.world_size}
+        self._tp_size: dict[EngineId, int] = {self.engine_id: self.world_size}
         # With heterogeneous TP, P must wait for all assigned D TP workers to
         # finish reading before safely freeing the blocks.
-        self.consumer_notification_counts_by_req = defaultdict[str, int](int)
+        self.consumer_notification_counts_by_req = defaultdict[ReqId, int](int)
 
     @staticmethod
     def _nixl_handshake_listener(metadata: NixlAgentMetadata,
@@ -679,11 +683,15 @@ class NixlConnectorWorker:
 
         # Number of D TP workers reading from a single P TP worker. This is
         # 1 when P and D `--tensor-parallel-size` match.
-        assert self._tp_size[self.engine_id] % self._tp_size[engine_id] == 0, (
-            "Local TP size must be divisible by remote TP size.")
-        tp_ratio = self._tp_size[self.engine_id] // self._tp_size[engine_id]
+        tp_ratio = divide(self._tp_size[self.engine_id],
+                          self._tp_size[engine_id])
         assert tp_ratio > 0, "Decode TP cannot be smaller than prefill TP"
-        if self.use_mla:
+
+        # Handle tp_size>num_kv_heads: replicate KV cache.
+        total_num_kv_heads = self.model_config.get_total_num_kv_heads()
+        is_kv_replicated = self._tp_size[engine_id] // total_num_kv_heads >= 1
+
+        if self.use_mla or is_kv_replicated:
             # With MLA the only difference is in the number of blocks.
             remote_block_size = nixl_agent_meta.block_len // (
                 self.slot_size_bytes)
@@ -720,7 +728,7 @@ class NixlConnectorWorker:
             self.kv_caches_base_addr[
                 engine_id] = nixl_agent_meta.kv_caches_base_addr
             rank_offset = self.tp_rank % tp_ratio * self.block_len \
-                if not self.use_mla else 0
+                if not (self.use_mla or is_kv_replicated) else 0
             # Register all remote blocks, but only the corresponding kv heads.
             for base_addr in nixl_agent_meta.kv_caches_base_addr:
                 for block_id in range(nixl_agent_meta.num_blocks):
@@ -836,17 +844,20 @@ class NixlConnectorWorker:
         """
         done_req_ids: set[str] = set()
         for req_id, handles in list(transfers.items()):
-            for handle, xfer_stime in handles:
+            in_progress = False
+            for handle, _xfer_stime in handles:
                 xfer_state = self.nixl_wrapper.check_xfer_state(handle)
                 if xfer_state == "DONE":
                     self.nixl_wrapper.release_xfer_handle(handle)
-                    done_req_ids.add(req_id)
-                    del transfers[req_id]
                 elif xfer_state == "PROC":
+                    in_progress = True
                     continue
                 else:
                     raise RuntimeError("Transfer failed with state %s",
                                        xfer_state)
+            if not in_progress:
+                done_req_ids.add(req_id)
+                del transfers[req_id]
         return done_req_ids
 
     def start_load_kv(self, metadata: NixlConnectorMetadata):

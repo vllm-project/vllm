@@ -33,6 +33,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.model_loader import TensorizerLoader, get_model_loader
+from vllm.model_executor.models.interfaces import has_step_pooler
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.multimodal.utils import group_mm_inputs_by_modality
@@ -262,6 +263,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 dtype=torch.int64,
                 device="cpu",
                 pin_memory=self.pin_memory)
+            self.mrope_positions_np = self.mrope_positions_cpu.numpy()
 
         # Only relevant for models using ALiBi (e.g, MPT)
         self.use_alibi = check_use_alibi(model_config)
@@ -878,15 +880,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 dst_start = mrope_pos_ptr
                 dst_end = mrope_pos_ptr + completion_part_len
 
-                self.mrope_positions_cpu[:, dst_start:dst_end] = \
-                    MRotaryEmbedding.get_next_input_positions_tensor(
-                        req.mrope_position_delta,
-                        context_len=num_computed_tokens +
-                        prompt_part_len,
-                        seq_len=num_computed_tokens +
-                        prompt_part_len +
-                        completion_part_len,
-                    )
+                MRotaryEmbedding.get_next_input_positions_tensor(
+                    out=self.mrope_positions_np,
+                    out_offset=dst_start,
+                    mrope_position_delta=req.mrope_position_delta,
+                    context_len=num_computed_tokens + prompt_part_len,
+                    num_new_tokens=completion_part_len,
+                )
 
                 mrope_pos_ptr += completion_part_len
 
@@ -1420,6 +1420,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
             sampler_output.sampled_token_ids = output_token_ids
 
+        num_nans_in_logits = {}
+        if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
+            num_nans_in_logits = self._get_nans_in_logits(logits)
+
         # TODO(woosuk): The following loop can be slow since it iterates over
         # the requests one by one. Optimize.
         discard_sampled_tokens_req_indices = []
@@ -1590,6 +1594,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             pooler_output=[],
             finished_sending=finished_sending,
             finished_recving=finished_recving,
+            num_nans_in_logits=num_nans_in_logits,
         )
 
     def kv_connector_no_forward(
@@ -1692,6 +1697,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 )
                 model_loader.load_weights(self.model,
                                           model_config=self.model_config)
+            if has_step_pooler(self.model):
+                self.input_batch.logits_processing_needs_token_ids = True
             if self.lora_config:
                 self.model = self.load_lora_model(self.model,
                                                   self.model_config,
@@ -1814,6 +1821,26 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self._sync_device()
 
         return prompt_logprobs_dict
+
+    def _get_nans_in_logits(
+        self,
+        logits: Optional[torch.Tensor],
+    ) -> dict[str, int]:
+        try:
+            if logits is None:
+                return {req_id: 0 for req_id in self.input_batch.req_ids}
+
+            num_nans_in_logits = {}
+            num_nans_for_index = logits.isnan().sum(dim=-1).cpu().numpy()
+            for req_id in self.input_batch.req_ids:
+                req_index = self.input_batch.req_id_to_index[req_id]
+                num_nans_in_logits[req_id] = (
+                    int(num_nans_for_index[req_index])
+                    if num_nans_for_index is not None
+                    and req_index < logits.shape[0] else 0)
+            return num_nans_in_logits
+        except IndexError:
+            return {}
 
     @contextmanager
     def maybe_randomize_inputs(self, input_ids: torch.Tensor):
