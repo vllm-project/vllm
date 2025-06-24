@@ -1270,7 +1270,9 @@ class RowParallelLinear(LinearBase):
 
         param.load_row_parallel_weight(loaded_weight=loaded_weight)
 
-    def resolve_input(self, input_):
+    def forward(
+            self, input_
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
         if self.input_is_parallel:
             input_parallel = input_
         else:
@@ -1278,13 +1280,6 @@ class RowParallelLinear(LinearBase):
             splitted_input = split_tensor_along_last_dim(
                 input_, num_partitions=self.tp_size)
             input_parallel = splitted_input[tp_rank].contiguous()
-        return input_parallel
-
-    def forward(
-            self, input_
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
-        input_parallel = self.resolve_input(input_)
-
         # Matrix multiply.
         assert self.quant_method is not None
         # Only fuse bias add into GEMM for rank 0 (this ensures that
