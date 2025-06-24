@@ -143,7 +143,8 @@ class PrithviMAE:
         self.model = LLM(
             model=os.path.join(os.path.dirname(__file__), "./model"),
             skip_tokenizer_init=True,
-            dtype="float32",
+            dtype="float16",
+            enforce_eager=True
         )
 
     def run(self, input_data, location_coords):
