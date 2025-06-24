@@ -14,10 +14,9 @@ The example performs the following steps:
 * Split the inference model across GPUs 1–2 using vLLM's tensor parallelism
   and Ray placement groups.
 * Generate text from a list of prompts using the inference engine.
-* Broadcast the training weights to the inference engine by using a Ray
-  collective RPC group.
-* Regenerate text after zeroing out the weights to confirm that the model
-  state has changed.
+* Update the weights of the training model and broadcast the updated weights
+  to the inference engine by using a Ray collective RPC group. Note that
+  for demonstration purposes we simply zero out the weights.
 
 For a production-ready implementation that supports multiple training and
 inference replicas, see the OpenRLHF framework:
@@ -116,6 +115,8 @@ model_update_group = stateless_init_process_group(
 ray.get(handle)
 
 # Simulate a training step by zeroing out all model weights.
+# In a real RLHF training loop the weights would be updated using the gradient
+# from an RL objective such as PPO on a reward model.
 for name, p in train_model.named_parameters():
     p.data.zero_()
 
