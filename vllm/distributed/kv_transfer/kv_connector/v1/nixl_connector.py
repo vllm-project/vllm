@@ -188,7 +188,7 @@ class NixlConnectorScheduler:
         self.side_channel_host = envs.VLLM_NIXL_SIDE_CHANNEL_HOST
         self.side_channel_port = (
             envs.VLLM_NIXL_SIDE_CHANNEL_PORT +
-            vllm_config.parallel_config.data_parallel_rank_local *
+            vllm_config.parallel_config.data_parallel_rank *
             vllm_config.parallel_config.tensor_parallel_size)
         logger.info("Initializing NIXL Scheduler %s", engine_id)
 
@@ -345,7 +345,7 @@ class NixlConnectorWorker:
         # Each TP rank listens/queries on the base_port + tp_rank.
         self.side_channel_port: int = (
             envs.VLLM_NIXL_SIDE_CHANNEL_PORT +
-            vllm_config.parallel_config.data_parallel_rank_local *
+            vllm_config.parallel_config.data_parallel_rank *
             vllm_config.parallel_config.tensor_parallel_size)
 
         # Metadata.
@@ -919,10 +919,13 @@ class NixlConnectorWorker:
 
                             fut.add_done_callback(done_callback)
 
-                        # TODO(lk-chen): handle failure state of f in the
+                        # TODO: handle failure state of future in the
                         # callback, we want to fail the request in this case.
-                        fut.add_done_callback(lambda f, entry=(req_id, meta):
-                                              self._ready_requests.put(entry))
+                        def request_ready(_f: Future[Any],
+                                          entry=(req_id, meta)):
+                            self._ready_requests.put(entry)
+
+                        fut.add_done_callback(request_ready)
                         continue
             self._read_blocks_for_req(req_id, meta)
 
