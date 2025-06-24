@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional
+from typing import Optional, Tuple
 
 import aiter as rocm_aiter
 import torch
@@ -25,6 +25,22 @@ def asm_V_shuffle(VC):
 class AITERPagedAttention(PagedAttention):
 
     @staticmethod
+    def split_kv_cache(
+        kv_cache: torch.Tensor,
+        num_kv_heads: int,
+        head_size: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        x = 16 // kv_cache.element_size()
+        num_blocks = kv_cache.shape[1]
+
+        key_cache = kv_cache[0]
+        key_cache = key_cache.view(num_blocks, num_kv_heads, head_size // x,
+                                   -1, x)
+        value_cache = kv_cache[1]
+        value_cache = value_cache.view(num_blocks, num_kv_heads, head_size, -1)
+        return key_cache, asm_V_shuffle(value_cache)
+
+    @staticmethod
     def write_to_paged_cache(
         key: torch.Tensor,
         value: torch.Tensor,
@@ -46,9 +62,19 @@ class AITERPagedAttention(PagedAttention):
             key_cache = key_cache.view(kv_cache_torch_dtype)
             value_cache = value_cache.view(kv_cache_torch_dtype)
 
+            # reshape_and_cache_with_pertoken_quant
+            # stores the key and value in the key_cache and value_cache
+            # and k_scale and v_scale in ASM Layout
+            # It takes input in the following format:
+            # key.shape: [num_seqs, num_query_heads, head_size]
+            # value.shape: [num_seqs, num_kv_heads, head_size]
+            # key_cache.shape: [num_blocks, num_kv_heads, head_size // x, -1, x]
+            # value_cache.shape: [num_blocks, num_kv_heads, block_size/X, head_size, X]  # noqa: E501
+            # k_scale.shape: [num_blocks, num_kv_heads, block_size]
+            # v_scale.shape: [num_blocks, num_kv_heads, block_size]
             rocm_aiter.reshape_and_cache_with_pertoken_quant(
-                key, value, key_cache, asm_V_shuffle(value_cache), k_scale,
-                v_scale, slot_mapping.flatten(), True)
+                key, value, key_cache, value_cache, k_scale, v_scale,
+                slot_mapping.flatten(), True)
 
     @staticmethod
     def forward_decode(
@@ -102,27 +128,18 @@ class AITERPagedAttention(PagedAttention):
                 (f"{blocksparse_block_size=} needs to be a multiple of"
                  f"{block_size=} used in block_tables.")
 
-        block_size = value_cache.shape[3]
+        # value_cache.shape: [num_blocks, num_kv_heads, head_size, block_size]
+        block_size = value_cache.shape[2] * value_cache.shape[4]
         max_num_blocks_per_seq = cdiv(max_seq_len, block_size)
 
-        return rocm_aiter.pa_fwd_asm(query,
-                                     key_cache,
-                                     asm_V_shuffle(value_cache),
-                                     block_tables,
-                                     seq_lens,
-                                     max_num_blocks=max_num_blocks_per_seq,
-                                     K_QScale=k_scale,
-                                     max_qlen=1,
-                                     V_QScale=v_scale)
-        rocm_aiter.pa_fwd_asm(
-            Q=query,
-            K=key_cache,
-            V=asm_V_shuffle(value_cache),
-            block_tables=block_tables,
-            context_lens=seq_lens,
-            max_num_blocks=max_num_blocks_per_seq,
-            K_QScale=k_scale,
-            V_QScale=v_scale,
-            out_=output,
-        )
+        output = rocm_aiter.pa_fwd_asm(Q=query,
+                                       K=key_cache,
+                                       V=value_cache,
+                                       block_tables=block_tables,
+                                       context_lens=seq_lens,
+                                       max_num_blocks=max_num_blocks_per_seq,
+                                       K_QScale=k_scale,
+                                       V_QScale=v_scale,
+                                       out_=None)
+
         return output

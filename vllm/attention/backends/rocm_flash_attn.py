@@ -695,10 +695,10 @@ class ROCmFlashAttentionImpl(AttentionImpl):
             num_blocks = kv_cache.shape[1]
             block_size = kv_cache.shape[2] // (self.num_kv_heads *
                                                self.head_size)
-            k_scale = torch.empty((self.num_kv_heads, num_blocks * block_size),
+            k_scale = torch.empty((num_blocks, self.num_kv_heads, block_size),
                                   dtype=torch.float32,
                                   device=kv_cache.device)
-            v_scale = torch.empty((self.num_kv_heads, num_blocks * block_size),
+            v_scale = torch.empty((num_blocks, self.num_kv_heads, block_size),
                                   dtype=torch.float32,
                                   device=kv_cache.device)
             self.aiter_kv_scales_initialized = True
