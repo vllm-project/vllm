@@ -280,10 +280,18 @@ class StableLMAlphaModel(nn.Module):
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
+        # StableLM-Alpha weight name mappings
+        weight_name_mappings = {
+            "embed.weight": "embed_tokens.weight",
+        }
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
 
         for name, loaded_weight in weights:
+            # Apply weight name mappings
+            if name in weight_name_mappings:
+                name = weight_name_mappings[name]
+            
             # Skip loading extra bias for GPTQ models.
             if name.endswith(".bias") and name not in params_dict:
                 continue
