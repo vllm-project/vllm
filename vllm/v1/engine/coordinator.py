@@ -305,6 +305,8 @@ class CoordinatorProc:
     def _reinit(self, dp_size: int):
         logger.info(f"Reinitializing CoordinatorProc to size {dp_size}")
         old_dp_size = len(self.engines)
-        assert dp_size > old_dp_size, "Only support upscale for now"
-        self.engines.extend([EngineState() for _ in range(dp_size - old_dp_size)])
+        if dp_size > old_dp_size:
+            self.engines.extend([EngineState() for _ in range(dp_size - old_dp_size)])
+        else:
+            self.engines = self.engines[:dp_size]
         self.stats_changed = True

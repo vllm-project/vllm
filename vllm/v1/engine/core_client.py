@@ -1150,16 +1150,28 @@ class RayDPClient(DPAsyncMPClient):
 
     async def reinit_async(self, dp_size: int) -> None:
         old_dp_size = self.vllm_config.parallel_config.data_parallel_size
+        if dp_size == old_dp_size:
+            logger.info("dp_size == old_dp_size == %d, no need to scale", dp_size)
+            return
+
         new_port = get_open_port()
         new_worker_port = get_open_port()
         logger.info(f"Using new port {new_port} and "
                     f"new worker port {new_worker_port} "
                     "for DP scaling")
 
-        self.resources.engine_manager.scale(dp_size, new_port, new_worker_port)
+        if dp_size > old_dp_size:
+            self.resources.engine_manager.scale_up(dp_size, new_port, new_worker_port)
+
         await self.call_utility_async("reinit", dp_size, new_port, new_worker_port)
 
-        for i in range(old_dp_size, dp_size):
-            # FIXME(rui): fix "local" for multi-node
-            self.core_engines.append(CoreEngine(i, local=True))
+        if dp_size < old_dp_size:
+            self.resources.engine_manager.scale_down(dp_size)
+
+        if dp_size > old_dp_size:
+            for i in range(old_dp_size, dp_size):
+                # FIXME(rui): fix "local" for multi-node
+                self.core_engines.append(CoreEngine(i, local=True))
+        else:
+            self.core_engines = self.core_engines[:dp_size]
         self.resources.coordinator.reinit(dp_size)

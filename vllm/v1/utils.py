@@ -498,6 +498,31 @@ class CoreEngineActorManager:
             ray.util.remove_placement_group(pg)
     
     def scale(self, new_dp_size: int, new_port: int, new_worker_port: int):
+        old_dp_size = self.vllm_config.parallel_config.data_parallel_size
+        assert new_dp_size != old_dp_size, (
+            "Should not reach here: "
+            f"new_dp_size {new_dp_size}, current_dp_size "
+            f"{old_dp_size}")
+
+        if new_dp_size > old_dp_size:
+            self.scale_up(new_dp_size, new_port, new_worker_port)
+        else:
+            self.scale_down(new_dp_size)
+
+    def scale_down(self, new_dp_size):
+        import ray
+        old_dp_size = self.vllm_config.parallel_config.data_parallel_size
+        assert new_dp_size < old_dp_size, (
+            "To scale down, new_dp_size must be less than current_dp_size: "
+            f"new_dp_size {new_dp_size}, current_dp_size "
+            f"{old_dp_size}")
+
+        pgs_to_remove = self.created_placement_groups[new_dp_size:]
+        self.created_placement_groups = self.created_placement_groups[:new_dp_size]
+        for pg in pgs_to_remove:
+            ray.util.remove_placement_group(pg)
+
+    def scale_up(self, new_dp_size: int, new_port: int, new_worker_port: int):
         import copy
 
         import ray
@@ -506,15 +531,11 @@ class CoreEngineActorManager:
 
         from vllm.v1.engine.core import DPEngineCoreActor
 
-        assert new_dp_size > self.vllm_config.parallel_config.data_parallel_size, (
-            "Only support upscale for now: "
-            f"new_dp_size {new_dp_size}, current_dp_size "
-            f"{self.vllm_config.parallel_config.data_parallel_size}")
-
         new_engine_actors = []
         new_refs = []
         upscale_placement_groups, upscale_local_dp_ranks = \
             self.create_upscale_placement_groups(self.vllm_config, new_dp_size)
+        self.created_placement_groups.extend(upscale_placement_groups)
 
         self.vllm_config.parallel_config.data_parallel_size = new_dp_size
         self.vllm_config.parallel_config.data_parallel_master_port = new_port
