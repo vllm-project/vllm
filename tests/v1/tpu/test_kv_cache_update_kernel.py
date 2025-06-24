@@ -12,12 +12,13 @@ from vllm.platforms import current_platform
 
 @pytest.mark.skipif(not current_platform.is_tpu(),
                     reason="This is a test for TPU only")
-def test_kv_cache_update_kernel():
+@pytest.mark.parametrize("page_size", [32, 33])
+@pytest.mark.parametrize("combined_kv_head_num", [2, 16])
+@pytest.mark.parametrize("head_dim", [128, 256])
+@pytest.mark.parametrize("kernel_block_size", [4, 8])
+def test_kv_cache_update_kernel(page_size: int, combined_kv_head_num: int,
+                                head_dim: int, kernel_block_size: int):
     page_num = 1000
-    page_size = 32
-    combined_kv_head_num = 16
-    head_dim = 128
-    kernel_block_size = 16
     padded_num_tokens = 128
     kv_cache_cpu = torch.zeros(
         (page_num * page_size, combined_kv_head_num, head_dim),
@@ -29,16 +30,26 @@ def test_kv_cache_update_kernel():
         dtype=torch.bfloat16,
         device="cpu")
     new_kv_xla = new_kv_cpu.to(torch_xla.device())
-    slice_lens = np.array([7, 32, 32, 1, 1, 1, 9], dtype=np.int32)
-    kv_cache_start_indices = np.array([57, 64, 96, 104, 213, 345, 488],
+    slice_lens = np.array([7, page_size, page_size, 1, 1, 1, 9],
+                          dtype=np.int32)
+    kv_cache_start_indices = np.array([
+        page_size * 2 - 7, page_size * 2, page_size * 3, page_size * 4 + 6,
+        page_size * 5 + 7, page_size * 6 + 8, page_size * 15 + 3
+    ],
                                       dtype=np.int32)
-    new_kv_cache_indices = np.array([0, 7, 39, 71, 72, 73, 74], dtype=np.int32)
+    new_kv_cache_indices = np.concatenate(
+        [np.array([0], dtype=np.int32),
+         np.cumsum(slice_lens[:-1])])
     slot_mapping = np.stack(
         [kv_cache_start_indices, new_kv_cache_indices, slice_lens], axis=1)
-    slot_mapping = np.pad(
-        slot_mapping, [[0, kernel_block_size - slot_mapping.shape[0]], [0, 0]],
-        constant_values=0)
-    slot_mapping_cpu = torch.tensor(slot_mapping, device="cpu")
+    padded_size = (slot_mapping.shape[0] + kernel_block_size -
+                   1) // kernel_block_size * kernel_block_size
+    slot_mapping = np.pad(slot_mapping,
+                          [[0, padded_size - slot_mapping.shape[0]], [0, 0]],
+                          constant_values=0)
+    slot_mapping_cpu = torch.tensor(slot_mapping,
+                                    device="cpu",
+                                    dtype=torch.int32)
     slot_mapping_xla = slot_mapping_cpu.to(torch_xla.device())
     torch_xla.sync()
 

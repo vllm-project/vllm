@@ -57,7 +57,7 @@ INVALID_TOKEN_ID = -1
 # Smallest output size
 MIN_NUM_SEQS = 8
 # Block size used for kv cache updating kernel
-KV_CACHE_UPDATE_BLOCK_SIZE = 8
+KV_CACHE_UPDATE_KERNEL_BLOCK_SIZE = 8
 
 
 #########################################################
@@ -742,7 +742,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             num_seqs=torch.tensor([num_reqs],
                                   dtype=torch.int32,
                                   device=self.device),
-            kv_cache_update_block_size=KV_CACHE_UPDATE_BLOCK_SIZE,
+            kv_cache_update_block_size=KV_CACHE_UPDATE_KERNEL_BLOCK_SIZE,
         )
         # NOTE(woosuk): Due to chunked prefills, there can be at most 1 partial
         # request in the batch. While we should not sample any token from this
@@ -1190,7 +1190,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             context_lens=context_lens,
             query_start_loc=query_start_loc,
             num_seqs=num_seqs,
-            kv_cache_update_block_size=KV_CACHE_UPDATE_BLOCK_SIZE,
+            kv_cache_update_block_size=KV_CACHE_UPDATE_KERNEL_BLOCK_SIZE,
         )
 
         if self.is_multimodal_model:
@@ -1800,11 +1800,11 @@ def _get_padded_num_kv_cache_update_slices(num_tokens: int, max_num_reqs: int,
     """Calculates the padded number of KV cache update slices to avoid
     recompilation."""
     padded_num_slices = 2 * max_num_reqs + num_tokens // page_size
-    pagged_num_slices = min(padded_num_slices, num_tokens)
-    pagged_num_slices = (
-        pagged_num_slices + KV_CACHE_UPDATE_BLOCK_SIZE -
-        1) // KV_CACHE_UPDATE_BLOCK_SIZE * KV_CACHE_UPDATE_BLOCK_SIZE
-    return pagged_num_slices
+    padded_num_slices = min(padded_num_slices, num_tokens)
+    padded_num_slices = (
+        padded_num_slices + KV_CACHE_UPDATE_KERNEL_BLOCK_SIZE - 1
+    ) // KV_CACHE_UPDATE_KERNEL_BLOCK_SIZE * KV_CACHE_UPDATE_KERNEL_BLOCK_SIZE
+    return padded_num_slices
 
 
 def replace_set_lora(model):

@@ -73,6 +73,9 @@ def kv_cache_update(
 ):
     assert slices.shape[0] % block_size == 0
     _, num_combined_kv_heads, head_dim = new_kv.shape
+    assert kv_cache.shape[1] == num_combined_kv_heads
+    assert kv_cache.shape[2] == head_dim
+    assert head_dim % 128 == 0
 
     in_specs = [
         pl.BlockSpec(memory_space=pltpu.TPUMemorySpace.ANY),
