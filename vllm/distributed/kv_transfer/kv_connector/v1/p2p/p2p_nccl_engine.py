@@ -160,7 +160,7 @@ class P2pNcclEngine:
                                                  daemon=True)
             self._ping_thread.start()
 
-        self.nccl_timeout_s = int(self.config.get_from_extra_config(
+        self.nccl_timeout_s = float(self.config.get_from_extra_config(
             "nccl_timeout_s", DEFAULT_TIMEOUT_SECONDS))
 
         self.max_num_timers = int(self.config.get_from_extra_config(
@@ -188,7 +188,7 @@ class P2pNcclEngine:
         if remote_address not in self.socks:
             sock = self.context.socket(zmq.DEALER)
             sock.setsockopt_string(zmq.IDENTITY, self.zmq_address)
-            sock.setsockopt(zmq.SNDTIMEO, self.nccl_timeout_s * 1000)
+            sock.setsockopt(zmq.SNDTIMEO, int(self.nccl_timeout_s * 1000))
             sock.connect(f"tcp://{remote_address}")
             self.socks[remote_address] = sock
             if remote_address in self.comms:
@@ -579,7 +579,7 @@ class P2pNcclEngine:
             func: Callable,
             tensor,
             peer_rank: int,
-            timeout: int,
+            timeout: float,
             stream=None
     ) -> int:
         result_code = 2
@@ -592,7 +592,7 @@ class P2pNcclEngine:
                     self.nccl.ncclCommAbort(comm)
                     logger.error(
                         "🔴ncclCommAbort, %s failed, remote_address:%s, "
-                        "timeout:%d", op_name, remote_address, timeout)
+                        "timeout:%f", op_name, remote_address, timeout)
                 except Exception as e:
                     logger.error(f"ncclCommAbort error: {e}")
                 result_code = 1
@@ -616,10 +616,10 @@ class P2pNcclEngine:
                                                        + self.nccl_timeout_s)
         return result_code
 
-    def send_with_timeout(self, remote_address, comm, tensor: torch.Tensor, dst: int, timeout: int, stream=None):
+    def send_with_timeout(self, remote_address, comm, tensor: torch.Tensor, dst: int, timeout: float, stream=None):
         return self._with_timeout("send", remote_address, comm, self._send, tensor, dst, timeout, stream)
 
-    def recv_with_timeout(self, remote_address, comm, tensor: torch.Tensor, src: int, timeout: int, stream=None):
+    def recv_with_timeout(self, remote_address, comm, tensor: torch.Tensor, src: int, timeout: float, stream=None):
         return self._with_timeout("recv", remote_address, comm, self._recv, tensor, src, timeout, stream)
 
     def close(self) -> None:
