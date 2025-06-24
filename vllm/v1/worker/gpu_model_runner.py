@@ -889,7 +889,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 dst_start = mrope_pos_ptr
                 dst_end = mrope_pos_ptr + completion_part_len
 
-                MRotaryEmbedding.mrope_assign_next_input_positions(
+                MRotaryEmbedding.get_next_input_positions_tensor(
                     out=self.mrope_positions_np,
                     out_offset=dst_start,
                     mrope_position_delta=req.mrope_position_delta,

@@ -1459,22 +1459,9 @@ class MRotaryEmbedding(RotaryEmbedding):
         ]
 
     @staticmethod
-    def get_next_input_positions_tensor(
-        mrope_position_delta: int,
-        context_len: int,
-        seq_len: int,
-    ) -> torch.Tensor:
-        return torch.arange(
-            mrope_position_delta + context_len,
-            mrope_position_delta + seq_len,
-        ).expand(3, -1)
-
-    # Faster version of `get_next_input_positions_tensor`
-    @staticmethod
-    def mrope_assign_next_input_positions(out: np.ndarray, out_offset: int,
-                                          mrope_position_delta: int,
-                                          context_len: int,
-                                          num_new_tokens: int):
+    def get_next_input_positions_tensor(out: np.ndarray, out_offset: int,
+                                        mrope_position_delta: int,
+                                        context_len: int, num_new_tokens: int):
 
         values = np.arange(mrope_position_delta + context_len,
                            mrope_position_delta + context_len + num_new_tokens,
