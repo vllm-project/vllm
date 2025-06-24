@@ -175,13 +175,13 @@ class EplbState:
         """
         Build the initial EPLB state.
         """
-        physical_to_logical_map = (
+        physical_to_logical_map_list = (
             cls.build_initial_global_physical_to_logical_map(
                 model.num_routed_experts,
                 model.num_redundant_experts,
             ))
         physical_to_logical_map = torch.tensor(
-            physical_to_logical_map,
+            physical_to_logical_map_list,
             device=device,
         )
         logical_to_physical_map = torch.full(
