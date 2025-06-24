@@ -1906,6 +1906,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         attn_metadata: Optional[dict[str, Any]] = None
         if capture_attn_cudagraph:
+            attn_metadata = {}
 
             query_start_loc = self.query_start_loc[:num_reqs + 1]
             # Make sure max_model_len is used at the graph capture time.
@@ -1923,7 +1924,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 max_query_len=num_tokens,
             )
 
-            attn_metadata = {}
             for kv_cache_group_id, kv_cache_group_spec in enumerate(
                     self.kv_cache_config.kv_cache_groups):
 
@@ -1971,7 +1971,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     intermediate_tensors=intermediate_tensors,
                     inputs_embeds=inputs_embeds,
                 )
-
             if self.use_aux_hidden_state_outputs:
                 hidden_states, _ = outputs
             else:
@@ -2482,7 +2481,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 continue
 
             # TODO: Support other attention modules, e.g., cross-attention
-            # encoder only can also benefit from KV cache for prefix caching
             if attn_module.attn_type in (AttentionType.DECODER,
                                          AttentionType.ENCODER_ONLY):
                 if attn_module.sliding_window is not None:
