@@ -202,7 +202,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
                 if kv_cache is None:
                     logger.warning("🚧src_kv_cache is None, %s",
                                    request.request_id)
-                    continue
+                    break
 
                 inject_kv_into_layer(kv_cache_layer, kv_cache,
                                      request.slot_mapping, request.request_id)

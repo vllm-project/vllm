@@ -182,6 +182,8 @@ class P2pNcclEngine:
         # transmitted anymore.
         if remote_address in self.address_black_list:
             if self.address_black_list[remote_address] > time.time():
+                logger.info("⛔remote_address:%s in address_black_list",
+                            remote_address)
                 return None, None
             self.address_black_list.pop(remote_address, None)
 
