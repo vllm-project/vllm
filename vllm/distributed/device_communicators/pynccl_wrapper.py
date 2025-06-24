@@ -207,6 +207,10 @@ class NCCLLibrary:
         # it is better not to call it at all.
         # ncclResult_t  ncclCommDestroy(ncclComm_t comm);
         Function("ncclCommDestroy", ncclResult_t, [ncclComm_t]),
+        # ncclResult_t ncclGroupStart();
+        Function("ncclGroupStart", ncclResult_t, []),
+        # ncclResult_t ncclGroupEnd();
+        Function("ncclGroupEnd", ncclResult_t, []),
     ]
 
     # class attribute to store the mapping from the path to the library
@@ -341,6 +345,12 @@ class NCCLLibrary:
 
     def ncclCommDestroy(self, comm: ncclComm_t) -> None:
         self.NCCL_CHECK(self._funcs["ncclCommDestroy"](comm))
+
+    def ncclGroupStart(self) -> None:
+        self.NCCL_CHECK(self._funcs["ncclGroupStart"]())
+
+    def ncclGroupEnd(self) -> None:
+        self.NCCL_CHECK(self._funcs["ncclGroupEnd"]())
 
 
 __all__ = [

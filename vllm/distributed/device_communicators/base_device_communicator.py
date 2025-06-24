@@ -137,6 +137,9 @@ class DeviceCommunicatorBase:
                                                input_size[dim], ) +
                                               input_size[dim + 1:])
         return output_tensor
+    
+    def all_gatherv(self, input_: Union[torch.Tensor, List[torch.Tensor]], dim: int = 0, sizes: Optional[List[int]] = None):
+        assert False, "not implemented"
 
     def reduce_scatter(self,
                        input_: torch.Tensor,
