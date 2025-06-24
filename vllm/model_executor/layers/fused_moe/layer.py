@@ -578,7 +578,15 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
+        enable_eplb: bool = False,
+        expert_load_view: Optional[torch.Tensor] = None,
+        logical_to_physical_map: Optional[torch.Tensor] = None,
+        logical_replica_count: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        if enable_eplb:
+            raise NotImplementedError(
+                "EPLB not supported for `UnquantizedFusedMoEMethod` yet.")
+
         return self.forward(
             x=x,
             layer=layer,
@@ -1564,12 +1572,6 @@ class FusedMoE(torch.nn.Module):
             hidden_states = full_hidden_states[chunk_start:chunk_end, :]
             router_logits = full_router_logits[chunk_start:chunk_end, :]
 
-            eplb_kwargs = {
-                "enable_eplb": True,
-                "expert_load_view": self.expert_load_view,
-                "logical_to_physical_map": self.logical_to_physical_map,
-                "logical_replica_count": self.logical_replica_count,
-            } if self.enable_eplb else {}
             assert (self.batched_hidden_states.size(0)  # type: ignore
                     >= chunk_size)
             assert (self.batched_router_logits.size(0)  # type: ignore 
@@ -1597,7 +1599,10 @@ class FusedMoE(torch.nn.Module):
                 scoring_func=self.scoring_func,
                 e_score_correction_bias=self.e_score_correction_bias,
                 activation=self.activation,
-                **eplb_kwargs,
+                enable_eplb=self.enable_eplb,
+                expert_load_view=self.expert_load_view,
+                logical_to_physical_map=self.logical_to_physical_map,
+                logical_replica_count=self.logical_replica_count,
             )
 
             if not skip_result_store:
@@ -1638,13 +1643,6 @@ class FusedMoE(torch.nn.Module):
             hidden_states, router_logits = get_ep_group().dispatch(
                 hidden_states, router_logits)
 
-        eplb_kwargs = {
-            "enable_eplb": True,
-            "expert_load_view": self.expert_load_view,
-            "logical_to_physical_map": self.logical_to_physical_map,
-            "logical_replica_count": self.logical_replica_count,
-        } if self.enable_eplb else {}
-
         # Matrix multiply.
         final_hidden_states = self.quant_method.apply(
             layer=self,
@@ -1662,7 +1660,10 @@ class FusedMoE(torch.nn.Module):
             e_score_correction_bias=self.e_score_correction_bias,
             activation=self.activation,
             apply_router_weight_on_input=self.apply_router_weight_on_input,
-            **eplb_kwargs,
+            enable_eplb=self.enable_eplb,
+            expert_load_view=self.expert_load_view,
+            logical_to_physical_map=self.logical_to_physical_map,
+            logical_replica_count=self.logical_replica_count,
         )
 
         if do_naive_dispatch_combine:
