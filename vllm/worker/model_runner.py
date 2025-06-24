@@ -743,6 +743,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         if self.runner.model_config.uses_mrope:
             image_grid_thw = mm_kwargs.get("image_grid_thw", None)
             video_grid_thw = mm_kwargs.get("video_grid_thw", None)
+            print(video_grid_thw)
             audio_feature_lengths = mm_kwargs.get("audio_feature_lengths",
                                                   None)
 

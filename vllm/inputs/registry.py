@@ -130,7 +130,6 @@ class InputProcessingContext(InputContext):
     ) -> _P:
         return super().get_hf_processor(
             typ,
-            tokenizer=self.tokenizer,
             **kwargs,
         )
 

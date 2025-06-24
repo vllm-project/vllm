@@ -39,6 +39,7 @@ from transformers.models.glm4v.configuration_glm4v import (Glm4vConfig,
                                                            Glm4vVisionConfig)
 from transformers.models.glm4v.image_processing_glm4v import (
     Glm4vImageProcessor, smart_resize)
+from transformers.models.glm4v.video_processing_glm4v import Glm4vVideoProcessor
 from transformers.video_utils import VideoMetadata
 
 from vllm.config import VllmConfig
@@ -81,7 +82,7 @@ from .vision import get_vit_attn_backend
 logger = init_logger(__name__)
 
 # For profile run
-_MAX_FRAMES_PER_VIDEO = 16
+_MAX_FRAMES_PER_VIDEO = 600
 
 # === Vision Inputs === #
 
@@ -131,31 +132,33 @@ class Glm4vVideoPixelInputs(TypedDict):
       num_channels * temporal_patch_size * patch_size * patch_size)`
     """
     video_metadata: Union[list[VideoMetadata], list[dict]]
-    video_grid_thw: torch.Tensor
-    """Shape: `(num_videos, 3)`
-
-    This should be in `(grid_t, grid_h, grid_w)` format.
+    video_grid_thw: Union[list[torch.Tensor], list[dict]]
+    """Shape: `(num_videos, 1, 3)` or `(1, 1, 3)` for single video
+    Each entry represents [grid_t, grid_h, grid_w] format where:
+    - grid_t: Temporal grid size (usually 1 for processed video)
+    - grid_h: Height grid size  
+    - grid_w: Width grid size
+    This describes the grid structure of the video patches.
     """
 
 
 class Glm4vVideoEmbeddingInputs(TypedDict):
     type: Literal["video_embeds"]
-    video_embeds: torch.Tensor
-    """Supported types:
-    - List[`torch.Tensor`]: A list of tensors holding all videos' features.
-        Each tensor holds an video's features.
-    - `torch.Tensor`: A tensor holding all videos' features
-      (concatenation of all videos' feature tensors).
 
-    Tensor shape: `(num_image_features, hidden_size)`
-    - `num_image_features` varies based on
-        the number and resolution of the videos.
-    - `hidden_size` must match the hidden size of language model backbone.
+    video_embeds: torch.Tensor
+    """
+    Tensor shape: `(num_video_patches, hidden_size)`
+    - `num_video_patches`: Total number of video patches across all frames
+    - `hidden_size`: Must match the hidden size of language model backbone
     """
 
     video_grid_thw: torch.Tensor
-    """Shape: `(num_videos, 3)`
-    This should be in `(grid_t, grid_h, grid_w)` format.
+    """Shape: `(num_videos, 1, 3)` or `(1, 1, 3)` for single video
+    Each entry represents [grid_t, grid_h, grid_w] format where:
+    - grid_t: Temporal grid size (usually 1 for processed video)
+    - grid_h: Height grid size  
+    - grid_w: Width grid size
+    This describes the grid structure of the video patches.
     """
 
 
@@ -829,30 +832,32 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
     def get_image_processor(self) -> Glm4vImageProcessor:
         return self.get_hf_processor().image_processor
 
+    def get_video_processor(self) -> Glm4vVideoProcessor:
+        return self.get_hf_processor().video_processor
+
     def _get_vision_info(
         self,
         *,
         image_width: int,
         image_height: int,
-        num_frames: int = 1,
+        num_frames: int = 16,
         do_resize: bool = True,
-        image_processor: Optional[Glm4vImageProcessor],
+        max_image_pixels: int = 28 * 28 * 2 * 30000,
     ) -> tuple[ImageSize, int]:
-        if image_processor is None:
-            image_processor = self.get_image_processor()
 
         hf_config = self.get_hf_config()
         vision_config = hf_config.vision_config
         patch_size = vision_config.patch_size
         merge_size = vision_config.spatial_merge_size
         temporal_patch_size = vision_config.temporal_patch_size
-
         if do_resize:
             resized_height, resized_width = smart_resize(
-                num_frames=temporal_patch_size,
+                num_frames=num_frames if num_frames > temporal_patch_size else temporal_patch_size,
                 height=image_height,
                 width=image_width,
-                factor=patch_size * merge_size)
+                factor=patch_size * merge_size,
+                max_pixels=max_image_pixels,
+            )
             preprocessed_size = ImageSize(width=resized_width,
                                           height=resized_height)
         else:
@@ -875,8 +880,7 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
     def get_image_size_with_most_features(self) -> ImageSize:
         max_image_size, _ = self._get_vision_info(
             image_width=9999999,
-            image_height=9999999,
-            image_processor=None,
+            image_height=9999999
         )
         return max_image_size
 
@@ -885,12 +889,11 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
         *,
         image_width: int,
         image_height: int,
-        image_processor: Optional[Glm4vImageProcessor],
     ) -> int:
         _, num_image_tokens = self._get_vision_info(
             image_width=image_width,
             image_height=image_height,
-            image_processor=image_processor,
+            max_image_pixels=28 * 28 * 2 * 6144
         )
         return num_image_tokens
 
@@ -900,7 +903,6 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
         return self.get_num_image_tokens(
             image_width=target_width,
             image_height=target_height,
-            image_processor=None,
         )
 
     def get_num_video_tokens(
@@ -909,13 +911,12 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
         image_width: int,
         image_height: int,
         num_frames: int,
-        image_processor: Optional[Glm4vImageProcessor],
     ) -> int:
         _, num_video_tokens = self._get_vision_info(
             image_width=image_width,
             image_height=image_height,
             num_frames=num_frames,
-            image_processor=image_processor,
+            max_image_pixels=28 * 28 * 2 * 30000
         )
         return num_video_tokens
 
@@ -930,10 +931,8 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
                 image_width=target_width,
                 image_height=target_height,
                 num_frames=next_num_frames,
-                image_processor=None,
             )
-
-            if next_max_tokens > max_tokens:
+            if next_max_tokens > max_tokens or next_max_tokens == 0:
                 break
 
             num_frames = next_num_frames
@@ -981,7 +980,6 @@ class Glm4vDummyInputsBuilder(BaseDummyInputsBuilder[Glm4vProcessingInfo]):
             self.info.get_image_size_with_most_features())
         target_num_frames = self.info.get_num_frames_with_most_features(
             seq_len, mm_counts)
-
         return {
             "image":
             self._get_dummy_images(width=target_width,
@@ -1209,10 +1207,8 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
         pixel_values_videos = kwargs.pop("pixel_values_videos", None)
         video_embeds = kwargs.pop("video_embeds", None)
         video_grid_thw = kwargs.pop("video_grid_thw", None)
-
         if pixel_values_videos is None and video_embeds is None:
             return None
-
         if pixel_values_videos is not None:
             pixel_values_videos = self._validate_and_reshape_mm_tensor(
                 pixel_values_videos, "video pixel values")
@@ -1281,6 +1277,9 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
                 self.visual.dtype)
             video_embeds = self.visual(pixel_values_videos, grid_thw=grid_thw)
 
+            from safetensors.torch import save_file
+            if video_embeds.shape[0] == 4485:
+                save_file({"image_embeddings_vllm": video_embeds.cpu()}, f"/mnt/image_embeddings_vllm.safetensors")
         # Split concatenated embeddings for each video item.
         merge_size = self.visual.spatial_merge_size
         sizes = grid_thw.prod(-1) // merge_size // merge_size
