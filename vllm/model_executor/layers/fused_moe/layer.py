@@ -107,8 +107,7 @@ class FusedMoEParallelConfig:
 
     @property
     def use_flashinfer_cutlass_kernels(self):
-        # TODO(shuw): fix me
-        return True
+        return envs.VLLM_USE_FLASHINFER_MOE and has_flashinfer
 
     @staticmethod
     def make(tp_size_: int, dp_size_: int,
@@ -1018,6 +1017,10 @@ class FusedMoE(torch.nn.Module):
     def use_deepep_ll_kernels(self):
         return self.moe_parallel_config.use_deepep_ll_kernels
 
+    @property
+    def use_flashinfer_cutlass_kernels(self):
+        return self.moe_parallel_config.use_flashinfer_cutlass_kernels
+
     def _load_per_tensor_weight_scale(self, shard_id: str,
                                       param: torch.nn.Parameter,
                                       loaded_weight: torch.Tensor,
@@ -1427,7 +1430,7 @@ class FusedMoE(torch.nn.Module):
                 ep_size=self.ep_size,
                 ep_rank=self.ep_rank,
                 tp_size=self.tp_size,
-                tp_rank=self.tp_rank,  
+                tp_rank=self.tp_rank,
             )
 
             if not skip_result_store:
@@ -1468,7 +1471,8 @@ class FusedMoE(torch.nn.Module):
 
         do_naive_dispatch_combine: bool = (
             self.dp_size > 1
-            and not self.moe_parallel_config.use_deepep_ht_kernels)
+            and not self.moe_parallel_config.use_deepep_ht_kernels
+            and not self.moe_parallel_config.use_flashinfer_cutlass_kernels)
         if do_naive_dispatch_combine:
             hidden_states, router_logits = get_ep_group().dispatch(
                 hidden_states, router_logits)
@@ -1490,6 +1494,10 @@ class FusedMoE(torch.nn.Module):
             e_score_correction_bias=self.e_score_correction_bias,
             activation=self.activation,
             apply_router_weight_on_input=self.apply_router_weight_on_input,
+            ep_rank=self.ep_rank,
+            ep_size=self.ep_size,
+            tp_size=self.tp_size,
+            tp_rank=self.tp_rank,            
         )
 
         if do_naive_dispatch_combine:

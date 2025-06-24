@@ -36,9 +36,14 @@ def _valid_flashinfer_fused_moe(hidden_states: torch.Tensor, w1: torch.Tensor,
     gemm kernel.  All of M, N, K and the quantization block_shape must be
     aligned by `dg.get_m_alignment_for_contiguous_layout()`.
     """
-    # TODO(shuw): add data type check!
     if not has_flashinfer_cutlass_fused_moe:
         logger.debug("FlashInferExperts disabled: flashinfer_cutlass_fused_moe not available.")
+        return False    
+    # Data type checks
+    if (w1.dtype != torch.uint8 or w2.dtype != torch.uint8 or
+        hidden_states.dtype not in [torch.float32, torch.float16, torch.bfloat16]):
+        logger.debug(f"FlashInferExperts disabled: w1/w2 must be torch.uint8 (got w1={w1.dtype}, w2={w2.dtype}), "
+                     f"hidden_states must be float32, float16, or bfloat16 (got {hidden_states.dtype}).")
         return False
     return True
 
@@ -68,7 +73,7 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def apply(
         self,
-        output: torch.Tensor,
+        # output: torch.Tensor,
         hidden_states: torch.Tensor,
         w1: torch.Tensor,
         w2: torch.Tensor,
@@ -87,35 +92,27 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         g2_alphas: torch.Tensor,
         input_sf: torch.Tensor,
         out_dtype: torch.dtype,
-        ep_rank: Optional[int] = None,
-        ep_size: Optional[int] = None,
-        tp_rank: Optional[int] = None,
-        tp_size: Optional[int] = None,
+        ep_rank: Optional[int] = 0,
+        ep_size: Optional[int] = 1,
+        tp_rank: Optional[int] = 0,
+        tp_size: Optional[int] = 1,
     ):
         # Flashinfer CUTLASS kernel takes scalar global scales,
         # min because inv_scale. 
-        a1_gs = torch.min(a1_scale)
-        a2_gs = torch.min(a2_scale)
-        w1_blockscale=w1_scale                                                                 
-        w2_blockscale=w2_scale                              
-        
+                            
         quant_scales=[
-            a1_gs,
-            w1_blockscale.view(torch.int32),
+            torch.min(a1_scale),
+            w1_scale.view(torch.int32),
             g1_alphas,
-            a2_gs,
-            w2_blockscale.view(torch.int32),
+            torch.min(a2_scale),
+            w2_scale.view(torch.int32),
             g2_alphas,
         ]
-        # TRTLLM Cutlass moe takes in activations in BF16/Half/nvfp4 precision
-        # and fp4 quantized weights loaded from the checkpoint
-        # TODO(shuw): do quantization here
-        # out_dtype = x.dtype
-        # x, input_sf = fp4_quantize(x, a1_gs)
+        # Flashinfer CUTLASS moe takes in activations in BF16/Half/nvfp4 precision
         # print("calling flashinfer cutlass fused moe\n"*100)
-        output = cutlass_fused_moe(
+        return cutlass_fused_moe(
             hidden_states,
-            topk_ids.to(torch.int),                                                               
+            topk_ids.to(torch.int),                                               
             topk_weights,                                                                                              
             w1.view(torch.long),                                                                         
             w2.view(torch.long),                                                                          
@@ -155,6 +152,7 @@ class FlashInferCutlassKernels(mk.FusedMoEModularKernel):
         ep_size: Optional[int] = 1,
         tp_rank: Optional[int] = 0,
         tp_size: Optional[int] = 1,
+        use_dp: bool=False,
         apply_router_weight_on_input: bool = False,
     ) -> torch.Tensor:
         has_nvfp4 = False
@@ -169,17 +167,16 @@ class FlashInferCutlassKernels(mk.FusedMoEModularKernel):
         (a1q, a1q_scale, expert_num_tokens, _expert_topk_ids,
          _expert_topk_weights) = self.prepare_finalize.prepare(
              a1, a1_scale, a2_scale, topk_weights, topk_ids,
-             global_num_experts, expert_map, apply_router_weight_on_input)
+             global_num_experts, expert_map, apply_router_weight_on_input, use_dp)
 
-        fused_out = output
         # TODO(shuw): no chunk atm
-        self.fused_experts.apply(
-            fused_out,
+        fused_out = self.fused_experts.apply(
+            # fused_out,
             a1q,
             w1,
             w2,
-            topk_ids,
-            topk_weights,
+            _expert_topk_ids,
+            _expert_topk_weights,
             activation,
             global_num_experts,
             w1_scale,
@@ -199,7 +196,7 @@ class FlashInferCutlassKernels(mk.FusedMoEModularKernel):
             tp_size,
         )
         self.prepare_finalize.finalize(output, fused_out, topk_weights,
-                                       topk_ids, apply_router_weight_on_input)
+                                       topk_ids, apply_router_weight_on_input, use_dp)
         return output
 
 def flashinfer_cutlass_fused_moe_nvfp4(
@@ -221,6 +218,7 @@ def flashinfer_cutlass_fused_moe_nvfp4(
     ep_size: Optional[int] = 1,
     tp_rank: Optional[int] = 0,
     tp_size: Optional[int] = 1,
+    use_dp: bool = False,
     apply_router_weight_on_input=False,
 )-> torch.Tensor:
     fn = FlashInferCutlassKernels(
@@ -249,6 +247,7 @@ def flashinfer_cutlass_fused_moe_nvfp4(
         ep_size=ep_size,
         tp_rank=tp_rank,
         tp_size=tp_size,
+        use_dp=use_dp,
         out_dtype=hidden_states.dtype,
         apply_router_weight_on_input=apply_router_weight_on_input,
     )

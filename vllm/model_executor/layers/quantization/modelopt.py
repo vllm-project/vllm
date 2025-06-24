@@ -736,9 +736,9 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         assert not apply_router_weight_on_input, (
             "Router weight on input is not "
             "supported for ModelOptNvFp4FusedMoE.")
-        assert expert_map is None, ("Expert Parallelism / expert_map "
-                                    "is currently not supported for "
-                                    "ModelOptNvFp4FusedMoE.")
+        # assert expert_map is None, ("Expert Parallelism / expert_map "
+        #                             "is currently not supported for "
+        #                             "ModelOptNvFp4FusedMoE.")
 
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
@@ -753,28 +753,27 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             e_score_correction_bias=e_score_correction_bias)
 
         if self.allow_flashinfer_cutlass:
-            # print("xxx"*100)
-            # return x
             return self.fused_experts(
                 hidden_states=x,
                 w1=layer.w13_weight,
                 w2=layer.w2_weight,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
-                inplace=True, # TODO(shuw): fix later, now output is high prec
+                inplace=False, # TODO(shuw): fix later, now output is high prec
                 activation=activation,
                 global_num_experts=global_num_experts,
                 w1_scale=layer.w13_blockscale_swizzled,
                 w2_scale=layer.w2_blockscale_swizzled,
                 a1_scale=layer.w13_input_scale_quant,
                 a2_scale=layer.w2_input_scale_quant,
-                g1_alphas=layer.w13_input_scale_quant,
-                g2_alphas=layer.w2_input_scale_quant,
+                g1_alphas=layer.g1_alphas,
+                g2_alphas=layer.g2_alphas,
                 use_nvfp4_w4a4=True,
                 ep_rank=ep_rank,
                 ep_size=ep_size,
                 tp_rank=tp_rank,
                 tp_size=tp_size,
+                use_dp=layer.dp_size>1,
             )
         from vllm.model_executor.layers.fused_moe.cutlass_moe import (
             cutlass_moe_fp4)

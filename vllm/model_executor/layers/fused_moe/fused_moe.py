@@ -1167,13 +1167,13 @@ def fused_experts(hidden_states: torch.Tensor,
                   ep_size: Optional[int] = 1,
                   tp_rank: Optional[int] = 0,
                   tp_size: Optional[int] = 1,
+                  use_dp: bool = False,
                   block_shape: Optional[list[int]] = None,
                   allow_deep_gemm: bool = False,
                   allow_flashinfer_cutlass: bool = False) -> torch.Tensor:
     # For now, disable DeepGemm for small N (<= 512) until better
     # permute/unpermute ops are available.
     N = w1.shape[1]
-    #TODO(shuw): hijack for now
     if (allow_flashinfer_cutlass and use_nvfp4_w4a4
         and _valid_flashinfer_fused_moe(hidden_states, w1, w2)):
         return flashinfer_cutlass_fused_moe_nvfp4(
@@ -1195,8 +1195,9 @@ def fused_experts(hidden_states: torch.Tensor,
             ep_size=ep_size,
             tp_rank=tp_rank,
             tp_size=tp_size,
+            use_dp=use_dp,
             apply_router_weight_on_input=apply_router_weight_on_input,
-        )    
+        )
     if (allow_deep_gemm and use_fp8_w8a8 and N > 512
             and _valid_deep_gemm(hidden_states, w1, w2)):
         assert apply_router_weight_on_input is False

@@ -26,8 +26,9 @@ def _resize_cache(x: torch.Tensor, v: tuple[int, ...]) -> torch.Tensor:
 def _fp4_quantize(
     A: torch.Tensor,
     A_scale: Optional[torch.Tensor],
-) -> tuple[torch,]:
-    return fp4_quantize(A, A_scale)
+    is_sf_swizzled_layout: bool,
+) -> tuple[torch.Tensor]:
+    return fp4_quantize(A, A_scale, is_sf_swizzled_layout=is_sf_swizzled_layout)
 
 def _fp8_quantize(
     A: torch.Tensor,
@@ -84,13 +85,16 @@ def moe_kernel_quantize_input(
     qtype: Optional[torch.dtype],
     per_channel_quant: bool,
     block_shape: Optional[list[int]] = None,
+    is_sf_swizzled_layout: bool = True,
 ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
     if qtype == torch.float8_e4m3fn:
         return _fp8_quantize(A, A_scale, per_channel_quant, block_shape)
     elif qtype == torch.int8:
         return _int8_quantize(A, A_scale, per_channel_quant, block_shape)
     elif qtype == torch.uint8: # nvfp4
-        return _fp4_quantize(A, A_scale)    
+        return _fp4_quantize(
+            A, A_scale, is_sf_swizzled_layout=is_sf_swizzled_layout
+        )    
     else:
         assert A_scale is None
         return A, A_scale
