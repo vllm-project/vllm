@@ -1,5 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+# To run this file, run 
+# pytest /path/to/vllm/tests/v1/e2e/test_llama4_eagle.py
+
 from __future__ import annotations
 
 import random
@@ -8,6 +12,10 @@ from typing import Any
 import pytest
 
 from vllm import LLM, SamplingParams
+
+TP8_REQUIRED_MODELS = [
+    "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
+]
 
 
 @pytest.fixture
@@ -48,62 +56,11 @@ def sampling_config():
     return SamplingParams(temperature=0, max_tokens=10, ignore_eos=False)
 
 
-@pytest.fixture
-def model_name():
-    return "meta-llama/Llama-3.1-8B-Instruct"
-
-
-def test_ngram_correctness(
-    monkeypatch: pytest.MonkeyPatch,
-    test_prompts: list[list[dict[str, Any]]],
-    sampling_config: SamplingParams,
-    model_name: str,
-):
-    '''
-    Compare the outputs of a original LLM and a speculative LLM
-    should be the same when using ngram speculative decoding.
-    '''
-    with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_V1", "1")
-
-        ref_llm = LLM(model=model_name, max_model_len=1024)
-        ref_outputs = ref_llm.chat(test_prompts, sampling_config)
-        del ref_llm
-
-        spec_llm = LLM(
-            model=model_name,
-            speculative_config={
-                "method": "ngram",
-                "prompt_lookup_max": 5,
-                "prompt_lookup_min": 3,
-                "num_speculative_tokens": 3,
-            },
-            max_model_len=1024,
-        )
-        spec_outputs = spec_llm.chat(test_prompts, sampling_config)
-        matches = 0
-        misses = 0
-        for ref_output, spec_output in zip(ref_outputs, spec_outputs):
-            if ref_output.outputs[0].text == spec_output.outputs[0].text:
-                matches += 1
-            else:
-                misses += 1
-                print(f"ref_output: {ref_output.outputs[0].text}")
-                print(f"spec_output: {spec_output.outputs[0].text}")
-
-        # Heuristic: expect at least 70% of the prompts to match exactly
-        # Upon failure, inspect the outputs to check for inaccuracy.
-        assert matches > int(0.7 * len(ref_outputs))
-        del spec_llm
-
-
 @pytest.mark.parametrize(
     "method_model_and_draft_model",
-    [("eagle", "meta-llama/Llama-3.1-8B-Instruct",
-      "yuhuili/EAGLE-LLaMA3.1-Instruct-8B"),
-     ("eagle3", "meta-llama/Llama-3.1-8B-Instruct",
-      "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B")],
-    ids=["llama3_eagle", "llama3_eagle3"])
+    [("eagle", "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
+      "ronaldbxu/EAGLE-Llama-4-Maverick-17B-128E-Instruct")],
+    ids=["llama4_eagle",])
 def test_eagle_correctness(
     monkeypatch: pytest.MonkeyPatch,
     test_prompts: list[list[dict[str, Any]]],
@@ -119,7 +76,13 @@ def test_eagle_correctness(
 
         model_name = method_model_and_draft_model[1]
 
+        tp = 1
+
+        if model_name in TP8_REQUIRED_MODELS:
+            tp = 8
+
         ref_llm = LLM(model=model_name,
+                      tensor_parallel_size=tp,
                       max_model_len=2048)
         ref_outputs = ref_llm.chat(test_prompts, sampling_config)
         del ref_llm
@@ -130,6 +93,7 @@ def test_eagle_correctness(
         spec_llm = LLM(
             model=model_name,
             trust_remote_code=True,
+            tensor_parallel_size=tp,
             speculative_config={
                 "method": method,
                 "model": spec_model_name,
