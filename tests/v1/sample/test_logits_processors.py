@@ -16,7 +16,8 @@ from tests.v1.sample.utils import (LogitsprocsTestFakes, create_fake_logits,
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.utils import is_pin_memory_available
-from vllm.v1.sample.logits_processor import BatchUpdate, MoveDirectionality
+from vllm.v1.sample.logits_processor import (BatchUpdate, BatchUpdateBuilder,
+                                             MoveDirectionality)
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.worker.utils import (STR_LOGITS_BIAS_LOGITPROC_ID,
                                   STR_MIN_P_LOGITPROC_ID,
@@ -389,14 +390,14 @@ def _generate_fake_step_update(
 
     # Generate fake removed request indices from current persistent
     # batch before adds
-    batch_update = BatchUpdate(
+    batch_update_builder = BatchUpdateBuilder(
         removed=random.sample(range(batch_size), num_step_remove))
 
     # Get added requests from workload
     for add_req_params in workload_params[wdx:(wdx + num_step_add_replace)]:
         # Replace as many removed requests as possible with added requests
-        add_remove_idx = batch_update.pop_removed_if_can()
-        batch_update.added.append(
+        add_remove_idx = batch_update_builder.pop_removed_if_can()
+        batch_update_builder.added.append(
             (add_remove_idx, add_req_params.params, add_req_params.out_tokens))
         persistent_batch[add_remove_idx] = add_req_params
 
@@ -404,7 +405,7 @@ def _generate_fake_step_update(
     add_reqs_append = workload_params[(wdx +
                                        num_step_add_replace):(wdx +
                                                               num_step_add)]
-    batch_update.added.extend([
+    batch_update_builder.added.extend([
         (adx + batch_size, add_req_params.params, add_req_params.out_tokens)
         for adx, add_req_params in enumerate(add_reqs_append)
     ])
@@ -415,14 +416,14 @@ def _generate_fake_step_update(
     # Simulate condensing persistent batch
     last_nonempty_index = pre_condense_batch_size - 1
     condensed_to_idxs = set()
-    while batch_update.removed:
-        if (last_nonempty_index in batch_update.removed
+    while batch_update_builder.removed:
+        if (last_nonempty_index in batch_update_builder.removed
                 or last_nonempty_index in condensed_to_idxs):
             last_nonempty_index -= 1
             continue
         # last_nonempty_index is the highest persistent batch index that was
         # not removed
-        first_empty_index = batch_update.peek_removed_if_can()
+        first_empty_index = batch_update_builder.peek_removed_if_can()
         assert first_empty_index is not None
         if first_empty_index > last_nonempty_index:
             break
@@ -430,12 +431,13 @@ def _generate_fake_step_update(
         # that is less than last_nonempty_index
         #
         # move last_nonempty_index -> first_empty_index
-        batch_update.pop_removed_if_can()
+        batch_update_builder.pop_removed_if_can()
         condensed_to_idxs.add(first_empty_index)
         persistent_batch[first_empty_index] = persistent_batch[
             last_nonempty_index]
-        batch_update.moved.append((last_nonempty_index, first_empty_index,
-                                   MoveDirectionality.UNIDIRECTIONAL))
+        batch_update_builder.moved.append(
+            (last_nonempty_index, first_empty_index,
+             MoveDirectionality.UNIDIRECTIONAL))
 
         last_nonempty_index -= 1
 
@@ -454,18 +456,19 @@ def _generate_fake_step_update(
         swaps = [
             tuple(sorted([idxs[2 * i], idxs[2 * i + 1]])) for i in range(k)
         ]
-        batch_update.moved.extend([(sw[0], sw[1], MoveDirectionality.SWAP)
-                                   for sw in swaps])
+        batch_update_builder.moved.extend([
+            (sw[0], sw[1], MoveDirectionality.SWAP) for sw in swaps
+        ])
         for adx, bdx in swaps:
             persistent_batch[adx], persistent_batch[bdx] = persistent_batch[
                 bdx], persistent_batch[adx]
-    batch_update.batch_size = condensed_batch_size
 
-    return batch_update, wdx, workload_size - wdx
+    return (batch_update_builder.buildBatchUpdate(condensed_batch_size), wdx,
+            workload_size - wdx)
 
 
 def _assert_valid(
-    batch_update: BatchUpdate,
+    batch_size: int,
     persistent_batch: list[LogitsProcsRequestParams],
     test_fakes: LogitsprocsTestFakes,
     slice_idxs: list[int],
@@ -481,7 +484,7 @@ def _assert_valid(
         return
 
     # Validate logits for each fake request
-    for batch_index in range(batch_update.batch_size):
+    for batch_index in range(batch_size):
         request_params = persistent_batch[batch_index]
         # Invoke the appropriate validation function for
         # the logitproc employed by this request
@@ -544,7 +547,7 @@ def test_logitsprocs(device: str, reqs_per_logitproc: int,
         logits_w_lp = fake_apply_logitsprocs(test_fakes, slice_idxs).cpu()
 
         _assert_valid(
-            batch_update=batch_update,
+            batch_size=batch_size,
             persistent_batch=persistent_batch,
             test_fakes=test_fakes,
             slice_idxs=slice_idxs,

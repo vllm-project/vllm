@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+import dataclasses
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from enum import Enum
@@ -30,23 +31,29 @@ MovedRequest = tuple[int, int, MoveDirectionality]
 RemovedRequest = int
 
 
+@dataclasses.dataclass
 class BatchUpdate:
-    # The current number of requests in the batch.
-    batch_size: int
+    batch_size: int  # Current num reqs in batch
+    removed: Sequence[RemovedRequest]
+    moved: Sequence[MovedRequest]
+    added: Sequence[AddedRequest]
+
+
+class BatchUpdateBuilder:
     _removed: list[RemovedRequest]
     _is_removed_sorted: bool
     moved: list[MovedRequest]
     added: list[AddedRequest]
 
-    def __init__(self,
-                 removed: Optional[list[RemovedRequest]] = None,
-                 moved: Optional[list[MovedRequest]] = None,
-                 added: Optional[list[AddedRequest]] = None,
-                 batch_size: Optional[int] = None) -> None:
+    def __init__(
+        self,
+        removed: Optional[list[RemovedRequest]] = None,
+        moved: Optional[list[MovedRequest]] = None,
+        added: Optional[list[AddedRequest]] = None,
+    ) -> None:
         self._removed = removed or []
         self.moved = moved or []
         self.added = added or []
-        self.batch_size = 0 if batch_size is None else batch_size
         self._is_removed_sorted = False
 
     def _sort_removed(self) -> None:
@@ -87,11 +94,18 @@ class BatchUpdate:
         return None
 
     def reset(self):
-        self.batch_size = 0
         self._removed = []
         self._is_removed_sorted = False
         self.moved = []
         self.added = []
+
+    def buildBatchUpdate(self, batch_size: int) -> BatchUpdate:
+        return BatchUpdate(
+            batch_size=batch_size,
+            removed=self.removed,
+            moved=self.moved,
+            added=self.added,
+        )
 
 
 class LogitsProcessor(ABC):

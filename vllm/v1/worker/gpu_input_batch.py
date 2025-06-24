@@ -14,8 +14,9 @@ from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.utils import swap_dict_values
 from vllm.v1.outputs import LogprobsTensors
-from vllm.v1.sample.logits_processor import BatchUpdate, MoveDirectionality
 from vllm.v1.pool.metadata import PoolingMetadata
+from vllm.v1.sample.logits_processor import (BatchUpdateBuilder,
+                                             MoveDirectionality)
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.utils import copy_slice
 from vllm.v1.worker.block_table import MultiGroupBlockTable
@@ -205,7 +206,7 @@ class InputBatch:
 
         # Internal representation of per-step batch state changes.
         # Should reset each step.
-        self.batch_update = BatchUpdate()
+        self.batch_update_builder = BatchUpdateBuilder()
 
         # Define logits processors. Note that Min-P logitsproc is returned
         # both on its own as min_p_logitsproc (to support spec decoding
@@ -241,7 +242,8 @@ class InputBatch:
         return cast(list[str], self._req_ids)
 
     def _get_next_add_index(self) -> int:
-        if (req_index := self.batch_update.pop_removed_if_can()) is not None:
+        if (req_index :=
+                self.batch_update_builder.pop_removed_if_can()) is not None:
             # Fill the empty index.
             return req_index
         # Append to end
@@ -251,12 +253,12 @@ class InputBatch:
         """Track add-request operations"""
         req_index = self._get_next_add_index()
         assert req_index < self.max_num_reqs
-        self.batch_update.added.append(
+        self.batch_update_builder.added.append(
             (req_index, request.sampling_params, request.output_token_ids))
         return req_index
 
     def has_step_removed_requests(self) -> bool:
-        return self.batch_update.has_removed()
+        return self.batch_update_builder.has_removed()
 
     def add_request(
         self,
@@ -382,7 +384,7 @@ class InputBatch:
         req_index = self.req_id_to_index.pop(req_id, None)
         if req_index is None:
             return None
-        self.batch_update.removed_append(req_index)
+        self.batch_update_builder.removed_append(req_index)
         self._req_ids[req_index] = None
         self.req_output_token_ids[req_index] = None
 
@@ -416,7 +418,8 @@ class InputBatch:
         return req_index
 
     def swap_states(self, i1: int, i2: int) -> None:
-        self.batch_update.moved.append((i1, i2, MoveDirectionality.SWAP))
+        self.batch_update_builder.moved.append(
+            (i1, i2, MoveDirectionality.SWAP))
         old_id_i1 = self._req_ids[i1]
         old_id_i2 = self._req_ids[i2]
         self._req_ids[i1], self._req_ids[i2] =\
@@ -470,7 +473,7 @@ class InputBatch:
         self.block_table.swap_row(i1, i2)
 
     def _register_move_request(self, from_idx: int, to_idx: int) -> None:
-        self.batch_update.moved.append(
+        self.batch_update_builder.moved.append(
             (from_idx, to_idx, MoveDirectionality.UNIDIRECTIONAL))
 
     def condense(self) -> None:
@@ -486,7 +489,7 @@ class InputBatch:
           swaps: list of (from,to) swap tuples for moved requests
           empty_req_indices: indices not filled by condensation
         """
-        empty_req_indices = self.batch_update.removed
+        empty_req_indices = self.batch_update_builder.removed
         num_reqs = self.num_reqs
         if num_reqs == 0:
             # The batched states are empty.
@@ -503,16 +506,17 @@ class InputBatch:
                 last_req_index -= 1
 
             # Find the smallest empty index.
-            empty_index = self.batch_update.peek_removed_if_can()
+            empty_index = self.batch_update_builder.peek_removed_if_can()
             assert empty_index is not None
             if empty_index >= last_req_index:
                 break
 
             # Move active request down into empty request
             # index.
-            self.batch_update.pop_removed_if_can()
-            self.batch_update.moved.append((last_req_index, empty_index,
-                                            MoveDirectionality.UNIDIRECTIONAL))
+            self.batch_update_builder.pop_removed_if_can()
+            self.batch_update_builder.moved.append(
+                (last_req_index, empty_index,
+                 MoveDirectionality.UNIDIRECTIONAL))
             req_id = self._req_ids[last_req_index]
             output_token_ids = self.req_output_token_ids[last_req_index]
             assert req_id is not None
@@ -570,11 +574,12 @@ class InputBatch:
 
     def _commit_logit_procs_state_changes(self) -> None:
         """Apply batch add/remove/permute to logits procs' states"""
-        self.batch_update.batch_size = self.num_reqs
+        batch_update = self.batch_update_builder.buildBatchUpdate(
+            self.num_reqs)
         for logit_proc in self.logitsprocs.all_list:
-            logit_proc.update_state(self.batch_update)
+            logit_proc.update_state(batch_update)
         # Clear state change representation to prepare for next step
-        self.batch_update.reset()
+        self.batch_update_builder.reset()
 
     def refresh(self):
         self._commit_logit_procs_state_changes()
