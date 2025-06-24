@@ -1,8 +1,8 @@
 #!/bin/bash
-# multi-node-serving.sh
 #
 # Helper script to manually start or join a Ray cluster for online serving of vLLM models.
-# This script is first executed on the head node, and then on each worker node with the IP address of the head node.
+# This script is first executed on the head node, and then on each worker node with the IP address
+# of the head node.
 #
 # Usage:
 #   ./multi-node-serving.sh leader --ray_port=6379 --ray_cluster_size=<SIZE> [<extra ray args>]
@@ -11,6 +11,11 @@
 # Subcommands:
 #   leader: Launches a Ray head node and blocks until the expected number of workers joins.
 #   worker: Starts a worker node that connects to an existing Ray head node.
+#
+# About Ray:
+# Ray is an open-source distributed execution framework that simplifies
+# distributed computing. Learn more:
+# https://ray.io/
 
 
 subcommand=$1  # Either "leader" or "worker".
