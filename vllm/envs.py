@@ -132,7 +132,6 @@ if TYPE_CHECKING:
     VLLM_MQ_MAX_CHUNK_BYTES_MB: int = 16
     VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: int = 300
     VLLM_KV_CACHE_LAYOUT: Optional[str] = None
-    VLLM_MULTIPROC_EXECUTE_MODEL_TIMEOUT_S: int = 300
     VLLM_COMPUTE_NANS_IN_LOGITS: bool = False
 
 
@@ -913,10 +912,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # implement and support a subset of all possible layouts.
     "VLLM_KV_CACHE_LAYOUT":
     lambda: os.getenv("VLLM_KV_CACHE_LAYOUT", None),
-
-    # Timeout for calling execute_model() in multiproc_executor
-    "VLLM_MULTIPROC_EXECUTE_MODEL_TIMEOUT_S":
-    lambda: int(os.getenv("VLLM_MULTIPROC_EXECUTE_MODEL_TIMEOUT_S", "300")),
 
     # Enable checking whether the generated logits contain NaNs,
     # indicating corrupted output. Useful for debugging low level bugs
