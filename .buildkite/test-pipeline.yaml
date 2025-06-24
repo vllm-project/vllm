@@ -271,6 +271,15 @@ steps:
   commands:
     - pytest -v -s prefix_caching
 
+
+- label: Platform Tests (CUDA)
+  mirror_hardwares: [amdexperimental]
+  source_file_dependencies:
+  - vllm/
+  - tests/cuda
+  commands:
+    - pytest -v -s cuda/test_cuda_context.py
+
 - label: Samplers Test # 36min
   mirror_hardwares: [amdexperimental]
   source_file_dependencies:

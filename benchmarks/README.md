@@ -387,3 +387,178 @@ python3 vllm/benchmarks/benchmark_throughput.py \
   --enable-lora \
   --lora-path yard1/llama-2-7b-sql-lora-test
   ```
+
+---
+## Example - Structured Output Benchmark
+
+Benchmark the performance of structured output generation (JSON, grammar, regex).
+
+### Server Setup
+
+```bash
+vllm serve NousResearch/Hermes-3-Llama-3.1-8B --disable-log-requests
+```
+
+### JSON Schema Benchmark
+
+```bash
+python3 benchmarks/benchmark_serving_structured_output.py \
+  --backend vllm \
+  --model NousResearch/Hermes-3-Llama-3.1-8B \
+  --dataset json \
+  --structured-output-ratio 1.0 \
+  --request-rate 10 \
+  --num-prompts 1000
+```
+
+### Grammar-based Generation Benchmark
+
+```bash
+python3 benchmarks/benchmark_serving_structured_output.py \
+  --backend vllm \
+  --model NousResearch/Hermes-3-Llama-3.1-8B \
+  --dataset grammar \
+  --structure-type grammar \
+  --request-rate 10 \
+  --num-prompts 1000
+```
+
+### Regex-based Generation Benchmark
+
+```bash
+python3 benchmarks/benchmark_serving_structured_output.py \
+  --backend vllm \
+  --model NousResearch/Hermes-3-Llama-3.1-8B \
+  --dataset regex \
+  --request-rate 10 \
+  --num-prompts 1000
+```
+
+### Choice-based Generation Benchmark
+
+```bash
+python3 benchmarks/benchmark_serving_structured_output.py \
+  --backend vllm \
+  --model NousResearch/Hermes-3-Llama-3.1-8B \
+  --dataset choice \
+  --request-rate 10 \
+  --num-prompts 1000
+```
+
+### XGrammar Benchmark Dataset
+
+```bash
+python3 benchmarks/benchmark_serving_structured_output.py \
+  --backend vllm \
+  --model NousResearch/Hermes-3-Llama-3.1-8B \
+  --dataset xgrammar_bench \
+  --request-rate 10 \
+  --num-prompts 1000
+```
+
+---
+## Example - Long Document QA Throughput Benchmark
+
+Benchmark the performance of long document question-answering with prefix caching.
+
+### Basic Long Document QA Test
+
+```bash
+python3 benchmarks/benchmark_long_document_qa_throughput.py \
+  --model meta-llama/Llama-2-7b-chat-hf \
+  --enable-prefix-caching \
+  --num-documents 16 \
+  --document-length 2000 \
+  --output-len 50 \
+  --repeat-count 5
+```
+
+### Different Repeat Modes
+
+```bash
+# Random mode (default) - shuffle prompts randomly
+python3 benchmarks/benchmark_long_document_qa_throughput.py \
+  --model meta-llama/Llama-2-7b-chat-hf \
+  --enable-prefix-caching \
+  --num-documents 8 \
+  --document-length 3000 \
+  --repeat-count 3 \
+  --repeat-mode random
+
+# Tile mode - repeat entire prompt list in sequence
+python3 benchmarks/benchmark_long_document_qa_throughput.py \
+  --model meta-llama/Llama-2-7b-chat-hf \
+  --enable-prefix-caching \
+  --num-documents 8 \
+  --document-length 3000 \
+  --repeat-count 3 \
+  --repeat-mode tile
+
+# Interleave mode - repeat each prompt consecutively
+python3 benchmarks/benchmark_long_document_qa_throughput.py \
+  --model meta-llama/Llama-2-7b-chat-hf \
+  --enable-prefix-caching \
+  --num-documents 8 \
+  --document-length 3000 \
+  --repeat-count 3 \
+  --repeat-mode interleave
+```
+
+---
+## Example - Prefix Caching Benchmark
+
+Benchmark the efficiency of automatic prefix caching.
+
+### Fixed Prompt with Prefix Caching
+
+```bash
+python3 benchmarks/benchmark_prefix_caching.py \
+  --model meta-llama/Llama-2-7b-chat-hf \
+  --enable-prefix-caching \
+  --num-prompts 1 \
+  --repeat-count 100 \
+  --input-length-range 128:256
+```
+
+### ShareGPT Dataset with Prefix Caching
+
+```bash
+# download dataset
+# wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
+
+python3 benchmarks/benchmark_prefix_caching.py \
+  --model meta-llama/Llama-2-7b-chat-hf \
+  --dataset-path /path/ShareGPT_V3_unfiltered_cleaned_split.json \
+  --enable-prefix-caching \
+  --num-prompts 20 \
+  --repeat-count 5 \
+  --input-length-range 128:256
+```
+
+---
+## Example - Request Prioritization Benchmark
+
+Benchmark the performance of request prioritization in vLLM.
+
+### Basic Prioritization Test
+
+```bash
+python3 benchmarks/benchmark_prioritization.py \
+  --model meta-llama/Llama-2-7b-chat-hf \
+  --input-len 128 \
+  --output-len 64 \
+  --num-prompts 100 \
+  --scheduling-policy priority
+```
+
+### Multiple Sequences per Prompt
+
+```bash
+python3 benchmarks/benchmark_prioritization.py \
+  --model meta-llama/Llama-2-7b-chat-hf \
+  --input-len 128 \
+  --output-len 64 \
+  --num-prompts 100 \
+  --scheduling-policy priority \
+  --n 2
+```
