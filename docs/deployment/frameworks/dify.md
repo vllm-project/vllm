@@ -18,13 +18,13 @@ This guide walks you through deploying Dify using a vLLM backend.
 
 - Start the vLLM server with the supported chat completion model, e.g.
 
-```console
+```bash
 vllm serve Qwen/Qwen1.5-7B-Chat
 ```
 
 - Start the Dify server with docker compose ([details](https://github.com/langgenius/dify?tab=readme-ov-file#quick-start)):
 
-```console
+```bash
 git clone https://github.com/langgenius/dify.git
 cd dify
 cd docker

@@ -13,7 +13,7 @@ AWQ, GPTQ, Rotation and SmoothQuant.
 
 Before quantizing models, you need to install Quark. The latest release of Quark can be installed with pip:
 
-```console
+```bash
 pip install amd-quark
 ```
 
@@ -22,13 +22,13 @@ for more installation details.
 
 Additionally, install `vllm` and `lm-evaluation-harness` for evaluation:
 
-```console
+```bash
 pip install vllm lm-eval==0.4.4
 ```
 
 ## Quantization Process
 
-After installing Quark, we will use an example to illustrate how to use Quark.  
+After installing Quark, we will use an example to illustrate how to use Quark.
 The Quark quantization process can be listed for 5 steps as below:
 
 1. Load the model
@@ -209,8 +209,8 @@ Now, you can load and run the Quark quantized model directly through the LLM ent
 
 Or, you can use `lm_eval` to evaluate accuracy:
 
-```console
-$ lm_eval --model vllm \
+```bash
+lm_eval --model vllm \
   --model_args pretrained=Llama-2-70b-chat-hf-w-fp8-a-fp8-kvcache-fp8-pertensor-autosmoothquant,kv_cache_dtype='fp8',quantization='quark' \
   --tasks gsm8k
 ```
@@ -222,7 +222,7 @@ to quantize large language models more conveniently. It supports quantizing mode
 of different quantization schemes and optimization algorithms. It can export the quantized model
 and run evaluation tasks on the fly. With the script, the example above can be:
 
-```console
+```bash
 python3 quantize_quark.py --model_dir meta-llama/Llama-2-70b-chat-hf \
                           --output_dir /path/to/output \
                           --quant_scheme w_fp8_a_fp8 \
