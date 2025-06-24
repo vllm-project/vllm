@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from copy import copy
 from typing import Any, Callable, Optional, Union
 
@@ -32,6 +32,7 @@ from vllm.v1.metrics.loggers import (PrometheusStatLogger, StatLoggerBase,
                                      StatLoggerFactory)
 from vllm.v1.metrics.reader import Metric, get_metrics_snapshot
 from vllm.v1.metrics.stats import IterationStats
+from vllm.v1.sample.logits_processor import LogitsProcessor
 
 logger = init_logger(__name__)
 
@@ -51,6 +52,7 @@ class LLMEngine:
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         use_cached_outputs: bool = False,
         multiprocess_mode: bool = False,
+        custom_logitsprocs: Sequence[LogitsProcessor] = [],
     ) -> None:
         if not envs.VLLM_USE_V1:
             raise ValueError(

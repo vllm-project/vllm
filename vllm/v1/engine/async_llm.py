@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
-from collections.abc import AsyncGenerator, Mapping
+from collections.abc import AsyncGenerator, Mapping, Sequence
 from copy import copy
 from typing import Any, Optional, Union
 
@@ -39,6 +39,7 @@ from vllm.v1.metrics.loggers import (StatLoggerBase, StatLoggerFactory,
                                      setup_default_loggers)
 from vllm.v1.metrics.prometheus import shutdown_prometheus
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
+from vllm.v1.sample.logits_processor import LogitsProcessor
 
 logger = init_logger(__name__)
 
@@ -46,18 +47,19 @@ logger = init_logger(__name__)
 class AsyncLLM(EngineClient):
 
     def __init__(
-        self,
-        vllm_config: VllmConfig,
-        executor_class: type[Executor],
-        log_stats: bool,
-        usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
-        mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
-        use_cached_outputs: bool = False,
-        log_requests: bool = True,
-        start_engine_loop: bool = True,
-        stat_loggers: Optional[list[StatLoggerFactory]] = None,
-        client_addresses: Optional[dict[str, str]] = None,
-        client_index: int = 0,
+            self,
+            vllm_config: VllmConfig,
+            executor_class: type[Executor],
+            log_stats: bool,
+            usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
+            mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
+            use_cached_outputs: bool = False,
+            log_requests: bool = True,
+            start_engine_loop: bool = True,
+            stat_loggers: Optional[list[StatLoggerFactory]] = None,
+            client_addresses: Optional[dict[str, str]] = None,
+            client_index: int = 0,
+            custom_logitsprocs: Sequence[LogitsProcessor] = (),
     ) -> None:
         """
         Create an AsyncLLM.
