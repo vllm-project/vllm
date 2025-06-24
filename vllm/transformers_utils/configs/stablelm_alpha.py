@@ -89,43 +89,42 @@ class StableLMAlphaConfig(PretrainedConfig):
 
     def __init__(
         self,
-        vocab_size=50257,
-        hidden_size=4096,
-        intermediate_size=11008,
+        vocab_size=50432,
+        hidden_size=2560,
         num_hidden_layers=32,
-        num_attention_heads=32,
-        num_key_value_heads=None,
-        max_position_embeddings=2048,
+        num_heads=32,
+        max_position_embeddings=4096,
         initializer_range=0.02,
         norm_eps=1e-5,
-        rotary_pct=1.0,
+        hidden_act="silu",
+        rotary_pct=0.25,
         rotary_emb_base=10000,
+        rotary_scaling_factor=1.0,
         use_qkv_bias=False,
         tie_word_embeddings=False,
         use_cache=True,
         pad_token_id=None,
-        bos_token_id=1,
-        eos_token_id=2,
+        bos_token_id=0,
+        eos_token_id=0,
         **kwargs,
     ):
         self.vocab_size = vocab_size
         self.hidden_size = hidden_size
-        self.intermediate_size = intermediate_size
         self.num_hidden_layers = num_hidden_layers
-        self.num_attention_heads = num_attention_heads
-
-        # for backward compatibility
-        if num_key_value_heads is None:
-            num_key_value_heads = num_attention_heads
-
-        self.num_key_value_heads = num_key_value_heads
+        self.num_heads = num_heads
         self.max_position_embeddings = max_position_embeddings
         self.initializer_range = initializer_range
         self.norm_eps = norm_eps
+        self.hidden_act = hidden_act
         self.rotary_pct = rotary_pct
         self.rotary_emb_base = rotary_emb_base
+        self.rotary_scaling_factor = rotary_scaling_factor
         self.use_qkv_bias = use_qkv_bias
         self.use_cache = use_cache
+
+        # For compatibility with vLLM, provide these attributes
+        self.num_attention_heads = num_heads
+        self.num_key_value_heads = num_heads  # StableLM-Alpha uses MHA
 
         super().__init__(
             pad_token_id=pad_token_id,
