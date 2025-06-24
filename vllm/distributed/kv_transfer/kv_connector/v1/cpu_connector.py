@@ -143,6 +143,8 @@ def h2d_page_copy(src_buffer: torch.Tensor, dst_layer: torch.Tensor,
     src_block_ids = torch.arange(start_block_id,
                                  end_block_id,
                                  dtype=torch.long)
+    num_blocks = len(src_block_ids)
+
     if separate_first_block:
         src_block_ids = src_block_ids[1:]
     # NOTE: we don't need to add the last block id here, because the
@@ -156,13 +158,17 @@ def h2d_page_copy(src_buffer: torch.Tensor, dst_layer: torch.Tensor,
 
     vllm_block_ids = torch.tensor(block_ids, dtype=torch.long)
     dst_block_ids = vllm_block_ids[src_block_ids]
+    real_src_block_ids = src_block_ids - start_block_id
 
     # Step 2: copy the first and last block separately if needed
     if start_block_id == end_block_id:
         # Only one block to copy
         start_position_in_block = start_token_idx % block_size
         end_position_in_block = stop_token_idx % block_size
-        h2d_copy_part_block(src_buffer, dst_layer, start_block_id,
+        #h2d_copy_part_block(src_buffer, dst_layer, start_block_id,
+        #                    vllm_block_ids[start_block_id],
+        #                    start_position_in_block, end_position_in_block)
+        h2d_copy_part_block(src_buffer, dst_layer, 0,
                             vllm_block_ids[start_block_id],
                             start_position_in_block, end_position_in_block)
         return
@@ -171,18 +177,18 @@ def h2d_page_copy(src_buffer: torch.Tensor, dst_layer: torch.Tensor,
         first_block_id_src = start_block_id
         first_block_id_dst = vllm_block_ids[first_block_id_src]
         start_token_idx_in_block = start_token_idx % block_size
-        h2d_copy_trailing_tokens(src_buffer, dst_layer, first_block_id_src,
-                                 first_block_id_dst, start_token_idx_in_block)
+        h2d_copy_trailing_tokens(src_buffer, dst_layer, 0, first_block_id_dst,
+                                 start_token_idx_in_block)
 
     if separate_last_block:
         last_block_id_src = end_block_id
         last_block_id_dst = vllm_block_ids[last_block_id_src]
         stop_token_idx_in_block = stop_token_idx % block_size
-        h2d_copy_leading_tokens(src_buffer, dst_layer, last_block_id_src,
+        h2d_copy_leading_tokens(src_buffer, dst_layer, num_blocks - 1,
                                 last_block_id_dst, stop_token_idx_in_block)
 
     # Step 3: copy the middle blocks
-    block_mapping = torch.stack([src_block_ids, dst_block_ids], dim=1)
+    block_mapping = torch.stack([real_src_block_ids, dst_block_ids], dim=1)
     ops.swap_blocks(src_buffer[0], dst_layer[0], block_mapping)
     ops.swap_blocks(src_buffer[1], dst_layer[1], block_mapping)
 

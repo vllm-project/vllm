@@ -27,7 +27,7 @@ if [[ $1 == "prefiller" ]]; then
         --disable-log-requests \
         --enforce-eager \
         --kv-transfer-config \
-        '{"kv_connector":"CPUConnector","kv_role":"kv_producer","kv_connector_extra_config": {"host": "localhost", "port": "54321", "size": 8}}'
+        '{"kv_connector":"CPUConnector","kv_role":"kv_producer","kv_connector_extra_config": {"host": "localhost", "port": "54321", "size": 40}}'
 
 
 elif [[ $1 == "decoder" ]]; then
@@ -41,7 +41,7 @@ elif [[ $1 == "decoder" ]]; then
         --disable-log-requests \
         --enforce-eager \
         --kv-transfer-config \
-        '{"kv_connector":"CPUConnector","kv_role":"kv_consumer","kv_connector_extra_config": {"host": "localhost", "port": "54321", "size": 8}}'
+        '{"kv_connector":"CPUConnector","kv_role":"kv_consumer","kv_connector_extra_config": {"host": "localhost", "port": "54321", "size": 40}}'
 
 
 else
