@@ -456,6 +456,9 @@ def hash_request_tokens(hash_function: Any, block_size: int,
     """
     token_ids = request.all_token_ids
 
+    print("[hash_request_tokens] block_size:     ", block_size)
+    print("[hash_request_tokens] len(token_ids): ", len(token_ids))
+
     req_need_extra_keys = need_extra_keys(request)
     req_extra_keys = None
     curr_mm_idx = 0
@@ -882,9 +885,11 @@ def _get_kv_cache_config_uniform_page_size(
         kv_cache_groups=kv_cache_groups,
     )
 
+    min_block_size = min([group.kv_cache_spec.block_size for group in kv_cache_groups])
+
     # Print the KV cache size and maximum concurrency.
     num_tokens = num_blocks // len(
-        grouped_layers) * vllm_config.cache_config.block_size
+        grouped_layers) * min_block_size
     num_tokens_str = f"{num_tokens:,}"
     logger.info("GPU KV cache size: %s tokens", num_tokens_str)
     max_model_len_str = f"{vllm_config.model_config.max_model_len:,}"

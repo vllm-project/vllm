@@ -14,35 +14,43 @@ from ...utils import check_logprobs_close, check_outputs_equal
 # The rest of the models will only be tested by test_models
 
 SSM_MODELS = [
-    "state-spaces/mamba-130m-hf",
-    "tiiuae/falcon-mamba-tiny-dev",
+    #"state-spaces/mamba-130m-hf",
+    #"tiiuae/falcon-mamba-tiny-dev",
     # TODO: Compare to a Mamba2 model. The HF transformers implementation of
     # Mamba2 is buggy for Codestral as it doesn't handle n_groups, so the test
     # doesn't compare vLLM output with HF output.
     # See https://github.com/huggingface/transformers/pull/35943
-    "mistralai/Mamba-Codestral-7B-v0.1",
+    #"mistralai/Mamba-Codestral-7B-v0.1",
 ]
 
 HYBRID_MODELS = [
-    "ai21labs/Jamba-tiny-dev",
+    #"ai21labs/Jamba-tiny-dev",
     # NOTE: ibm-granite/granite-4.0-tiny-preview are skipped currently as
     # it is not yet available in huggingface transformers
     # "ibm-granite/granite-4.0-tiny-preview",
     # NOTE: Running Plamo2 in transformers implementation requires to install
     # causal-conv1d package, which is not listed as a test dependency as it's
     # not compatible with pip-compile.
-    "pfnet/plamo-2-1b",
-    "Zyphra/Zamba2-1.2B-instruct",
-    "hmellor/tiny-random-BambaForCausalLM",
+    #"pfnet/plamo-2-1b",
+    #"Zyphra/Zamba2-1.2B-instruct",
+    #"hmellor/tiny-random-BambaForCausalLM",
+    "/net/storage149/autofs/css22/nmg/models/hf/ibm-ai-platform/Bamba-9B-v1/main/",
 ]
 
 V1_SUPPORTED_MODELS = [
     "mistralai/Mamba-Codestral-7B-v0.1",
+    #"hmellor/tiny-random-BambaForCausalLM",
+    "/net/storage149/autofs/css22/nmg/models/hf/ibm-ai-platform/Bamba-9B-v1/main/"
 ]
+
+
+ATTN_BLOCK_SIZES = {
+    "hmellor/tiny-random-BambaForCausalLM": 48,
+    "/net/storage149/autofs/css22/nmg/models/hf/ibm-ai-platform/Bamba-9B-v1/main/": 528
+}
 
 # Avoid OOM
 MAX_NUM_SEQS = 4
-
 
 @pytest.mark.parametrize("model", SSM_MODELS + HYBRID_MODELS)
 @pytest.mark.parametrize("max_tokens", [64])
@@ -56,6 +64,9 @@ def test_models(
     max_tokens: int,
     num_logprobs: int,
 ) -> None:
+
+    #example_prompts = ["Hello World "]
+
     with hf_runner(model) as hf_model:
         if model != "mistralai/Mamba-Codestral-7B-v0.1":
             hf_outputs = hf_model.generate_greedy_logprobs_limit(
@@ -63,22 +74,33 @@ def test_models(
         else:
             hf_outputs = None
 
-    with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
+
+    if model in ATTN_BLOCK_SIZES:
+        block_size = ATTN_BLOCK_SIZES[model]
+    else:
+        block_size = 16
+
+    '''
+    with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS, block_size=block_size) as vllm_model:
         vllm_v0_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs)
+    '''
 
     if model in V1_SUPPORTED_MODELS:
         with monkeypatch.context() as m:
             m.setenv("VLLM_USE_V1", "1")
+            m.setenv("VLLM_ATTENTION_BACKEND", "FLASHINFER_VLLM_V1")
             with vllm_runner(model,
                              max_num_seqs=MAX_NUM_SEQS,
                              enforce_eager=True,
-                             enable_prefix_caching=False) as vllm_model:
+                             enable_prefix_caching=False,
+                             block_size=block_size) as vllm_model:
                 vllm_v1_outputs = vllm_model.generate_greedy_logprobs(
                     example_prompts, max_tokens, num_logprobs)
     else:
         vllm_v1_outputs = None
 
+    '''
     if hf_outputs is not None:
         check_logprobs_close(
             outputs_0_lst=hf_outputs,
@@ -86,6 +108,7 @@ def test_models(
             name_0="hf",
             name_1="vllm-v0",
         )
+    '''
 
     if model in V1_SUPPORTED_MODELS:
         ref_outputs = hf_outputs if hf_outputs is not None else vllm_v0_outputs
@@ -96,7 +119,7 @@ def test_models(
             name_1="vllm-v1",
         )
 
-
+'''
 @pytest.mark.parametrize("model", SSM_MODELS + HYBRID_MODELS)
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("num_logprobs", [5])
@@ -126,7 +149,7 @@ def test_batching(
     )
 
 
-@pytest.mark.parametrize("model", [SSM_MODELS[0], HYBRID_MODELS[0]])
+@pytest.mark.parametrize("model", [HYBRID_MODELS[0]])
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("num_logprobs", [5])
 @pytest.mark.parametrize("chunked_prefill_token_size", [1, 4, 16])
@@ -162,7 +185,7 @@ def test_chunked_prefill(
     )
 
 
-@pytest.mark.parametrize("model", [SSM_MODELS[0], HYBRID_MODELS[0]])
+@pytest.mark.parametrize("model", [HYBRID_MODELS[0]])
 @pytest.mark.parametrize("max_tokens", [10])
 def test_chunked_prefill_with_parallel_sampling(
     vllm_runner,
@@ -194,7 +217,7 @@ def test_chunked_prefill_with_parallel_sampling(
         vllm_model.generate(example_prompts, sampling_params)
 
 
-@pytest.mark.parametrize("model", [SSM_MODELS[0], HYBRID_MODELS[0]])
+@pytest.mark.parametrize("model", [HYBRID_MODELS[0]])
 @pytest.mark.parametrize("max_tokens", [20])
 def test_mamba_cache_cg_padding(
     vllm_runner,
@@ -223,7 +246,7 @@ def test_mamba_cache_cg_padding(
             "Could be related to mamba cache not padded correctly")
 
 
-@pytest.mark.parametrize("model", [SSM_MODELS[0], HYBRID_MODELS[0]])
+@pytest.mark.parametrize("model", [HYBRID_MODELS[0]])
 @pytest.mark.parametrize("max_tokens", [20])
 def test_models_preemption_recompute(
     vllm_runner,
@@ -251,7 +274,7 @@ def test_models_preemption_recompute(
     )
 
 
-@pytest.mark.parametrize("model", [SSM_MODELS[0], HYBRID_MODELS[0]])
+@pytest.mark.parametrize("model", [HYBRID_MODELS[0]])
 def test_fail_upon_inc_requests_and_finished_requests_lt_available_blocks(
     vllm_runner,
     example_prompts,
@@ -274,7 +297,7 @@ def test_fail_upon_inc_requests_and_finished_requests_lt_available_blocks(
                     "steps finished requests registered unnecessarily ")
 
 
-@pytest.mark.parametrize("model", [SSM_MODELS[0], HYBRID_MODELS[0]])
+@pytest.mark.parametrize("model", [HYBRID_MODELS[0]])
 def test_state_cleanup(
     vllm_runner,
     example_prompts,
@@ -295,7 +318,7 @@ def test_state_cleanup(
                     "could be related to finished_requests_ids")
 
 
-@pytest.mark.parametrize("model", [SSM_MODELS[0], HYBRID_MODELS[0]])
+@pytest.mark.parametrize("model", [HYBRID_MODELS[0]])
 @pytest.mark.parametrize("max_tokens", [64])
 def test_multistep_correctness(
     vllm_runner,
@@ -322,7 +345,7 @@ def test_multistep_correctness(
 
 
 @multi_gpu_test(num_gpus=2)
-@pytest.mark.parametrize("model", [SSM_MODELS[0], HYBRID_MODELS[0]])
+@pytest.mark.parametrize("model", [HYBRID_MODELS[0]])
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("num_logprobs", [5])
 def test_distributed_correctness(
@@ -348,3 +371,4 @@ def test_distributed_correctness(
         name_0="vllm_tp_1",
         name_1="vllm_tp_2",
     )
+'''

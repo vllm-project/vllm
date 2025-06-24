@@ -26,6 +26,7 @@ class KVCacheCoordinator(ABC):
     ):
         self.kv_cache_config = kv_cache_config
         self.max_model_len = max_model_len
+        self.enable_caching = enable_caching
 
         self.block_pool = BlockPool(kv_cache_config.num_blocks, enable_caching,
                                     enable_kv_cache_events)
@@ -273,10 +274,12 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
 
         self.full_attention_block_size = self.full_attention_spec.block_size
         self.other_block_size = self.other_spec.block_size
-        # think this is only needed for prefix caching
-        #assert self.other_block_size % self.full_attention_block_size == 0, (
-        #    "KVCacheCoordinator assumes the block_size of full attention "
-        #    "layers is divisible by other layers now.")
+
+        if self.enable_caching:
+            # this requirement is only needed for the prefix caching logic
+            assert self.other_block_size % self.full_attention_block_size == 0, (
+                "KVCacheCoordinator assumes the block_size of full attention "
+                "layers is divisible by other layers now.")
 
         if max(self.full_attention_group_ids) < min(self.other_group_ids):
             self.full_attn_first = True
