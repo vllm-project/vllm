@@ -3,12 +3,12 @@ import dataclasses
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from enum import Enum
-from typing import Optional
+from typing import Optional, Union
 
 import torch
 from torch._prims_common import DeviceLikeType
 
-from vllm import SamplingParams
+from vllm import PoolingParams, SamplingParams
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -23,7 +23,7 @@ class MoveDirectionality(Enum):
 
 # (index, params, output_tok_ids) tuples for new
 # requests added to the batch.
-AddedRequest = tuple[int, SamplingParams, list[int]]
+AddedRequest = tuple[int, Union[SamplingParams, PoolingParams], list[int]]
 # (index 1, index 2, directionality) tuples representing
 # one-way moves or two-way swaps of requests in batch
 MovedRequest = tuple[int, int, MoveDirectionality]
@@ -220,8 +220,8 @@ class MinPLogitsProcessor(LogitsProcessor):
 
         needs_update = False
         # Process added requests.
-        for index, sampling_params, _ in batch_update.added:
-            min_p = sampling_params.min_p
+        for index, params, _ in batch_update.added:
+            min_p = params.min_p if isinstance(params, SamplingParams) else 0.0
             if self.min_p_cpu[index] != min_p:
                 needs_update = True
                 self.min_p_cpu[index] = min_p
@@ -294,8 +294,9 @@ class LogitBiasLogitsProcessor(LogitsProcessor):
 
         needs_update = False
         # Process added requests.
-        for index, sampling_params, _ in batch_update.added:
-            if lb := sampling_params.logit_bias:
+        for index, params, _ in batch_update.added:
+            if isinstance(params, SamplingParams) and (lb :=
+                                                       params.logit_bias):
                 self.biases[index] = lb
                 needs_update = True
 
@@ -365,11 +366,12 @@ class MinTokensLogitsProcessor(LogitsProcessor):
         needs_update = False
 
         # Process added requests.
-        for index, sampling_params, output_tok_ids in batch_update.added:
-            if ((min_tokens := sampling_params.min_tokens)
+        for index, params, output_tok_ids in batch_update.added:
+            if (isinstance(params, SamplingParams)
+                    and (min_tokens := params.min_tokens)
                     and len(output_tok_ids) < min_tokens):
                 self.min_toks[index] = (min_tokens, output_tok_ids,
-                                        sampling_params.all_stop_token_ids)
+                                        params.all_stop_token_ids)
                 needs_update = True
 
         if self.min_toks:

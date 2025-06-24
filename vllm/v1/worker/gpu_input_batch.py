@@ -254,8 +254,10 @@ class InputBatch:
         """Track add-request operations"""
         req_index = self._get_next_add_index()
         assert req_index < self.max_num_reqs
+        params = (request.sampling_params
+                  if request.sampling_params else request.pooling_params)
         self.batch_update_builder.added.append(
-            (req_index, request.sampling_params, request.output_token_ids))
+            (req_index, params, request.output_token_ids))
         return req_index
 
     def has_step_removed_requests(self) -> bool:
