@@ -107,6 +107,17 @@ class FullAttentionSpec(AttentionSpec):
         return cdiv(max_model_len, self.block_size) * self.page_size_bytes
 
     @classmethod
+    def merge_window_sizes(cls, window_sizes: set[int]) -> Optional[int]:
+        if len(window_sizes) == 0:
+            return None
+        elif len(window_sizes) == 1:
+            return window_sizes.pop()
+        else:
+            raise ValueError(
+                "All sliding window/local attention layers in the same KV cache"
+                "group must have the same window size.")
+
+    @classmethod
     def merge(cls, specs: list[Self]) -> Self:
         """
         Merge a list of FullAttentionSpec objects into a single 
@@ -118,24 +129,13 @@ class FullAttentionSpec(AttentionSpec):
         attention_chunk_size = set(spec.attention_chunk_size for spec in specs
                                    if spec.attention_chunk_size is not None)
 
-        if len(sliding_window) == 0:
-            merged_spec.sliding_window = None
-        elif len(sliding_window) == 1:
-            merged_spec.sliding_window = sliding_window.pop()
-        else:
-            raise ValueError(
-                "All sliding window layers in the same KV cache group "
-                "must have the same window size.")
-        if len(attention_chunk_size) == 0:
-            merged_spec.attention_chunk_size = None
-        elif len(attention_chunk_size) == 1:
-            merged_spec.attention_chunk_size = attention_chunk_size.pop()
-        else:
-            raise ValueError(
-                "All chunked local attention layers in the same KV cache group "
-                "must have the same chunk size.")
-        assert len(sliding_window) + len(attention_chunk_size) <= 1, (
-            "Model with both sliding window layers and chunked local attention "
+        merged_spec.sliding_window = cls.merge_window_sizes(sliding_window)
+        merged_spec.attention_chunk_size = (
+            cls.merge_window_sizes(attention_chunk_size))
+        assert (
+            (merged_spec.sliding_window is not None) +
+            (merged_spec.attention_chunk_size is not None) <= 1
+        ), ("Model with both sliding window layers and chunked local attention "
             "layers is not supported.")
         return merged_spec
 
@@ -146,7 +146,9 @@ class ChunkedLocalAttentionSpec(AttentionSpec):
 
     @property
     def type_id(self) -> str:
-        return (f"local_attention_{self.block_size}_{self.page_size_bytes}")
+        return (
+            f"local_attention_{self.attention_chunk_size}_{self.block_size}_{self.page_size_bytes}"
+        )  # noqa
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         max_model_len = vllm_config.model_config.max_model_len
@@ -161,25 +163,6 @@ class ChunkedLocalAttentionSpec(AttentionSpec):
                          max_model_len)
 
         return cdiv(num_tokens, self.block_size) * self.page_size_bytes
-
-    @classmethod
-    def merge(cls, specs: list[Self]) -> Self:
-        """
-        Merge a list of ChunkedLocalAttentionSpec objects into a single 
-        ChunkedLocalAttentionSpec object.
-        """
-        merged_spec = super().merge(specs)
-        attention_chunk_size = set(spec.attention_chunk_size for spec in specs
-                                   if spec.attention_chunk_size is not None)
-        if len(attention_chunk_size) == 0:
-            merged_spec.attention_chunk_size = 0
-        elif len(attention_chunk_size) == 1:
-            merged_spec.attention_chunk_size = attention_chunk_size.pop()
-        else:
-            raise ValueError(
-                "All chunked local attention layers in the same KV cache group "
-                "must have the same chunk size.")
-        return merged_spec
 
 
 @dataclass

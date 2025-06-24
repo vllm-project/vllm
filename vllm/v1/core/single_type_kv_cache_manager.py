@@ -399,6 +399,7 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
         super().__init__(kv_cache_spec, block_pool, **kwargs)
         self.attention_chunk_size = kv_cache_spec.attention_chunk_size
         self._null_block = block_pool.null_block
+        print("chunked liocal")
 
     @classmethod
     def find_longest_cache_hit(
@@ -413,6 +414,8 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
         assert isinstance(kv_cache_spec, ChunkedLocalAttentionSpec), (
             "ChunkedLocalAttentionManager can only be used for " +
             "chunked local attention groups")
+        if use_eagle:
+            max_length -= 1
         max_num_blocks = max_length // kv_cache_spec.block_size
         if max_length > 0:
             local_attention_start_idx = (max_length //
@@ -420,18 +423,15 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
                                          kv_cache_spec.attention_chunk_size)
         else:
             local_attention_start_idx = 0
-        # [ block 0, ..., block x(x_start<=first_attention_token),
-        # block x+1, ..,  block N (N_end <=max_len), ...]
+        # we marked blocks out of window as computed
+        # with null blocks, and blocks inside window based on cache lookup
+        # result [null] [null] ... [null] [hit block 1 (1st block contain
+        # last window)] [hit block 2] ... [hit block x]
         local_attention_start_block_idx = (local_attention_start_idx //
                                            kv_cache_spec.block_size)
         computed_blocks: tuple[list[KVCacheBlock], ...] = tuple(
             [block_pool.null_block] * local_attention_start_block_idx
             for _ in range(len(kv_cache_group_ids)))
-        # we marked blocks out of window as computed
-        # with null blocks, and blocks inside window
-        # based on cache lookup result
-        # [null] [null] ... [null] [hit block 1 (1st block contain last window)]
-        # [hit block 2] ... [hit block x]
         for i in range(local_attention_start_block_idx, max_num_blocks):
             block_hash = block_hashes[i]
             if cached_block := block_pool.get_cached_block(
@@ -440,29 +440,27 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
                     computed.append(cached)
             else:
                 break
-        if use_eagle and computed_blocks[0]:
-            for computed in computed_blocks:
-                computed.pop()
         return computed_blocks
 
     def remove_skipped_blocks(self, request_id: str,
                               num_computed_tokens: int) -> None:
-        # Remove the blocks that are no longer be in the
-        # chunked attention window and skipped
-        # during the attention computation.
+        # Remove the blocks that are no longer be in the chunked attention
+        # window and skipped during the attention computation.
 
-        # N // chunk_size * chunk_size
         # [chunk 0][chunk 1]local_attention_start_idx ... current
+        # we computed previous number of chunks to get the idx of
+        # current chunk window starting offset,
+        # e.g. for computed 1024 tokens, the 1024th token (0 indexed)
+        # is in the second chunk, there are 1 prev chunk, the start idx
+        # is 1024. for 1023, it will be 0.
 
         local_attention_start_idx = (
             num_computed_tokens
         ) // self.attention_chunk_size * self.attention_chunk_size
-        # 1024-> 0, 1025-> 1024
         first_useful_block_idx = local_attention_start_idx // self.block_size
-        # block size =128, 0 -> block 0, 1024 -> block 8, 372 -> block 2
+        #  if block size = 128, 0 -> block 0, 1024 -> block 8, 372 -> block 2
         blocks = self.req_to_blocks[request_id]
         removed_blocks: list[KVCacheBlock] = []
-        blockids = []
         for i in range(first_useful_block_idx - 1, -1, -1):
             if blocks[i] == self._null_block:
                 # If the block is already a null block, the blocks before it
@@ -470,7 +468,6 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
                 # to this function.
                 break
             removed_blocks.append(blocks[i])
-            blockids.append(i)
             blocks[i] = self._null_block
         self.block_pool.free_blocks(removed_blocks)
 

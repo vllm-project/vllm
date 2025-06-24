@@ -838,8 +838,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         use_sliding_window = (isinstance(kv_cache_spec, SlidingWindowSpec) or
                               (isinstance(kv_cache_spec, FullAttentionSpec)
                                and kv_cache_spec.sliding_window is not None))
-        use_local_attention = isinstance(kv_cache_spec,
-                                         ChunkedLocalAttentionSpec)
+        use_local_attention = (
+            isinstance(kv_cache_spec, ChunkedLocalAttentionSpec)
+            or (isinstance(kv_cache_spec, FullAttentionSpec)
+                and kv_cache_spec.attention_chunk_size is not None))
         assert isinstance(kv_cache_spec, AttentionSpec)
         use_cascade = attn_metadata_builder.use_cascade_attention(
             common_prefix_len=common_prefix_len,
@@ -2477,14 +2479,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         "attention module can not be with ",
                         "both local attention and sliding window")
                 elif use_local_attention:
-                    kv_cache_spec[layer_name] = \
-                    ChunkedLocalAttentionSpec(
+                    kv_cache_spec[layer_name] = (ChunkedLocalAttentionSpec(
                         block_size=block_size,
                         num_kv_heads=attn_module.num_kv_heads,
                         head_size=attn_module.head_size,
                         dtype=self.kv_cache_dtype,
                         attention_chunk_size=self.attention_chunk_size,
-                        use_mla=use_mla)
+                        use_mla=use_mla))
                 else:
                     kv_cache_spec[layer_name] = FullAttentionSpec(
                         block_size=block_size,
