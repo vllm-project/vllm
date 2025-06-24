@@ -9,14 +9,15 @@ on the Ray distributed computing framework and first-class support for the vLLM 
 
 
 Key features:
-- Automatic scaling, batching, buffering, and load balancing across a Ray cluster.
+- Automatic scaling, back-pressure, and load balancing across a Ray cluster.
 - Unified multi-node multi-model deployment.
 - Exposes an OpenAI-compatible HTTP API.
 - Multi-LoRA support with shared base models.
 
 Run `python3 ray_serve_deepseek.py` to launch an endpoint.
 
-Learn more in the official documentation: https://docs.ray.io/en/latest/serve/llm/serving-llms.html
+Learn more in the official Ray Serve LLM documentation:
+https://docs.ray.io/en/latest/serve/llm/serving-llms.html
 """
 
 from ray import serve
