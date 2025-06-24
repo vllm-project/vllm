@@ -47,7 +47,6 @@ class UniProcExecutor(ExecutorBase):
         self.collective_rpc("init_device")
         self.collective_rpc("load_model")
 
-
     def collective_rpc(self,
                        method: Union[str, Callable],
                        timeout: Optional[float] = None,
@@ -119,7 +118,6 @@ class ExecutorWithExternalLauncher(UniProcExecutor):
         self.collective_rpc("init_worker", args=([kwargs], ))
         self.collective_rpc("init_device")
         self.collective_rpc("load_model")
-
 
     def determine_num_available_blocks(self) -> Tuple[int, int]:
         """

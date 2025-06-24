@@ -124,7 +124,6 @@ class RayDistributedExecutor(DistributedExecutorBase):
             self.driver_exec_method = make_async(
                 self.driver_worker.execute_method)
 
-
     def shutdown(self) -> None:
         logger.info(
             "Shutting down Ray distributed executor. If you see error log "
