@@ -1329,6 +1329,12 @@ class LLM:
     def stop_profile(self) -> None:
         self.llm_engine.stop_profile()
 
+    def start_object_graph(self) -> None:
+        self.llm_engine.start_object_graph()
+    
+    def stop_object_graph(self) -> None:
+        self.llm_engine.stop_object_graph()
+
     def reset_prefix_cache(self, device: Optional[Device] = None) -> bool:
         return self.llm_engine.reset_prefix_cache(device)
 
