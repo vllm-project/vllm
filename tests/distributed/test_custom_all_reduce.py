@@ -133,7 +133,7 @@ def eager_quickreduce(
 ):
     with monkeypatch.context() as m:
         m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
-        os.environ["VLLM_ROCM_QR_QUANT_REGIME"] = "FP"
+        os.environ["VLLM_ROCM_QUICK_REDUCE_QUANTIZATION"] = "FP"
         device = torch.device(f"cuda:{rank}")
         torch.cuda.set_device(device)
         init_test_distributed_environment(tp_size, pp_size, rank,

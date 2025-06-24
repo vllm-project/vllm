@@ -86,22 +86,28 @@ class CustomAllreduce:
                  device: Union[int, str, torch.device],
                  cr_max_size=8192 * 1024) -> None:
         """
-        Custom allredcue (cr) is non-destructive acceleration, which is
-        available for cuda and rocm MI300 series.
-        Custom quick allreduce (qr) is accelerated by quantization, 
-        currently supports fp16, Q8, Q6, Q4 quantization. 
-        We view qr as complementary to cr, the condition for qr is 
-        even more demanding; qr is initialized, then cr must also 
-        be initialized. If the conditions of cr are not met, qr is 
-        naturally not initialized.
-        Due to instruction set limitations, only rocm MI300 series
-        is supported for the time being.
+        Custom allreduce provides non-destructive acceleration and is 
+        available for CUDA and ROCm MI300 series.
+
+        Custom quick allreduce leverages quantization for further 
+        acceleration on ROCm. It currently supports Q8, Q6, and Q4 
+        quantization formats and FP(float16, bfloat16).
+
+        Quick allreduce is designed as a complement to custom allreduce. 
+        Its initialization requires even stricter conditions, when quick 
+        allreduce is initialized, custom allreduce must also be 
+        initialized. If the conditions for custom allreduce are not met, 
+        quick allreduce will not be initialized either.
+
+        Only the ROCm MI300 series is supported for quick allreduce at 
+        this time.
+
         Args:
             group: the process group to work on. If None, it will use the
                 default process group.
             device: the device to bind the CustomAllreduce to. If None,
                 it will be bind to f"cuda:{local_rank}".
-            cr_max_size: max supported size of cr.
+            cr_max_size: max supported size of custom allreduce.
         It is the caller's responsibility to make sure each communicator
         is bind to a unique device, and all communicators in this group
         are in the same node.
@@ -202,8 +208,9 @@ class CustomAllreduce:
             return
         if not current_platform.is_rocm():
             # First, we only enable quickreduce for MI300 series,
-            # If it's rocm then it must be MI300 series because cr is only
-            # available on the mi300 series, qr must be available.
+            # If it's rocm then it must be MI300 series because custom
+            # allreduce is only available on the mi300 series,
+            # quick allreduce must be available.
             self._SHOULD_INIT_QR = False
 
             # test P2P capability, this checks software/cudaruntime support
@@ -219,8 +226,9 @@ class CustomAllreduce:
                 return
 
         self.init_custom_allreduce()
-        # self.disabled is used to indicate cr, if the condition
-        # of cr is not satisfied, qr must not be satisfied,
+        # self.disabled is used to indicate custom allreduce, if the
+        # condition of custom allreduce is not satisfied, quick allreduce
+        # must not be satisfied,
         # This boolean serves as a uniform identifier for external.
         self.disabled = False
         self.init_custom_quick_allreduce()
@@ -264,8 +272,8 @@ class CustomAllreduce:
         # On RocM, bfloat16 kernels are slower than fp16
         # due to slower match operations
         # If environment variable is not set to 1 we convert input to fp16
-        self.use_fp16_kernels = envs.VLLM_ROCM_QR_CAST_BF16_TO_FP16
-        regime_str = envs.VLLM_ROCM_QR_QUANT_REGIME
+        self.use_fp16_kernels = envs.VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16
+        regime_str = envs.VLLM_ROCM_QUICK_REDUCE_QUANTIZATION
         if regime_str not in QuickReduceRegime.__members__:
             logger.warning(
                 "Custom quick allreduce:",
@@ -276,7 +284,7 @@ class CustomAllreduce:
 
         if regime_str == "NONE":
             logger.debug("Custom quick allreduce is disabled based "
-                         "on env variable VLLM_ROCM_QR_QUANT_REGIME")
+                         "on env variable VLLM_ROCM_QUICK_REDUCE_QUANTIZATION")
             return
 
         vllm_config = get_current_vllm_config()
@@ -293,8 +301,9 @@ class CustomAllreduce:
             if dtype == torch.bfloat16 and self.use_fp16_kernels:
                 logger.info(
                     "Custom quick allreduce: BF16 inputs will be converted "
-                    "to FP16 to improve performance. set"
-                    "envs.VLLM_ROCM_QR_CAST_BF16_TO_FP16=0 to turn off.")
+                    "to FP16 to improve performance. set "
+                    "envs.VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16=0 "
+                    "to turn off.")
 
         self.qr_quant_level = QuickReduceRegime[regime_str]
         self._qr_ptr = ops.init_custom_qr(self.rank, self.world_size)
@@ -375,7 +384,8 @@ class CustomAllreduce:
         return False
 
     def should_custom_ar(self, inp: torch.Tensor):
-        # Determine whether to use qr, or cr or quit
+        # Determine whether to use custom quick allreduce,
+        # or custom allreduce or quit.
         return self.should_quick_allreduce(
             inp) or self.should_custom_allreduce(inp)
 

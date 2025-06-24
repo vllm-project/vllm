@@ -88,12 +88,6 @@ __quickreduce_device_inline__ static void buffer_store_dwordx4(
     int32_t aux) __asm("llvm.amdgcn.raw.buffer.store.v4i32");
 
 __quickreduce_device_inline__ static void set_fp16_ovfl(bool const value) {
-  // short size = 0b00001;    // Specifies the bit size to modify
-  // const short offset = 0b10111;  // Corrected offset to 23, which is the bit
-  // position of FP16_OVFL const short hwRegId = 0b000001; // HW register ID for
-  // MODE const short simm16 = (size << 11) | (offset << 6) | hwRegId; simm16 =
-  // 0xdc1
-
 #if defined(__gfx942__)
   if (value) {
     asm volatile("s_setreg_imm32_b32 0xdc1, 1;" ::);
