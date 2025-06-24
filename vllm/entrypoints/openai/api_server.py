@@ -1219,7 +1219,7 @@ async def init_app_state(
         model_config,
         state.openai_serving_models,
         request_logger=request_logger) if model_config.task in (
-            "score", "embed", "pooling") else None
+            "classify", "embed", "pooling") else None
     state.openai_serving_classification = ServingClassification(
         engine_client,
         model_config,
@@ -1231,7 +1231,7 @@ async def init_app_state(
         model_config,
         state.openai_serving_models,
         request_logger=request_logger
-    ) if model_config.task == "score" else None
+    ) if model_config.task == "classify" else None
     state.openai_serving_tokenization = OpenAIServingTokenization(
         engine_client,
         model_config,

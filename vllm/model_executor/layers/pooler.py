@@ -286,6 +286,7 @@ class PoolerHead(nn.Module):
         else:
             pooled_data = pooled_data.to(torch.float32)
 
+        # for matryoshka representation
         if isinstance(pooling_metadata, V0PoolingMetadata):
             dimensions_list = [
                 pooling_param.dimensions
@@ -300,10 +301,15 @@ class PoolerHead(nn.Module):
         if any(d is not None for d in dimensions_list):
             # change the output dimension
             assert len(pooled_data) == len(dimensions_list)
-            pooled_data = [
-                vecs if d is None else vecs[..., :d]
-                for vecs, d in zip(pooled_data, dimensions_list)
-            ]
+            if set(dimensions_list) == 1 and not isinstance(pooled_data, list):
+                # if all dimensions are the same
+                d = dimensions_list[0]
+                pooled_data = pooled_data[..., :d]
+            else:
+                pooled_data = [
+                    vecs if d is None else vecs[..., :d]
+                    for vecs, d in zip(pooled_data, dimensions_list)
+                ]
 
         if self.normalize:
             if isinstance(pooled_data, list):
@@ -326,6 +332,10 @@ class PoolerHead(nn.Module):
                 else:
                     pooled_data = F.sigmoid(pooled_data)
 
+        # shape:
+        # classify & score -> (batch_size, num_classes)
+        # embed -> (batch_size, embedding_dim) or list(embedding_dim)
+        #          (batch_size, dimensions) or list(dimensions) if using MRL
         return pooled_data
 
 
@@ -420,7 +430,6 @@ class ClassifierPooler(nn.Module):
                 offset += prompt_len
                 pooled_data.append(pooled_data_i)
 
-        offset = 0
         pooled_data_lst = []
         for pooled_data_i in pooled_data:
 
@@ -437,7 +446,8 @@ class ClassifierPooler(nn.Module):
             # apply classifier once on the full batch if possible
             pooled_output = self.classifier(pooled_output)
 
-        scores = self.default_activation_function(pooled_output).squeeze(-1)
+        # shape: (batch_size, num_labels)
+        scores = self.default_activation_function(pooled_output)
 
         pooled_outputs = [PoolingSequenceGroupOutput(data) for data in scores]
         return PoolerOutput(outputs=pooled_outputs)

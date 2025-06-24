@@ -21,8 +21,7 @@ from vllm.model_executor.layers.linear import QKVCrossParallelLinear
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.models import ModelRegistry
-from vllm.model_executor.models.adapters import (as_seq_cls_model,
-                                                 as_embedding_model,
+from vllm.model_executor.models.adapters import (as_embedding_model,
                                                  as_reward_model)
 from vllm.utils import is_pin_memory_available
 
