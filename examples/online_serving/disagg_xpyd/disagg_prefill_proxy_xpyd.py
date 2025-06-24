@@ -21,16 +21,17 @@ decode_cv = threading.Condition()
 
 DEFAULT_PING_SECONDS = 5
 
+
 def _remove_oldest_instances(instances: dict[str, Any]) -> None:
     oldest_key = next(iter(instances), None)
     while oldest_key is not None:
         value = instances[oldest_key]
         if value[1] > time.time():
             break
-        print(f"🔴Remove [HTTP:{oldest_key}, ZMQ:{value[0]}, "
-              f"stamp:{value[1]}]")
+        print(f"🔴Remove [HTTP:{oldest_key}, ZMQ:{value[0]}, stamp:{value[1]}]")
         instances.pop(oldest_key, None)
         oldest_key = next(iter(instances), None)
+
 
 def _listen_for_register(poller, router_socket):
     while True:
@@ -69,7 +70,7 @@ def _listen_for_register(poller, router_socket):
                 )
 
             if node is None:
-                print(f"🔵Add [HTTP:{data["http_address"]}, ZMQ:{data["http_address"]}")
+                print(f"🔵Add [HTTP:{data['http_address']}, ZMQ:{data['http_address']}")
 
 
 def start_service_discovery(hostname, port):
