@@ -35,7 +35,8 @@ from vllm.model_executor.layers.linear import (QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader, maybe_remap_kv_scale_name
+from vllm.model_executor.model_loader.weight_utils import (
+    default_weight_loader, maybe_remap_kv_scale_name)
 
 from .llama import LlamaForCausalLM, LlamaMLP, LlamaModel
 from .utils import (AutoWeightsLoader, extract_layer_index, fast_topk,
@@ -432,9 +433,11 @@ class Llama4Model(LlamaModel):
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name or "experts" in name:
                     continue
-                # Don't transform k_scale/v_scale parameter names with stacked parameter mapping
-                # but allow other scale parameters (input_scale, weight_scale) to be processed
-                if not (name.endswith((".k_scale", ".v_scale")) and "self_attn" in name):
+                # Don't transform k_scale/v_scale parameter names with
+                # stacked parameter mapping but allow other scale parameters
+                # (input_scale, weight_scale) to be processed
+                if not (name.endswith(
+                    (".k_scale", ".v_scale")) and "self_attn" in name):
                     name = name.replace(weight_name, param_name)
                 if is_pp_missing_parameter(name, self):
                     continue
@@ -444,9 +447,10 @@ class Llama4Model(LlamaModel):
                     if name is None:
                         continue  # Skip this parameter if remapping failed
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
                 if weight_loader == default_weight_loader:
-                    # default_weight_loader doesn't support shard_id, just load the weight directly
+                    # default_weight_loader doesn't support shard_id
                     weight_loader(param, loaded_weight)
                 else:
                     # Custom weight loader that supports shard_id
@@ -466,40 +470,52 @@ class Llama4Model(LlamaModel):
                     if is_pp_missing_parameter(name, self):
                         continue
 
-                    # Handle flat expert scale parameters that don't match per-expert patterns
-                    if ("experts." in name and
-                        ("w13_input_scale" in name or "w13_weight_scale" in name or
-                         "w2_input_scale" in name or "w2_weight_scale" in name)):
+                    # Handle flat expert scale parameters that
+                    # don't match per-expert patterns
+                    if ("experts." in name and ("w13_input_scale" in name
+                                                or "w13_weight_scale" in name
+                                                or "w2_input_scale" in name
+                                                or "w2_weight_scale" in name)):
                         # These are flat expert scales that apply to all experts
                         param = params_dict[name]
-                        weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                        weight_loader = getattr(param, "weight_loader",
+                                                default_weight_loader)
 
-                        # Check if this is a MoE-specific weight loader that needs extra arguments
+                        # Check if this is a MoE-specific weight loader that
+                        # needs extra arguments
                         if hasattr(param, 'weight_loader'):
                             try:
                                 # Try to inspect the weight_loader signature
                                 import inspect
                                 sig = inspect.signature(weight_loader)
-                                if 'expert_id' in sig.parameters and 'shard_id' in sig.parameters:
-                                    # This is a MoE weight loader, provide the required arguments
-                                    # Determine the appropriate shard_id based on parameter name
+                                if ('expert_id' in sig.parameters and
+                                    'shard_id' in sig.parameters):
+                                    # This is a MoE weight loader, provide the
+                                    # required arguments
+                                    # Determine the appropriate shard_id based
+                                    # on parameter name
                                     if "w13_" in name:
-                                        # w13 corresponds to gate_up_proj, which can be either w1 or w3
-                                        # For scales, we typically use w1 as the representative
+                                        # w13 corresponds to gate_up_proj, which
+                                        # can be either w1 or w3
                                         shard_id = "w1"
                                     elif "w2_" in name:
                                         # w2 corresponds to down_proj
                                         shard_id = "w2"
                                     else:
-                                        # Fallback - this shouldn't happen for scale parameters
+                                        # Fallback - this shouldn't happen for
+                                        # scale parameters
                                         shard_id = "w1"
 
-                                    weight_loader(param, loaded_weight, name, shard_id=shard_id, expert_id=0)
+                                    weight_loader(param,
+                                                  loaded_weight,
+                                                  name,
+                                                  shard_id=shard_id,
+                                                  expert_id=0)
                                 else:
                                     # Regular weight loader
                                     weight_loader(param, loaded_weight)
                             except Exception:
-                                # Fallback to regular loading if signature inspection fails
+                                # Fallback to regular loading
                                 weight_loader(param, loaded_weight)
                         else:
                             weight_loader(param, loaded_weight)
@@ -507,7 +523,8 @@ class Llama4Model(LlamaModel):
                         continue
 
                     param = params_dict[name]
-                    weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                    weight_loader = getattr(param, "weight_loader",
+                                            default_weight_loader)
                     weight_loader(param, loaded_weight)
                     loaded_params.add(name)
         return loaded_params
