@@ -386,7 +386,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         """
         NOTE(Chen): The prefix blocks are null blocks for sliding window layers.
         So it's not correct to count ref_cnt like FullAttentionManager. Return 
-        0 here for correctness. Need to support cascade attention + sliding
+        0 here for correctness. Need to support cascade attention + sliding 
         window in the future.
         """
         return 0
