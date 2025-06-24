@@ -919,7 +919,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # or bad hardware but it may add compute overhead.
     "VLLM_COMPUTE_NANS_IN_LOGITS":
     lambda: bool(int(os.getenv("VLLM_COMPUTE_NANS_IN_LOGITS", "0"))),
-    
+
     # Controls whether or not emulations are used for NVFP4
     # generations on machines < 100 for compressed-tensors
     # models
