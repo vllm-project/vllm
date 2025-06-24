@@ -629,8 +629,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
 
             forward_dag = MultiOutputNode(outputs)
 
-        from vllm.distributed.device_communicators.ray_accelerator_context import (
-            register_accelerator_context)
+        from ray.experimental.channel.accelerator_context import register_accelerator_context
 
         register_accelerator_context(torch_module_name="cuda",
                                      communicator_cls=RayCudaCommunicator)

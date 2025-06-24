@@ -1,15 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import uuid
-from typing import Optional, list, tuple
+from typing import Any, List, Optional, Tuple
 
 import ray
 import torch
 from ray.exceptions import RayChannelError
-from ray.experimental.channel.accelerator_context import AcceleratorContext
-from ray.experimental.channel.communicator import (Communicator,
-                                                   TorchTensorAllocator)
-from ray.experimental.util.types import ReduceOp
+from ray.experimental.channel import (AcceleratorContext,
+    Communicator, TorchTensorAllocator)
+from ray.experimental.util import ReduceOp
 
 from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 from vllm.distributed.utils import StatelessProcessGroup
@@ -17,6 +16,22 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
+class RayStatelessProcessGroup(StatelessProcessGroup):
+    """
+    StatelessProcessGroup for Ray.
+    
+    This only holds information about the group, and does not do any
+    communication.
+    """
+    def __init__(self, rank: int, world_size: int,comm_id: tuple):
+        super().__init__(rank, world_size, None, None)
+        self.comm_id = comm_id
+
+    def get_rank(self) -> int:
+        return self.rank
+    
+    def broadcast_obj(self, obj: Any, src: int) -> Any:
+        return self.comm_id
 
 class RayCudaCommunicator(Communicator):
     """
@@ -31,7 +46,7 @@ class RayCudaCommunicator(Communicator):
         world_size: int,
         comm_id: tuple,
         rank: Optional[int],
-        actor_handles: list["ray.actor.ActorHandle"],
+        actor_handles: List["ray.actor.ActorHandle"],
         cuda_stream: Optional["torch.cuda.Stream"],
         use_communication_streams: bool = False,
     ):
@@ -52,15 +67,7 @@ class RayCudaCommunicator(Communicator):
                 rank == expected_rank), f"RayCudaCommunicator's rank {rank} "
             f"does not match expected rank {expected_rank}"
 
-            # FIXME(rui): fix host and port, or revamp CPU group integration
-            pg = StatelessProcessGroup.create(
-                host="localhost",
-                port=12345,
-                world_size=world_size,
-                rank=rank,
-                data_expiration_seconds=3600,
-                store_timeout=300,
-            )
+            pg = RayStatelessProcessGroup(rank, world_size, comm_id)
             device = AcceleratorContext.get().get_accelerator_devices()[0]
             self._pynccl = PyNcclCommunicator(pg, device=device)
         else:
@@ -154,7 +161,7 @@ class RayCudaCommunicator(Communicator):
         shape: Tuple[int],
         dtype: "torch.dtype",
         peer_rank: int,
-        allocator=Optional[TorchTensorAllocator],
+        allocator: Optional[TorchTensorAllocator],
     ) -> "torch.Tensor":
         """
         Receive a torch.Tensor from a peer and synchronize the current stream.
