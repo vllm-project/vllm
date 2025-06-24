@@ -252,14 +252,16 @@ def mteb_test_rerank_models(hf_runner,
                      max_model_len=None,
                      **vllm_extra_kwargs) as vllm_model:
 
+        model_config = vllm_model.model.llm_engine.model_config
+
         if model_info.architecture:
-            assert (model_info.architecture
-                    in vllm_model.model.llm_engine.model_config.architectures)
+            assert (model_info.architecture in model_config.architectures)
+        assert model_config.hf_config.num_labels == 1
 
         vllm_main_score = run_mteb_rerank(VllmMtebEncoder(vllm_model),
                                           tasks=MTEB_RERANK_TASKS,
                                           languages=MTEB_RERANK_LANGS)
-        vllm_dtype = vllm_model.model.llm_engine.model_config.dtype
+        vllm_dtype = model_config.dtype
 
     with hf_runner(model_info.name, is_cross_encoder=True,
                    dtype="float32") as hf_model:
