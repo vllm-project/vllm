@@ -9,6 +9,7 @@ from collections import deque
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from enum import Enum
 from typing import TYPE_CHECKING, Any, Optional
 
 import msgpack
@@ -30,6 +31,12 @@ logger = logging.getLogger(__name__)
 DEFAULT_MEM_POOL_SIZE_GB = 32
 DEFAULT_PING_SECONDS = 3
 DEFAULT_TIMEOUT_SECONDS = 3
+
+
+class CommunicationResult(Enum):
+    SUCCESS = 0
+    TIMEOUT = 1
+    EXCEPTION = 2
 
 
 @contextmanager
@@ -351,7 +358,7 @@ class P2pNcclEngine:
                                                      comm, tensor, rank ^ 1,
                                                      self.nccl_timeout_s,
                                                      self.recv_stream)
-                        if ret == 0:
+                        if ret == CommunicationResult.SUCCESS:
                             tensor_size = tensor.element_size() * tensor.numel(
                             )
                             if (self.buffer_size + tensor_size
@@ -576,7 +583,7 @@ class P2pNcclEngine:
                       peer_rank: int,
                       timeout: float,
                       stream=None) -> int:
-        result_code = 2
+        result_code = CommunicationResult.EXCEPTION
         abort_triggered = threading.Event()
 
         def timeout_watcher():
@@ -589,21 +596,21 @@ class P2pNcclEngine:
                         "timeout:%f", op_name, remote_address, timeout)
                 except Exception as e:
                     logger.error("🔴ncclCommAbort error: %s", e)
-                result_code = 1
+                result_code = CommunicationResult.TIMEOUT
 
         self.timers.submit(timeout_watcher)
 
         try:
             func(comm, tensor, peer_rank, stream)
-            result_code = 0
+            result_code = CommunicationResult.SUCCESS
         except Exception as e:
             logger.error("🔴%s failed, remote_address:%s, e:%s", op_name,
                          remote_address, e)
-            result_code = 2
+            result_code = CommunicationResult.EXCEPTION
         finally:
             abort_triggered.set()
 
-        if result_code != 0:
+        if result_code != CommunicationResult.SUCCESS:
             self.socks.pop(remote_address, None)
             self.comms.pop(remote_address, None)
             self.address_black_list[remote_address] = (time.time() +
