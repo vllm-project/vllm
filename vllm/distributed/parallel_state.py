@@ -26,7 +26,7 @@ import contextlib
 import gc
 import pickle
 import weakref
-from collections import namedtuple
+from collections import defaultdict, namedtuple
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from multiprocessing import shared_memory
@@ -1301,3 +1301,64 @@ def in_the_same_node_as(pg: Union[ProcessGroup, StatelessProcessGroup],
             aggregated_data += rank_data
 
     return [x == 1 for x in aggregated_data.tolist()]
+
+
+def node_count(pg: Union[ProcessGroup, StatelessProcessGroup]) -> int:
+    """
+    Returns the total number of nodes in the process group.
+    
+    This function works by having each rank determine how many ranks are
+    colocated with it (including itself), then sharing these counts across
+    all ranks to determine the number of unique nodes.
+    
+    Args:
+        pg: The process group to analyze
+        
+    Returns:
+        int: The total number of nodes
+    """
+    if isinstance(pg, ProcessGroup):
+        rank = torch.distributed.get_rank(group=pg)
+        world_size = torch.distributed.get_world_size(group=pg)
+    else:
+        rank = pg.rank
+        world_size = pg.world_size
+
+    if world_size == 1:
+        return 1
+
+    # Each rank determines how many ranks are colocated with it
+    # (including itself)
+    same_node_flags = in_the_same_node_as(pg, rank)
+    local_node_size = sum(same_node_flags)
+
+    # Create a tensor to collect all node sizes from all ranks
+    all_node_sizes = torch.tensor([local_node_size], dtype=torch.int32)
+
+    if isinstance(pg, ProcessGroup):
+        # Gather all node sizes to all ranks
+        gathered_sizes = [
+            torch.zeros_like(all_node_sizes) for _ in range(world_size)
+        ]
+        torch.distributed.all_gather(gathered_sizes, all_node_sizes, group=pg)
+        all_node_sizes = torch.cat(gathered_sizes)
+    else:
+        # For StatelessProcessGroup, collect sizes from all ranks
+        all_sizes = []
+        for i in range(world_size):
+            size_data = local_node_size if i == rank else None
+            broadcasted_size = pg.broadcast_obj(size_data, src=i)
+            all_sizes.append(broadcasted_size)
+        all_node_sizes = torch.tensor(all_sizes, dtype=torch.int32)
+
+    # Count unique node sizes to determine number of nodes
+    # Since all ranks on the same node will report the same node size,
+    # and ranks on different nodes will report different sizes,
+    # we can count unique combinations of (size, count_of_that_size)
+    unique_sizes = defaultdict[int, int](int)
+    for size in all_node_sizes.tolist():
+        unique_sizes[size] += 1
+
+    # Calculate number of nodes: for each unique size,
+    # the number of nodes with that size is count / size
+    return sum(count // size for size, count in unique_sizes.items())
