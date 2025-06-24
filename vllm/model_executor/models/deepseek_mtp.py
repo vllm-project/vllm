@@ -112,7 +112,10 @@ class DeepSeekMultiTokenPredictor(nn.Module):
             for idx in range(self.mtp_start_layer_idx,
                              self.mtp_start_layer_idx + self.num_mtp_layers)
         })
-
+        self.embed_tokens = VocabParallelEmbedding(
+            config.vocab_size,
+            config.hidden_size,
+        )
         self.logits_processor = LogitsProcessor(config.vocab_size)
 
     def forward(
