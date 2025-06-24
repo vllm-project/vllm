@@ -31,6 +31,10 @@ def is_fp8(x: Union[torch.dtype, torch.Tensor]) -> bool:
     return x == torch.float8_e4m3fn or x == torch.float8_e4m3fnuz
 
 
+def ceil_div(x: int, y: int) -> int:
+    return (x + y - 1) // y
+
+
 def cutlass_scaled_mm(
     A: torch.Tensor,
     B: torch.Tensor,
@@ -157,9 +161,6 @@ def apply_w8a8_block_fp8_linear(
 
     if current_platform.is_cuda():
         if current_platform.has_device_capability(100):
-
-            def ceil_div(x: int, y: int) -> int:
-                return (x + y - 1) // y
 
             use_cutlass = cutlass_block_fp8_supported and (
                 ceil_div(weight.shape[0], 128) == weight_scale.shape[0]

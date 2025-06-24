@@ -7,6 +7,8 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from vllm.model_executor.layers.quantization.utils.fp8_utils import ceil_div
+
 
 class BlockDiagonalCausalFromBottomRightMask:
 
@@ -397,9 +399,6 @@ def test_contexted_kv_attention(
         B_P_SIZE = 128
         assert (large_tile_size >= B_P_SIZE
                 ), f"Expect {large_tile_size=} to be larger than {B_P_SIZE=}"
-
-        def ceil_div(a, b):
-            return (a + b - 1) // b
 
         def pad_to_multiple(a, b):
             return ceil_div(a, b) * b

@@ -8,9 +8,7 @@ import torch
 from neuronxcc import nki
 from neuronxcc.nki.language import par_dim
 
-
-def ceil_div(a, b):
-    return (a + b - 1) // b
+from vllm.model_executor.layers.quantization.utils.fp8_utils import ceil_div
 
 
 def is_power_of_2(x):

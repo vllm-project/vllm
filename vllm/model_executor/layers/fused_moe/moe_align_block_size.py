@@ -5,12 +5,9 @@ from typing import Optional
 import torch
 
 from vllm import _custom_ops as ops
+from vllm.model_executor.layers.quantization.utils.fp8_utils import ceil_div
 from vllm.triton_utils import tl, triton
 from vllm.utils import round_up
-
-
-def ceil_div(a, b):
-    return (a + b - 1) // b
 
 
 @triton.jit
