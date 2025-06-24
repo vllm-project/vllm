@@ -14,6 +14,7 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType,
                                               is_quantized_kv_cache)
 from vllm.logger import init_logger
+from vllm.model_executor.layers.kv_cache import ReshapeAndCacheFlash
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
                                               CommonAttentionMetadata)
@@ -372,6 +373,8 @@ class FlexAttentionImpl(AttentionImpl):
         else:
             self.sliding_window = (-1, -1)
         self.kv_cache_dtype = kv_cache_dtype
+        self.reshape_and_cache_flash = ReshapeAndCacheFlash(
+            self.kv_cache_dtype)
         self.logits_soft_cap = logits_soft_cap
         if self.logits_soft_cap is not None:
             raise NotImplementedError(
@@ -441,13 +444,12 @@ class FlexAttentionImpl(AttentionImpl):
 
         key_cache, value_cache = kv_cache.unbind(0)
 
-        torch.ops._C_cache_ops.reshape_and_cache_flash(
+        self.reshape_and_cache_flash(
             key,
             value,
             key_cache,
             value_cache,
             attn_metadata.slot_mapping,
-            self.kv_cache_dtype,
             layer._k_scale,
             layer._v_scale,
         )

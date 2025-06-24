@@ -17,6 +17,7 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
 from vllm.attention.layer import Attention
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
+from vllm.model_executor.layers.kv_cache import ReshapeAndCacheFlash
 from vllm.v1.attention.backends.flash_attn import use_cascade_attention
 from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
                                               CommonAttentionMetadata,
@@ -543,6 +544,8 @@ class FlashInferImpl(AttentionImpl):
         else:
             self.sliding_window = (sliding_window - 1, 0)
         self.kv_cache_dtype = kv_cache_dtype
+        self.reshape_and_cache_flash = ReshapeAndCacheFlash(
+            self.kv_cache_dtype)
         self.logits_soft_cap = logits_soft_cap
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
 
@@ -606,13 +609,12 @@ class FlashInferImpl(AttentionImpl):
             # and value[:num_actual_tokens] because the reshape_and_cache_flash
             # op uses the slot_mapping's shape to determine the number of
             # actual tokens.
-            torch.ops._C_cache_ops.reshape_and_cache_flash(
+            self.reshape_and_cache_flash(
                 key,
                 value,
                 kv_cache[:, 0],
                 kv_cache[:, 1],
                 attn_metadata.slot_mapping,
-                self.kv_cache_dtype,
                 layer._k_scale,
                 layer._v_scale,
             )

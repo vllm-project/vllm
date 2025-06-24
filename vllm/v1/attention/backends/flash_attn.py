@@ -17,6 +17,7 @@ from vllm.attention.utils.fa_utils import (flash_attn_supports_fp8,
                                            get_flash_attn_version)
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
+from vllm.model_executor.layers.kv_cache import ReshapeAndCacheFlash
 from vllm.platforms import current_platform
 from vllm.utils import cdiv
 from vllm.v1.attention.backends.utils import (
@@ -371,6 +372,8 @@ class FlashAttentionImpl(AttentionImpl):
         else:
             self.sliding_window = (sliding_window - 1, 0)
         self.kv_cache_dtype = kv_cache_dtype
+        self.reshape_and_cache_flash = ReshapeAndCacheFlash(
+            self.kv_cache_dtype)
         if logits_soft_cap is None:
             # In flash-attn, setting logits_soft_cap as 0 means no soft cap.
             logits_soft_cap = 0
@@ -454,13 +457,12 @@ class FlashAttentionImpl(AttentionImpl):
             # and value[:num_actual_tokens] because the reshape_and_cache_flash
             # op uses the slot_mapping's shape to determine the number of
             # actual tokens.
-            torch.ops._C_cache_ops.reshape_and_cache_flash(
+            self.reshape_and_cache_flash(
                 key,
                 value,
                 key_cache,
                 value_cache,
                 attn_metadata.slot_mapping,
-                self.kv_cache_dtype,
                 layer._k_scale,
                 layer._v_scale,
             )
