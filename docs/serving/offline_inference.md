@@ -3,10 +3,7 @@ title: Offline Inference
 ---
 [](){ #offline-inference }
 
-Run vLLM on a list of prompts in your own code.
-
-The offline API is based on the [LLM][vllm.LLM] class.
-Initialize the vLLM engine by creating a new `LLM` instance and specifying a model.
+Offline inference is possible in your own code using vLLM's [`LLM`][vllm.LLM] class.
 
 For example, the following code downloads the [`facebook/opt-125m`](https://huggingface.co/facebook/opt-125m) model from HuggingFace
 and runs it in vLLM using the default configuration.
@@ -14,16 +11,15 @@ and runs it in vLLM using the default configuration.
 ```python
 from vllm import LLM
 
+# Initalize the vLLM engine.
 llm = LLM(model="facebook/opt-125m")
 ```
 
-After you initialize the `LLM` instance, use the available APIs to perform model inference.
+After initializing the `LLM` instance, use the available APIs to perform model inference.
 The available APIs depend on the model type:
 
 - [Generative models][generative-models] output logprobs which are sampled from to obtain the final output text.
 - [Pooling models][pooling-models] output their hidden states directly.
-
-For more details about each API, see the preceding pages.
 
 !!! info
     [API Reference][offline-inference-api]
