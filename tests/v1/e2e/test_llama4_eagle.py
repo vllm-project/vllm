@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-# To run this file, run 
+# To run this file, run
 # pytest /path/to/vllm/tests/v1/e2e/test_llama4_eagle.py
 
 from __future__ import annotations
@@ -60,7 +60,9 @@ def sampling_config():
     "method_model_and_draft_model",
     [("eagle", "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
       "ronaldbxu/EAGLE-Llama-4-Maverick-17B-128E-Instruct")],
-    ids=["llama4_eagle",])
+    ids=[
+        "llama4_eagle",
+    ])
 def test_eagle_correctness(
     monkeypatch: pytest.MonkeyPatch,
     test_prompts: list[list[dict[str, Any]]],

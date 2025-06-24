@@ -97,13 +97,12 @@ def test_ngram_correctness(
         del spec_llm
 
 
-@pytest.mark.parametrize(
-    "method_model_and_draft_model",
-    [("eagle", "meta-llama/Llama-3.1-8B-Instruct",
-      "yuhuili/EAGLE-LLaMA3.1-Instruct-8B"),
-     ("eagle3", "meta-llama/Llama-3.1-8B-Instruct",
-      "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B")],
-    ids=["llama3_eagle", "llama3_eagle3"])
+@pytest.mark.parametrize("method_model_and_draft_model",
+                         [("eagle", "meta-llama/Llama-3.1-8B-Instruct",
+                           "yuhuili/EAGLE-LLaMA3.1-Instruct-8B"),
+                          ("eagle3", "meta-llama/Llama-3.1-8B-Instruct",
+                           "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B")],
+                         ids=["llama3_eagle", "llama3_eagle3"])
 def test_eagle_correctness(
     monkeypatch: pytest.MonkeyPatch,
     test_prompts: list[list[dict[str, Any]]],
@@ -119,8 +118,7 @@ def test_eagle_correctness(
 
         model_name = method_model_and_draft_model[1]
 
-        ref_llm = LLM(model=model_name,
-                      max_model_len=2048)
+        ref_llm = LLM(model=model_name, max_model_len=2048)
         ref_outputs = ref_llm.chat(test_prompts, sampling_config)
         del ref_llm
 
