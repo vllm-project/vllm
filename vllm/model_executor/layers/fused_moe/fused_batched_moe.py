@@ -39,6 +39,7 @@ def moe_mmk(
     # Offsets and masks
     offs_m,
     offs_n,
+    offs_bn,
     mask_m,
     # Block size for block-wise quantization
     group_n: tl.constexpr,
@@ -64,7 +65,7 @@ def moe_mmk(
         # block-wise
         if group_k > 0 and group_n > 0:
             a_scale_ptrs = a_scale_ptr + offs_m * stride_asm
-            offs_bsn = offs_n // group_n
+            offs_bsn = offs_bn // group_n
             b_scale_ptrs = b_scale_ptr + offs_bsn * stride_bsn
 
         # per act token
@@ -142,7 +143,7 @@ def moe_mmk(
     elif use_w8a8:
         if group_k > 0 and group_n > 0:
             accumulator = accumulator.to(compute_type)
-        elif True or not per_act_token_quant:
+        else: #if True or not per_act_token_quant:
             accumulator = (accumulator * a_scale * b_scale).to(compute_type)
     else:
         accumulator = accumulator.to(compute_type)
@@ -178,6 +179,8 @@ def expert_triton_kernel(
     stride_bse,
     stride_bsk,
     stride_bsn,
+    # offsets
+    offs_bn,
     # Blockwise quantization data
     group_n,
     group_k,
@@ -222,6 +225,7 @@ def expert_triton_kernel(
         # Offsets and masks
         offs_m,
         offs_n,
+        offs_bn,
         mask_m,
         # Block size for block-wise quantization
         group_n,
@@ -315,12 +319,15 @@ def batched_triton_kernel(
     c_ptr = (c_ptr + expert_id * stride_ce + cta_m_start * stride_cm +
              cta_n_start * stride_cn)
 
+    offs_bn = (pid_n * BLOCK_N + tl.arange(0, BLOCK_N).to(tl.int64)) % N
+
     if use_fp8_w8a8:
         a_scale_ptr = a_scale_ptr + expert_id * stride_ase
         b_scale_ptr = b_scale_ptr + expert_id * stride_bse
         # block-wise
         if group_k > 0 and group_n > 0:
             a_scale_ptr = a_scale_ptr + cta_m_start * stride_asm
+            #b_scale_ptr = b_scale_ptr + offs_bn * stride_bsn
             # b group advancement?
         elif False and per_act_token_quant:
             a_scale_ptr = a_scale_ptr + cta_m_start * stride_asm
@@ -351,6 +358,8 @@ def batched_triton_kernel(
         stride_bse,
         stride_bsk,
         stride_bsn,
+        # offsets
+        offs_bn,
         # Blockwise quantization data
         group_n,
         group_k,
@@ -404,12 +413,13 @@ def invoke_moe_batched_triton_kernel(
     if B_scale is not None:
         if B_scale.ndim == 1:
             stride_bse = 1
-            stride_bsn = 0
             stride_bsk = 0
+            stride_bsn = 0
         else:
             stride_bse = B_scale.stride(0)
-            stride_bsn = B_scale.stride(1)
             stride_bsk = B_scale.stride(2)
+            stride_bsn = B_scale.stride(1)
+
     else:
         stride_bse = 0
         stride_bsk = 0

@@ -100,7 +100,7 @@ class BatchedMMTensors:
 @pytest.mark.parametrize(
     "dtype",
     [torch.float8_e4m3fn, torch.float32, torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("block_shape", [[128, 128]]) # [None])#, [128, 128]])
+@pytest.mark.parametrize("block_shape", [None, [128, 128]]) # [None])#, [128, 128]])
 @pytest.mark.parametrize("per_act_token_quant", [False, True])# [False])# ,True])
 def test_batched_mm(num_experts: int, max_tokens_per_expert: int, K: int,
                     N: int, dtype: torch.dtype,
@@ -162,8 +162,7 @@ def test_batched_mm(num_experts: int, max_tokens_per_expert: int, K: int,
 
     assert A_q.dtype == B_q.dtype
 
-    #A_scale.fill_(1)
-    B_scale.fill_(1)
+    #B_scale.fill_(0.5)
 
     invoke_moe_batched_triton_kernel(
         A_q,
