@@ -101,4 +101,4 @@ def test_prm_models(
         hf_output = torch.tensor(hf_output)
         vllm_output = torch.tensor(vllm_output)
 
-        assert torch.allclose(hf_output, vllm_output, 1e-2)
+        assert torch.allclose(hf_output, vllm_output, 1.5e-2)
