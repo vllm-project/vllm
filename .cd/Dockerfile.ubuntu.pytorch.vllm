@@ -38,10 +38,13 @@ RUN pip install datasets && \
     pip install pandas
 
 # Copy utility scripts and configuration
-RUN mkdir -p /root/scripts/settings/
-COPY entrypoint.py vllm_autocalc.py vllm_autocalc_rules.py /root/scripts/
-COPY settings/settings_vllm.csv settings/defaults.yaml settings/varlist_conf.yaml settings/template_vllm_server.sh /root/scripts/settings/
+RUN mkdir -p /root/scripts/
+COPY templates /root/scripts/templates/
+COPY entrypoints /root/scripts/entrypoints/
+COPY server_autoconfig /root/scripts/server_autoconfig/
+COPY benchmark_configurations /root/scripts/benchmark_configurations/
+COPY server_configurations /root/scripts/server_configurations/
 WORKDIR /root/scripts
 
 # Set entrypoint script
-ENTRYPOINT ["python3", "/root/scripts/entrypoint.py"]
+ENTRYPOINT ["python3", "-m", "entrypoints.entrypoint_main"]

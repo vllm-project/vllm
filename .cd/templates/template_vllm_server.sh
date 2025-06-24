@@ -3,8 +3,7 @@
 #@VARS
 
 ## Start server
-python3 -m vllm.entrypoints.openai.api_server \
-        --model $MODEL \
+vllm serve $MODEL \
         --block-size $BLOCK_SIZE \
         --dtype $DTYPE \
         --tensor-parallel-size $TENSOR_PARALLEL_SIZE \
@@ -15,4 +14,5 @@ python3 -m vllm.entrypoints.openai.api_server \
         --max-num-seqs $MAX_NUM_SEQS \
         --max-num-prefill-seqs $MAX_NUM_PREFILL_SEQS \
         --num-scheduler-steps 1 \
-        --disable-log-requests
+        --disable-log-requests \
+2>&1 | tee -a  logs/vllm_server.log
