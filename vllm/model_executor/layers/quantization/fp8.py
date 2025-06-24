@@ -3,7 +3,7 @@
 
 import functools
 import importlib.util
-from typing import Any, Callable, Optional, Union
+from typing import TYPE_CHECKING, Any, Callable, Optional, Union
 
 import torch
 import torch.nn.functional as F
@@ -38,6 +38,9 @@ from vllm.model_executor.parameter import (BlockQuantScaleParameter,
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
+
+if TYPE_CHECKING:
+    from vllm.model_executor.models.utils import WeightsMapper
 
 ACTIVATION_SCHEMES = ["static", "dynamic"]
 
@@ -101,6 +104,11 @@ class Fp8Config(QuantizationConfig):
     @classmethod
     def get_config_filenames(cls) -> list[str]:
         return []
+
+    def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
+        if self.ignored_layers is not None:
+            self.ignored_layers = hf_to_vllm_mapper.apply_list(
+                self.ignored_layers)
 
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> "Fp8Config":

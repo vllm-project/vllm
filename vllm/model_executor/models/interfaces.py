@@ -17,6 +17,7 @@ from .interfaces_base import is_pooling_model
 
 if TYPE_CHECKING:
     from vllm.attention import AttentionMetadata
+    from vllm.model_executor.models.utils import WeightsMapper
     from vllm.sequence import IntermediateTensors
 
 logger = init_logger(__name__)
@@ -492,20 +493,33 @@ def supports_cross_encoding(
 class SupportsQuant:
     """The interface required for all models that support quantization."""
 
-    packed_modules_mapping: ClassVar[dict[str, list[str]]] = {}
+    hf_to_vllm_mapper: ClassVar[Optional["WeightsMapper"]] = None
+    packed_modules_mapping: ClassVar[Optional[dict[str, list[str]]]] = None
     quant_config: Optional[QuantizationConfig] = None
 
     def __new__(cls, *args, **kwargs) -> Self:
         instance = super().__new__(cls)
+
+        # find config passed in arguments
         quant_config = cls._find_quant_config(*args, **kwargs)
         if quant_config is not None:
+
+            # attach config to model for general use
             instance.quant_config = quant_config
-            instance.quant_config.packed_modules_mapping.update(
-                cls.packed_modules_mapping)
+
+            # apply model mappings to config for proper config-model matching
+            if instance.hf_to_vllm_mapper is not None:
+                instance.quant_config.apply_vllm_mapper(
+                    instance.hf_to_vllm_mapper)
+            if instance.packed_modules_mapping is not None:
+                instance.quant_config.packed_modules_mapping.update(
+                    instance.packed_modules_mapping)
+
         return instance
 
     @staticmethod
     def _find_quant_config(*args, **kwargs) -> Optional[QuantizationConfig]:
+        """Find quant config passed through model constructor args"""
         from vllm.config import VllmConfig  # avoid circular import
 
         args_values = list(args) + list(kwargs.values())
