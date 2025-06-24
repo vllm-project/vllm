@@ -53,7 +53,6 @@ class ClassificationMixin(OpenAIServing):
 
             ctx.tokenizer = await self.engine_client.get_tokenizer(
                 ctx.lora_request)
-            self._set_tokenizer(ctx.tokenizer)
 
             if ctx.prompt_adapter_request is not None:
                 raise NotImplementedError(
@@ -65,6 +64,7 @@ class ClassificationMixin(OpenAIServing):
                 ctx.engine_prompts,
             ) = await self._preprocess_completion(
                 ctx.request,
+                ctx.tokenizer,
                 ctx.request.input,
                 truncate_prompt_tokens=ctx.request.truncate_prompt_tokens,
             )

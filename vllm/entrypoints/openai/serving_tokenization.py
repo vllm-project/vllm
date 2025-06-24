@@ -64,7 +64,6 @@ class OpenAIServingTokenization(OpenAIServing):
             ) = self._maybe_get_adapters(request)
 
             tokenizer = await self.engine_client.get_tokenizer(lora_request)
-            self._set_tokenizer(tokenizer)
 
             if isinstance(request, TokenizeChatRequest):
                 tool_dicts = (None if request.tools is None else
@@ -90,6 +89,7 @@ class OpenAIServingTokenization(OpenAIServing):
                 (request_prompts,
                  engine_prompts) = await self._preprocess_completion(
                      request,
+                     tokenizer,
                      request.prompt,
                      add_special_tokens=request.add_special_tokens,
                  )
@@ -137,7 +137,6 @@ class OpenAIServingTokenization(OpenAIServing):
         ) = self._maybe_get_adapters(request)
 
         tokenizer = await self.engine_client.get_tokenizer(lora_request)
-        self._set_tokenizer(tokenizer)
 
         self._log_inputs(request_id,
                          request.tokens,
@@ -150,6 +149,7 @@ class OpenAIServingTokenization(OpenAIServing):
 
         prompt_input = await self._tokenize_prompt_input_async(
             request,
+            tokenizer,
             request.tokens,
         )
         input_text = prompt_input["prompt"]

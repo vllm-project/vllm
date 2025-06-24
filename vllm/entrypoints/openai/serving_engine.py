@@ -8,7 +8,6 @@ import sys
 import time
 from collections.abc import AsyncGenerator, Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from contextvars import ContextVar
 from http import HTTPStatus
 from typing import (Annotated, Any, Callable, ClassVar, Generic, Optional,
                     TypeVar, Union, cast, overload)
@@ -81,9 +80,6 @@ from vllm.tracing import (contains_trace_headers, extract_trace_headers,
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
 from vllm.utils import (AsyncMicrobatchTokenizer, is_list_of,
                         merge_async_iterators, random_uuid)
-
-request_async_tokenizer: ContextVar[Optional[AsyncMicrobatchTokenizer]] = (
-    ContextVar("request_async_tokenizer", default=None))
 
 logger = init_logger(__name__)
 
@@ -228,39 +224,20 @@ class OpenAIServing:
 
         self._tokenizer_executor = ThreadPoolExecutor(max_workers=1)
 
-        self._async_tokenizer: Optional[AsyncMicrobatchTokenizer] = None
-
     def _set_tokenizer(self, tokenizer):
         """
         Return (and cache) an `AsyncMicrobatchTokenizer` bound to the 
         given tokenizer.
-
-        The cache key is the tokenizer instance itself. This guarantees that
-        distinct tokenizers each get their own `AsyncMicrobatchTokenizer`, 
-        while repeated calls with the same tokenizer re-use the cached wrapper.
         """
         if not hasattr(self, "_async_tokenizer_pool"):
             self._async_tokenizer_pool: dict[AnyTokenizer,
                                              AsyncMicrobatchTokenizer] = {}
 
-        tok = self._async_tokenizer_pool.get(tokenizer)
-        if tok is None:
-            tok = AsyncMicrobatchTokenizer(tokenizer)
-            self._async_tokenizer_pool[tokenizer] = tok
+        if tokenizer not in self._async_tokenizer_pool:
+            self._async_tokenizer_pool[tokenizer] = AsyncMicrobatchTokenizer(
+                tokenizer)
 
-        # Bind to this coroutine so downstream helpers
-        # pick up the correct tokenizer
-        request_async_tokenizer.set(tok)
-
-        return tok
-
-    @staticmethod
-    def _get_request_async_tokenizer() -> AsyncMicrobatchTokenizer:
-        """Get the current request's async tokenizer."""
-        tok = request_async_tokenizer.get()
-        if tok is None:
-            raise RuntimeError("Tokenizer not initialized for this request.")
-        return tok
+        return self._async_tokenizer_pool[tokenizer]
 
     async def _preprocess(
         self,
@@ -500,11 +477,12 @@ class OpenAIServing:
     async def _normalize_prompt_text_to_input(
         self,
         request: AnyRequest,
+        tokenizer: AnyTokenizer,
         prompt: str,
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]],
         add_special_tokens: bool,
     ) -> TextTokensPrompt:
-        async_tokenizer = self._get_request_async_tokenizer()
+        async_tokenizer = self._set_tokenizer(tokenizer)
 
         if (self.model_config.encoder_config is not None
                 and self.model_config.encoder_config.get(
@@ -536,10 +514,11 @@ class OpenAIServing:
     async def _normalize_prompt_tokens_to_input(
         self,
         request: AnyRequest,
+        tokenizer: AnyTokenizer,
         prompt_ids: list[int],
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]],
     ) -> TextTokensPrompt:
-        async_tokenizer = self._get_request_async_tokenizer()
+        async_tokenizer = self._set_tokenizer(tokenizer)
 
         if truncate_prompt_tokens is None:
             input_ids = prompt_ids
@@ -615,6 +594,7 @@ class OpenAIServing:
     async def _tokenize_prompt_input_async(
         self,
         request: AnyRequest,
+        tokenizer: AnyTokenizer,
         prompt_input: Union[str, list[int]],
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None,
         add_special_tokens: bool = True,
@@ -626,6 +606,7 @@ class OpenAIServing:
         """
         async for result in self._tokenize_prompt_inputs_async(
                 request,
+                tokenizer,
             [prompt_input],
                 truncate_prompt_tokens=truncate_prompt_tokens,
                 add_special_tokens=add_special_tokens,
@@ -636,6 +617,7 @@ class OpenAIServing:
     async def _tokenize_prompt_inputs_async(
         self,
         request: AnyRequest,
+        tokenizer: AnyTokenizer,
         prompt_inputs: Iterable[Union[str, list[int]]],
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None,
         add_special_tokens: bool = True,
@@ -649,6 +631,7 @@ class OpenAIServing:
             if isinstance(text, str):
                 yield await self._normalize_prompt_text_to_input(
                     request,
+                    tokenizer,
                     prompt=text,
                     truncate_prompt_tokens=truncate_prompt_tokens,
                     add_special_tokens=add_special_tokens,
@@ -656,6 +639,7 @@ class OpenAIServing:
             else:
                 yield await self._normalize_prompt_tokens_to_input(
                     request,
+                    tokenizer,
                     prompt_ids=text,
                     truncate_prompt_tokens=truncate_prompt_tokens,
                 )
@@ -663,6 +647,7 @@ class OpenAIServing:
     async def _tokenize_prompt_input_or_inputs_async(
         self,
         request: AnyRequest,
+        tokenizer: AnyTokenizer,
         input_or_inputs: Optional[Union[str, list[str], list[int],
                                         list[list[int]]]],
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None,
@@ -703,12 +688,14 @@ class OpenAIServing:
             if prompt_input["is_tokens"] is False:
                 task = self._normalize_prompt_text_to_input(
                     request,
+                    tokenizer,
                     prompt_input["content"],
                     truncate_prompt_tokens=truncate_prompt_tokens,
                     add_special_tokens=add_special_tokens)
             else:
                 task = self._normalize_prompt_tokens_to_input(
                     request,
+                    tokenizer,
                     prompt_input["content"],
                     truncate_prompt_tokens=truncate_prompt_tokens)
             tasks.append(task)
@@ -725,6 +712,7 @@ class OpenAIServing:
         request: Union[DetokenizeRequest, EmbeddingCompletionRequest,
                        RerankRequest, ClassificationRequest, ScoreRequest,
                        TokenizeCompletionRequest],
+        tokenizer: AnyTokenizer,
         input_or_inputs: Union[str, list[str], list[int], list[list[int]]],
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = ...,
         add_special_tokens: bool = ...,
@@ -735,6 +723,7 @@ class OpenAIServing:
     async def _preprocess_completion(
         self,
         request: CompletionRequest,
+        tokenizer: AnyTokenizer,
         input_or_inputs: Optional[Union[str, list[str], list[int],
                                         list[list[int]]]],
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = ...,
@@ -746,6 +735,7 @@ class OpenAIServing:
     async def _preprocess_completion(
         self,
         request: CompletionLikeRequest,
+        tokenizer: AnyTokenizer,
         input_or_inputs: Optional[Union[str, list[str], list[int],
                                         list[list[int]]]],
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None,
@@ -763,6 +753,7 @@ class OpenAIServing:
         (request_prompts_text, request_prompts_embeds
          ) = await self._tokenize_prompt_input_or_inputs_async(
              request,
+             tokenizer,
              input_or_inputs,
              truncate_prompt_tokens=truncate_prompt_tokens,
              add_special_tokens=add_special_tokens,
@@ -871,6 +862,7 @@ class OpenAIServing:
         if isinstance(request_prompt, str):
             prompt_inputs = await self._tokenize_prompt_input_async(
                 request,
+                tokenizer,
                 request_prompt,
                 truncate_prompt_tokens=truncate_prompt_tokens,
                 add_special_tokens=add_special_tokens,
