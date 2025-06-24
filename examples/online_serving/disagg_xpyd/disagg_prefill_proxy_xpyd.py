@@ -27,7 +27,7 @@ def _remove_oldest_instances(instances: dict[str, Any]) -> None:
         value = instances[oldest_key]
         if value[1] > time.time():
             break
-        print(f"Warn remove [HTTP:{oldest_key}, ZMQ:{value[0]}, "
+        print(f"🔴Remove [HTTP:{oldest_key}, ZMQ:{value[0]}, "
               f"stamp:{value[1]}]")
         instances.pop(oldest_key, None)
         oldest_key = next(iter(instances), None)
@@ -44,7 +44,7 @@ def _listen_for_register(poller, router_socket):
                 global prefill_instances
                 global prefill_cv
                 with prefill_cv:
-                    prefill_instances.pop(data["http_address"], None)
+                    node = prefill_instances.pop(data["http_address"], None)
                     prefill_instances[data["http_address"]] = (
                         data["zmq_address"],
                         time.time() + DEFAULT_PING_SECONDS,
@@ -55,7 +55,7 @@ def _listen_for_register(poller, router_socket):
                 global decode_instances
                 global decode_cv
                 with decode_cv:
-                    decode_instances.pop(data["http_address"], None)
+                    node = decode_instances.pop(data["http_address"], None)
                     decode_instances[data["http_address"]] = (
                         data["zmq_address"],
                         time.time() + DEFAULT_PING_SECONDS,
@@ -67,6 +67,9 @@ def _listen_for_register(poller, router_socket):
                     remote_address,
                     data,
                 )
+
+            if node is None:
+                print(f"🔵Add [HTTP:{data["http_address"]}, ZMQ:{data["http_address"]}")
 
 
 def start_service_discovery(hostname, port):

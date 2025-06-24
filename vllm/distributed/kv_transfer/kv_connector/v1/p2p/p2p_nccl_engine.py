@@ -54,7 +54,7 @@ def set_p2p_nccl_context(num_channels: str):
     for var in env_vars:
         original_values[var] = os.environ.get(var)
 
-    logger.info("set_p2p_nccl_context, original_values: %s", original_values)
+    logger.debug("set_p2p_nccl_context, original_values: %s", original_values)
 
     try:
         os.environ['NCCL_MAX_NCHANNELS'] = num_channels
@@ -274,6 +274,14 @@ class P2pNcclEngine:
         tensor_id: str,
         remote_address: typing.Optional[str] = None,
     ) -> torch.Tensor:
+        if remote_address in self.address_black_list:
+            if self.address_black_list[remote_address] > time.time():
+                logger.info(
+                    "⛔recv_tensor, remote_address:%s in address_black_list",
+                    remote_address)
+                return None
+            self.address_black_list.pop(remote_address, None)
+
         if self.send_type == "PUT" or self.send_type == "PUT_ASYNC":
             start_time = time.time()
             with self.recv_store_cv:
@@ -326,102 +334,117 @@ class P2pNcclEngine:
 
         return tensor
 
+    def _recv_store_add_tensor(self, tensor_id, tensor=None):
+        with self.recv_store_cv:
+            self.recv_store[tensor_id] = tensor
+            self._have_received_tensor_id(tensor_id)
+            self.recv_store_cv.notify()
+
     def _listen_for_requests(self):
         while True:
             socks = dict(self.poller.poll())
-            if self.router_socket in socks:
-                remote_address, message = self.router_socket.recv_multipart()
-                data = msgpack.loads(message)
-                if data["cmd"] == "NEW":
-                    unique_id = self.nccl.unique_id_from_bytes(
-                        bytes(data["unique_id"]))
-                    with torch.cuda.device(self.device):
-                        rank = 1
-                        with set_p2p_nccl_context(self.nccl_num_channels):
-                            comm: ncclComm_t = self.nccl.ncclCommInitRank(
-                                2, unique_id, rank)
-                        self.comms[remote_address.decode()] = (comm, rank)
-                        logger.info(
-                            "🤝ncclCommInitRank Success, %s👈%s, MyRank: %s",
-                            self.zmq_address, remote_address.decode(), rank)
-                elif data["cmd"] == "PUT":
-                    tensor_id = data["tensor_id"]
-                    try:
-                        tensor = torch.empty(data["shape"],
-                                             dtype=getattr(
-                                                 torch, data["dtype"]),
-                                             device=self.device)
-                        self.router_socket.send_multipart(
-                            [remote_address, b"0"])
-                        comm, rank = self.comms[remote_address.decode()]
-                        ret = self.recv_with_timeout(remote_address.decode(),
-                                                     comm, tensor, rank ^ 1,
-                                                     self.nccl_timeout_s,
-                                                     self.recv_stream)
-                        if ret == CommunicationResult.SUCCESS:
-                            tensor_size = tensor.element_size() * tensor.numel(
-                            )
-                            if (self.buffer_size + tensor_size
-                                    > self.buffer_size_threshold):
-                                # Store Tensor in memory pool
-                                addr = self.pool.store_tensor(tensor)
-                                tensor = (addr, tensor.dtype, tensor.shape)
-                                logger.warning(
-                                    "🔴[PUT]Recv Tensor, Out Of Threshold, "
-                                    "%s👈%s, data:%s, addr:%d",
-                                    self.zmq_address, remote_address.decode(),
-                                    data, addr)
-                            else:
-                                self.buffer_size += tensor_size
-                        else:
-                            tensor = None
-                            logger.warning(
-                                "🔴[PUT]Recv Tensor, Timeout, "
-                                "%s👈%s, data:%s", self.zmq_address,
-                                remote_address.decode(), data)
-
-                    except torch.cuda.OutOfMemoryError:
-                        self.router_socket.send_multipart(
-                            [remote_address, b"1"])
-                        tensor = None
-                        logger.warning(
-                            "🔴[PUT]Recv Tensor, Out Of Memory, %s👈%s, "
-                            "data:%s", self.zmq_address,
-                            remote_address.decode(), data)
-
-                    with self.recv_store_cv:
-                        self.recv_store[tensor_id] = tensor
-                        self._have_received_tensor_id(tensor_id)
-                        self.recv_store_cv.notify()
-
-                elif data["cmd"] == "GET":
-                    tensor_id = data["tensor_id"]
-                    with self.send_store_cv:
-                        tensor = self.send_store.pop(tensor_id, None)
-                        if tensor is not None:
-                            data = {
-                                "ret": 0,
-                                "shape": tensor.shape,
-                                "dtype":
-                                str(tensor.dtype).replace("torch.", "")
-                            }
-                            # LRU
-                            self.send_store[tensor_id] = tensor
-                            self._have_sent_tensor_id(tensor_id)
-                        else:
-                            data = {"ret": 1}
-
+            if self.router_socket not in socks:
+                continue
+            remote_address, message = self.router_socket.recv_multipart()
+            data = msgpack.loads(message)
+            remote = remote_address.decode()
+            if data["cmd"] == "NEW":
+                unique_id = self.nccl.unique_id_from_bytes(
+                    bytes(data["unique_id"]))
+                with torch.cuda.device(self.device):
+                    rank = 1
+                    with set_p2p_nccl_context(self.nccl_num_channels):
+                        comm: ncclComm_t = self.nccl.ncclCommInitRank(
+                            2, unique_id, rank)
+                    self.comms[remote] = (comm, rank)
+                    logger.info(
+                        "🤝ncclCommInitRank Success, %s👈%s, MyRank: %s",
+                        self.zmq_address, remote, rank)
+            elif data["cmd"] == "PUT":
+                tensor_id = data["tensor_id"]
+                try:
+                    tensor = torch.empty(data["shape"],
+                                         dtype=getattr(
+                                             torch, data["dtype"]),
+                                         device=self.device)
+                except torch.cuda.OutOfMemoryError:
+                    self._recv_store_add_tensor(tensor_id)
                     self.router_socket.send_multipart(
-                        [remote_address, msgpack.dumps(data)])
-
-                    if data["ret"] == 0:
-                        comm, rank = self.comms[remote_address.decode()]
-                        self._send(comm, tensor.to(self.device), rank ^ 1,
-                                   self.send_stream)
-                else:
+                        [remote_address, b"1"])
                     logger.warning(
-                        "🚧Unexpected, Received message from %s, data:%s",
-                        remote_address, data)
+                        "🔴[PUT]Recv Tensor, Out Of Memory, %s👈%s, data:%s",
+                        self.zmq_address, remote, data)
+                    continue
+
+                comm_rank = self.comms.get(remote)
+                if comm_rank is None:
+                    self._recv_store_add_tensor(tensor_id)
+                    self.router_socket.send_multipart(
+                        [remote_address, b"2"])
+                    logger.warning(
+                        "🔴[PUT]Recv Tensor, No NCCL, %s👈%s, data:%s",
+                        self.zmq_address, remote, data)
+                    continue
+
+                self.router_socket.send_multipart(
+                    [remote_address, b"0"])
+                comm, rank = comm_rank
+                ret = self.recv_with_timeout(remote, comm, tensor, rank ^ 1,
+                                             self.nccl_timeout_s,
+                                             self.recv_stream)
+                if ret != CommunicationResult.SUCCESS:
+                    self._recv_store_add_tensor(tensor_id)
+                    logger.warning(
+                        "🔴[PUT]Recv Tensor, Timeout, %s👈%s, data:%s",
+                        self.zmq_address, remote, data)
+                    continue
+
+                tensor_size = tensor.element_size() * tensor.numel()
+                if (self.buffer_size + tensor_size
+                        > self.buffer_size_threshold):
+                    # Store Tensor in memory pool
+                    addr = self.pool.store_tensor(tensor)
+                    tensor = (addr, tensor.dtype, tensor.shape)
+                    logger.warning(
+                        "🔴[PUT]Recv Tensor, Out Of Threshold, "
+                        "%s👈%s, data:%s, addr:%d",
+                        self.zmq_address, remote,
+                        data, addr)
+                else:
+                    self.buffer_size += tensor_size
+                self._recv_store_add_tensor(tensor_id, tensor)
+                logger.debug(
+                    "🔵[PUT]Recv Tensor, %s👈%s, data:%s",
+                    self.zmq_address, remote, data)
+
+            elif data["cmd"] == "GET":
+                tensor_id = data["tensor_id"]
+                with self.send_store_cv:
+                    tensor = self.send_store.pop(tensor_id, None)
+                    if tensor is not None:
+                        data = {
+                            "ret": 0,
+                            "shape": tensor.shape,
+                            "dtype":
+                            str(tensor.dtype).replace("torch.", "")
+                        }
+                        # LRU
+                        self.send_store[tensor_id] = tensor
+                        self._have_sent_tensor_id(tensor_id)
+                    else:
+                        data = {"ret": 1}
+
+                self.router_socket.send_multipart(
+                    [remote_address, msgpack.dumps(data)])
+
+                if data["ret"] == 0:
+                    comm, rank = self.comms[remote]
+                    self._send(comm, tensor.to(self.device), rank ^ 1,
+                               self.send_stream)
+            else:
+                logger.warning(
+                    "🚧Unexpected, Received message from %s, data:%s",
+                    remote_address, data)
 
     def _have_sent_tensor_id(self, tensor_id: str):
         request_id = tensor_id.split('#')[0]
@@ -590,10 +613,14 @@ class P2pNcclEngine:
             nonlocal result_code
             if not abort_triggered.wait(timeout):
                 try:
+                    logger.error(
+                        "🐞Before ncclCommAbort, %s failed, remote_address:%s, "
+                        "timeout:%f", op_name, remote_address, timeout)
+                    now = time.time()
                     self.nccl.ncclCommAbort(comm)
                     logger.error(
-                        "🔴ncclCommAbort, %s failed, remote_address:%s, "
-                        "timeout:%f", op_name, remote_address, timeout)
+                        "🐞After ncclCommAbort, %s failed, remote_address:%s, "
+                        "timeout:%f, take:%f", op_name, remote_address, timeout, time.time() - now)
                 except Exception as e:
                     logger.error("🔴ncclCommAbort error: %s", e)
                 result_code = CommunicationResult.TIMEOUT
@@ -604,7 +631,7 @@ class P2pNcclEngine:
             func(comm, tensor, peer_rank, stream)
             result_code = CommunicationResult.SUCCESS
         except Exception as e:
-            logger.error("🔴%s failed, remote_address:%s, e:%s", op_name,
+            logger.error("🐞%s failed, remote_address:%s, e:%s", op_name,
                          remote_address, e)
             result_code = CommunicationResult.EXCEPTION
         finally:
@@ -615,6 +642,10 @@ class P2pNcclEngine:
             self.comms.pop(remote_address, None)
             self.address_black_list[remote_address] = (time.time() +
                                                        self.nccl_timeout_s)
+            logger.error(
+                "🐞Add address_black_list, %s failed, remote_address:%s, "
+                "timeout:%f", op_name, remote_address, timeout)
+
         return result_code
 
     def send_with_timeout(self,
