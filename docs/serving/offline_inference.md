@@ -3,10 +3,10 @@ title: Offline Inference
 ---
 [](){ #offline-inference }
 
-You can run vLLM in your own code on a list of prompts.
+Run vLLM on a list of prompts in your own code.
 
 The offline API is based on the [LLM][vllm.LLM] class.
-To initialize the vLLM engine, create a new instance of `LLM` and specify the model to run.
+Initialize the vLLM engine by creating a new `LLM` instance and specifying a model.
 
 For example, the following code downloads the [`facebook/opt-125m`](https://huggingface.co/facebook/opt-125m) model from HuggingFace
 and runs it in vLLM using the default configuration.
@@ -17,20 +17,20 @@ from vllm import LLM
 llm = LLM(model="facebook/opt-125m")
 ```
 
-After initializing the `LLM` instance, you can perform model inference using various APIs.
-The available APIs depend on the type of model that is being run:
+After you initialize the `LLM` instance, use the available APIs to perform model inference.
+The available APIs depend on the model type:
 
 - [Generative models][generative-models] output logprobs which are sampled from to obtain the final output text.
 - [Pooling models][pooling-models] output their hidden states directly.
 
-Please refer to the above pages for more details about each API.
+For more details about each API, see the preceding pages.
 
 !!! info
     [API Reference][offline-inference-api]
 
 ### Ray Data LLM API
 
-Ray Data offers an alternative offline inference API that uses vLLM as the underlying engine.
+Ray Data LLM is an alternative offline inference API that uses vLLM as the underlying engine.
 This API adds several batteries-included capabilities that simplify large-scale, GPU-efficient inference:
 
 * Streaming execution processes datasets that exceed aggregate cluster memory.
@@ -41,4 +41,4 @@ This API adds several batteries-included capabilities that simplify large-scale,
 The following example shows how to run batched inference with Ray Data and vLLM: 
 <gh-file:examples/offline_inference/batch_llm_inference.py>
 
-Learn more about the Ray Data LLM API: https://docs.ray.io/en/latest/data/working-with-llms.html
+For more information about the Ray Data LLM API, see the [Ray Data LLM documentation](https://docs.ray.io/en/latest/data/working-with-llms.html).
