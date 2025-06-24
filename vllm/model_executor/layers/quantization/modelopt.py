@@ -405,8 +405,6 @@ class ModelOptFp8MoEMethod:
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias,
         )
-        # from vllm.model_executor.layers.fused_moe.cutlass_moe import (
-        #     cutlass_moe_fp8)
         from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
         return fused_experts(
             x,

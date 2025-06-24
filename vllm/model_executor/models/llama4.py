@@ -395,18 +395,11 @@ class Llama4Model(LlamaModel):
                                                    torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
-            # (".qkv_proj", ".q_proj", "q"),
-            # (".qkv_proj", ".k_proj", "k"),
-            # (".qkv_proj", ".v_proj", "v"),
-            # (".gate_up_proj", ".gate_proj", 0),
-            # (".gate_up_proj", ".up_proj", 1),
-            (".self_attn.qkv_proj", ".self_attn.q_proj", "q"),
-            (".self_attn.qkv_proj", ".self_attn.k_proj", "k"),
-            (".self_attn.qkv_proj", ".self_attn.v_proj", "v"),
-            (".shared_expert.gate_up_proj", ".shared_expert.gate_proj", 0),
-            (".shared_expert.gate_up_proj", ".shared_expert.up_proj", 1),
-            (".feed_forward.gate_up_proj", ".feed_forward.gate_proj", 0),
-            (".feed_forward.gate_up_proj", ".feed_forward.up_proj", 1),
+            (".qkv_proj", ".q_proj", "q"),
+            (".qkv_proj", ".k_proj", "k"),
+            (".qkv_proj", ".v_proj", "v"),
+            (".gate_up_proj", ".gate_proj", 0),
+            (".gate_up_proj", ".up_proj", 1),
         ]
         fused_experts_params = False
         expert_params_mapping = FusedMoE.make_expert_params_mapping(
