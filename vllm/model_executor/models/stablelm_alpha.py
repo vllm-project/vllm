@@ -330,8 +330,9 @@ class StableLMAlphaForCausalLM(nn.Module, SupportsPP):
         self.config = config
         self.quant_config = quant_config
 
-        self.model = StableLMAlphaModel(vllm_config=vllm_config,
-                                        prefix=maybe_prefix(prefix, "model"))
+        self.transformer = StableLMAlphaModel(vllm_config=vllm_config,
+                                              prefix=maybe_prefix(
+                                                  prefix, "transformer"))
 
         self.lm_head = ParallelLMHead(config.vocab_size,
                                       config.hidden_size,
@@ -339,7 +340,7 @@ class StableLMAlphaForCausalLM(nn.Module, SupportsPP):
                                       prefix=f"{prefix}.lm_head")
 
         if getattr(self.config, "tie_word_embeddings", False):
-            self.lm_head.weight = self.model.embed_tokens.weight
+            self.lm_head.weight = self.transformer.embed_tokens.weight
 
         self.logits_processor = LogitsProcessor(config.vocab_size)
 
@@ -347,13 +348,13 @@ class StableLMAlphaForCausalLM(nn.Module, SupportsPP):
         def _make_empty_intermediate_tensors(
                 batch_size: int, dtype: torch.dtype,
                 device: torch.device) -> IntermediateTensors:
-            return self.model.make_empty_intermediate_tensors(
+            return self.transformer.make_empty_intermediate_tensors(
                 batch_size, dtype, device)
 
         self.make_empty_intermediate_tensors = _make_empty_intermediate_tensors
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
+        return self.transformer.get_input_embeddings(input_ids)
 
     def forward(
         self,
@@ -363,8 +364,8 @@ class StableLMAlphaForCausalLM(nn.Module, SupportsPP):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        hidden_states = self.model(input_ids, positions, intermediate_tensors,
-                                   inputs_embeds)
+        hidden_states = self.transformer(input_ids, positions,
+                                         intermediate_tensors, inputs_embeds)
         return hidden_states
 
     def compute_logits(
