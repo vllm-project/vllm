@@ -10,6 +10,7 @@ Ray Data provides functionality for:
 * Reading and writing to most popular file formats and cloud object storage.
 * Streaming execution, so you can run inference on datasets that far exceed
   the aggregate RAM of the cluster.
+* Scale up the workload without code changes.
 * Automatic sharding, load-balancing, and autoscaling across a Ray cluster,
   with built-in fault-tolerance and retry semantics.
 * Continuous batching that keeps vLLM replicas saturated and maximises GPU
