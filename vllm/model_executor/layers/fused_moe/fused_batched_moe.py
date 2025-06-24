@@ -74,18 +74,8 @@ def moe_mmk(
             a_scale_ptrs = a_scale_ptr + offs_m * stride_asm
             a_scale = tl.load(a_scale_ptrs, mask=mask_m, other=0.0)[:,None]
 
-            b_scale_ptrs = b_scale_ptr + offs_n[None, :] * stride_bsn
+            b_scale_ptrs = b_scale_ptr + offs_bn[None, :] * stride_bsn
             b_scale = tl.load(b_scale_ptrs)
-
-
-            # Load per-token scale for activations
-            # + (expert_id * stride_ase)??
-            #a_scale_ptrs = a_scale_ptr + offs_m * stride_asm
-            #a_scale = tl.load(a_scale_ptrs, mask=mask_m, other=0.0)[:, None]
-
-            # TODO: probably not correct
-            #b_scale_ptrs = b_scale_ptr + expert_id * stride_bse #+ offs_n[None, :] * stride_bsn
-            #b_scale = tl.load(b_scale_ptrs)
 
         # tensor-wise
         else:
@@ -133,10 +123,6 @@ def moe_mmk(
         # Advance the ptrs to the next K block.
         a_ptrs += BLOCK_K * stride_ak
         b_ptrs += BLOCK_K * stride_bk
-
-        if False and per_act_token_quant:
-            a_scale_ptrs += BLOCK_K * stride_ask
-            b_scale_ptrs += BLOCK_K * stride_bsk
 
     if use_w8a16:
         accumulator = (accumulator * b_scale).to(compute_type)
@@ -329,9 +315,9 @@ def batched_triton_kernel(
             a_scale_ptr = a_scale_ptr + cta_m_start * stride_asm
             #b_scale_ptr = b_scale_ptr + offs_bn * stride_bsn
             # b group advancement?
-        elif False and per_act_token_quant:
+        elif per_act_token_quant:
             a_scale_ptr = a_scale_ptr + cta_m_start * stride_asm
-            b_scale_ptr = b_scale_ptr + cta_n_start * stride_bsn
+            # b_scale_ptr = b_scale_ptr + cta_n_start * stride_bsn
 
     expert_triton_kernel(
         a_ptr,
