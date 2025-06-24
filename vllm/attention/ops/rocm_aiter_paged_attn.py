@@ -12,6 +12,16 @@ from vllm.utils import cdiv
 FP8_DTYPE = current_platform.fp8_dtype()
 
 
+def asm_V_shuffle(VC):
+    # [num_blocks, num_kv_heads, head_size, block_size]
+    x = 16 // VC.element_size()
+    num_blocks, num_kv_heads, head_size, block_size = VC.shape
+    VC = VC.view(num_blocks, num_kv_heads, head_size, block_size // x, x)
+    # [num_blocks, num_kv_heads, block_size/X, head_size, X]
+    VC = VC.permute(0, 1, 3, 2, 4).contiguous()
+    return VC
+
+
 class AITERPagedAttention(PagedAttention):
 
     @staticmethod
@@ -37,8 +47,8 @@ class AITERPagedAttention(PagedAttention):
             value_cache = value_cache.view(kv_cache_torch_dtype)
 
             rocm_aiter.reshape_and_cache_with_pertoken_quant(
-                key, value, key_cache, value_cache, k_scale, v_scale,
-                slot_mapping.flatten(), True)
+                key, value, key_cache, asm_V_shuffle(value_cache), k_scale,
+                v_scale, slot_mapping.flatten(), True)
 
     @staticmethod
     def forward_decode(
@@ -92,11 +102,15 @@ class AITERPagedAttention(PagedAttention):
                 (f"{blocksparse_block_size=} needs to be a multiple of"
                  f"{block_size=} used in block_tables.")
 
-        output = torch.empty_like(query)
         block_size = value_cache.shape[3]
         max_num_blocks_per_seq = cdiv(max_seq_len, block_size)
 
-        rocm_aiter.pa_fwd_asm(query, key_cache, value_cache, block_tables,
-                              seq_lens, max_num_blocks_per_seq, k_scale,
-                              v_scale, output)
-        return output
+        return rocm_aiter.pa_fwd_asm(query,
+                                     key_cache,
+                                     asm_V_shuffle(value_cache),
+                                     block_tables,
+                                     seq_lens,
+                                     max_num_blocks=max_num_blocks_per_seq,
+                                     K_QScale=k_scale,
+                                     max_qlen=1,
+                                     V_QScale=v_scale)
