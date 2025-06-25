@@ -46,8 +46,8 @@ class StructuredOutputManager:
         # compilation, so we set it to half the number of CPUs.
         max_workers = max(1, (multiprocessing.cpu_count() + 1) // 2)
         self.executor = ThreadPoolExecutor(max_workers=max_workers)
-        self.tokenizer = None if vllm_config.model_config.skip_tokenizer_init else \
-            init_tokenizer_from_configs(
+        self.tokenizer = None if vllm_config.model_config.skip_tokenizer_init \
+            else init_tokenizer_from_configs(
                 model_config=self.vllm_config.model_config,
                 scheduler_config=self.vllm_config.scheduler_config,
                 lora_config=self.vllm_config.lora_config,
