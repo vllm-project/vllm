@@ -1054,12 +1054,21 @@ def compute_max_diff(output, output_ref):
         torch.abs(output_ref))
 
 
-def torch_moe(a, w1, w2, score, topk, expert_map):
+def torch_experts(a: torch.Tensor,
+                  w1: torch.Tensor,
+                  w2: torch.Tensor,
+                  topk_weight: torch.Tensor,
+                  topk_ids: torch.Tensor,
+                  global_num_experts: int = -1,
+                  expert_map: Optional[torch.Tensor] = None) -> torch.Tensor:
+    assert (global_num_experts == -1
+            or (global_num_experts == w1.shape[0] and expert_map is None)
+            or (expert_map is not None
+                and global_num_experts == expert_map.shape[0]))
+    topk = topk_ids.shape[1]
     B, D = a.shape
     a = a.view(B, -1, D).repeat(1, topk, 1).reshape(-1, D)
     out = torch.zeros(B * topk, w2.shape[1], dtype=a.dtype, device=a.device)
-    score = torch.softmax(score, dim=-1, dtype=torch.float32)
-    topk_weight, topk_ids = torch.topk(score, topk)
     topk_weight = topk_weight.view(-1)
     topk_ids = topk_ids.view(-1)
     if expert_map is not None:
@@ -1071,6 +1080,19 @@ def torch_moe(a, w1, w2, score, topk, expert_map):
                 a[mask] @ w1[i].transpose(0, 1)) @ w2[i].transpose(0, 1)
     return (out.view(B, -1, w2.shape[1]) *
             topk_weight.view(B, -1, 1).to(out.dtype)).sum(dim=1)
+
+
+def torch_moe(a: torch.Tensor,
+              w1: torch.Tensor,
+              w2: torch.Tensor,
+              score: torch.Tensor,
+              topk: int,
+              global_num_experts: int = -1,
+              expert_map: Optional[torch.Tensor] = None) -> torch.Tensor:
+    score = torch.softmax(score, dim=-1, dtype=torch.float32)
+    topk_weight, topk_ids = torch.topk(score, topk)
+    return torch_experts(a, w1, w2, topk_weight, topk_ids, global_num_experts,
+                         expert_map)
 
 
 def torch_moe_single(a, w, score, topk):
