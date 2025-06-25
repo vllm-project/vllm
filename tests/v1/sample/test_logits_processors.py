@@ -17,6 +17,7 @@ from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.utils import is_pin_memory_available
 from vllm.v1.sample.logits_processor import (BatchUpdate, BatchUpdateBuilder,
+                                             MinTokensLogitsProcessor,
                                              MoveDirectionality)
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.worker.utils import (STR_LOGITS_BIAS_LOGITPROC_ID,
@@ -124,7 +125,7 @@ def _generate_test_fakes(batch_size: int, device: str) -> LogitsprocsTestFakes:
 def _sampling_params_from_logitproc(logitproc_id: str) -> SamplingParams:
     """Customize request SamplingParams for a specified logitproc"""
     # SamplingParams for req with no logitproc
-    kwargs = {"min_p": 0, "logit_bias": None, "min_tokens": 0}
+    kwargs = {"min_p": 0.0, "logit_bias": None, "min_tokens": 0}
     if fxn := logitsprocs_test_mapping[logitproc_id].gen_request_fxn:
         fxn(kwargs)
     return SamplingParams(**kwargs)
@@ -164,23 +165,24 @@ def _generate_mixed_logitsprocs_batch_params(
     ]
 
 
-def _logit_bias_params(kwargs: dict) -> None:
-    """Logit bias config"""
-    kwargs["logit_bias"] = {
-        random.randint(0, VOCAB_SIZE - 1): random.choice([-0.1, 0.2])
-    }
-
-
 def _raise_error_invalid(
     msg_suffix: str,
     batch_index: int,
     request_params: LogitsProcsRequestParams,
     step_idx: int,
+    err_cls: type[Exception] = ValueError,
 ) -> None:
-    raise ValueError(f"Validation failed for step={step_idx}, "
-                     f"batch_index={batch_index}, "
-                     f"workload_index={request_params.workload_index}, "
-                     f"req_params={request_params}. Reason: {msg_suffix}")
+    raise err_cls(f"Validation failed for step={step_idx}, "
+                  f"batch_index={batch_index}, "
+                  f"workload_index={request_params.workload_index}, "
+                  f"req_params={request_params}. Reason: {msg_suffix}")
+
+
+def _logit_bias_params(kwargs: dict) -> None:
+    """Logit bias config"""
+    kwargs["logit_bias"] = {
+        random.randint(0, VOCAB_SIZE - 1): random.choice([-0.1, 0.2])
+    }
 
 
 def _logit_bias_validate(
@@ -284,12 +286,57 @@ def _min_tokens_validate(
     step_idx: int,
 ) -> None:
     """Validate min-tokens logitsproc applied correctly"""
-    num_out_tokens = len(request_params.out_tokens)
-    min_reached = num_out_tokens >= MIN_TOKENS_LEN_THRESHOLD
-    stop_token_ids = request_params.params.all_stop_token_ids
+    ref_num_out_tokens = len(request_params.out_tokens)
+    min_reached = ref_num_out_tokens >= MIN_TOKENS_LEN_THRESHOLD
+    ref_all_stop_token_ids = request_params.params.all_stop_token_ids
+    mt_lp: MinTokensLogitsProcessor = (
+        test_fakes.sampling_metadata.logitsprocs.get_logitsproc_by_id(
+            STR_MIN_TOKENS_LOGITPROC_ID))
+    assert isinstance(mt_lp, MinTokensLogitsProcessor)
+    min_tok = mt_lp.min_toks.get(batch_index, None)
+
+    # Validate min-token logits processor state
+    if min_tok:
+        (_, out_tok, all_stop_token_ids) = min_tok
+        num_out_tokens = len(out_tok)
+        if num_out_tokens != ref_num_out_tokens:
+            _raise_error_invalid(msg_suffix=(
+                "Number of output tokens in min-token logit processor "
+                f"request metadata ({num_out_tokens}) does not match "
+                f"reference ({ref_num_out_tokens})."),
+                                 batch_index=batch_index,
+                                 request_params=request_params,
+                                 step_idx=step_idx)
+        if ref_all_stop_token_ids != all_stop_token_ids:
+            _raise_error_invalid(msg_suffix=(
+                "Stop token ids do not match reference; all_stop_token_ids: "
+                f"{sorted(all_stop_token_ids)}, ref_all_stop_token_ids: "
+                f"{sorted(ref_all_stop_token_ids)}"),
+                                 batch_index=batch_index,
+                                 request_params=request_params,
+                                 step_idx=step_idx)
+        if min_reached:
+            _raise_error_invalid(msg_suffix=(
+                "Expected min-tokens request with min reached, but batch "
+                "index is recognized by min-tokens logits processor."),
+                                 batch_index=batch_index,
+                                 request_params=request_params,
+                                 step_idx=step_idx,
+                                 err_cls=RuntimeError)
+
+    elif not min_reached:
+        _raise_error_invalid(msg_suffix=(
+            "Expected min-tokens request with min not reached, but batch "
+            "index is not recognized by min-tokens logits processor."),
+                             batch_index=batch_index,
+                             request_params=request_params,
+                             step_idx=step_idx,
+                             err_cls=RuntimeError)
+
+    # Validate min-token logits
     for token_id in range(VOCAB_SIZE):
         logits_for_token = logits_new[batch_index][token_id]
-        if token_id in stop_token_ids and not min_reached:
+        if token_id in ref_all_stop_token_ids and not min_reached:
             if logits_for_token != -float("inf"):
                 _raise_error_invalid(
                     msg_suffix=(f"Token {token_id} is a stop token and "
@@ -303,7 +350,7 @@ def _min_tokens_validate(
             if logits_for_token == -float("inf"):
                 _raise_error_invalid(
                     msg_suffix=(f"Token {token_id} should not be masked but "
-                                f"is (output len={num_out_tokens})"),
+                                f"is (output len={ref_num_out_tokens})"),
                     batch_index=batch_index,
                     request_params=request_params,
                     step_idx=step_idx)
@@ -318,10 +365,19 @@ def _none_validate(
     step_idx: int,
 ) -> None:
     """Validate that no logits processors are applied"""
-    if not torch.all(logits_new[batch_index] == (test_fakes.logits[
-            persistent_batch[batch_index].workload_index].cpu())):
+    logits = (
+        test_fakes.logits[persistent_batch[batch_index].workload_index].cpu())
+    ref_logits = logits_new[batch_index]
+    if not torch.all(ref_logits == logits):
+        mismatch_toks = (ref_logits
+                         != logits).nonzero(as_tuple=True)[0].tolist()
+        mismatch_strs = []
+        for token in mismatch_toks:
+            val = float(logits[token])
+            ref_val = float(ref_logits[token])
+            mismatch_strs.append(f"({token=},{val=},{ref_val=})")
         _raise_error_invalid(msg_suffix=(
-            "Unexpected modification of logits with no logitsprocs"),
+            f"Unexpected modification of logits: {','.join(mismatch_strs)}"),
                              batch_index=batch_index,
                              request_params=request_params,
                              step_idx=step_idx)
@@ -351,8 +407,10 @@ logitsprocs_test_mapping = {
 def _get_test_cases() -> list[list[str]]:
     """Each test case is a set of logitsprocs"""
     logitsprocs_ids = list(logitsprocs_test_mapping.keys())
-    return [[logitproc_id]
-            for logitproc_id in logitsprocs_ids] + [logitsprocs_ids]
+    return [[STR_NO_LOGITPROC]] + [[logitproc_id, STR_NO_LOGITPROC]
+                                   for logitproc_id in logitsprocs_ids
+                                   if logitproc_id != STR_NO_LOGITPROC
+                                   ] + [logitsprocs_ids]
 
 
 def _generate_fake_step_update(
