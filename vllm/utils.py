@@ -3000,8 +3000,8 @@ class GrowingMemoryObjGraph:
             objgraph.show_backrefs(obj,
                                    max_depth=10,
                                    too_many=5,
-                                   filename=os.path.join(
-                                       analysis_dir, f"{gt[0]}_backrefs.dot"))
+                                   filename=os.path.join(analysis_dir,
+                                                         f"{gt[0]}_backrefs.dot"))
 
             # Generate reference graph
             objgraph.show_refs(obj,
@@ -3013,10 +3013,10 @@ class GrowingMemoryObjGraph:
             # Generate reference chain to module
             objgraph.show_chain(objgraph.find_backref_chain(
                 obj, objgraph.is_proper_module),
-                filename=os.path.join(
-                    analysis_dir, f"{gt[0]}_chain.dot"))
+                filename=os.path.join(analysis_dir,
+                                      f"{gt[0]}_chain.dot"))
 
-        output_file_path = os.path.join(analysis_dir, 
+        output_file_path = os.path.join(analysis_dir,
                                         "growing_memory_stats.log")
         try:
             with open(output_file_path, 'w', encoding='utf-8') as f:
