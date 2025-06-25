@@ -68,7 +68,7 @@ docker run \
 
 echo "run script..."
 echo
-docker exec "$CONTAINER_NAME" /bin/bash -c ".buildkite/scripts/hardware_ci/run_bm.sh"
+docker exec "$CONTAINER_NAME" /bin/bash -c ".buildkite/scripts/tpu/run_bm.sh"
 
 echo "copy result back..."
 VLLM_LOG="$LOG_ROOT/$TEST_NAME"_vllm_log.txt
