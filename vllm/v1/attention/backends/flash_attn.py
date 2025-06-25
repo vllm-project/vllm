@@ -140,6 +140,9 @@ def _get_sliding_window_configs(
 class FlashAttentionMetadataBuilder(
         AttentionMetadataBuilder[FlashAttentionMetadata]):
     full_cudagraph_supported: ClassVar[bool] = get_flash_attn_version() >= 2
+    # FlashAttn support a unified varlen fwd kernel for prefill-decode phase, so
+    # it's ok to either separate attention routine or not for both FA2 or 3.
+    force_separate_routine: ClassVar[Optional[bool]] = None
 
     def __init__(self, runner: "GPUModelRunner", kv_cache_spec: AttentionSpec,
                  block_table: BlockTable):

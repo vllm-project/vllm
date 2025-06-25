@@ -2338,12 +2338,29 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 block_table_i,
             )
 
-            if (self.full_cuda_graph
-                    and not attn_metadata_builder_i.full_cudagraph_supported):
-                raise ValueError(
-                    f"Full CUDAGraph not supported for "
-                    f"{attn_backend_i.__name__}. Turn off CompilationConfig."
-                    f"full_cuda_graph or use a different attention backend.")
+            if self.full_cuda_graph:
+                if not attn_metadata_builder_i.full_cudagraph_supported:
+                    raise ValueError(
+                        f"Full CUDAGraph not supported for "
+                        f"{attn_backend_i.__name__}. Turn off "
+                        f"CompilationConfig.full_cuda_graph or use a different"
+                        f" attention backend.")
+
+                # check if the attention backends enforce to have separate
+                # routines for mix prefill-decode and pure decode phase
+                if attn_metadata_builder_i.force_separate_routine is not None \
+                    and self.compilation_config.separate_attention_rountine\
+                    != attn_metadata_builder_i.force_separate_routine:
+
+                    expected = attn_metadata_builder_i.force_separate_routine
+                    logger.warning_once(
+                        f"Full CUDAGraph for {attn_backend_i.__name__}"
+                        f"enforce CompilationConfig.separate_attention"
+                        f"_rountine as: {expected}. Now set it to: "
+                        f"{expected}.")
+
+                    self.compilation_config.separate_attention_rountine = \
+                                                                    expected
 
             self.attn_backends.append(attn_backend_i)
             self.attn_metadata_builders.append(attn_metadata_builder_i)

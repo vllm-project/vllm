@@ -55,6 +55,7 @@ class FlashMLAMetadata(MLACommonMetadata[FlashMLADecodeMetadata]):
 
 class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
     full_cudagraph_supported: ClassVar[bool] = True  # Decode-only
+    force_separate_routine: ClassVar[Optional[bool]] = True
 
     def __init__(self, runner, kv_cache_spec: AttentionSpec,
                  block_table: BlockTable):

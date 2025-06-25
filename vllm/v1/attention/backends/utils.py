@@ -4,7 +4,7 @@ import abc
 import functools
 from abc import abstractmethod
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, ClassVar, Generic, TypeVar
+from typing import TYPE_CHECKING, ClassVar, Generic, Optional, TypeVar
 
 import numpy as np
 import torch
@@ -50,6 +50,9 @@ M = TypeVar("M")
 class AttentionMetadataBuilder(abc.ABC, Generic[M]):
     # Does this backend/builder support CUDA Graphs for attention.
     full_cudagraph_supported: ClassVar[bool] = False
+    # If full cudagraph support, select if this attention backend
+    # enforce separate rountine to be True, False or None (free).
+    force_separate_routine: ClassVar[Optional[bool]] = None
 
     @abstractmethod
     def build(self, common_prefix_len: int,

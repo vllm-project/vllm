@@ -219,6 +219,7 @@ class FlashInferMetadata:
 
 class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
     full_cudagraph_supported: ClassVar[bool] = True
+    force_separate_routine: ClassVar[Optional[bool]] = True
 
     def __init__(self, runner: GPUModelRunner, kv_cache_spec: AttentionSpec,
                  block_table: BlockTable):
