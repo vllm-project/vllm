@@ -404,9 +404,12 @@ class InputPreprocessor:
 
         inputs: Union[TokenInputs, MultiModalInputs]
         if multi_modal_data := parsed_content.get("multi_modal_data"):
-            mm_processor_kwargs = parsed_content.get(
-                "mm_processor_kwargs") or {}
-            mm_processor_kwargs.update(tokenization_kwargs)
+            mm_processor_kwargs = {}
+            if tokenization_kwargs is not None:
+                mm_processor_kwargs.update(tokenization_kwargs)
+            if (processor_kwargs := parsed_content.get("mm_processor_kwargs")):
+                mm_processor_kwargs.update(processor_kwargs)
+
             inputs = self._process_multimodal(
                 prompt_text,
                 multi_modal_data,
