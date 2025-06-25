@@ -470,7 +470,6 @@ class P2pNcclEngine:
                             request_id, None)
                         self.recv_request_id_to_tensor_ids.pop(
                             request_id, None)
-                    addr = 0
                     if isinstance(tensor, tuple):
                         addr, _, _ = tensor
                         self.pool.free(addr)
