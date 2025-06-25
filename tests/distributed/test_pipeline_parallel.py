@@ -82,7 +82,7 @@ class PPTestSettings:
             parallel_setups=[
                 ParallelSetup(tp_size=tp_base,
                               pp_size=pp_base,
-                              eager_mode=True,
+                              eager_mode=False,
                               chunked_prefill=False),
                 ParallelSetup(tp_size=tp_base,
                               pp_size=2 * pp_base,

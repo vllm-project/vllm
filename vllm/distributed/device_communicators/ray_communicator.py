@@ -34,9 +34,10 @@ class RayStatelessProcessGroup(StatelessProcessGroup):
 
 class RayCudaCommunicator(Communicator):
     """
-    Communicator for a group of Compiled Graph actors on NVIDIA GPU.
+    Communicator for a group of Ray Compiled Graph actors on NVIDIA GPU.
+    This is based on the PyNCCL communicator.
 
-    The Compiled Graph execution leverages this internally to support
+    The Ray Compiled Graph execution uses this communicator to support
     communication between actors in the group.
     """
 
