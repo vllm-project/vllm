@@ -1993,7 +1993,7 @@ class TranslationRequest(OpenAIBaseModel):
     """
 
     # TODO support additional sampling parameters
-    # --8<-- [start:transcription-sampling-params]
+    # --8<-- [start:translation-sampling-params]
     temperature: float = Field(default=0.0)
     """The sampling temperature, between 0 and 1.
 
@@ -2002,7 +2002,7 @@ class TranslationRequest(OpenAIBaseModel):
     will use [log probability](https://en.wikipedia.org/wiki/Log_probability)
     to automatically increase the temperature until certain thresholds are hit.
     """
-    # --8<-- [end:transcription-sampling-params]
+    # --8<-- [end:translation-sampling-params]
 
     # --8<-- [start:translation-extra-params]
     language: Optional[str] = None

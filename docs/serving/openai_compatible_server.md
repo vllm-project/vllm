@@ -57,7 +57,7 @@ We currently support the following OpenAI APIs:
     - Only applicable to [embedding models](../models/pooling_models.md) (`--task embed`).
 - [Transcriptions API][transcriptions-api] (`/v1/audio/transcriptions`)
     - Only applicable to Automatic Speech Recognition (ASR) models (OpenAI Whisper) (`--task generate`).
-- [Translation API][translation-api] (`/v1/audio/translations`)
+- [Translation API][translations-api] (`/v1/audio/translations`)
     - Only applicable to Automatic Speech Recognition (ASR) models (OpenAI Whisper) (`--task generate`).
 
 In addition, we have the following custom APIs:
@@ -396,13 +396,13 @@ Code example: <gh-file:examples/online_serving/openai_translation_client.py>
 The following [sampling parameters][sampling-params] are supported.
 
 ```python
---8<-- "vllm/entrypoints/openai/protocol.py:transcription-sampling-params"
+--8<-- "vllm/entrypoints/openai/protocol.py:translation-sampling-params"
 ```
 
 The following extra parameters are supported:
 
 ```python
---8<-- "vllm/entrypoints/openai/protocol.py:transcription-extra-params"
+--8<-- "vllm/entrypoints/openai/protocol.py:translation-extra-params"
 ```
 
 [](){ #tokenizer-api }
