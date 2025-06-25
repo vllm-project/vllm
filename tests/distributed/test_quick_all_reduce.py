@@ -105,17 +105,17 @@ def eager_quickreduce(
 
         # Size over 8MB is sufficient for custom quick allreduce.
         sz = 16 * 1024 * 1024
-        fa = get_tp_group().device_communicator.ca_comm
+        fa = get_tp_group().device_communicator.qr_comm
         inp = torch.tensor([1.0 * ((i) % 23) for i in range(sz)],
                            dtype=torch.float16,
                            device=device)
-        out = fa.qr_all_reduce(inp)
+        out = fa.quick_all_reduce(inp)
         torch.testing.assert_close(out, inp * tp_size, atol=2.5, rtol=0.1)
 
         inp = torch.tensor([1.0 * ((i) % 23) for i in range(sz)],
                            dtype=torch.bfloat16,
                            device=device)
-        out = fa.qr_all_reduce(inp)
+        out = fa.quick_all_reduce(inp)
         torch.testing.assert_close(out, inp * tp_size, atol=2.5, rtol=0.1)
 
 
