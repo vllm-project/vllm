@@ -116,7 +116,7 @@ class XPUPlatform(Platform):
 
         # check and update parallel config
         parallel_config = vllm_config.parallel_config
-        parallel_config.worker_cls = "vllm.v1.worker.xpu_worker.XPUWorker"
+        parallel_config.worker_cls = "vllm.v1.worker.gpu_worker.Worker"
 
         if parallel_config.distributed_executor_backend is None:
             if parallel_config.world_size > 1:
@@ -195,3 +195,27 @@ class XPUPlatform(Platform):
     @classmethod
     def device_count(cls) -> int:
         return torch.xpu.device_count()
+
+    @classmethod
+    def empty_cache(cls, ):
+        torch.xpu.empty_cache()
+
+    @classmethod
+    def reset_peak_memory_stats(cls):
+        torch.xpu.reset_peak_memory_stats()
+
+    @classmethod
+    def mem_get_info(cls):
+        return torch.xpu.mem_get_info()
+
+    @classmethod
+    def memory_stats(cls):
+        return torch.xpu.memory_stats()
+
+    @classmethod
+    def memory_reserved(cls):
+        return torch.xpu.memory_reserved()
+
+    @classmethod
+    def synchronize(cls):
+        return torch.xpu.synchronize()

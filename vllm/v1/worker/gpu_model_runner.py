@@ -346,12 +346,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def _init_device_properties(self) -> None:
         """Initialize attributes from torch.cuda.get_device_properties
         """
-        self.device_properties = torch.cuda.get_device_properties(self.device)
-        self.num_sms = self.device_properties.multi_processor_count
+        from vllm.platforms import current_platform
+
+        if current_platform.is_cuda():
+            self.device_properties = torch.cuda.get_device_properties(
+                self.device)
+            self.num_sms = self.device_properties.multi_processor_count
+        else:
+            self.num_sms = 0
 
     # Note: used for model runner override.
     def _sync_device(self) -> None:
-        torch.cuda.synchronize()
+        from vllm.platforms import current_platform
+        current_platform.synchronize()
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         """Update the cached states and the persistent batch with the scheduler
