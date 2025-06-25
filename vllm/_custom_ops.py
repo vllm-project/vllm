@@ -5,7 +5,6 @@ import contextlib
 from typing import TYPE_CHECKING, Optional, Union
 
 import torch
-import torch.library
 
 import vllm.envs as envs
 from vllm.logger import init_logger
