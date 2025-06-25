@@ -243,7 +243,7 @@ class P2pNcclEngine:
                 if tensor_id not in self.recv_store:
                     logger.warning(
                         "🔴[PUT]Recv From %s, tensor_id:%s not exist, rank:%d",
-                        remote_address, tensor_id,self.rank)
+                        remote_address, tensor_id, self.rank)
                 tensor = self.recv_store.get(tensor_id)
 
             if tensor is not None:
@@ -256,7 +256,7 @@ class P2pNcclEngine:
                                          tensor.numel())
             else:
                 logger.warning("🔴[PUT]Recv From %s, tensor_id:%s, rank:%d",
-                               remote_address, tensor_id,self.rank)
+                               remote_address, tensor_id, self.rank)
             return tensor
 
         # GET
@@ -305,18 +305,15 @@ class P2pNcclEngine:
                         comm: ncclComm_t = self.nccl.ncclCommInitRank(
                             2, unique_id, rank)
                     self.comms[remote] = (comm, rank)
-                    logger.info(
-                        "🤝ncclCommInitRank Success, %s👈%s, MyRank:%s",
-                        self.zmq_address, remote, rank)
+                    logger.info("🤝ncclCommInitRank Success, %s👈%s, MyRank:%s",
+                                self.zmq_address, remote, rank)
             elif data["cmd"] == "PUT":
                 tensor_id = data["tensor_id"]
                 try:
                     tensor = torch.empty(data["shape"],
-                                         dtype=getattr(
-                                             torch, data["dtype"]),
+                                         dtype=getattr(torch, data["dtype"]),
                                          device=self.device)
-                    self.router_socket.send_multipart(
-                        [remote_address, b"0"])
+                    self.router_socket.send_multipart([remote_address, b"0"])
                     comm, rank = self.comms[remote]
                     self._recv(comm, tensor, rank ^ 1, self.recv_stream)
                     tensor_size = tensor.element_size() * tensor.numel()
@@ -333,13 +330,11 @@ class P2pNcclEngine:
                         self.buffer_size += tensor_size
 
                 except torch.cuda.OutOfMemoryError:
-                    self.router_socket.send_multipart(
-                        [remote_address, b"1"])
+                    self.router_socket.send_multipart([remote_address, b"1"])
                     tensor = None
                     logger.warning(
                         "🔴[PUT]Recv Tensor, Out Of Memory, %s👈%s, "
-                        "data:%s", self.zmq_address,
-                        remote, data)
+                        "data:%s", self.zmq_address, remote, data)
 
                 with self.recv_store_cv:
                     self.recv_store[tensor_id] = tensor
@@ -354,8 +349,7 @@ class P2pNcclEngine:
                         data = {
                             "ret": 0,
                             "shape": tensor.shape,
-                            "dtype":
-                            str(tensor.dtype).replace("torch.", "")
+                            "dtype": str(tensor.dtype).replace("torch.", "")
                         }
                         # LRU
                         self.send_store[tensor_id] = tensor
@@ -468,15 +462,16 @@ class P2pNcclEngine:
         finished_sending: set[str] = set()
         if self.send_type != "GET":
             for request_id in self.send_request_id_to_tensor_ids:
-                if (num_layers ==
-                        len(self.send_request_id_to_tensor_ids[request_id])):
+                if (num_layers == len(
+                        self.send_request_id_to_tensor_ids[request_id])):
                     finished_sending.add(request_id)
             for request_id in finished_sending:
                 self.send_request_id_to_tensor_ids.pop(request_id, None)
         # Retrieve requests that have already received the KV cache.
         finished_recving: set[str] = set()
         for request_id in self.recv_request_id_to_tensor_ids:
-            if num_layers == len(self.recv_request_id_to_tensor_ids[request_id]):
+            if num_layers == len(
+                    self.recv_request_id_to_tensor_ids[request_id]):
                 finished_recving.add(request_id)
         for request_id in finished_recving:
             self.recv_request_id_to_tensor_ids.pop(request_id, None)

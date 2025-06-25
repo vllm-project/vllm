@@ -266,7 +266,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
 
     def wait_for_save(self):
         """P2pNcclConnector does not save explicitly."""
-        pass
+        return
 
     def get_finished(
             self, finished_req_ids: set[str],
@@ -434,7 +434,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
 
         self.chunked_prefill.pop(request.request_id, None)
 
-        return True, None
+        return self.is_producer, None
 
     # ==============================
     # Static methods
