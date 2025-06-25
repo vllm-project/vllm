@@ -3976,11 +3976,11 @@ class CompilationConfig:
     performance benefits for smaller models."""
     separate_attention_routine: bool = False
     """
-    Enable a distinct attention calls routine under an attention backend for full
-    cuda graph capturing. This is because some attention backends like FlashMLA,
-    FlashInfer, FA2, etc. implement different branches for mix prefill-decode and
-    pure decode cases. This flag enables us to potentially capture the cudagraph
-    separately for each branch.
+    Enable a distinct attention calls routine under an attention backend for
+    full cuda graph capturing. This is because some attention backends like
+    FlashMLA, FlashInfer, FA2, etc. implement different branches for mix
+    prefill-decode and pure decode cases. This flag enables us to potentially
+    capture the cudagraph separately for each branch.
     """
 
     pass_config: PassConfig = field(default_factory=PassConfig)
@@ -4187,7 +4187,10 @@ class CompilationConfig:
         # the runtime batch_size is not cudagraph captured. This is only
         # supported for separate_attention_routine.
         if self.separate_attention_routine:
-            assert self.full_cuda_graph, "separate_attention_routine requires full_cuda_graph to be True"
+            assert self.full_cuda_graph, (
+                "separate_attention_routine requires "
+                "full_cuda_graph to be True"
+            )
         if not self.splitting_ops:
             self.splitting_ops = [
                 "vllm.unified_attention",

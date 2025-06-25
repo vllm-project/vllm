@@ -236,7 +236,9 @@ class FullCudagraphWrapper:
         self.graph_pool = graph_pool
         self.sym_shape_indices = sym_shape_indices
 
-        self.separate_attention_routine = vllm_config.compilation_config.separate_attention_routine
+        self.separate_attention_routine = (
+            vllm_config.compilation_config.separate_attention_routine
+        )
 
         self.is_debugging_mode = envs.VLLM_LOGGING_LEVEL == "DEBUG"
 
@@ -282,7 +284,7 @@ class FullCudagraphWrapper:
         # eagerly run the compiled graphs, which should be cudagraph capturable
         # as a whole.
         
-        concrete_size_entries = self.concrete_size_entries  # default as general usage
+        concrete_size_entries = self.concrete_size_entries  
         if self.separate_attention_routine and forward_context.is_pure_decoding:
             concrete_size_entries = self.concrete_size_entries_decode
 
@@ -324,15 +326,16 @@ class FullCudagraphWrapper:
             entry.input_addresses = input_addresses
             cudagraph = torch.cuda.CUDAGraph()
 
-            with ExitStack() as stack:
+            with ExitStack(), \
+                torch.cuda.graph(cudagraph, pool=self.graph_pool):
                 # mind-exploding: carefully manage the reference and memory.
-                with torch.cuda.graph(cudagraph, pool=self.graph_pool):
-                    # `output` is managed by pytorch's cudagraph pool
-                    output = entry.runnable(*args)
-                    # by converting it to weak ref,
-                    # the original `output` will immediately be released
-                    # to save memory. 
-                    output = weak_ref_tensors(output)
+                
+                # `output` is managed by pytorch's cudagraph pool
+                output = entry.runnable(*args)
+                # by converting it to weak ref,
+                # the original `output` will immediately be released
+                # to save memory. 
+                output = weak_ref_tensors(output)
 
             # here we always use weak ref for the output
             # to save memory

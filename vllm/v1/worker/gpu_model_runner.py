@@ -1339,7 +1339,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 if self.full_cuda_graph else True
         # Note: When skip_attention_cuda_graphs is always False and
         # compilition_config.separate_attention_routine is True, as in FA2,
-        # this flag helps to determine the correct routine to run for the full cudagraph.
+        # this flag helps to determine the correct routine for the full
+        # cudagraph.
         is_pure_decoding = num_scheduled_tokens == self.input_batch.num_reqs
 
         # Run the model.

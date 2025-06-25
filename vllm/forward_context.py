@@ -97,7 +97,7 @@ class ForwardContext:
     # determine whether to use a full cudagraph for attention or piecewise 
     # cudagraphs that skip the attention part. By default true, we use piecewise 
     # cudagraphs.
-    skip_attention_cuda_graphs: bool = True,
+    skip_attention_cuda_graphs: bool = True
     is_pure_decoding: bool = False
 
 

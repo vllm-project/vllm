@@ -227,14 +227,17 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self._prefill_wrapper = None  # Wrapper for prefill/append
         self._decode_wrapper = None  # Wrapper for decode
         self._decode_wrapper = None  # Wrapper for decode (general shape)
-        self.enable_cuda_graph = self.vllm_config.compilation_config.full_cuda_graph
+        self.enable_cuda_graph = (
+            self.vllm_config.compilation_config.full_cuda_graph
+        )
         if self.enable_cuda_graph:
             # For full cudagraph capture, one `decode_wrapper` for each batch
             # size is needed for FlashInfer.
-            self._decode_wrappers_cudagraph: dict[int, BatchDecodeWithPagedKVCacheWrapper] = {} 
-            self._decode_cudagraph_max_bs = min(runner.max_num_reqs, 
-                runner.cudagraph_batch_sizes[-1])
-            
+            self._decode_wrappers_cudagraph: dict[int,
+                BatchDecodeWithPagedKVCacheWrapper] = {} 
+            self._decode_cudagraph_max_bs = min(
+                runner.max_num_reqs, runner.cudagraph_batch_sizes[-1])
+
         self._cascade_wrapper = None  # Wrapper for cascade attention
 
         # Global hyperparameters shared by all attention layers
@@ -446,8 +449,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 use_cudagraph = (self.enable_cuda_graph and pure_decode and \
                         self._num_decodes <= self._decode_cudagraph_max_bs)
                 if use_cudagraph:
-                    num_input_tokens_decode = self.vllm_config.pad_for_cudagraph(
-                        self._num_decodes)
+                    num_input_tokens_decode = (
+                        self.vllm_config.pad_for_cudagraph(self._num_decodes)
+                    )
                 else:
                     num_input_tokens_decode = self._num_decodes
 
