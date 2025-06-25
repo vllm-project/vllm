@@ -4,7 +4,9 @@ DeepEP test utilities
 """
 import dataclasses
 import importlib
+import socket
 import traceback
+from contextlib import closing
 from typing import Callable, Optional
 
 import torch
@@ -79,6 +81,13 @@ def _worker_parallel_launch(
         torch.distributed.destroy_process_group()
 
 
+def find_free_port():
+    with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as s:
+        s.bind(('', 0))
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        return s.getsockname()[1]
+
+
 def parallel_launch(
     world_size: int,
     worker: Callable[Concatenate[ProcessGroupInfo, P], None],
@@ -92,7 +101,7 @@ def parallel_launch(
             world_size,
             world_size,
             0,
-            "tcp://localhost:29500",
+            f"tcp://localhost:{find_free_port()}",
             worker,
         ) + args,
         nprocs=world_size,
