@@ -453,7 +453,7 @@ def _generate_fake_step_update(
     # Get added requests from workload
     for add_req_params in workload_params[wdx:(wdx + num_step_add_replace)]:
         # Replace as many removed requests as possible with added requests
-        add_remove_idx = batch_update_builder.pop_removed_if_can()
+        add_remove_idx = batch_update_builder.pop_removed()
         batch_update_builder.added.append(
             (add_remove_idx, add_req_params.params, add_req_params.out_tokens))
         persistent_batch[add_remove_idx] = add_req_params
@@ -480,7 +480,7 @@ def _generate_fake_step_update(
             continue
         # last_nonempty_index is the highest persistent batch index that was
         # not removed
-        first_empty_index = batch_update_builder.peek_removed_if_can()
+        first_empty_index = batch_update_builder.peek_removed()
         assert first_empty_index is not None
         if first_empty_index > last_nonempty_index:
             break
@@ -488,7 +488,7 @@ def _generate_fake_step_update(
         # that is less than last_nonempty_index
         #
         # move last_nonempty_index -> first_empty_index
-        batch_update_builder.pop_removed_if_can()
+        batch_update_builder.pop_removed()
         condensed_to_idxs.add(first_empty_index)
         persistent_batch[first_empty_index] = persistent_batch[
             last_nonempty_index]

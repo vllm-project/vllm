@@ -59,18 +59,18 @@ class BatchUpdateBuilder:
     * All information about requests removed from persistent batch
       during a step is aggregated in self._removed through calls to
       self.removed_append() at the beginning of a step. This must happen
-      before the first time that self.removed, self.pop_removed_if_can()
-      or self.peek_removed_if_can() are invoked in a given step
-    * After the first time that self.removed, self.pop_removed_if_can()
-      or self.peek_removed_if_can() are read in a step, no new removals
+      before the first time that self.removed, self.pop_removed()
+      or self.peek_removed() are invoked in a given step
+    * After the first time that self.removed, self.pop_removed()
+      or self.peek_removed() are read in a step, no new removals
       are registered using self.removed_append()
     * Elements of self._removed are never directly modified, added or
       removed (i.e. modification is only via self.removed_append() and
-      self.pop_removed_if_can())
+      self.pop_removed())
     
     Guarantees under above assumptions:
     * self.removed is always sorted in descending order
-    * self.pop_removed_if_can() and self.peek_removed_if_can() both return
+    * self.pop_removed() and self.peek_removed() both return
       the lowest removed request index in the current step
     """
 
@@ -113,8 +113,8 @@ class BatchUpdateBuilder:
         the persistent batch.
 
         Must not be called after the first time
-        self.removed, self.pop_removed_if_can() or
-        self.peek_removed_if_can() are invoked.
+        self.removed, self.pop_removed() or
+        self.peek_removed() are invoked.
         
         Args:
           index: request index
@@ -127,14 +127,14 @@ class BatchUpdateBuilder:
     def has_removed(self) -> bool:
         return bool(self._removed)
 
-    def peek_removed_if_can(self) -> Optional[int]:
+    def peek_removed(self) -> Optional[int]:
         """Return lowest removed request index"""
         if self.has_removed():
             self._ensure_removed_sorted()
             return self._removed[-1]
         return None
 
-    def pop_removed_if_can(self) -> Optional[int]:
+    def pop_removed(self) -> Optional[int]:
         """Pop lowest removed request index"""
         if self.has_removed():
             self._ensure_removed_sorted()

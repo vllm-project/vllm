@@ -243,8 +243,7 @@ class InputBatch:
         return cast(list[str], self._req_ids)
 
     def _get_next_add_index(self) -> int:
-        if (req_index :=
-                self.batch_update_builder.pop_removed_if_can()) is not None:
+        if (req_index := self.batch_update_builder.pop_removed()) is not None:
             # Fill the empty index.
             return req_index
         # Append to end
@@ -509,14 +508,14 @@ class InputBatch:
                 last_req_index -= 1
 
             # Find the smallest empty index.
-            empty_index = self.batch_update_builder.peek_removed_if_can()
+            empty_index = self.batch_update_builder.peek_removed()
             assert empty_index is not None
             if empty_index >= last_req_index:
                 break
 
             # Move active request down into empty request
             # index.
-            self.batch_update_builder.pop_removed_if_can()
+            self.batch_update_builder.pop_removed()
             self.batch_update_builder.moved.append(
                 (last_req_index, empty_index,
                  MoveDirectionality.UNIDIRECTIONAL))
