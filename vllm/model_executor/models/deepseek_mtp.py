@@ -240,6 +240,12 @@ class DeepSeekMTP(nn.Module, SupportsPP):
                     if name.endswith(".bias") and name not in params_dict:
                         continue
 
+                    # According to DeepSeek-V3 Technical Report, MTP modules
+                    # shares embedding layer. We only load the first weights.
+                    if (spec_layer != self.model.mtp_start_layer_idx and
+                        ".layers" not in name):
+                        continue
+
                     param = params_dict[name]
                     weight_loader = getattr(param, "weight_loader",
                                             default_weight_loader)
@@ -251,17 +257,25 @@ class DeepSeekMTP(nn.Module, SupportsPP):
         """
         Rewrite the weight name to match the format of the original model.
         Add .mtp_block for modules in transformer layer block for spec layer
+        and rename shared layer weights to be top level.
         """
         spec_layer_weight_names = [
-            "enorm", "hnorm", "eh_proj", "shared_head"
+            "embed_tokens", "enorm", "hnorm", "eh_proj", "shared_head"
         ]
+        shared_weight_names = ["embed_tokens"]
         spec_layer_weight = False
+        shared_weight = False
         for weight_name in spec_layer_weight_names:
             if weight_name in name:
                 spec_layer_weight = True
+                if weight_name in shared_weight_names:
+                    shared_weight = True
                 break
         if not spec_layer_weight:
             # treat rest weights as weights for transformer layer block
             name = name.replace(f"model.layers.{spec_layer}.",
                                 f"model.layers.{spec_layer}.mtp_block.")
+        elif shared_weight:
+            # treat shared weights as top level weights
+            name = name.replace(f"model.layers.{spec_layer}.", "model.")
         return name
