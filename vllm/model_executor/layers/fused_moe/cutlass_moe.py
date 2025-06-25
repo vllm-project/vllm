@@ -174,6 +174,7 @@ def run_cutlass_moe_fp8(
         c1 = _resize_cache(workspace13, (M * topk, N * 2))
         c2 = _resize_cache(workspace2, (M * topk, N))
         c3 = _resize_cache(workspace13, (M * topk, K))
+        c1.fill_(0)
 
     c1.fill_(0)
 
