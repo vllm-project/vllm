@@ -1359,6 +1359,7 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
         local_size: int,
         original_max_position_embeddings: int,
         decode_meta: DualChunkFlashAttentionMetadata,
+        layer: Optional[AttentionLayer] = None,
     ):
         if not causal:
             raise ValueError(
@@ -1392,6 +1393,7 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
                 softmax_scale,
                 alibi_slopes,
                 causal=False,
+                layer=layer
             ))
         outputs_list.append(intra_output)
         softmax_lses_list.append(intra_softmax_lse)
@@ -1408,6 +1410,7 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
                     softmax_scale,
                     alibi_slopes,
                     causal=False,
+                    layer=layer
                 ))
             outputs_list.append(succ_output)
             softmax_lses_list.append(succ_softmax_lse)
@@ -1424,6 +1427,7 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
                     softmax_scale,
                     alibi_slopes,
                     causal=False,
+                    layer=layer
                 ))
             outputs_list.append(inter_output)
             softmax_lses_list.append(inter_softmax_lse)
@@ -1449,17 +1453,16 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
         softmax_scale: float,
         alibi_slopes: Optional[torch.Tensor],
         causal: bool,
+        layer: Optional[AttentionLayer] = None,
     ):
         fp8_attention = self.kv_cache_dtype.startswith("fp8")
         descale_shape = None
         q_descale = k_descale = v_descale = None
-        
         if fp8_attention:
             descale_shape = (cache_seqlens.shape[0], key_cache.shape[-2])
-            # Note: You'd need to pass the actual scale tensors from the layer
-            q_descale = torch.ones(descale_shape, device=query.device, dtype=torch.float32)
-            k_descale = torch.ones(descale_shape, device=query.device, dtype=torch.float32)
-            v_descale = torch.ones(descale_shape, device=query.device, dtype=torch.float32)
+            q_descale = layer._q_scale.expand(descale_shape)
+            k_descale = layer._k_scale.expand(descale_shape)
+            v_descale = layer._v_scale.expand(descale_shape)
 
         out, softmax_lse = flash_attn_with_kvcache(
             q=query,
