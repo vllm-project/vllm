@@ -546,10 +546,10 @@ class ModelConfig:
                                self.code_revision, self.config_format)
 
         if hf_overrides_kw:
-            logger.info("Overriding HF config with %s", hf_overrides_kw)
+            logger.debug("Overriding HF config with %s", hf_overrides_kw)
             hf_config.update(hf_overrides_kw)
         if hf_overrides_fn:
-            logger.info("Overriding HF config with %s", hf_overrides_fn)
+            logger.debug("Overriding HF config with %s", hf_overrides_fn)
             hf_config = hf_overrides_fn(hf_config)
 
         self.hf_config = hf_config
@@ -1947,8 +1947,8 @@ class ParallelConfig:
                         if get_current_placement_group():
                             backend = "ray"
             self.distributed_executor_backend = backend
-            logger.info("Defaulting to use %s for distributed inference",
-                        backend)
+            logger.debug("Defaulting to use %s for distributed inference",
+                         backend)
 
         if self.distributed_executor_backend is None and self.world_size == 1:
             self.distributed_executor_backend = "uni"
