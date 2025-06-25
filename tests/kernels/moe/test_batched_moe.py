@@ -95,8 +95,6 @@ def test_batched_mm(num_experts: int, max_tokens_per_expert: int, K: int,
         act_dtype = dtype
         quant_dtype = None
 
-    #print(f"TYPES {dtype}, {act_dtype}, {quant_dtype}")
-
     num_expert_tokens = torch.randint(low=0,
                                       high=max_tokens_per_expert,
                                       size=(num_experts, ),
@@ -225,8 +223,6 @@ def test_fused_moe_batched_experts(
                                                  block_shape=block_shape,
                                                  in_dtype=act_dtype,
                                                  quant_dtype=quant_dtype)
-
-    torch.set_printoptions(profile="full")
 
     with set_current_vllm_config(vllm_config):
         topk_weight, topk_ids, _ = fused_topk(a, score, topk, False)

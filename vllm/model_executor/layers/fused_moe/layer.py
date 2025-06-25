@@ -640,7 +640,13 @@ class FusedMoE(torch.nn.Module):
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
         self.params_dtype = params_dtype
-        all2all_manager = get_ep_group().device_communicator.all2all_manager
+
+        if ep_size is not None:
+            all2all_manager = get_ep_group().device_communicator.all2all_manager
+            world_size = (all2all_manager.world_size
+                          if all2all_manager is not None else 1)
+        else:
+            world_size = 1
 
         vllm_config = get_current_vllm_config()
         self.moe_parallel_config: FusedMoEParallelConfig = (
@@ -649,8 +655,7 @@ class FusedMoE(torch.nn.Module):
                           get_tensor_model_parallel_world_size()),
                 dp_size_=(dp_size if dp_size is not None else
                           get_dp_group().world_size),
-                world_size_=(all2all_manager.world_size
-                             if all2all_manager is not None else 1),
+                world_size_=world_size,
                 vllm_parallel_config=vllm_config.parallel_config))
 
         self.global_num_experts = num_experts + num_redundant_experts
