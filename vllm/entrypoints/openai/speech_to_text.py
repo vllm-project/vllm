@@ -159,16 +159,15 @@ class OpenAISpeechToText(OpenAIServing):
     translation."""
 
     def __init__(
-            self,
-            engine_client: EngineClient,
-            model_config: ModelConfig,
-            models: OpenAIServingModels,
-            *,
-            request_logger: Optional[RequestLogger],
-            return_tokens_as_token_ids: bool = False,
-            task_type: str = "transcribe",  # or "translate"
+        self,
+        engine_client: EngineClient,
+        model_config: ModelConfig,
+        models: OpenAIServingModels,
+        *,
+        request_logger: Optional[RequestLogger],
+        return_tokens_as_token_ids: bool = False,
+        task_type: Literal["transcribe", "translate"] = "transcribe",
     ):
-        assert task_type in ["transcribe", "translate"]
         super().__init__(engine_client=engine_client,
                          model_config=model_config,
                          models=models,
@@ -245,7 +244,7 @@ class OpenAISpeechToText(OpenAIServing):
         request: SpeechToTextRequest,
         raw_request: Request,
         response_class: type[T],
-        stream_generator_method: Callable,
+        stream_generator_method: Callable[..., AsyncGenerator[str, None]],
     ) -> Union[T, AsyncGenerator[str, None], ErrorResponse]:
         """Base method for speech-to-text operations like transcription and 
         translation."""
