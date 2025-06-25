@@ -39,25 +39,6 @@ class GteNewModel(VerifyAndUpdateConfig):
         }
 
 
-class JinaRobertaModel(GteNewModel):
-
-    @staticmethod
-    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
-        config = vllm_config.model_config.hf_config
-
-        assert config.__class__.__name__ == "XLMRobertaFlashConfig"
-
-        head_dim = config.hidden_size // config.num_attention_heads
-        config.rotary_kwargs = {
-            "head_size": head_dim,
-            "rotary_dim": getattr(config, "rotary_emb_dim", head_dim),
-            "max_position": config.max_position_embeddings,
-            "base": getattr(config, "rope_theta", config.rotary_emb_base),
-            "rope_scaling": getattr(config, "rope_scaling", None)
-        }
-        return config
-
-
 class NomicBertModel(VerifyAndUpdateConfig):
 
     @staticmethod
@@ -168,6 +149,27 @@ class Qwen3ForSequenceClassification(VerifyAndUpdateConfig):
             ("Try loading the original Qwen3 Reranker?, see: "
              "https://github.com/vllm-project/vllm/tree/main/examples/offline_inference/qwen3_reranker.py")
         config.num_labels = 1
+
+
+class XLMRobertaModel(GteNewModel):
+
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        config = vllm_config.model_config.hf_config
+
+        if config.position_embedding_type == "rotary":
+            # JinaRobertaModel
+            assert config.__class__.__name__ == "XLMRobertaFlashConfig"
+
+            head_dim = config.hidden_size // config.num_attention_heads
+            config.rotary_kwargs = {
+                "head_size": head_dim,
+                "rotary_dim": getattr(config, "rotary_emb_dim", head_dim),
+                "max_position": config.max_position_embeddings,
+                "base": getattr(config, "rope_theta", config.rotary_emb_base),
+                "rope_scaling": getattr(config, "rope_scaling", None)
+            }
+            return config
 
 
 class SnowflakeGteNewModel(VerifyAndUpdateConfig):
