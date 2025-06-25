@@ -2995,26 +2995,28 @@ class GrowingMemoryObjGraph:
             except IndexError:
                 logger.warning("Type %s has no available objects", gt[0])
                 continue
+        
+        # Generate back reference graph
+        objgraph.show_backrefs(
+            obj,
+            max_depth=10,
+            too_many=5,
+            filename=os.path.join(analysis_dir, f"{gt[0]}_backrefs.dot"),
+        )
 
-            # Generate back reference graph
-            objgraph.show_backrefs(obj,
-                                   max_depth=10,
-                                   too_many=5,
-                                   filename=os.path.join(analysis_dir,
-                                                         f"{gt[0]}_backrefs.dot"))
+        # Generate reference graph
+        objgraph.show_refs(
+            obj,
+            max_depth=10,
+            too_many=5,
+            filename=os.path.join(analysis_dir, f"{gt[0]}_refs.dot"),
+        )
 
-            # Generate reference graph
-            objgraph.show_refs(obj,
-                               max_depth=10,
-                               too_many=5,
-                               filename=os.path.join(
-                                   analysis_dir, f"{gt[0]}_refs.dot"))
-
-            # Generate reference chain to module
-            objgraph.show_chain(objgraph.find_backref_chain(
-                obj, objgraph.is_proper_module),
-                filename=os.path.join(analysis_dir,
-                                      f"{gt[0]}_chain.dot"))
+        # Generate reference chain to module
+        objgraph.show_chain(
+            objgraph.find_backref_chain(obj, objgraph.is_proper_module),
+            filename=os.path.join(analysis_dir, f"{gt[0]}_chain.dot"),
+        )
 
         output_file_path = os.path.join(analysis_dir,
                                         "growing_memory_stats.log")
