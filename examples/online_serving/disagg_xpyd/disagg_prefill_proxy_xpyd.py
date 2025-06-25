@@ -70,7 +70,7 @@ def _listen_for_register(poller, router_socket):
                 )
 
             if node is None:
-                print(f"🔵Add [HTTP:{data['http_address']}, ZMQ:{data['http_address']}")
+                print(f"🔵Add [HTTP:{data['http_address']}, ZMQ:{data['zmq_address']}")
 
 
 def start_service_discovery(hostname, port):
