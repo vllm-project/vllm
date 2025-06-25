@@ -90,8 +90,11 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
         """
         dummy_text = self.get_dummy_text(mm_counts)
         dummy_mm_data = self.get_dummy_mm_data(seq_len, mm_counts)
+        processor_kwargs = {"truncation": False}
 
-        return ProcessorInputs(prompt=dummy_text, mm_data=dummy_mm_data)
+        return ProcessorInputs(prompt=dummy_text,
+                               mm_data=dummy_mm_data,
+                               hf_processor_mm_kwargs=processor_kwargs)
 
     def _get_dummy_audios(
         self,

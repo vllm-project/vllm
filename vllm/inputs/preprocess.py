@@ -404,10 +404,13 @@ class InputPreprocessor:
 
         inputs: Union[TokenInputs, MultiModalInputs]
         if multi_modal_data := parsed_content.get("multi_modal_data"):
+            mm_processor_kwargs = parsed_content.get(
+                "mm_processor_kwargs") or {}
+            mm_processor_kwargs.update(tokenization_kwargs)
             inputs = self._process_multimodal(
                 prompt_text,
                 multi_modal_data,
-                parsed_content.get("mm_processor_kwargs"),
+                mm_processor_kwargs,
                 lora_request=lora_request,
                 return_mm_hashes=return_mm_hashes,
             )
@@ -860,7 +863,8 @@ class InputPreprocessor:
                 "returned until they are supported on vLLM V1.")
             # Encoder-decoder model requires special mapping of
             # input prompts to encoder & decoder
-            return self._process_encoder_decoder_prompt(prompt)
+            return self._process_encoder_decoder_prompt(
+                prompt, tokenization_kwargs)
 
         if is_explicit_encoder_decoder_prompt(prompt):
             raise ValueError("Cannot pass encoder-decoder prompt "
