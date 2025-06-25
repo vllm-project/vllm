@@ -33,7 +33,7 @@ import torch
 from torch.distributed import all_gather, all_reduce
 
 from vllm.config import ParallelConfig
-from vllm.distributed.parallel_state import get_ep_group
+from vllm.distributed.parallel_state import get_ep_group, get_node_count
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import MixtureOfExperts
 
@@ -384,9 +384,14 @@ class EplbState:
         # TODO(bowen): Treat differently for prefill and decode nodes
         num_replicas = model.num_physical_experts
         num_groups = model.num_expert_groups
-        # TODO(bowen): Remove magic numbers
-        num_nodes = (ep_group.size() + 7) // 8
+        num_nodes = get_node_count()
         num_gpus = ep_group.size()
+
+        if num_gpus % num_nodes != 0:
+            logger.warning_once(
+                f"num_gpus % num_nodes != 0, "
+                "not using hierarchical rearrangement algorithm.\n"
+                f"{num_gpus=}, {num_nodes=}")
 
         # Get new expert mappings
         (
@@ -420,7 +425,7 @@ class EplbState:
             torch.cuda.synchronize()
             time_end = time.perf_counter()
             logger.info(
-                "Rearranged experts %s in %.2f seconds.",
-                "(profile)" if is_profile else "",
+                "Rearranged experts%sin %.2f seconds.",
+                " (profile) " if is_profile else " ",
                 time_end - time_start,
             )
