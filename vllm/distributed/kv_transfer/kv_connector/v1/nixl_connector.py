@@ -708,7 +708,8 @@ class NixlConnectorWorker:
                 self.slot_size_bytes = kv_elem_size * n_kv_heads * head_dim
             assert block_size == self.block_size
         else:
-            raise RuntimeError(f"{self.device_type} is not supported yet.")
+            raise RuntimeError(
+                f"{self.device_type} ({self.backend_name}) is not supported.")
 
         # TODO(tms): self.block_len needs to be per-layer for sliding window,
         # hybrid attn, etc
