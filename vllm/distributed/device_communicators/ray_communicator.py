@@ -7,7 +7,7 @@ import torch
 from ray.exceptions import RayChannelError
 from ray.experimental.channel import (AcceleratorContext, Communicator,
                                       TorchTensorAllocator)
-from ray.experimental.util import ReduceOp
+from torch.distributed import ReduceOp
 
 from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 from vllm.distributed.device_communicators.pynccl_wrapper import NCCLLibrary
@@ -25,9 +25,8 @@ class RayStatelessProcessGroup(StatelessProcessGroup):
     communication.
     """
 
-    def __init__(self, rank: int, world_size: int, comm_id: tuple):
+    def __init__(self, rank: int, world_size: int):
         super().__init__(rank, world_size, None, None)
-        self.comm_id = comm_id
 
     def get_rank(self) -> int:
         return self.rank
@@ -69,7 +68,7 @@ class RayCudaCommunicator(Communicator):
                 rank == expected_rank), f"RayCudaCommunicator's rank {rank} "
             f"does not match expected rank {expected_rank}"
 
-            pg = RayStatelessProcessGroup(rank, world_size, comm_id)
+            pg = RayStatelessProcessGroup(rank, world_size)
             device = AcceleratorContext.get().get_accelerator_devices()[0]
             self._pynccl = PyNcclCommunicator(pg,
                                               device=device,
@@ -82,7 +81,7 @@ class RayCudaCommunicator(Communicator):
         self._send_stream: Optional[torch.cuda.Stream] = None
         self._recv_stream: Optional[torch.cuda.Stream] = None
         if cuda_stream is not None:
-            assert rank is not None, "NCCL actor has no rank assigned"
+            assert rank is not None, "Actor has no rank assigned"
             self._cuda_stream = cuda_stream
 
             if use_communication_streams:
@@ -94,8 +93,6 @@ class RayCudaCommunicator(Communicator):
                 self._send_stream = self._cuda_stream
                 self._recv_stream = self._cuda_stream
 
-        self._closed = False
-
     def initialize(self, rank: int) -> None:
         # No additional initialization is needed.
         pass
@@ -105,7 +102,7 @@ class RayCudaCommunicator(Communicator):
 
     def get_rank(self, actor: ray.actor.ActorHandle) -> int:
         """
-        Return the given actor's rank in the NCCL communicator.
+        Return the given actor's rank in the communicator.
 
         Args:
             actor: The actor handle to look up.
@@ -114,7 +111,8 @@ class RayCudaCommunicator(Communicator):
         try:
             rank = actor_ids.index(actor._ray_actor_id)
         except ValueError as e:
-            raise ValueError("Actor is not in the NCCL group.") from e
+            raise ValueError(
+                "Actor is not in the RayCudaCommunicator group.") from e
         return rank
 
     def get_self_rank(self) -> Optional[int]:
@@ -125,7 +123,7 @@ class RayCudaCommunicator(Communicator):
 
     def get_world_size(self) -> int:
         """
-        Return the number of ranks in the RayCudaCommunicator.
+        Return the number of ranks in the RayCudaCommunicator group.
         """
         return self._world_size
 
@@ -222,7 +220,6 @@ class RayCudaCommunicator(Communicator):
         out_tensor = self._pynccl.all_reduce(send_buf,
                                              op=op,
                                              stream=self._cuda_stream)
-        # TODO(rui): optimize the integration
         if out_tensor is not None:
             recv_buf.copy_(out_tensor)
 
@@ -239,29 +236,20 @@ class RayCudaCommunicator(Communicator):
 
     @property
     def recv_stream(self):
-        import torch
-
         return torch.cuda.StreamContext(self._recv_stream)
 
     @property
     def send_stream(self):
-        import torch
-
         return torch.cuda.StreamContext(self._send_stream)
 
     def destroy(self) -> None:
         """
         Destroy the RayCudaCommunicator.
         """
-        if self._closed:
-            return
-
-        self._closed = True
-
         if self._pynccl is not None:
             logger.info("Destructing RayCudaCommunicator on actor: %s",
                         ray.get_runtime_context().current_actor)
-            # TODO(rui): need to destroy the pynccl communicator?
+            self._pynccl = None
 
     def get_transport_name(self) -> str:
         return "nccl"
