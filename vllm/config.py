@@ -561,6 +561,10 @@ class ModelConfig:
         else:
             self.truncation_side = "right"
 
+        model_info, arch = self.registry.inspect_model_cls(self.architectures)
+        self._model_info = model_info
+        self._architecture = arch
+
         self.pooler_config = self._init_pooler_config()
 
         self.dtype = _get_and_verify_dtype(
@@ -658,8 +662,11 @@ class ModelConfig:
     @property
     def architecture(self) -> str:
         # The architecture vllm actually used.
-        model_info, arch = self.registry.inspect_model_cls(self.architectures)
-        return arch
+        return self._architecture
+
+    @property
+    def model_info(self) -> dict[str, Any]:
+        return self._model_info
 
     def maybe_pull_model_tokenizer_for_s3(self, model: str,
                                           tokenizer: str) -> None:
@@ -4661,11 +4668,11 @@ class VllmConfig:
             batch_size_capture_list)
 
     def recalculate_max_model_len(self, max_model_len: int):
+        # Can only be called in try_verify_and_update_config
         model_config = self.model_config
         max_model_len = model_config.get_and_verify_max_len(max_model_len)
         self.model_config.max_model_len = max_model_len
         self.scheduler_config.max_model_len = max_model_len
-        self.compute_hash()
 
     def try_verify_and_update_config(self):
         import vllm.model_executor.models.config as _config

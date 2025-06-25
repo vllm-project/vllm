@@ -43,7 +43,7 @@ class VllmMtebEncoder(mteb.Encoder):
         # issues by randomizing the order.
         r = self.rng.permutation(len(sentences))
         sentences = [sentences[i] for i in r]
-        outputs = self.model.encode(sentences, use_tqdm=False)
+        outputs = self.model.encode(sentences)
         embeds = np.array(outputs)
         embeds = embeds[np.argsort(r)]
         return embeds
