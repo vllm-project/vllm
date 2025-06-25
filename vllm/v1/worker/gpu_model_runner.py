@@ -6,7 +6,7 @@ import gc
 import time
 import weakref
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any, Optional, Union, Literal
+from typing import TYPE_CHECKING, Any, Literal, Optional, Union
 
 import numpy as np
 import torch
@@ -1333,7 +1333,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Some attention backends only support CUDA Graphs in pure decode.
         # If attention doesn't support CUDA Graphs for this batch, we skip them,
-        # and turn back to the piecewise CUDA graphs. Or if full_cuda_graph is 
+        # and turn back to the piecewise CUDA graphs. Or if full_cuda_graph is
         # False, we always turn to the piecewise CUDA graphs.
         skip_attention_cuda_graphs = not attention_cuda_graphs \
                 if self.full_cuda_graph else True
@@ -1915,14 +1915,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         assert len(num_scheduled_tokens_list) == num_reqs
         num_scheduled_tokens = np.array(num_scheduled_tokens_list,
                                         dtype=np.int32)
-        
+
         # [Bugfix] This lets FA2 to correctly activate the optimized routine
         # for pure decoding, i.e., Flashdecoding + an optimization for GQA/MQA.
-        max_query_len = 1 if is_pure_decoding else num_tokens  
+        max_query_len = 1 if is_pure_decoding else num_tokens
 
         attn_metadata: Optional[dict[str, Any]] = None
         skip_attention_cuda_graphs = True
-        if capture_attn_cudagraph:  
+        if capture_attn_cudagraph:
             # Note: At this step, `capture_attn_cudagraph` should be True or
             # "auto", but we always treat it as "auto". i.e., always let the
             # attention backends to determine whether to capture the attention
@@ -1962,7 +1962,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     for layer_name in kv_cache_group_spec.layer_names:
                         attn_metadata[layer_name] = attn_metadata_i
             else:
-                attn_metadata = None # reset to None other than empty dict
+                attn_metadata = None  # reset to None other than empty dict
 
         with self.maybe_dummy_run_with_lora(self.lora_config,
                                             num_scheduled_tokens):
@@ -1996,7 +1996,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     self.vllm_config,
                     num_tokens=num_tokens,
                     num_tokens_across_dp=num_tokens_across_dp,
-                    skip_attention_cuda_graphs=skip_attention_cuda_graphs, 
+                    skip_attention_cuda_graphs=skip_attention_cuda_graphs,
                     is_pure_decoding=is_pure_decoding):
                 outputs = model(
                     input_ids=input_ids,
@@ -2243,40 +2243,48 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # phase, based on the attention backends.
             capture_attn_cudagraph_general = "auto" if full_cg else False
 
-            # Skip capturing batch sizes of 1 in mix prefill-decode if 
-            # separate_attention_routine is on. As bs=1 can treat as a 
-            # pure decode. 
-            start_idx = 0 
+            # Skip capturing batch sizes of 1 in mix prefill-decode if
+            # separate_attention_routine is on. As bs=1 can treat as a
+            # pure decode.
+            start_idx = 0
             if self.vllm_config.compilation_config.separate_attention_routine \
                    and len(self.cudagraph_batch_sizes) > 0 \
                    and self.cudagraph_batch_sizes[0] == 1:
                 start_idx = 1
             # Capture the mix prefill-decode (general usage) cudagraphs
-            for num_tokens in tqdm(reversed(self.cudagraph_batch_sizes[start_idx:]),
-                                   desc="Capturing CUDA graphs (mix prefill-decode)",
-                                   total=len(self.cudagraph_batch_sizes)):
+            for num_tokens in tqdm(
+                    reversed(self.cudagraph_batch_sizes[start_idx:]),
+                    desc="Capturing CUDA graphs (mix prefill-decode)",
+                    total=len(self.cudagraph_batch_sizes)):
                 for _ in range(
                         self.compilation_config.cudagraph_num_of_warmups):
-                    self._dummy_run(num_tokens, 
-                                capture_attn_cudagraph=capture_attn_cudagraph_general, 
-                                is_pure_decoding=False)
-                self._dummy_run(num_tokens, 
-                            capture_attn_cudagraph=capture_attn_cudagraph_general, 
-                            is_pure_decoding=False)
+                    self._dummy_run(
+                        num_tokens,
+                        capture_attn_cudagraph=capture_attn_cudagraph_general,
+                        is_pure_decoding=False)
+                self._dummy_run(
+                    num_tokens,
+                    capture_attn_cudagraph=capture_attn_cudagraph_general,
+                    is_pure_decoding=False)
 
             if self.vllm_config.compilation_config.separate_attention_routine:
                 # Capture the pure decode cudagraphs. Typically a full cudagraph
-                
+
                 max_num_reqs = self.scheduler_config.max_num_seqs
-                decode_cudagraph_batch_sizes = [x for x in self.cudagraph_batch_sizes 
-                                                if x <= max_num_reqs]
-                for num_tokens in tqdm(reversed(decode_cudagraph_batch_sizes),
-                                       desc="Capturing CUDA graphs (pure decode)",
-                                       total=len(decode_cudagraph_batch_sizes)):
-                    for _ in range(self.compilation_config.cudagraph_num_of_warmups):
-                        self._dummy_run(num_tokens, capture_attn_cudagraph=full_cg,
-                                         is_pure_decoding=True)
-                    self._dummy_run(num_tokens, capture_attn_cudagraph=full_cg, 
+                decode_cudagraph_batch_sizes = [
+                    x for x in self.cudagraph_batch_sizes if x <= max_num_reqs
+                ]
+                for num_tokens in tqdm(
+                        reversed(decode_cudagraph_batch_sizes),
+                        desc="Capturing CUDA graphs (pure decode)",
+                        total=len(decode_cudagraph_batch_sizes)):
+                    for _ in range(
+                            self.compilation_config.cudagraph_num_of_warmups):
+                        self._dummy_run(num_tokens,
+                                        capture_attn_cudagraph=full_cg,
+                                        is_pure_decoding=True)
+                    self._dummy_run(num_tokens,
+                                    capture_attn_cudagraph=full_cg,
                                     is_pure_decoding=True)
 
         end_time = time.perf_counter()

@@ -144,9 +144,10 @@ class CUDAPiecewiseBackend:
         # Skip CUDA graphs if this entry doesn't use them OR
         # if we're supposed to treat the piecewise graphs as a whole,
         # In the latter case, forward_context.skip_attention_cuda_graphs
-        # is False, and we rely on a wrapper class to capture the full 
+        # is False, and we rely on a wrapper class to capture the full
         # cudagraph outside the fx graph.
-        skip_attention_cuda_graphs = get_forward_context().skip_attention_cuda_graphs  #noqa
+        skip_attention_cuda_graphs = get_forward_context(
+        ).skip_attention_cuda_graphs
         if not entry.use_cudagraph or not skip_attention_cuda_graphs:
             return entry.runnable(*args)
 
@@ -158,8 +159,7 @@ class CUDAPiecewiseBackend:
                         "Warming up %s/%s of %s usage for shape %s",
                         entry.num_finished_warmup,
                         self.compilation_config.cudagraph_num_of_warmups,
-                        entry.usage_type,
-                        runtime_shape)
+                        entry.usage_type, runtime_shape)
                 return entry.runnable(*args)
 
             if self.is_first_graph:
@@ -167,8 +167,7 @@ class CUDAPiecewiseBackend:
                 # capturing is fast, we don't need to log it for every shape.
                 # We only log it in the debug mode.
                 logger.debug("Capturing a cudagraph of %s usage for shape %s",
-                             entry.usage_type,
-                             runtime_shape)
+                             entry.usage_type, runtime_shape)
 
             input_addresses = [
                 x.data_ptr() for x in args if isinstance(x, torch.Tensor)
@@ -227,9 +226,14 @@ class CUDAPiecewiseBackend:
 
 
 class FullCudagraphWrapper:
-    def __init__(self, graph: fx.GraphModule, vllm_config: VllmConfig,
-                 graph_pool: Any, sym_shape_indices: list[int],
-                 ):
+
+    def __init__(
+        self,
+        graph: fx.GraphModule,
+        vllm_config: VllmConfig,
+        graph_pool: Any,
+        sym_shape_indices: list[int],
+    ):
         self.graph = graph
         self.vllm_config = vllm_config
         self.compilation_config = vllm_config.compilation_config
@@ -237,21 +241,19 @@ class FullCudagraphWrapper:
         self.sym_shape_indices = sym_shape_indices
 
         self.separate_attention_routine = (
-            vllm_config.compilation_config.separate_attention_routine
-        )
+            vllm_config.compilation_config.separate_attention_routine)
 
         self.is_debugging_mode = envs.VLLM_LOGGING_LEVEL == "DEBUG"
 
         self.first_run_finished = False
 
         self.cudagraph_capture_sizes: set[int] = set(
-                self.compilation_config.cudagraph_capture_sizes
-            ) if self.compilation_config.use_cudagraph else set()
+            self.compilation_config.cudagraph_capture_sizes
+        ) if self.compilation_config.use_cudagraph else set()
 
         self.concrete_size_entries: dict[int, ConcreteSizeEntry] = {}
         self.concrete_size_entries_decode: dict[int, ConcreteSizeEntry] = {}
 
-        
         for shape in self.cudagraph_capture_sizes:
             self.concrete_size_entries[shape] = ConcreteSizeEntry(
                 runtime_shape=shape,
@@ -278,17 +280,17 @@ class FullCudagraphWrapper:
         if forward_context.skip_attention_cuda_graphs:
             # turn back to piecewise cudagraphs backend, which is responsible
             # for capturing and running the piecewise cudagraphs.
-            return self.graph(*args)  
-        
-        # if not skip, the fx graph and its sub-graphs will only be supposed to 
+            return self.graph(*args)
+
+        # if not skip, the fx graph and its sub-graphs will only be supposed to
         # eagerly run the compiled graphs, which should be cudagraph capturable
         # as a whole.
-        
-        concrete_size_entries = self.concrete_size_entries  
+
+        concrete_size_entries = self.concrete_size_entries
         if self.separate_attention_routine and forward_context.is_pure_decoding:
             concrete_size_entries = self.concrete_size_entries_decode
 
-        if not runtime_shape in concrete_size_entries:
+        if runtime_shape not in concrete_size_entries:
             # we don't need to do anything for this shape.
             return self.graph(*args)
 
@@ -303,21 +305,18 @@ class FullCudagraphWrapper:
         if entry.cudagraph is None:
             if entry.num_finished_warmup < self.compilation_config.cudagraph_num_of_warmups:  # noqa
                 entry.num_finished_warmup += 1
-                logger.debug(
-                    "Warming up %s/%s of %s usage for shape %s",
-                    entry.num_finished_warmup,
-                    self.compilation_config.cudagraph_num_of_warmups,
-                    entry.usage_type, runtime_shape)
+                logger.debug("Warming up %s/%s of %s usage for shape %s",
+                             entry.num_finished_warmup,
+                             self.compilation_config.cudagraph_num_of_warmups,
+                             entry.usage_type, runtime_shape)
                 return entry.runnable(*args)
 
-            
             # Since we capture cudagraph for many different shapes and
             # capturing is fast, we don't need to log it for every shape.
             # We only log it in the debug mode.
-            
+
             logger.debug("Capturing a cudagraph of %s usage for shape %s",
-                            entry.usage_type,
-                            runtime_shape)
+                         entry.usage_type, runtime_shape)
 
             input_addresses = [
                 x.data_ptr() for x in args if isinstance(x, torch.Tensor)
@@ -328,12 +327,12 @@ class FullCudagraphWrapper:
             with ExitStack(), \
                 torch.cuda.graph(cudagraph, pool=self.graph_pool):
                 # mind-exploding: carefully manage the reference and memory.
-                
+
                 # `output` is managed by pytorch's cudagraph pool
                 output = entry.runnable(*args)
                 # by converting it to weak ref,
                 # the original `output` will immediately be released
-                # to save memory. 
+                # to save memory.
                 output = weak_ref_tensors(output)
 
             # here we always use weak ref for the output

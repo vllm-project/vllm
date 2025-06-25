@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, Optional
 
 import torch
 from flashinfer import (BatchDecodeWithPagedKVCacheWrapper,
@@ -219,6 +219,7 @@ class FlashInferMetadata:
 
 class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
     full_cudagraph_supported: ClassVar[bool] = True
+
     def __init__(self, runner: GPUModelRunner, kv_cache_spec: AttentionSpec,
                  block_table: BlockTable):
         self.runner = runner
@@ -227,13 +228,12 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self._prefill_wrapper = None  # Wrapper for prefill/append
         self._decode_wrapper = None  # Wrapper for decode (general shape)
         self.enable_cuda_graph = (
-            self.vllm_config.compilation_config.full_cuda_graph
-        )
+            self.vllm_config.compilation_config.full_cuda_graph)
         if self.enable_cuda_graph:
             # For full cudagraph capture, one `decode_wrapper` for each batch
             # size is needed for FlashInfer.
-            self._decode_wrappers_cudagraph: dict[int,
-                BatchDecodeWithPagedKVCacheWrapper] = {} 
+            self._decode_wrappers_cudagraph: dict[
+                int, BatchDecodeWithPagedKVCacheWrapper] = {}
             self._decode_cudagraph_max_bs = min(
                 runner.max_num_reqs, runner.cudagraph_batch_sizes[-1])
 
@@ -246,16 +246,16 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.block_table = block_table
 
         # Preparing persistent buffers
-        self.paged_kv_indptr = torch.zeros(
-                self.runner.max_num_reqs + 1,
-                dtype=torch.int32,
-                device=self.runner.device)
+        self.paged_kv_indptr = torch.zeros(self.runner.max_num_reqs + 1,
+                                           dtype=torch.int32,
+                                           device=self.runner.device)
         self.paged_kv_indices = torch.zeros(
-            block_table.get_device_tensor().numel(), # max num pages possible
-            dtype=torch.int32, device=self.runner.device)
-        self.paged_kv_last_page_len = torch.zeros(
-            self.runner.max_num_reqs,
-            dtype=torch.int32, device=self.runner.device)
+            block_table.get_device_tensor().numel(),  # max num pages possible
+            dtype=torch.int32,
+            device=self.runner.device)
+        self.paged_kv_last_page_len = torch.zeros(self.runner.max_num_reqs,
+                                                  dtype=torch.int32,
+                                                  device=self.runner.device)
 
     def reorder_batch(self, input_batch: InputBatch,
                       scheduler_output: SchedulerOutput) -> bool:
@@ -330,9 +330,12 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 self._get_workspace_buffer(), get_kv_cache_layout())
         return self._prefill_wrapper
 
-    def _get_decode_wrapper(self, batch_size: int, use_cudagraph: bool = False):
+    def _get_decode_wrapper(self,
+                            batch_size: int,
+                            use_cudagraph: bool = False):
         if use_cudagraph:
-            decode_wrapper = self._decode_wrappers_cudagraph.get(batch_size, None)
+            decode_wrapper = self._decode_wrappers_cudagraph.get(
+                batch_size, None)
         else:
             decode_wrapper = self._decode_wrapper
 
@@ -343,11 +346,12 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 self.runner.parallel_config)
             use_tensor_cores = envs.VLLM_FLASHINFER_FORCE_TENSOR_CORES or (
                 num_qo_heads // num_kv_heads > 4)
-            
+
             if use_cudagraph:
                 paged_kv_indptr = self.paged_kv_indptr[:batch_size + 1]
                 paged_kv_indices = self.paged_kv_indices
-                paged_kv_last_page_len = self.paged_kv_last_page_len[:batch_size]
+                paged_kv_last_page_len = self.paged_kv_last_page_len[:
+                                                                     batch_size]
             else:
                 paged_kv_indptr = None
                 paged_kv_indices = None
@@ -449,15 +453,14 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         self._num_decodes <= self._decode_cudagraph_max_bs)
                 if use_cudagraph:
                     num_input_tokens_decode = (
-                        self.vllm_config.pad_for_cudagraph(self._num_decodes)
-                    )
+                        self.vllm_config.pad_for_cudagraph(self._num_decodes))
                 else:
                     num_input_tokens_decode = self._num_decodes
 
                 attn_metadata.decode_wrapper = self._get_decode_wrapper(
-                                    num_input_tokens_decode, use_cudagraph)
+                    num_input_tokens_decode, use_cudagraph)
                 # TODO: Override flashinfer's plan function to avoid some
-                # host-to-device copy overhead. 
+                # host-to-device copy overhead.
                 attn_metadata.decode_wrapper.plan(
                     # NOTE: Use the persistent buffer with padding length,
                     # instead of the same address but chunked length buffers in
@@ -538,8 +541,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 < block_table_bounds.unsqueeze(1))
         paged_kv_indices = block_table_tensor[mask]
         num_actual_pages = paged_kv_indices.size(0)
-        self.paged_kv_indices[:num_actual_pages].copy_(
-                paged_kv_indices, non_blocking=True)
+        self.paged_kv_indices[:num_actual_pages].copy_(paged_kv_indices,
+                                                       non_blocking=True)
         # Fill the remaining paged_kv_last_page_len with 1. This is because
         # flashinfer treats 0 as a full page instead of empty.
         self.paged_kv_indices[num_actual_pages:].fill_(-1)
@@ -550,24 +553,22 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         device=block_table_bounds.device),
             block_table_bounds.cumsum(dim=0, dtype=torch.int32)
         ])
-        self.paged_kv_indptr[:1+num_reqs].copy_(
-            paged_kv_indptr, non_blocking=True)
+        self.paged_kv_indptr[:1 + num_reqs].copy_(paged_kv_indptr,
+                                                  non_blocking=True)
         # make sure self.paged_kv_indptr is not decreasing
-        self.paged_kv_indptr[1+num_reqs:].fill_(
-            paged_kv_indptr[-1])
+        self.paged_kv_indptr[1 + num_reqs:].fill_(paged_kv_indptr[-1])
 
         paged_kv_last_page_len = seq_lens % page_size
         paged_kv_last_page_len = torch.where(paged_kv_last_page_len == 0,
                                              page_size, paged_kv_last_page_len)
-        self.paged_kv_last_page_len[:num_reqs].copy_(
-            paged_kv_last_page_len, non_blocking=True)
-        self.paged_kv_last_page_len[num_reqs:].fill_(
-            1)
+        self.paged_kv_last_page_len[:num_reqs].copy_(paged_kv_last_page_len,
+                                                     non_blocking=True)
+        self.paged_kv_last_page_len[num_reqs:].fill_(1)
 
         attn_metadata = FlashInferMetadata(
             num_actual_tokens=num_actual_tokens,
             qo_indptr=qo_indptr,
-            paged_kv_indptr=self.paged_kv_indptr[:1+num_reqs],
+            paged_kv_indptr=self.paged_kv_indptr[:1 + num_reqs],
             paged_kv_indices=self.paged_kv_indices[:num_actual_pages],
             paged_kv_last_page_len=self.paged_kv_last_page_len[:num_reqs],
             num_qo_heads=self.runner.num_query_heads,
@@ -591,7 +592,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self._plan(attn_metadata)
 
         return attn_metadata
-    
+
     def build_for_cudagraph_capture(
             self, common_attn_metadata: CommonAttentionMetadata):
         """
@@ -599,9 +600,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         Currently, only decode is supported for full cudagraphs with FlashInfer.
         """
         m = common_attn_metadata
-        m.query_start_loc.copy_(torch.arange(m.num_actual_tokens+1,
-                                            dtype=torch.int32,
-                                            device=self.runner.device),
+        m.query_start_loc.copy_(torch.arange(m.num_actual_tokens + 1,
+                                             dtype=torch.int32,
+                                             device=self.runner.device),
                                 non_blocking=True)
         assert m.num_reqs == m.num_actual_tokens, \
             "FlashInfer only supports decode-only full CUDAGraph capture. " \
@@ -615,7 +616,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self._num_prefills = 0
         self._num_prefill_tokens = 0
         return self.build(0, m)
-    
+
     def can_run_in_cudagraph(
             self, common_attn_metadata: CommonAttentionMetadata) -> bool:
         return common_attn_metadata.max_query_len == 1

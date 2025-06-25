@@ -167,7 +167,6 @@ class FlashAttentionMetadataBuilder(
             #  by the kernel launching code.
             self.aot_schedule = False
 
-
         # Sliding window size to be used with the AOT scheduler will be
         # populated on first build() call.
         self.aot_sliding_window: Optional[tuple[int, int]] = None

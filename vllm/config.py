@@ -4192,15 +4192,14 @@ class CompilationConfig:
         # NOTE: this function needs to be called
         # NOTE: When full_cuda_graph is True, instead of setting an empty
         # list and capture the full cudagraph inside the flattened fx graph,
-        # we keep the piecewise fx graph structure but capture the full 
+        # we keep the piecewise fx graph structure but capture the full
         # cudagraph outside the fx graph. This reduces some cpu overhead when
         # the runtime batch_size is not cudagraph captured. This is only
         # supported for separate_attention_routine.
         if self.separate_attention_routine:
             assert self.full_cuda_graph, (
                 "separate_attention_routine requires "
-                "full_cuda_graph to be True"
-            )
+                "full_cuda_graph to be True")
         if not self.splitting_ops:
             self.splitting_ops = [
                 "vllm.unified_attention",

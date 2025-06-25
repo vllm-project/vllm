@@ -531,14 +531,13 @@ class Platform:
         Get piecewise backend class for piecewise graph.
         """
         return "vllm.compilation.base_piecewise_backend.AbstractPiecewiseBackend"  # noqa
-    
+
     @classmethod
     def get_fullgraph_wrapper_cls(cls) -> str:
         """
         Get fullgraph wrapper class for fullgraph static graph.
         """
         return "vllm.compilation.base_piecewise_backend.AbstractFullgraphWrapper"  # noqa
-
 
     @classmethod
     def stateless_init_device_torch_dist_pg(

@@ -99,7 +99,7 @@ class AbstractFullgraphWrapper(Protocol):
         
         """
         raise NotImplementedError
-    
+
     def __call__(self, *args) -> Any:
         """
         Executes the wrapped graph for given input args.
