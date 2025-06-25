@@ -1174,9 +1174,8 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             num_tokens, self.max_num_reqs, self.block_size)
         slot_mapping = torch.zeros((3, padded_num_slices),
                                    dtype=torch.int32).to(self.device)
-        block_tables = torch.zeros(
-            (num_reqs, num_blocks),
-            dtype=torch.int32).to(self.device)
+        block_tables = torch.zeros((num_reqs, num_blocks),
+                                   dtype=torch.int32).to(self.device)
         query_lens = [1] * num_reqs
         query_start_loc = torch.cumsum(torch.tensor([0] + query_lens,
                                                     dtype=torch.int32),
