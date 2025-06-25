@@ -52,11 +52,6 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
-        self.embed_tokens = VocabParallelEmbedding(
-            config.vocab_size,
-            config.hidden_size,
-        )
-
         self.enorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.hnorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.eh_proj = nn.Linear(config.hidden_size * 2,
@@ -74,8 +69,6 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
         inputs_embeds: Optional[torch.Tensor] = None,
         spec_step_index: int = 0,
     ) -> torch.Tensor:
-        if inputs_embeds is None:
-            inputs_embeds = self.embed_tokens(input_ids)
         assert inputs_embeds is not None
         # masking inputs at position 0, as not needed by MTP
         inputs_embeds[positions == 0] = 0
@@ -126,6 +119,8 @@ class DeepSeekMultiTokenPredictor(nn.Module):
         inputs_embeds: Optional[torch.Tensor] = None,
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
+        if inputs_embeds is None:
+            inputs_embeds = self.embed_tokens(input_ids)
         current_step_idx = (spec_step_idx % self.num_mtp_layers)
         return self.layers[str(self.mtp_start_layer_idx + current_step_idx)](
             input_ids,
@@ -258,7 +253,7 @@ class DeepSeekMTP(nn.Module, SupportsPP):
         Add .mtp_block for modules in transformer layer block for spec layer
         """
         spec_layer_weight_names = [
-            "embed_tokens", "enorm", "hnorm", "eh_proj", "shared_head"
+            "enorm", "hnorm", "eh_proj", "shared_head"
         ]
         spec_layer_weight = False
         for weight_name in spec_layer_weight_names:
