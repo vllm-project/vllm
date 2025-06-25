@@ -8,6 +8,7 @@ import random
 import pytest
 import torch
 
+from tests.kernels.utils import baseline_scaled_mm
 from vllm import _custom_ops as ops
 
 
@@ -42,24 +43,6 @@ def per_block_cast_to_fp8(
     x_scaled = (x_view * (448.0 / x_amax)).to(dtype=torch.float8_e4m3fn)
     return x_scaled.view_as(x_padded)[:m, :n].contiguous(), (
         x_amax / 448.0).view(x_view.size(0), x_view.size(2))
-
-
-def baseline_scaled_mm(a, b, a_scales, b_scales, out_dtype):
-
-    def group_broadcast(t, shape):
-        for i, s in enumerate(shape):
-            if t.shape[i] != s and t.shape[i] != 1:
-                assert s % t.shape[i] == 0
-                t = (t.unsqueeze(i +
-                                 1).expand(*t.shape[:i + 1], s // t.shape[i],
-                                           *t.shape[i + 1:]).flatten(i, i + 1))
-        return t
-
-    scale_a = group_broadcast(a_scales, a.shape)
-    scale_b = group_broadcast(b_scales, b.shape)
-
-    return torch.mm((scale_a * a.to(dtype=torch.float32)),
-                    (scale_b * b.to(dtype=torch.float32))).to(dtype=out_dtype)
 
 
 @pytest.mark.parametrize("num_groups, expected_m_per_group, k, n", [
