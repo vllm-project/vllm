@@ -7,6 +7,12 @@ For production use, we recommend using our OpenAI compatible server.
 We are also not going to accept PRs modifying this file, please
 change `vllm/entrypoints/openai/api_server.py` instead.
 """
+from vllm import LLM
+import torch.nn as nn
+import torch
+import os
+from vllm.model_executor.models.reward_qwen import QWenRewardModel
+from transformers import AutoTokenizer
 import asyncio
 import json
 import ssl
@@ -27,6 +33,14 @@ from vllm.sampling_params import SamplingParams
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import FlexibleArgumentParser, random_uuid, set_ulimit
 from vllm.version import __version__ as VLLM_VERSION
+from transformers import AutoConfig
+
+def load_reward_model(model_path: str):
+    config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+    config.model_path = model_path  # 自定义字段
+    model = QWenRewardModel(config)
+    model.eval()
+    return model
 
 logger = init_logger("vllm.entrypoints.api_server")
 
@@ -104,19 +118,24 @@ def build_app(args: Namespace) -> FastAPI:
     
     return app
 
-async def init_app(
-    args: Namespace,
-    llm_engine: Optional[AsyncLLMEngine] = None,
-) -> FastAPI:
+async def init_app(args: Namespace, llm_engine: Optional[AsyncLLMEngine] = None) -> FastAPI:
     app = build_app(args)
-
     global engine
 
     engine_args = AsyncEngineArgs.from_cli_args(args)
-    engine = (llm_engine
-              if llm_engine is not None else AsyncLLMEngine.from_engine_args(
-                  engine_args, usage_context=UsageContext.API_SERVER))
+    engine = llm_engine or AsyncLLMEngine.from_engine_args(
+        engine_args, usage_context=UsageContext.API_SERVER
+    )
+
+    # ✅ 构建 tokenizer 和 reward_head
+    tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
+    reward_model = load_reward_model(args.model)
+
+    # ✅ 挂载到 app.state
+    app.state.engine = engine
     app.state.engine_client = engine
+    app.state.tokenizer = tokenizer
+    app.state.reward_model = reward_model
     return app
 
 

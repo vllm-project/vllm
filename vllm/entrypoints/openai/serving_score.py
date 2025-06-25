@@ -452,25 +452,26 @@ class ScoreOutput(BaseModel):
 
 @router.post("/v1/score", response_model=ScoreOutput)
 async def score_reward_model(payload: ScoreInput, request: Request):
-    # 获取模型和 tokenizer（FastAPI engine 注入）
-    engine = request.app.state.engine
-    model = engine.model_executor.driver.model
-    tokenizer = engine.tokenizer
+    try:
+        engine = request.app.state.engine
+        tokenizer = request.app.state.tokenizer
+        reward_model = request.app.state.reward_model
 
-    if not hasattr(model, "score"):
-        return {"score": -1.0}  # 或抛出错误
+        prompt = clean_chatml(payload.prompt.strip())
+        response = clean_chatml(payload.response.strip()) + tokenizer.eos_token
+        full_input = prompt + response
 
-    # === 👇 与训练时保持一致的输入处理逻辑 ===
-    prompt = clean_chatml(payload.prompt.strip())
-    response = clean_chatml(payload.response.strip()) + tokenizer.eos_token
-    full_input = prompt + response
+        inputs = tokenizer([full_input], return_tensors="pt")
 
-    tokens = tokenizer(full_input, return_tensors="pt", padding="max_length", truncation=True, max_length=1024).to("cuda")
+        with torch.no_grad():
+            score = reward_model.score(
+                input_ids=inputs["input_ids"],
+                attention_mask=inputs["attention_mask"]
+            ).item()
 
-    with torch.no_grad():
-        reward = model.score(
-            input_ids=tokens["input_ids"],
-            attention_mask=tokens["attention_mask"]
-        )
-
-    return {"score": reward.item()}
+        return {"score": score}
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return {"score": -1.0}
