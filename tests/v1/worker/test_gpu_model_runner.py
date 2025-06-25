@@ -443,7 +443,7 @@ def test_load_model_weights_inplace(dist_init, model_runner, model_runner_2):
     assert str(model_runner.get_model().state_dict()) != str(
         model_runner_2.get_model().state_dict())
     model_runner_2.load_config.load_format = original_load_format
-    model_runner_2.load_model()  # Load real weights inplace
+    model_runner_2.reload_weights()  # Load real weights inplace
     assert str(model_runner.get_model().state_dict()) == str(
         model_runner_2.get_model().state_dict())
 
