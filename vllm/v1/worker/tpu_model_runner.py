@@ -995,16 +995,9 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             else:
                 # model = get_model(vllm_config=self.vllm_config)
                 model_loader = get_model_loader(self.load_config)
-                if not hasattr(self, "model"):
-                    logger.info("Loading model from scratch...")
-                    model = model_loader.load_model(
-                        vllm_config=self.vllm_config,
-                        model_config=self.model_config)
-                else:
-                    logger.info("Model was already initialized. \
-                            Loading weights inplace...")
-                    model_loader.load_weights(self.model,
-                                              model_config=self.model_config)
+                logger.info("Loading model from scratch...")
+                model = model_loader.load_model(vllm_config=self.vllm_config,
+                                                model_config=self.model_config)
         if self.lora_config is not None:
             model = self.load_lora_model(model, self.model_config,
                                          self.scheduler_config,
@@ -1018,6 +1011,11 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         if not hasattr(self, "model"):
             self.model = model
         self.sampler = TPUSampler()
+
+    def reload_weights(self) -> None:
+        model_loader = get_model_loader(self.load_config)
+        logger.info("Reloading weights inplace...")
+        model_loader.load_weights(self.model, model_config=self.model_config)
 
     @torch.no_grad()
     def _dummy_run(self, num_tokens: int) -> None:
