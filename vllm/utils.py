@@ -2971,12 +2971,18 @@ class GrowingMemoryObjGraph:
             return f"Failed to create directory: {e}"
 
         output_lines = []
-        current_time = time.time()
-        statistics_time = current_time - self.start_time
         start_time_formatted = datetime.datetime.fromtimestamp(
             self.start_time).strftime("%Y-%m-%d %H:%M:%S")
+        current_time_formatted = datetime.datetime.now().strftime(
+            "%Y-%m-%d %H:%M:%S")
         output_lines.append(
-            f"{'='*50}\n start time {start_time_formatted}, Statistics time: {statistics_time} seconds\n{'='*50}\n"
+            f"{'='*50}"
+        )
+        output_lines.append(
+            f"start time {start_time_formatted}, current time: {current_time_formatted}"
+        )
+        output_lines.append(
+            f"{'='*50}"
         )
 
         gc.collect()
