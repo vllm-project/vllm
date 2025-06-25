@@ -40,13 +40,15 @@ class QuickReduceRegime(Enum):
     NONE = 4
 
 
+MB = 1024 * 1024
+
+
 class QuickAllReduce:
 
     _SUPPORTED_WORLD_SIZES = [2, 4, 8]
     _SUPPORTED_DTYPES = [torch.float16, torch.bfloat16]
     # The following data is based on kernel tests.
     # In this order [FP, INT8, INT6, INT4].
-    MB = 1024 * 1024
     _QR_MIN_SIZE = {
         (torch.float16, 2): [1 * MB, 2 * MB, 2 * MB, 1 * MB],
         (torch.float16, 4): [1 * MB, 16 * MB, 4 * MB, 2 * MB],
@@ -196,11 +198,14 @@ class QuickAllReduce:
                     "envs.VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16=0 "
                     "to turn off.")
 
-        qr_max_size = envs.VLLM_ROCM_QUICK_REDUCE_MAX_SIZE
-        if qr_max_size is not None and qr_max_size < 1 * QuickAllReduce.MB:
-            logger.info(
-                "You should not set a max_size smaller than 1MB, which can "
-                "lead to error or degradation to custom allreduce or rccl.")
+        # VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB is specified in MB
+        qr_max_size = envs.VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB
+        if qr_max_size is not None:
+            if qr_max_size < 1:
+                logger.info(
+                    "You should not set a max_size smaller than 1MB, which can "
+                    "lead to error or degradation to custom allreduce or rccl.")
+            qr_max_size=qr_max_size * MB
         self._ptr = ops.init_custom_qr(self.rank, self.world_size, qr_max_size)
         self.qr_max_size = qr_max_size if qr_max_size is not None \
             else ops.qr_max_size()
