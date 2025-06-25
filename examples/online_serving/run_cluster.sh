@@ -1,5 +1,5 @@
 #!/bin/bash
-
+#
 # Launch a Ray cluster inside Docker for vLLM inference.
 # This script can start either a head node or a worker node, depending on the
 # --head or --worker flag provided as the third positional argument.
@@ -73,3 +73,14 @@ docker run \
     -v "${PATH_TO_HF_HOME}:/root/.cache/huggingface" \
     "${ADDITIONAL_ARGS[@]}" \
     "${DOCKER_IMAGE}" -c "${RAY_START_CMD}"
+
+#
+# The container is named "node". To open a shell inside the container after
+# launch, use:
+#       docker exec -it node /bin/bash
+#
+# Then, you can execute vLLM commands on the Ray cluster as if it were a
+# single machine, e.g. vllm serve ...
+#
+# To stop the container, use:
+#       docker stop node
