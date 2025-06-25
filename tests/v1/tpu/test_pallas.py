@@ -47,7 +47,7 @@ def test_ragged_paged_attention():
     key = torch.zeros(num_tokens, num_kv_heads * head_size)
     value = torch.zeros(num_tokens, num_kv_heads * head_size)
     kv_cache = torch.zeros(num_blocks, block_size, num_kv_heads * 2, head_size)
-    slot_mapping = torch.zeros(num_tokens, dtype=torch.int64)
+    slot_mapping = torch.zeros((3, num_tokens), dtype=torch.int64)
     max_num_reqs = 8
     max_num_blocks_per_req = 8
     block_tables = torch.zeros((max_num_reqs, max_num_blocks_per_req),
