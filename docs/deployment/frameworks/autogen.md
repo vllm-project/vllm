@@ -11,7 +11,7 @@ title: AutoGen
 
 - Setup [AutoGen](https://microsoft.github.io/autogen/0.2/docs/installation/) environment
 
-```console
+```bash
 pip install vllm
 
 # Install AgentChat and OpenAI client from Extensions
@@ -23,7 +23,7 @@ pip install -U "autogen-agentchat" "autogen-ext[openai]"
 
 - Start the vLLM server with the supported chat completion model, e.g.
 
-```console
+```bash
 python -m vllm.entrypoints.openai.api_server \
     --model mistralai/Mistral-7B-Instruct-v0.2
 ```

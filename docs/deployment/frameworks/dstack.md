@@ -11,14 +11,14 @@ vLLM can be run on a cloud based GPU machine with [dstack](https://dstack.ai/), 
 
 To install dstack client, run:
 
-```console
+```bash
 pip install "dstack[all]
 dstack server
 ```
 
 Next, to configure your dstack project, run:
 
-```console
+```bash
 mkdir -p vllm-dstack
 cd vllm-dstack
 dstack init
