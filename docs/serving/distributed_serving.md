@@ -22,7 +22,7 @@ After provisioning sufficient resources, run vLLM. Find a log message that looks
 
 vLLM supports distributed tensor-parallel and pipeline-parallel inference and serving. The current implementation includes [Megatron-LM's tensor parallel algorithm](https://arxiv.org/pdf/1909.08053.pdf). 
 
-The default distributed runtimes are for multi-node inference and  for single node inference. During single-node inference, if the process does not run inside a Ray placement group and the node provides enough GPUs for the configured `tensor_parallel_size`, then the distributed runtime defaults to Python native `multiprocessing`. Otherwise, vLLM uses [Ray](https://github.com/ray-project/ray) as the executor backend by default. Override the default by setting `distributed_executor_backend` in the `LLM` class or `--distributed-executor-backend` in the API server. Valid values are `mp` for multiprocessing and `ray` for Ray.
+vLLM's default distributed runtimes are [Ray](https://github.com/ray-project/ray) for multi-node inference and Python's native `multiprocessing` for single-node inference. Override the default by setting `distributed_executor_backend` in the `LLM` class or `--distributed-executor-backend` in the API server using `mp` for multiprocessing or `ray` for Ray.
 
 Set `tensor_parallel_size` in the `LLM` class to the desired GPU count for multi-GPU inference:
 
