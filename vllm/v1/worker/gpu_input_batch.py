@@ -576,12 +576,9 @@ class InputBatch:
 
     def _commit_logit_procs_state_changes(self) -> None:
         """Apply batch add/remove/permute to logits procs' states"""
-        batch_update = self.batch_update_builder.buildBatchUpdate(
-            self.num_reqs)
+        batch_update = self.batch_update_builder.get_and_reset(self.num_reqs)
         for logit_proc in self.logitsprocs.all_list:
             logit_proc.update_state(batch_update)
-        # Clear state change representation to prepare for next step
-        self.batch_update_builder.reset()
 
     def refresh(self):
         self._commit_logit_procs_state_changes()

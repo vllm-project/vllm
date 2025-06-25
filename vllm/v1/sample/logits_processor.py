@@ -141,15 +141,16 @@ class BatchUpdateBuilder:
             return self._removed.pop()
         return None
 
-    def reset(self):
+    def _reset(self):
         """Reset batch info at end of step"""
         self._removed = []
         self._is_removed_sorted = False
         self.moved = []
         self.added = []
 
-    def buildBatchUpdate(self, batch_size: int) -> BatchUpdate:
-        """Generate a logitsprocs batch update data structure.
+    def get_and_reset(self, batch_size: int) -> BatchUpdate:
+        """Generate a logitsprocs batch update data structure
+        and reset internal batch update builder state.
         
         Args:
           batch_size: current persistent batch size
@@ -157,12 +158,14 @@ class BatchUpdateBuilder:
         Returns:
           Frozen logitsprocs batch update dataclass instance
         """
-        return BatchUpdate(
+        batch_update = BatchUpdate(
             batch_size=batch_size,
             removed=self.removed,
             moved=self.moved,
             added=self.added,
         )
+        self._reset()
+        return batch_update
 
 
 class LogitsProcessor(ABC):

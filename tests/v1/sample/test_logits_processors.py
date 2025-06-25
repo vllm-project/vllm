@@ -417,6 +417,7 @@ def _generate_fake_step_update(
     persistent_batch: list[LogitsProcsRequestParams],
     workload_params: list[LogitsProcsRequestParams],
     wdx: int,
+    batch_update_builder: BatchUpdateBuilder,
 ) -> tuple[BatchUpdate, int, int]:
     batch_size = len(persistent_batch)
     workload_size = len(workload_params)
@@ -445,10 +446,9 @@ def _generate_fake_step_update(
 
     num_step_add_replace = min(num_step_add, num_step_remove)
 
-    # Generate fake removed request indices from current persistent
-    # batch before adds
-    batch_update_builder = BatchUpdateBuilder(
-        removed=random.sample(range(batch_size), num_step_remove))
+    # Generate fake removed request indices drawn from persistent batch indices
+    for removal in random.sample(range(batch_size), num_step_remove):
+        batch_update_builder.removed_append(removal)
 
     # Get added requests from workload
     for add_req_params in workload_params[wdx:(wdx + num_step_add_replace)]:
@@ -520,7 +520,7 @@ def _generate_fake_step_update(
             persistent_batch[adx], persistent_batch[bdx] = persistent_batch[
                 bdx], persistent_batch[adx]
 
-    return (batch_update_builder.buildBatchUpdate(condensed_batch_size), wdx,
+    return (batch_update_builder.get_and_reset(condensed_batch_size), wdx,
             workload_size - wdx)
 
 
@@ -576,6 +576,10 @@ def test_logitsprocs(device: str, reqs_per_logitproc: int,
     persistent_batch: list[LogitsProcsRequestParams] = [
     ]  # Persistent batch state, as list of workload indices
 
+    # Generate fake removed request indices from current persistent
+    # batch before adds
+    batch_update_builder = BatchUpdateBuilder()
+
     # Break when entire workload has been added previously and persistent
     # batch is empty
     workload_reqs_remaining = workload_size
@@ -593,6 +597,7 @@ def test_logitsprocs(device: str, reqs_per_logitproc: int,
             persistent_batch=persistent_batch,
             workload_params=workload_params,
             wdx=wdx,
+            batch_update_builder=batch_update_builder,
         )
         batch_size = batch_update.batch_size
 
