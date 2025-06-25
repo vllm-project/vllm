@@ -15,6 +15,8 @@ from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.block_table import BlockTable
 
+_PARTITION_SIZE_ROCM = 256
+
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.worker.gpu_input_batch import InputBatch
@@ -211,7 +213,6 @@ class AiterFlashAttentionMetadataBuilder:
         self.block_size = kv_cache_spec.block_size
         self.kv_cache_spec = kv_cache_spec
         self.block_table = block_table
-
         # Sliding window size to be used with the AOT scheduler will be
         # populated on first build() call.
         self.aot_sliding_window: Optional[tuple[int, int]] = None
@@ -296,6 +297,18 @@ class AiterFlashAttentionMetadataBuilder:
         prefix_kv_lens = None
         suffix_kv_lens = None
 
+        nbyes_per_qo_elem = torch.finfo(self.runner.dtype).bits // 8
+        max_num_partitions = (max_seq_len + _PARTITION_SIZE_ROCM -
+                              1) // _PARTITION_SIZE_ROCM
+
+        workspace_buffer = torch.empty(
+            (num_reqs * self.num_heads_q * max_num_partitions * self.headdim) *
+            nbyes_per_qo_elem + 2 *
+            (num_reqs * self.num_heads_q * max_num_partitions) * 4,
+            dtype=torch.uint8,
+            device=self.runner.device,
+        )
+
         attn_metadata = AiterFlashAttentionMetadata(
             num_actual_tokens=num_actual_tokens,
             max_query_len=max_query_len,
@@ -307,12 +320,14 @@ class AiterFlashAttentionMetadataBuilder:
             block_table=block_table_tensor,
             slot_mapping=slot_mapping,
             use_cascade=use_cascade,
+            workspace_buffer=workspace_buffer,
             common_prefix_len=common_prefix_len,
             cu_prefix_query_lens=cu_prefix_query_lens,
             prefix_kv_lens=prefix_kv_lens,
             suffix_kv_lens=suffix_kv_lens,
             local_attn_metadata=local_attn_metadata,
         )
+
         return attn_metadata
 
     def can_run_in_cudagraph(
@@ -379,6 +394,7 @@ class AiterFlashAttentionMetadata:
     total_tokens: int
     block_table: torch.Tensor
     slot_mapping: torch.Tensor
+    workspace_buffer: torch.Tensor
 
     # For cascade attention.
     use_cascade: bool
@@ -563,24 +579,9 @@ class AiterFlashAttentionImpl(AttentionImpl):
                     v_scale=layer._v_scale,
                 )
 
-            _, num_heads, head_size = query.shape
-            _PARTITION_SIZE_ROCM = 256
-            num_seqs = seqused_k.shape[0]
-            nbyes_per_qo_elem = torch.finfo(output.dtype).bits // 8
-            max_num_partitions = (max_seqlen_k + _PARTITION_SIZE_ROCM -
-                                  1) // _PARTITION_SIZE_ROCM
-
-            workspace_buffer = torch.empty(
-                (num_seqs * num_heads * max_num_partitions * head_size) *
-                nbyes_per_qo_elem + 2 *
-                (num_seqs * num_heads * max_num_partitions) * 4,
-                dtype=torch.uint8,
-                device=output.device,
-            )
-
             aiter.paged_attention_v1(
                 output[:num_actual_tokens],
-                workspace_buffer,
+                attn_metadata.workspace_buffer,
                 query[:num_actual_tokens],
                 key_cache,
                 value_cache,
