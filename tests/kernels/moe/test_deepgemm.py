@@ -161,10 +161,11 @@ def run_single_case(m, n, k, topk, num_experts, block_size):
             out_deepgemm.to(torch.float32) - out_triton.to(torch.float32))) /
                 torch.mean(torch.abs(out_triton.to(torch.float32))))
 
-    assert rel_diff < 0.005, f'Relative difference exceeds tolerance: {rel_diff:.5f} (m={m}, k={k}, n={n})'
+    assert rel_diff < 0.005, \
+        f'Relative error: {rel_diff:.5f} (m={m}, k={k}, n={n})'
 
     diff = calc_diff(out_deepgemm, out_triton)
-    assert diff < 0.001, f'Difference exceeds tolerance: {diff:.5f} (m={m}, k={k}, n={n})'
+    assert diff < 0.001, f'Dice error: {diff:.5f} (m={m}, k={k}, n={n})'
 
 
 MNKs = [
