@@ -215,9 +215,6 @@ class MinPLogitsProcessor(LogitsProcessor):
         return float(self.min_p_cpu[index])
 
     def update_state(self, batch_update: BatchUpdate):
-        if not batch_update:
-            return
-
         needs_update = False
         # Process added requests.
         for index, params, _ in batch_update.added:
@@ -289,16 +286,14 @@ class LogitBiasLogitsProcessor(LogitsProcessor):
         return False
 
     def update_state(self, batch_update: BatchUpdate):
-        if not batch_update:
-            return
-
-        needs_update = False
         # Process added requests.
+        needs_update = bool(batch_update.added)
         for index, params, _ in batch_update.added:
             if isinstance(params, SamplingParams) and (lb :=
                                                        params.logit_bias):
                 self.biases[index] = lb
-                needs_update = True
+            else:
+                self.biases.pop(index, None)
 
         if self.biases:
             # Process removed requests.
@@ -308,17 +303,24 @@ class LogitBiasLogitsProcessor(LogitsProcessor):
 
             # Process moved requests, unidirectional (a->b) and swap (a<->b)
             for a_index, b_index, direct in batch_update.moved:
-                a_entry = self.biases.pop(a_index, None)
-                if direct == MoveDirectionality.SWAP and (
-                        b_entry := self.biases.pop(b_index, None)) is not None:
-                    needs_update = True
-                    self.biases[a_index] = b_entry
-                if a_entry is not None:
-                    needs_update = True
-                    self.biases[b_index] = a_entry
+                if direct == MoveDirectionality.UNIDIRECTIONAL:
+                    if (a_entry := self.biases.pop(a_index, None)) is None:
+                        if self.biases.pop(b_index, None) is not None:
+                            needs_update = True
+                    else:
+                        self.biases[b_index] = a_entry
+                        needs_update = True
+                else:
+                    a_entry = self.biases.pop(a_index, None)
+                    if (b_entry := self.biases.pop(b_index, None)) is not None:
+                        self.biases[a_index] = b_entry
+                        needs_update = True
+                    if a_entry is not None:
+                        self.biases[b_index] = a_entry
+                        needs_update = True
 
         # Update tensors if needed.
-        if self.biases and needs_update:
+        if needs_update:
             reqs, tok_ids, biases = [], [], []
             for req, lb in self.biases.items():
                 reqs.extend([req] * len(lb))
@@ -363,16 +365,19 @@ class MinTokensLogitsProcessor(LogitsProcessor):
         return False
 
     def update_state(self, batch_update: BatchUpdate):
-        needs_update = False
 
         # Process added requests.
+        needs_update = bool(batch_update.added)
         for index, params, output_tok_ids in batch_update.added:
             if (isinstance(params, SamplingParams)
                     and (min_tokens := params.min_tokens)
                     and len(output_tok_ids) < min_tokens):
+                # Replace request metadata at batch index
                 self.min_toks[index] = (min_tokens, output_tok_ids,
                                         params.all_stop_token_ids)
-                needs_update = True
+            else:
+                # Drop request metadata at batch index
+                self.min_toks.pop(index, None)
 
         if self.min_toks:
             # Process removed requests.
@@ -410,16 +415,16 @@ class MinTokensLogitsProcessor(LogitsProcessor):
                 for index in to_remove:
                     del self.min_toks[index]
 
-            # Update tensors if needed.
-            if needs_update and self.min_toks:
-                reqs: list[int] = []
-                tok_ids: list[int] = []
-                for req, (_, _, stop_tok_ids) in self.min_toks.items():
-                    reqs.extend([req] * len(stop_tok_ids))
-                    tok_ids.extend(stop_tok_ids)
+        # Update tensors if needed.
+        if needs_update:
+            reqs: list[int] = []
+            tok_ids: list[int] = []
+            for req, (_, _, stop_tok_ids) in self.min_toks.items():
+                reqs.extend([req] * len(stop_tok_ids))
+                tok_ids.extend(stop_tok_ids)
 
-                self.logits_slice = (self._device_tensor(reqs, torch.int32),
-                                     self._device_tensor(tok_ids, torch.int32))
+            self.logits_slice = (self._device_tensor(reqs, torch.int32),
+                                 self._device_tensor(tok_ids, torch.int32))
 
     def _device_tensor(self, data: list, dtype: torch.dtype) -> torch.Tensor:
         return (torch.tensor(data,
