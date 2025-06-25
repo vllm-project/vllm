@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Union
 
 import torch
 
@@ -123,8 +123,9 @@ class BitsAndBytesConfig(QuantizationConfig):
             llm_int8_skip_modules=llm_int8_skip_modules,
             llm_int8_threshold=llm_int8_threshold)
 
-    def get_quant_method(self, layer: torch.nn.Module,
-                         prefix: str) -> Optional["LinearMethodBase"]:
+    def get_quant_method(
+        self, layer: torch.nn.Module, prefix: str
+    ) -> Optional[Union["LinearMethodBase", "BitsAndBytesMoEMethod"]]:
         if isinstance(layer, LinearBase):
             if is_layer_skipped_bnb(prefix, self.llm_int8_skip_modules):
                 return UnquantizedLinearMethod()
@@ -432,59 +433,18 @@ class BitsAndBytesMoEMethod(FusedMoEMethodBase):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
-
-        def _create_weights_4bit():
-            quant_ratio = calculate_quant_ratio(params_dtype)
-            # Fused gate_up_proj (column parallel)
-            w13_total_size = (hidden_size * 2 *
-                              intermediate_size_per_partition) // quant_ratio
-            w13_qweight = torch.nn.Parameter(
-                torch.empty(
-                    num_experts,
-                    w13_total_size,
-                    1,
-                    dtype=torch.uint8,
-                ),
-                requires_grad=False,
-            )
-            layer.register_parameter("w13_weight", w13_qweight)
-            set_weight_attrs(w13_qweight, extra_weight_attrs)
-            set_weight_attrs(
-                w13_qweight, {
-                    "input_dim": 0,
-                    "output_dim": 0,
-                    "pack_factor": 2,
-                    "use_bitsandbytes_4bit": True
-                })
-            # down_proj (row parallel)
-            w2_total_size = (hidden_size *
-                             intermediate_size_per_partition) // quant_ratio
-            w2_qweight = torch.nn.Parameter(
-                torch.empty(
-                    num_experts,
-                    w2_total_size,
-                    1,
-                    dtype=torch.uint8,
-                ),
-                requires_grad=False,
-            )
-            set_weight_attrs(
-                w2_qweight, {
-                    "input_dim": 0,
-                    "output_dim": 0,
-                    "pack_factor": 2,
-                    "use_bitsandbytes_4bit": True
-                })
-            layer.register_parameter("w2_weight", w2_qweight)
-            set_weight_attrs(w2_qweight, extra_weight_attrs)
-
-        def _create_weights_8bit():
-            raise NotImplementedError
-
         if self.quant_config.load_in_8bit:
-            _create_weights_8bit()
+            call_fun = self._create_weights_8bit
         else:
-            _create_weights_4bit()
+            call_fun = self._create_weights_4bit
+        call_fun(
+            layer,
+            num_experts,
+            hidden_size,
+            intermediate_size_per_partition,
+            params_dtype,
+            **extra_weight_attrs,
+        )
 
     def apply(
         self,
@@ -504,7 +464,6 @@ class BitsAndBytesMoEMethod(FusedMoEMethodBase):
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
     ) -> torch.Tensor:
-
         if self.quant_config.load_in_8bit:
             raise NotImplementedError
         topk_weights, topk_ids = FusedMoE.select_experts(
@@ -520,10 +479,11 @@ class BitsAndBytesMoEMethod(FusedMoEMethodBase):
             e_score_correction_bias=e_score_correction_bias,
             indices_type=self.topk_indices_dtype)
 
+        w13, w2 = self._apply_4bit_dequnt(layer)
         return fused_experts(
             hidden_states=x,
-            w1=layer.w13_weight,
-            w2=layer.w2_weight,
+            w1=w13,
+            w2=w2,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             inplace=True,
@@ -533,16 +493,111 @@ class BitsAndBytesMoEMethod(FusedMoEMethodBase):
             expert_map=expert_map,
         )
 
-    def _apply_8bit_weight(
-            self,
-            layer: torch.nn.Module,
-            x: torch.Tensor,
-            bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def _create_weights_4bit(
+        self,
+        layer: torch.nn.Module,
+        num_experts: int,
+        hidden_size: int,
+        intermediate_size_per_partition: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        quant_ratio = calculate_quant_ratio(params_dtype)
+        # Fused gate_up_proj (column parallel)
+        w13_total_size = (hidden_size * 2 *
+                          intermediate_size_per_partition) // quant_ratio
+        w13_qweight = torch.nn.Parameter(
+            torch.empty(
+                num_experts,
+                w13_total_size,
+                1,
+                dtype=torch.uint8,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w13_weight", w13_qweight)
+        set_weight_attrs(w13_qweight, extra_weight_attrs)
+        set_weight_attrs(
+            w13_qweight,
+            {
+                "num_experts":
+                num_experts,
+                "input_dim":
+                hidden_size,
+                "output_dim":
+                2 * intermediate_size_per_partition,
+                "experts_shape": (
+                    num_experts,
+                    intermediate_size_per_partition * 2,
+                    hidden_size,
+                ),
+                "pack_factor":
+                quant_ratio,
+                "use_bitsandbytes_4bit":
+                True,
+            },
+        )
+        # down_proj (row parallel)
+        w2_total_size = (hidden_size *
+                         intermediate_size_per_partition) // quant_ratio
+        w2_qweight = torch.nn.Parameter(
+            torch.empty(
+                num_experts,
+                w2_total_size,
+                1,
+                dtype=torch.uint8,
+            ),
+            requires_grad=False,
+        )
+        set_weight_attrs(
+            w2_qweight,
+            {
+                "num_experts":
+                num_experts,
+                "input_dim":
+                intermediate_size_per_partition,
+                "output_dim":
+                hidden_size,
+                "experts_shape": (
+                    num_experts,
+                    hidden_size,
+                    intermediate_size_per_partition,
+                ),
+                "pack_factor":
+                quant_ratio,
+                "use_bitsandbytes_4bit":
+                True,
+            },
+        )
+        layer.register_parameter("w2_weight", w2_qweight)
+        set_weight_attrs(w2_qweight, extra_weight_attrs)
+
+    def _create_weights_8bit(
+        self,
+        layer: torch.nn.Module,
+        num_experts: int,
+        hidden_size: int,
+        intermediate_size_per_partition: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
         raise NotImplementedError
 
-    def _apply_4bit_weight(
-            self,
-            layer: torch.nn.Module,
-            x: torch.Tensor,
-            bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def _apply_4bit_dequnt(
+            self, layer: torch.nn.Module) -> tuple[torch.Tensor, torch.Tensor]:
+        from bitsandbytes.functional import dequantize_4bit
+        w13 = dequantize_4bit(
+            layer.w13_weight.reshape(-1, 1),
+            layer.w13_weight.bnb_quant_state[0],
+        )
+        w2 = dequantize_4bit(
+            layer.w2_weight.reshape(-1, 1),
+            layer.w2_weight.bnb_quant_state[0],
+        )
+        w13 = w13.reshape(layer.w13_weight.experts_shape)
+        w2 = w2.reshape(layer.w2_weight.experts_shape)
+        return w13, w2
+
+    def _apply_8bit_dequant(
+            self, layer: torch.nn.Module) -> tuple[torch.Tensor, torch.Tensor]:
         raise NotImplementedError

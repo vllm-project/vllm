@@ -135,13 +135,14 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         return hf_weights_files, use_safetensors
 
     def _hf_weight_iter(self, hf_weights_files, use_safetensors: bool):
-        def _maybe_pool_model(module_name:str):
+
+        def _maybe_pool_model(module_name: str):
             # For pool model, we need to add the prefix `model.`
             # for the weight name if possible.
             if self.is_pool_model and self.target_modules[0]. \
                 startswith("model.") and not module_name.startswith(
                     "model."):
-                return "model."+module_name
+                return "model." + module_name
 
             return module_name
 
@@ -160,8 +161,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             # mapping weight names from transformers to vllm while preserving
             # original names.
             mapped_name = self.weight_mapper(org_name)
-            mapped_name=_maybe_pool_model(mapped_name)
-
+            mapped_name = _maybe_pool_model(mapped_name)
 
             yield org_name, mapped_name, param
 
@@ -315,9 +315,6 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                 mapped_weight_name,
                 weight_tensor,
         ) in self._hf_weight_iter(hf_weights_files, use_safetensors):
-
-            if ".mlp.experts" in org_weight_name:
-                pass
             if any(target_module in mapped_weight_name
                    for target_module in self.target_modules
                    ) and mapped_weight_name.endswith(".weight"):
@@ -391,15 +388,13 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                 quant_state_dict[mapped_weight_name] = quant_state
             else:
                 processed_weight = weight_tensor
-            if "layers.13.mlp.experts." in org_weight_name:
-                pass
             yield org_weight_name, processed_weight
 
     def _get_bnb_target_modules(self, model: nn.Module) -> None:
 
         for name, module in model.named_modules():
-            if (isinstance(module, LinearBase)  and
-                    hasattr(module.quant_method, "quant_config")):
+            if (isinstance(module, LinearBase)
+                    and hasattr(module.quant_method, "quant_config")):
                 if modules_info := self.modules_mapping.get_sub_modules(name):
                     # Map vllm's names to transformers's names.
                     rep_name, sub_modules = modules_info
@@ -410,19 +405,28 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                 # in case model has a mixture of disk-merged and disk-split
                 # weights with same last name.
                 self.target_modules.append(name)
-            elif (isinstance(module,FusedMoE) and
-                    hasattr(module.quant_method, "quant_config")):
-                expert_mapping=model.get_expert_mapping()
+            elif (isinstance(module, FusedMoE)
+                  and hasattr(module.quant_method, "quant_config")):
+                if not hasattr(model, "get_expert_mapping"):
+                    raise AttributeError(
+                        f"MoE Model {type(model).__name__} does not support "
+                        "BitsAndBytes quantization yet. "
+                        "No 'get_expert_mapping' found.")
+                # Get the corresponding weight name using module name and
+                # get_expert_mapping.
+                expert_mapping = model.get_expert_mapping()
                 for exp in expert_mapping:
-                    rep_name = name.replace("experts",'')+exp[1][:-1]
+                    weight_name = exp[1]
+                    rep_name = name.replace("experts",
+                                            "") + weight_name.removesuffix(".")
                     self.target_modules.append(rep_name)
-
 
         assert (self.target_modules
                 ), "vllm currently does not support BNB quantization for"
         f" {type(model).__name__}"
 
-    def load_weights(self, model: nn.Module, model_config: ModelConfig) -> None:
+    def load_weights(self, model: nn.Module,
+                     model_config: ModelConfig) -> None:
         if not hasattr(model, "load_weights"):
             raise AttributeError(
                 "The required method 'load_weights' is not defined in class"
@@ -432,7 +436,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             raise AttributeError(
                 f"Model {type(model).__name__} does not support BitsAndBytes "
                 "quantization yet. No 'packed_modules_mapping' found.")
-        self.is_pool_model=is_pooling_model(model)
+        self.is_pool_model = is_pooling_model(model)
 
         self.modules_mapping = ParamMapping(get_packed_modules_mapping(model))
 
@@ -461,11 +465,13 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             # dimension (dim=-1)
             elif isinstance(module, (RowParallelLinear, )):
                 self.column_sharded_weights_modules.append(name)
-            elif isinstance(module,FusedMoE):
+            elif isinstance(module, FusedMoE):
                 expert_mapping = model.get_expert_mapping()
                 for exp in expert_mapping:
                     if exp[-1] == "w2":
-                        rep_name=name.replace("experts",'')+exp[1][:-1]
+                        weight_name = exp[1]
+                        rep_name = name.replace(
+                            "experts", "") + weight_name.removesuffix(".")
                         self.column_sharded_weights_modules.append(rep_name)
 
         self.model_type = type(model).__name__
@@ -510,7 +516,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             if weights_not_loaded:
                 raise ValueError("Following weights were not initialized from "
                                  f"checkpoint: {weights_not_loaded}")
-        fuse_moe_quant_states(model,quant_state_dict)
+        maybe_fuse_moe_quant_states(model, quant_state_dict)
         param_dict = dict(model.named_parameters())
         stacked_quant_state_dict: dict[str, dict[int, Any]] = {}
         # TODO: Change this lazy import to normal import
@@ -585,11 +591,12 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                     set_weight_attrs(
                         param, {"matmul_state": [None] * len(quant_states)})
         torch.cuda.empty_cache()
+
     def download_model(self, model_config: ModelConfig) -> None:
         self._prepare_weights(model_config.model, model_config.revision)
 
 
-def dequantize_dq(quant_states: dict) -> None:
+def dequantize_dq(quant_states: dict):
     """
     When BNB employs Double Quantization, we perform the dequantization of 
     these constants during weight loading rather than at inference time, 
@@ -597,95 +604,117 @@ def dequantize_dq(quant_states: dict) -> None:
     at the cost of increased memory usage.
     """
     from bitsandbytes.functional import QuantState, dequantize_blockwise
-    if isinstance(quant_states,dict):
-        for _, quant_state in quant_states.items():
-            # Copied from: https://github.com/bitsandbytes-foundation/bitsandbytes/blob/0.45.3/bitsandbytes/functional.py#L1352-#L1356
-            if isinstance(quant_states,QuantState) and quant_states.nested:
-                absmax = dequantize_blockwise(quant_state.absmax,
-                                            quant_state.state2)
-                absmax += quant_state.offset
-                if absmax.dtype != torch.float32:
-                    absmax = absmax.float()
-                quant_state.absmax = absmax
-                quant_state.nested = False
-                quant_state.offset = None
-                quant_state.state2 = None
-    elif isinstance(quant_states,QuantState) and quant_states.nested:
-        absmax = dequantize_blockwise(quant_states.absmax,
-                                    quant_states.state2)
-        absmax += quant_states.offset
+
+    def _dequantize_single_state(quant_state):
+        """Helper function to dequantize a single QuantState object."""
+        if not (isinstance(quant_state, QuantState) and quant_state.nested):
+            return
+
+        # Copied from: https://github.com/bitsandbytes-foundation/bitsandbytes/blob/0.45.3/bitsandbytes/functional.py#L1352-#L1356
+        absmax = dequantize_blockwise(quant_state.absmax, quant_state.state2)
+        absmax += quant_state.offset
+
+        # Ensure float32 dtype
         if absmax.dtype != torch.float32:
             absmax = absmax.float()
-        quant_states.absmax = absmax
-        quant_states.nested = False
-        quant_states.offset = None
-        quant_states.state2 = None
+
+        quant_state.absmax = absmax
+        quant_state.nested = False
+        quant_state.offset = None
+        quant_state.state2 = None
+
+    if isinstance(quant_states, dict):
+        for quant_state in quant_states.values():
+            _dequantize_single_state(quant_state)
+    else:
+        _dequantize_single_state(quant_states)
     return quant_states
 
 
-def fuse_moe_quant_states(model: nn.Module, quant_states_dict: dict):
+def maybe_fuse_moe_quant_states(model: nn.Module,
+                                quant_states_dict: dict) -> None:
+    """
+    
+    This function consolidates individual expert quantization states into
+    fused representations for w13 and w2.
+    """
     from bitsandbytes.functional import QuantState
 
-    # moe_quant_states_dict = {}
+    if not hasattr(model, "get_expert_mapping"):
+        return
+
     expert_mapping = model.get_expert_mapping()
     for name, module in model.named_modules():
-        if isinstance(module, FusedMoE):
-            w1_states_lst = []
-            w2_states_lst = []
-            w3_states_lst = []
-            for mapping in expert_mapping:
-                layer_prefix = name.split("experts")[0]
-                weight_name = layer_prefix + mapping[1] + "weight"
-                quant_state = dequantize_dq(quant_states_dict[weight_name])
-                if mapping[-1] == "w1":
-                    w1_states_lst.append(quant_state)
-                elif mapping[-1] == "w2":
-                    w2_states_lst.append(quant_state)
-                else:
-                    w3_states_lst.append(quant_state)
-                del quant_states_dict[weight_name]
-            assert (
-                len(w1_states_lst)
-                == len(w2_states_lst)
-                == len(w3_states_lst)
-            )
-            w13_absmax_lst = []
-            w2_absmax_lst = []
-            for w1_qs,w2_qs,w3_qs in zip(w1_states_lst,w2_states_lst,
-                                         w3_states_lst):
-                w13_absmax_lst.append(w1_qs.absmax)
-                w13_absmax_lst.append(w3_qs.absmax)
-                w2_absmax_lst.append(w2_qs.absmax)
-                assert (
-                   w1_qs.blocksize
-                    == w2_qs.blocksize
-                    == w3_qs.blocksize
-                )
-                assert (
-                   w1_qs.dtype
-                    == w2_qs.dtype
-                    == w3_qs.dtype
-                )
+        if not isinstance(module, FusedMoE):
+            continue
 
-            w13_absmax = torch.cat(w13_absmax_lst)
-            w2_absmax = torch.cat(w2_absmax_lst)
-            w13_qs = QuantState(
-                absmax=w13_absmax,
-                shape=10, # FIXME Get the correct shape
-                code=w1_states_lst[0].code,
-                blocksize=w1_states_lst[0].blocksize,
-                dtype=w1_states_lst[0].dtype,
+        w1_states_lst = []
+        w2_states_lst = []
+        w3_states_lst = []
+        for exp in expert_mapping:
+            shard_id = exp[-1]
+            if shard_id not in ("w1", "w2", "w3"):
+                raise ValueError(f"shard_id must be ['w1','w2','w3'] but "
+                                    f"got {shard_id}.")
+            layer_prefix = name.split("experts")[0]
+            weight_qual_name = layer_prefix + exp[1] + "weight"
+            quant_state = dequantize_dq(quant_states_dict[weight_qual_name])
+            if shard_id == "w1":
+                w1_states_lst.append(quant_state)
+            elif shard_id == "w2":
+                w2_states_lst.append(quant_state)
+            else:
+                w3_states_lst.append(quant_state)
+            del quant_states_dict[weight_qual_name]
+        assert (len(w1_states_lst) == len(w2_states_lst) ==
+                len(w3_states_lst))
+        w13_absmax_lst = []
+        w2_absmax_lst = []
+        w13_shape_lst = []
+        w2_shape_lst = []
+        for w1_qs, w2_qs, w3_qs in zip(w1_states_lst, w2_states_lst,
+                                        w3_states_lst):
+            assert w1_qs.shape == w3_qs.shape
+            assert w1_qs.blocksize == w2_qs.blocksize == w3_qs.blocksize
+            assert w1_qs.dtype == w2_qs.dtype == w3_qs.dtype
+            # w1 and w3 are interleaved in storage
+            w13_absmax_lst.append(w1_qs.absmax)
+            w13_absmax_lst.append(w3_qs.absmax)
+            w2_absmax_lst.append(w2_qs.absmax)
+            w13_shape_lst.append(w1_qs.shape)
+            w13_shape_lst.append(w3_qs.shape)
+            w2_shape_lst.append(w2_qs.shape)
+        # FIXME dimension is dirty
+        w13_dim0 = 0
+        w13_dim1 = w13_shape_lst[0][1]
+        for shape in w13_shape_lst:
+            w13_dim0 += shape[0]
 
-            )
-            w2_qs = quant_state = QuantState(
-                absmax=w2_absmax,
-                shape=10, # DITTO
-                code=w2_states_lst[0].code,
-                blocksize=w2_states_lst[0].blocksize,
-                dtype=w2_states_lst[0].dtype,
-            )
-            w13_weight_name = name + ".w13_weight"
-            w2_weight_name = name + ".w2_weight"
-            quant_states_dict[w13_weight_name] = w13_qs
-            quant_states_dict[w2_weight_name]=w2_qs
-    # pass
+        w2_dim0 = 0
+        w2_dim1 = w2_shape_lst[0][1]
+        for shape in w2_shape_lst:
+            w2_dim0 += shape[0]
+        w13_absmax = torch.cat(w13_absmax_lst)
+        w2_absmax = torch.cat(w2_absmax_lst)
+        # Create fused quantization state for w13.
+        w13_qs = QuantState(
+            absmax=w13_absmax,
+            shape=(w13_dim0, w13_dim1),
+            code=w1_states_lst[0].code,
+            blocksize=w1_states_lst[0].blocksize,
+            dtype=w1_states_lst[0].dtype,
+        )
+        # Create fused quantization state for w2.
+        w2_qs = QuantState(
+            absmax=w2_absmax,
+            shape=(w2_dim0, w2_dim1),
+            code=w2_states_lst[0].code,
+            blocksize=w2_states_lst[0].blocksize,
+            dtype=w2_states_lst[0].dtype,
+        )
+        # The weight suffixes .w13_weight and .w2_weight are consistent
+        # with the param in BitsAndBytesMoEMethod.
+        w13_weight_name = name + ".w13_weight"
+        w2_weight_name = name + ".w2_weight"
+        quant_states_dict[w13_weight_name] = w13_qs
+        quant_states_dict[w2_weight_name] = w2_qs

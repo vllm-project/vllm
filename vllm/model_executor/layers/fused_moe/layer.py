@@ -1062,14 +1062,21 @@ class FusedMoE(torch.nn.Module):
                            expert_data=expert_data,
                            tp_rank=tp_rank)
 
-    def _load_w13(self, expert_data: torch.Tensor, shard_dim: int,
-                  shard_id: str, loaded_weight: torch.Tensor, tp_rank: int):
+    def _load_w13(self,
+                  expert_data: torch.Tensor,
+                  shard_dim: int,
+                  shard_id: str,
+                  loaded_weight: torch.Tensor,
+                  tp_rank: int,
+                  load_full: bool = False):
 
         # Index the loaded weight for tp sharding.
         # gate_up_proj: "MergedColumnParallel", so tp sharding on output_dim
         shard_size = expert_data.shape[shard_dim] // 2
-        loaded_weight = loaded_weight.narrow(shard_dim, shard_size * tp_rank,
-                                             shard_size)
+        if not load_full:
+            loaded_weight = loaded_weight.narrow(shard_dim,
+                                                 shard_size * tp_rank,
+                                                 shard_size)
         # Narrow parameter and load.
         # w1, gate_proj: Load into first logical weight of w13.
         if shard_id == "w1":
@@ -1155,6 +1162,26 @@ class FusedMoE(torch.nn.Module):
         if is_gguf_weight_type:
             param.weight_type = loaded_weight.item()
             param.data.copy_(loaded_weight)
+            return
+
+        # Case for BitsAndBytes
+        use_bitsandbytes_4bit = getattr(param, "use_bitsandbytes_4bit", False)
+        if use_bitsandbytes_4bit:
+            shard_dim = 0
+            # BNB inflight quantization has already sharded the weights
+            full_load = True
+            expert_data = param.data[expert_id]
+            if shard_id == "w2":
+                expert_data.copy_(loaded_weight)
+            elif shard_id in ("w1", "w3"):
+                self._load_w13(
+                    shard_id=shard_id,
+                    shard_dim=shard_dim,
+                    loaded_weight=loaded_weight,
+                    expert_data=expert_data,
+                    tp_rank=self.tp_rank,
+                    load_full=full_load,
+                )
             return
 
         # is_transposed: if the dim to shard the weight
