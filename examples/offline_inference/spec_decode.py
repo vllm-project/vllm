@@ -49,7 +49,7 @@ def main():
     args = parse_args()
     args.endpoint_type = "openai-chat"
 
-    model_dir = args.model_dir 
+    model_dir = args.model_dir
     if args.model_dir is None:
         model_dir = "meta-llama/Llama-3.1-8B-Instruct"
     tokenizer = AutoTokenizer.from_pretrained(model_dir)
@@ -62,13 +62,11 @@ def main():
 
     if args.method == "eagle" or args.method == "eagle3":
         eagle_dir = args.eagle_dir
-        if args.method == "eagle":
-            if eagle_dir is None:
-                eagle_dir = "yuhuili/EAGLE-LLaMA3.1-Instruct-8B"
+        if args.method == "eagle" and eagle_dir is None:
+            eagle_dir = "yuhuili/EAGLE-LLaMA3.1-Instruct-8B"
 
-        elif args.method == "eagle3":
-            if eagle_dir is None:
-                eagle_dir = "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B"
+        elif args.method == "eagle3" and eagle_dir is None:
+            eagle_dir = "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B"
         speculative_config = {
             "method": args.method,
             "model": eagle_dir,
