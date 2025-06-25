@@ -143,7 +143,9 @@ class DeviceCommunicatorBase:
 
     def reduce_scatter(self,
                        input_: torch.Tensor,
-                       dim: int = -1) -> torch.Tensor:
+                       dim: int = -1,
+                       sizes: Optional[List[int]] = None) -> torch.Tensor:
+        assert sizes is None, "Varying size reduce scatter not supported with base device communicator"
         world_size = self.world_size
         # Bypass the function if we are using only 1 GPU.
         if world_size == 1:
