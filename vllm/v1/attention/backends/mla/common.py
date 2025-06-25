@@ -630,10 +630,10 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         m.max_query_len = 1  # decode-only
 
         # Update state usually set in reorder_batch.
-        self._num_decodes = m.num_reqs
-        self._num_decode_tokens = m.num_actual_tokens
-        self._num_prefills = 0
-        self._num_prefill_tokens = 0
+        # self._num_decodes = m.num_reqs
+        # self._num_decode_tokens = m.num_actual_tokens
+        # self._num_prefills = 0
+        # self._num_prefill_tokens = 0
         return self.build(0, m)
 
     def use_cascade_attention(self, *args, **kwargs) -> bool:
