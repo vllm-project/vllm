@@ -861,13 +861,11 @@ class FusedMoE(torch.nn.Module):
         self.global_num_experts = num_experts
 
         # For smuggling this layer into the fused moe custom op
-        self.use_direct_call = self.dp_size == 1
-        if not self.use_direct_call:
-            compilation_config = vllm_config.compilation_config
-            if prefix in compilation_config.static_forward_context:
-                raise ValueError("Duplicate layer name: {}".format(prefix))
-            compilation_config.static_forward_context[prefix] = self
-            self.layer_name = prefix
+        compilation_config = vllm_config.compilation_config
+        if prefix in compilation_config.static_forward_context:
+            raise ValueError("Duplicate layer name: {}".format(prefix))
+        compilation_config.static_forward_context[prefix] = self
+        self.layer_name = prefix
 
         # Determine expert maps
         if self.use_ep:
@@ -1361,11 +1359,8 @@ class FusedMoE(torch.nn.Module):
 
     def forward(self, hidden_states: torch.Tensor,
                 router_logits: torch.Tensor):
-        if self.use_direct_call:
-            return self.forward_impl(hidden_states, router_logits)
-        else:
-            return torch.ops.vllm.moe_forward(hidden_states, router_logits,
-                                              self.layer_name)
+        return torch.ops.vllm.moe_forward(hidden_states, router_logits,
+                                          self.layer_name)
 
     def forward_impl_chunked(self, full_hidden_states: torch.Tensor,
                              full_router_logits: torch.Tensor):

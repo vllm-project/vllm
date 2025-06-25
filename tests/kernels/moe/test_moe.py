@@ -4,6 +4,9 @@
 
 Run `pytest tests/kernels/test_moe.py`.
 """
+import functools
+from typing import Callable, Optional, Union
+
 import pytest
 import torch
 from torch.nn import Parameter
@@ -14,6 +17,7 @@ from transformers.models.mixtral.modeling_mixtral import MixtralSparseMoeBlock
 import vllm.model_executor.layers.fused_moe  # noqa
 from tests.kernels.utils import opcheck, stack_and_dev, torch_moe
 from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.fused_moe import fused_moe
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     fused_topk, modular_triton_fused_moe)
@@ -40,7 +44,76 @@ vllm_config.scheduler_config.max_num_seqs = 128
 vllm_config.scheduler_config.max_model_len = 8192
 
 
-@pytest.mark.parametrize("m", [1, 33, 64, 222, 1024 * 128])
+def run_moe_test(
+    baseline: Union[Callable, torch.Tensor],
+    moe_fn: Callable,
+    a: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    score: torch.Tensor,
+    topk: int,
+    global_num_experts: int = -1,
+    expert_map: Optional[torch.Tensor] = None,
+    padding: bool = False,
+    use_compile: bool = False,
+    use_cudagraph: bool = False,
+    atol: float = 2e-2,
+    rtol: float = 0,
+) -> torch.Tensor:
+    if isinstance(baseline, torch.Tensor):
+        baseline_output = baseline
+    else:
+        baseline_output = baseline(a,
+                                   w1,
+                                   w2,
+                                   score,
+                                   topk,
+                                   global_num_experts=global_num_experts,
+                                   expert_map=expert_map)
+
+    # Pad the weight if moe padding is enabled
+    if padding:
+        w1 = F.pad(w1, (0, 128), "constant", 0)[..., 0:-128]
+        w2 = F.pad(w2, (0, 128), "constant", 0)[..., 0:-128]
+
+    if use_compile:
+        moe_fn = torch.compile(moe_fn, backend="inductor", fullgraph=True)
+        torch._dynamo.mark_dynamic(a, 0)
+        torch._dynamo.mark_dynamic(score, 0)
+
+    test_output = moe_fn(a,
+                         w1,
+                         w2,
+                         score,
+                         topk,
+                         global_num_experts=global_num_experts,
+                         expert_map=expert_map)
+
+    if use_cudagraph:
+        test_output.fill_(0)
+        stream = torch.cuda.Stream()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            test_output = moe_fn(a,
+                                 w1,
+                                 w2,
+                                 score,
+                                 topk,
+                                 global_num_experts=global_num_experts,
+                                 expert_map=expert_map)
+        torch.cuda.synchronize()
+        graph.replay()
+        torch.cuda.synchronize()
+
+    torch.testing.assert_close(test_output,
+                               baseline_output,
+                               atol=atol,
+                               rtol=rtol)
+
+    return baseline_output
+
+
+@pytest.mark.parametrize("m", [1, 33, 64, 222, 32768, 40000])
 @pytest.mark.parametrize("n", [128, 1024, 2048])
 @pytest.mark.parametrize("k", [128, 511, 1024])
 @pytest.mark.parametrize("e", NUM_EXPERTS)
@@ -48,6 +121,7 @@ vllm_config.scheduler_config.max_model_len = 8192
 @pytest.mark.parametrize("ep_size", EP_SIZE)
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("padding", [True, False])
+@pytest.mark.parametrize("chunk_size", [8192])
 def test_fused_moe(
     m: int,
     n: int,
@@ -57,7 +131,17 @@ def test_fused_moe(
     ep_size: int,
     dtype: torch.dtype,
     padding: bool,
+    chunk_size: int,
+    monkeypatch,
 ):
+    current_platform.seed_everything(7)
+
+    monkeypatch.setenv("VLLM_FUSED_MOE_CHUNK_SIZE", str(chunk_size))
+
+    #
+    # Setup test data
+    #
+
     a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
     w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10
     w2 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 10
@@ -77,58 +161,70 @@ def test_fused_moe(
     else:
         e_map = None
 
-    m_fused_moe = modular_triton_fused_moe(use_fp8_w8a8=False,
-                                           use_int8_w8a8=False,
-                                           use_int8_w8a16=False,
-                                           use_int4_w4a16=False,
-                                           per_channel_quant=False,
-                                           block_shape=None)
+    #
+    # Setup test functions
+    #
+
+    m_fused_moe_fn = modular_triton_fused_moe(use_fp8_w8a8=False,
+                                              use_int8_w8a8=False,
+                                              use_int8_w8a16=False,
+                                              use_int4_w4a16=False,
+                                              per_channel_quant=False,
+                                              block_shape=None)
+
+    def m_fused_moe(
+        a: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        score: torch.Tensor,
+        topk: int,
+        global_num_experts: int = -1,
+        expert_map: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        topk_weights, topk_ids, _ = fused_topk(a, score, topk, False)
+        return m_fused_moe_fn(a,
+                              w1,
+                              w2,
+                              topk_weights,
+                              topk_ids,
+                              global_num_experts=global_num_experts,
+                              expert_map=expert_map)
+
+    fused_moe_fn = functools.partial(fused_moe, renormalize=False)
+
+    #
+    # Run tests
+    #
+    runner = functools.partial(
+        run_moe_test,
+        a=a,
+        w1=w1,
+        w2=w2,
+        score=score,
+        topk=topk,
+        global_num_experts=e,
+        expert_map=e_map,
+        padding=padding,
+    )
+
+    # Note: for now use_compile will error out if the problem size is
+    # large enough to trigger chunking. I'm leaving the flag and
+    # setup code in case we are able to revisit this later.
+    use_compile = False
+
+    use_cudagraph = (n >= 1024 and k >= 1024
+                     and current_platform.is_cuda_alike())
 
     with set_current_vllm_config(vllm_config):
-        torch_output = torch_moe(a, w1, w2, score, topk, e_map)
-        iterative_output = iterative_moe(a,
-                                         w1,
-                                         w2,
-                                         score,
-                                         topk,
-                                         global_num_experts=e,
-                                         expert_map=e_map,
-                                         renormalize=False)
-
-        # Pad the weight if moe padding is enabled
-        if padding:
-            w1 = F.pad(w1, (0, 128), "constant", 0)[..., 0:-128]
-            torch.cuda.empty_cache()
-            w2 = F.pad(w2, (0, 128), "constant", 0)[..., 0:-128]
-            torch.cuda.empty_cache()
-
-        triton_output = fused_moe(a,
-                                  w1,
-                                  w2,
-                                  score,
-                                  topk,
-                                  global_num_experts=e,
-                                  expert_map=e_map,
-                                  renormalize=False)
-
-        topk_weights, topk_ids, _ = fused_topk(a, score, topk, False)
-        m_triton_output = m_fused_moe(a,
-                                      w1,
-                                      w2,
-                                      topk_weights,
-                                      topk_ids,
-                                      global_num_experts=e,
-                                      expert_map=e_map)
-
-    torch.testing.assert_close(triton_output, torch_output, atol=2e-2, rtol=0)
-    torch.testing.assert_close(m_triton_output,
-                               torch_output,
-                               atol=2e-2,
-                               rtol=0)
-    torch.testing.assert_close(iterative_output,
-                               torch_output,
-                               atol=2e-2,
-                               rtol=0)
+        baseline_output = runner(torch_moe, iterative_moe)
+        runner(baseline_output,
+               fused_moe_fn,
+               use_compile=use_compile,
+               use_cudagraph=use_cudagraph)
+        runner(baseline_output,
+               m_fused_moe,
+               use_compile=use_compile,
+               use_cudagraph=use_cudagraph)
 
 
 @pytest.mark.parametrize("m", [1, 32, 222])
@@ -238,7 +334,12 @@ def test_fused_moe_wn16(m: int, n: int, k: int, e: int, topk: int,
                                   w1_zp=w1_qzeros if has_zp else None,
                                   w2_zp=w2_qzeros if has_zp else None,
                                   block_shape=[0, group_size])
-        torch_output = torch_moe(a, w1_ref, w2_ref, score, topk, e_map)
+        torch_output = torch_moe(a,
+                                 w1_ref,
+                                 w2_ref,
+                                 score,
+                                 topk,
+                                 expert_map=e_map)
 
     torch.testing.assert_close(triton_output, torch_output, atol=2e-2, rtol=0)
 
@@ -265,45 +366,51 @@ def test_mixtral_moe(dtype: torch.dtype, padding: bool, use_rocm_aiter: bool,
             pytest.skip("AITER ROCm test skip for float32")
 
     # Instantiate our and huggingface's MoE blocks
-    config = MixtralConfig()
-    hf_moe = MixtralSparseMoeBlock(config).to(dtype).to("cuda")
-    vllm_moe = MixtralMoE(
-        num_experts=config.num_local_experts,
-        top_k=config.num_experts_per_tok,
-        hidden_size=config.hidden_size,
-        intermediate_size=config.intermediate_size,
-        params_dtype=dtype,
-        tp_size=1,
-        dp_size=1,
-    ).cuda()
+    vllm_config.compilation_config.static_forward_context = dict()
+    with (set_current_vllm_config(vllm_config),
+          set_forward_context(None, vllm_config)):
+        config = MixtralConfig()
+        hf_moe = MixtralSparseMoeBlock(config).to(dtype).to("cuda")
+        vllm_moe = MixtralMoE(
+            num_experts=config.num_local_experts,
+            top_k=config.num_experts_per_tok,
+            hidden_size=config.hidden_size,
+            intermediate_size=config.intermediate_size,
+            params_dtype=dtype,
+            tp_size=1,
+            dp_size=1,
+        ).cuda()
 
-    # Load the weights
-    vllm_moe.gate.weight.data[:] = hf_moe.gate.weight.data
-    for i in range(config.num_local_experts):
-        weights = (hf_moe.experts[i].w1.weight.data,
-                   hf_moe.experts[i].w3.weight.data)
-        vllm_moe.experts.w13_weight[i][:] = torch.cat(weights, dim=0)
-        vllm_moe.experts.w2_weight[i][:] = hf_moe.experts[i].w2.weight.data
+        # Load the weights
+        vllm_moe.gate.weight.data[:] = hf_moe.gate.weight.data
+        for i in range(config.num_local_experts):
+            weights = (hf_moe.experts[i].w1.weight.data,
+                       hf_moe.experts[i].w3.weight.data)
+            vllm_moe.experts.w13_weight[i][:] = torch.cat(weights, dim=0)
+            vllm_moe.experts.w2_weight[i][:] = hf_moe.experts[i].w2.weight.data
 
-    # Generate input batch of dimensions [batch_size, seq_len, hidden_dim]
-    hf_inputs = torch.randn((1, 64, config.hidden_size)).to(dtype).to("cuda")
-    # vLLM uses 1D query [num_tokens, hidden_dim]
-    vllm_inputs = hf_inputs.flatten(0, 1)
+        # Generate input batch of dimensions [batch_size, seq_len, hidden_dim]
+        hf_inputs = torch.randn(
+            (1, 64, config.hidden_size)).to(dtype).to("cuda")
+        # vLLM uses 1D query [num_tokens, hidden_dim]
+        vllm_inputs = hf_inputs.flatten(0, 1)
 
-    # Pad the weight if moe padding is enabled
-    if padding:
-        vllm_moe.experts.w13_weight = Parameter(F.pad(
-            vllm_moe.experts.w13_weight, (0, 128), "constant", 0)[..., 0:-128],
-                                                requires_grad=False)
-        torch.cuda.empty_cache()
-        vllm_moe.experts.w2_weight = Parameter(F.pad(
-            vllm_moe.experts.w2_weight, (0, 128), "constant", 0)[..., 0:-128],
-                                               requires_grad=False)
-        torch.cuda.empty_cache()
+        # Pad the weight if moe padding is enabled
+        if padding:
+            vllm_moe.experts.w13_weight = Parameter(F.pad(
+                vllm_moe.experts.w13_weight, (0, 128), "constant", 0)[...,
+                                                                      0:-128],
+                                                    requires_grad=False)
+            torch.cuda.empty_cache()
+            vllm_moe.experts.w2_weight = Parameter(F.pad(
+                vllm_moe.experts.w2_weight, (0, 128), "constant", 0)[...,
+                                                                     0:-128],
+                                                   requires_grad=False)
+            torch.cuda.empty_cache()
 
-    # Run forward passes for both MoE blocks
-    hf_states, _ = hf_moe.forward(hf_inputs)
-    vllm_states = vllm_moe.forward(vllm_inputs)
+        # Run forward passes for both MoE blocks
+        hf_states, _ = hf_moe.forward(hf_inputs)
+        vllm_states = vllm_moe.forward(vllm_inputs)
 
     mixtral_moe_tol = {
         torch.float32: 1e-3,
@@ -546,7 +653,12 @@ def test_fused_marlin_moe(
     topk_weights, topk_ids, _ = fused_topk(a, score, topk, False)
 
     with set_current_vllm_config(vllm_config):
-        torch_output = torch_moe(a, w_ref1, w_ref2, score, topk, e_map)
+        torch_output = torch_moe(a,
+                                 w_ref1,
+                                 w_ref2,
+                                 score,
+                                 topk,
+                                 expert_map=e_map)
 
     marlin_output = torch.ops.vllm.fused_marlin_moe(
         a,
