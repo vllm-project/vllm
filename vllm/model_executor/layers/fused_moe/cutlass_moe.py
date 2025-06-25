@@ -10,11 +10,13 @@ from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP)
-from vllm.model_executor.layers.fused_moe.utils import (
-    _fp8_perm, _resize_cache, _fp8_quantize)
+from vllm.model_executor.layers.fused_moe.utils import (_fp8_perm,
+                                                        _fp8_quantize,
+                                                        _resize_cache)
 from vllm.scalar_type import scalar_types
 
 logger = init_logger(__name__)
+
 
 def run_cutlass_moe_fp8(
     output: torch.Tensor,
@@ -485,21 +487,25 @@ def cutlass_moe_fp4(a: torch.Tensor, a1_gscale: torch.Tensor,
     return out.to(dtype=out_dtype)
 
 
-def _valid_cutlass_block_scaled_grouped_gemm(hidden_states: torch.Tensor, w1: torch.Tensor, w2: torch.Tensor) -> bool:
+def _valid_cutlass_block_scaled_grouped_gemm(hidden_states: torch.Tensor,
+                                             w1: torch.Tensor,
+                                             w2: torch.Tensor) -> bool:
 
     def _valid_cutlass_block_scaled_grouped_gemm_shape(M: int, N: int, K: int):
-        return 128 <= M and N % 128 == 0 and K % 128 == 0
+        return M >= 128 and N % 128 == 0 and K % 128 == 0
 
     m = hidden_states.size(0)
     _, K, N = w2.size()
     if not _valid_cutlass_block_scaled_grouped_gemm_shape(m, N, K):
-        logger.debug("CutlassBlockScaledGroupedGemm disabled: unalinged problem size.")
+        logger.debug(
+            "CutlassBlockScaledGroupedGemm disabled: unalinged problem size.")
         return False
-    
+
     if (w1.dtype != torch.float8_e4m3fn or w2.dtype != torch.float8_e4m3fn):
-        logger.debug("CutlassBlockScaledGroupedGemm disabled: invalid weight dtype(s).")
+        logger.debug(
+            "CutlassBlockScaledGroupedGemm disabled: invalid weight dtype(s).")
         return False
-    
+
     return True
 
 
@@ -518,14 +524,17 @@ def run_cutlass_block_scaled_fused_experts(
     w2_scale = w2_scale.transpose(1, 2)
 
     assert topk_weights.shape == topk_ids.shape, "topk shape mismatch"
-    assert a.shape[0] == topk_ids.shape[0], "a and topk_ids must have the same batch size"
+    assert a.shape[0] == topk_ids.shape[
+        0], "a and topk_ids must have the same batch size"
     assert w1_q.dtype == torch.float8_e4m3fn, "w1_q must be float8_e4m3fn"
     assert w2_q.dtype == torch.float8_e4m3fn, "w2_q must be float8_e4m3fn"
     assert a.shape[1] == w1_q.shape[1], "Hidden size mismatch w1"
     assert w1_q.shape[2] == w2_q.shape[1] * 2, "Hidden size mismatch w2"
     assert w1_q.shape[0] == w2_q.shape[0], "Expert number mismatch"
-    assert w1_q.shape[0] == w1_scale.shape[0], "w1_scale expert number mismatch"
-    assert w1_q.shape[0] == w2_scale.shape[0], "w2_scale expert number mismatch"
+    assert w1_q.shape[0] == w1_scale.shape[
+        0], "w1_scale expert number mismatch"
+    assert w1_q.shape[0] == w2_scale.shape[
+        0], "w2_scale expert number mismatch"
     assert a.dtype in [torch.half, torch.bfloat16], "Invalid output dtype"
 
     out_dtype = a.dtype
@@ -534,13 +543,22 @@ def run_cutlass_block_scaled_fused_experts(
     k = w1_q.size(1)
     n = w2_q.size(1)
 
-    expert_offsets = torch.empty((num_experts + 1,), dtype=torch.int32, device="cuda")
-    problem_sizes1 = torch.empty((num_experts, 3), dtype=torch.int32, device="cuda")
-    problem_sizes2 = torch.empty((num_experts, 3), dtype=torch.int32, device="cuda")
+    expert_offsets = torch.empty((num_experts + 1, ),
+                                 dtype=torch.int32,
+                                 device="cuda")
+    problem_sizes1 = torch.empty((num_experts, 3),
+                                 dtype=torch.int32,
+                                 device="cuda")
+    problem_sizes2 = torch.empty((num_experts, 3),
+                                 dtype=torch.int32,
+                                 device="cuda")
 
     topk = topk_ids.size(1)
 
-    a_q, a1_scale = _fp8_quantize(a, A_scale=None, per_act_token=False, block_shape=[128, 128])
+    a_q, a1_scale = _fp8_quantize(a,
+                                  A_scale=None,
+                                  per_act_token=False,
+                                  block_shape=[128, 128])
     device = a_q.device
 
     a_map = torch.empty((topk_ids.numel()), dtype=torch.int32, device=device)
@@ -576,8 +594,11 @@ def run_cutlass_block_scaled_fused_experts(
 
     intermediate = torch.empty((m * topk, n), dtype=out_dtype, device=device)
     torch.ops._C.silu_and_mul(intermediate, c1)
-    
-    intermediate_q, a2_scale = _fp8_quantize(intermediate, A_scale=None, per_act_token=False, block_shape=[128, 128])
+
+    intermediate_q, a2_scale = _fp8_quantize(intermediate,
+                                             A_scale=None,
+                                             per_act_token=False,
+                                             block_shape=[128, 128])
 
     ops.cutlass_blockwise_scaled_grouped_mm(
         c2,
@@ -589,4 +610,5 @@ def run_cutlass_block_scaled_fused_experts(
         expert_offsets[:-1],
     )
 
-    return (c2[c_map].view(m, topk, k) * topk_weights.view(m, topk, 1).to(out_dtype)).sum(dim=1)
+    return (c2[c_map].view(m, topk, k) *
+            topk_weights.view(m, topk, 1).to(out_dtype)).sum(dim=1)

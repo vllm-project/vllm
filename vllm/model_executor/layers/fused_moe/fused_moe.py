@@ -12,6 +12,9 @@ import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.cutlass_moe import (
+    _valid_cutlass_block_scaled_grouped_gemm,
+    run_cutlass_block_scaled_fused_experts)
 from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
     _valid_deep_gemm, deep_gemm_moe_fp8)
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
@@ -20,9 +23,6 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP)
 from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache, moe_kernel_quantize_input)
-from vllm.model_executor.layers.fused_moe.cutlass_moe import (
-    _valid_cutlass_block_scaled_grouped_gemm,
-    run_cutlass_block_scaled_fused_experts)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils import direct_register_custom_op
@@ -1140,31 +1140,32 @@ def dispatch_fused_experts_func(inplace: bool) -> Callable[..., torch.Tensor]:
     return torch_vllm_outplace_fused_experts
 
 
-def fused_experts(hidden_states: torch.Tensor,
-                  w1: torch.Tensor,
-                  w2: torch.Tensor,
-                  topk_weights: torch.Tensor,
-                  topk_ids: torch.Tensor,
-                  inplace: bool = False,
-                  activation: str = "silu",
-                  apply_router_weight_on_input: bool = False,
-                  use_fp8_w8a8: bool = False,
-                  use_int8_w8a8: bool = False,
-                  use_int8_w8a16: bool = False,
-                  use_int4_w4a16: bool = False,
-                  per_channel_quant: bool = False,
-                  global_num_experts: int = -1,
-                  expert_map: Optional[torch.Tensor] = None,
-                  w1_scale: Optional[torch.Tensor] = None,
-                  w2_scale: Optional[torch.Tensor] = None,
-                  w1_zp: Optional[torch.Tensor] = None,
-                  w2_zp: Optional[torch.Tensor] = None,
-                  a1_scale: Optional[torch.Tensor] = None,
-                  a2_scale: Optional[torch.Tensor] = None,
-                  block_shape: Optional[list[int]] = None,
-                  allow_deep_gemm: bool = False,
-                  allow_cutlass_block_scaled_grouped_gemm: bool = False,
-                  ) -> torch.Tensor:
+def fused_experts(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    inplace: bool = False,
+    activation: str = "silu",
+    apply_router_weight_on_input: bool = False,
+    use_fp8_w8a8: bool = False,
+    use_int8_w8a8: bool = False,
+    use_int8_w8a16: bool = False,
+    use_int4_w4a16: bool = False,
+    per_channel_quant: bool = False,
+    global_num_experts: int = -1,
+    expert_map: Optional[torch.Tensor] = None,
+    w1_scale: Optional[torch.Tensor] = None,
+    w2_scale: Optional[torch.Tensor] = None,
+    w1_zp: Optional[torch.Tensor] = None,
+    w2_zp: Optional[torch.Tensor] = None,
+    a1_scale: Optional[torch.Tensor] = None,
+    a2_scale: Optional[torch.Tensor] = None,
+    block_shape: Optional[list[int]] = None,
+    allow_deep_gemm: bool = False,
+    allow_cutlass_block_scaled_grouped_gemm: bool = False,
+) -> torch.Tensor:
     # For now, disable DeepGemm for small N (<= 512) until better
     # permute/unpermute ops are available.
     N = w1.shape[1]
@@ -1188,7 +1189,7 @@ def fused_experts(hidden_states: torch.Tensor,
             apply_router_weight_on_input=apply_router_weight_on_input,
         )
     elif (allow_cutlass_block_scaled_grouped_gemm and use_fp8_w8a8
-            and _valid_cutlass_block_scaled_grouped_gemm(hidden_states, w1, w2)):
+          and _valid_cutlass_block_scaled_grouped_gemm(hidden_states, w1, w2)):
         assert apply_router_weight_on_input is False
         return run_cutlass_block_scaled_fused_experts(
             a=hidden_states,
@@ -1197,8 +1198,7 @@ def fused_experts(hidden_states: torch.Tensor,
             w1_scale=w1_scale,
             w2_scale=w2_scale,
             topk_weights=topk_weights,
-            topk_ids=topk_ids
-        )
+            topk_ids=topk_ids)
     else:
         return dispatch_fused_experts_func(inplace)(
             hidden_states=hidden_states,
