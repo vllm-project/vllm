@@ -15,9 +15,9 @@ from vllm.platforms import current_platform
 @pytest.mark.parametrize("page_size", [32, 33])
 @pytest.mark.parametrize("combined_kv_head_num", [2, 16])
 @pytest.mark.parametrize("head_dim", [128, 256])
-@pytest.mark.parametrize("kernel_block_size", [4, 8])
+@pytest.mark.parametrize("num_slices_per_block", [4, 8])
 def test_kv_cache_update_kernel(page_size: int, combined_kv_head_num: int,
-                                head_dim: int, kernel_block_size: int):
+                                head_dim: int, num_slices_per_block: int):
     page_num = 1000
     padded_num_tokens = 128
     kv_cache_cpu = torch.zeros(
@@ -42,11 +42,12 @@ def test_kv_cache_update_kernel(page_size: int, combined_kv_head_num: int,
          np.cumsum(slice_lens[:-1])])
     slot_mapping = np.stack(
         [kv_cache_start_indices, new_kv_cache_indices, slice_lens], axis=1)
-    padded_size = (slot_mapping.shape[0] + kernel_block_size -
-                   1) // kernel_block_size * kernel_block_size
+    padded_size = (slot_mapping.shape[0] + num_slices_per_block -
+                   1) // num_slices_per_block * num_slices_per_block
     slot_mapping = np.pad(slot_mapping,
                           [[0, padded_size - slot_mapping.shape[0]], [0, 0]],
                           constant_values=0)
+    slot_mapping = np.transpose(slot_mapping)
     slot_mapping_cpu = torch.tensor(slot_mapping,
                                     device="cpu",
                                     dtype=torch.int32)
@@ -56,7 +57,7 @@ def test_kv_cache_update_kernel(page_size: int, combined_kv_head_num: int,
     torch.ops.xla.dynamo_set_buffer_donor_(kv_cache_xla, True)
     new_kv_cache_xla = torch.ops.xla.kv_cache_update_op(
         new_kv_xla, slot_mapping_xla, kv_cache_xla, page_size,
-        kernel_block_size)
+        num_slices_per_block)
     kv_cache_xla.copy_(new_kv_cache_xla)
     torch_xla.sync()
 

@@ -57,7 +57,7 @@ INVALID_TOKEN_ID = -1
 # Smallest output size
 MIN_NUM_SEQS = 8
 # Block size used for kv cache updating kernel
-KV_CACHE_UPDATE_KERNEL_BLOCK_SIZE = 8
+NUM_SLICES_PER_KV_CACHE_UPDATE_BLOCK = 8
 
 
 #########################################################
@@ -720,6 +720,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             slot_mapping_metadata,
             [[0, padded_num_slices - len(slot_mapping_metadata)], [0, 0]],
             constant_values=0)
+        slot_mapping_metadata = np.transpose(slot_mapping_metadata)
         slot_mapping_metadata = torch.tensor(slot_mapping_metadata,
                                              device=self.device)
 
@@ -742,7 +743,8 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             num_seqs=torch.tensor([num_reqs],
                                   dtype=torch.int32,
                                   device=self.device),
-            kv_cache_update_block_size=KV_CACHE_UPDATE_KERNEL_BLOCK_SIZE,
+            num_slices_per_kv_cache_update_block=
+            NUM_SLICES_PER_KV_CACHE_UPDATE_BLOCK,
         )
         # NOTE(woosuk): Due to chunked prefills, there can be at most 1 partial
         # request in the batch. While we should not sample any token from this
@@ -1170,7 +1172,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                                    dtype=torch.int32).to(self.device)
         padded_num_slices = _get_padded_num_kv_cache_update_slices(
             num_tokens, self.max_num_reqs, self.block_size)
-        slot_mapping = torch.zeros((padded_num_slices, 3),
+        slot_mapping = torch.zeros((3, padded_num_slices),
                                    dtype=torch.int32).to(self.device)
         block_tables = torch.zeros(
             (num_reqs, num_blocks),
@@ -1190,7 +1192,8 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             context_lens=context_lens,
             query_start_loc=query_start_loc,
             num_seqs=num_seqs,
-            kv_cache_update_block_size=KV_CACHE_UPDATE_KERNEL_BLOCK_SIZE,
+            num_slices_per_kv_cache_update_block=
+            NUM_SLICES_PER_KV_CACHE_UPDATE_BLOCK,
         )
 
         if self.is_multimodal_model:
@@ -1802,8 +1805,9 @@ def _get_padded_num_kv_cache_update_slices(num_tokens: int, max_num_reqs: int,
     padded_num_slices = 2 * max_num_reqs + num_tokens // page_size
     padded_num_slices = min(padded_num_slices, num_tokens)
     padded_num_slices = (
-        padded_num_slices + KV_CACHE_UPDATE_KERNEL_BLOCK_SIZE - 1
-    ) // KV_CACHE_UPDATE_KERNEL_BLOCK_SIZE * KV_CACHE_UPDATE_KERNEL_BLOCK_SIZE
+        padded_num_slices + NUM_SLICES_PER_KV_CACHE_UPDATE_BLOCK - 1
+    ) // NUM_SLICES_PER_KV_CACHE_UPDATE_BLOCK * \
+        NUM_SLICES_PER_KV_CACHE_UPDATE_BLOCK
     return padded_num_slices
 
 
