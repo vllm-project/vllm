@@ -290,7 +290,10 @@ class NixlConnectorScheduler:
         if not params:
             return
         if params.get("do_remote_decode"):
-            # NOTE: figure out full computed blocks to send / save
+            # NOTE: when kv_buffer_device (e.) is not supported by Nixl,
+            # prefilled blocks need to be saved to host memory before transfer.
+
+            # figure out full computed blocks to save
             block_ids = blocks.get_block_ids()[0]
             all_full = request.num_tokens % self.block_size == 0
             full_block_ids = (block_ids if all_full else block_ids[:-1])
@@ -679,6 +682,7 @@ class NixlConnectorWorker:
             block_size, n_kv_heads_x_2, head_dim = block_shape
             self.slot_size_bytes = kv_elem_size * n_kv_heads_x_2 * head_dim
         elif self.device_type == "cuda":
+            assert use_mla == self.use_mla
             # TODO (NickLucche) not compatible with hybrid allocator.
             # Enforce check once it goes live, as a single kv layout
             # is expected for xfers.
