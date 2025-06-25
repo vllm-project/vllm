@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from abc import ABC, abstractmethod
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import Optional
@@ -64,7 +65,72 @@ class KVCacheBlocks:
         return KVCacheBlocks(tuple([] for _ in range(len(self.blocks))))
 
 
-class DummyKVCacheManager:
+class KVCacheManagerInterface(ABC):
+
+    @abstractmethod
+    def usage(self) -> float:
+        raise NotImplementedError
+
+    @abstractmethod
+    def make_prefix_cache_stats(self) -> Optional[PrefixCacheStats]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_computed_blocks(self,
+                            request: Request) -> tuple[KVCacheBlocks, int]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def allocate_slots(
+        self,
+        request: Request,
+        num_new_tokens: int,
+        num_new_computed_tokens: int = 0,
+        new_computed_blocks: Optional[KVCacheBlocks] = None,
+        num_draft_tokens: int = 0,
+        num_lookahead_tokens: int = 0,
+        delay_cache_blocks: bool = False,
+    ) -> Optional[KVCacheBlocks]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def free(self, request: Request) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def reset_prefix_cache(self) -> bool:
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_num_common_prefix_blocks(
+        self,
+        request: Request,
+        num_running_requests: int,
+    ) -> list[int]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def free_block_hashes(self, request: Request) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def take_events(self) -> list[KVCacheEvent]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_block_ids(self, request_id: str) -> tuple[list[int], ...]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def create_empty_block_list(self) -> KVCacheBlocks:
+        raise NotImplementedError
+
+
+class DummyKVCacheManager(KVCacheManagerInterface):
 
     @property
     def usage(self) -> float:
@@ -88,7 +154,7 @@ class DummyKVCacheManager:
         delay_cache_blocks: bool = False,
     ) -> Optional[KVCacheBlocks]:
         #if we do not return a KV cache block requests are unschedulable
-        return KVCacheBlocks([KVCacheBlock(block_id=0)])
+        return KVCacheBlocks(tuple([KVCacheBlock(block_id=0)]))
 
     def free(self, request: Request) -> None:
         pass
@@ -109,9 +175,9 @@ class DummyKVCacheManager:
     def take_events(self) -> list[KVCacheEvent]:
         return []
 
-    def get_block_ids(self, request_id: str) -> list[list[int]]:
+    def get_block_ids(self, request_id: str) -> tuple[list[int], ...]:
         """Get the block ids of a request."""
-        return []
+        return tuple([])
 
     def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
         """Cache the blocks for the request, if enabled."""
@@ -119,10 +185,10 @@ class DummyKVCacheManager:
 
     def create_empty_block_list(self) -> KVCacheBlocks:
         """Creates a new KVCacheBlocks instance with no blocks."""
-        return (KVCacheBlocks([]), 0)
+        return KVCacheBlocks(tuple([]))
 
 
-class KVCacheManager:
+class KVCacheManager(KVCacheManagerInterface):
 
     def __init__(
         self,

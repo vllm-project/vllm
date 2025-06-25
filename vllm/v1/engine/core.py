@@ -140,7 +140,7 @@ class EngineCore:
             kv_cache_specs = []
             kv_cache_configs = [
                 KVCacheConfig(num_blocks=0,
-                              kv_cache_tensors={},
+                              kv_cache_tensors=[],
                               kv_cache_groups=[])
             ]
         else:
