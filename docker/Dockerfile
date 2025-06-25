@@ -167,10 +167,6 @@ FROM base as dev
 ENV UV_HTTP_TIMEOUT=500
 ENV UV_INDEX_STRATEGY="unsafe-best-match"
 
-# Workaround for #17068
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system --no-build-isolation "git+https://github.com/state-spaces/mamba@v2.2.4"
-
 COPY requirements/lint.txt requirements/lint.txt
 COPY requirements/test.txt requirements/test.txt
 COPY requirements/dev.txt requirements/dev.txt
@@ -302,12 +298,8 @@ ADD . /vllm-workspace/
 ENV UV_HTTP_TIMEOUT=500
 ENV UV_INDEX_STRATEGY="unsafe-best-match"
 
-# Workaround for #17068
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system --no-build-isolation "git+https://github.com/state-spaces/mamba@v2.2.4"
-
 # install development dependencies (for testing)
-RUN --mount=type=cache,target=/root/.cache/uv \   
+RUN --mount=type=cache,target=/root/.cache/uv \
     CUDA_MAJOR="${CUDA_VERSION%%.*}"; \
     if [ "$CUDA_MAJOR" -ge 12 ]; then \
         uv pip install --system -r requirements/dev.txt; \
