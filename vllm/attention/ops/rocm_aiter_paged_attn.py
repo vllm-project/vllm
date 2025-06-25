@@ -128,18 +128,19 @@ class AITERPagedAttention(PagedAttention):
                 (f"{blocksparse_block_size=} needs to be a multiple of"
                  f"{block_size=} used in block_tables.")
 
+        output = torch.empty_like(query)
         # value_cache.shape: [num_blocks, num_kv_heads, head_size, block_size]
         block_size = value_cache.shape[2] * value_cache.shape[4]
         max_num_blocks_per_seq = cdiv(max_seq_len, block_size)
 
-        output = rocm_aiter.pa_fwd_asm(Q=query,
-                                       K=key_cache,
-                                       V=value_cache,
-                                       block_tables=block_tables,
-                                       context_lens=seq_lens,
-                                       max_num_blocks=max_num_blocks_per_seq,
-                                       K_QScale=k_scale,
-                                       V_QScale=v_scale,
-                                       out_=None)
+        rocm_aiter.pa_fwd_asm(Q=query,
+                              K=key_cache,
+                              V=value_cache,
+                              block_tables=block_tables,
+                              context_lens=seq_lens,
+                              max_num_blocks=max_num_blocks_per_seq,
+                              K_QScale=k_scale,
+                              V_QScale=v_scale,
+                              out_=output)
 
         return output
