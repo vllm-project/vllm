@@ -14,7 +14,7 @@ This describes how to set up your environment to run vLLM on Neuron.
 - Python: 3.9 or newer
 - Pytorch 2.5/2.6
 - Accelerator: NeuronCore-v2 (in trn1/inf2 chips) or NeuronCore-v3 (in trn2 chips)
-- AWS Neuron SDK 2.23
+- AWS Neuron SDK
 
 ## Configure a new environment
 
