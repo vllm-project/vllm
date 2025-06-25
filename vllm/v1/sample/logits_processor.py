@@ -105,7 +105,7 @@ class BatchUpdateBuilder:
     def removed(self) -> list[RemovedRequest]:
         """Removed request indices sorted in
         descending order"""
-        self._sort_removed()
+        self._ensure_removed_sorted()
         return self._removed
 
     def removed_append(self, index: int) -> None:
@@ -130,14 +130,14 @@ class BatchUpdateBuilder:
     def peek_removed_if_can(self) -> Optional[int]:
         """Return lowest removed request index"""
         if self.has_removed():
-            self._sort_removed()
+            self._ensure_removed_sorted()
             return self._removed[-1]
         return None
 
     def pop_removed_if_can(self) -> Optional[int]:
         """Pop lowest removed request index"""
         if self.has_removed():
-            self._sort_removed()
+            self._ensure_removed_sorted()
             return self._removed.pop()
         return None
 
