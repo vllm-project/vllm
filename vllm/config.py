@@ -4675,10 +4675,9 @@ class VllmConfig:
         self.scheduler_config.max_model_len = max_model_len
 
     def try_verify_and_update_config(self):
-        import vllm.model_executor.models.config as _config
+        from vllm.model_executor.models.config import MODELS_CONFIG_MAP
         architecture = self.model_config.architecture
-        cls: Optional[type[_config.VerifyAndUpdateConfig]] = getattr(
-            _config, architecture, None)
+        cls = MODELS_CONFIG_MAP.get(architecture, None)
         if cls is not None:
             cls.verify_and_update_config(self)
 

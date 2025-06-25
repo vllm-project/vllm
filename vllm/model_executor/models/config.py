@@ -18,7 +18,7 @@ class VerifyAndUpdateConfig:
         raise NotImplementedError
 
 
-class GteNewModel(VerifyAndUpdateConfig):
+class GteNewModelConfig(VerifyAndUpdateConfig):
 
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
@@ -39,29 +39,26 @@ class GteNewModel(VerifyAndUpdateConfig):
         }
 
 
-class GteModel(VerifyAndUpdateConfig):
-    # SnowflakeGteNewModel
+class JinaRobertaModelConfig(VerifyAndUpdateConfig):
 
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
         config = vllm_config.model_config.hf_config
 
-        assert config.__class__.__name__ == "GteConfig"
-        assert config.hidden_act == "gelu"
+        if config.position_embedding_type == "rotary":
+            assert config.__class__.__name__ == "XLMRobertaFlashConfig"
 
-        config.hidden_act = "geglu"
-
-        head_dim = config.hidden_size // config.num_attention_heads
-        config.rotary_kwargs = {
-            "head_size": head_dim,
-            "rotary_dim": getattr(config, "rotary_emb_dim", head_dim),
-            "max_position": config.max_position_embeddings,
-            "base": config.rope_theta,
-            "rope_scaling": getattr(config, "rope_scaling", None)
-        }
+            head_dim = config.hidden_size // config.num_attention_heads
+            config.rotary_kwargs = {
+                "head_size": head_dim,
+                "rotary_dim": getattr(config, "rotary_emb_dim", head_dim),
+                "max_position": config.max_position_embeddings,
+                "base": getattr(config, "rope_theta", config.rotary_emb_base),
+                "rope_scaling": getattr(config, "rope_scaling", None)
+            }
 
 
-class NomicBertModel(VerifyAndUpdateConfig):
+class NomicBertModelConfig(VerifyAndUpdateConfig):
 
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
@@ -153,7 +150,7 @@ class NomicBertModel(VerifyAndUpdateConfig):
             vllm_config.recalculate_max_model_len(max_model_len)
 
 
-class Qwen3ForSequenceClassification(VerifyAndUpdateConfig):
+class Qwen3ForSequenceClassificationConfig(VerifyAndUpdateConfig):
 
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
@@ -173,22 +170,31 @@ class Qwen3ForSequenceClassification(VerifyAndUpdateConfig):
         config.num_labels = 1
 
 
-class XLMRobertaModel(GteNewModel):
+class SnowflakeGteNewModelConfig(VerifyAndUpdateConfig):
 
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
         config = vllm_config.model_config.hf_config
 
-        if config.position_embedding_type == "rotary":
-            # JinaRobertaModel
-            assert config.__class__.__name__ == "XLMRobertaFlashConfig"
+        assert config.__class__.__name__ == "GteConfig"
+        assert config.hidden_act == "gelu"
 
-            head_dim = config.hidden_size // config.num_attention_heads
-            config.rotary_kwargs = {
-                "head_size": head_dim,
-                "rotary_dim": getattr(config, "rotary_emb_dim", head_dim),
-                "max_position": config.max_position_embeddings,
-                "base": getattr(config, "rope_theta", config.rotary_emb_base),
-                "rope_scaling": getattr(config, "rope_scaling", None)
-            }
-            return config
+        config.hidden_act = "geglu"
+
+        head_dim = config.hidden_size // config.num_attention_heads
+        config.rotary_kwargs = {
+            "head_size": head_dim,
+            "rotary_dim": getattr(config, "rotary_emb_dim", head_dim),
+            "max_position": config.max_position_embeddings,
+            "base": config.rope_theta,
+            "rope_scaling": getattr(config, "rope_scaling", None)
+        }
+
+
+MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
+    "GteModel": SnowflakeGteNewModelConfig,
+    "GteNewModel": GteNewModelConfig,
+    "NomicBertModel": NomicBertModelConfig,
+    "Qwen3ForSequenceClassification": Qwen3ForSequenceClassificationConfig,
+    "XLMRobertaModel": JinaRobertaModelConfig,
+}
