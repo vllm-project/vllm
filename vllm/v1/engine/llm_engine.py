@@ -82,8 +82,7 @@ class LLMEngine:
             self.dp_group = None
         self.should_execute_dummy_batch = False
 
-        
-        if not self.vllm_config.model_config.skip_tokenizer_init:     
+        if not self.vllm_config.model_config.skip_tokenizer_init:
             # Tokenizer (+ ensure liveness if running in another process).
             self.tokenizer = init_tokenizer_from_configs(
                 model_config=vllm_config.model_config,

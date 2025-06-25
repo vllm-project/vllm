@@ -390,7 +390,8 @@ class Processor:
         if tokenizer:
             max_input_id = max(prompt_ids, default=0)
             if max_input_id > tokenizer.max_token_id:
-                raise ValueError(f"Token id {max_input_id} is out of vocabulary")
+                raise ValueError(
+                    f"Token id {max_input_id} is out of vocabulary")
 
         max_prompt_len = self.model_config.max_model_len
         if len(prompt_ids) > max_prompt_len:
