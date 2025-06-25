@@ -217,10 +217,38 @@ class LogitsProcessorManager:
         """Find logits processor by id, if it exists"""
         return self.all.get(id, None)
 
+    def add_logitsprocs_by_ids(
+            self, ids_logitsprocs: Sequence[tuple[str,
+                                                  LogitsProcessor]]) -> None:
+        """Add a sequence of (logitproc ID, logitproc instance)'s to the
+        logitsprocs manager
+        
+        Args:
+          ids_logitsprocs: sequence of (logitproc ID, logitproc instance pairs)
+        """
+        ids = self.all_ids
+        for id, logitproc in ids_logitsprocs:
+            # Ensure no duplicate IDs
+            if id in ids:
+                raise ValueError(
+                    f"Logits processor ID {id} already loaded (loaded IDs: "
+                    f"{ids})")
+            ids.add(id)
+            if logitproc.requires_nongreedy():
+                self.nongreedy[id] = logitproc
+            else:
+                # Greedy-compatible logitproc
+                self.greedy[id] = logitproc
+
     @property
     def all(self) -> dict[str, LogitsProcessor]:
         """All logits processors"""
         return self.greedy | self.nongreedy
+
+    @property
+    def all_ids(self) -> set[str]:
+        "All logits processors' IDs"
+        return self.greedy.keys() | self.nongreedy.keys()
 
     @property
     def nongreedy_list(self) -> list[LogitsProcessor]:
