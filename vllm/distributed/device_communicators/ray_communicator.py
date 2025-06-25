@@ -1,20 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import uuid
-from typing import Any, List, Optional, Tuple
+from typing import Optional
 
 import ray
 import torch
 from ray.exceptions import RayChannelError
-from ray.experimental.channel import (AcceleratorContext,
-    Communicator, TorchTensorAllocator)
+from ray.experimental.channel import (AcceleratorContext, Communicator,
+                                      TorchTensorAllocator)
 from ray.experimental.util import ReduceOp
 
 from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
+from vllm.distributed.device_communicators.pynccl_wrapper import NCCLLibrary
 from vllm.distributed.utils import StatelessProcessGroup
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
+
 
 class RayStatelessProcessGroup(StatelessProcessGroup):
     """
@@ -23,15 +24,14 @@ class RayStatelessProcessGroup(StatelessProcessGroup):
     This only holds information about the group, and does not do any
     communication.
     """
-    def __init__(self, rank: int, world_size: int,comm_id: tuple):
+
+    def __init__(self, rank: int, world_size: int, comm_id: tuple):
         super().__init__(rank, world_size, None, None)
         self.comm_id = comm_id
 
     def get_rank(self) -> int:
         return self.rank
-    
-    def broadcast_obj(self, obj: Any, src: int) -> Any:
-        return self.comm_id
+
 
 class RayCudaCommunicator(Communicator):
     """
@@ -41,13 +41,15 @@ class RayCudaCommunicator(Communicator):
     communication between actors in the group.
     """
 
+    _nccl = NCCLLibrary()
+
     def __init__(
         self,
         world_size: int,
         comm_id: tuple,
         rank: Optional[int],
-        actor_handles: List["ray.actor.ActorHandle"],
-        cuda_stream: Optional["torch.cuda.Stream"],
+        actor_handles: list["ray.actor.ActorHandle"],
+        cuda_stream: Optional[torch.cuda.Stream],
         use_communication_streams: bool = False,
     ):
         self._world_size = world_size
@@ -69,7 +71,9 @@ class RayCudaCommunicator(Communicator):
 
             pg = RayStatelessProcessGroup(rank, world_size, comm_id)
             device = AcceleratorContext.get().get_accelerator_devices()[0]
-            self._pynccl = PyNcclCommunicator(pg, device=device)
+            self._pynccl = PyNcclCommunicator(pg,
+                                              device=device,
+                                              unique_id=comm_id)
         else:
             # Driver does not have a rank.
             self._pynccl = None
@@ -82,8 +86,6 @@ class RayCudaCommunicator(Communicator):
             self._cuda_stream = cuda_stream
 
             if use_communication_streams:
-                import torch
-
                 device = AcceleratorContext.get().get_accelerator_devices()[0]
 
                 self._send_stream = torch.cuda.Stream(device=device)
@@ -111,8 +113,8 @@ class RayCudaCommunicator(Communicator):
         actor_ids = [a._ray_actor_id for a in self._actor_handles]
         try:
             rank = actor_ids.index(actor._ray_actor_id)
-        except ValueError:
-            raise ValueError("Actor is not in the NCCL group.")
+        except ValueError as e:
+            raise ValueError("Actor is not in the NCCL group.") from e
         return rank
 
     def get_self_rank(self) -> Optional[int]:
@@ -158,7 +160,7 @@ class RayCudaCommunicator(Communicator):
 
     def recv(
         self,
-        shape: Tuple[int],
+        shape: tuple[int],
         dtype: "torch.dtype",
         peer_rank: int,
         allocator: Optional[TorchTensorAllocator],
@@ -266,4 +268,4 @@ class RayCudaCommunicator(Communicator):
 
     @classmethod
     def generate_communicator_id(cls) -> str:
-        return str(uuid.uuid4())
+        return cls._nccl.ncclGetUniqueId()
