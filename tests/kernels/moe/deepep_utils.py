@@ -4,6 +4,7 @@ DeepEP test utilities
 """
 import dataclasses
 import importlib
+import os
 import socket
 import traceback
 from contextlib import closing
@@ -101,7 +102,7 @@ def parallel_launch(
             world_size,
             world_size,
             0,
-            f"tcp://localhost:{find_free_port()}",
+            f"tcp://{os.getenv('LOCALHOST', 'localhost')}:{find_free_port()}",
             worker,
         ) + args,
         nprocs=world_size,
