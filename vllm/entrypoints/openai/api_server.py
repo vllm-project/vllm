@@ -1128,7 +1128,9 @@ async def init_app_state(
     if args.served_model_name is not None:
         served_model_names = args.served_model_name
     else:
-        served_model_names = [args.model]
+        served_model_names = [vllm_config.model_config.model]
+        
+    logger.info(f"[Kourosh] init_app_state, {served_model_names=}")
 
     if args.disable_log_requests:
         request_logger = None

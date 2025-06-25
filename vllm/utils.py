@@ -2917,3 +2917,225 @@ def is_torch_equal_or_newer(target: str) -> bool:
     except Exception:
         # Fallback to PKG-INFO to load the package info, needed by the doc gen.
         return Version(importlib.metadata.version('torch')) >= Version(target)
+
+
+# class ArgParserUtils:
+    
+#     @staticmethod
+#     def parse_type(return_type: Callable[[str], T]) -> Callable[[str], T]:
+
+#         def _parse_type(val: str) -> T:
+#             try:
+#                 if return_type is json.loads and not re.match("^{.*}$", val):
+#                     return cast(T, nullable_kvs(val))
+#                 return return_type(val)
+#             except ValueError as e:
+#                 raise argparse.ArgumentTypeError(
+#                     f"Value {val} cannot be converted to {return_type}.") from e
+
+#         return _parse_type
+
+
+#     @staticmethod
+#     def optional_type(
+#             return_type: Callable[[str], T]) -> Callable[[str], Optional[T]]:
+
+#         def _optional_type(val: str) -> Optional[T]:
+#             if val == "" or val == "None":
+#                 return None
+#             return parse_type(return_type)(val)
+
+#         return _optional_type
+
+
+#     @staticmethod
+#     def union_dict_and_str(val: str) -> Optional[Union[str, dict[str, str]]]:
+#         if not re.match("^{.*}$", val):
+#             return str(val)
+#         return optional_type(json.loads)(val)
+
+
+#     @deprecated(
+#         "Passing a JSON argument as a string containing comma separated key=value "
+#         "pairs is deprecated. This will be removed in v0.10.0. Please use a JSON "
+#         "string instead.")
+#     def nullable_kvs(val: str) -> dict[str, int]:
+#         """Parses a string containing comma separate key [str] to value [int]
+#         pairs into a dictionary.
+
+#         Args:
+#             val: String value to be parsed.
+
+#         Returns:
+#             Dictionary with parsed values.
+#         """
+#         out_dict: dict[str, int] = {}
+#         for item in val.split(","):
+#             kv_parts = [part.lower().strip() for part in item.split("=")]
+#             if len(kv_parts) != 2:
+#                 raise argparse.ArgumentTypeError(
+#                     "Each item should be in the form KEY=VALUE")
+#             key, value = kv_parts
+
+#             try:
+#                 parsed_value = int(value)
+#             except ValueError as exc:
+#                 msg = f"Failed to parse value of item {key}={value}"
+#                 raise argparse.ArgumentTypeError(msg) from exc
+
+#             if key in out_dict and out_dict[key] != parsed_value:
+#                 raise argparse.ArgumentTypeError(
+#                     f"Conflicting values specified for key: {key}")
+#             out_dict[key] = parsed_value
+
+#         return out_dict
+
+
+#     def is_type(type_hint: TypeHint, type: TypeHintT) -> TypeIs[TypeHintT]:
+#         """Check if the type hint is a specific type."""
+#         return type_hint is type or get_origin(type_hint) is type
+
+
+#     def contains_type(type_hints: set[TypeHint], type: TypeHintT) -> bool:
+#         """Check if the type hints contain a specific type."""
+#         return any(is_type(type_hint, type) for type_hint in type_hints)
+
+
+#     def get_type(type_hints: set[TypeHint], type: TypeHintT) -> TypeHintT:
+#         """Get the specific type from the type hints."""
+#         return next((th for th in type_hints if is_type(th, type)), None)
+
+
+#     def literal_to_kwargs(type_hints: set[TypeHint]) -> dict[str, Any]:
+#         """Convert Literal type hints to argparse kwargs."""
+#         type_hint = get_type(type_hints, Literal)
+#         choices = get_args(type_hint)
+#         choice_type = type(choices[0])
+#         if not all(isinstance(choice, choice_type) for choice in choices):
+#             raise ValueError(
+#                 "All choices must be of the same type. "
+#                 f"Got {choices} with types {[type(c) for c in choices]}")
+#         return {"type": choice_type, "choices": sorted(choices)}
+
+
+#     def is_not_builtin(type_hint: TypeHint) -> bool:
+#         """Check if the class is not a built-in type."""
+#         return type_hint.__module__ != "builtins"
+
+
+#     def get_type_hints(type_hint: TypeHint) -> set[TypeHint]:
+#         """Extract type hints from Annotated or Union type hints."""
+#         type_hints: set[TypeHint] = set()
+#         origin = get_origin(type_hint)
+#         args = get_args(type_hint)
+
+#         if origin is Annotated:
+#             type_hints.update(get_type_hints(args[0]))
+#         elif origin is Union:
+#             for arg in args:
+#                 type_hints.update(get_type_hints(arg))
+#         else:
+#             type_hints.add(type_hint)
+
+#         return type_hints
+
+
+#     def get_kwargs(cls: ConfigType) -> dict[str, Any]:
+#         cls_docs = get_attr_docs(cls)
+#         kwargs = {}
+#         for field in fields(cls):
+#             # Get the set of possible types for the field
+#             type_hints: set[TypeHint] = get_type_hints(field.type)
+
+#             # If the field is a dataclass, we can use the model_validate_json
+#             generator = (th for th in type_hints if is_dataclass(th))
+#             dataclass_cls = next(generator, None)
+
+#             # Get the default value of the field
+#             if field.default is not MISSING:
+#                 default = field.default
+#             elif field.default_factory is not MISSING:
+#                 default = field.default_factory()
+
+#             # Get the help text for the field
+#             name = field.name
+#             help = cls_docs[name].strip()
+#             # Escape % for argparse
+#             help = help.replace("%", "%%")
+
+#             # Initialise the kwargs dictionary for the field
+#             kwargs[name] = {"default": default, "help": help}
+
+#             # Set other kwargs based on the type hints
+#             json_tip = """\n\nShould either be a valid JSON string or JSON keys
+#             passed individually. For example, the following sets of arguments are
+#             equivalent:\n\n
+#             - `--json-arg '{"key1": "value1", "key2": {"key3": "value2"}}'`\n
+#             - `--json-arg.key1 value1 --json-arg.key2.key3 value2`\n\n"""
+#             if dataclass_cls is not None:
+
+#                 def parse_dataclass(val: str, cls=dataclass_cls) -> Any:
+#                     try:
+#                         if hasattr(cls, "from_cli"):
+#                             return cls.from_cli(val)
+#                         return TypeAdapter(cls).validate_json(val)
+#                     except ValidationError as e:
+#                         raise argparse.ArgumentTypeError(repr(e)) from e
+
+#                 kwargs[name]["type"] = parse_dataclass
+#                 kwargs[name]["help"] += json_tip
+#             elif contains_type(type_hints, bool):
+#                 # Creates --no-<name> and --<name> flags
+#                 kwargs[name]["action"] = argparse.BooleanOptionalAction
+#             elif contains_type(type_hints, Literal):
+#                 kwargs[name].update(literal_to_kwargs(type_hints))
+#             elif contains_type(type_hints, tuple):
+#                 type_hint = get_type(type_hints, tuple)
+#                 types = get_args(type_hint)
+#                 tuple_type = types[0]
+#                 assert all(t is tuple_type for t in types if t is not Ellipsis), (
+#                     "All non-Ellipsis tuple elements must be of the same "
+#                     f"type. Got {types}.")
+#                 kwargs[name]["type"] = tuple_type
+#                 kwargs[name]["nargs"] = "+" if Ellipsis in types else len(types)
+#             elif contains_type(type_hints, list):
+#                 type_hint = get_type(type_hints, list)
+#                 types = get_args(type_hint)
+#                 assert len(types) == 1, (
+#                     "List type must have exactly one type. Got "
+#                     f"{type_hint} with types {types}")
+#                 kwargs[name]["type"] = types[0]
+#                 kwargs[name]["nargs"] = "+"
+#             elif contains_type(type_hints, int):
+#                 kwargs[name]["type"] = int
+#                 # Special case for large integers
+#                 if name in {"max_model_len", "max_num_batched_tokens"}:
+#                     kwargs[name]["type"] = human_readable_int
+#             elif contains_type(type_hints, float):
+#                 kwargs[name]["type"] = float
+#             elif (contains_type(type_hints, dict)
+#                 and (contains_type(type_hints, str)
+#                     or any(is_not_builtin(th) for th in type_hints))):
+#                 kwargs[name]["type"] = union_dict_and_str
+#             elif contains_type(type_hints, dict):
+#                 kwargs[name]["type"] = parse_type(json.loads)
+#                 kwargs[name]["help"] += json_tip
+#             elif (contains_type(type_hints, str)
+#                 or any(is_not_builtin(th) for th in type_hints)):
+#                 kwargs[name]["type"] = str
+#             else:
+#                 raise ValueError(
+#                     f"Unsupported type {type_hints} for argument {name}.")
+
+#             # If the type hint was a sequence of literals, use the helper function
+#             # to update the type and choices
+#             if get_origin(kwargs[name].get("type")) is Literal:
+#                 kwargs[name].update(literal_to_kwargs({kwargs[name]["type"]}))
+
+#             # If None is in type_hints, make the argument optional.
+#             # But not if it's a bool, argparse will handle this better.
+#             if type(None) in type_hints and not contains_type(type_hints, bool):
+#                 kwargs[name]["type"] = optional_type(kwargs[name]["type"])
+#                 if kwargs[name].get("choices"):
+#                     kwargs[name]["choices"].append("None")
+#         return kwargs

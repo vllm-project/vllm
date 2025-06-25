@@ -153,6 +153,8 @@ class OpenAIServingChat(OpenAIServing):
             tokenizer = await self.engine_client.get_tokenizer(lora_request)
 
             tool_parser = self.tool_parser
+            
+            logger.info(f"[Kourosh] 1")
 
             if isinstance(tokenizer, MistralTokenizer):
                 # because of issues with pydantic we need to potentially
@@ -175,6 +177,8 @@ class OpenAIServingChat(OpenAIServing):
             tool_dicts = None if request.tools is None else [
                 tool.model_dump() for tool in request.tools
             ]
+
+            logger.info(f"[Kourosh] 2")
 
             (
                 conversation,
@@ -270,9 +274,11 @@ class OpenAIServingChat(OpenAIServing):
                 conversation, tokenizer, request_metadata)
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
+            logger.error(f"[Kourosh] error in chat_completion_full_generator: {e}")
             return self.create_error_response(str(e))
 
     def get_chat_request_role(self, request: ChatCompletionRequest) -> str:
+        logger.info(f"[Kourosh] get_chat_request_role, {request.add_generation_prompt=}, {request.messages=}")
         if request.add_generation_prompt:
             return self.response_role
         return request.messages[-1]["role"]
@@ -942,6 +948,7 @@ class OpenAIServingChat(OpenAIServing):
         choices: list[ChatCompletionResponseChoice] = []
 
         role = self.get_chat_request_role(request)
+        logger.info(f"[Kourosh] role: {role}")
         for output in final_res.outputs:
             token_ids = output.token_ids
             out_logprobs = output.logprobs
@@ -980,6 +987,7 @@ class OpenAIServingChat(OpenAIServing):
                 (not isinstance(request.tool_choice,
                                 ChatCompletionNamedToolChoiceParam
                                 ) and request.tool_choice != "required"):
+                logger.info(f"[Kourosh] auto tool is not enabled, {role=}, {reasoning_content=}, {content=}")
                 message = ChatMessage(role=role,
                                       reasoning_content=reasoning_content,
                                       content=content)
@@ -1009,6 +1017,7 @@ class OpenAIServingChat(OpenAIServing):
                 assert content is not None
                 tool_calls = TypeAdapter(
                     list[FunctionDefinition]).validate_json(content)
+                logger.info(f"[Kourosh] tool_calls: {tool_calls}")
                 message = ChatMessage(
                     role=role,
                     content="",
@@ -1023,7 +1032,7 @@ class OpenAIServingChat(OpenAIServing):
             # if the request doesn't use tool choice
             # OR specifies to not use a tool
             elif not request.tool_choice or request.tool_choice == "none":
-
+                logger.info(f"[Kourosh] no tool choice")
                 message = ChatMessage(role=role,
                                       reasoning_content=reasoning_content,
                                       content=content)
@@ -1033,7 +1042,7 @@ class OpenAIServingChat(OpenAIServing):
                     request.tool_choice == "auto"
                     or request.tool_choice is None) and self.enable_auto_tools \
                     and self.tool_parser:
-
+                logger.info(f"[Kourosh] tool choice is auto")
                 try:
                     tool_parser = self.tool_parser(tokenizer)
                 except RuntimeError as e:
@@ -1047,6 +1056,7 @@ class OpenAIServingChat(OpenAIServing):
                 # call. The same is not true for named function calls
                 auto_tools_called = tool_call_info.tools_called
                 if tool_call_info.tools_called:
+                    logger.info(f"[Kourosh] tool_call_info.tools_called: {tool_call_info.tools_called}")
                     message = ChatMessage(role=role,
                                           reasoning_content=reasoning_content,
                                           content=tool_call_info.content,
@@ -1055,6 +1065,7 @@ class OpenAIServingChat(OpenAIServing):
                 else:
                     # FOR NOW make it a chat message; we will have to detect
                     # the type to make it later.
+                    logger.info(f"[Kourosh] no tool call info")
                     message = ChatMessage(role=role,
                                           reasoning_content=reasoning_content,
                                           content=content)

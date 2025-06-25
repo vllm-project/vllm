@@ -108,6 +108,7 @@ class OpenAIServingModels:
                 raise ValueError(load_result.message)
 
     def is_base_model(self, model_name) -> bool:
+        logger.info(f"[Kourosh] is_base_model, {self.base_model_paths=}")
         return any(model.name == model_name for model in self.base_model_paths)
 
     def model_name(self, lora_request: Optional[LoRARequest] = None) -> str:
