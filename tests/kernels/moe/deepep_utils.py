@@ -5,9 +5,7 @@ DeepEP test utilities
 import dataclasses
 import importlib
 import os
-import socket
 import traceback
-from contextlib import closing
 from typing import Callable, Optional
 
 import torch
@@ -15,6 +13,8 @@ from torch.distributed import ProcessGroup
 from torch.multiprocessing import (
     spawn)  # pyright: ignore[reportPrivateImportUsage]
 from typing_extensions import Concatenate, ParamSpec
+
+from vllm.model_executor.layers.fused_moe.utils import find_free_port
 
 has_deep_ep = importlib.util.find_spec("deep_ep") is not None
 if has_deep_ep:
@@ -80,13 +80,6 @@ def _worker_parallel_launch(
         raise
     finally:
         torch.distributed.destroy_process_group()
-
-
-def find_free_port():
-    with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as s:
-        s.bind(('', 0))
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        return s.getsockname()[1]
 
 
 def parallel_launch(
