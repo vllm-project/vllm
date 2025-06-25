@@ -460,6 +460,18 @@ Sequence group cmpl-3cbf19b0c6d74b3f90b5d5db2ed2385e-0 is preempted by Preemptio
 **Usage of Multi-Step Scheduling feature**
 Enabling of Multi-Step Scheduling is recommended for better decode performance. Refer to vllm-project#6854 for more details.
 
+# Custom Performance Optimizations for vLLM on Gaudi
+
+## Split QKV projection
+
+This is an experimental performance optimization implemented for selected models: LLama, Mixtral, Granite and GPTBigCode. It allows splitting the QKV projection into three separate operations - Q, K, and V projections. This approach is particularly beneficial in scenarios where models have high compute requirements, as it enables better pipelining of workloads between MME's and TPC's engines. For example, models with large batch sizes or long sequence lengths can see improved throughput due to reduced contention on compute resources. More information can be found in the [Gaudi Architecture](https://docs.habana.ai/en/v1.20.1/Gaudi_Overview/Gaudi_Architecture.html) page. To apply this optimization, use the `--split-qkv` argument for online mode or set `split_qkv=True` in offline mode.
+
+> [!NOTE]
+> Splitting QKV projection can also degrade the performance for cases with low compute, i.e. low batch size, short sequence lengths or using tensor parallelism. It should always be verified in a particular scenario using a profiling tool such as [perfetto.habana.ai](https://perfetto.habana.ai/#!/viewer) or by analyzing execution traces to ensure optimal performance.
+
+> [!NOTE]
+> This optimization doesn't work with FP8 precision at this moment. Support will be added in future releases.
+
 ## Troubleshooting
 
 If you encounter device out-of-memory issues or want to attempt inference with higher batch sizes, try tweaking HPU Graphs as follows:
