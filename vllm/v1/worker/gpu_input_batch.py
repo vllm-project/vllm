@@ -16,11 +16,11 @@ from vllm.utils import swap_dict_values
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.pool.metadata import PoolingMetadata
 from vllm.v1.sample.logits_processor import (BatchUpdateBuilder,
-                                             MoveDirectionality)
+                                             MoveDirectionality,
+                                             init_builtin_logitsprocs)
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.utils import copy_slice
 from vllm.v1.worker.block_table import MultiGroupBlockTable
-from vllm.v1.worker.utils import init_builtin_logitsprocs
 
 
 @dataclass

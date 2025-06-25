@@ -6,10 +6,6 @@ import torch
 
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.v1.kv_cache_interface import KVCacheGroupSpec
-from vllm.v1.sample.logits_processor import (LogitBiasLogitsProcessor,
-                                             LogitsProcessorManager,
-                                             MinPLogitsProcessor,
-                                             MinTokensLogitsProcessor)
 
 # Logits processor id strs
 STR_NO_LOGITPROC = "none"
@@ -120,35 +116,3 @@ def initialize_kv_cache_for_kv_sharing(
         kv_caches[layer_name] = kv_caches[target_layer_name]
         group_idx = layer_to_kv_cache_group_idx[target_layer_name]
         kv_cache_groups[group_idx].layer_names.append(layer_name)
-
-
-def init_builtin_logitsprocs(pin_memory_available: bool, max_num_reqs: int,
-                             device: torch.device) -> LogitsProcessorManager:
-    """Construct 'builtin' vLLM logitsprocs which the engine
-    loads by default.
-    
-    Args:
-      pin_memory_available: pinned memory is available for use
-                            for use by logitsproc
-      max_num_reqs: ceiling on request count in persistent batch
-      device: inference device
-
-    Returns:
-      Data structure encapsulating loaded logitsprocs
-    """
-    min_tokens_logitproc = MinTokensLogitsProcessor(
-        pin_memory=pin_memory_available, device=device)
-    logit_bias_logitproc = LogitBiasLogitsProcessor(
-        pin_memory=pin_memory_available, device=device)
-    min_p_logitproc = MinPLogitsProcessor(
-        pin_memory=pin_memory_available,
-        device=device,
-        # +1 for temporary swap space
-        max_num_reqs=max_num_reqs + 1)
-    return LogitsProcessorManager(
-        non_argmax_invariant={
-            STR_MIN_TOKENS_LOGITPROC_ID: min_tokens_logitproc,
-            STR_LOGITS_BIAS_LOGITPROC_ID: logit_bias_logitproc
-        },
-        argmax_invariant={STR_MIN_P_LOGITPROC_ID: min_p_logitproc},
-    )

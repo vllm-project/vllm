@@ -18,12 +18,13 @@ from vllm.sampling_params import SamplingParams
 from vllm.utils import is_pin_memory_available
 from vllm.v1.sample.logits_processor import (BatchUpdate, BatchUpdateBuilder,
                                              MinTokensLogitsProcessor,
-                                             MoveDirectionality)
+                                             MoveDirectionality,
+                                             init_builtin_logitsprocs)
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.worker.utils import (STR_LOGITS_BIAS_LOGITPROC_ID,
                                   STR_MIN_P_LOGITPROC_ID,
                                   STR_MIN_TOKENS_LOGITPROC_ID,
-                                  STR_NO_LOGITPROC, init_builtin_logitsprocs)
+                                  STR_NO_LOGITPROC)
 
 PIN_MEMORY_AVAILABLE = is_pin_memory_available()
 MAX_NUM_REQS = 256
