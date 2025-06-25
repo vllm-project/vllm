@@ -393,8 +393,6 @@ class P2pNcclEngine:
                 while not self.send_queue:
                     self.send_queue_cv.wait()
                 tensor_id, remote_address, tensor = self.send_queue.popleft()
-                if not self.send_queue:
-                    self.send_queue_cv.notify()
             self._send_sync(tensor_id, tensor, remote_address)
 
     def _send_sync(
@@ -428,7 +426,7 @@ class P2pNcclEngine:
                 response.decode())
             return False
 
-        self._send(comm, tensor.to(self.device), rank ^ 1, self.send_stream)
+        self._send(comm, tensor, rank ^ 1, self.send_stream)
 
         if self.send_type == "PUT_ASYNC":
             self._have_sent_tensor_id(tensor_id)
