@@ -158,9 +158,13 @@ class FlashAttentionMetadataBuilder(
 
         self.aot_schedule = (get_flash_attn_version() == 3)
         self.use_full_cuda_graph = compilation_config.full_cuda_graph
-        if self.use_full_cuda_graph and not self.aot_schedule:
-            raise ValueError("Full CUDA graph mode requires AOT scheduling, "
-                             "which requires FlashAttention 3.")
+        if self.use_full_cuda_graph:
+            # NOTE(lucas): AOT scheduling not supported in full cuda graph mode
+            #  yet. This is because the scheduler and kernel need to always use
+            #  the same num_splits (which acts as an upper bound with the
+            #  dynamic split scheduler) which is currently heuristically decided
+            #  by the kernel launching code.
+            self.aot_schedule = False
         self.scheduler_metadata = torch.zeros(self.runner.max_num_reqs + 1,
                                               dtype=torch.int32,
                                               device=self.runner.device)
