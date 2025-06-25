@@ -35,6 +35,16 @@ RemovedRequest = int
 class BatchUpdate:
     """Persistent batch state change info for logitsprocs"""
     batch_size: int  # Current num reqs in batch
+
+    # Metadata for requests added to, removed from, and moved
+    # within the persistent batch.
+    #
+    # Note: each added request is represented as
+    # (index, params, output_tok_ids)
+    # Key assumption: output_tok_ids is a reference to the
+    # request's running output tokens list; in this way
+    # the logits processors always see the latest list of
+    # generated tokens
     removed: Sequence[RemovedRequest]
     moved: Sequence[MovedRequest]
     added: Sequence[AddedRequest]
