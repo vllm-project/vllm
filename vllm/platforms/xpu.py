@@ -197,3 +197,40 @@ class XPUPlatform(Platform):
     @classmethod
     def device_count(cls) -> int:
         return torch.xpu.device_count()
+
+    @classmethod
+    def empty_cache(cls, ):
+        torch.xpu.empty_cache()
+
+    @classmethod
+    def reset_peak_memory_stats(cls):
+        torch.xpu.reset_peak_memory_stats()
+
+    @classmethod
+    def mem_get_info(cls):
+        if cls.is_data_center_gpu():
+            return torch.xpu.mem_get_info()
+        else:
+            # we provide this function due to `torch.xpu.mem_get_info()` doesn't
+            # return correct free_gpu_memory on intel client GPU. We need to
+            # calculate/estiamte it.
+            _, total_gpu_memory = torch.xpu.mem_get_info()
+            # FIXME: memory_allocated() doesn't count non-torch allocations,
+            # and we don't have any API to get it. so we mark it as 128MB.
+            used_memory = torch.xpu.memory_allocated()
+            non_torch_allocations = 128 * 1024 * 1024
+            free_gpu_memory = total_gpu_memory - (used_memory +
+                                                  non_torch_allocations)
+            return free_gpu_memory, total_gpu_memory
+
+    @classmethod
+    def memory_stats(cls):
+        return torch.xpu.memory_stats()
+
+    @classmethod
+    def memory_reserved(cls):
+        return torch.xpu.memory_reserved()
+
+    @classmethod
+    def synchronize(cls):
+        return torch.xpu.synchronize()

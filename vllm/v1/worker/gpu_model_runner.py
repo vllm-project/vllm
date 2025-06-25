@@ -47,6 +47,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (BatchedTensorInputs, MultiModalKwargsItem,
                                     PlaceholderRange)
 from vllm.multimodal.utils import group_mm_kwargs_by_modality
+from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors, PoolerOutput
@@ -416,12 +417,16 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     def _init_device_properties(self) -> None:
         """Initialize attributes from torch.cuda.get_device_properties
         """
-        self.device_properties = torch.cuda.get_device_properties(self.device)
-        self.num_sms = self.device_properties.multi_processor_count
+        if current_platform.is_cuda():
+            self.device_properties = torch.cuda.get_device_properties(
+                self.device)
+            self.num_sms = self.device_properties.multi_processor_count
+        else:
+            self.num_sms = None
 
     # Note: used for model runner override.
     def _sync_device(self) -> None:
-        torch.cuda.synchronize()
+        current_platform.synchronize()
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         """Update the cached states and the persistent batch with the scheduler
@@ -2647,7 +2652,22 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         compilation_counter.num_gpu_runner_capture_triggers += 1
 
         start_time = time.perf_counter()
-        start_free_gpu_memory = torch.cuda.mem_get_info()[0]
+        start_free_gpu_memory = current_platform.mem_get_info()[0]
+
+        @contextmanager
+        def freeze_gc():
+            # Optimize garbage collection during CUDA graph capture.
+            # Clean up, then freeze all remaining objects from being included
+            # in future collections.
+            gc.collect()
+            should_freeze = not envs.VLLM_ENABLE_CUDAGRAPH_GC
+            if should_freeze:
+                gc.freeze()
+            try:
+                yield
+            finally:
+                if should_freeze:
+                    gc.unfreeze()
 
         @contextmanager
         def freeze_gc():
@@ -2704,7 +2724,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         set_cudagraph_capturing_enabled(False)
 
         end_time = time.perf_counter()
-        end_free_gpu_memory = torch.cuda.mem_get_info()[0]
+        end_free_gpu_memory = current_platform.mem_get_info()[0]
         elapsed_time = end_time - start_time
         cuda_graph_size = start_free_gpu_memory - end_free_gpu_memory
         # This usually takes 5~20 seconds.
