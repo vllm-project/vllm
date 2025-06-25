@@ -53,7 +53,6 @@ from vllm.entrypoints.openai.orca_metrics import metrics_header
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
-                                              ChatCompletionResponse,
                                               ClassificationRequest,
                                               ClassificationResponse,
                                               CompletionRequest,

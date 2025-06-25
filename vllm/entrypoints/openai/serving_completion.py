@@ -523,13 +523,13 @@ class OpenAIServingCompletion(OpenAIServing):
 
         request_metadata.final_usage_info = usage
 
-        return CompletionResponse(
-            id=request_id,
-            created=created_time,
-            model=model_name,
-            choices=choices,
-            usage=usage,
-            kv_transfer_params=final_res_batch[0].kv_transfer_params), latest_engine_stats
+        return CompletionResponse(id=request_id,
+                                  created=created_time,
+                                  model=model_name,
+                                  choices=choices,
+                                  usage=usage,
+                                  kv_transfer_params=final_res_batch[0].
+                                  kv_transfer_params), latest_engine_stats
 
     def _create_completion_logprobs(
         self,
