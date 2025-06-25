@@ -2203,6 +2203,7 @@ class SchedulerConfig:
                 self.max_num_partial_prefills, self.max_long_partial_prefills,
                 self.long_prefill_token_threshold)
 
+        # If cuda_graph_sizes is not specified, default set to [max_num_seqs].
         if self.cuda_graph_sizes is None:
             self.cuda_graph_sizes = [self.max_num_seqs]
 
