@@ -303,8 +303,8 @@ class EngineArgs:
     kv_cache_dtype: CacheDType = CacheConfig.cache_dtype
     seed: Optional[int] = ModelConfig.seed
     max_model_len: Optional[int] = ModelConfig.max_model_len
-    cuda_graph_sizes: Optional[list[int]] = get_field(SchedulerConfig,
-                                                      "cuda_graph_sizes")
+    cuda_graph_sizes: list[int] = get_field(SchedulerConfig,
+                                            "cuda_graph_sizes")
     # Note: Specifying a custom executor backend by passing a class
     # is intended for expert use only. The API may change without
     # notice.

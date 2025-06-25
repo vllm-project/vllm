@@ -2033,7 +2033,7 @@ class SchedulerConfig:
     NOTE: This will be replaced by speculative config in the future; it is
     present to enable correctness tests until then."""
 
-    cuda_graph_sizes: Optional[list[int]] = None  # type: ignore
+    cuda_graph_sizes: list[int] = field(default_factory=lambda: [])
     """Cuda graph capture sizes
     1. if none provided, then default set to [max_num_seqs]
     2. if one value is provided, then the capture list would follow the
@@ -2204,7 +2204,7 @@ class SchedulerConfig:
                 self.long_prefill_token_threshold)
 
         # If cuda_graph_sizes is not specified, default set to [max_num_seqs].
-        if self.cuda_graph_sizes is None:
+        if not self.cuda_graph_sizes:
             self.cuda_graph_sizes = [self.max_num_seqs]
 
     @model_validator(mode='after')
