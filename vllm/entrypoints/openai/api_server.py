@@ -1015,6 +1015,74 @@ def load_log_config(log_config_file: Optional[str]) -> Optional[dict]:
         return None
 
 
+class AuthenticationMiddleware:
+    """
+    Pure ASGI middleware that authenticates each request by checking
+    if the Authorization header exists and equals "Bearer {api_key}".
+
+    Notes
+    -----
+    There are two cases in which authentication is skipped:
+        1. The HTTP method is OPTIONS.
+        2. The request path doesn't start with /v1 (e.g. /health).
+    """
+
+    def __init__(self, app: ASGIApp, api_token: str) -> None:
+        self.app = app
+        self.api_token = api_token
+
+    def __call__(self, scope: Scope, receive: Receive,
+                 send: Send) -> Awaitable[None]:
+        if scope["type"] not in ("http",
+                                 "websocket") or scope["method"] == "OPTIONS":
+            # scope["type"] can be "lifespan" or "startup" for example,
+            # in which case we don't need to do anything
+            return self.app(scope, receive, send)
+        root_path = scope.get("root_path", "")
+        url_path = URL(scope=scope).path.removeprefix(root_path)
+        headers = Headers(scope=scope)
+        # Type narrow to satisfy mypy.
+        if url_path.startswith("/v1") and headers.get(
+                "Authorization") != f"Bearer {self.api_token}":
+            response = JSONResponse(content={"error": "Unauthorized"},
+                                    status_code=401)
+            return response(scope, receive, send)
+        return self.app(scope, receive, send)
+
+
+class XRequestIdMiddleware:
+    """
+    Middleware the set's the X-Request-Id header for each response
+    to a random uuid4 (hex) value if the header isn't already
+    present in the request, otherwise use the provided request id.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    def __call__(self, scope: Scope, receive: Receive,
+                 send: Send) -> Awaitable[None]:
+        if scope["type"] not in ("http", "websocket"):
+            return self.app(scope, receive, send)
+
+        # Extract the request headers.
+        request_headers = Headers(scope=scope)
+
+        async def send_with_request_id(message: Message) -> None:
+            """
+            Custom send function to mutate the response headers
+            and append X-Request-Id to it.
+            """
+            if message["type"] == "http.response.start":
+                response_headers = MutableHeaders(raw=message["headers"])
+                request_id = request_headers.get("X-Request-Id",
+                                                 uuid.uuid4().hex)
+                response_headers.append("X-Request-Id", request_id)
+            await send(message)
+
+        return self.app(scope, receive, send_with_request_id)
+
+
 def build_app(args: Namespace) -> FastAPI:
     if args.disable_fastapi_docs:
         app = FastAPI(openapi_url=None,
@@ -1062,78 +1130,9 @@ def build_app(args: Namespace) -> FastAPI:
 
     # Ensure --api-key option from CLI takes precedence over VLLM_API_KEY
     if token := args.api_key or envs.VLLM_API_KEY:
-
-        class AuthenticationMiddleware:
-            """
-            Pure ASGI middleware that authenticates each request by checking
-            if the Authorization header exists and equals "Bearer {api_key}".
-
-            Notes
-            -----
-            There are two cases in which authentication is skipped:
-                1. The HTTP method is OPTIONS.
-                2. The request path doesn't start with /v1 (e.g. /health).
-            """
-
-            def __init__(self, app: ASGIApp) -> None:
-                self.app = app
-
-            def __call__(self, scope: Scope, receive: Receive,
-                         send: Send) -> Awaitable[None]:
-                if scope["type"] not in (
-                        "http", "websocket") or scope["method"] == "OPTIONS":
-                    # scope["type"] can be "lifespan" or "startup" for example,
-                    # in which case we don't need to do anything
-                    return self.app(scope, receive, send)
-                root_path = scope.get("root_path", "")
-                url_path = URL(scope=scope).path.removeprefix(root_path)
-                headers = Headers(scope=scope)
-                # Type narrow to satisfy mypy.
-                if (isinstance(token, str) and url_path.startswith("/v1")
-                        and headers.get("Authorization") != f"Bearer {token}"):
-                    response = JSONResponse(content={"error": "Unauthorized"},
-                                            status_code=401)
-                    return response(scope, receive, send)
-                return self.app(scope, receive, send)
-
-        app.add_middleware(AuthenticationMiddleware)
+        app.add_middleware(AuthenticationMiddleware, api_token=token)
 
     if args.enable_request_id_headers:
-
-        class XRequestIdMiddleware:
-            """
-            Middleware the set's the X-Request-Id header for each response
-            to a random uuid4 (hex) value if the header isn't already
-            present in the request, otherwise use the provided request id.
-            """
-
-            def __init__(self, app: ASGIApp) -> None:
-                self.app = app
-
-            def __call__(self, scope: Scope, receive: Receive,
-                         send: Send) -> Awaitable[None]:
-                if scope["type"] not in ("http", "websocket"):
-                    return self.app(scope, receive, send)
-
-                # Extract the request headers.
-                request_headers = Headers(scope=scope)
-
-                async def send_with_request_id(message: Message) -> None:
-                    """
-                    Custom send function to mutate the response headers
-                    and append X-Request-Id to it.
-                    """
-                    if message["type"] == "http.response.start":
-                        response_headers = MutableHeaders(
-                            raw=message["headers"])
-                        request_id = request_headers.get(
-                            "X-Request-Id",
-                            uuid.uuid4().hex)
-                        response_headers.append("X-Request-Id", request_id)
-                    await send(message)
-
-                return self.app(scope, receive, send_with_request_id)
-
         app.add_middleware(XRequestIdMiddleware)
 
     if envs.VLLM_DEBUG_LOG_API_SERVER_RESPONSE:
