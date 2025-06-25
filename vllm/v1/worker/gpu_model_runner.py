@@ -1693,8 +1693,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 draft_token_ids.append(drafter_output.tolist())
         return draft_token_ids
 
-    def update_load_config(self, **kwargs) -> None:
-        self.load_config = dataclasses.replace(self.load_config, **kwargs)
+    def update_config(self, overrides: dict[str, Any]) -> None:
+        for config_name, config_overrides in overrides.items():
+            try:
+                config = getattr(self, config_name)
+            except AttributeError as exc:
+                raise ValueError(f"Unknown config {config_name}") from exc
+            new_config = dataclasses.replace(config, **config_overrides)
+            setattr(self, config_name, new_config)
 
     def load_model(self) -> None:
         logger.info("Starting to load model %s...", self.model_config.model)

@@ -4,7 +4,7 @@ import bisect
 import dataclasses
 import gc
 import time
-from typing import TYPE_CHECKING, Optional, cast
+from typing import TYPE_CHECKING, Any, Optional, cast
 from unittest.mock import patch
 
 import numpy as np
@@ -969,8 +969,14 @@ class TPUModelRunner(LoRAModelRunnerMixin):
 
         return model_runner_output
 
-    def update_load_config(self, **kwargs) -> None:
-        self.load_config = dataclasses.replace(self.load_config, **kwargs)
+    def update_config(self, overrides: dict[str, Any]) -> None:
+        for config_name, config_overrides in overrides.items():
+            try:
+                config = getattr(self, config_name)
+            except AttributeError as exc:
+                raise ValueError(f"Unknown config {config_name}") from exc
+            new_config = dataclasses.replace(config, **config_overrides)
+            setattr(self, config_name, new_config)
 
     def load_model(self) -> None:
         self.device = self.device_config.device

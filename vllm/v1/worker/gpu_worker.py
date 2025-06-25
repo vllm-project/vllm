@@ -3,7 +3,7 @@
 """A GPU worker class."""
 import gc
 import os
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 import torch.distributed
@@ -184,8 +184,8 @@ class Worker(WorkerBase):
         with context:
             self.model_runner.load_model()
 
-    def update_load_config(self, **kwargs) -> None:
-        self.model_runner.update_load_config(**kwargs)
+    def update_config(self, overrides: dict[str, Any]) -> None:
+        self.model_runner.update_config(overrides)
 
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
