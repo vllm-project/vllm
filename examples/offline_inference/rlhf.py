@@ -22,7 +22,7 @@ For a production-ready implementation that supports multiple training and
 inference replicas, see the OpenRLHF framework:
 https://github.com/OpenRLHF/OpenRLHF
 
-This example assumes a single-node cluster with four GPUs, but Ray
+This example assumes a single-node cluster with three GPUs, but Ray
 supports multi-node clusters. vLLM expects the GPUs are only used for vLLM
 workloads. Residual GPU activity interferes with vLLM memory profiling and
 causes unexpected behavior.
