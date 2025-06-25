@@ -23,11 +23,12 @@ from ...utils import check_embeddings_close
                      marks=[pytest.mark.core_model, pytest.mark.cpu_model]),
         pytest.param("Alibaba-NLP/gte-Qwen2-1.5B-instruct"),
         pytest.param("ssmits/Qwen2-7B-Instruct-embed-base"),
+        pytest.param("Linq-AI-Research/Linq-Embed-Mistral"),
         # [Cross-Encoder]
         pytest.param("sentence-transformers/stsb-roberta-base-v2"),
     ],
 )
-@pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize("dtype", ["half", "float"])
 def test_models(
     hf_runner,
     vllm_runner,
@@ -58,6 +59,8 @@ def test_models(
     # So we need to strip the input texts to avoid test failing.
     example_prompts = [str(s).strip() for s in example_prompts]
 
+    # Force hf_runner to use CPU
+    monkeypatch.setattr(hf_runner, "get_default_device", lambda self: "cpu")
     with hf_runner(model, dtype=dtype,
                    is_sentence_transformer=True) as hf_model:
         hf_outputs = hf_model.encode(example_prompts)
