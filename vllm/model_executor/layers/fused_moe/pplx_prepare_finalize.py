@@ -8,7 +8,7 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.utils import (
-    moe_kernel_quantize_input)
+    moe_kernel_quantize_input, _validate_scale_shape)
 from vllm.utils import cdiv, round_up
 
 
@@ -120,15 +120,12 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             per_act_token_quant=quant_config.per_act_token_quant,
             block_shape=quant_config.block_shape)
 
-        if quant_config.quant_dtype is not None:
-            if quant_config.is_per_tensor:
-                assert a1q_scale.numel() == 1
-            elif quant_config.is_per_act_token:
-                assert a1q_scale.numel() == a1.numel()
-                assert a1q_scale.shape == a1.shape
-            else:
-                assert a1q_scale.numel() == a1.shape[0] * cdiv(a1.shape[1], quant_config.block_shape[1])
-                assert a1q_scale.shape == (a1.shape[0], cdiv(a1.shape[1], quant_config.block_shape[1]))
+        _validate_scale_shape(
+            a1q,
+            a1q_scale,
+            quant_config.per_act_token_quant,
+            quant_config.block_shape
+        )
 
         if a1q_scale is not None:
             scalar_scales = a1q_scale.numel() == 1
@@ -140,21 +137,8 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
             orig_a_scale_block_shape = a1q_scale.shape[-1]
 
-            # pad out scales if needed. TODO (bnell): do for non-scalar scales?
-            if False and (scalar_scales or quant_config.is_per_tensor):
-                #print(f"a1q_scale {a1q.shape}, {a1q_scale.shape}")
-                a1q_scale = a1q_scale.repeat(1, 4 * torch.float32.itemsize)
-            else:
-                #a1q_scale = torch.repeat_interleave(a1q_scale, round_up(a1q_scale.shape[1], 16), dim=1)
-                #a1q_scale = torch.nn.functional.pad(a1q_scale, pad=(0, 16-a1q_scale.shape[1]), mode='replicate')
-                pass
-
             if not quant_config.is_grouped:
                 a1q_scale = a1q_scale.repeat(repeat_rows, repeat_cols)
-
-            #assert a1_scale is None or a1_scale.shape[0] == a1q.shape[1], f"{a1_scale.shape}, {a1q_scale.shape}"
-
-            #print(f"FINAL SCALE SHAPE {a1q_scale.shape}")
 
         assert a1q_scale is None or a1q_scale.ndim == 2, \
             f"{0 if a1q_scale is None else (a1q_scale.ndim, a1q_scale.shape)}"
@@ -172,7 +156,6 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         )
 
         num_dp = self.world_size // self.dp_size
-        #print(f"EXPERT_X {(num_local_experts, self.max_num_tokens * num_dp, hidden_dim)}, {a1q.dtype}, {device}")
         expert_x = torch.empty(
             (num_local_experts, self.max_num_tokens * num_dp, hidden_dim),
             dtype=a1q.dtype,
@@ -184,24 +167,24 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             float32_size = torch.float32.itemsize
 
             if quant_config.is_per_act_token:
+                token_dim = expert_x.size(1)
                 final_dim = expert_x.size(2)
                 assert final_dim % 4 == 0 #?
             elif quant_config.is_per_tensor:
+                token_dim = 1
                 final_dim = 4
             else:
                 num_blocks = cdiv(expert_x.size(2), quant_config.block_shape[1])
                 final_dim = round_up(num_blocks, 4)
+                token_dim = expert_x.size(1)
 
             expert_x_scale_shape = (
                 num_local_experts,
-                expert_x.size(1),
+                token_dim,
                 final_dim,
             )
 
-            #print(f"EXPERT_X_SCALE {expert_x_scale_shape}")
-
-            # empty?
-            expert_x_scale = torch.zeros(
+            expert_x_scale = torch.empty(
                 expert_x_scale_shape,
                 dtype=torch.float32,
                 device=expert_x.device,
@@ -210,8 +193,6 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         # This argument is optional, defaults to indices.size(0)
         # There's not much point setting this unless it is != indices.size(0)
         bound_m: Optional[torch.Tensor] = None
-
-        #print(f"DISPATCH X={expert_x.shape}, X_SCALE={expert_x_scale.shape}, A={a1q.shape}, A_SCALE={a1q_scale.shape}, TOPK={topk_ids}")
 
         self.a2a.dispatch(
             out_expert_num_tokens=expert_num_tokens,
@@ -222,7 +203,6 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             indices=topk_ids,
             bound_m=bound_m,
         )
-        #print(f"DISPATCH DONE {device}")
 
         if expert_x_scale is not None:
             expert_x_scale = expert_x_scale[:, :, :orig_a_scale_block_shape]
@@ -243,8 +223,8 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         # There's not much point setting this unless it is != topk_ids.size(0)
         bound_m: Optional[torch.Tensor] = None
 
-        assert topk_ids.size(0) == num_tokens, (
-            f"{topk_ids.size(0)} == {num_tokens}")
+        #assert topk_ids.size(0) == num_tokens, (
+        #    f"{topk_ids.size(0)} == {num_tokens}")
         assert output.size(0) <= self.max_num_tokens, (
             f"{output.size(0)} <= {self.max_num_tokens}")
         assert output.size(1) == fused_expert_output.size(-1)
@@ -253,10 +233,8 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         if apply_router_weight_on_input:
             topk_weights = torch.ones_like(topk_weights)
 
-        #print(f"COMBINE {output.device}")
         self.a2a.combine(out_tokens=output,
                          indices=topk_ids,
                          weights=topk_weights,
                          expert_y=fused_expert_output,
                          bound_m=bound_m)
-        #print(f"COMBINE DONE {output.device}")

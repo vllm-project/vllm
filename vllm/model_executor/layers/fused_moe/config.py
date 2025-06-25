@@ -310,6 +310,8 @@ class FusedMoEConfig:
             logger.debug("Using FusedMoEConfig::max_num_tokens=%d",
                          self.max_num_tokens)
 
+        assert self.max_num_tokens > 0
+
     @property
     def quant_dtype(self) -> Optional[torch.dtype]:
         if self.quant_config is not None:

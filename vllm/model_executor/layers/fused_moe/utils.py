@@ -111,3 +111,22 @@ def maybe_fix_scales(scales: Optional[torch.Tensor],
             scales = scales.view(num_experts, -1, scales.size(-1))
 
     return scales
+
+
+def _validate_scale_shape(
+    a: torch.Tensor,
+    a_scale: Optional[torch.Tensor],
+    per_act_token_quant: bool,
+    block_shape: Optional[list[int]],
+) -> None:
+    if a_scale is None:
+        return
+
+    if not per_act_token_quant and block_shape is None:
+        assert a_scale.numel() == 1, f"{a_scale.shape}"
+    elif per_act_token_quant:
+        assert a_scale.shape[0] == a.shape[0] and a_scale.shape[1] == 1, (
+            f"{a_scale.shape[0]} == {a.shape[0]} and {a_scale.shape[1]} == 1")
+    else:
+        expected = (a.shape[0], cdiv(a.shape[1], block_shape[1]))
+        assert a_scale.shape == expected, f"{a_scale.shape} == {expected}"

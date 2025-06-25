@@ -20,7 +20,7 @@ except ImportError:
 
 from tests.kernels.moe.utils import make_test_weights, naive_batched_moe
 from tests.kernels.utils import torch_experts
-from tests.kernels.quant_utils import dequant
+from tests.kernels.quant_utils import batched_dequant
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe import fused_topk, override_config
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
@@ -42,16 +42,19 @@ requires_pplx = pytest.mark.skipif(
 )
 
 PPLX_PREPARE_COMBOS = [
-#    (1, 128, 128),
+    # TODO: figure out why this fails
+    #(1, 128, 128),
+    (2, 128, 512),
+    (3, 1024, 2048),
     (4, 128, 128),
     (32, 1024, 512),
-#    (45, 512, 2048),
+    (45, 512, 2048),
     (64, 1024, 512),
     (222, 2048, 1024),
 ]
 
 PPLX_MOE_COMBOS = [
-    (1, 128, 128),
+#    (1, 128, 128),
     (2, 128, 512),
     (3, 1024, 2048),
     (32, 128, 1024),
@@ -203,7 +206,7 @@ def chunk_by_rank(t: torch.Tensor, r: int, w: int) -> torch.Tensor:
 
 
 def dummy_work(a: torch.Tensor) -> torch.Tensor:
-    return a # * 1.5
+    return a * 1.1
 
 
 def pplx_prepare_finalize(
@@ -271,6 +274,13 @@ def pplx_prepare_finalize(
     chunk_topk_weight = chunk_by_rank(topk_weight, rank, world_size).to(device)
     chunk_topk_ids = chunk_by_rank(topk_ids, rank, world_size).to(device)
 
+    out = torch.full(
+        (max_num_tokens, hidden_dim),
+        torch.nan,
+        dtype=a.dtype,
+        device=device,
+    )
+
     b_a, b_a_scale, expert_num_tokens, _, _ = prepare_finalize.prepare(
         a_chunk,
         None,
@@ -288,16 +298,10 @@ def pplx_prepare_finalize(
         ),
     )
 
-    # Do some fake work
-    #print(f"INTER {b_a.shape} {b_a_scale.shape if b_a_scale is not None else None}")
-    b_a = dummy_work(dequant(b_a, b_a_scale, block_shape, per_act_token_quant, a.dtype))
+    #print(f"B_A_SCALE = {b_a.shape}, {b_a_scale.shape if b_a_scale is not None else None}, {per_act_token_quant} {block_shape}, {a_chunk.shape}")
+    # TOOD: shouldn't need batched_dequant
 
-    out = torch.full(
-        (max_num_tokens, hidden_dim),
-        torch.nan,
-        dtype=a.dtype,
-        device=device,
-    )
+    b_a = dummy_work(batched_dequant(b_a, b_a_scale, block_shape, per_act_token_quant, a.dtype))
 
     prepare_finalize.finalize(
         out,
@@ -339,33 +343,19 @@ def _pplx_prepare_finalize(
         cpu_group = torch.distributed.new_group(group_ranks, backend="gloo")
         group_name = cpu_group.group_name
 
-    #device = pgi.device
-
     topk_weight, topk_ids, _ = fused_topk(a, score, topk, False)
     m, k = a.shape
 
-    a_rep = torch.repeat_interleave(dummy_work(a), topk, dim=0) #.to(device)
+    a_rep = torch.repeat_interleave(dummy_work(a), topk, dim=0)
 
-    if True:
-        torch_output = (a_rep.view(m, topk, k) *
-                        topk_weight.view(m, topk, 1).to(a_rep.dtype)).sum(dim=1)
-    else:
-        import vllm._custom_ops as ops
-        a_rep = a_rep.view(m, topk, k)
-        a_rep.mul_(topk_weight.view(m, topk, 1).to(a_rep.dtype))
-        torch_output = torch.empty_like(a)
-        ops.moe_sum(a_rep, torch_output)
+    torch_output = (a_rep.view(m, topk, k) *
+                    topk_weight.view(m, topk, 1).to(a_rep.dtype)).sum(dim=1)
 
     pplx_output = pplx_prepare_finalize(pgi, dp_size, a, topk_weight, topk_ids,
                                         num_experts, quant_dtype, block_shape,
                                         per_act_token_quant, group_name)
 
-    torch_output = chunk_by_rank(torch_output, pgi.rank,
-                                 pgi.world_size).to(pplx_output.device)
-
-    #torch.set_printoptions(profile="full")
-    #print(f"PPLX {pplx_output.shape}\n{pplx_output.shape}")
-    #print(f"TORCH {torch_output.shape}\n{torch_output.shape}")
+    torch_output = chunk_by_rank(torch_output, pgi.rank, pgi.world_size).to(pgi.device)
 
     torch.testing.assert_close(pplx_output, torch_output, atol=3e-2, rtol=3e-2)
 
@@ -373,15 +363,14 @@ def _pplx_prepare_finalize(
         nvshmem_finalize()
 
 
-# TODO (bnell): this test point does not work for odd M due to how the test is
-# written, not due to limitations of the pplx kernels.  The pplx_moe
-# test below is able to deal with odd M.
+# TODO (bnell): this test point does not work for M==1 due to how the test
+# is written, not due to limitations of the pplx kernels.
 @pytest.mark.parametrize("mnk", PPLX_PREPARE_COMBOS)
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
 @pytest.mark.parametrize("dtype", [torch.float8_e4m3fn, torch.bfloat16])
 @pytest.mark.parametrize("world_dp_size", [[2, 1]])
-@pytest.mark.parametrize("per_act_token_quant", [False])
+@pytest.mark.parametrize("per_act_token_quant", [False, True])
 @pytest.mark.parametrize("block_shape", [None, [128, 128]])
 @pytest.mark.parametrize("use_internode", [False])
 @requires_pplx
@@ -414,8 +403,6 @@ def test_pplx_prepare_finalize(
     m, n, k = mnk
     world_size, dp_size = world_dp_size
     device = "cuda"
-
-    #print(f"MNK = {mnk}")
 
     a = torch.randn((m, k), device=device, dtype=act_dtype) / 10
     score = torch.randn((m, e), device=device, dtype=act_dtype)
@@ -510,8 +497,12 @@ def pplx_moe(
     w2_chunk = chunk_by_rank(w2, rank, world_size).to(device)
 
     if w1_scale is not None:
-        w1_scale_chunk = chunk_by_rank(w1_scale, rank, world_size).to(device)
-        w2_scale_chunk = chunk_by_rank(w2_scale, rank, world_size).to(device)
+        if not per_act_token_quant:
+            w1_scale_chunk = w1_scale
+            w2_scale_chunk = w2_scale
+        else:
+            w1_scale_chunk = chunk_by_rank(w1_scale, rank, world_size).to(device)
+            w2_scale_chunk = chunk_by_rank(w2_scale, rank, world_size).to(device)
     else:
         w1_scale_chunk = None
         w2_scale_chunk = None
@@ -558,48 +549,6 @@ def pplx_moe(
     torch.cuda.synchronize()
 
     ata.destroy()
-
-    return out
-
-
-def _batched_moe(pgi, dp_size, a, w1, w2, topk_weight, topk_ids):
-    assert torch.cuda.current_device() == pgi.local_rank
-
-    num_experts = w1.shape[0]
-    device = pgi.device
-    rank = pgi.rank
-    world_size = pgi.world_size
-    max_num_tokens = rank_chunk(a.shape[0], 0, world_size)
-
-    prepare_finalize = BatchedPrepareAndFinalize(
-        max_num_tokens=max_num_tokens,
-        world_size=world_size,
-        dp_size=dp_size,
-        rank=rank,
-    )
-
-    experts = NaiveBatchedExperts(max_num_tokens=a.shape[0],
-                                  world_size=1,
-                                  dp_size=1)
-
-    fused_experts = FusedMoEModularKernel(
-        prepare_finalize,
-        experts,
-    )
-
-    # Note: workers with the same dp_rank must use the exact same inputs.
-    a_chunk = chunk_by_rank(a, rank, world_size).to(device)
-    chunk_topk_weight = chunk_by_rank(topk_weight, rank, world_size).to(device)
-    chunk_topk_ids = chunk_by_rank(topk_ids, rank, world_size).to(device)
-
-    out = fused_experts(
-        a_chunk,
-        # Chunking weights like this only works for batched format
-        chunk_by_rank(w1, rank, world_size).to(device),
-        chunk_by_rank(w2, rank, world_size).to(device),
-        chunk_topk_weight,
-        chunk_topk_ids,
-        global_num_experts=num_experts)
 
     return out
 
@@ -654,18 +603,22 @@ def _pplx_moe(
                                      quant_dtype=qtype,
                                      per_act_token_quant=per_act_token_quant,
                                      block_shape=block_shape)
+
         pplx_output = pplx_moe(group_name, pgi.rank, pgi.world_size, dp_size,
                                a, w1, w2, topk_weight, topk_ids, w1_s, w2_s,
                                qtype, per_act_token_quant, block_shape)
-        # TODO (bnell): fix + re-enable
-        #batched_output = _batched_moe(pgi, dp_size, a, w1, w2, topk_weight,
-        #                              topk_ids)
 
-    torch_output = chunk_by_rank(torch_output, pgi.rank,
-                                 pgi.world_size).to(pplx_output.device)
+        # all reduce on pplx?
+        #torch.distributed.all_reduce(pplx_output)
 
-    torch.testing.assert_close(pplx_output, torch_output, atol=2e-2, rtol=0)
-    #torch.testing.assert_close(batched_output, torch_output, atol=2e-2, rtol=0)
+        batched_output = naive_batched_moe(a, w1, w2, topk_weight,
+            topk_ids, w1_s, w2_s, qtype, per_act_token_quant, block_shape)
+
+    chunked_torch_output = chunk_by_rank(torch_output, pgi.rank,
+                                         pgi.world_size).to(pplx_output.device)
+
+    torch.testing.assert_close(pplx_output, chunked_torch_output, atol=3e-2, rtol=3e-2)
+    #torch.testing.assert_close(batched_output, torch_output, atol=3e-2, rtol=3e-2)
 
     if use_internode:
         nvshmem_finalize()

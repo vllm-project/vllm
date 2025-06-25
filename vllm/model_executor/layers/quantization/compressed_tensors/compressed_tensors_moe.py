@@ -864,7 +864,7 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
 
         experts = CutlassExpertsFp8(
             num_experts,
-            None, #moe.in_dtype,
+            moe.in_dtype,
             self.input_quant.strategy == QuantizationStrategy.TOKEN,
             self.weight_quant.strategy == QuantizationStrategy.CHANNEL,
             use_batched_format=use_batched_format,
