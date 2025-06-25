@@ -71,6 +71,11 @@ class PallasAttentionBackend(AttentionBackend):
         min_page_size = 1 << (min_page_size - 1).bit_length()
         return min_page_size
 
+    @staticmethod
+    def get_max_num_seqs(model_len: int, page_size: int) -> int:
+        num_page_per_req = cdiv(model_len, page_size)
+        return 1024 * 1024 // 2 // num_page_per_req // 4
+
     # TPU has limited SREGs (scalar registers), if page_size is too small, we
     # can spill SREGs easily which leads to bad performance. The strategy we
     # apply here is trying to split max-model-len to 16 pages which make the
