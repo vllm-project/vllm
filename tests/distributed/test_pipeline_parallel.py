@@ -101,8 +101,8 @@ class PPTestSettings:
                               eager_mode=True,
                               chunked_prefill=False),
             ],
-            distributed_backends=["ray"],
-            vllm_major_versions=["1"],
+            distributed_backends=["mp", "mp", "ray", "ray"],
+            vllm_major_versions=["0", "1", "0", "1"],
             task=task,
             test_options=PPTestOptions(multi_node_only=multi_node_only,
                                        load_format=load_format),
@@ -244,19 +244,19 @@ MULTIMODAL_MODELS = {
 # NOTE: You can update this on your local machine to run specific tests
 TEST_MODELS = [
     # [LANGUAGE GENERATION]
-    # "microsoft/Phi-3.5-MoE-instruct",
+    "microsoft/Phi-3.5-MoE-instruct",
     "meta-llama/Llama-3.2-1B-Instruct",
-    # "ArthurZ/Ilama-3.2-1B",
-    # "ibm/PowerLM-3b",
+    "ArthurZ/Ilama-3.2-1B",
+    "ibm/PowerLM-3b",
     # [LANGUAGE EMBEDDING]
-    # "intfloat/e5-mistral-7b-instruct",
-    # "BAAI/bge-multilingual-gemma2",
-    # # [MULTIMODAL GENERATION]
-    # "OpenGVLab/InternVL2-1B",
-    # "microsoft/Phi-3.5-vision-instruct",
-    # "fixie-ai/ultravox-v0_5-llama-3_2-1b",
-    # # [LANGUAGE GENERATION - HYBRID ARCH]
-    # "ai21labs/Jamba-tiny-dev",
+    "intfloat/e5-mistral-7b-instruct",
+    "BAAI/bge-multilingual-gemma2",
+    # [MULTIMODAL GENERATION]
+    "OpenGVLab/InternVL2-1B",
+    "microsoft/Phi-3.5-vision-instruct",
+    "fixie-ai/ultravox-v0_5-llama-3_2-1b",
+    # [LANGUAGE GENERATION - HYBRID ARCH]
+    "ai21labs/Jamba-tiny-dev",
 ]
 
 
