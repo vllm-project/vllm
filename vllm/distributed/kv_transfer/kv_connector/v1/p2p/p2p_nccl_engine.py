@@ -239,11 +239,12 @@ class P2pNcclEngine:
         remote_address: typing.Optional[str] = None,
     ) -> torch.Tensor:
         if self.send_type == "PUT" or self.send_type == "PUT_ASYNC":
-            start_time = time.time()
             with self.recv_store_cv:
-                while tensor_id not in self.recv_store:
-                    self.recv_store_cv.wait()
-                tensor = self.recv_store[tensor_id]
+                if tensor_id not in self.recv_store:
+                    logger.warning(
+                        "🔴[PUT]Recv From %s, tensor_id:%s not exist, rank:%d",
+                        remote_address, tensor_id,self.rank)
+                tensor = self.recv_store.get(tensor_id)
 
             if tensor is not None:
                 if isinstance(tensor, tuple):
@@ -254,11 +255,8 @@ class P2pNcclEngine:
                     self.buffer_size -= (tensor.element_size() *
                                          tensor.numel())
             else:
-                duration = time.time() - start_time
-                logger.warning(
-                    "🔴[PUT]Recv From %s, tensor_id:%s, duration:%.3fms, "
-                    "rank:%d", remote_address, tensor_id, duration * 1000,
-                    self.rank)
+                logger.warning("🔴[PUT]Recv From %s, tensor_id:%s, rank:%d",
+                               remote_address, tensor_id,self.rank)
             return tensor
 
         # GET
