@@ -303,17 +303,24 @@ class LogitBiasLogitsProcessor(LogitsProcessor):
 
             # Process moved requests, unidirectional (a->b) and swap (a<->b)
             for a_index, b_index, direct in batch_update.moved:
-                a_entry = self.biases.pop(a_index, None)
-                if direct == MoveDirectionality.SWAP and (
-                        b_entry := self.biases.pop(b_index, None)) is not None:
-                    needs_update = True
-                    self.biases[a_index] = b_entry
-                if a_entry is not None:
-                    needs_update = True
-                    self.biases[b_index] = a_entry
+                if direct == MoveDirectionality.UNIDIRECTIONAL:
+                    if (a_entry := self.biases.pop(a_index, None)) is None:
+                        if self.biases.pop(b_index, None) is not None:
+                            needs_update = True
+                    else:
+                        self.biases[b_index] = a_entry
+                        needs_update = True
+                else:
+                    a_entry = self.biases.pop(a_index, None)
+                    if (b_entry := self.biases.pop(b_index, None)) is not None:
+                        self.biases[a_index] = b_entry
+                        needs_update = True
+                    if a_entry is not None:
+                        self.biases[b_index] = a_entry
+                        needs_update = True
 
         # Update tensors if needed.
-        if self.biases and needs_update:
+        if needs_update:
             reqs, tok_ids, biases = [], [], []
             for req, lb in self.biases.items():
                 reqs.extend([req] * len(lb))

@@ -365,10 +365,19 @@ def _none_validate(
     step_idx: int,
 ) -> None:
     """Validate that no logits processors are applied"""
-    if not torch.all(logits_new[batch_index] == (test_fakes.logits[
-            persistent_batch[batch_index].workload_index].cpu())):
+    logits = (
+        test_fakes.logits[persistent_batch[batch_index].workload_index].cpu())
+    ref_logits = logits_new[batch_index]
+    if not torch.all(ref_logits == logits):
+        mismatch_toks = (ref_logits
+                         != logits).nonzero(as_tuple=True)[0].tolist()
+        mismatch_strs = []
+        for token in mismatch_toks:
+            val = float(logits[token])
+            ref_val = float(ref_logits[token])
+            mismatch_strs.append(f"({token=},{val=},{ref_val=})")
         _raise_error_invalid(msg_suffix=(
-            "Unexpected modification of logits with no logitsprocs"),
+            f"Unexpected modification of logits: {','.join(mismatch_strs)}"),
                              batch_index=batch_index,
                              request_params=request_params,
                              step_idx=step_idx)
@@ -398,8 +407,10 @@ logitsprocs_test_mapping = {
 def _get_test_cases() -> list[list[str]]:
     """Each test case is a set of logitsprocs"""
     logitsprocs_ids = list(logitsprocs_test_mapping.keys())
-    return [[logitproc_id]
-            for logitproc_id in logitsprocs_ids] + [logitsprocs_ids]
+    return [[STR_NO_LOGITPROC]] + [[logitproc_id, STR_NO_LOGITPROC]
+                                   for logitproc_id in logitsprocs_ids
+                                   if logitproc_id != STR_NO_LOGITPROC
+                                   ] + [logitsprocs_ids]
 
 
 def _generate_fake_step_update(
