@@ -2979,7 +2979,7 @@ class GrowingMemoryObjGraph:
             f"{'='*50}"
         )
         output_lines.append(
-            f"start time {start_time_formatted}, current time: {current_time_formatted}"
+            f"start {start_time_formatted}, current: {current_time_formatted}"
         )
         output_lines.append(
             f"{'='*50}"
