@@ -26,7 +26,7 @@ import contextlib
 import gc
 import pickle
 import weakref
-from collections import defaultdict, namedtuple
+from collections import Counter, namedtuple
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from multiprocessing import shared_memory
@@ -802,6 +802,7 @@ class GroupCoordinator:
 
 
 _WORLD: Optional[GroupCoordinator] = None
+_NODE_COUNT: Optional[int] = None
 
 
 def get_world_group() -> GroupCoordinator:
@@ -961,10 +962,14 @@ def init_distributed_environment(
             local_rank = envs.LOCAL_RANK
         else:
             local_rank = rank
-    global _WORLD
+    global _WORLD, _NODE_COUNT
     if _WORLD is None:
         ranks = list(range(torch.distributed.get_world_size()))
         _WORLD = init_world_group(ranks, local_rank, backend)
+        # Compute and cache the node count during initialization
+        _NODE_COUNT = node_count(_WORLD.cpu_group)
+        logger.debug("Detected %d nodes in the distributed environment",
+                     _NODE_COUNT)
     else:
         assert _WORLD.world_size == torch.distributed.get_world_size(), (
             "world group already initialized with a different world size")
@@ -1164,6 +1169,24 @@ def get_tensor_model_parallel_rank():
     return get_tp_group().rank_in_group
 
 
+def get_node_count() -> int:
+    """Return the total number of nodes in the distributed environment.
+    
+    This function returns a cached value that was computed during
+    distributed environment initialization.
+    
+    Returns:
+        int: The total number of nodes
+        
+    Raises:
+        AssertionError: If the distributed environment is not initialized
+    """
+    assert _NODE_COUNT is not None, (
+        "node count is not available - distributed environment not initialized"
+    )
+    return _NODE_COUNT
+
+
 def destroy_model_parallel():
     """Set the groups to none and destroy them."""
     global _TP
@@ -1189,10 +1212,11 @@ def destroy_model_parallel():
 
 
 def destroy_distributed_environment():
-    global _WORLD
+    global _WORLD, _NODE_COUNT
     if _WORLD:
         _WORLD.destroy()
     _WORLD = None
+    _NODE_COUNT = None
     if torch.distributed.is_initialized():
         torch.distributed.destroy_process_group()
 
@@ -1355,9 +1379,7 @@ def node_count(pg: Union[ProcessGroup, StatelessProcessGroup]) -> int:
     # Since all ranks on the same node will report the same node size,
     # and ranks on different nodes will report different sizes,
     # we can count unique combinations of (size, count_of_that_size)
-    unique_sizes = defaultdict[int, int](int)
-    for size in all_node_sizes.tolist():
-        unique_sizes[size] += 1
+    unique_sizes = Counter(all_node_sizes.tolist())
 
     # Calculate number of nodes: for each unique size,
     # the number of nodes with that size is count / size
