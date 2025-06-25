@@ -43,7 +43,7 @@ def set_p2p_nccl_context(num_channels: str):
     for var in env_vars:
         original_values[var] = os.environ.get(var)
 
-    logger.info("set_p2p_nccl_context, original_values: %s", original_values)
+    logger.debug("set_p2p_nccl_context, original_values: %s", original_values)
 
     try:
         os.environ['NCCL_MAX_NCHANNELS'] = num_channels
@@ -183,7 +183,7 @@ class P2pNcclEngine:
                     comm: ncclComm_t = self.nccl.ncclCommInitRank(
                         2, unique_id, rank)
                 self.comms[remote_address] = (comm, rank)
-                logger.info("🤝ncclCommInitRank Success, %s👉%s, MyRank: %s",
+                logger.info("🤝ncclCommInitRank Success, %s👉%s, MyRank:%s",
                             self.zmq_address, remote_address, rank)
 
         return self.socks[remote_address], self.comms[remote_address]
@@ -406,7 +406,7 @@ class P2pNcclEngine:
                 while self.send_queue:
                     self.send_queue_cv.wait()
             duration = time.time() - start_time
-            logger.debug(
+            logger.info(
                 "🚧[PUT_ASYNC]It took %.3fms to wait for the send_queue"
                 " to be empty, rank:%d", duration * 1000, self.rank)
 
@@ -477,11 +477,18 @@ class P2pNcclEngine:
                         addr, _, _ = tensor
                         self.pool.free(addr)
 
+        num_layers = len(forward_context.no_compile_layers)
         # TODO:Retrieve requests that have already sent the KV cache.
         finished_sending: set[str] = set()
 
-        # TODO:Retrieve requests that have already received the KV cache.
+        # Retrieve requests that have already received the KV cache.
+        # TODO: 1)Avoid polling. 2)Validate chunked prefill and preemption.
         finished_recving: set[str] = set()
+        for request_id in self.recv_request_id_to_tensor_ids:
+            if num_layers == len(self.recv_request_id_to_tensor_ids[request_id]):
+                finished_recving.add(request_id)
+        for request_id in finished_recving:
+            self.recv_request_id_to_tensor_ids.pop(request_id, None)
 
         return finished_sending or None, finished_recving or None
 
