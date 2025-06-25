@@ -19,6 +19,7 @@ def main():
         model="facebook/opt-125m",
         load_format="dummy",
         enforce_eager=True,
+        tensor_parallel_size=2,
     )
 
     # Update load format from `dummy` to `auto`
