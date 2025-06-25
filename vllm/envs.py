@@ -137,7 +137,7 @@ if TYPE_CHECKING:
     VLLM_USE_NVFP4_CT_EMULATIONS: bool = False
     VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: str = "NONE"
     VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16: bool = True
-    VLLM_ROCM_QUICK_REDUCE_MAX_SIZE: int = -1
+    VLLM_ROCM_QUICK_REDUCE_MAX_SIZE: Optional[int] = None
 
 
 def get_default_cache_root():
@@ -715,7 +715,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # on your GPU memory capacity. Data exceeding this size will use
     # either custom allreduce or RCCL communication.
     "VLLM_ROCM_QUICK_REDUCE_MAX_SIZE":
-    lambda: int(os.getenv("VLLM_ROCM_QUICK_REDUCE_MAX_SIZE", "-1")),
+    lambda: int(os.getenv("VLLM_ROCM_QUICK_REDUCE_MAX_SIZE", "2147483648"))
+    if "VLLM_ROCM_QUICK_REDUCE_MAX_SIZE" in os.environ else None,
 
     # If set, when running in Quark emulation mode, do not dequantize the
     # weights at load time. Instead, dequantize weights on-the-fly during

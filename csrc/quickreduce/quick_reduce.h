@@ -88,12 +88,13 @@ struct DeviceComms {
   DeviceComms() : initialized(false), world_size(1), rank(0) {}
   ~DeviceComms() { destroy(); }
 
-  void init(int world_size, int rank, int64_t max_problem_size = -1) {
+  void init(int world_size, int rank,
+            std::optional<int64_t> max_problem_size = std::nullopt) {
     destroy();
     this->world_size = world_size;
     this->rank = rank;
-    if (max_problem_size > 0) {
-      this->kMaxProblemSize = max_problem_size;
+    if (max_problem_size.has_value() && max_problem_size.value() > 0) {
+      this->kMaxProblemSize = max_problem_size.value();
     }
     // Allocate buffer size for worst case: F16 2-stage buffer.
     uint32_t flags_buffer_size =

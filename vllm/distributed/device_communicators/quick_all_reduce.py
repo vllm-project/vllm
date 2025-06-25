@@ -197,8 +197,12 @@ class QuickAllReduce:
                     "to turn off.")
 
         qr_max_size = envs.VLLM_ROCM_QUICK_REDUCE_MAX_SIZE
+        if qr_max_size is not None and qr_max_size < 1 * QuickAllReduce.MB:
+            logger.info(
+                "You should not set a max_size smaller than 1MB, which can "
+                "lead to error or degradation to custom allreduce or rccl.")
         self._ptr = ops.init_custom_qr(self.rank, self.world_size, qr_max_size)
-        self.qr_max_size = qr_max_size if qr_max_size != -1 \
+        self.qr_max_size = qr_max_size if qr_max_size is not None \
             else ops.qr_max_size()
         self.create_shared_buffer()
         self.disabled = False
@@ -239,7 +243,7 @@ class QuickAllReduce:
     def quick_all_reduce(self, inp: torch.Tensor, *, out: torch.Tensor = None):
         """Performs an out-of-place custom quick all reduce."""
         # quick allreduce doesn't require a separate graph mode,
-        # as the IPC has already been acquired during init().
+        # as QR uses static IPC buffer.
         if out is None:
             out = torch.empty_like(inp)
         ops.qr_all_reduce(self._ptr, inp, out, self.qr_quant_level.value,
