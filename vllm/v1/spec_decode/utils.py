@@ -6,7 +6,8 @@ from vllm.v1.worker.gpu_input_batch import InputBatch
 
 
 def is_spec_decode_supported(req_id: str, input_batch: InputBatch) -> bool:
-    min_p_lp = input_batch.logitsprocs.get_logitproc_by_id("min_p")
+    min_p_lp = input_batch.logitsprocs.get_logitprocs_by_cls(
+        MinPLogitsProcessor)
     if (isinstance(min_p_lp, MinPLogitsProcessor) and
             min_p_lp.get_min_p_by_index(input_batch.req_id_to_index[req_id])):
         # Spec decode doesn't support min_p sampling.

@@ -11,9 +11,6 @@ from torch._prims_common import DeviceLikeType
 
 from vllm import PoolingParams, SamplingParams
 from vllm.logger import init_logger
-from vllm.v1.worker.utils import (STR_LOGITS_BIAS_LOGITPROC_ID,
-                                  STR_MIN_P_LOGITPROC_ID,
-                                  STR_MIN_TOKENS_LOGITPROC_ID)
 
 logger = init_logger(__name__)
 
@@ -206,42 +203,21 @@ class LogitsProcessor(ABC):
 
 @dataclass
 class LogitsProcessorManager:
-    """Encapsulates initialized logitsproc objects.
+    """Encapsulates initialized logitsproc objects."""
+    argmax_invariant: list[LogitsProcessor] = field(
+        default_factory=list)  # argmax-invariant logitsprocs
+    non_argmax_invariant: list[LogitsProcessor] = field(
+        default_factory=list)  # non-argmax-invariant logitsprocs
 
-    Each logits processor has a unique id.
-    """
-    argmax_invariant: dict[str, LogitsProcessor] = field(
-        default_factory=dict)  # id -> argmax-invariant logitsprocs
-    non_argmax_invariant: dict[str, LogitsProcessor] = field(
-        default_factory=dict)  # id -> non-argmax-invariant logitsprocs
-
-    def __post_init__(self):
-        """Guarantee unique ids"""
-        if (self.argmax_invariant.keys() & self.non_argmax_invariant.keys()):
-            raise ValueError("Argmax invariant and non-invariant logits "
-                             "processors must not share ids")
-
-    def get_logitproc_by_id(self, id: str) -> Optional[LogitsProcessor]:
+    def get_logitprocs_by_cls(
+            self, cls: type[LogitsProcessor]) -> list[LogitsProcessor]:
         """Find logits processor by id, if it exists"""
-        return self.all.get(id, None)
+        return [lp for lp in self.all if isinstance(lp, cls)]
 
     @property
-    def all(self) -> dict[str, LogitsProcessor]:
-        """All logits processors"""
-        return self.non_argmax_invariant | self.argmax_invariant
-
-    @property
-    def argmax_invariant_list(self) -> list[LogitsProcessor]:
-        return list(self.argmax_invariant.values())
-
-    @property
-    def non_argmax_invariant_list(self) -> list[LogitsProcessor]:
-        return list(self.non_argmax_invariant.values())
-
-    @property
-    def all_list(self) -> list[LogitsProcessor]:
+    def all(self) -> list[LogitsProcessor]:
         """List of all logits processors"""
-        return self.argmax_invariant_list + self.non_argmax_invariant_list
+        return self.argmax_invariant + self.non_argmax_invariant
 
 
 ###### ----- Built-in LogitsProcessor impls below here
@@ -525,9 +501,9 @@ def init_builtin_logitsprocs(pin_memory_available: bool, max_num_reqs: int,
         # +1 for temporary swap space
         max_num_reqs=max_num_reqs + 1)
     return LogitsProcessorManager(
-        non_argmax_invariant={
-            STR_MIN_TOKENS_LOGITPROC_ID: min_tokens_logitproc,
-            STR_LOGITS_BIAS_LOGITPROC_ID: logit_bias_logitproc
-        },
-        argmax_invariant={STR_MIN_P_LOGITPROC_ID: min_p_logitproc},
+        non_argmax_invariant=[
+            min_tokens_logitproc,
+            logit_bias_logitproc,
+        ],
+        argmax_invariant=[min_p_logitproc],
     )

@@ -174,10 +174,10 @@ class LogitsprocsTestFakes(NamedTuple):
 
     def get_logitsproc_by_id(self, id: str) -> LogitsProcessor:
         """Shorthand for getting a specific logitproc from SamplingMetadata"""
-        return self.sampling_metadata.logitsprocs.get_logitproc_by_id(id)
+        return self.sampling_metadata.logitsprocs.get_logitprocs_by_cls(id)
 
     def get_logitsprocs(self) -> list[LogitsProcessor]:
-        return self.sampling_metadata.logitsprocs.all_list
+        return self.sampling_metadata.logitsprocs.all
 
 
 def fake_update_logitsprocs_state(
@@ -197,6 +197,6 @@ def fake_apply_logitsprocs(
     """Imitate application of logits processors in engine core"""
     logits = test_fakes.logits[torch.tensor(slice_indices,
                                             dtype=torch.long)].clone()
-    for processor in test_fakes.sampling_metadata.logitsprocs.all_list:
+    for processor in test_fakes.sampling_metadata.logitsprocs.all:
         logits = processor.apply(logits)
     return logits
