@@ -8,27 +8,15 @@ from openai import OpenAI
 
 from vllm.assets.audio import AudioAsset
 
-# TODO get actual asset
-mary_had_lamb = AudioAsset("mary_had_lamb").get_local_path()
-winning_call = AudioAsset("winning_call").get_local_path()
 
-# Modify OpenAI's API key and API base to use vLLM's API server.
-openai_api_key = "EMPTY"
-openai_api_base = "http://localhost:8000/v1"
-client = OpenAI(
-    api_key=openai_api_key,
-    base_url=openai_api_base,
-)
-
-
-def sync_openai():
-    with open(str(mary_had_lamb), "rb") as f:
+def sync_openai(audio_path: str, client: OpenAI):
+    with open(audio_path, "rb") as f:
         translation = client.audio.translations.create(
             file=f,
             model="openai/whisper-large-v3",
             response_format="json",
             temperature=0.0,
-            # Additional sampling params not provided by OpenAI API.
+            # Additional params not provided by OpenAI API.
             extra_body=dict(
                 language="it",
                 seed=4419,
@@ -38,21 +26,18 @@ def sync_openai():
         print("translation result:", translation.text)
 
 
-sync_openai()
-
-
-# OpenAI translation API client does not support streaming.
-async def stream_openai_response():
+async def stream_openai_response(audio_path: str, base_url: str, api_key: str):
     data = {
         "language": "it",
         "stream": True,
         "model": "openai/whisper-large-v3",
     }
-    url = openai_api_base + "/audio/translations"
-    headers = {"Authorization": f"Bearer {openai_api_key}"}
+    url = base_url + "/audio/translations"
+    headers = {"Authorization": f"Bearer {api_key}"}
     print("translation result:", end=" ")
+    # OpenAI translation API client does not support streaming.
     async with httpx.AsyncClient() as client:
-        with open(str(winning_call), "rb") as f:
+        with open(audio_path, "rb") as f:
             async with client.stream(
                 "POST", url, files={"file": f}, data=data, headers=headers
             ) as response:
@@ -71,5 +56,20 @@ async def stream_openai_response():
                         print(content, end="")
 
 
-# Run the asynchronous function
-asyncio.run(stream_openai_response())
+def main():
+    foscolo = str(AudioAsset("azacinto_foscolo").get_local_path())
+
+    # Modify OpenAI's API key and API base to use vLLM's API server.
+    openai_api_key = "EMPTY"
+    openai_api_base = "http://localhost:8000/v1"
+    client = OpenAI(
+        api_key=openai_api_key,
+        base_url=openai_api_base,
+    )
+    sync_openai(foscolo, client)
+    # Run the asynchronous function
+    asyncio.run(stream_openai_response(foscolo, openai_api_base, openai_api_key))
+
+
+if __name__ == "__main__":
+    main()
