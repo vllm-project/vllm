@@ -4,7 +4,7 @@
 # This script can start either a head node or a worker node, depending on the
 # --head or --worker flag provided as the third positional argument.
 #
-# Usage overview.
+# Usage:
 # 1. Designate one machine as the head node and execute:
 #    bash run_cluster.sh \
 #         vllm/vllm-openai \
