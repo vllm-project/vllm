@@ -116,14 +116,11 @@ def test_eagle_correctness(
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
 
-        model_name = method_model_and_draft_model[1]
+        method, model_name, spec_model_name = method_model_and_draft_model
 
         ref_llm = LLM(model=model_name, max_model_len=2048)
         ref_outputs = ref_llm.chat(test_prompts, sampling_config)
         del ref_llm
-
-        method = method_model_and_draft_model[0]
-        spec_model_name = method_model_and_draft_model[2]
 
         spec_llm = LLM(
             model=model_name,
