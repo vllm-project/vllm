@@ -242,8 +242,8 @@ class DeepSeekMTP(nn.Module, SupportsPP):
 
                     # According to DeepSeek-V3 Technical Report, MTP modules
                     # shares embedding layer. We only load the first weights.
-                    if (spec_layer != self.model.mtp_start_layer_idx and
-                        ".layers" not in name):
+                    if (spec_layer != self.model.mtp_start_layer_idx
+                            and ".layers" not in name):
                         continue
 
                     param = params_dict[name]
