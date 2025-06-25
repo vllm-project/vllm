@@ -14,8 +14,9 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalPlaceholderDict
 from vllm.sampling_params import RequestOutputKind
-from vllm.sequence import (PromptLogprobs, RequestMetrics, SampleLogprobs,
-                           SequenceGroup, SequenceGroupBase, SequenceStatus)
+from vllm.sequence import (InbandEngineStats, PromptLogprobs, RequestMetrics,
+                           SampleLogprobs, SequenceGroup, SequenceGroupBase,
+                           SequenceStatus)
 
 logger = init_logger(__name__)
 
@@ -111,6 +112,7 @@ class RequestOutput:
         outputs: list[CompletionOutput],
         finished: bool,
         metrics: Optional[RequestMetrics] = None,
+        inband_engine_stats: Optional[InbandEngineStats] = None,
         lora_request: Optional[LoRARequest] = None,
         encoder_prompt: Optional[str] = None,
         encoder_prompt_token_ids: Optional[list[int]] = None,
@@ -133,6 +135,7 @@ class RequestOutput:
         self.outputs = outputs
         self.finished = finished
         self.metrics = metrics
+        self.inband_engine_stats = inband_engine_stats
         self.lora_request = lora_request
         self.encoder_prompt = encoder_prompt
         self.encoder_prompt_token_ids = encoder_prompt_token_ids
@@ -319,6 +322,7 @@ class RequestOutput:
             "outputs": outputs,
             "finished": finished,
             "metrics": seq_group.metrics,
+            "inband_engine_stats": seq_group.inband_engine_stats,
             "lora_request": seq_group.lora_request,
             "encoder_prompt": encoder_prompt,
             "encoder_prompt_token_ids": encoder_prompt_token_ids,
@@ -344,6 +348,7 @@ class RequestOutput:
                 f"outputs={self.outputs}, "
                 f"finished={self.finished}, "
                 f"metrics={self.metrics}, "
+                f"inband_engine_stats={self.inband_engine_stats},"
                 f"lora_request={self.lora_request}, "
                 f"num_cached_tokens={self.num_cached_tokens}, "
                 f"multi_modal_placeholders={self.multi_modal_placeholders})")
