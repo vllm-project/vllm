@@ -50,16 +50,13 @@ class OpenAIServingTranscription(OpenAISpeechToText):
         See https://platform.openai.com/docs/api-reference/audio/createTranscription
         for the API specification. This API mimics the OpenAI transcription API.
         """
-        response = await self._create_speech_to_text(
+        return await self._create_speech_to_text(
             audio_data=audio_data,
             request=request,
             raw_request=raw_request,
             response_class=TranscriptionResponse,
             stream_generator_method=self.transcription_stream_generator,
         )
-        # Make mypy happy
-        assert not isinstance(response, TranslationResponse)
-        return response
 
     async def transcription_stream_generator(
             self, request: TranscriptionRequest,
@@ -108,16 +105,13 @@ class OpenAIServingTranslation(OpenAISpeechToText):
         See https://platform.openai.com/docs/api-reference/audio/createTranslation
         for the API specification. This API mimics the OpenAI translation API.
         """
-        response = await self._create_speech_to_text(
+        return await self._create_speech_to_text(
             audio_data=audio_data,
             request=request,
             raw_request=raw_request,
             response_class=TranslationResponse,
             stream_generator_method=self.translation_stream_generator,
         )
-        # Make mypy happy
-        assert not isinstance(response, TranscriptionResponse)
-        return response
 
     async def translation_stream_generator(
             self, request: TranslationRequest,

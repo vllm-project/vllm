@@ -6,7 +6,7 @@ import math
 import time
 from collections.abc import AsyncGenerator
 from math import ceil
-from typing import Callable, Optional, Union, cast
+from typing import Callable, Literal, Optional, TypeVar, Union, cast
 
 import numpy as np
 from fastapi import Request
@@ -34,6 +34,8 @@ except ImportError:
     librosa = PlaceholderModule("librosa")  # type: ignore[assignment]
 
 SpeechToTextResponse = Union[TranscriptionResponse, TranslationResponse]
+T = TypeVar("T", bound=SpeechToTextResponse)
+
 logger = init_logger(__name__)
 
 # From https://platform.openai.com/docs/guides/speech-to-text/supported-languages
@@ -242,11 +244,9 @@ class OpenAISpeechToText(OpenAIServing):
         audio_data: bytes,
         request: SpeechToTextRequest,
         raw_request: Request,
-        response_class: Union[type[TranscriptionResponse],
-                              type[TranslationResponse]],
+        response_class: type[T],
         stream_generator_method: Callable,
-    ) -> Union[Union[TranscriptionResponse, TranslationResponse],
-               AsyncGenerator[str, None], ErrorResponse]:
+    ) -> Union[T, AsyncGenerator[str, None], ErrorResponse]:
         """Base method for speech-to-text operations like transcription and 
         translation."""
         error_check_ret = await self._check_model(request)
@@ -332,7 +332,7 @@ class OpenAISpeechToText(OpenAIServing):
             for result_generator in list_result_generator:
                 async for op in result_generator:
                     text += op.outputs[0].text
-            return response_class(text=text)
+            return cast(T, response_class(text=text))
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
         except ValueError as e:
@@ -346,7 +346,7 @@ class OpenAISpeechToText(OpenAIServing):
         request_id: str,
         request_metadata: RequestResponseMetadata,
         audio_duration_s: float,
-        chunk_object_type: str,
+        chunk_object_type: Literal["translation.chunk", "transcription.chunk"],
         response_stream_choice_class: Union[
             type[TranscriptionResponseStreamChoice],
             type[TranslationResponseStreamChoice]],
