@@ -4677,7 +4677,7 @@ class VllmConfig:
     def try_verify_and_update_config(self):
         import vllm.model_executor.models.config as _config
         architecture = self.model_config.architecture
-        cls: Optional[_config.VerifyAndUpdateConfig] = getattr(
+        cls: Optional[type[_config.VerifyAndUpdateConfig]] = getattr(
             _config, architecture, None)
         if cls is not None:
             cls.verify_and_update_config(self)
