@@ -2975,15 +2975,10 @@ class GrowingMemoryObjGraph:
             self.start_time).strftime("%Y-%m-%d %H:%M:%S")
         current_time_formatted = datetime.datetime.now().strftime(
             "%Y-%m-%d %H:%M:%S")
+        output_lines.append(f"{'='*50}")
         output_lines.append(
-            f"{'='*50}"
-        )
-        output_lines.append(
-            f"start {start_time_formatted}, current: {current_time_formatted}"
-        )
-        output_lines.append(
-            f"{'='*50}"
-        )
+            f"start {start_time_formatted}, current: {current_time_formatted}")
+        output_lines.append(f"{'='*50}")
 
         gc.collect()
         growth_info = objgraph.growth()
@@ -3002,33 +2997,27 @@ class GrowingMemoryObjGraph:
                 continue
 
             # Generate back reference graph
-            objgraph.show_backrefs(
-                obj,
-                max_depth=10,
-                too_many=5,
-                filename=os.path.join(
-                    analysis_dir, f"{gt[0]}_backrefs.dot")
-            )
+            objgraph.show_backrefs(obj,
+                                   max_depth=10,
+                                   too_many=5,
+                                   filename=os.path.join(
+                                       analysis_dir, f"{gt[0]}_backrefs.dot"))
 
             # Generate reference graph
-            objgraph.show_refs(
-                obj,
-                max_depth=10,
-                too_many=5,
-                filename=os.path.join(
-                    analysis_dir, f"{gt[0]}_refs.dot")
-            )
+            objgraph.show_refs(obj,
+                               max_depth=10,
+                               too_many=5,
+                               filename=os.path.join(
+                                   analysis_dir, f"{gt[0]}_refs.dot"))
 
             # Generate reference chain to module
-            objgraph.show_chain(
-                objgraph.find_backref_chain(
-                    obj, objgraph.is_proper_module),
+            objgraph.show_chain(objgraph.find_backref_chain(
+                obj, objgraph.is_proper_module),
                 filename=os.path.join(
-                    analysis_dir, f"{gt[0]}_chain.dot")
-            )
+                    analysis_dir, f"{gt[0]}_chain.dot"))
 
-        output_file_path = os.path.join(
-            analysis_dir, "growing_memory_stats.log")
+        output_file_path = os.path.join(analysis_dir, 
+                                        "growing_memory_stats.log")
         try:
             with open(output_file_path, 'w', encoding='utf-8') as f:
                 for line in output_lines:
@@ -3039,5 +3028,4 @@ class GrowingMemoryObjGraph:
 
         logger.info("obj graph statistics completed, output_lines: %s",
                     output_lines)
-
         return "obj graph statistics completed"

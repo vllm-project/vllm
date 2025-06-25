@@ -45,10 +45,8 @@ def main():
     # Add buffer time to wait for background processes (if multiprocessing is enabled)
     # to complete writing object graph analysis output.
     time.sleep(10)
-    
     print(f"Completed! Results saved to: {os.environ['VLLM_OBJ_GRAPH_DIR']}")
     print("You can check the generated files to analyze memory growth")
-
 
 if __name__ == "__main__":
     main()

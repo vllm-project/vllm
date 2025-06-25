@@ -19,7 +19,7 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.sequence import ExecuteModelRequest, IntermediateTensors
-from vllm.utils import (GrowingMemoryObjGraph, 
+from vllm.utils import (GrowingMemoryObjGraph,
                         enable_trace_function_call_for_thread,
                         resolve_obj_by_qualname, run_method,
                         update_environment_variables,
