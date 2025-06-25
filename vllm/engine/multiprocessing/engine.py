@@ -26,8 +26,9 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          RPCResetMultiModalCacheRequest,
                                          RPCResetPrefixCacheRequest,
                                          RPCSleepRequest, RPCStartupRequest,
-                                         RPCStartupResponse, RPCUObjectGraphRequest,
-                                         RPCUProfileRequest, RPCWakeUpRequest)
+                                         RPCStartupResponse,
+                                         RPCUProfileRequest, RPCWakeUpRequest,
+                                         RPCUObjectGraphRequest)
 # yapf: enable
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput

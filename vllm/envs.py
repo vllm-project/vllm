@@ -603,8 +603,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Enables memory object graph tracking if set. Path to the directory where
     # object graph files are saved. Note that it must be an absolute path.
     "VLLM_OBJ_GRAPH_DIR":
-    lambda: (None if os.getenv("VLLM_OBJ_GRAPH_DIR", None) is None else os
-             .path.expanduser(os.getenv("VLLM_OBJ_GRAPH_DIR", "."))),
+    lambda: (None if os.getenv("VLLM_OBJ_GRAPH_DIR", None) is None else os.path
+             .expanduser(os.getenv("VLLM_OBJ_GRAPH_DIR", "."))),
 
     # If set, vLLM will use Triton implementations of AWQ.
     "VLLM_USE_TRITON_AWQ":

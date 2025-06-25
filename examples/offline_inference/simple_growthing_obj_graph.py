@@ -46,8 +46,8 @@ def main():
     # to complete writing object graph analysis output.
     time.sleep(10)
     
-    print(f"Object graph analysis completed! Results saved to: {os.environ['VLLM_OBJ_GRAPH_DIR']}")
-    print("You can check the generated .dot files and .log files to analyze memory object growth")
+    print(f"Completed! Results saved to: {os.environ['VLLM_OBJ_GRAPH_DIR']}")
+    print("You can check the generated files to analyze memory growth")
 
 
 if __name__ == "__main__":

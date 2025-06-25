@@ -133,7 +133,8 @@ RPC_REQUEST_T = Union[RPCProcessRequest, RPCAbortRequest, RPCStartupRequest,
                       RPCUProfileRequest, RPCLoadAdapterRequest,
                       RPCResetMultiModalCacheRequest,
                       RPCResetPrefixCacheRequest, RPCSleepRequest,
-                      RPCWakeUpRequest, RPCIsSleepingRequest]
+                      RPCWakeUpRequest, RPCIsSleepingRequest,
+                      RPCUObjectGraphRequest]
 
 REQUEST_OUTPUTS_T = Union[List[RequestOutput], RPCAdapterLoadedResponse,
                           RPCIsSleepingResponse, RPCError]
