@@ -251,7 +251,6 @@ class CustomAllreduce:
         # When custom allreduce is disabled, this will be None.
         if self.disabled or not self.should_custom_ar(input):
             return None
-
         if self._IS_CAPTURING:
             if torch.cuda.is_current_stream_capturing():
                 return self.all_reduce(input, registered=True)

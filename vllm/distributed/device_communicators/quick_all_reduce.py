@@ -204,8 +204,9 @@ class QuickAllReduce:
             if qr_max_size < 1:
                 logger.info(
                     "You should not set a max_size smaller than 1MB, which can "
-                    "lead to error or degradation to custom allreduce or rccl.")
-            qr_max_size=qr_max_size * MB
+                    "lead to error or degradation to custom allreduce or rccl."
+                )
+            qr_max_size = qr_max_size * MB
         self._ptr = ops.init_custom_qr(self.rank, self.world_size, qr_max_size)
         self.qr_max_size = qr_max_size if qr_max_size is not None \
             else ops.qr_max_size()
