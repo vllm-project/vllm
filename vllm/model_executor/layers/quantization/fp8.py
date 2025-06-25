@@ -477,8 +477,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             self.allow_cutlass_block_scaled_grouped_gemm = True
         else:
             logger.warning_once(
-                "CutlassBlockScaledGroupedGemm not supported on the current platform."
-            )
+                "CutlassBlockScaledGroupedGemm not supported on the current "
+                "platform.")
 
         self.topk_indices_dtype = None
         self.fused_experts = functools.partial(  # type: ignore
