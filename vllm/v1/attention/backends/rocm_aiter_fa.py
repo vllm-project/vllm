@@ -62,7 +62,7 @@ if current_platform.is_rocm():
                           tl.arange(0, BLOCK_SIZE)[:, None]) < seq_len
 
             kv_idx = tl.load(block_table + batch_idx * block_table_stride_0 +
-                             block_idx)
+                             block_idx).to(tl.int64)
 
             kv_buffer_off = kv_idx * BLOCK_SIZE * E_DIM + tl.arange(
                 0, BLOCK_SIZE)[:, None] * E_DIM + tl.arange(0, E_DIM)[None, :]
