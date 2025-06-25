@@ -356,6 +356,13 @@ class ModelConfig:
     limit_mm_per_prompt: dict[str, int] = field(default_factory=dict)
     """Maximum number of data items per modality per prompt. Only applicable
     for multimodal models."""
+    video_num_frames: int = 32
+    """Number of frames to sample for each video input. Depending on the 
+    implementation of the VideoLoader (controlled by setting 
+    VLLM_VIDEO_LOADER_BACKEND), videos with fewer frames than this number
+    may either return repeated frames, padded frames, or fewer frames."""
+    mm_placeholder_str_override: dict[str, str] = field(default_factory=dict)
+    """Optionally override placeholder string for given modalities."""
     use_async_output_proc: bool = True
     """Whether to use async output processor."""
     config_format: Union[str, ConfigFormat] = ConfigFormat.AUTO.value
@@ -690,6 +697,8 @@ class ModelConfig:
         if self.registry.is_multimodal_model(self.architectures):
             return MultiModalConfig(
                 limit_per_prompt=self.limit_mm_per_prompt,
+                video_num_frames=self.video_num_frames,
+                mm_placeholder_str_override=self.mm_placeholder_str_override,
                 mm_processor_kwargs=self.mm_processor_kwargs,
                 disable_mm_preprocessor_cache=self.
                 disable_mm_preprocessor_cache)
@@ -2999,6 +3008,15 @@ class MultiModalConfig:
     For example, to allow up to 16 images and 2 videos per prompt:
     `{"images": 16, "videos": 2}`
     """
+
+    video_num_frames: int = 32
+    """Number of frames to sample for each video input. Depending on the 
+    implementation of the VideoLoader (controlled by setting 
+    VLLM_VIDEO_LOADER_BACKEND), videos with fewer frames than this number
+    may either return repeated frames, padded frames, or fewer frames."""
+
+    mm_placeholder_str_override: dict[str, str] = field(default_factory=dict)
+    """Optionally override placeholder string for given modalities."""
 
     mm_processor_kwargs: Optional[dict[str, object]] = None
     """

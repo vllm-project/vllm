@@ -221,9 +221,9 @@ class MediaConnector:
     def fetch_video(
         self,
         video_url: str,
+        num_frames: int,
         *,
         image_mode: str = "RGB",
-        num_frames: int = 32,
     ) -> npt.NDArray:
         """
         Load video from a HTTP or base64 data URL.
@@ -240,9 +240,9 @@ class MediaConnector:
     async def fetch_video_async(
         self,
         video_url: str,
+        num_frames: int,
         *,
         image_mode: str = "RGB",
-        num_frames: int = 32,
     ) -> npt.NDArray:
         """
         Asynchronously load video from a HTTP or base64 data URL.

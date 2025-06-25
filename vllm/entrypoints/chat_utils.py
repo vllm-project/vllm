@@ -506,6 +506,9 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
 
     def _placeholder_str(self, modality: ModalityStr,
                          current_count: int) -> Optional[str]:
+        if modality in self._model_config.mm_placeholder_str_override:
+            return self._model_config.mm_placeholder_str_override[modality]
+
         # TODO: Let user specify how to insert image tokens into prompt
         # (similar to chat template)
         hf_config = self._model_config.hf_config
@@ -758,7 +761,10 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         return self.parse_audio(audio_url)
 
     def parse_video(self, video_url: str) -> None:
-        video = self._connector.fetch_video(video_url)
+        video = self._connector.fetch_video(
+            video_url=video_url,
+            num_frames=self._tracker._model_config.video_num_frames
+        )
 
         placeholder = self._tracker.add("video", video)
         self._add_placeholder(placeholder)
@@ -813,7 +819,10 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         return self.parse_audio(audio_url)
 
     def parse_video(self, video_url: str) -> None:
-        video = self._connector.fetch_video_async(video_url)
+        video = self._connector.fetch_video_async(
+            video_url=video_url,
+            num_frames=self._tracker._model_config.video_num_frames
+        )
 
         placeholder = self._tracker.add("video", video)
         self._add_placeholder(placeholder)
