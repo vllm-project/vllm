@@ -479,7 +479,6 @@ class Gemma3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
             "model.vision_tower.": "vision_tower.",
             "model.multi_modal_projector.": "multi_modal_projector.",
             "lm_head.": "language_model.lm_head.",
-            "vision_tower.vision_model.": "vision_model.",
         })
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
