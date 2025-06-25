@@ -241,7 +241,7 @@ void get_cutlass_moe_mm_data(
   // mm to run it for.
   int32_t version_num = get_sm_version_num();
 #if (defined ENABLE_CUTLASS_MOE_SM90 && ENABLE_CUTLASS_MOE_SM90) || \
-    (defined ENABLE_SCALED_MM_SM100 && ENABLE_SCALED_MM_SM90)
+    (defined ENABLE_CUTLASS_MOE_SM100 && ENABLE_CUTLASS_MOE_SM100)
   get_cutlass_moe_mm_data_caller(topk_ids, expert_offsets, problem_sizes1,
                                  problem_sizes2, input_permutation,
                                  output_permutation, num_experts, n, k,
