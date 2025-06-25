@@ -44,3 +44,4 @@ watchfiles # required for http server to monitor the updates of TLS files
 python-json-logger # Used by logging as per examples/others/logging_configuration.md
 scipy # Required for phi-4-multimodal-instruct
 ninja # Required for xgrammar, rocm, tpu, xpu
+pybase64 # fast base64 implementation
