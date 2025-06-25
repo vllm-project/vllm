@@ -14,6 +14,17 @@ from vllm.model_executor.parameter import (GroupQuantScaleParameter,
                                            PackedvLLMParameter)
 from vllm.platforms import current_platform
 
+try:
+    from aiter.ops.triton.gemm_afp4wfp4 import (
+        gemm_afp4wfp4, gemm_afp4wfp4_preshuffled_scales)
+    from aiter.ops.triton.quant import dynamic_mxfp4_quant
+    if envs.VLLM_TRITON_FP4_GEMM_USE_ASM:
+        from aiter import gemm_a4w4_asm
+        from aiter.utility.fp4_utils import (
+            dynamic_mxfp4_quant as dynamic_mxfp4_quant_asm)
+except ImportError:
+    dynamic_mxfp4_quant = gemm_afp4wfp4 = None
+
 __all__ = ["QuarkW4A4MXFP4"]
 
 
@@ -26,6 +37,13 @@ class QuarkW4A4MXFP4(QuarkScheme):
         self.weight_quant_spec = weight_quant_spec
         self.input_quant_spec = input_quant_spec
         self.emulate = not current_platform.supports_mx()
+        if not self.emulate and (dynamic_mxfp4_quant is None
+                                 or gemm_afp4wfp4 is None):
+            # Currently need these kernels if not emulating
+            raise NotImplementedError(
+                f"{self.__class__.__name__} requires AITER to be installed "
+                "for non-emulation mode! Please refer to "
+                "https://github.com/ROCm/aiter for installation details.")
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -34,10 +52,10 @@ class QuarkW4A4MXFP4(QuarkScheme):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         layer.weight = torch.nn.Parameter(layer.weight.data,
                                           requires_grad=False)
-        layer.weight_scale = torch.nn.Parameter(layer.weight_scale.data,
-                                                requires_grad=False)
 
         if self.emulate:
+            layer.weight_scale = torch.nn.Parameter(layer.weight_scale.data,
+                                                    requires_grad=False)
             try:
                 from quark.torch.export.nn.modules import realquantizer
                 from quark.torch.quantization.config.config import (
@@ -73,6 +91,21 @@ class QuarkW4A4MXFP4(QuarkScheme):
 
             # This call is necessary to release the scales memory.
             torch.cuda.empty_cache()
+        else:
+            if envs.VLLM_TRITON_FP4_GEMM_USE_ASM:
+                weight_scale_shuffle = layer.weight_scale.data
+                sm, sn = weight_scale_shuffle.shape
+                weight_scale_shuffle = weight_scale_shuffle.view(
+                    sm // 32, 2, 16, sn // 8, 2, 4, 1)
+                weight_scale_shuffle = weight_scale_shuffle.permute(
+                    0, 3, 5, 2, 4, 1, 6).contiguous()
+                weight_scale_shuffle = weight_scale_shuffle.view(sm, sn)
+                layer.weight_scale = torch.nn.Parameter(weight_scale_shuffle,
+                                                        requires_grad=False)
+            else:
+                layer.weight_scale = torch.nn.Parameter(
+                    layer.weight_scale.data.T.contiguous(),
+                    requires_grad=False)
 
     def create_weights(self, layer: torch.nn.Module,
                        output_partition_sizes: list[int],
@@ -113,7 +146,8 @@ class QuarkW4A4MXFP4(QuarkScheme):
     def apply_weights(self,
                       layer: torch.nn.Module,
                       x: torch.Tensor,
-                      bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+                      bias: Optional[torch.Tensor] = None,
+                      x_scales: torch.Tensor = None) -> torch.Tensor:
 
         if self.emulate:
             if envs.VLLM_QUARK_EMU_MEM_OPT:
@@ -123,4 +157,61 @@ class QuarkW4A4MXFP4(QuarkScheme):
             qdq_x, _ = per_token_group_quant_mxfp4(x, OCP_MX_BLOCK_SIZE)
             return F.linear(qdq_x, dq_w, bias)
         else:
-            raise NotImplementedError()
+            M = x.shape[0]
+            if envs.VLLM_TRITON_FP4_GEMM_USE_ASM and M > 128:
+                if x_scales is None:
+                    x_q, x_s = dynamic_mxfp4_quant_asm(x, shuffle=True)
+                else:
+                    x_q = x
+                    x_s = x_scales
+
+                y = torch.empty((M + 255) // 256 * 256,
+                                layer.weight.shape[0],
+                                device=x_q.device,
+                                dtype=self.out_dtype)
+                #asm_bias = torch.empty_like(y)
+                gemm_a4w4_asm(x_q,
+                              layer.weight,
+                              x_s,
+                              layer.weight_scale,
+                              y,
+                              y,
+                              bpreshuffle=False)
+
+                return y[:M]
+            elif envs.VLLM_TRITON_FP4_GEMM_USE_ASM:
+                if x_scales is None:
+                    x_q, x_s = dynamic_mxfp4_quant_asm(x, shuffle=(M >= 32))
+                    x_s = x_s.view(torch.uint8)
+                else:
+                    x_q = x
+                    x_s = x_scales
+                if M >= 32:
+                    sm, sn = x_s.shape
+                    x_s = x_s.view(sm // 32, sn * 32)
+                y = torch.empty(x_q.shape[0],
+                                layer.weight.shape[0],
+                                device=x_q.device,
+                                dtype=self.out_dtype)
+
+                smw, snw = layer.weight_scale.shape
+                gemm_afp4wfp4_preshuffled_scales(
+                    x_q, layer.weight.T, x_s,
+                    layer.weight_scale.view(smw // 32, snw * 32),
+                    self.out_dtype, y)
+                return y
+            else:
+                if x_scales is None:
+                    x_q, x_s = dynamic_mxfp4_quant(x)
+                else:
+                    x_q = x
+                    x_s = x_scales
+                y = torch.empty(x_q.shape[0],
+                                layer.weight.shape[0],
+                                device=x_q.device,
+                                dtype=self.out_dtype)
+
+                gemm_afp4wfp4(x_q, layer.weight.T, x_s, layer.weight_scale.T,
+                              self.out_dtype, y)
+
+                return y

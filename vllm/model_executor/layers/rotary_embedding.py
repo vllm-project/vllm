@@ -30,6 +30,7 @@ import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
 
+from vllm import envs
 from vllm.model_executor.custom_op import CustomOp
 from vllm.platforms import current_platform
 
@@ -176,8 +177,6 @@ class RotaryEmbedding(CustomOp):
         key: Optional[torch.Tensor] = None,
         offsets: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
-        from vllm import _custom_ops as ops
-
         # __setattr__ in nn.Module (called by `self.cos_sin_cache = ...`)
         # is expensive, so avoid calling it if possible
         if self.cos_sin_cache.device != query.device or \
@@ -185,16 +184,58 @@ class RotaryEmbedding(CustomOp):
             self.cos_sin_cache = self.cos_sin_cache.to(query.device,
                                                        dtype=query.dtype)
 
-        # ops.rotary_embedding()/batched_rotary_embedding()
-        # are in-place operations that update the query and key tensors.
-        if offsets is not None:
-            ops.batched_rotary_embedding(positions, query, key, self.head_size,
-                                         self.cos_sin_cache,
-                                         self.is_neox_style, self.rotary_dim,
-                                         offsets)
+        num_tokens = positions.numel()
+        if envs.VLLM_USE_AITER_TRITON_ROPE and num_tokens <= 128:
+            import aiter.ops.triton.rope as ops
+            assert key is not None
+            cos, sin = self.cos_sin_cache.chunk(2, dim=-1)
+            query_shape = query.shape
+            key_shape = key.shape
+            query = query.view(num_tokens, -1, self.head_size)
+            key = key.view(num_tokens, -1, self.head_size)
+            query_ = query[..., :self.rotary_dim]
+            key_ = key[..., :self.rotary_dim]
+            if offsets is not None:
+                offsets = offsets.view(*query.shape[:1])
+                ops.rope_cached_thd_positions_offsets_2c_gqa_fwd_inplace(
+                    query_,
+                    key_,
+                    cos,
+                    sin,
+                    positions,
+                    offsets,
+                    0,
+                    True,
+                    False,
+                )
+            else:
+                ops.rope_cached_thd_positions_2c_gqa_fwd_inplace(
+                    query_,
+                    key_,
+                    cos,
+                    sin,
+                    positions,
+                    0,
+                    True,
+                    False,
+                )
+            query = query.view(query_shape)
+            key = key.view(key_shape)
         else:
-            ops.rotary_embedding(positions, query, key, self.head_size,
-                                 self.cos_sin_cache, self.is_neox_style)
+            from vllm import _custom_ops as ops
+
+            # ops.rotary_embedding()/batched_rotary_embedding()
+            # are in-place operations that update the query and key tensors.
+            if offsets is not None:
+                ops.batched_rotary_embedding(positions, query, key,
+                                             self.head_size,
+                                             self.cos_sin_cache,
+                                             self.is_neox_style,
+                                             self.rotary_dim, offsets)
+            else:
+                ops.rotary_embedding(positions, query, key, self.head_size,
+                                     self.cos_sin_cache, self.is_neox_style)
+
         return query, key
 
     def forward_xpu(

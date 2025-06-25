@@ -13,6 +13,7 @@ FP8_DTYPE = current_platform.fp8_dtype()
 
 
 class AITERPagedAttention(PagedAttention):
+    is_asm_supported: bool = False
 
     @staticmethod
     def write_to_paged_cache(
@@ -25,20 +26,30 @@ class AITERPagedAttention(PagedAttention):
         k_scale: torch.Tensor,
         v_scale: torch.Tensor,
     ) -> None:
-        if kv_cache_dtype not in ["int8", "fp8", "fp8_e4m3"]:
-            PagedAttention.write_to_paged_cache(key, value, key_cache,
-                                                value_cache, slot_mapping,
-                                                kv_cache_dtype, k_scale,
-                                                v_scale)
+        if not AITERPagedAttention.is_asm_supported:
+            PagedAttention.write_to_paged_cache(
+                key,
+                value,
+                key_cache,
+                value_cache,
+                slot_mapping,
+                kv_cache_dtype,
+                k_scale,
+                v_scale,
+            )
         else:
-            kv_cache_torch_dtype = (FP8_DTYPE
-                                    if "fp8" in kv_cache_dtype else torch.int8)
+            kv_cache_torch_dtype = FP8_DTYPE \
+                        if "fp8" in kv_cache_dtype else torch.int8
             key_cache = key_cache.view(kv_cache_torch_dtype)
             value_cache = value_cache.view(kv_cache_torch_dtype)
 
-            rocm_aiter.reshape_and_cache_with_pertoken_quant(
-                key, value, key_cache, value_cache, k_scale, v_scale,
-                slot_mapping.flatten(), True)
+            # rocm_aiter.reshape_and_cache_with_pertoken_quant(
+            #     key, value, key_cache, value_cache, k_scale, v_scale,
+            #     slot_mapping.flatten(), True)
+            rocm_aiter.reshape_and_cache(key, value, key_cache, value_cache,
+                                         slot_mapping.flatten(),
+                                         kv_cache_dtype, k_scale, v_scale,
+                                         True)
 
     @staticmethod
     def forward_decode(
@@ -59,44 +70,76 @@ class AITERPagedAttention(PagedAttention):
         blocksparse_vert_stride: int = 0,
         blocksparse_block_size: int = 64,
         blocksparse_head_sliding_step: int = 0,
+        output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        if kv_cache_dtype not in ["int8", "fp8", "fp8_e4m3"]:
-            return PagedAttention.forward_decode(
-                query=query,
-                key_cache=key_cache,
-                value_cache=value_cache,
-                block_tables=block_tables,
-                seq_lens=seq_lens,
-                max_seq_len=max_seq_len,
-                kv_cache_dtype=kv_cache_dtype,
-                num_kv_heads=num_kv_heads,
-                scale=scale,
-                alibi_slopes=alibi_slopes,
-                k_scale=k_scale,
-                v_scale=v_scale,
-                tp_rank=tp_rank,
-                blocksparse_local_blocks=blocksparse_local_blocks,
-                blocksparse_vert_stride=blocksparse_vert_stride,
-                blocksparse_block_size=blocksparse_block_size,
-                blocksparse_head_sliding_step=blocksparse_head_sliding_step)
+        if output is None:
+            output = torch.empty_like(query)
+        block_size = value_cache.shape[3]
+        if not AITERPagedAttention.is_asm_supported:
+            import aiter
+
+            max_num_partitions = (max_seq_len + 256 - 1) // 256
+            assert 256 % block_size == 0
+            num_seqs, num_heads, head_size = query.shape
+            tmp_output = torch.empty(
+                size=(num_seqs, num_heads, max_num_partitions, head_size),
+                dtype=output.dtype,
+                device=output.device,
+            )
+            exp_sums = torch.empty(
+                size=(num_seqs, num_heads, max_num_partitions),
+                dtype=torch.float32,
+                device=output.device,
+            )
+            max_logits = torch.empty_like(exp_sums)
+            return aiter.paged_attention_rocm(
+                output,
+                exp_sums,
+                max_logits,
+                tmp_output,
+                query,
+                key_cache,
+                value_cache,
+                num_kv_heads,
+                scale,
+                block_tables,
+                seq_lens,
+                block_size,
+                max_seq_len,
+                alibi_slopes,
+                kv_cache_dtype,
+                k_scale,
+                v_scale,
+                None,
+                256,
+            )
 
         if "fp8" in kv_cache_dtype:
-            key_cache = key_cache.view(torch.float8_e4m3fnuz)
-            value_cache = value_cache.view(torch.float8_e4m3fnuz)
+            kv_cache_torch_dtype = FP8_DTYPE
+            # kv_cache_torch_dtype = torch.int8
+            key_cache = key_cache.view(kv_cache_torch_dtype)
+            value_cache = value_cache.view(kv_cache_torch_dtype)
 
         if blocksparse_vert_stride is not None and blocksparse_vert_stride > 1:
             # use blocksparse paged attention
             block_size = value_cache.size(-1)
-            assert (blocksparse_block_size > 0 and
-                    blocksparse_block_size % block_size == 0), \
-                (f"{blocksparse_block_size=} needs to be a multiple of"
-                 f"{block_size=} used in block_tables.")
+            assert (blocksparse_block_size > 0
+                    and blocksparse_block_size % block_size == 0), (
+                        f"{blocksparse_block_size=} needs to be a multiple of"
+                        f"{block_size=} used in block_tables.")
 
-        output = torch.empty_like(query)
-        block_size = value_cache.shape[3]
         max_num_blocks_per_seq = cdiv(max_seq_len, block_size)
 
-        rocm_aiter.pa_fwd_asm(query, key_cache, value_cache, block_tables,
-                              seq_lens, max_num_blocks_per_seq, k_scale,
-                              v_scale, output)
+        rocm_aiter.pa_fwd_asm(
+            query,
+            key_cache,
+            value_cache,
+            # asm_V_shuffle(value_cache),
+            block_tables,
+            seq_lens,
+            max_num_blocks_per_seq,
+            K_QScale=k_scale,
+            V_QScale=v_scale,
+            out_=output,
+        )
         return output

@@ -151,7 +151,6 @@ def use_rocm_custom_paged_attention(
                 and (envs.VLLM_ROCM_CUSTOM_PAGED_ATTN)
                 and not (envs.VLLM_ROCM_USE_AITER_PAGED_ATTN
                          and envs.VLLM_ROCM_USE_AITER))
-
     else:
         return (ON_GFX11_GFX12 and (not envs.VLLM_USE_V1 or sliding_window == 0
                                     or sliding_window == (-1, -1))
