@@ -23,8 +23,7 @@ from vllm.logger import init_logger
 from .interfaces import (has_inner_state, has_noops, is_attention_free,
                          is_hybrid, supports_cross_encoding,
                          supports_multimodal, supports_multimodal_raw_input,
-                         supports_pp, supports_transcription,
-                         supports_v0_only)
+                         supports_pp, supports_transcription, supports_v0_only)
 from .interfaces_base import is_text_generation_model
 
 logger = init_logger(__name__)
@@ -539,7 +538,7 @@ class _ModelRegistry:
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures)
         return model_cls.supports_multimodal
-    
+
     def supports_multimodal_raw_input(
         self,
         architectures: Union[str, list[str]],

@@ -330,14 +330,13 @@ class OutputProcessor:
         tokenizer = None if not self.tokenizer else \
             self.tokenizer.get_lora_tokenizer(request.lora_request)
 
-        req_state = RequestState.from_new_request(
-            tokenizer=tokenizer,
-            request=request,
-            prompt=prompt,
-            parent_req=parent_req,
-            request_index=request_index,
-            queue=queue,
-            log_stats=self.log_stats)
+        req_state = RequestState.from_new_request(tokenizer=tokenizer,
+                                                  request=request,
+                                                  prompt=prompt,
+                                                  parent_req=parent_req,
+                                                  request_index=request_index,
+                                                  queue=queue,
+                                                  log_stats=self.log_stats)
         self.request_states[request_id] = req_state
         self.lora_states.add_request(req_state)
         if parent_req:

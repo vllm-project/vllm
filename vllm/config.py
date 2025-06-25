@@ -642,8 +642,10 @@ class ModelConfig:
         self.original_max_model_len = self.max_model_len
         self.max_model_len = self.get_and_verify_max_len(self.max_model_len)
         self.multimodal_config = self._init_multimodal_config()
-        self.is_pooling_model = self.registry.is_pooling_model(self.architectures)
-        self.model_supports_multimodal_raw_input = self._init_model_supports_multimodal_raw_input()
+        self.is_pooling_model = self.registry.is_pooling_model(
+            self.architectures)
+        self.model_supports_multimodal_raw_input = (
+            self._init_model_supports_multimodal_raw_input())
         if not self.skip_tokenizer_init:
             self._verify_tokenizer_mode()
 

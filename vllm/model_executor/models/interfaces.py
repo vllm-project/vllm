@@ -165,18 +165,21 @@ class _SupportsMultiModalWithRawInput(Protocol):
 
 
 @overload
-def supports_multimodal_raw_input(model: object) -> TypeIs[SupportsMultiModalWithRawInput]:
+def supports_multimodal_raw_input(
+        model: object) -> TypeIs[SupportsMultiModalWithRawInput]:
     ...
 
 
 @overload
-def supports_multimodal_raw_input(model: type[object]) -> TypeIs[type[SupportsMultiModalWithRawInput]]:
+def supports_multimodal_raw_input(
+        model: type[object]) -> TypeIs[type[SupportsMultiModalWithRawInput]]:
     ...
 
 
 def supports_multimodal_raw_input(
     model: Union[type[object], object]
-) -> Union[TypeIs[type[SupportsMultiModalWithRawInput]], TypeIs[SupportsMultiModalWithRawInput]]:
+) -> Union[TypeIs[type[SupportsMultiModalWithRawInput]],
+           TypeIs[SupportsMultiModalWithRawInput]]:
     if isinstance(model, type):
         return isinstance(model, _SupportsMultiModalWithRawInput)
 

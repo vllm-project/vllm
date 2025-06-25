@@ -25,13 +25,14 @@ from transformers import BatchFeature
 
 from vllm.config import VllmConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.interfaces import (IsAttentionFree,
-                                                   SupportsMultiModalWithRawInput)
+from vllm.model_executor.models.interfaces import (
+    IsAttentionFree, SupportsMultiModalWithRawInput)
 from vllm.model_executor.models.utils import AutoWeightsLoader
 from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig, MultiModalFieldElem,
-                                    MultiModalInputs, MultiModalKwargs, MultiModalKwargsItem,
+from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
+                                    MultiModalFieldElem, MultiModalInputs,
+                                    MultiModalKwargs, MultiModalKwargsItem,
                                     MultiModalSharedField, PlaceholderRange)
 from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
@@ -62,7 +63,8 @@ class PrithviGeoSpatialMAEInputBuilder(
         # The size of pixel_values might change in the cases where we resize
         # the input but never exceeds the dimensions below.
         return {
-            "pixel_values": torch.full((6, 512, 512), 1.0, dtype=torch.float16),
+            "pixel_values": torch.full((6, 512, 512), 1.0,
+                                       dtype=torch.float16),
             "location_coords": torch.full((1, 2), 1.0, dtype=torch.float16),
         }
 
@@ -75,8 +77,10 @@ class PrithviGeoSpatialMAEMultiModalProcessor(BaseMultiModalProcessor):
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(
-            pixel_values=MultiModalFieldConfig.shared(batch_size=1, modality="image"),
-            location_coords=MultiModalFieldConfig.shared(batch_size=1, modality="image"),
+            pixel_values=MultiModalFieldConfig.shared(batch_size=1,
+                                                      modality="image"),
+            location_coords=MultiModalFieldConfig.shared(batch_size=1,
+                                                         modality="image"),
         )
 
     def _get_prompt_updates(
@@ -99,15 +103,16 @@ class PrithviGeoSpatialMAEMultiModalProcessor(BaseMultiModalProcessor):
 
         for k, v in mm_data.items():
             mm_kwargs[k] = v
-        mm_place_holders = {
-            "image": [PlaceholderRange(offset=0, length=0)]
-        }
+        mm_place_holders = {"image": [PlaceholderRange(offset=0, length=0)]}
 
         multimodal_kwargs_items = [
-            MultiModalKwargsItem.from_elems(
-                [MultiModalFieldElem(modality="image", key=key, data=data, field=MultiModalSharedField(1))
-                 for key, data in mm_kwargs.items()]
-            )
+            MultiModalKwargsItem.from_elems([
+                MultiModalFieldElem(modality="image",
+                                    key=key,
+                                    data=data,
+                                    field=MultiModalSharedField(1))
+                for key, data in mm_kwargs.items()
+            ])
         ]
 
         return MultiModalInputs(
@@ -124,7 +129,8 @@ class PrithviGeoSpatialMAEMultiModalProcessor(BaseMultiModalProcessor):
     PrithviGeoSpatialMAEMultiModalProcessor,
     info=PrithviGeoSpatialMAEProcessingInfo,
     dummy_inputs=PrithviGeoSpatialMAEInputBuilder)
-class PrithviGeoSpatialMAE(nn.Module, IsAttentionFree, SupportsMultiModalWithRawInput):
+class PrithviGeoSpatialMAE(nn.Module, IsAttentionFree,
+                           SupportsMultiModalWithRawInput):
     """ Prithvi Masked Autoencoder"""
 
     @classmethod
@@ -189,13 +195,14 @@ class PrithviGeoSpatialMAE(nn.Module, IsAttentionFree, SupportsMultiModalWithRaw
             location_coords = None
 
         return pixel_values, location_coords
-    
+
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        # We do not really use any input tokens and therefore no embeddings to be calculated
-        # However, due to the mandatory token ids in the input prompt we pass one token and the
-        # size of the dummy embedding tensors must reflect that.
+        # We do not really use any input tokens and therefore no embeddings
+        # to be calculated. However, due to the mandatory token ids in
+        # the input prompt we pass one token and the size of the dummy
+        #  embedding tensors must reflect that.
         return torch.empty(input_ids.shape)
-    
+
     def forward(
         self,
         input_ids: Optional[torch.Tensor],
@@ -217,7 +224,10 @@ class PrithviGeoSpatialMAE(nn.Module, IsAttentionFree, SupportsMultiModalWithRaw
         hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
     ) -> Optional[PoolerOutput]:
-        return PoolerOutput([PoolingSequenceGroupOutput(hidden_state) for hidden_state in hidden_states])
+        return PoolerOutput([
+            PoolingSequenceGroupOutput(hidden_state)
+            for hidden_state in hidden_states
+        ])
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
