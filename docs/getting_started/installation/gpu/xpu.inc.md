@@ -22,7 +22,7 @@ Currently, there are no pre-built XPU wheels.
 # --8<-- [end:pre-built-wheels]
 # --8<-- [start:build-wheel-from-source]
 
-- First, install required driver and Intel OneAPI 2025.0 or later.
+- First, install required [driver](https://dgpu-docs.intel.com/driver/installation.html#installing-gpu-drivers) and [Intel OneAPI](https://www.intel.com/content/www/us/en/developer/tools/oneapi/base-toolkit.html) 2025.0 or later.
 - Second, install Python packages for vLLM XPU backend building:
 
 ```bash
