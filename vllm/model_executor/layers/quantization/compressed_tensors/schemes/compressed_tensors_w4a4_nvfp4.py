@@ -4,11 +4,14 @@ from typing import Callable, Optional
 import torch
 from torch.nn.parameter import Parameter
 
+import vllm.envs as envs
 from vllm._custom_ops import (cutlass_scaled_fp4_mm,
                               cutlass_scaled_mm_supports_fp4, scaled_fp4_quant)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme)
+from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (  # noqa: E501
+    run_nvfp4_emulations)
 from vllm.model_executor.parameter import (GroupQuantScaleParameter,
                                            ModelWeightParameter,
                                            PerTensorScaleParameter)
@@ -26,6 +29,8 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
 
     @classmethod
     def get_min_capability(cls) -> int:
+        if envs.VLLM_USE_NVFP4_CT_EMULATIONS:
+            return 80
         return 100
 
     @classmethod
@@ -128,6 +133,17 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
                       layer: torch.nn.Module,
                       x: torch.Tensor,
                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+
+        if envs.VLLM_USE_NVFP4_CT_EMULATIONS:
+            out = run_nvfp4_emulations(
+                x=x,
+                input_global_scale=layer.input_global_scale,
+                weight=layer.weight,
+                weight_scale_swizzled=layer.weight_scale_swizzled,
+                weight_global_scale=layer.weight_global_scale)
+            if bias is not None:
+                out = out + bias
+            return out
 
         output_dtype = x.dtype
         output_shape = [x.shape[0], layer.weight.shape[0]]
