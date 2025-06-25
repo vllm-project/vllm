@@ -215,9 +215,15 @@ class RocmPlatform(Platform):
             selected_backend = _Backend.ROCM_FLASH
 
         if envs.VLLM_USE_V1:
-            logger.info("Using Triton Attention backend on V1 engine.")
-            return ("vllm.v1.attention.backends."
-                    "triton_attn.TritonAttentionBackend")
+            if envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA \
+                and on_gfx9():
+                logger.info("Using Flash Attention backend on V1 engine.")
+                return ("vllm.v1.attention.backends."
+                        "rocm_aiter_fa.AiterFlashAttentionBackend")
+            else:
+                logger.info("Using Triton Attention backend on V1 engine.")
+                return ("vllm.v1.attention.backends."
+                        "triton_attn.TritonAttentionBackend")
         if selected_backend == _Backend.ROCM_FLASH:
             if not cls.has_device_capability(90):
                 # not Instinct series GPUs.

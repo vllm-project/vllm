@@ -8,9 +8,7 @@ import torch
 from neuronxcc import nki
 from neuronxcc.nki.language import par_dim
 
-
-def ceil_div(a, b):
-    return (a + b - 1) // b
+from vllm.utils import cdiv
 
 
 def is_power_of_2(x):
@@ -35,11 +33,10 @@ def load_block_tables(block_tables_hbm, num_tiles, num_blocks_per_tile):
         (num_tiles, num_blocks_per_tile))
 
     block_tables_sbuf = nl.zeros(
-        (ceil_div(num_tiles,
-                  B_P_SIZE), par_dim(B_P_SIZE), num_blocks_per_tile),
+        (cdiv(num_tiles, B_P_SIZE), par_dim(B_P_SIZE), num_blocks_per_tile),
         dtype=nl.int32,
     )
-    for i in nl.affine_range(ceil_div(num_tiles, B_P_SIZE)):
+    for i in nl.affine_range(cdiv(num_tiles, B_P_SIZE)):
         i_p = nl.arange(B_P_SIZE)[:, None]
         i_f = nl.arange(num_blocks_per_tile)[None, :]
         block_tables_sbuf[i, i_p, i_f] = nl.load(
@@ -83,7 +80,7 @@ def transform_block_tables_for_indirect_load(
     assert is_power_of_2(
         num_blocks_per_tile), f"{num_blocks_per_tile=} is not power of 2"
 
-    num_loads = ceil_div(num_blocks_per_tile, B_P_SIZE)
+    num_loads = cdiv(num_blocks_per_tile, B_P_SIZE)
     block_tables_transposed = nl.ndarray(
         (
             num_loads,
@@ -165,7 +162,7 @@ def load_kv_tile_from_cache(
            equivalent to (par_dim(B_P_SIZE), seqlen_kv // B_P_SIZE * B_D_SIZE)
     """
     # load key cache
-    num_loads = ceil_div(num_blocks_per_large_tile, B_P_SIZE)
+    num_loads = cdiv(num_blocks_per_large_tile, B_P_SIZE)
     for load_idx in nl.affine_range(num_loads):
         i_p = nl.arange(B_P_SIZE)[:, None]
         i_f = nl.arange(tiled_block_size * B_D_SIZE)[None, :]
@@ -605,7 +602,7 @@ def flash_paged_attention(
     )
 
     for large_k_tile_idx in nl.sequential_range(0, num_large_k_tile):
-        num_loads = ceil_div(num_blocks_per_large_tile, B_P_SIZE)
+        num_loads = cdiv(num_blocks_per_large_tile, B_P_SIZE)
         cur_k_tile = nl.ndarray(
             (par_dim(B_D_SIZE), LARGE_TILE_SZ),
             dtype=kernel_dtype,
