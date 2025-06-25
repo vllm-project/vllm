@@ -272,7 +272,8 @@ class ModernBertPooler(nn.Module):
             pooled_output = pooled_output[0, :]
         else:
             raise ValueError(
-                f"Pooling type should be either `cls` or `mean`, but got {self.pooling_type}"
+                "Pooling type should be either `cls` or `mean`, "
+                f"but got {self.pooling_type}"
             )
         pooled_output = self.norm(self.act(self.dense(pooled_output)))
         return pooled_output
