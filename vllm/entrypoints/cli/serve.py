@@ -23,11 +23,11 @@ from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import FlexibleArgumentParser, get_tcp_uri
 from vllm.v1.engine.core import EngineCoreProc
-from vllm.v1.engine.utils import (APIServerProcessManager,
-                                  CoreEngineProcManager, launch_core_engines,
-                                  wait_for_completion_or_failure)
+from vllm.v1.engine.utils import CoreEngineProcManager, launch_core_engines
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
+from vllm.v1.utils import (APIServerProcessManager,
+                           wait_for_completion_or_failure)
 
 logger = init_logger(__name__)
 

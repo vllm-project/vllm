@@ -1,10 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import argparse
+import multiprocessing
 import time
+import weakref
 from collections import defaultdict
 from collections.abc import Sequence
+from multiprocessing import connection
 from multiprocessing.process import BaseProcess
-from typing import TYPE_CHECKING, Generic, Optional, TypeVar, Union, overload
+from typing import (TYPE_CHECKING, Any, Callable, Generic, Optional, TypeVar,
+                    Union, overload)
 
 import torch
 
@@ -17,6 +22,9 @@ from vllm.utils import (get_open_port, get_open_zmq_ipc_path, get_tcp_uri,
 
 if TYPE_CHECKING:
     from vllm.attention.layer import Attention
+    from vllm.v1.engine.coordinator import DPCoordinator
+    from vllm.v1.engine.utils import (CoreEngineActorManager,
+                                      CoreEngineProcManager)
 
 logger = init_logger(__name__)
 
@@ -104,6 +112,145 @@ def get_engine_client_zmq_addr(local_only: bool,
 
     return get_open_zmq_ipc_path() if local_only else (get_tcp_uri(
         host, port or get_open_port()))
+
+
+class APIServerProcessManager:
+    """Manages a group of API server processes.
+    
+    Handles creation, monitoring, and termination of API server worker
+    processes. Also monitors extra processes to check if they are healthy.
+    """
+
+    def __init__(
+        self,
+        target_server_fn: Callable,
+        listen_address: str,
+        sock: Any,
+        args: argparse.Namespace,
+        num_servers: int,
+        input_addresses: list[str],
+        output_addresses: list[str],
+        stats_update_address: Optional[str] = None,
+    ):
+        """Initialize and start API server worker processes.
+        
+        Args:
+            target_server_fn: Function to call for each API server process
+            listen_address: Address to listen for client connections
+            sock: Socket for client connections
+            args: Command line arguments
+            num_servers: Number of API server processes to start
+            input_addresses: Input addresses for each API server
+            output_addresses: Output addresses for each API server
+            stats_update_address: Optional stats update address 
+        """
+        self.listen_address = listen_address
+        self.sock = sock
+        self.args = args
+
+        # Start API servers
+        spawn_context = multiprocessing.get_context("spawn")
+        self.processes: list[BaseProcess] = []
+
+        for i, in_addr, out_addr in zip(range(num_servers), input_addresses,
+                                        output_addresses):
+            client_config = {
+                "input_address": in_addr,
+                "output_address": out_addr,
+                "client_index": i
+            }
+            if stats_update_address is not None:
+                client_config["stats_update_address"] = stats_update_address
+
+            proc = spawn_context.Process(target=target_server_fn,
+                                         name=f"ApiServer_{i}",
+                                         args=(listen_address, sock, args,
+                                               client_config))
+            self.processes.append(proc)
+            proc.start()
+
+        logger.info("Started %d API server processes", len(self.processes))
+
+        # Shutdown only the API server processes on garbage collection
+        # The extra processes are managed by their owners
+        self._finalizer = weakref.finalize(self, shutdown, self.processes)
+
+    def close(self) -> None:
+        self._finalizer()
+
+
+def wait_for_completion_or_failure(
+        api_server_manager: APIServerProcessManager,
+        engine_manager: Optional[Union["CoreEngineProcManager",
+                                       "CoreEngineActorManager"]] = None,
+        coordinator: Optional["DPCoordinator"] = None) -> None:
+    """Wait for all processes to complete or detect if any fail.
+    
+    Raises an exception if any process exits with a non-zero status.
+
+    Args:
+        api_server_manager: The manager for API servers.
+        engine_manager: The manager for engine processes.
+            If CoreEngineProcManager, it manages local engines;
+            if CoreEngineActorManager, it manages all engines.
+        coordinator: The coordinator for data parallel.
+    """
+
+    from vllm.v1.engine.utils import (CoreEngineActorManager,
+                                      CoreEngineProcManager)
+
+    try:
+        logger.info("Waiting for API servers to complete ...")
+        # Create a mapping of sentinels to their corresponding processes
+        # for efficient lookup
+        sentinel_to_proc: dict[Any, BaseProcess] = {
+            proc.sentinel: proc
+            for proc in api_server_manager.processes
+        }
+
+        if coordinator:
+            sentinel_to_proc[coordinator.proc.sentinel] = coordinator.proc
+
+        actor_run_refs = []
+        if isinstance(engine_manager, CoreEngineProcManager):
+            for proc in engine_manager.processes:
+                sentinel_to_proc[proc.sentinel] = proc
+        elif isinstance(engine_manager, CoreEngineActorManager):
+            actor_run_refs = engine_manager.get_run_refs()
+
+        # Check if any process terminates
+        while sentinel_to_proc or actor_run_refs:
+            # Wait for any process to terminate
+            ready_sentinels: list[Any] = connection.wait(sentinel_to_proc,
+                                                         timeout=5)
+
+            # Process any terminated processes
+            for sentinel in ready_sentinels:
+                proc = sentinel_to_proc.pop(sentinel)
+
+                # Check if process exited with error
+                if proc.exitcode != 0:
+                    raise RuntimeError(
+                        f"Process {proc.name} (PID: {proc.pid}) "
+                        f"died with exit code {proc.exitcode}")
+
+            if actor_run_refs:
+                import ray
+                _, actor_run_refs = ray.wait(actor_run_refs, timeout=5)
+
+    except KeyboardInterrupt:
+        logger.info("Received KeyboardInterrupt, shutting down API servers...")
+    except Exception as e:
+        logger.exception("Exception occurred while running API servers: %s",
+                         str(e))
+        raise
+    finally:
+        logger.info("Terminating remaining processes ...")
+        api_server_manager.close()
+        if coordinator:
+            coordinator.close()
+        if engine_manager:
+            engine_manager.close()
 
 
 # Note(rob): shutdown function cannot be a bound method,
