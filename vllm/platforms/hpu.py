@@ -30,7 +30,8 @@ class HpuPlatform(Platform):
     simple_compile_backend: str = "hpu_backend" if not is_fake_hpu(
     ) else "inductor"
     supported_quantization: list[str] = [
-        "compressed-tensors", "fp8", "inc", "awq_hpu", "gptq_hpu"
+        "compressed-tensors", "fp8", "inc", "awq_hpu", "gptq_hpu",
+        "bitsandbytes"
     ]
 
     @classmethod
