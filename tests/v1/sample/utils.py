@@ -174,7 +174,7 @@ class LogitsprocsTestFakes(NamedTuple):
 
     def get_logitsproc_by_id(self, id: str) -> LogitsProcessor:
         """Shorthand for getting a specific logitproc from SamplingMetadata"""
-        return self.sampling_metadata.logitsprocs.get_logitsproc_by_id(id)
+        return self.sampling_metadata.logitsprocs.get_logitproc_by_id(id)
 
     def get_logitsprocs(self) -> list[LogitsProcessor]:
         return self.sampling_metadata.logitsprocs.all_list

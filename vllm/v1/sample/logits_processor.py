@@ -213,7 +213,7 @@ class LogitsProcessorManager:
             raise ValueError("Greedy and non-greedy logits "
                              "processors must not share ids")
 
-    def get_logitsproc_by_id(self, id: str) -> Optional[LogitsProcessor]:
+    def get_logitproc_by_id(self, id: str) -> Optional[LogitsProcessor]:
         """Find logits processor by id, if it exists"""
         return self.all.get(id, None)
 
