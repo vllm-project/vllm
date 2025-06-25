@@ -151,6 +151,9 @@ pip install -e .
     [sccache](https://github.com/mozilla/sccache) works similarly to `ccache`, but has the capability to utilize caching in remote storage environments.
     The following environment variables can be set to configure the vLLM `sccache` remote: `SCCACHE_BUCKET=vllm-build-sccache SCCACHE_REGION=us-west-2 SCCACHE_S3_NO_CREDENTIALS=1`. We also recommend setting `SCCACHE_IDLE_TIMEOUT=0`.
 
+!!! note "Faster Kernel Development"
+    For frequent C++/CUDA kernel changes, after the initial `pip install -e .` setup, consider using the [Incremental Compilation Workflow](../../contributing/incremental_build.md) for significantly faster rebuilds of only the modified kernel code.
+
 ##### Use an existing PyTorch installation
 
 There are scenarios where the PyTorch dependency cannot be easily installed via pip, e.g.:
