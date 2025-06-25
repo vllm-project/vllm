@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # To run this file, run
-# pytest /path/to/vllm/tests/v1/e2e/test_llama4_eagle.py
+# pytest -vx /tests/v1/e2e/test_llama4_eagle.py
 
 from __future__ import annotations
 
@@ -12,10 +12,6 @@ from typing import Any
 import pytest
 
 from vllm import LLM, SamplingParams
-
-TP8_REQUIRED_MODELS = [
-    "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
-]
 
 
 @pytest.fixture
@@ -76,21 +72,15 @@ def test_eagle_correctness(
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
 
-        model_name = method_model_and_draft_model[1]
+        method, model_name, spec_model_name = method_model_and_draft_model
 
-        tp = 1
-
-        if model_name in TP8_REQUIRED_MODELS:
-            tp = 8
+        tp = 8
 
         ref_llm = LLM(model=model_name,
                       tensor_parallel_size=tp,
                       max_model_len=2048)
         ref_outputs = ref_llm.chat(test_prompts, sampling_config)
         del ref_llm
-
-        method = method_model_and_draft_model[0]
-        spec_model_name = method_model_and_draft_model[2]
 
         spec_llm = LLM(
             model=model_name,
