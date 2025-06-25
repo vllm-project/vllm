@@ -397,17 +397,6 @@ class P2pNcclEngine:
                     self.send_queue_cv.notify()
             self._send_sync(tensor_id, tensor, remote_address)
 
-    def wait_for_sent(self):
-        if self.send_type == "PUT_ASYNC":
-            start_time = time.time()
-            with self.send_queue_cv:
-                while self.send_queue:
-                    self.send_queue_cv.wait()
-            duration = time.time() - start_time
-            logger.info(
-                "🚧[PUT_ASYNC]It took %.3fms to wait for the send_queue"
-                " to be empty, rank:%d", duration * 1000, self.rank)
-
     def _send_sync(
         self,
         tensor_id: str,
@@ -475,12 +464,18 @@ class P2pNcclEngine:
                         addr, _, _ = tensor
                         self.pool.free(addr)
 
-        num_layers = len(forward_context.no_compile_layers)
-        # TODO:Retrieve requests that have already sent the KV cache.
-        finished_sending: set[str] = set()
-
-        # Retrieve requests that have already received the KV cache.
         # TODO: 1)Avoid polling. 2)Validate chunked prefill and preemption.
+        num_layers = len(forward_context.no_compile_layers)
+        # Retrieve requests that have already sent the KV cache.
+        finished_sending: set[str] = set()
+        if self.send_type != "GET":
+            for request_id in self.send_request_id_to_tensor_ids:
+                if (num_layers ==
+                        len(self.send_request_id_to_tensor_ids[request_id])):
+                    finished_sending.add(request_id)
+            for request_id in finished_sending:
+                self.send_request_id_to_tensor_ids.pop(request_id, None)
+        # Retrieve requests that have already received the KV cache.
         finished_recving: set[str] = set()
         for request_id in self.recv_request_id_to_tensor_ids:
             if num_layers == len(self.recv_request_id_to_tensor_ids[request_id]):
@@ -488,6 +483,7 @@ class P2pNcclEngine:
         for request_id in finished_recving:
             self.recv_request_id_to_tensor_ids.pop(request_id, None)
 
+        # TODO: Add failed requests (e.g., transmission errors)
         return finished_sending or None, finished_recving or None
 
     def _ping(self):

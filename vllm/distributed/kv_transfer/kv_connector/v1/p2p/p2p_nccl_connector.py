@@ -265,9 +265,8 @@ class P2pNcclConnector(KVConnectorBase_V1):
                                              kv_cache, remote_address)
 
     def wait_for_save(self):
-        if self.is_producer:
-            assert self.p2p_nccl_engine is not None
-            self.p2p_nccl_engine.wait_for_sent()
+        """P2pNcclConnector does not save explicitly."""
+        pass
 
     def get_finished(
             self, finished_req_ids: set[str],
@@ -414,14 +413,6 @@ class P2pNcclConnector(KVConnectorBase_V1):
                                  block_ids=block_ids,
                                  block_size=self._block_size)
 
-        # Requests loaded asynchronously are not in the scheduler_output.
-        # for request_id in self._requests_need_load:
-        #     request, block_ids = self._requests_need_load[request_id]
-        #     meta.add_request(request_id=request.request_id,
-        #                      token_ids=request.prompt_token_ids,
-        #                      block_ids=block_ids,
-        #                      block_size=self._block_size)
-
         self._requests_need_load.clear()
         return meta
 
@@ -443,7 +434,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
 
         self.chunked_prefill.pop(request.request_id, None)
 
-        return False, None
+        return True, None
 
     # ==============================
     # Static methods
