@@ -171,11 +171,13 @@ class LogitsProcessor(ABC):
     def apply(self, logits: torch.Tensor) -> torch.Tensor:
         raise NotImplementedError
 
-    @classmethod
     @abstractmethod
-    def requires_nongreedy(cls) -> bool:
-        """True if logits processor is incompatible with
-        greedy sampling.
+    def is_argmax_invariant(self) -> bool:
+        """True if logits processor has no impact on the
+        argmax computation in greedy sampling.
+        NOTE: may or may not have the same value for all
+        instances of a given LogitsProcessor subclass,
+        depending on subclass implementation.
         TODO(andy): won't be utilized until logits
         processors are user-extensible
         """
@@ -258,8 +260,8 @@ class MinPLogitsProcessor(LogitsProcessor):
         # Current slice of the device tensor
         self.min_p: torch.Tensor = self.min_p_device[:0]
 
-    @classmethod
-    def requires_nongreedy(cls) -> bool:
+    def is_argmax_invariant(self) -> bool:
+        """Min-p never impacts greedy sampling"""
         return True
 
     def get_min_p_by_index(self, index: int) -> float:
@@ -332,8 +334,9 @@ class LogitBiasLogitsProcessor(LogitsProcessor):
         self.logits_slice = (self._device_tensor([], torch.int32),
                              self._device_tensor([], torch.int32))
 
-    @classmethod
-    def requires_nongreedy(cls) -> bool:
+    def is_argmax_invariant(self) -> bool:
+        """Logit bias can rebalance token probabilities and change the
+        outcome of argmax in greedy sampling."""
         return False
 
     def update_state(self, batch_update: BatchUpdate):
@@ -411,8 +414,9 @@ class MinTokensLogitsProcessor(LogitsProcessor):
                                                   self._device_tensor(
                                                       [], torch.int32))
 
-    @classmethod
-    def requires_nongreedy(cls) -> bool:
+    def is_argmax_invariant(self) -> bool:
+        """By censoring stop tokens, min-tokens can change the outcome
+        of the argmax operation in greedy sampling."""
         return False
 
     def update_state(self, batch_update: BatchUpdate):
