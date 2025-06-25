@@ -65,6 +65,7 @@ def test_ragged_paged_attention():
         context_lens=context_lens,
         query_start_loc=query_start_loc,
         num_seqs=num_seqs,
+        kv_cache_update_block_size=8,
     )
 
     with patch("torch.ops.xla.ragged_paged_attention"
