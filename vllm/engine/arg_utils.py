@@ -3,7 +3,9 @@
 
 # yapf: disable
 import argparse
+import copy
 import dataclasses
+import functools
 import json
 import sys
 import threading
@@ -168,7 +170,8 @@ def get_type_hints(type_hint: TypeHint) -> set[TypeHint]:
     return type_hints
 
 
-def get_kwargs(cls: ConfigType) -> dict[str, Any]:
+@functools.lru_cache(maxsize=30)
+def _compute_kwargs(cls: ConfigType) -> dict[str, Any]:
     cls_docs = get_attr_docs(cls)
     kwargs = {}
     for field in fields(cls):
@@ -267,6 +270,16 @@ def get_kwargs(cls: ConfigType) -> dict[str, Any]:
             if kwargs[name].get("choices"):
                 kwargs[name]["choices"].append("None")
     return kwargs
+
+
+def get_kwargs(cls: ConfigType) -> dict[str, Any]:
+    """Return argparse kwargs for the given Config dataclass.
+
+    The heavy computation is cached via functools.lru_cache, and a deep copy
+    is returned so callers can mutate the dictionary without affecting the
+    cached version.
+    """
+    return copy.deepcopy(_compute_kwargs(cls))
 
 
 @dataclass
@@ -1274,11 +1287,6 @@ class EngineArgs:
                 != EngineArgs.disable_async_output_proc):
             _raise_or_fallback(feature_name="--disable-async-output-proc",
                                recommend_to_remove=True)
-            return False
-
-        if self.scheduling_policy != SchedulerConfig.policy:
-            _raise_or_fallback(feature_name="--scheduling-policy",
-                               recommend_to_remove=False)
             return False
 
         if self.num_scheduler_steps != SchedulerConfig.num_scheduler_steps:
