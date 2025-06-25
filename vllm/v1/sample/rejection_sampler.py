@@ -289,6 +289,28 @@ def compute_probs(
     # NOTE(woosuk): `apply_top_k_top_p` uses sorting to calculate the mask,
     # which is slow for large vocab sizes. This may cause performance issues.
     logits = apply_top_k_top_p(logits, top_k, top_p)
+
+    # Apply min_p before softmax if provided
+    if sampling_metadata.min_p is not None and (sampling_metadata.min_p > 0).any():
+        min_p = expand_batch_to_tokens(
+            sampling_metadata.min_p,
+            cu_num_draft_tokens,
+            num_tokens,
+        )
+        # Convert logits to probability distribution
+        probability_values = torch.nn.functional.softmax(logits, dim=-1)
+        # Calculate maximum probabilities per sequence
+        max_probabilities = torch.amax(probability_values,
+                                       dim=-1,
+                                       keepdim=True)
+        # Reshape min_p for broadcasting
+        adjusted_min_p = min_p.unsqueeze(1) * max_probabilities
+        # Identify valid tokens using threshold comparison
+        valid_token_mask = probability_values >= adjusted_min_p
+        valid_token_mask = valid_token_mask.bool()
+        # Apply mask using boolean indexing
+        logits = logits.masked_fill(~valid_token_mask, -float('inf'))
+        
     output_prob = logits.softmax(dim=-1, dtype=torch.float32)
     return output_prob
 
