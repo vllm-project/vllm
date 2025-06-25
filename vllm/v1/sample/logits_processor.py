@@ -204,15 +204,15 @@ class LogitsProcessorManager:
 
     Each logits processor has a unique id.
     """
-    nongreedy: dict[str, LogitsProcessor] = field(
-        default_factory=dict)  # id -> nongreedy-sampling-only logitsproc
-    greedy: dict[str, LogitsProcessor] = field(
-        default_factory=dict)  # id -> greedy-sampling compatible logitsproc
+    argmax_invariant: dict[str, LogitsProcessor] = field(
+        default_factory=dict)  # id -> argmax-invariant logitsprocs
+    non_argmax_invariant: dict[str, LogitsProcessor] = field(
+        default_factory=dict)  # id -> non-argmax-invariant logitsprocs
 
     def __post_init__(self):
         """Guarantee unique ids"""
-        if (self.nongreedy.keys() & self.greedy.keys()):
-            raise ValueError("Greedy and non-greedy logits "
+        if (self.argmax_invariant.keys() & self.non_argmax_invariant.keys()):
+            raise ValueError("Argmax invariant and non-invariant logits "
                              "processors must not share ids")
 
     def get_logitproc_by_id(self, id: str) -> Optional[LogitsProcessor]:
@@ -222,20 +222,20 @@ class LogitsProcessorManager:
     @property
     def all(self) -> dict[str, LogitsProcessor]:
         """All logits processors"""
-        return self.greedy | self.nongreedy
+        return self.non_argmax_invariant | self.argmax_invariant
 
     @property
-    def nongreedy_list(self) -> list[LogitsProcessor]:
-        return list(self.nongreedy.values())
+    def argmax_invariant_list(self) -> list[LogitsProcessor]:
+        return list(self.argmax_invariant.values())
 
     @property
-    def greedy_list(self) -> list[LogitsProcessor]:
-        return list(self.greedy.values())
+    def non_argmax_invariant_list(self) -> list[LogitsProcessor]:
+        return list(self.non_argmax_invariant.values())
 
     @property
     def all_list(self) -> list[LogitsProcessor]:
         """List of all logits processors"""
-        return self.nongreedy_list + self.greedy_list
+        return self.argmax_invariant_list + self.non_argmax_invariant_list
 
 
 ###### ----- Built-in LogitsProcessor impls below here

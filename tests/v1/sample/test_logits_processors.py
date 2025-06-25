@@ -599,7 +599,7 @@ def test_logitsprocs(device: str, reqs_per_logitproc: int,
         # Apply fake batch update to logitsprocs
         fake_update_logitsprocs_state(test_fakes, batch_update)
 
-        # Emulate application of greedy logits processors in engine
+        # Emulate application of logits processors in engine
         slice_idxs = [req.workload_index for req in persistent_batch]
         logits_w_lp = fake_apply_logitsprocs(test_fakes, slice_idxs).cpu()
 

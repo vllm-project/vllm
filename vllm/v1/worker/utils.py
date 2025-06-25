@@ -146,9 +146,9 @@ def init_builtin_logitsprocs(pin_memory_available: bool, max_num_reqs: int,
         # +1 for temporary swap space
         max_num_reqs=max_num_reqs + 1)
     return LogitsProcessorManager(
-        greedy={
+        non_argmax_invariant={
             STR_MIN_TOKENS_LOGITPROC_ID: min_tokens_logitproc,
             STR_LOGITS_BIAS_LOGITPROC_ID: logit_bias_logitproc
         },
-        nongreedy={STR_MIN_P_LOGITPROC_ID: min_p_logitproc},
+        argmax_invariant={STR_MIN_P_LOGITPROC_ID: min_p_logitproc},
     )

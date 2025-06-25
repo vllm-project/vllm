@@ -45,7 +45,8 @@ class Sampler(nn.Module):
         logits = self.apply_bad_words(logits, sampling_metadata)
 
         # Apply logits processors which can impact greedy sampling
-        for processor in sampling_metadata.logitsprocs.greedy_list:
+        for processor in (
+                sampling_metadata.logitsprocs.non_argmax_invariant_list):
             logits = processor.apply(logits)
 
         # Apply penalties (e.g., min_tokens, freq_penalties).
@@ -114,7 +115,7 @@ class Sampler(nn.Module):
 
         # Apply logits processors that only apply to random sampling
         # (argmax invariant)
-        for processor in sampling_metadata.logitsprocs.nongreedy_list:
+        for processor in sampling_metadata.logitsprocs.argmax_invariant_list:
             logits = processor.apply(logits)
 
         # Apply top_k and/or top_p.
