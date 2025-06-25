@@ -60,79 +60,84 @@ To identify the particular CUDA operation that causes the error, you can add `--
 
 If GPU/CPU communication cannot be established, you can use the following Python script and follow the instructions below to confirm whether the GPU/CPU communication is working correctly.
 
-```python
-# Test PyTorch NCCL
-import torch
-import torch.distributed as dist
-dist.init_process_group(backend="nccl")
-local_rank = dist.get_rank() % torch.cuda.device_count()
-torch.cuda.set_device(local_rank)
-data = torch.FloatTensor([1,] * 128).to("cuda")
-dist.all_reduce(data, op=dist.ReduceOp.SUM)
-torch.cuda.synchronize()
-value = data.mean().item()
-world_size = dist.get_world_size()
-assert value == world_size, f"Expected {world_size}, got {value}"
+??? Code
 
-print("PyTorch NCCL is successful!")
+    ```python
+    # Test PyTorch NCCL
+    import torch
+    import torch.distributed as dist
+    dist.init_process_group(backend="nccl")
+    local_rank = dist.get_rank() % torch.cuda.device_count()
+    torch.cuda.set_device(local_rank)
+    data = torch.FloatTensor([1,] * 128).to("cuda")
+    dist.all_reduce(data, op=dist.ReduceOp.SUM)
+    torch.cuda.synchronize()
+    value = data.mean().item()
+    world_size = dist.get_world_size()
+    assert value == world_size, f"Expected {world_size}, got {value}"
 
-# Test PyTorch GLOO
-gloo_group = dist.new_group(ranks=list(range(world_size)), backend="gloo")
-cpu_data = torch.FloatTensor([1,] * 128)
-dist.all_reduce(cpu_data, op=dist.ReduceOp.SUM, group=gloo_group)
-value = cpu_data.mean().item()
-assert value == world_size, f"Expected {world_size}, got {value}"
+    print("PyTorch NCCL is successful!")
 
-print("PyTorch GLOO is successful!")
+    # Test PyTorch GLOO
+    gloo_group = dist.new_group(ranks=list(range(world_size)), backend="gloo")
+    cpu_data = torch.FloatTensor([1,] * 128)
+    dist.all_reduce(cpu_data, op=dist.ReduceOp.SUM, group=gloo_group)
+    value = cpu_data.mean().item()
+    assert value == world_size, f"Expected {world_size}, got {value}"
 
-if world_size <= 1:
-    exit()
+    print("PyTorch GLOO is successful!")
 
-# Test vLLM NCCL, with cuda graph
-from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
+    if world_size <= 1:
+        exit()
 
-pynccl = PyNcclCommunicator(group=gloo_group, device=local_rank)
-# pynccl is enabled by default for 0.6.5+,
-# but for 0.6.4 and below, we need to enable it manually.
-# keep the code for backward compatibility when because people
-# prefer to read the latest documentation.
-pynccl.disabled = False
+    # Test vLLM NCCL, with cuda graph
+    from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 
-s = torch.cuda.Stream()
-with torch.cuda.stream(s):
+    pynccl = PyNcclCommunicator(group=gloo_group, device=local_rank)
+    # pynccl is enabled by default for 0.6.5+,
+    # but for 0.6.4 and below, we need to enable it manually.
+    # keep the code for backward compatibility when because people
+    # prefer to read the latest documentation.
+    pynccl.disabled = False
+
+    s = torch.cuda.Stream()
+    with torch.cuda.stream(s):
+        data.fill_(1)
+        out = pynccl.all_reduce(data, stream=s)
+        value = out.mean().item()
+        assert value == world_size, f"Expected {world_size}, got {value}"
+
+    print("vLLM NCCL is successful!")
+
+    g = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(cuda_graph=g, stream=s):
+        out = pynccl.all_reduce(data, stream=torch.cuda.current_stream())
+
     data.fill_(1)
-    out = pynccl.all_reduce(data, stream=s)
+    g.replay()
+    torch.cuda.current_stream().synchronize()
     value = out.mean().item()
     assert value == world_size, f"Expected {world_size}, got {value}"
 
-print("vLLM NCCL is successful!")
+    print("vLLM NCCL with cuda graph is successful!")
 
-g = torch.cuda.CUDAGraph()
-with torch.cuda.graph(cuda_graph=g, stream=s):
-    out = pynccl.all_reduce(data, stream=torch.cuda.current_stream())
-
-data.fill_(1)
-g.replay()
-torch.cuda.current_stream().synchronize()
-value = out.mean().item()
-assert value == world_size, f"Expected {world_size}, got {value}"
-
-print("vLLM NCCL with cuda graph is successful!")
-
-dist.destroy_process_group(gloo_group)
-dist.destroy_process_group()
-```
+    dist.destroy_process_group(gloo_group)
+    dist.destroy_process_group()
+    ```
 
 If you are testing with a single node, adjust `--nproc-per-node` to the number of GPUs you want to use:
 
-```console
+```bash
 NCCL_DEBUG=TRACE torchrun --nproc-per-node=<number-of-GPUs> test.py
 ```
 
 If you are testing with multi-nodes, adjust `--nproc-per-node` and `--nnodes` according to your setup and set `MASTER_ADDR` to the correct IP address of the master node, reachable from all nodes. Then, run:
 
-```console
-NCCL_DEBUG=TRACE torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=$MASTER_ADDR test.py
+```bash
+NCCL_DEBUG=TRACE torchrun --nnodes 2 \
+    --nproc-per-node=2 \
+    --rdzv_backend=c10d \
+    --rdzv_endpoint=$MASTER_ADDR test.py
 ```
 
 If the script runs successfully, you should see the message `sanity check is successful!`.
@@ -165,25 +170,27 @@ WARNING 12-11 14:50:37 multiproc_worker_utils.py:281] CUDA was previously
 
 or an error from Python that looks like this:
 
-```console
-RuntimeError:
-        An attempt has been made to start a new process before the
-        current process has finished its bootstrapping phase.
+??? Logs
 
-        This probably means that you are not using fork to start your
-        child processes and you have forgotten to use the proper idiom
-        in the main module:
+    ```console
+    RuntimeError:
+            An attempt has been made to start a new process before the
+            current process has finished its bootstrapping phase.
 
-            if __name__ == '__main__':
-                freeze_support()
-                ...
+            This probably means that you are not using fork to start your
+            child processes and you have forgotten to use the proper idiom
+            in the main module:
 
-        The "freeze_support()" line can be omitted if the program
-        is not going to be frozen to produce an executable.
+                if __name__ == '__main__':
+                    freeze_support()
+                    ...
 
-        To fix this issue, refer to the "Safe importing of main module"
-        section in https://docs.python.org/3/library/multiprocessing.html
-```
+            The "freeze_support()" line can be omitted if the program
+            is not going to be frozen to produce an executable.
+
+            To fix this issue, refer to the "Safe importing of main module"
+            section in https://docs.python.org/3/library/multiprocessing.html
+    ```
 
 then you must update your Python code to guard usage of `vllm` behind a `if
 __name__ == '__main__':` block. For example, instead of this:
@@ -207,20 +214,22 @@ if __name__ == '__main__':
 
 vLLM heavily depends on `torch.compile` to optimize the model for better performance, which introduces the dependency on the `torch.compile` functionality and the `triton` library. By default, we use `torch.compile` to [optimize some functions](https://github.com/vllm-project/vllm/pull/10406) in the model. Before running vLLM, you can check if `torch.compile` is working as expected by running the following script:
 
-```python
-import torch
+??? Code
 
-@torch.compile
-def f(x):
-    # a simple function to test torch.compile
-    x = x + 1
-    x = x * 2
-    x = x.sin()
-    return x
+    ```python
+    import torch
 
-x = torch.randn(4, 4).cuda()
-print(f(x))
-```
+    @torch.compile
+    def f(x):
+        # a simple function to test torch.compile
+        x = x + 1
+        x = x * 2
+        x = x.sin()
+        return x
+
+    x = torch.randn(4, 4).cuda()
+    print(f(x))
+    ```
 
 If it raises errors from `torch/_inductor` directory, usually it means you have a custom `triton` library that is not compatible with the version of PyTorch you are using. See [this issue](https://github.com/vllm-project/vllm/issues/12219) for example.
 

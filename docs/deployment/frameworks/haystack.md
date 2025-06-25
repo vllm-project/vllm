@@ -13,7 +13,7 @@ It allows you to deploy a large language model (LLM) server with vLLM as the bac
 
 - Setup vLLM and Haystack environment
 
-```console
+```bash
 pip install vllm haystack-ai
 ```
 
@@ -21,35 +21,35 @@ pip install vllm haystack-ai
 
 - Start the vLLM server with the supported chat completion model, e.g.
 
-```console
+```bash
 vllm serve mistralai/Mistral-7B-Instruct-v0.1
 ```
 
 - Use the `OpenAIGenerator` and `OpenAIChatGenerator` components in Haystack to query the vLLM server.
 
-```python
-from haystack.components.generators.chat import OpenAIChatGenerator
-from haystack.dataclasses import ChatMessage
-from haystack.utils import Secret
+??? Code
 
-generator = OpenAIChatGenerator(
-    # for compatibility with the OpenAI API, a placeholder api_key is needed
-    api_key=Secret.from_token("VLLM-PLACEHOLDER-API-KEY"),
-    model="mistralai/Mistral-7B-Instruct-v0.1",
-    api_base_url="http://{your-vLLM-host-ip}:{your-vLLM-host-port}/v1",
-    generation_kwargs = {"max_tokens": 512}
-)
+    ```python
+    from haystack.components.generators.chat import OpenAIChatGenerator
+    from haystack.dataclasses import ChatMessage
+    from haystack.utils import Secret
 
-response = generator.run(
-  messages=[ChatMessage.from_user("Hi. Can you help me plan my next trip to Italy?")]
-)
+    generator = OpenAIChatGenerator(
+        # for compatibility with the OpenAI API, a placeholder api_key is needed
+        api_key=Secret.from_token("VLLM-PLACEHOLDER-API-KEY"),
+        model="mistralai/Mistral-7B-Instruct-v0.1",
+        api_base_url="http://{your-vLLM-host-ip}:{your-vLLM-host-port}/v1",
+        generation_kwargs = {"max_tokens": 512}
+    )
 
-print("-"*30)
-print(response)
-print("-"*30)
-```
+    response = generator.run(
+      messages=[ChatMessage.from_user("Hi. Can you help me plan my next trip to Italy?")]
+    )
 
-Output e.g.:
+    print("-"*30)
+    print(response)
+    print("-"*30)
+    ```
 
 ```console
 ------------------------------

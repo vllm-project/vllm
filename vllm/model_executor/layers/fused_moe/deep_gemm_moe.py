@@ -48,7 +48,7 @@ def _valid_deep_gemm(hidden_states: torch.Tensor, w1: torch.Tensor,
     M = hidden_states.size(0)
     _, K, N = w2.size()
     if not _valid_deep_gemm_shape(M, N, K):
-        logger.debug("DeepGemm disabled: unalinged problem size.")
+        logger.debug("DeepGemm disabled: unaligned problem size.")
         return False
 
     if (w1.dtype != torch.float8_e4m3fn or w2.dtype != torch.float8_e4m3fn):
@@ -74,15 +74,12 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         return True
 
     def workspace_shapes(
-        self,
-        a: torch.Tensor,
-        aq: torch.Tensor,
-        M: int,
-        N: int,
-        K: int,
-        topk: int,
-        num_experts: int,
+        self, a: torch.Tensor, aq: torch.Tensor, M: int, N: int, K: int,
+        topk: int, global_num_experts: int, local_num_experts: int
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
+        # We use global_num_experts due to how moe_align_block_size handles
+        # expert_maps.
+        num_experts = global_num_experts
         block_m = self.block_shape[0]
         M_sum = (M * topk) + num_experts * (block_m - 1)
         M_sum = round_up(M_sum, block_m)
@@ -146,6 +143,7 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         quant_out = _resize_cache(workspace13.view(dtype=torch.float8_e4m3fn),
                                   (M_sum, N // 2))
         mm2_out = _resize_cache(workspace2, (M_sum, K))
+        # import pdb; pdb.set_trace()
 
         dg.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
             (a1q, a1q_scale), (w1, w1_scale), mm1_out, expert_ids)

@@ -122,6 +122,7 @@ function (get_torch_gpu_compiler_flags OUT_GPU_FLAGS GPU_LANG)
       "-DENABLE_FP8"
       "-U__HIP_NO_HALF_CONVERSIONS__"
       "-U__HIP_NO_HALF_OPERATORS__"
+      "-Werror=unused-variable"
       "-fno-gpu-rdc")
 
   endif()

@@ -420,9 +420,9 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     endif()
   endif()
 
-  # The cutlass_scaled_mm kernels for Blackwell (c3x, i.e. CUTLASS 3.x) require
-  # CUDA 12.8 or later
-  cuda_archs_loose_intersection(SCALED_MM_ARCHS "10.0a;10.1a;12.0a" "${CUDA_ARCHS}")
+  # The cutlass_scaled_mm kernels for Blackwell SM100 (c3x, i.e. CUTLASS 3.x)
+  # require CUDA 12.8 or later
+  cuda_archs_loose_intersection(SCALED_MM_ARCHS "10.0a;10.1a" "${CUDA_ARCHS}")
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.8 AND SCALED_MM_ARCHS)
     set(SRCS
       "csrc/quantization/cutlass_w8a8/scaled_mm_c3x_sm100.cu"
@@ -542,10 +542,10 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
 
   # CUTLASS MoE kernels
 
-  # The MoE kernel cutlass_moe_mm requires CUDA 12.3 or later (and only works
+  # The MoE kernel cutlass_moe_mm requires CUDA 12.3 or later (and ONLY works
   # on Hopper). get_cutlass_(pplx_)moe_mm_data should only be compiled
   # if it's possible to compile MoE kernels that use its output.
-  cuda_archs_loose_intersection(SCALED_MM_ARCHS "9.0a;10.0a" "${CUDA_ARCHS}")
+  cuda_archs_loose_intersection(SCALED_MM_ARCHS "9.0a" "${CUDA_ARCHS}")
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.3 AND SCALED_MM_ARCHS)
     set(SRCS "csrc/quantization/cutlass_w8a8/moe/grouped_mm_c3x.cu"
              "csrc/quantization/cutlass_w8a8/moe/moe_data.cu")
