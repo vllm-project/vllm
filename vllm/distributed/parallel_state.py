@@ -26,7 +26,7 @@ import contextlib
 import gc
 import pickle
 import weakref
-from collections import Counter, namedtuple
+from collections import namedtuple
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from multiprocessing import shared_memory
@@ -966,8 +966,8 @@ def init_distributed_environment(
     if _WORLD is None:
         ranks = list(range(torch.distributed.get_world_size()))
         _WORLD = init_world_group(ranks, local_rank, backend)
-        # Compute and cache the node count during initialization
-        _NODE_COUNT = node_count(_WORLD.cpu_group)
+        # Reset cached node count - will be computed lazily when first requested
+        _NODE_COUNT = _node_count(_WORLD.cpu_group)
         logger.debug("Detected %d nodes in the distributed environment",
                      _NODE_COUNT)
     else:
@@ -1170,20 +1170,9 @@ def get_tensor_model_parallel_rank():
 
 
 def get_node_count() -> int:
-    """Return the total number of nodes in the distributed environment.
-    
-    This function returns a cached value that was computed during
-    distributed environment initialization.
-    
-    Returns:
-        int: The total number of nodes
-        
-    Raises:
-        AssertionError: If the distributed environment is not initialized
-    """
+    """Return the total number of nodes in the distributed environment. """
     assert _NODE_COUNT is not None, (
-        "node count is not available - distributed environment not initialized"
-    )
+        "distributed environment is not initialized")
     return _NODE_COUNT
 
 
@@ -1327,14 +1316,10 @@ def in_the_same_node_as(pg: Union[ProcessGroup, StatelessProcessGroup],
     return [x == 1 for x in aggregated_data.tolist()]
 
 
-def node_count(pg: Union[ProcessGroup, StatelessProcessGroup]) -> int:
+def _node_count(pg: Union[ProcessGroup, StatelessProcessGroup]) -> int:
     """
     Returns the total number of nodes in the process group.
-    
-    This function works by having each rank determine how many ranks are
-    colocated with it (including itself), then sharing these counts across
-    all ranks to determine the number of unique nodes.
-    
+
     Args:
         pg: The process group to analyze
         
@@ -1342,45 +1327,29 @@ def node_count(pg: Union[ProcessGroup, StatelessProcessGroup]) -> int:
         int: The total number of nodes
     """
     if isinstance(pg, ProcessGroup):
-        rank = torch.distributed.get_rank(group=pg)
         world_size = torch.distributed.get_world_size(group=pg)
     else:
-        rank = pg.rank
         world_size = pg.world_size
 
     if world_size == 1:
         return 1
 
-    # Each rank determines how many ranks are colocated with it
-    # (including itself)
-    same_node_flags = in_the_same_node_as(pg, rank)
-    local_node_size = sum(same_node_flags)
+    # Build node assignment map
+    node_assignment = [0] * world_size  # rank -> node_id
+    next_node_id = 0
 
-    # Create a tensor to collect all node sizes from all ranks
-    all_node_sizes = torch.tensor([local_node_size], dtype=torch.int32)
+    for current_rank in range(world_size):
+        if node_assignment[current_rank] != 0:
+            continue  # Already assigned to a node
 
-    if isinstance(pg, ProcessGroup):
-        # Gather all node sizes to all ranks
-        gathered_sizes = [
-            torch.zeros_like(all_node_sizes) for _ in range(world_size)
-        ]
-        torch.distributed.all_gather(gathered_sizes, all_node_sizes, group=pg)
-        all_node_sizes = torch.cat(gathered_sizes)
-    else:
-        # For StatelessProcessGroup, collect sizes from all ranks
-        all_sizes = []
-        for i in range(world_size):
-            size_data = local_node_size if i == rank else None
-            broadcasted_size = pg.broadcast_obj(size_data, src=i)
-            all_sizes.append(broadcasted_size)
-        all_node_sizes = torch.tensor(all_sizes, dtype=torch.int32)
+        # Assign current rank to a new node
+        next_node_id += 1
+        node_assignment[current_rank] = next_node_id
 
-    # Count unique node sizes to determine number of nodes
-    # Since all ranks on the same node will report the same node size,
-    # and ranks on different nodes will report different sizes,
-    # we can count unique combinations of (size, count_of_that_size)
-    unique_sizes = Counter(all_node_sizes.tolist())
+        # Find all ranks on the same node as current_rank
+        same_node_flags = in_the_same_node_as(pg, current_rank)
+        for other_rank, is_same_node in enumerate(same_node_flags):
+            if is_same_node and node_assignment[other_rank] == 0:
+                node_assignment[other_rank] = next_node_id
 
-    # Calculate number of nodes: for each unique size,
-    # the number of nodes with that size is count / size
-    return sum(count // size for size, count in unique_sizes.items())
+    return next_node_id

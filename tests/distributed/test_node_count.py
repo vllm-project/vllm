@@ -5,7 +5,7 @@ import os
 
 import torch.distributed as dist
 
-from vllm.distributed.parallel_state import node_count
+from vllm.distributed.parallel_state import _node_count
 from vllm.distributed.utils import StatelessProcessGroup
 from vllm.utils import get_ip, get_open_port
 
@@ -27,9 +27,9 @@ if __name__ == "__main__":
     stateless_pg = StatelessProcessGroup.create(ip, port, rank, world_size)
 
     for pg in [dist.group.WORLD, stateless_pg]:
-        test_result = node_count(pg)
+        test_result = _node_count(pg)
 
-        # Expected node count based on environment variables)
+        # Expected node count based on environment variable)
         expected = int(os.environ.get("NUM_NODES", "1"))
 
         assert test_result == expected, \
