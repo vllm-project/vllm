@@ -2042,11 +2042,12 @@ class SchedulerConfig:
     NOTE: This will be replaced by speculative config in the future; it is
     present to enable correctness tests until then."""
 
-    cuda_graph_sizes: list[int] = field(default_factory=lambda: [512])
-    """Cuda graph capture sizes, default is 512.
-    1. if one value is provided, then the capture list would follow the
+    cuda_graph_sizes: list[int] = field(default_factory=list)
+    """Cuda graph capture sizes
+    1. if none provided, then default set to [max_num_seqs]
+    2. if one value is provided, then the capture list would follow the
     pattern: [1, 2, 4] + [i for i in range(8, cuda_graph_sizes + 1, 8)]
-    2. more than one value (e.g. 1 2 128) is provided, then the capture list
+    3. more than one value (e.g. 1 2 128) is provided, then the capture list
     will follow the provided list."""
 
     delay_factor: float = 0.0
@@ -2210,6 +2211,10 @@ class SchedulerConfig:
                 "long_prefill_token_threshold=%d",
                 self.max_num_partial_prefills, self.max_long_partial_prefills,
                 self.long_prefill_token_threshold)
+
+        # If cuda_graph_sizes is not specified, default set to [max_num_seqs].
+        if not self.cuda_graph_sizes:
+            self.cuda_graph_sizes = [self.max_num_seqs]
 
     @model_validator(mode='after')
     def _verify_args(self) -> Self:
