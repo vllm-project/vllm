@@ -41,9 +41,10 @@ requires_pplx = pytest.mark.skipif(
     reason="Requires PPLX kernels",
 )
 
-PPLX_PREPARE_COMBOS = [
+PPLX_COMBOS = [
     # TODO: figure out why this fails
     #(1, 128, 128),
+
     (2, 128, 512),
     (3, 1024, 2048),
     (4, 128, 128),
@@ -51,16 +52,13 @@ PPLX_PREPARE_COMBOS = [
     (45, 512, 2048),
     (64, 1024, 512),
     (222, 2048, 1024),
-]
+    (256, 1408, 2048),
 
-PPLX_MOE_COMBOS = [
-#    (1, 128, 128),
-    (2, 128, 512),
-    (3, 1024, 2048),
-    (32, 128, 1024),
-    (45, 512, 2048),
-    (64, 1024, 1024),
-    (222, 1024, 2048),
+    #(6, 1408, 2048),
+    #(16, 1408, 2048),
+    #(199, 1408, 2048),
+    #(200, 1408, 2048),
+    #(256, 1408, 2048),
 ]
 
 NUM_EXPERTS = [8, 64]
@@ -281,10 +279,17 @@ def pplx_prepare_finalize(
         device=device,
     )
 
+    if quant_dtype is not None and not per_act_token_quant and block_shape is None:
+        a1_scale = torch.tensor(1.0, device="cuda", dtype=torch.float32)
+        a2_scale = torch.tensor(1.0, device="cuda", dtype=torch.float32)
+    else:
+        a1_scale = None
+        a2_scale = None
+
     b_a, b_a_scale, expert_num_tokens, _, _ = prepare_finalize.prepare(
         a_chunk,
-        None,
-        None,
+        a1_scale,
+        a2_scale,
         chunk_topk_weight,
         chunk_topk_ids,
         num_experts,
@@ -365,7 +370,7 @@ def _pplx_prepare_finalize(
 
 # TODO (bnell): this test point does not work for M==1 due to how the test
 # is written, not due to limitations of the pplx kernels.
-@pytest.mark.parametrize("mnk", PPLX_PREPARE_COMBOS)
+@pytest.mark.parametrize("mnk", PPLX_COMBOS)
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
 @pytest.mark.parametrize("dtype", [torch.float8_e4m3fn, torch.bfloat16])
@@ -424,7 +429,9 @@ def pplx_moe(
     topk_ids: torch.Tensor,
     w1_scale: Optional[torch.Tensor] = None,
     w2_scale: Optional[torch.Tensor] = None,
-    qtype: Optional[torch.dtype] = None,
+    a1_scale: Optional[torch.Tensor] = None,
+    a2_scale: Optional[torch.Tensor] = None,
+    quant_dtype: Optional[torch.dtype] = None,
     per_act_token_quant=False,
     block_shape: Optional[list[int]] = None,
     use_compile: bool = False,
@@ -443,7 +450,7 @@ def pplx_moe(
         max_num_tokens,
         hidden_dim,
         a.dtype,
-        qtype,
+        quant_dtype,
         per_act_token_quant=per_act_token_quant,
         block_shape=block_shape,
     )
@@ -479,7 +486,7 @@ def pplx_moe(
     experts = BatchedTritonExperts(max_num_tokens=max_num_tokens,
                                    world_size=world_size,
                                    dp_size=dp_size,
-                                   use_fp8_w8a8=qtype == torch.float8_e4m3fn,
+                                   use_fp8_w8a8=quant_dtype == torch.float8_e4m3fn,
                                    block_shape=block_shape)
 
     fused_experts = FusedMoEModularKernel(
@@ -497,12 +504,8 @@ def pplx_moe(
     w2_chunk = chunk_by_rank(w2, rank, world_size).to(device)
 
     if w1_scale is not None:
-        if not per_act_token_quant:
-            w1_scale_chunk = w1_scale
-            w2_scale_chunk = w2_scale
-        else:
-            w1_scale_chunk = chunk_by_rank(w1_scale, rank, world_size).to(device)
-            w2_scale_chunk = chunk_by_rank(w2_scale, rank, world_size).to(device)
+        w1_scale_chunk = chunk_by_rank(w1_scale, rank, world_size).to(device)
+        w2_scale_chunk = chunk_by_rank(w2_scale, rank, world_size).to(device)
     else:
         w1_scale_chunk = None
         w2_scale_chunk = None
@@ -527,6 +530,8 @@ def pplx_moe(
                          chunk_topk_ids,
                          w1_scale=w1_scale_chunk,
                          w2_scale=w2_scale_chunk,
+                         a1_scale=a1_scale,
+                         a2_scale=a2_scale,
                          global_num_experts=num_experts)
 
     if use_cudagraphs:
@@ -541,6 +546,8 @@ def pplx_moe(
                                  chunk_topk_ids,
                                  w1_scale=w1_scale_chunk,
                                  w2_scale=w2_scale_chunk,
+                                 a1_scale=a1_scale,
+                                 a2_scale=a2_scale,
                                  global_num_experts=num_experts)
 
         torch.cuda.synchronize()
@@ -563,7 +570,7 @@ def _pplx_moe(
     topk: int,
     w1_s: Optional[torch.Tensor] = None,
     w2_s: Optional[torch.Tensor] = None,
-    qtype: Optional[torch.dtype] = None,
+    quant_dtype: Optional[torch.dtype] = None,
     per_act_token_quant: bool = False,
     block_shape: Optional[list[int]] = None,
     use_internode: bool = False,
@@ -585,48 +592,112 @@ def _pplx_moe(
     moe_config = get_default_config(m, e, n, k, topk, a.dtype, False)
 
     device = torch.device("cuda", pgi.rank)
+    rank = pgi.rank
+    world_size = pgi.world_size
     a = a.to(device)
     w1 = w1.to(device)
     w2 = w2.to(device)
     w1_s = w1_s.to(device) if w1_s is not None else None
     w2_s = w2_s.to(device) if w2_s is not None else None
 
+    if quant_dtype is not None and not per_act_token_quant and block_shape is None:
+        a1_scale = torch.tensor(1.0, device="cuda", dtype=torch.float32)
+        a2_scale = torch.tensor(1.0, device="cuda", dtype=torch.float32)
+    else:
+        a1_scale = None
+        a2_scale = None
+
     with set_current_vllm_config(vllm_config), override_config(moe_config):
         topk_weight, topk_ids, _ = fused_topk(a, score, topk, False)
-        torch_output = torch_experts(a,
-                                     w1,
-                                     w2,
-                                     topk_weight,
-                                     topk_ids,
-                                     w1_scale=w1_s,
-                                     w2_scale=w2_s,
-                                     quant_dtype=qtype,
-                                     per_act_token_quant=per_act_token_quant,
-                                     block_shape=block_shape)
 
-        pplx_output = pplx_moe(group_name, pgi.rank, pgi.world_size, dp_size,
-                               a, w1, w2, topk_weight, topk_ids, w1_s, w2_s,
-                               qtype, per_act_token_quant, block_shape)
+        if False:
+            a_chunk = chunk_by_rank(a, rank, world_size).to(device)
+            topk_weight_chunk = chunk_by_rank(topk_weight, rank, world_size).to(device)
+            topk_ids_chunk = chunk_by_rank(topk_ids, rank, world_size).to(device)
+            w1_chunk = chunk_by_rank(w1, rank, world_size).to(device)
+            w2_chunk = chunk_by_rank(w2, rank, world_size).to(device)
+
+            if w1_s is not None:
+                w1_s_chunk = chunk_by_rank(w1_s, rank, world_size).to(device)
+                w2_s_chunk = chunk_by_rank(w2_s, rank, world_size).to(device)
+            else:
+                w1_s_chunk = None
+                w2_s_chunk = None
+        else:
+            a_chunk = a
+            topk_weight_chunk = topk_weight
+            topk_ids_chunk = topk_ids
+            w1_chunk = w1
+            w2_chunk = w2
+            w1_s_chunk = w1_s
+            w2_s_chunk = w2_s
+
+        torch_output = torch_experts(
+            a_chunk,
+            w1_chunk,
+            w2_chunk,
+            topk_weight_chunk,
+            topk_ids_chunk,
+            w1_scale=w1_s_chunk,
+            w2_scale=w2_s_chunk,
+            a1_scale=a1_scale,
+            a2_scale=a2_scale,
+            quant_dtype=quant_dtype,
+            per_act_token_quant=per_act_token_quant,
+            block_shape=block_shape,
+        )
+
+        batched_output = naive_batched_moe(
+            a_chunk,
+            w1_chunk,
+            w2_chunk,
+            topk_weight_chunk,
+            topk_ids_chunk,
+            w1_scale=w1_s_chunk,
+            w2_scale=w2_s_chunk,
+            a1_scale=a1_scale,
+            a2_scale=a2_scale,
+            quant_dtype=quant_dtype,
+            per_act_token_quant=per_act_token_quant,
+            block_shape=block_shape,
+        )
+
+        pplx_output = pplx_moe(
+            group_name,
+            rank,
+            world_size,
+            dp_size,
+            a,
+            w1,
+            w2,
+            topk_weight,
+            topk_ids,
+            w1_scale=w1_s,
+            w2_scale=w2_s,
+            a1_scale=a1_scale,
+            a2_scale=a2_scale,
+            quant_dtype=quant_dtype,
+            per_act_token_quant=per_act_token_quant,
+            block_shape=block_shape)
 
         # all reduce on pplx?
         #torch.distributed.all_reduce(pplx_output)
-
-        batched_output = naive_batched_moe(a, w1, w2, topk_weight,
-            topk_ids, w1_s, w2_s, qtype, per_act_token_quant, block_shape)
 
     chunked_torch_output = chunk_by_rank(torch_output, pgi.rank,
                                          pgi.world_size).to(pplx_output.device)
 
     torch.testing.assert_close(pplx_output, chunked_torch_output, atol=3e-2, rtol=3e-2)
-    #torch.testing.assert_close(batched_output, torch_output, atol=3e-2, rtol=3e-2)
+    torch.testing.assert_close(batched_output, torch_output, atol=3e-2, rtol=3e-2)
 
     if use_internode:
         nvshmem_finalize()
 
 
-@pytest.mark.parametrize("mnk", PPLX_MOE_COMBOS)
+@pytest.mark.parametrize("mnk", PPLX_COMBOS)
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
+#@pytest.mark.parametrize("e", [32])
+#@pytest.mark.parametrize("topk", [6])
 @pytest.mark.parametrize("dtype", [torch.float8_e4m3fn, torch.bfloat16])
 @pytest.mark.parametrize("world_dp_size", [[2, 1]])
 @pytest.mark.parametrize("per_act_token_quant", [False, True])

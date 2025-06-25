@@ -207,6 +207,14 @@ def test_batched_mm(num_experts: int, max_tokens_per_expert: int, K: int,
     torch.testing.assert_close(ref_output, q_ref_output, atol=atol, rtol=rtol)
     torch.testing.assert_close(test_output, q_ref_output, atol=atol, rtol=rtol)
 
+# @pytest.mark.parametrize("m", [6, 16, 199, 200, 256])
+# @pytest.mark.parametrize("n", [2816//2])
+# @pytest.mark.parametrize("k", [2048])
+# @pytest.mark.parametrize("e", [32])
+# @pytest.mark.parametrize("topk", [6])
+# @pytest.mark.parametrize("dtype", [torch.float8_e4m3fn])
+# @pytest.mark.parametrize("per_act_token_quant", [False])
+# @pytest.mark.parametrize("block_shape", [None])
 
 @pytest.mark.parametrize(("m", "n", "k"), MNK_FACTORS)
 @pytest.mark.parametrize("e", NUM_EXPERTS)
@@ -214,6 +222,7 @@ def test_batched_mm(num_experts: int, max_tokens_per_expert: int, K: int,
 @pytest.mark.parametrize("dtype", [torch.float8_e4m3fn, torch.bfloat16])
 @pytest.mark.parametrize("per_act_token_quant", [False, True])
 @pytest.mark.parametrize("block_shape", [None, [128, 128]])
+@pytest.mark.parametrize("input_scales", [False])
 def test_fused_moe_batched_experts(
     m: int,
     n: int,
@@ -223,6 +232,7 @@ def test_fused_moe_batched_experts(
     dtype: torch.dtype,
     per_act_token_quant: bool,
     block_shape: Optional[list[int]],
+    input_scales: bool,
 ):
     current_platform.seed_everything(7)
 
@@ -257,20 +267,15 @@ def test_fused_moe_batched_experts(
         per_act_token_quant=per_act_token_quant,
     )
 
+    if input_scales and quant_dtype is not None:
+        a1_scale = torch.tensor(1, device="cuda", dtype=torch.float32)
+        a2_scale = torch.tensor(1, device="cuda", dtype=torch.float32)
+    else:
+        a1_scale = None
+        a2_scale = None
+
     with set_current_vllm_config(vllm_config):
         topk_weight, topk_ids, _ = fused_topk(a, score, topk, False)
-        batched_output = batched_moe(
-            a,
-            w1,
-            w2,
-            topk_weight,
-            topk_ids,
-            w1_scale=w1_s,
-            w2_scale=w2_s,
-            quant_dtype=quant_dtype,
-            per_act_token_quant=per_act_token_quant,
-            block_shape=block_shape,
-        )
 
         baseline_output = torch_experts(
             a,
@@ -280,11 +285,14 @@ def test_fused_moe_batched_experts(
             topk_ids,
             w1_scale=w1_s,
             w2_scale=w2_s,
+            a1_scale=a1_scale,
+            a2_scale=a2_scale,
             quant_dtype=quant_dtype,
             per_act_token_quant=per_act_token_quant,
-            block_shape=block_shape)
+            block_shape=block_shape,
+        )
 
-        triton_output = triton_moe(
+        batched_output = naive_batched_moe(
             a,
             w1,
             w2,
@@ -292,6 +300,23 @@ def test_fused_moe_batched_experts(
             topk_ids,
             w1_scale=w1_s,
             w2_scale=w2_s,
+            a1_scale=a1_scale,
+            a2_scale=a2_scale,
+            quant_dtype=quant_dtype,
+            per_act_token_quant=per_act_token_quant,
+            block_shape=block_shape,
+        )
+
+        triton_output = batched_moe(
+            a,
+            w1,
+            w2,
+            topk_weight,
+            topk_ids,
+            w1_scale=w1_s,
+            w2_scale=w2_s,
+            a1_scale=a1_scale,
+            a2_scale=a2_scale,
             quant_dtype=quant_dtype,
             per_act_token_quant=per_act_token_quant,
             block_shape=block_shape,

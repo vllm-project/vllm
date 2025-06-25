@@ -905,6 +905,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 global_num_experts=global_num_experts,
                 expert_map=expert_map)
         else:
+            #print(f"A1_SCALE = {layer.w13_input_scale}")
+            #print(f"A2_SCALE = {layer.w2_input_scale}")
             return self.fused_experts(
                 hidden_states=x,
                 w1=layer.w13_weight,
