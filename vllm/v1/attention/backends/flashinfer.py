@@ -225,7 +225,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.vllm_config = runner.vllm_config
         self._workspace_buffer = None
         self._prefill_wrapper = None  # Wrapper for prefill/append
-        self._decode_wrapper = None  # Wrapper for decode
         self._decode_wrapper = None  # Wrapper for decode (general shape)
         self.enable_cuda_graph = (
             self.vllm_config.compilation_config.full_cuda_graph

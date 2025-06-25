@@ -587,7 +587,8 @@ class VllmBackend:
             fullgraph_wrapper = resolve_obj_by_qualname(
                 current_platform.get_fullgraph_wrapper_cls())
             self.split_gm = fullgraph_wrapper(self.split_gm, self.vllm_config,
-                                              self.graph_pool, self.sym_tensor_indices)
+                                              self.graph_pool, 
+                                              self.sym_tensor_indices)
 
         if not self.compilation_config.use_cudagraph or \
             not self.compilation_config.cudagraph_copy_inputs:

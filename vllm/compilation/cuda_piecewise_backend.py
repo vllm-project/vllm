@@ -143,10 +143,10 @@ class CUDAPiecewiseBackend:
 
         # Skip CUDA graphs if this entry doesn't use them OR
         # if we're supposed to treat the piecewise graphs as a whole,
-        # which implies forward_context.skip_attention_cuda_graphs is False.
-        # In the latter case, we rely on a wrapper class to capture
-        # the full cudagraph outside the fx graph.
-        skip_attention_cuda_graphs = get_forward_context().skip_attention_cuda_graphs
+        # In the latter case, forward_context.skip_attention_cuda_graphs
+        # is False, and we rely on a wrapper class to capture the full 
+        # cudagraph outside the fx graph.
+        skip_attention_cuda_graphs = get_forward_context().skip_attention_cuda_graphs  #noqa
         if not entry.use_cudagraph or not skip_attention_cuda_graphs:
             return entry.runnable(*args)
 
@@ -307,8 +307,7 @@ class FullCudagraphWrapper:
                     "Warming up %s/%s of %s usage for shape %s",
                     entry.num_finished_warmup,
                     self.compilation_config.cudagraph_num_of_warmups,
-                    entry.usage_type,
-                    runtime_shape)
+                    entry.usage_type, runtime_shape)
                 return entry.runnable(*args)
 
             

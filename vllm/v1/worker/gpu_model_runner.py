@@ -1894,7 +1894,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def _dummy_run(
         self,
         num_tokens: int,
-        capture_attn_cudagraph: bool | Literal["auto"] = False,
+        capture_attn_cudagraph: Union[bool, Literal["auto"]] = False,
         is_pure_decoding: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
 
@@ -1923,9 +1923,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         attn_metadata: Optional[dict[str, Any]] = None
         skip_attention_cuda_graphs = True
         if capture_attn_cudagraph:  
-            # Note: At this step, `capture_attn_cudagraph` should be True or "auto",
-            # but we always treat it as "auto". i.e., always let the attention backends
-            # to determine whether to capture the attention or not.
+            # Note: At this step, `capture_attn_cudagraph` should be True or
+            # "auto", but we always treat it as "auto". i.e., always let the
+            # attention backends to determine whether to capture the attention
+            # or not.
             attn_metadata = {}
 
             query_start_loc = self.query_start_loc[:num_reqs + 1]
@@ -1944,7 +1945,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 max_query_len=max_query_len,
             )
             # If all attention backends can run in a cudagraph, we use a full
-            # cudagraph for attention. Otherwise, turn back to piecewise cudagraphs.
+            # cudagraph for attention. Otherwise, back to piecewise cudagraphs.
             attention_cuda_graphs = all(
                 b.can_run_in_cudagraph(common_attn_metadata)
                 for b in self.attn_metadata_builders)
@@ -2237,9 +2238,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         with graph_capture(device=self.device):
             full_cg = self.full_cuda_graph
 
-            # If full_cuda_graph is true, automatically determine whether or not
-            # to capture the attention for the mix prefill-decode (general) phase,
-            # based on the attention backends.
+            # If full_cuda_graph is true, automatically determine whether or
+            # not to capture the attention for the mix prefill-decode (general)
+            # phase, based on the attention backends.
             capture_attn_cudagraph_general = "auto" if full_cg else False
 
             # Skip capturing batch sizes of 1 in mix prefill-decode if 
