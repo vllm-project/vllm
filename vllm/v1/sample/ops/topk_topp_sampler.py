@@ -102,6 +102,8 @@ class TopKTopPSampler(nn.Module):
                            "PyTorch-native implementation.")
             return self.forward_native(logits, generators, k, p)
         # flashinfer sampling functions expect contiguous logits.
+        # In flex_attn/triton_attn fp32 inference, logits can be non-contiguous
+        # because of slicing operation in logits_processor.
         return flashinfer_sample(logits.contiguous(), k, p, generators)
 
     def forward_tpu(
