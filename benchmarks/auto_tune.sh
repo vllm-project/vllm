@@ -10,6 +10,7 @@
 # 3. Set variables (ALL REQUIRED)
 #   BASE: your directory for vllm repo
 #   MODEL: the model served by vllm
+#   SYSTEM: the hardware, choice TPU or GPU, for other systems, "get best profile" might not support.
 #   TP: ways of tensor parallelism
 #   DOWNLOAD_DIR: directory to download and load model weights.
 #   INPUT_LEN: request input len
@@ -34,6 +35,7 @@
 TAG=$(date +"%Y_%m_%d_%H_%M")
 BASE=""
 MODEL="meta-llama/Llama-3.1-8B-Instruct"
+SYSTEM="TPU"
 TP=1
 DOWNLOAD_DIR=""
 INPUT_LEN=4000
@@ -45,12 +47,15 @@ NUM_BATCHED_TOKENS_LIST="512 1024 2048 4096"
 
 LOG_FOLDER="$BASE/auto-benchmark/$TAG"
 RESULT="$LOG_FOLDER/result.txt"
+PROFILE_PATH="$LOG_FOLDER/profile"
 
 echo "result file: $RESULT"
 echo "model: $MODEL"
 
 rm -rf $LOG_FOLDER
+rm -rf $PROFILE_PATH
 mkdir -p $LOG_FOLDER
+mkdir -p $PROFILE_PATH
 
 cd "$BASE/vllm"
 
@@ -70,10 +75,11 @@ start_server() {
     local max_num_seqs=$2
     local max_num_batched_tokens=$3
     local vllm_log=$4
+    local profile_dir=$5
     
     pkill -f vllm
 
-    VLLM_USE_V1=1 VLLM_SERVER_DEV_MODE=1 vllm serve $MODEL \
+    VLLM_USE_V1=1 VLLM_SERVER_DEV_MODE=1 VLLM_TORCH_PROFILER_DIR=$profile_dir vllm serve $MODEL \
         --disable-log-requests \
         --port 8004 \
         --gpu-memory-utilization $gpu_memory_utilization \
@@ -105,19 +111,37 @@ start_server() {
     fi
 }
 
+update_best_profile() {
+    local profile_dir=$1
+    local profile_index=$2
+    sorted_paths=($(find "$profile_dir" -maxdepth 1 -not -path "$profile_dir" | sort))
+    selected_profile_file=
+    if [[ "$SYSTEM" == "TPU" ]]; then
+        selected_profile_file="${sorted_paths[$profile_index]}/*.xplane.pb"
+    fi 
+    if [[ "$SYSTEM" == "GPU" ]]; then
+        selected_profile_file="${sorted_paths[$profile_index]}"
+    fi 
+    rm -f $PROFILE_PATH/*
+    cp $selected_profile_file $PROFILE_PATH
+}
+
 run_benchmark() {
     local max_num_seqs=$1
     local max_num_batched_tokens=$2
     local gpu_memory_utilization=$3
     echo "max_num_seq: $max_num_seqs, max_num_batched_tokens: $max_num_batched_tokens"
     local vllm_log="$LOG_FOLDER/vllm_log_${max_num_seqs}_${max_num_batched_tokens}.txt"
+    local profile_dir="$LOG_FOLDER/profile_${max_num_seqs}_${max_num_batched_tokens}"
     echo "vllm_log: $vllm_log"
     echo
     rm -f $vllm_log
+    mkdir -p $profile_dir
     pkill -f vllm
+    local profile_index=0
 
     echo "starting server..."
-    start_server $gpu_memory_utilization $max_num_seqs $max_num_batched_tokens $vllm_log
+    start_server $gpu_memory_utilization $max_num_seqs $max_num_batched_tokens $vllm_log $profile_dir
     result=$?
     if [[ "$result" -eq 1 ]]; then
         echo "server failed to start. gpu_memory_utilization:$gpu_memory_utilization, max_num_seqs:$max_num_seqs, max_num_batched_tokens: $max_num_batched_tokens"
@@ -144,7 +168,8 @@ run_benchmark() {
         --goodput e2el:$MAX_LATENCY_ALLOWED_MS \
         --num-prompts 1000 \
         --random-prefix-len $prefix_len \
-        --port 8004 &> "$bm_log"
+        --port 8004 \
+        --profile &> "$bm_log"
     throughput=$(grep "Request throughput (req/s):" "$bm_log" | sed 's/[^0-9.]//g')
     e2el=$(grep "P99 E2EL (ms):" "$bm_log" | awk '{print $NF}')
     goodput=$(grep "Request goodput (req/s):" "$bm_log" | sed 's/[^0-9.]//g')
@@ -158,6 +183,7 @@ run_benchmark() {
     # start from request-rate as int(throughput) + 1
         request_rate=$((${throughput%.*} + 1))
         while ((request_rate > 0)); do
+            profile_index=$((profile_index+1))
             # clear prefix cache
             curl -X POST http://0.0.0.0:8004/reset_prefix_cache
             sleep 5
@@ -195,6 +221,12 @@ run_benchmark() {
             best_max_num_seqs=$max_num_seqs
             best_num_batched_tokens=$max_num_batched_tokens
             best_goodput=$goodput
+            if [[ "$SYSTEM" == "TPU" ]]; then
+                update_best_profile "$profile_dir/plugins/profile" $profile_index
+            fi
+            if [[ "$SYSTEM" == "GPU" ]]; then
+                update_best_profile "$profile_dir" $profile_index
+            fi
         fi
     else
         echo "max_num_seqs: $max_num_seqs, max_num_batched_tokens: $max_num_batched_tokens does not meet latency requirement ${MAX_LATENCY_ALLOWED_MS}"
@@ -239,6 +271,6 @@ for num_seqs in "${num_seqs_list[@]}"; do
     done
 done
 echo "finish permutations"
-echo "best_max_num_seqs: $best_max_num_seqs, best_num_batched_tokens: $best_num_batched_tokens, best_throughput: $best_throughput"
-echo "best_max_num_seqs: $best_max_num_seqs, best_num_batched_tokens: $best_num_batched_tokens, best_throughput: $best_throughput" >> "$RESULT"
+echo "best_max_num_seqs: $best_max_num_seqs, best_num_batched_tokens: $best_num_batched_tokens, best_throughput: $best_throughput, profile saved in: $PROFILE_PATH"
+echo "best_max_num_seqs: $best_max_num_seqs, best_num_batched_tokens: $best_num_batched_tokens, best_throughput: $best_throughput, profile saved in: $PROFILE_PATH" >> "$RESULT"
 

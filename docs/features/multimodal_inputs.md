@@ -307,7 +307,7 @@ Full example: <gh-file:examples/online_serving/openai_chat_completion_client_for
     By default, the timeout for fetching images through HTTP URL is `5` seconds.
     You can override this by setting the environment variable:
 
-    ```console
+    ```bash
     export VLLM_IMAGE_FETCH_TIMEOUT=<timeout>
     ```
 
@@ -370,7 +370,7 @@ Full example: <gh-file:examples/online_serving/openai_chat_completion_client_for
     By default, the timeout for fetching videos through HTTP URL is `30` seconds.
     You can override this by setting the environment variable:
 
-    ```console
+    ```bash
     export VLLM_VIDEO_FETCH_TIMEOUT=<timeout>
     ```
 
@@ -476,7 +476,7 @@ Full example: <gh-file:examples/online_serving/openai_chat_completion_client_for
     By default, the timeout for fetching audios through HTTP URL is `10` seconds.
     You can override this by setting the environment variable:
 
-    ```console
+    ```bash
     export VLLM_AUDIO_FETCH_TIMEOUT=<timeout>
     ```
 
