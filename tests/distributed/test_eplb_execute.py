@@ -303,8 +303,9 @@ def test_rearrange_expert_weights_with_redundancy(world_size, num_layers,
     def worker_fn():
         # Initialize model parallel (using tensor parallel as an entrypoint
         # to expert parallel)
-        ensure_model_parallel_initialized(tensor_model_parallel_size=world_size,
-                                          pipeline_model_parallel_size=1)
+        ensure_model_parallel_initialized(
+            tensor_model_parallel_size=world_size,
+            pipeline_model_parallel_size=1)
 
         ep_group = get_tp_group().cpu_group
         ep_rank = torch.distributed.get_rank()
@@ -381,8 +382,9 @@ def test_rearrange_expert_weights_no_change(world_size):
 
     @worker_fn_wrapper
     def worker_fn():
-        ensure_model_parallel_initialized(tensor_model_parallel_size=world_size,
-                                          pipeline_model_parallel_size=1)
+        ensure_model_parallel_initialized(
+            tensor_model_parallel_size=world_size,
+            pipeline_model_parallel_size=1)
 
         ep_group = get_tp_group().cpu_group
         ep_rank = torch.distributed.get_rank()
@@ -398,10 +400,9 @@ def test_rearrange_expert_weights_no_change(world_size):
         redundancy_config = [2] * num_logical_experts
 
         # Same indices - no change
-        indices = create_expert_indices_with_redundancy(num_layers,
-                                                        num_logical_experts,
-                                                        total_physical_experts,
-                                                        redundancy_config)
+        indices = create_expert_indices_with_redundancy(
+            num_layers, num_logical_experts, total_physical_experts,
+            redundancy_config)
 
         expert_weights = create_expert_weights(num_layers, num_local_experts,
                                                hidden_sizes, ep_rank, device,
@@ -444,8 +445,9 @@ def test_rearrange_expert_weights_profile_mode(world_size):
 
     @worker_fn_wrapper
     def worker_fn():
-        ensure_model_parallel_initialized(tensor_model_parallel_size=world_size,
-                                          pipeline_model_parallel_size=1)
+        ensure_model_parallel_initialized(
+            tensor_model_parallel_size=world_size,
+            pipeline_model_parallel_size=1)
 
         ep_group = get_tp_group().cpu_group
         ep_rank = torch.distributed.get_rank()
