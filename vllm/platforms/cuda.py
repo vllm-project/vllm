@@ -370,6 +370,10 @@ class CudaPlatformBase(Platform):
     @classmethod
     def get_piecewise_backend_cls(cls) -> str:
         return "vllm.compilation.cuda_piecewise_backend.CUDAPiecewiseBackend"  # noqa
+    
+    @classmethod
+    def get_fullgraph_wrapper_cls(cls) -> str:
+        return "vllm.compilation.cuda_piecewise_backend.FullCudagraphWrapper"  # noqa
 
     @classmethod
     def stateless_init_device_torch_dist_pg(

@@ -139,7 +139,7 @@ def _get_sliding_window_configs(
 
 class FlashAttentionMetadataBuilder(
         AttentionMetadataBuilder[FlashAttentionMetadata]):
-    full_cudagraph_supported: ClassVar[bool] = get_flash_attn_version() == 3
+    full_cudagraph_supported: ClassVar[bool] = get_flash_attn_version() >= 2
 
     def __init__(self, runner: "GPUModelRunner", kv_cache_spec: AttentionSpec,
                  block_table: BlockTable):
@@ -158,9 +158,7 @@ class FlashAttentionMetadataBuilder(
 
         self.aot_schedule = (get_flash_attn_version() == 3)
         self.use_full_cuda_graph = compilation_config.full_cuda_graph
-        if self.use_full_cuda_graph and not self.aot_schedule:
-            raise ValueError("Full CUDA graph mode requires AOT scheduling, "
-                             "which requires FlashAttention 3.")
+        
         self.scheduler_metadata = torch.zeros(self.runner.max_num_reqs + 1,
                                               dtype=torch.int32,
                                               device=self.runner.device)
@@ -299,8 +297,7 @@ class FlashAttentionMetadataBuilder(
                                           max_seq_len=max_seq_len,
                                           causal=True)
 
-        if self.use_full_cuda_graph:
-            assert scheduler_metadata is not None
+        if scheduler_metadata is not None:
             n = scheduler_metadata.shape[0]
             self.scheduler_metadata[:n].copy_(scheduler_metadata,
                                               non_blocking=True)
@@ -332,7 +329,7 @@ class FlashAttentionMetadataBuilder(
 
     def can_run_in_cudagraph(
             self, common_attn_metadata: CommonAttentionMetadata) -> bool:
-        # Full CUDA Graph always supported (FA2 support checked separately)
+        # Full CUDA Graph always supported
         return True
 
     def use_cascade_attention(self, *args, **kwargs) -> bool:
