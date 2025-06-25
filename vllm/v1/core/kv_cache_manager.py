@@ -63,7 +63,9 @@ class KVCacheBlocks:
         """Creates a new KVCacheBlocks instance with no blocks."""
         return KVCacheBlocks(tuple([] for _ in range(len(self.blocks))))
 
+
 class DummyKVCacheManager:
+
     @property
     def usage(self) -> float:
         return 0.0
@@ -73,7 +75,7 @@ class DummyKVCacheManager:
 
     def get_computed_blocks(self,
                             request: Request) -> tuple[KVCacheBlocks, int]:
-        return(KVCacheBlocks([]), 0)
+        return (KVCacheBlocks([]), 0)
 
     def allocate_slots(
         self,
@@ -110,6 +112,15 @@ class DummyKVCacheManager:
     def get_block_ids(self, request_id: str) -> list[list[int]]:
         """Get the block ids of a request."""
         return []
+
+    def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
+        """Cache the blocks for the request, if enabled."""
+        pass
+
+    def create_empty_block_list(self) -> KVCacheBlocks:
+        """Creates a new KVCacheBlocks instance with no blocks."""
+        return (KVCacheBlocks([]), 0)
+
 
 class KVCacheManager:
 

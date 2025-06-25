@@ -129,6 +129,7 @@ def supports_multimodal(
 
     return isinstance(model, SupportsMultiModal)
 
+
 @runtime_checkable
 class SupportsMultiModalWithRawInput(SupportsMultiModal, Protocol):
     """The interface required for all multi-modal models."""
@@ -143,28 +144,33 @@ class SupportsMultiModalWithRawInput(SupportsMultiModal, Protocol):
         MRO of your model class.
     """
 
+
 @runtime_checkable
 class _SupportsMultiModalWithRawInput(Protocol):
     supports_multimodal_raw_input: ClassVar[Literal[True]]
 
 
 @overload
-def supports_multimodal_raw_input(model: object) -> TypeIs[SupportsMultiModalWithRawInput]:
+def supports_multimodal_raw_input(
+        model: object) -> TypeIs[SupportsMultiModalWithRawInput]:
     ...
 
 
 @overload
-def supports_multimodal_raw_input(model: type[object]) -> TypeIs[type[SupportsMultiModalWithRawInput]]:
+def supports_multimodal_raw_input(
+        model: type[object]) -> TypeIs[type[SupportsMultiModalWithRawInput]]:
     ...
 
 
 def supports_multimodal_raw_input(
     model: Union[type[object], object]
-) -> Union[TypeIs[type[SupportsMultiModalWithRawInput]], TypeIs[SupportsMultiModalWithRawInput]]:
+) -> Union[TypeIs[type[SupportsMultiModalWithRawInput]],
+           TypeIs[SupportsMultiModalWithRawInput]]:
     if isinstance(model, type):
         return isinstance(model, _SupportsMultiModalWithRawInput)
 
     return isinstance(model, SupportsMultiModalWithRawInput)
+
 
 @runtime_checkable
 class SupportsLoRA(Protocol):

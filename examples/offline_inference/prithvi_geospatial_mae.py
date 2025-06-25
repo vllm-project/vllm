@@ -144,7 +144,7 @@ class PrithviMAE:
             model=os.path.join(os.path.dirname(__file__), "./model"),
             skip_tokenizer_init=True,
             dtype="float16",
-            enforce_eager=True
+            enforce_eager=True,
         )
 
     def run(self, input_data, location_coords):
