@@ -112,7 +112,7 @@ class Sampler(nn.Module):
         # Apply temperature.
         logits = self.apply_temperature(logits, sampling_metadata.temperature)
 
-        # Apply logits processors only compatible with nongreedy sampling.
+        # Apply logits processors that only apply to random sampling.
         for processor in sampling_metadata.logitsprocs.nongreedy_list:
             logits = processor.apply(logits)
 
