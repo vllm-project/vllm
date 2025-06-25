@@ -157,6 +157,7 @@ def _support_torch_compile(
             vllm_config.compilation_config.level in [
             CompilationLevel.NO_COMPILATION, CompilationLevel.DYNAMO_AS_IS
         ] or not supports_dynamo()
+        self.do_not_compile = True
         if self.do_not_compile:
             return
         compilation_counter.num_models_seen += 1

@@ -4518,6 +4518,11 @@ class VllmConfig:
                 "Piecewise compilation is not supported with "
                 "microbatching. Disabling piecewiseching compilation.")
             self.compilation_config.level = CompilationLevel.NO_COMPILATION
+            if not self.model_config.enforce_eager:
+                self.compilation_config.full_cuda_graph = True
+                logger.warning_once(
+                    "Enabling fullcudagraphs for microbatching"
+                )
 
         if (self.kv_events_config is not None
                 and self.kv_events_config.enable_kv_cache_events
