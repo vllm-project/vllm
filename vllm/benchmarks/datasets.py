@@ -382,6 +382,7 @@ class RandomDataset(BenchmarkDataset):
             re_encoded_sequence = tokenizer.encode(
                 prompt, add_special_tokens=False)[:total_input_len]
             prompt = tokenizer.decode(re_encoded_sequence)
+            total_input_len = len(re_encoded_sequence)
             requests.append(
                 SampleRequest(
                     prompt=prompt,
