@@ -2,6 +2,7 @@
 import dataclasses
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional, Union
 
@@ -195,7 +196,47 @@ class LogitsProcessor(ABC):
         raise NotImplementedError
 
 
-###### ----- LogitsProcessor impls below here
+@dataclass
+class LogitsProcessorManager:
+    """Encapsulates initialized logitsproc objects.
+
+    Each logits processor has a unique id.
+    """
+    nongreedy: dict[str, LogitsProcessor] = field(
+        default_factory=dict)  # id -> nongreedy-sampling-only logitsproc
+    greedy: dict[str, LogitsProcessor] = field(
+        default_factory=dict)  # id -> greedy-sampling compatible logitsproc
+
+    def __post_init__(self):
+        """Guarantee unique ids"""
+        if (self.nongreedy.keys() & self.greedy.keys()):
+            raise ValueError("Greedy and non-greedy logits "
+                             "processors must not share ids")
+
+    def get_logitsproc_by_id(self, id: str) -> Optional[LogitsProcessor]:
+        """Find logits processor by id, if it exists"""
+        return self.all.get(id, None)
+
+    @property
+    def all(self) -> dict[str, LogitsProcessor]:
+        """All logits processors"""
+        return self.greedy | self.nongreedy
+
+    @property
+    def nongreedy_list(self) -> list[LogitsProcessor]:
+        return list(self.nongreedy.values())
+
+    @property
+    def greedy_list(self) -> list[LogitsProcessor]:
+        return list(self.greedy.values())
+
+    @property
+    def all_list(self) -> list[LogitsProcessor]:
+        """List of all logits processors"""
+        return self.nongreedy_list + self.greedy_list
+
+
+###### ----- Built-in LogitsProcessor impls below here
 
 
 class MinPLogitsProcessor(LogitsProcessor):

@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from dataclasses import dataclass, field
 from typing import Optional
 
 import torch
@@ -8,7 +7,7 @@ import torch
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.v1.kv_cache_interface import KVCacheGroupSpec
 from vllm.v1.sample.logits_processor import (LogitBiasLogitsProcessor,
-                                             LogitsProcessor,
+                                             LogitsProcessorManager,
                                              MinPLogitsProcessor,
                                              MinTokensLogitsProcessor)
 
@@ -121,46 +120,6 @@ def initialize_kv_cache_for_kv_sharing(
         kv_caches[layer_name] = kv_caches[target_layer_name]
         group_idx = layer_to_kv_cache_group_idx[target_layer_name]
         kv_cache_groups[group_idx].layer_names.append(layer_name)
-
-
-@dataclass
-class LogitsProcessorManager:
-    """Encapsulates initialized logitsproc objects.
-    
-    Each logits processor has a unique id.
-    """
-    nongreedy: dict[str, LogitsProcessor] = field(
-        default_factory=dict)  # id -> nongreedy-sampling-only logitsproc
-    greedy: dict[str, LogitsProcessor] = field(
-        default_factory=dict)  # id -> greedy-sampling compatible logitsproc
-
-    def __post_init__(self):
-        """Guarantee unique ids"""
-        if (self.nongreedy.keys() & self.greedy.keys()):
-            raise ValueError("Greedy and non-greedy logits "
-                             "processors must not share ids")
-
-    def get_logitsproc_by_id(self, id: str) -> Optional[LogitsProcessor]:
-        """Find logits processor by id, if it exists"""
-        return self.all.get(id, None)
-
-    @property
-    def all(self) -> dict[str, LogitsProcessor]:
-        """All logits processors"""
-        return self.greedy | self.nongreedy
-
-    @property
-    def nongreedy_list(self) -> list[LogitsProcessor]:
-        return list(self.nongreedy.values())
-
-    @property
-    def greedy_list(self) -> list[LogitsProcessor]:
-        return list(self.greedy.values())
-
-    @property
-    def all_list(self) -> list[LogitsProcessor]:
-        """List of all logits processors"""
-        return self.nongreedy_list + self.greedy_list
 
 
 def init_builtin_logitsprocs(pin_memory_available: bool, max_num_reqs: int,

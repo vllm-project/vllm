@@ -6,11 +6,11 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from vllm.v1.sample.logits_processor import LogitsProcessorManager
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import (PLACEHOLDER_TOKEN_ID,
                                               RejectionSampler)
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
-from vllm.v1.worker.utils import LogitsProcessorManager
 
 DEVICE = "cuda"
 
