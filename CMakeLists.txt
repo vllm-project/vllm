@@ -540,7 +540,25 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     set(MLA_ARCHS)
   endif()
 
-  # CUTLASS MoE kernels
+  # CUTLASS MoE Data Preparation kernels
+  cuda_archs_loose_intersection(MOE_DATA_ARCHS "9.0a;10.0a" "${CUDA_ARCHS}")
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.3 AND MOE_DATA_ARCHS)
+    set(SRCS "csrc/quantization/cutlass_w8a8/moe/moe_data.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${SRCS}"
+      CUDA_ARCHS "${MOE_DATA_ARCHS}")
+    list(APPEND VLLM_EXT_SRC "${SRCS}")
+    list(APPEND VLLM_GPU_FLAGS "-DENABLE_CUTLASS_MOE_SM90=1")
+    message(STATUS "Building cutlass moe data-prep kernels for archs: ${MOE_DATA_ARCHS}")
+  else()
+    if (NOT ${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.3 AND MOE_DATA_ARCHS)
+      message(STATUS "Not building moe data-prep kernels as CUDA Compiler version is "
+                     "not >= 12.3")
+    else()
+      message(STATUS "Not building moe data-prep kernels because no compatible archs found "
+                     "in CUDA target architectures")
+    endif()
+  endif()
 
   # The MoE kernel cutlass_moe_mm requires CUDA 12.3 or later (and ONLY works
   # on Hopper). get_cutlass_(pplx_)moe_mm_data should only be compiled
