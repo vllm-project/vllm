@@ -90,7 +90,7 @@ class BatchUpdateBuilder:
         self.added = added or []
         self._is_removed_sorted = False
 
-    def _sort_removed(self) -> None:
+    def _ensure_removed_sorted(self) -> None:
         """Sort removed request indices in
         descending order.
         
