@@ -376,7 +376,7 @@ class TritonAttentionImpl(AttentionImpl):
                     query.reshape(
                         (num_tokens, num_heads * head_size)).contiguous(),
                     layer._q_scale)
-            query = query.reshape((num_tokens, num_heads, head_size))
+                query = query.reshape((num_tokens, num_heads, head_size))
 
         use_local_attn = \
             (self.use_irope and attn_metadata.local_attn_metadata is not None)
