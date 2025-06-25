@@ -39,6 +39,28 @@ class GteNewModel(VerifyAndUpdateConfig):
         }
 
 
+class GteModel(VerifyAndUpdateConfig):
+    # SnowflakeGteNewModel
+
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        config = vllm_config.model_config.hf_config
+
+        assert config.__class__.__name__ == "GteConfig"
+        assert config.hidden_act == "gelu"
+
+        config.hidden_act = "geglu"
+
+        head_dim = config.hidden_size // config.num_attention_heads
+        config.rotary_kwargs = {
+            "head_size": head_dim,
+            "rotary_dim": getattr(config, "rotary_emb_dim", head_dim),
+            "max_position": config.max_position_embeddings,
+            "base": config.rope_theta,
+            "rope_scaling": getattr(config, "rope_scaling", None)
+        }
+
+
 class NomicBertModel(VerifyAndUpdateConfig):
 
     @staticmethod
@@ -170,24 +192,3 @@ class XLMRobertaModel(GteNewModel):
                 "rope_scaling": getattr(config, "rope_scaling", None)
             }
             return config
-
-
-class SnowflakeGteNewModel(VerifyAndUpdateConfig):
-
-    @staticmethod
-    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
-        config = vllm_config.model_config.hf_config
-
-        assert config.__class__.__name__ == "GteConfig"
-        assert config.hidden_act == "gelu"
-
-        config.hidden_act = "geglu"
-
-        head_dim = config.hidden_size // config.num_attention_heads
-        config.rotary_kwargs = {
-            "head_size": head_dim,
-            "rotary_dim": getattr(config, "rotary_emb_dim", head_dim),
-            "max_position": config.max_position_embeddings,
-            "base": config.rope_theta,
-            "rope_scaling": getattr(config, "rope_scaling", None)
-        }
