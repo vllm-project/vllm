@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import asyncio
-
-from vllm import LLM, AsyncEngineArgs, AsyncLLMEngine, SamplingParams
+from vllm import LLM, SamplingParams
 
 # Sample prompts.
 prompts = [
@@ -15,36 +13,6 @@ prompts = [
 sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
 
-async def aync_main():
-    engine_args = AsyncEngineArgs(
-        model="facebook/opt-125m",
-        load_format="dummy",
-        enforce_eager=True,
-    )
-    # Create an engine without loading real weights
-    engine = AsyncLLMEngine.from_engine_args(engine_args)
-    # Update load format from `dummy` to `auto`
-    await engine.collective_rpc("update_load_config", kwargs={"load_format": "auto"})
-    # Now load real weights inplace
-    await engine.collective_rpc("load_model")
-
-    # Check outputs make sense
-    prompt = "What is LLM?"
-    results_generator = engine.generate(
-        prompt=prompt,
-        sampling_params=SamplingParams(temperature=0.0),
-        request_id="0",
-    )
-    final_output = None
-    async for request_output in results_generator:
-        final_output = request_output
-    assert final_output is not None
-    print("\nAsync engine Outputs:\n" + "-" * 60)
-    print(f"Prompt:    {prompt!r}")
-    print(f"Output:    {final_output.outputs[0].text!r}")
-    print("-" * 60)
-
-
 def main():
     # Create an LLM without loading real weights
     llm = LLM(
@@ -54,9 +22,11 @@ def main():
     )
 
     # Update load format from `dummy` to `auto`
-    llm.collective_rpc("update_load_config", kwargs={"load_format": "auto"})
-    # Now load real weights inplace
-    llm.collective_rpc("load_model")
+    llm.collective_rpc(
+        "update_config", args=({"load_config": {"load_format": "auto"}},)
+    )
+    # Now reload real weights inplace
+    llm.collective_rpc("reload_weights")
 
     # Check outputs make sense
     outputs = llm.generate(prompts, sampling_params)
@@ -71,4 +41,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    asyncio.run(aync_main())
