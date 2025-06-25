@@ -259,13 +259,11 @@ class Plamo2MambaMixer(nn.Module):
 
         ssd_output_list = []
 
+        # Process prefill requests
         if has_prefill:
-            # |---------- N-1 iteration --------|
-            # |---------------- N iteration ---------------------|
-            # |- tokenA -|......................|-- newTokens ---|
-            # |---------- context_len ----------|
-            # |-------------------- seq_len ---------------------|
-            #                                   |-- query_len ---|
+            # 2. Convolution sequence transformation
+            # - "cache_indices" updates the conv_state cache in positions
+            # pointed to by "mamba_cache_params.state_indices_tensor"
             hidden_states_p = causal_conv1d_fn(
                 hidden_states_p.transpose(0, 1),
                 conv_weights,
@@ -284,7 +282,7 @@ class Plamo2MambaMixer(nn.Module):
 
             B, C, dt = self._project_ssm_parameters(hidden_states_p)
 
-            # 3.c perform the recurrence y ← SSM(A, B, C)(x)
+            # 3. State Space Model sequence transformation
             initial_states = None
             if (mamba2_metadata.has_initial_states is not None
                     and mamba2_metadata.prep_initial_states):
@@ -325,6 +323,7 @@ class Plamo2MambaMixer(nn.Module):
 
         # Process decode requests
         if has_decode:
+            # 2. Convolution sequence transformation
             hidden_states_d = causal_conv1d_update(
                 hidden_states_d,
                 mamba_cache_params.conv_state,
@@ -335,7 +334,7 @@ class Plamo2MambaMixer(nn.Module):
 
             B, C, dt = self._project_ssm_parameters(hidden_states_d)
 
-            # 3.c perform the recurrence y ← SSM(A, B, C)(x)
+            # 3. State Space Model sequence transformation
             A = self.A[:, None, ...][:, :,
                                      None].expand(-1, self.head_dim,
                                                   self.config.mamba_d_state)
