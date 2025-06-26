@@ -39,6 +39,9 @@ def parse_args():
     parser.add_argument("--top-k", type=int, default=-1)
     parser.add_argument("--print-output", action="store_true")
     parser.add_argument("--output-len", type=int, default=256)
+    parser.add_argument("--model-dir", type=str, default=None)
+    parser.add_argument("--eagle-dir", type=str, default=None)
+    parser.add_argument("--max-model-len", type=int, default=2048)
     return parser.parse_args()
 
 
@@ -46,9 +49,10 @@ def main():
     args = parse_args()
     args.endpoint_type = "openai-chat"
 
-    model_dir = "meta-llama/Llama-3.1-8B-Instruct"
+    model_dir = args.model_dir
+    if args.model_dir is None:
+        model_dir = "meta-llama/Llama-3.1-8B-Instruct"
     tokenizer = AutoTokenizer.from_pretrained(model_dir)
-    max_model_len = 2048
 
     prompts = get_samples(args, tokenizer)
     # add_special_tokens is False to avoid adding bos twice when using chat templates
@@ -57,16 +61,18 @@ def main():
     ]
 
     if args.method == "eagle" or args.method == "eagle3":
-        if args.method == "eagle":
+        eagle_dir = args.eagle_dir
+        if args.method == "eagle" and eagle_dir is None:
             eagle_dir = "yuhuili/EAGLE-LLaMA3.1-Instruct-8B"
-        elif args.method == "eagle3":
+
+        elif args.method == "eagle3" and eagle_dir is None:
             eagle_dir = "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B"
         speculative_config = {
             "method": args.method,
             "model": eagle_dir,
             "num_speculative_tokens": args.num_spec_tokens,
             "draft_tensor_parallel_size": args.draft_tp,
-            "max_model_len": max_model_len,
+            "max_model_len": args.max_model_len,
         }
     elif args.method == "ngram":
         speculative_config = {
@@ -74,7 +80,7 @@ def main():
             "num_speculative_tokens": args.num_spec_tokens,
             "prompt_lookup_max": args.prompt_lookup_max,
             "prompt_lookup_min": args.prompt_lookup_min,
-            "max_model_len": max_model_len,
+            "max_model_len": args.max_model_len,
         }
     else:
         raise ValueError(f"unknown method: {args.method}")
@@ -86,7 +92,7 @@ def main():
         enable_chunked_prefill=args.enable_chunked_prefill,
         max_num_batched_tokens=args.max_num_batched_tokens,
         enforce_eager=args.enforce_eager,
-        max_model_len=max_model_len,
+        max_model_len=args.max_model_len,
         max_num_seqs=args.max_num_seqs,
         gpu_memory_utilization=0.8,
         speculative_config=speculative_config,
