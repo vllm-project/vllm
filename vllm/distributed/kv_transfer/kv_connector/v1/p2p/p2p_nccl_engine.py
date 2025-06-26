@@ -343,7 +343,7 @@ class P2pNcclEngine:
                     self._have_received_tensor_id(tensor_id)
                     self.recv_store_cv.notify()
 
-                logger.info(
+                logger.debug(
                     "🔵[PUT]Recv Tensor, %s👈%s, is_success:%s, data:%s",
                     self.zmq_address, remote, tensor is not None, data)
 
