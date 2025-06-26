@@ -664,7 +664,15 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
+        enable_eplb: bool = False,
+        expert_load_view: Optional[torch.Tensor] = None,
+        logical_to_physical_map: Optional[torch.Tensor] = None,
+        logical_replica_count: Optional[torch.Tensor] = None,
     ):
+        if enable_eplb:
+            raise NotImplementedError(
+                "EPLB not supported for `ModelOptNvFp4FusedMoE` yet.")
+
         if self.use_marlin:
             topk_weights, topk_ids = FusedMoE.select_experts(
                 hidden_states=x,
