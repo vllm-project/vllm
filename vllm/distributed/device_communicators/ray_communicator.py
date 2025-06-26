@@ -130,6 +130,8 @@ class RayCudaCommunicator(Communicator):
                 self._send_stream = self._cuda_stream
                 self._recv_stream = self._cuda_stream
 
+        self._closed = False
+
     def initialize(self, rank: int) -> None:
         # No additional initialization is needed.
         pass
@@ -285,6 +287,10 @@ class RayCudaCommunicator(Communicator):
         """
         Destroy the RayCudaCommunicator.
         """
+        if self._closed:
+            return
+        self._closed = True
+
         if self._pynccl is not None:
             logger.info("Destructing RayCudaCommunicator on actor: %s",
                         ray.get_runtime_context().current_actor)
