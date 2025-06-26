@@ -2388,22 +2388,27 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 elif isinstance(kv_cache_spec, MambaSpec):
                     raw_tensor = kv_cache_raw_tensors[layer_name]
                     dtype = kv_cache_spec.dtype
+                    page_size = kv_cache_spec.page_size_bytes // get_dtype_size(
+                        dtype)
                     state_tensors = []
-                    start_pos = 0
+                    storage_offset = 0
                     for shape in kv_cache_spec.shapes:
                         target_shape = (num_blocks, *shape)
-                        size_in_bytes = np.prod(shape) * get_dtype_size(
-                            dtype) * num_blocks
-                        tensor = raw_tensor[start_pos:start_pos +
-                                            size_in_bytes]
-                        tensor = tensor.view(dtype).view(target_shape)
+                        stride = torch.empty(target_shape).stride()
+                        target_stride = (page_size, *stride[1:])
+                        tensor = torch.as_strided(
+                            raw_tensor.view(dtype),
+                            size=target_shape,
+                            stride=target_stride,
+                            storage_offset=storage_offset,
+                        )
                         state_tensors.append(tensor)
-                        start_pos += size_in_bytes
-                    if kv_cache_spec.multiple_of is None:
-                        assert start_pos == raw_tensor.numel()
-                    kv_caches[layer_name] = tuple(state_tensors)
+                        storage_offset += stride[0]
+
+                    kv_caches[layer_name] = state_tensors
                 else:
                     raise NotImplementedError
+
         return kv_caches
 
     def initialize_kv_cache_tensors(
