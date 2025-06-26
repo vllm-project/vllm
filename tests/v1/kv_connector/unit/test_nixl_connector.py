@@ -9,13 +9,13 @@ from unittest.mock import patch
 
 import pytest
 
+from vllm import LLM
 from vllm.config import KVTransferConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
     KVConnectorRole, NixlAgentMetadata, NixlConnector, NixlConnectorMetadata,
     NixlConnectorWorker)
 from vllm.forward_context import ForwardContext
-from vllm.llm_engine.llm_engine import LLM
-from vllm.llm_engine.scheduler.scheduler import SamplingParams
+from vllm.sampling_params import SamplingParams
 
 from .utils import create_request, create_scheduler, create_vllm_config
 
