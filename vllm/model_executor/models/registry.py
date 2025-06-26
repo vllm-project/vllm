@@ -122,6 +122,7 @@ _TEXT_GENERATION_MODELS = {
     # [Encoder-decoder]
     "BartModel": ("bart", "BartForConditionalGeneration"),
     "BartForConditionalGeneration": ("bart", "BartForConditionalGeneration"),
+    "KeyeForConditionalGeneration": ("keye", "KeyeForConditionalGeneration"),
 }
 
 _EMBEDDING_MODELS = {
