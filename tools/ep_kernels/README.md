@@ -1,5 +1,3 @@
-# Machete (Mixed Precision Cutlass-Based GEMM)
-
 Large-scale cluster-level expert parallel, as described in the [DeepSeek-V3 Technical Report](http://arxiv.org/abs/2412.19437), is an efficient way to deploy sparse Mixture of Experts (MoE) models with many experts. However, such deployment requires many components beyond a normal Python package, including system package support and system driver support. It is impossible to bundle all these components into a Python package.
 
 Here we break down the requirements in 3 steps:
