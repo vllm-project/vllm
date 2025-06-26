@@ -11,7 +11,7 @@ from typing_extensions import Self
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.utils import cdiv, get_dtype_size
+from vllm.utils import cdiv, get_dtype_size, round_up
 
 logger = init_logger(__name__)
 
@@ -172,7 +172,7 @@ class MambaSpec(KVCacheSpec):
     def page_size_bytes(self) -> int:
         page_size = self.num_elements * get_dtype_size(self.dtype)
         if self.multiple_of is not None:
-            page_size = cdiv(page_size, self.multiple_of) * self.multiple_of
+            page_size = round_up(page_size, self.multiple_of)
         return page_size
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
