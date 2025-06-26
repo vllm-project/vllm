@@ -275,7 +275,7 @@ The new format of `--lora-modules` is mainly to support the display of parent mo
 
 ## Default LoRA Models For Multimodal Models
 
-Some models, e.g., Granite Speech and Phi 4 multimodal, contain LoRA adapter(s) that are expected to always be applied when a given modality is present. This can be a bit tedious to manage with the above approaches, as it requires the user to send the `LoRARequest` (offline) or to filter requests between the base model and LoRA model (server) depending on the content of the request's multimodal data.
+Some models, e.g., [Granite Speech](https://huggingface.co/ibm-granite/granite-speech-3.3-8b) and [Phi-4-multimodal-instruct](https://huggingface.co/microsoft/Phi-4-multimodal-instruct) multimodal, contain LoRA adapter(s) that are expected to always be applied when a given modality is present. This can be a bit tedious to manage with the above approaches, as it requires the user to send the `LoRARequest` (offline) or to filter requests between the base model and LoRA model (server) depending on the content of the request's multimodal data.
 
 To this end, we allow registration of default multimodal LoRAs to handle this automatically, where users can map each modality to a LoRA adapter to automatically apply it when the corresponding inputs are present. Note that currently, we only allow one LoRA per prompt; if several modalities are provided, each of which are registered to a given modality, none of them will be applied.
 
@@ -338,13 +338,13 @@ outputs = model.generate(
 )
 ```
 
-You can also pass a json dictionary of `--default_mm_loras` mapping modalities to LoRA model IDs. For example, when starting the server:
+You can also pass a json dictionary of `--default-mm-loras` mapping modalities to LoRA model IDs. For example, when starting the server:
 
 ```bash
 vllm serve ibm-granite/granite-speech-3.3-2b \
     --max-model-len 2048 \
     --enable-lora \
-    --default_mm_loras '{"audio":"ibm-granite/granite-speech-3.3-2b"}' \
+    --default-mm-loras '{"audio":"ibm-granite/granite-speech-3.3-2b"}' \
     --max-lora-rank 64
 ```
 
