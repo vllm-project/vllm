@@ -414,6 +414,8 @@ def test_abort_timeout_on_prefiller(monkeypatch):
         max_tokens=1,
         extra_args={"kv_transfer_params": remote_prefill_opts})
     scheduler = llm.llm_engine.engine_core.engine_core.scheduler
+    req_to_blocks = scheduler.kv_cache_manager.coordinator.single_type_managers[
+        0].req_to_blocks
 
     padding = "Just making this request a little longer so that we're sure "
     "we're not hitting the small-request lower bound beneath which we don't "
@@ -423,15 +425,16 @@ def test_abort_timeout_on_prefiller(monkeypatch):
                      sampling_params)
 
     # Request finished but not freed
-    assert '0' in scheduler.pending_kv_free_req_ids
-    # Some other request
+    assert '0' in scheduler.finished_req_ids and '0' in req_to_blocks
+    # Some other request, 0 still not freed
     _ = llm.generate([f"What is the capital of Italy? {padding}"],
                      sampling_params)
-    assert scheduler.pending_kv_free_req_ids == {"0", "1"}
+    assert '0' in req_to_blocks
+    assert '1' in scheduler.finished_req_ids and '1' in req_to_blocks
 
     # Wait for timeout and trigger another scheduler loop
     time.sleep(timeout)
     _ = llm.generate([f"What is the capital of France? {padding}"],
                      sampling_params)
     # Request-0 times out and is cleared!
-    assert '0' not in scheduler.pending_kv_free_req_ids
+    assert '0' not in req_to_blocks
