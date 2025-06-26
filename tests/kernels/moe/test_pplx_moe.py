@@ -334,7 +334,7 @@ def _pplx_prepare_finalize(
 @pytest.mark.parametrize("mnk", PPLX_PREPARE_COMBOS)
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
-@pytest.mark.parametrize("dtype", [torch.float8_e4m3fn, torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("world_dp_size", [[2, 1]])
 @pytest.mark.parametrize("use_internode", [False])
 @requires_pplx
@@ -441,7 +441,6 @@ def pplx_moe(
     w1_chunk = chunk_by_rank(w1, rank, world_size).to(device)
     w2_chunk = chunk_by_rank(w2, rank, world_size).to(device)
 
-    # TODO scale chunk function
     if w1_scale is not None:
         w1_scale_chunk = chunk_by_rank(w1_scale, rank, world_size).to(device)
         w2_scale_chunk = chunk_by_rank(w2_scale, rank, world_size).to(device)

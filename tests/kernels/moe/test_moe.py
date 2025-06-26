@@ -18,6 +18,7 @@ import vllm.model_executor.layers.fused_moe  # noqa
 from tests.kernels.utils import opcheck, stack_and_dev, torch_moe
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.forward_context import set_forward_context
+from vllm.distributed.parallel_state import init_distributed_environment
 from vllm.model_executor.layers.fused_moe import fused_moe
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     fused_topk, modular_triton_fused_moe)
@@ -368,6 +369,13 @@ def test_mixtral_moe(dtype: torch.dtype, padding: bool, use_rocm_aiter: bool,
 
         if dtype == torch.float32:
             pytest.skip("AITER ROCm test skip for float32")
+
+    monkeypatch.setenv('RANK', "0")
+    monkeypatch.setenv('LOCAL_RANK', "0")
+    monkeypatch.setenv('WORLD_SIZE', "1")
+    monkeypatch.setenv('MASTER_ADDR', 'localhost')
+    monkeypatch.setenv('MASTER_PORT', '12345')
+    init_distributed_environment()
 
     # Instantiate our and huggingface's MoE blocks
     vllm_config.compilation_config.static_forward_context = dict()

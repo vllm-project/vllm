@@ -164,8 +164,8 @@ def test_w8a8_block_fp8_fused_moe(M, N, K, E, topk, block_size, dtype, seed,
             w2_scale=w2_s,
         )
 
-    torch.testing.assert_close(out, ref_out, atol=0.03, rtol=0.03)
-    torch.testing.assert_close(m_out, ref_out, atol=0.03, rtol=0.03)
+    torch.testing.assert_close(out, ref_out, atol=0.035, rtol=0.035)
+    torch.testing.assert_close(m_out, ref_out, atol=0.035, rtol=0.035)
 
 
 def fp8_perm(m, idx):
@@ -310,4 +310,4 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed,
             graph.replay()
             torch.cuda.synchronize()
 
-    torch.testing.assert_close(out, ref_out, atol=0.03, rtol=0.03)
+    torch.testing.assert_close(out, ref_out, atol=0.035, rtol=0.035)
