@@ -263,9 +263,9 @@ if [ "$TARGETPLATFORM" != "linux/arm64" ]; then \
     else \
       # keep whatever was in TORCH_CUDA_ARCH_LIST, but drop 7.0
       export TORCH_CUDA_ARCH_LIST="$(echo "$TORCH_CUDA_ARCH_LIST" \
-          | tr ' ' '\n'                 \   # break into one-per-line
-          | grep -v '^7\.0$'            \   # kill 7.0
-          | paste -sd' ' -              )"  # collapse back to space-separated
+          | tr ' ' '\n'                 \
+          | grep -v '^7\.0$'            \
+          | paste -sd' ' -              )" && \
       echo "Building for archs: $TORCH_CUDA_ARCH_LIST" && \
       git clone https://github.com/flashinfer-ai/flashinfer.git \
                 --single-branch --branch v0.2.6.post1 --recursive && \
