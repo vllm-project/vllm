@@ -34,8 +34,7 @@ HYBRID_MODELS = [
     "pfnet/plamo-2-1b",
     "Zyphra/Zamba2-1.2B-instruct",
     "hmellor/tiny-random-BambaForCausalLM",
-    # too big for CI
-    #"ibm-ai-platform/Bamba-9B-v1",
+    "ibm-ai-platform/Bamba-9B-v1",
 ]
 
 V1_SUPPORTED_MODELS = [
