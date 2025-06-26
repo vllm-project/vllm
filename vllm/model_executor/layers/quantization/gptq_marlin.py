@@ -635,7 +635,15 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
+        enable_eplb: bool = False,
+        expert_load_view: Optional[torch.Tensor] = None,
+        logical_to_physical_map: Optional[torch.Tensor] = None,
+        logical_replica_count: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        if enable_eplb:
+            raise NotImplementedError(
+                "EPLB not supported for `GPTQMarlinMoEMethod` yet.")
+
         assert activation == "silu", "Only SiLU activation is supported."
         if apply_router_weight_on_input:
             raise NotImplementedError(
