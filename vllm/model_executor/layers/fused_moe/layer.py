@@ -13,7 +13,6 @@ from torch.nn.parameter import UninitializedParameter
 import vllm.envs as envs
 from vllm.config import get_current_vllm_config
 from vllm.distributed import (get_dp_group, get_ep_group,
-                              get_world_group,
                               get_tensor_model_parallel_world_size,
                               get_world_group,
                               tensor_model_parallel_all_reduce)
@@ -651,8 +650,8 @@ class FusedMoE(torch.nn.Module):
 
         tp_size_ = (tp_size if tp_size is not None else
                     get_tensor_model_parallel_world_size())
-        dp_size_ = (dp_size if dp_size is not None else
-                    get_dp_group().world_size)
+        dp_size_ = (dp_size
+                    if dp_size is not None else get_dp_group().world_size)
         world_size_ = get_world_group().world_size
 
         vllm_config = get_current_vllm_config()
