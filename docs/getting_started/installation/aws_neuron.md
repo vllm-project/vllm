@@ -14,7 +14,8 @@ This describes how to set up your environment to run vLLM on Neuron.
 - Python: 3.9 or newer
 - Pytorch 2.5/2.6
 - Accelerator: NeuronCore-v2 (in trn1/inf2 chips) or NeuronCore-v3 (in trn2 chips)
-- AWS Neuron SDK 2.23 (the latest Neuron SDK 2.24 is only supported on the AWS Neuron forked repo, see details below)
+- AWS Neuron SDK 2.23.0 or greater 
+Note: The latest AWS Neuron SDK 2.24.0 may only be installed via the AWS Neuron Fork. See details [below][installing-aws-fork].
 
 ## Configure a new environment
 
@@ -54,18 +55,14 @@ pip install -U -r requirements/neuron.txt
 VLLM_TARGET_DEVICE="neuron" pip install -e .
 ```
 
-The Neuron features that are upstreamed to vLLM main reflect Neuron SDK 2.23. Please run the following to
-obtain Neuron 2.23 libraries (refer to [Neuron 2.23 release artifacts](https://awsdocs-neuron.readthedocs-hosted.com/en/latest/release-notes/prev/content.html#neuron-2-23-0-05-20-2025) for a full list of dependency versions):
+All features up to Neuron 2.23.0 have been upstreamed to vLLM. To install Neuron 2.23.0, please refer to [Neuron 2.23 release artifacts](https://awsdocs-neuron.readthedocs-hosted.com/en/latest/release-notes/prev/content.html#neuron-2-23-0-05-20-2025).
 
-```bash
-pip install neuronx-distributed==0.12.12111
-pip install neuronx-distributed-inference==0.3.5591
-```
+[](){ #installing-aws-fork }
 
 Alternatively, the latest Neuron 2.24 features are supported on an AWS Neuron maintained [Github fork of vLLM](https://github.com/aws-neuron/upstreaming-to-vllm/tree/neuron-2.24-vllm-v0.7.2) at
 <https://github.com/aws-neuron/upstreaming-to-vllm/tree/neuron-2.24-vllm-v0.7.2>. Please utilize the AWS fork for the following features:
 
-- Prefix caching
+- [Prefix caching](https://awsdocs-neuron.readthedocs-hosted.com/en/latest/libraries/nxd-inference/developer_guides/feature-guide.html#prefix-caching-support)
 - Disaggregated inference
 
 Refer to [vLLM User Guide for NxD Inference](https://awsdocs-neuron.readthedocs-hosted.com/en/latest/libraries/nxd-inference/developer_guides/vllm-user-guide.html)
