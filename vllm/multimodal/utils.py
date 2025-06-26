@@ -34,25 +34,19 @@ else:
     MultiModalPlaceholderDict = Any
 
 
-def get_kwargs(media_io_kwargs: dict[str, object], modality: str):
-    if modality in media_io_kwargs:
-        return media_io_kwargs[modality]
-    else:
-        return {}
-
-
 class MediaConnector:
 
     def __init__(
         self,
-        media_io_kwargs: dict[str, object],
+        media_io_kwargs: Optional[dict[str, object]] = None,
         connection: HTTPConnection = global_http_connection,
         *,
         allowed_local_media_path: str = "",
     ) -> None:
         super().__init__()
 
-        self.media_io_kwargs: dict[str, object] = media_io_kwargs
+        self.media_io_kwargs: dict[
+            str, object] = media_io_kwargs if media_io_kwargs else {}
         self.connection = connection
 
         if allowed_local_media_path:
@@ -158,8 +152,8 @@ class MediaConnector:
         """
         Load audio from a URL.
         """
-        audio_io = AudioMediaIO(**get_kwargs(self.media_io_kwargs,
-                                             "audio"))  # type: ignore
+        audio_io = AudioMediaIO(**self.media_io_kwargs.get("audio",
+                                                           {}))  # type: ignore
 
         return self.load_from_url(
             audio_url,
@@ -174,8 +168,8 @@ class MediaConnector:
         """
         Asynchronously fetch audio from a URL.
         """
-        audio_io = AudioMediaIO(**get_kwargs(self.media_io_kwargs,
-                                             "audio"))  # type: ignore
+        audio_io = AudioMediaIO(**self.media_io_kwargs.get("audio",
+                                                           {}))  # type: ignore
 
         return await self.load_from_url_async(
             audio_url,
@@ -195,8 +189,8 @@ class MediaConnector:
         By default, the image is converted into RGB format.
         """
         image_io = ImageMediaIO(image_mode=image_mode,
-                                **get_kwargs(self.media_io_kwargs,
-                                             "image"))  # type: ignore
+                                **self.media_io_kwargs.get("image",
+                                                           {}))  # type: ignore
 
         try:
             return self.load_from_url(
@@ -220,8 +214,8 @@ class MediaConnector:
         By default, the image is converted into RGB format.
         """
         image_io = ImageMediaIO(image_mode=image_mode,
-                                **get_kwargs(self.media_io_kwargs,
-                                             "image"))  # type: ignore
+                                **self.media_io_kwargs.get("image",
+                                                           {}))  # type: ignore
 
         try:
             return await self.load_from_url_async(
@@ -243,11 +237,11 @@ class MediaConnector:
         Load video from a HTTP or base64 data URL.
         """
         image_io = ImageMediaIO(image_mode=image_mode,
-                                **get_kwargs(self.media_io_kwargs,
-                                             "image"))  # type: ignore
+                                **self.media_io_kwargs.get("image",
+                                                           {}))  # type: ignore
         video_io = VideoMediaIO(image_io,
-                                **get_kwargs(self.media_io_kwargs,
-                                             "video"))  # type: ignore
+                                **self.media_io_kwargs.get("video",
+                                                           {}))  # type: ignore
 
         return self.load_from_url(
             video_url,
@@ -267,11 +261,11 @@ class MediaConnector:
         By default, the image is converted into RGB format.
         """
         image_io = ImageMediaIO(image_mode=image_mode,
-                                **get_kwargs(self.media_io_kwargs,
-                                             "image"))  # type: ignore
+                                **self.media_io_kwargs.get("image",
+                                                           {}))  # type: ignore
         video_io = VideoMediaIO(image_io,
-                                **get_kwargs(self.media_io_kwargs,
-                                             "video"))  # type: ignore
+                                **self.media_io_kwargs.get("video",
+                                                           {}))  # type: ignore
 
         return await self.load_from_url_async(
             video_url,
@@ -291,7 +285,7 @@ class MediaConnector:
         return image_embedding_io.load_base64("", data)
 
 
-global_media_connector = MediaConnector(media_io_kwargs={})
+global_media_connector = MediaConnector()
 """The global [`MediaConnector`][vllm.multimodal.utils.MediaConnector]
 instance used by vLLM."""
 

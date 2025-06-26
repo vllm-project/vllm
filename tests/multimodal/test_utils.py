@@ -45,7 +45,7 @@ TEST_VIDEO_URLS = [
 
 @pytest.fixture(scope="module")
 def url_images() -> dict[str, Image.Image]:
-    connector = MediaConnector(media_io_kwargs={})
+    connector = MediaConnector()
 
     return {
         image_url: connector.fetch_image(image_url)
@@ -70,7 +70,7 @@ def _image_equals(a: Image.Image, b: Image.Image) -> bool:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("image_url", TEST_IMAGE_URLS)
 async def test_fetch_image_http(image_url: str):
-    connector = MediaConnector(media_io_kwargs={})
+    connector = MediaConnector()
 
     image_sync = connector.fetch_image(image_url)
     image_async = await connector.fetch_image_async(image_url)
@@ -82,7 +82,7 @@ async def test_fetch_image_http(image_url: str):
 @pytest.mark.parametrize("suffix", get_supported_suffixes())
 async def test_fetch_image_base64(url_images: dict[str, Image.Image],
                                   image_url: str, suffix: str):
-    connector = MediaConnector(media_io_kwargs={})
+    connector = MediaConnector()
     url_image = url_images[image_url]
 
     try:
@@ -118,11 +118,10 @@ async def test_fetch_image_base64(url_images: dict[str, Image.Image],
 @pytest.mark.asyncio
 @pytest.mark.parametrize("image_url", TEST_IMAGE_URLS)
 async def test_fetch_image_local_files(image_url: str):
-    connector = MediaConnector(media_io_kwargs={})
+    connector = MediaConnector()
 
     with TemporaryDirectory() as temp_dir:
-        local_connector = MediaConnector(allowed_local_media_path=temp_dir,
-                                         media_io_kwargs={})
+        local_connector = MediaConnector(allowed_local_media_path=temp_dir)
 
         origin_image = connector.fetch_image(image_url)
         origin_image.save(os.path.join(temp_dir, os.path.basename(image_url)),
@@ -153,7 +152,7 @@ async def test_fetch_image_local_files(image_url: str):
 
 @pytest.mark.asyncio
 async def test_fetch_image_error_conversion():
-    connector = MediaConnector(media_io_kwargs={})
+    connector = MediaConnector()
     broken_img = "data:image/png;base64,aGVsbG9fdmxsbV9jb21tdW5pdHkK"
 
     # PIL.UnidentifiedImageError should be converted to ValueError
@@ -168,7 +167,7 @@ async def test_fetch_image_error_conversion():
 @pytest.mark.parametrize("video_url", TEST_VIDEO_URLS)
 @pytest.mark.parametrize("num_frames", [-1, 32, 1800])
 async def test_fetch_video_http(video_url: str, num_frames: int):
-    connector = MediaConnector(media_io_kwargs={})
+    connector = MediaConnector()
 
     video_sync = connector.fetch_video(video_url)
     video_async = await connector.fetch_video_async(video_url)
