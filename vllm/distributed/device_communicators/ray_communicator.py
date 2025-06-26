@@ -198,7 +198,7 @@ class RayCudaCommunicator(Communicator):
         shape: tuple[int],
         dtype: "torch.dtype",
         peer_rank: int,
-        allocator: Optional[TorchTensorAllocator],
+        allocator: TorchTensorAllocator,
     ) -> "torch.Tensor":
         """
         Receive a torch.Tensor from a peer and synchronize the current stream.
@@ -208,8 +208,10 @@ class RayCudaCommunicator(Communicator):
         (e.g., remote actor died), and the buffer is not safe to read.
 
         Args:
-            buf: The torch.Tensor to receive into. This buffer is safe to read
+            shape: The shape of the tensor to receive.
+            dtype: The dtype of the tensor to receive.
             peer_rank: The rank of the actor to receive from.
+            allocator: The allocator to use to create the received tensor.
         """
         if self._closed:
             raise RayChannelError("RayCudaCommunicator has been destroyed.")
