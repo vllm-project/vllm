@@ -387,11 +387,15 @@ class AiterFlashAttentionImpl(AttentionImpl):
         blocksparse_params: Optional[dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         attn_type: AttentionType = AttentionType.DECODER,
+        kv_sharing_target_layer_name: Optional[str] = None,
         use_irope: bool = False,
     ) -> None:
         if blocksparse_params is not None:
             raise ValueError(
                 "AiterFlashAttention does not support block-sparse attention.")
+        if kv_sharing_target_layer_name is not None:
+            raise NotImplementedError(
+                "KV sharing is not supported in AiterFlashAttention.")
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
