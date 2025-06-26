@@ -132,7 +132,7 @@ RequestT = TypeVar("RequestT", bound=AnyRequest)
 
 class RequestProcessingMixin(BaseModel):
     """
-    Mixin for request processing, 
+    Mixin for request processing,
     handling prompt preparation and engine input.
     """
     request_prompts: Optional[Sequence[RequestPrompt]] = []
@@ -144,7 +144,7 @@ class RequestProcessingMixin(BaseModel):
 
 class ResponseGenerationMixin(BaseModel):
     """
-    Mixin for response generation, 
+    Mixin for response generation,
     managing result generators and final batch results.
     """
     result_generator: Optional[AsyncGenerator[tuple[int, Union[
@@ -208,6 +208,7 @@ class OpenAIServing:
         *,
         request_logger: Optional[RequestLogger],
         return_tokens_as_token_ids: bool = False,
+        enable_force_include_usage: bool = False,
     ):
         super().__init__()
 
@@ -219,6 +220,7 @@ class OpenAIServing:
 
         self.request_logger = request_logger
         self.return_tokens_as_token_ids = return_tokens_as_token_ids
+        self.enable_force_include_usage = enable_force_include_usage
 
         self._tokenizer_executor = ThreadPoolExecutor(max_workers=1)
 

@@ -200,5 +200,5 @@ benchmarks/**/*.json
 actionlint
 shellcheck*/
 
-# Ingore moe/marlin_moe gen code
+# Ignore moe/marlin_moe gen code
 csrc/moe/marlin_moe_wna16/kernel_*

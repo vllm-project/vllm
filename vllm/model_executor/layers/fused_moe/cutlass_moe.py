@@ -14,6 +14,7 @@ from vllm.scalar_type import scalar_types
 
 
 def run_cutlass_moe_fp8(
+    output: torch.Tensor,
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
     w2: torch.Tensor,
@@ -31,7 +32,8 @@ def run_cutlass_moe_fp8(
     out_dtype: torch.dtype,
     per_act_token: bool,
     per_out_ch: bool,
-) -> torch.Tensor:
+    use_batched_format: bool,
+):
     a1q = hidden_states
 
     assert w1_scale is not None
@@ -39,49 +41,46 @@ def run_cutlass_moe_fp8(
     assert w1.dtype == torch.float8_e4m3fn
     assert w2.dtype == torch.float8_e4m3fn
     if expert_num_tokens is None:
-        assert a1q.shape[1] == w1.shape[2], "Hidden size mismatch w1"
+        assert a1q.size(1) == w1.size(2), "Hidden size mismatch w1"
     else:
-        assert a1q.shape[2] == w1.shape[2], "Hidden size mismatch w1"
-    assert w1.shape[1] == w2.shape[2] * 2, "Hidden size mismatch w2"
-    assert w1_scale.dim() == 1 or w1_scale.shape[1] == 1 or w1_scale.shape[
-        1] == w1.shape[1], "W1 scale shape mismatch"
-    assert w2_scale.dim() == 1 or w2_scale.shape[1] == 1 or w2_scale.shape[
-        1] == w2.shape[1], "W2 scale shape mismatch"
-    assert w1.shape[0] == w2.shape[0], "Expert number mismatch"
-    assert a1q_scale is None or a1q_scale.dim(
-    ) == 0 or a1q_scale.shape[0] == 1 or a1q_scale.shape[0] == a1q.shape[
-        0], "Input scale shape mismatch"
-    assert w1.shape[0] == w2.shape[0], "Weights expert number mismatch"
-    assert w1.shape[0] == w1_scale.shape[0], "w1 scales expert number mismatch"
-    assert w1.shape[0] == w2_scale.shape[0], "w2 scales expert number mismatch"
-    assert a2_scale is None or a2_scale.dim(
-    ) == 0 or a2_scale.shape[0] == 1 or a2_scale.shape[0] == a1q.shape[
-        0], "Intermediate scale shape mismatch"
+        assert a1q.size(2) == w1.size(2), "Hidden size mismatch w1"
+    assert w1.size(1) == w2.size(2) * 2, "Hidden size mismatch w2"
+    assert w1_scale.dim() == 1 or w1_scale.size(
+        1) == 1 or w1_scale.shape[1] == w1.size(1), "W1 scale shape mismatch"
+    assert w2_scale.dim() == 1 or w2_scale.size(
+        1) == 1 or w2_scale.shape[1] == w2.size(1), "W2 scale shape mismatch"
+    assert w1.size(0) == w2.size(0), "Expert number mismatch"
+    assert a1q_scale is None or a1q_scale.dim() == 0 or a1q_scale.size(
+        0) == 1 or a1q_scale.size(
+            0) == a1q.shape[0], "Input scale shape mismatch"
+    assert w1.size(0) == w2.size(0), "Weights expert number mismatch"
+    assert w1.size(0) == w1_scale.size(0), "w1 scales expert number mismatch"
+    assert w1.size(0) == w2_scale.size(0), "w2 scales expert number mismatch"
+    assert a2_scale is None or a2_scale.dim() == 0 or a2_scale.size(
+        0) == 1 or a2_scale.size(
+            0) == a1q.shape[0], "Intermediate scale shape mismatch"
     assert out_dtype in [torch.half, torch.bfloat16], "Invalid output dtype"
     if expert_map is not None:
         assert expert_num_tokens is None
 
-    # We have two modes: PPLX and non-PPLX. We differentiate them by checking
-    # if expert_num_tokens is None (expert_num_tokens is a tensor which PPLX
-    # uses to track the number of tokens per expert).
-    # In the non-PPLX mode, the input tokens are not padded: thus, the shape
+    # We have two modes: batched experts and non-batched experts.
+    # In the non-batched mode, the input tokens are not padded: thus, the shape
     # of the input is [total_num_tokens, hidden_size]. The input and output
     # require shuffling by a_map and c_map such that the tokens assigned to
     # each expert are contiguous.
-    # In the PPLX mode, the input tokens are padded per expert to ensure that
-    # the PPLX dispatch and combine functions work correctly: thus, the shape
+    # In the batched mode, the input tokens are padded per expert to ensure that
+    # the batched dispatch and combine functions work correctly: thus, the shape
     # of the input is [num_experts, max_num_tokens_per_expert, hidden_size].
-    # The PPLX input and output require no shuffling by a_map and c_map since
+    # The batched input and output require no shuffling by a_map and c_map since
     # their tokens are already contiguous for each expert as a result of
     # the dispatch function.
-    is_pplx = expert_num_tokens is not None
 
-    M = a1q.shape[0]  # no pplx
-    padded_M = a1q.shape[1]  # pplx
+    M = a1q.size(0)  # non batched expert M
+    padded_M = a1q.size(1)  # batched expert M
     _, K, N = w2.shape
     device = a1q.device
 
-    assert w1.shape[2] == K
+    assert w1.size(2) == K
     assert global_num_experts != -1
     assert a1q_scale is not None
 
@@ -92,10 +91,12 @@ def run_cutlass_moe_fp8(
     else:
         local_topk_ids = topk_ids
 
-    topk = local_topk_ids.shape[1]
-    local_E = w1.shape[0]
+    topk = local_topk_ids.size(1)
+    local_E = w1.size(0)
 
-    if is_pplx:
+    if use_batched_format:
+        assert expert_num_tokens is not None
+
         expert_offsets = torch.empty((local_E),
                                      dtype=torch.int32,
                                      device=device)
@@ -110,10 +111,10 @@ def run_cutlass_moe_fp8(
                                          problem_sizes2, expert_num_tokens,
                                          local_E, padded_M, N, K)
 
-        w1_scale = w1_scale.reshape(w1_scale.shape[0], -1)
-        w2_scale = w2_scale.reshape(w2_scale.shape[0], -1)
-        a1q = a1q.reshape(-1, a1q.shape[2])
-        a1q_scale = a1q_scale.reshape(-1, a1q_scale.shape[2]).contiguous()
+        w1_scale = w1_scale.reshape(w1_scale.size(0), -1)
+        w2_scale = w2_scale.reshape(w2_scale.size(0), -1)
+        a1q = a1q.reshape(-1, a1q.size(2))
+        a1q_scale = a1q_scale.reshape(-1, a1q_scale.size(2)).contiguous()
 
     else:
         expert_offsets = torch.empty((global_num_experts + 1),
@@ -150,24 +151,24 @@ def run_cutlass_moe_fp8(
         a1q_scale = a1q_scale[a_map] if per_act_token else a1q_scale
         expert_offsets = expert_offsets[:-1]
 
-    ab_strides1 = torch.full((w1.shape[0], ),
+    ab_strides1 = torch.full((w1.size(0), ),
                              K,
                              device=device,
                              dtype=torch.int64)
-    c_strides1 = torch.full((w1.shape[0], ),
+    c_strides1 = torch.full((w1.size(0), ),
                             2 * N,
                             device=device,
                             dtype=torch.int64)
-    ab_strides2 = torch.full((w1.shape[0], ),
+    ab_strides2 = torch.full((w1.size(0), ),
                              N,
                              device=device,
                              dtype=torch.int64)
-    c_strides2 = torch.full((w1.shape[0], ),
+    c_strides2 = torch.full((w1.size(0), ),
                             K,
                             device=device,
                             dtype=torch.int64)
 
-    if is_pplx:
+    if use_batched_format:
         c1 = _resize_cache(workspace13, (local_E * padded_M, N * 2))
         c2 = _resize_cache(workspace2, (local_E * padded_M, N))
         c3 = _resize_cache(workspace13, (local_E * padded_M, K))
@@ -192,12 +193,15 @@ def run_cutlass_moe_fp8(
                        problem_sizes2, ab_strides2, ab_strides2, c_strides2,
                        per_act_token, per_out_ch)
 
-    if is_pplx:
-        return c3.reshape(local_E, padded_M, K)
+    if use_batched_format:
+        output.copy_(c3.reshape(local_E, padded_M, K), non_blocking=True)
     else:
-        return c3[c_map].view(M, topk, K)
+        # We can't do this inplace because output may point to the same tensor
+        # as c3.
+        output.copy_(c3[c_map].view(M * topk, K), non_blocking=True)
 
 
+# TODO (bnell): split class batched vs. non-batched?
 class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
 
     def __init__(
@@ -206,12 +210,17 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
         out_dtype: torch.dtype,
         per_act_token: bool,
         per_out_ch: bool,
+        use_batched_format: bool = False,
     ):
         super().__init__()
         self.max_experts_per_worker = max_experts_per_worker
         self.out_dtype = out_dtype
         self.per_act_token = per_act_token
         self.per_out_ch = per_out_ch
+        self.use_batched_format = use_batched_format
+
+    def supports_chunking(self) -> bool:
+        return not self.use_batched_format
 
     def workspace_shapes(
         self,
@@ -221,15 +230,26 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
         N: int,
         K: int,
         topk: int,
-        num_experts: int,
-    ) -> tuple[int, int, torch.dtype]:
-        padded_M = aq.shape[1]
-        workspace1 = self.max_experts_per_worker * padded_M * max(N, K)
-        workspace2 = self.max_experts_per_worker * padded_M * (N // 2)
-        return (workspace1, workspace2, self.out_dtype)
+        global_num_experts: int,
+        local_num_experts: int,
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
+        workspace1: tuple[int, ...] = ()
+        workspace2: tuple[int, ...] = ()
+        output: tuple[int, ...] = ()
+        if self.use_batched_format:
+            padded_M = aq.size(1)
+            workspace1 = (self.max_experts_per_worker, padded_M, max(N, K))
+            workspace2 = (self.max_experts_per_worker, padded_M, (N // 2))
+            output = (self.max_experts_per_worker, padded_M, K)
+        else:
+            workspace1 = (M * topk, max(2 * N, K))
+            workspace2 = (M * topk, N)
+            output = (M * topk, K)
+        return (workspace1, workspace2, output, self.out_dtype)
 
     def apply(
         self,
+        output: torch.Tensor,
         hidden_states: torch.Tensor,
         w1: torch.Tensor,
         w2: torch.Tensor,
@@ -246,16 +266,17 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
         workspace13: torch.Tensor,
         workspace2: torch.Tensor,
         expert_num_tokens: Optional[torch.Tensor],
-    ) -> torch.Tensor:
+    ):
         assert w1_zp is None, "w1_zp is not supported in CUTLASS MoE"
         assert w2_zp is None, "w2_zp is not supported in CUTLASS MoE"
         activation_callable = lambda i, o: self.activation(activation, i, o)
-        return run_cutlass_moe_fp8(hidden_states, w1, w2, topk_ids,
-                                   activation_callable, global_num_experts,
-                                   expert_map, w1_scale, w2_scale, a1q_scale,
-                                   a2_scale, workspace13, workspace2,
-                                   expert_num_tokens, self.out_dtype,
-                                   self.per_act_token, self.per_out_ch)
+        run_cutlass_moe_fp8(output, hidden_states, w1, w2, topk_ids,
+                            activation_callable, global_num_experts,
+                            expert_map, w1_scale, w2_scale, a1q_scale,
+                            a2_scale, workspace13, workspace2,
+                            expert_num_tokens, self.out_dtype,
+                            self.per_act_token, self.per_out_ch,
+                            self.use_batched_format)
 
 
 def cutlass_moe_fp8(
@@ -311,7 +332,7 @@ def cutlass_moe_fp8(
     """
     per_act_token = a1_scale.numel() != 1 if a1_scale is not None else (
         a2_scale.numel() != 1 if a2_scale is not None else False)
-    per_out_ch = w1_scale.numel() != w1_q.shape[0]
+    per_out_ch = w1_scale.numel() != w1_q.size(0)
 
     out_dtype = a.dtype
 
@@ -325,6 +346,7 @@ def cutlass_moe_fp8(
             out_dtype=out_dtype,
             per_act_token=per_act_token,
             per_out_ch=per_out_ch,
+            use_batched_format=False,
         ),
     )
 
@@ -403,11 +425,11 @@ def cutlass_moe_fp4(a: torch.Tensor, a1_gscale: torch.Tensor,
     assert (m == m_a), "input shape mismatch"
     assert 2 * half_k_w1 == k_w2, "Hidden size mismatch w2 and w1"
     assert a.dtype in [torch.half, torch.bfloat16], "Invalid input dtype"
-    assert (topk_weights.shape[0] == m and topk_ids.shape[0]
+    assert (topk_weights.size(0) == m and topk_ids.size(0)
             == m), ("topk must be provided for each row of a")
 
     out_dtype = a.dtype
-    num_topk = topk_ids.shape[1]
+    num_topk = topk_ids.size(1)
 
     expert_offsets = torch.empty((e + 1), dtype=torch.int32, device=device)
     blockscale_offsets = torch.empty((e + 1), dtype=torch.int32, device=device)
@@ -441,7 +463,7 @@ def cutlass_moe_fp4(a: torch.Tensor, a1_gscale: torch.Tensor,
                                 out_dtype, device)
     del rep_a_fp4, rep_a_blockscale
     # hidden size dimension is split to one halfpytho sized tensor.
-    intermediate = torch.empty((m * num_topk, w1_fp4.shape[1] // 2),
+    intermediate = torch.empty((m * num_topk, w1_fp4.size(1) // 2),
                                device=device,
                                dtype=out_dtype)
 

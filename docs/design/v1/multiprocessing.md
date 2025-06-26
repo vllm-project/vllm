@@ -7,7 +7,7 @@ page for information on known issues and how to solve them.
 
 ## Introduction
 
-!!! warning
+!!! important
     The source code references are to the state of the code at the time of writing in December, 2024.
 
 The use of Python multiprocessing in vLLM is complicated by:
@@ -123,7 +123,7 @@ what is happening. First, a log message from vLLM:
 WARNING 12-11 14:50:37 multiproc_worker_utils.py:281] CUDA was previously
     initialized. We must use the `spawn` multiprocessing start method. Setting
     VLLM_WORKER_MULTIPROC_METHOD to 'spawn'. See
-    https://docs.vllm.ai/en/latest/usage/debugging.html#python-multiprocessing
+    https://docs.vllm.ai/en/latest/usage/troubleshooting.html#python-multiprocessing
     for more information.
 ```
 

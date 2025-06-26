@@ -12,6 +12,7 @@ from vllm.attention.backends.placeholder_attn import (
     PlaceholderAttentionMetadata)
 from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.platforms import current_platform
+from vllm.v1.attention.backends.mamba_attn import Mamba2AttentionMetadata
 
 
 @dataclass
@@ -42,12 +43,9 @@ class Mamba2Metadata:
            - feature-axis
            - batch-axis
            - sequence-axis)
-    MAX_NUM_PROGRAMS: tracks current size of batch_ptr, which is also
-           the maximum number of Triton program along .program_id(0)
     """
     nums_dict: Optional[dict] = None
     cu_seqlen: Optional[int] = None
-    MAX_NUM_PROGRAMS: int = 1024
     batch_ptr: Optional[torch.tensor] = None
     token_chunk_offset_ptr: Optional[torch.tensor] = None
 
@@ -170,7 +168,7 @@ def prepare_mamba2_metadata(
 
 
 def update_metadata(x: torch.Tensor, query_start_loc: torch.Tensor,
-                    mamba2_metadata: Mamba2Metadata):
+                    mamba2_metadata: Mamba2Metadata | Mamba2AttentionMetadata):
     """
     this is triggered upon handling a new input at the first layer
     """
@@ -187,9 +185,7 @@ def update_metadata(x: torch.Tensor, query_start_loc: torch.Tensor,
         nums_dict[BLOCK_M]['mlist'] = mlist
         mlist_len = len(nums_dict[BLOCK_M]['mlist'])
         nums_dict[BLOCK_M]['mlist_len'] = mlist_len
-        # type: ignore
-        mamba2_metadata.MAX_NUM_PROGRAMS = max(
-            mamba2_metadata.MAX_NUM_PROGRAMS, mlist_len)
+        MAX_NUM_PROGRAMS = max(1024, mlist_len) * 2
         offsetlist = []  # type: ignore
         for idx, num in enumerate(nums):
             offsetlist.extend(range(num))
@@ -198,26 +194,22 @@ def update_metadata(x: torch.Tensor, query_start_loc: torch.Tensor,
 
         if mamba2_metadata.batch_ptr is None:
             # Update default value after class definition
-            mamba2_metadata.MAX_NUM_PROGRAMS *= 2
-            mamba2_metadata.batch_ptr = torch.full(
-                (mamba2_metadata.MAX_NUM_PROGRAMS, ),
-                PAD_SLOT_ID,
-                dtype=torch.int32,
-                device='cuda')
+            #mamba2_metadata.MAX_NUM_PROGRAMS *= 2
+            mamba2_metadata.batch_ptr = torch.full((MAX_NUM_PROGRAMS, ),
+                                                   PAD_SLOT_ID,
+                                                   dtype=torch.int32,
+                                                   device='cuda')
             mamba2_metadata.token_chunk_offset_ptr = torch.full(
-                (mamba2_metadata.MAX_NUM_PROGRAMS, ),
+                (MAX_NUM_PROGRAMS, ),
                 PAD_SLOT_ID,
                 dtype=torch.int32,
                 device='cuda')
         else:
-            if mamba2_metadata.batch_ptr.nelement(
-            ) < mamba2_metadata.MAX_NUM_PROGRAMS:
-                mamba2_metadata.batch_ptr.resize_(
-                    mamba2_metadata.MAX_NUM_PROGRAMS).fill_(
-                        PAD_SLOT_ID)  # type: ignore
+            if mamba2_metadata.batch_ptr.nelement() < MAX_NUM_PROGRAMS:
+                mamba2_metadata.batch_ptr.resize_(MAX_NUM_PROGRAMS).fill_(
+                    PAD_SLOT_ID)
                 mamba2_metadata.token_chunk_offset_ptr.resize_(  # type: ignore
-                    mamba2_metadata.MAX_NUM_PROGRAMS).fill_(
-                        PAD_SLOT_ID)  # type: ignore
+                    MAX_NUM_PROGRAMS).fill_(PAD_SLOT_ID)
 
         mamba2_metadata.batch_ptr[0:mlist_len].copy_(mlist)
         mamba2_metadata.token_chunk_offset_ptr[  # type: ignore

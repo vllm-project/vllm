@@ -44,8 +44,8 @@ class SupportsMultiModal(Protocol):
         MRO of your model class.
     """
 
-    def get_multimodal_embeddings(
-            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
+    def get_multimodal_embeddings(self,
+                                  **kwargs: object) -> MultiModalEmbeddings:
         """
         Returns multimodal embeddings generated from multimodal kwargs 
         to be merged with text embeddings.
@@ -487,6 +487,12 @@ def supports_cross_encoding(
     model: Union[type[object], object],
 ) -> Union[TypeIs[type[SupportsCrossEncoding]], TypeIs[SupportsCrossEncoding]]:
     return is_pooling_model(model) and _supports_cross_encoding(model)
+
+
+def has_step_pooler(model: Union[type[object], object]) -> bool:
+    """Check if the model uses step pooler."""
+    return is_pooling_model(model) and any(
+        type(module).__name__ == "StepPool" for module in model.modules())
 
 
 class SupportsQuant:
