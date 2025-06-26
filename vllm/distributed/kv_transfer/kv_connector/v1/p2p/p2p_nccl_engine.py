@@ -471,16 +471,16 @@ class P2pNcclEngine:
                 if (num_layers == len(
                         self.send_request_id_to_tensor_ids[request_id])):
                     finished_sending.add(request_id)
-            # for request_id in finished_sending:
-            #     self.send_request_id_to_tensor_ids.pop(request_id, None)
+            for request_id in finished_sending:
+                self.send_request_id_to_tensor_ids.pop(request_id, None)
         # Retrieve requests that have already received the KV cache.
         finished_recving: set[str] = set()
         for request_id in self.recv_request_id_to_tensor_ids:
             if num_layers == len(
                     self.recv_request_id_to_tensor_ids[request_id]):
                 finished_recving.add(request_id)
-        # for request_id in finished_recving:
-        #     self.recv_request_id_to_tensor_ids.pop(request_id, None)
+        for request_id in finished_recving:
+            self.recv_request_id_to_tensor_ids.pop(request_id, None)
 
         # TODO: Add failed requests (e.g., transmission errors)
         return finished_sending or None, finished_recving or None
