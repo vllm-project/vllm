@@ -1,5 +1,5 @@
 ---
-title: Implementing a Basic Model
+title: Basic Model
 ---
 [](){ #new-model-basic }
 

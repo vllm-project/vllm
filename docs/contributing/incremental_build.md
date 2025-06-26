@@ -1,4 +1,4 @@
-# Incremental Compilation Workflow for vLLM Development
+# Incremental Compilation Workflow
 
 When working on vLLM's C++/CUDA kernels located in the `csrc/` directory, recompiling the entire project with `uv pip install -e .` for every change can be time-consuming. An incremental compilation workflow using CMake allows for faster iteration by only recompiling the necessary components after an initial setup. This guide details how to set up and use such a workflow, which complements your editable Python installation.
 
