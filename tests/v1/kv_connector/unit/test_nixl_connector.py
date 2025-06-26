@@ -7,7 +7,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
 from .utils import create_request, create_scheduler, create_vllm_config
 
 
-def test_basic_inferface():
+def test_basic_interface():
     """Unit test for basic NixlConnector interface functionality."""
 
     vllm_config = create_vllm_config()
@@ -25,7 +25,7 @@ def test_basic_inferface():
 
     scheduler.add_request(request)
 
-    # Remote Prefill, triggers NixlConnectorMetdata.
+    # Remote Prefill, triggers NixlConnectorMetadata.
     scheduler_output = scheduler.schedule()
     kv_connector_metadata = scheduler_output.kv_connector_metadata
     assert kv_connector_metadata is not None

@@ -171,6 +171,9 @@ class RequestStatus(enum.IntEnum):
     FINISHED_ABORTED = enum.auto()
     FINISHED_IGNORED = enum.auto()
 
+    def __str__(self):
+        return self.name
+
     @staticmethod
     def is_finished(status: "RequestStatus") -> bool:
         return status > RequestStatus.PREEMPTED

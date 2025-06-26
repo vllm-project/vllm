@@ -44,8 +44,8 @@ class SupportsMultiModal(Protocol):
         MRO of your model class.
     """
 
-    def get_multimodal_embeddings(
-            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
+    def get_multimodal_embeddings(self,
+                                  **kwargs: object) -> MultiModalEmbeddings:
         """
         Returns multimodal embeddings generated from multimodal kwargs 
         to be merged with text embeddings.

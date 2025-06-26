@@ -20,12 +20,10 @@ repos:
     args: [--output-format, github, --fix]
   - id: ruff-format
     files: ^(.buildkite|benchmarks|examples)/.*
-- repo: https://github.com/codespell-project/codespell
-  rev: v2.4.1
+- repo: https://github.com/crate-ci/typos
+  rev: v1.32.0
   hooks:
-  - id: codespell
-    additional_dependencies: ['tomli']
-    args: ['--toml', 'pyproject.toml']
+  - id: typos
 - repo: https://github.com/PyCQA/isort
   rev: 6.0.1
   hooks:
@@ -145,6 +143,13 @@ repos:
     types: [python]
     pass_filenames: false
     additional_dependencies: [regex]
+  - id: check-pickle-imports
+    name: Prevent new pickle/cloudpickle imports
+    entry: python tools/check_pickle_imports.py
+    language: python
+    types: [python]
+    pass_filenames: false
+    additional_dependencies: [pathspec, regex]
   # Keep `suggestion` last
   - id: suggestion
     name: Suggestion

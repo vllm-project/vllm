@@ -480,6 +480,13 @@ class Platform:
         return False
 
     @classmethod
+    def default_v1(cls, model_config: ModelConfig) -> bool:
+        """
+        Returns whether the current platform supports v1 by default.
+        """
+        return cls.supports_v1(model_config)
+
+    @classmethod
     def use_custom_allreduce(cls) -> bool:
         """
         Returns if custom allreduce is supported on the current platform

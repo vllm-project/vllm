@@ -248,7 +248,7 @@ def test_temperature_zero_target_distribution(seed: int, device: str):
                                     size=(batch_size, 1),
                                     dtype=torch.int64)
     # The target probaility distribution is a temperature zero distribution
-    # with zero entroy. Since our draft token ids don't match the probability
+    # with zero entropy. Since our draft token ids don't match the probability
     # 1.0 tokens in the target distribution we will reject all of them and
     # fallback to the greedy sampling for selecting 1 token for each sequence.
     # Verify the same.

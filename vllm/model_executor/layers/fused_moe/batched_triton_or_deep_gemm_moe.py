@@ -81,18 +81,19 @@ class BatchedTritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         N: int,
         K: int,
         topk: int,
-        num_experts: int,
+        global_num_experts: int,
+        local_num_experts: int,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
         # Note: the deep gemm workspaces are strictly larger than the triton
         # workspaces so we can be pessimistic here and allocate for DeepGemm
         # even if we fall back to triton later, e.g. if expert maps are set.
         if self.allow_deep_gemm and self.batched_deep_gemm_experts is not None:
             return self.batched_deep_gemm_experts.workspace_shapes(
-                a, aq, M, N, K, topk, num_experts)
+                a, aq, M, N, K, topk, global_num_experts, local_num_experts)
         else:
             assert self.batched_triton_experts is not None
             return self.batched_triton_experts.workspace_shapes(
-                a, aq, M, N, K, topk, num_experts)
+                a, aq, M, N, K, topk, global_num_experts, local_num_experts)
 
     def apply(
         self,

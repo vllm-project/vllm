@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-# Datastructures defining an input batch
+# Datastructures defining a GPU input batch
 
 from dataclasses import dataclass
 from typing import Optional, cast
@@ -453,6 +453,11 @@ class InputBatch:
         self.block_table.swap_row(i1, i2)
 
     def condense(self, empty_req_indices: list[int]) -> None:
+        """Move non-empty requests down into lower, empty indices.
+        
+        Args:
+          empty_req_indices: empty batch indices, sorted descending.
+        """
         num_reqs = self.num_reqs
         if num_reqs == 0:
             # The batched states are empty.

@@ -965,9 +965,9 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         grid_thw_list = grid_thw.tolist()
 
         if image_input["type"] == "image_embeds":
-            image_embeds = image_input["image_embeds"].type(self.visual.dtype)
+            image_embeds = image_input["image_embeds"]
         else:
-            pixel_values = image_input["pixel_values"].type(self.visual.dtype)
+            pixel_values = image_input["pixel_values"]
             image_embeds = self.visual(pixel_values, grid_thw=grid_thw_list)
 
         # Split concatenated embeddings for each image item.
@@ -985,10 +985,9 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         grid_thw_list = grid_thw.tolist()
 
         if video_input["type"] == "video_embeds":
-            video_embeds = video_input["video_embeds"].type(self.visual.dtype)
+            video_embeds = video_input["video_embeds"]
         else:
-            pixel_values_videos = video_input["pixel_values_videos"].type(
-                self.visual.dtype)
+            pixel_values_videos = video_input["pixel_values_videos"]
             video_embeds = self.visual(pixel_values_videos,
                                        grid_thw=grid_thw_list)
 
@@ -1017,13 +1016,13 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def get_multimodal_embeddings(
-            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
+    def get_multimodal_embeddings(self,
+                                  **kwargs: object) -> MultiModalEmbeddings:
 
         mm_input_by_modality = self._parse_and_validate_multimodal_inputs(
             **kwargs)
         if not mm_input_by_modality:
-            return None
+            return []
 
         # The result multimodal_embeddings is tuple of tensors, with each
         # tensor correspoending to a multimodal data item (image or video).
