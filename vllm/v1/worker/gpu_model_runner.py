@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import copy
-import dataclasses
 import gc
 import time
 import weakref
@@ -21,7 +20,7 @@ from vllm.attention.backends.abstract import AttentionBackend
 from vllm.attention.layer import Attention
 from vllm.compilation.counter import compilation_counter
 from vllm.config import (CompilationLevel, VllmConfig,
-                         get_layers_from_vllm_config)
+                         get_layers_from_vllm_config, update_config)
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
@@ -1695,11 +1694,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     def update_config(self, overrides: dict[str, Any]) -> None:
         for config_name, config_overrides in overrides.items():
-            try:
-                config = getattr(self, config_name)
-            except AttributeError as exc:
-                raise ValueError(f"Unknown config {config_name}") from exc
-            new_config = dataclasses.replace(config, **config_overrides)
+            assert hasattr(self,
+                           config_name), f"Unknown config `{config_name}`"
+            config = getattr(self, config_name)
+            new_config = update_config(config, config_overrides)
             setattr(self, config_name, new_config)
 
     def load_model(self) -> None:

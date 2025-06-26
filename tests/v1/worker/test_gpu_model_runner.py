@@ -433,6 +433,15 @@ def test_kv_cache_stride_order(monkeypatch, model_runner):
         assert all(not kv.is_contiguous() for kv in model_runner.kv_caches)
 
 
+def test_update_config(model_runner):
+    # Simple update
+    model_runner.update_config({"load_config": {"load_format": "dummy"}})
+    assert model_runner.load_config.load_format == "dummy"
+    # Raise error on non-existing config
+    with pytest.raises(AssertionError):
+        model_runner.update_config({"do_not_exist_config": "dummy"})
+
+
 def test_load_model_weights_inplace(dist_init, model_runner, model_runner_2):
     # In this test, model_runner loads model + weights in one go, while
     # model_runner_2 loads dummy weights first then load real weights inplace

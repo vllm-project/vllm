@@ -8,7 +8,7 @@ import pytest
 
 from vllm.compilation.backends import VllmBackend
 from vllm.config import (LoadConfig, ModelConfig, PoolerConfig, VllmConfig,
-                         config, get_field)
+                         config, get_field, update_config)
 from vllm.model_executor.layers.pooler import PoolingType
 from vllm.platforms import current_platform
 
@@ -77,6 +77,34 @@ def test_get_field():
     assert isinstance(c, Field)
     assert c.default == "default"
     assert c.default_factory is MISSING
+
+
+@dataclass
+class _TestNestedConfig:
+    a: _TestConfigFields = field(
+        default_factory=lambda: _TestConfigFields(a=0))
+
+
+def test_update_config():
+    # Simple update
+    config = _TestConfigFields(a=0)
+    new_config = update_config(config, {"a": 42})
+    assert new_config.a == 42
+    # Nonexistent field
+    with pytest.raises(AssertionError):
+        new_config = update_config(config, {"nonexistent": 1})
+    # Nested update with dataclass
+    config = _TestNestedConfig()
+    new_inner_config = _TestConfigFields(a=1, c="new_value")
+    new_config = update_config(config, {"a": new_inner_config})
+    assert new_config.a == new_inner_config
+    # Nested update with dict
+    config = _TestNestedConfig()
+    new_config = update_config(config, {"a": {"c": "new_value"}})
+    assert new_config.a.c == "new_value"
+    # Nested update with invalid type
+    with pytest.raises(AssertionError):
+        new_config = update_config(config, {"a": "new_value"})
 
 
 @pytest.mark.parametrize(
