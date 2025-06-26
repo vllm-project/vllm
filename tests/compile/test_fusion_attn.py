@@ -6,12 +6,13 @@ import torch._dynamo
 
 from tests.compile.backend import TestBackend
 from tests.models.utils import check_outputs_equal
+from vllm.config import set_current_vllm_config
 from vllm import LLM, SamplingParams
 from vllm.compilation.fusion import QUANT_OPS, QuantKey, kFp8StaticTensorSym
 from vllm.compilation.fusion_attn import ATTN_OP, AttnFusionPass
 from vllm.compilation.fx_utils import find_op_nodes
 from vllm.compilation.noop_elimination import NoOpEliminationPass
-from vllm.config import CompilationConfig, CompilationLevel, VllmConfig
+from vllm.config import CompilationConfig, CompilationLevel, VllmConfig, ModelConfig, PassConfig
 from vllm.platforms import current_platform
 
 # globals needed for string-import custom Dynamo backend field
@@ -22,13 +23,16 @@ backend_unfused: Optional[TestBackend] = None
 @pytest.mark.parametrize(
     "model, quant_key",
     [("amd/Llama-3.1-8B-Instruct-FP8-KV", kFp8StaticTensorSym)])
-@pytest.mark.parametrize(
-    "use_triton_fa", [True, False] if current_platform.is_rocm() else [False])
+@pytest.mark.parametrize("use_triton_fa, use_v1", [(False, True)])
 @pytest.mark.skipif(not current_platform.supports_fp8(), reason="Need FP8")
 @pytest.mark.skipif(not current_platform.is_cuda_alike(),
                     reason="Only test CUDA and ROCm")
 def test_attention_fusion(example_prompts, monkeypatch, model: str,
-                          quant_key: QuantKey, use_triton_fa: bool):
+                          quant_key: QuantKey, use_triton_fa: bool,
+                          use_v1: bool):
+    if use_triton_fa and use_v1:
+        pytest.skip("Triton FA only applies to V0")
+
     # Clean Dynamo cache to avoid reusing other test cases
     # (for some reason the reset at the end is not enough)
     torch._dynamo.reset()
@@ -36,8 +40,8 @@ def test_attention_fusion(example_prompts, monkeypatch, model: str,
     # Use global backends
     global backend, backend_unfused
 
-    use_v1 = False  # can be made a param once V1 support added
     monkeypatch.setenv("VLLM_USE_V1", str(int(use_v1)))
+    monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
     monkeypatch.setenv("VLLM_USE_TRITON_FLASH_ATTN", str(int(use_triton_fa)))
 
     # Prompt 4 seems too open-ended, differs between fused and unfused
@@ -48,50 +52,61 @@ def test_attention_fusion(example_prompts, monkeypatch, model: str,
         # DYNAMO_AS_IS triggers custom backend & does full Dynamo compilation
         # DYNAMO_ONCE does not properly propagate shapes.
         level=CompilationLevel.DYNAMO_AS_IS,
-        backend="tests.compile.test_fusion_attn.backend_unfused",
+        full_cuda_graph=True,
+        pass_config=PassConfig(),
+        backend="tests.compile.test_fusion_attn.backend_unfused"
     )
-    vllm_config = VllmConfig(compilation_config=compile_config)
-    backend_unfused = TestBackend(NoOpEliminationPass(vllm_config))
+    model_config = ModelConfig(dtype="bfloat16", )
+    vllm_config = VllmConfig(compilation_config=compile_config,
+                             model_config=model_config)
+    with set_current_vllm_config(vllm_config):
+        backend_unfused = TestBackend(NoOpEliminationPass(vllm_config))
 
-    llm = LLM(model,
-              enforce_eager=True,
-              compilation_config=compile_config,
-              gpu_memory_utilization=0.9,
-              max_model_len=2048)
+        print("Before ctr 1")
+        llm = LLM(model,
+                compilation_config=compile_config,
+                gpu_memory_utilization=0.5,
+                max_model_len=2048)
+        print("After ctr 1")
 
-    sampling_params = SamplingParams(temperature=0.0,
-                                     max_tokens=10,
-                                     top_p=0.95)
+        sampling_params = SamplingParams(temperature=0.0,
+                                        max_tokens=10,
+                                        top_p=0.95)
 
-    unfused_output = llm.generate(prompts, sampling_params)
-    backend_unfused = None  # Reset backend to make sure llm gets released
-    del llm
+        print("Before generate 1")
+        unfused_output = llm.generate(prompts, sampling_params)
+        print("After generate 1")
+        backend_unfused = None  # Reset backend to make sure llm gets released
+        del llm
 
     compile_config = CompilationConfig(
         # DYNAMO_AS_IS triggers custom backend & does full Dynamo compilation
         # DYNAMO_ONCE does not properly propagate shapes.
         level=CompilationLevel.DYNAMO_AS_IS,
-        backend="tests.compile.test_fusion_attn.backend",
+        full_cuda_graph=True,
+        pass_config=PassConfig(enable_noop=True, enable_attn_fusion=True),
+        backend="tests.compile.test_fusion_attn.backend"
     )
-    vllm_config = VllmConfig(compilation_config=compile_config)
+    vllm_config = VllmConfig(compilation_config=compile_config,
+                             model_config=model_config)
 
-    # AttnFusionPass needs attention layers to be registered in config upon init
-    # so we initialize it during compilation.
-    attn_pass = lambda *args, **kw: AttnFusionPass(vllm_config)(*args, **kw)
-    backend = TestBackend(NoOpEliminationPass(vllm_config), attn_pass)
-    llm2 = LLM(model,
-               enforce_eager=True,
-               compilation_config=compile_config,
-               gpu_memory_utilization=0.9,
-               max_model_len=2048)
+    with set_current_vllm_config(vllm_config):
+        # AttnFusionPass needs attention layers to be registered in config upon init
+        # so we initialize it during compilation.
+        attn_pass = lambda *args, **kw: AttnFusionPass(vllm_config)(*args, **kw)
+        backend = TestBackend(NoOpEliminationPass(vllm_config), attn_pass)
+        llm2 = LLM(model,
+                compilation_config=compile_config,
+                gpu_memory_utilization=0.5,
+                max_model_len=2048)
 
-    # check support
-    attn_fusion_supported = [
-        layer.impl.fused_output_quant_supported(quant_key.dtype,
-                                                quant_key.static,
-                                                quant_key.group_shape)
-        for key, layer in compile_config.static_forward_context.items()
-    ]
+        # check support
+        attn_fusion_supported = [
+            layer.impl.fused_output_quant_supported(quant_key.dtype,
+                                                    quant_key.static,
+                                                    quant_key.group_shape)
+            for key, layer in compile_config.static_forward_context.items()
+        ]
 
     print(f"{attn_fusion_supported=}")
     if any(attn_fusion_supported):

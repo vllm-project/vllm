@@ -12,6 +12,17 @@ from vllm.compilation.fx_utils import find_op_nodes
 from vllm.compilation.inductor_pass import InductorPass
 from vllm.config import get_current_vllm_config
 
+class TestPass(InductorPass):
+    def __init__(self, backend: "TestBackend"):
+        self.backend = backend
+
+    def __call__(self, graph: fx.Graph):
+        print("TestPass: Before pass")
+        self.backend.graph_pre_compile = deepcopy(graph)
+        for pass_ in self.backend.custom_passes:
+            pass_(graph)
+
+        self.backend.graph_post_pass = deepcopy(graph)
 
 class TestBackend:
     """
@@ -31,9 +42,11 @@ class TestBackend:
         compile_config = get_current_vllm_config().compilation_config
         self.inductor_config = compile_config.inductor_compile_config
         self.inductor_config['force_disable_caches'] = True
-        self.inductor_config['post_grad_custom_post_pass'] = self.post_pass
+        self.test_pass = TestPass(self)
+        self.inductor_config['post_grad_custom_post_pass'] = self.test_pass
 
     def __call__(self, graph: fx.GraphModule, example_inputs):
+        print("AAAAA")
         self.graph_pre_compile = deepcopy(graph)
         from torch._inductor.compile_fx import compile_fx
         return compile_fx(graph,
@@ -41,6 +54,7 @@ class TestBackend:
                           config_patches=self.inductor_config)
 
     def post_pass(self, graph: fx.Graph):
+        print("BBBBB")
         self.graph_pre_pass = deepcopy(graph)
         for pass_ in self.custom_passes:
             pass_(graph)
