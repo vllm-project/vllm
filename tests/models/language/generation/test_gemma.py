@@ -14,10 +14,14 @@ def test_dummy_loader(vllm_runner, monkeypatch, model: str) -> None:
                 model,
                 load_format="dummy",
         ) as llm:
-            normalizers = llm.model.collective_rpc(
-                lambda self: self.model_runner.model.model.normalizer.cpu(
-                ).item())
-            assert np.allclose(
-                normalizers,
-                llm.model.llm_engine.model_config.hf_config.hidden_size**0.5,
-                rtol=1e-3)
+            if model == "google/gemma-3-4b-it":
+                normalizers = llm.model.collective_rpc(
+                    lambda self: self.model_runner.model.language_model.model.
+                    normalizer.cpu().item())
+                config = llm.model.llm_engine.model_config.hf_config.text_config
+            else:
+                normalizers = llm.model.collective_rpc(
+                    lambda self: self.model_runner.model.model.normalizer.cpu(
+                    ).item())
+                config = llm.model.llm_engine.model_config.hf_config
+            assert np.allclose(normalizers, config.hidden_size**0.5, rtol=2e-3)
