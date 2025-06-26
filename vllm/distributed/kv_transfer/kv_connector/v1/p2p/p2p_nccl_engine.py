@@ -285,7 +285,7 @@ class P2pNcclEngine:
                              dtype=getattr(torch, data["dtype"]),
                              device=self.device)
 
-        self._recv(comm, tensor, rank ^ 1, self.recv_stream)
+        self._recv(comm, tensor_id, tensor, rank ^ 1, self.recv_stream)
 
         return tensor
 
@@ -368,7 +368,7 @@ class P2pNcclEngine:
 
                 if data["ret"] == 0:
                     comm, rank = self.comms[remote]
-                    self._send(comm, tensor.to(self.device), rank ^ 1,
+                    self._send(comm, tensor_id, tensor.to(self.device), rank ^ 1,
                                self.send_stream)
             else:
                 logger.warning(
@@ -426,7 +426,7 @@ class P2pNcclEngine:
                 response.decode())
             return False
 
-        self._send(comm, tensor, rank ^ 1, self.send_stream)
+        self._send(comm, tensor_id, tensor, rank ^ 1, self.send_stream)
 
         if self.send_type == "PUT_ASYNC":
             self._have_sent_tensor_id(tensor_id)
