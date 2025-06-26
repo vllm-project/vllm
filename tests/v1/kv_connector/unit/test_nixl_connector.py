@@ -7,6 +7,8 @@ from collections import defaultdict
 from typing import Optional
 from unittest.mock import patch
 
+import pytest
+
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
     KVConnectorRole, NixlAgentMetadata, NixlConnector, NixlConnectorMetadata,
     NixlConnectorWorker)
@@ -161,7 +163,8 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
         super().__init__(*args, **kwargs)
         self._hand_shake_latency = hand_shake_latency
 
-    def _nixl_handshake(self, host: str, port: int) -> dict[int, str]:
+    def _nixl_handshake(self, host: str, port: int,
+                        remote_tp_size: int) -> dict[int, str]:
         # Mimic slow _nixl_handshake, as well as bypass zmq communication.
         time.sleep(self._hand_shake_latency)
         # These should've been done in register_kv_caches(), called by
@@ -177,10 +180,10 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
                 agent_metadata=FakeNixlWrapper.AGENT_METADATA,
                 kv_caches_base_addr=[0],
                 num_blocks=1,
-                tp_size=1,
                 block_len=self.block_len,
                 attn_backend_name=self.backend_name,
-            ))
+            ),
+            remote_tp_size=remote_tp_size)
         return {0: remote_agent_name}
 
 
@@ -233,6 +236,8 @@ class TestNixlHandshake:
                         "localhost",
                         "remote_port":
                         1234,
+                        "remote_tp_size":
+                        1,
                     })
             connector.bind_connector_metadata(metadata)
 
@@ -259,13 +264,23 @@ class TestNixlHandshake:
     @patch(
         "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",
         FakeNixlWrapper)
+    @pytest.mark.parametrize("decode_tp_size, prefill_tp_size", [
+        (1, 1),
+        (2, 1),
+        (4, 2),
+        (4, 4),
+    ])
     def test_async_load_kv(
-        self,
-        # dist_init is a fixture that initializes the distributed environment.
-        dist_init):
+            self,
+            # Fixture that initializes the distributed environment.
+            dist_init,
+            # Simulate consumer-producer TP sizes.
+            decode_tp_size,
+            prefill_tp_size):
         """Test that NixlConnector's start_load_kv should be non-blocking."""
 
         vllm_config = create_vllm_config()
+        vllm_config.parallel_config.tensor_parallel_size = decode_tp_size
 
         # Test worker role in decode server.
         connector = NixlConnector(vllm_config, KVConnectorRole.WORKER)
@@ -280,6 +295,7 @@ class TestNixlHandshake:
                                  FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
                                  "remote_host": "localhost",
                                  "remote_port": 1234,
+                                 "remote_tp_size": prefill_tp_size,
                              })
         connector.bind_connector_metadata(metadata)
 
@@ -329,6 +345,7 @@ class TestNixlHandshake:
                                      FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
                                      "remote_host": "localhost",
                                      "remote_port": 1234,
+                                     "remote_tp_size": 1,
                                  })
         connector.bind_connector_metadata(metadata)
 
