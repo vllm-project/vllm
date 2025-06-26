@@ -156,14 +156,13 @@ def make_quantized_test_activations(
         assert (quant_dtype == torch.float8_e4m3fn
                 or quant_dtype == torch.int8), "only fp8/int8 supported"
         a_q = torch.zeros_like(a, dtype=quant_dtype)
-        a_scale = [None] * E
+        a_scale_l = [None] * E
         for e in range(E):
-            a_q[e], a_scale[e] = moe_kernel_quantize_input(
+            a_q[e], a_scale_l[e] = moe_kernel_quantize_input(
                 a[e], None, quant_dtype, per_act_token_quant, block_shape)
-        a_scale = torch.stack(a_scale)
+        a_scale = torch.stack(a_scale_l)
 
         if not per_act_token_quant and block_shape is None:
-            assert a_scale is not None
             a_scale = a_scale.view(E, 1, 1)
 
     return a, a_q, a_scale
