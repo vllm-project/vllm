@@ -52,7 +52,8 @@ Alternatively, set up a two-GPU on-premises Kubernetes cluster before continuing
 
 #### Install the KubeRay operator
 
-Install the latest stable KubeRay operator by following the [official installation guide](https://docs.ray.io/en/latest/cluster/kubernetes/getting-started/kuberay-operator-installation.html).
+Install the latest stable KubeRay operator by following the 
+[official installation guide](https://docs.ray.io/en/latest/cluster/kubernetes/getting-started/kuberay-operator-installation.html).
 
 #### Store the Hugging Face token as a Kubernetes secret
 
