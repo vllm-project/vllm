@@ -17,14 +17,9 @@ from flashinfer.decode import trtllm_batch_decode_with_kv_cache
 import vllm.envs as envs
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionType)
-<<<<<<< HEAD
 from vllm.config import VllmConfig
-=======
-from vllm.attention.layer import Attention
-from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     get_kv_connector_cache_layout)
->>>>>>> 110ad8f8a (flashinfer hnd)
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils import cdiv
