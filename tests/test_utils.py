@@ -5,6 +5,7 @@
 import asyncio
 import hashlib
 import json
+import logging
 import pickle
 import socket
 from collections.abc import AsyncIterator
@@ -319,6 +320,30 @@ def test_dict_args(parser):
         "use_inductor": True,
         "backend": "custom",
     }
+
+
+def test_duplicate_dict_args(caplog_vllm, parser):
+    args = [
+        "--model-name=something.something",
+        "--hf-overrides.key1",
+        "val1",
+        "--hf-overrides.key1",
+        "val2",
+        "-O1",
+        "-O.level",
+        "2",
+        "-O3",
+    ]
+
+    parsed_args = parser.parse_args(args)
+    # Should be the last value
+    assert parsed_args.hf_overrides == {"key1": "val2"}
+    assert parsed_args.compilation_config == {"level": 3}
+
+    assert len(caplog_vllm.records) == 1
+    assert "duplicate" in caplog_vllm.text
+    assert "--hf-overrides.key1" in caplog_vllm.text
+    assert "-O.level" in caplog_vllm.text
 
 
 # yapf: enable

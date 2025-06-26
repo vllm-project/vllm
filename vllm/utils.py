@@ -1504,16 +1504,24 @@ class FlexibleArgumentParser(ArgumentParser):
         def recursive_dict_update(
             original: dict[str, Any],
             update: dict[str, Any],
-        ):
-            """Recursively updates a dictionary with another dictionary."""
+        ) -> set[str]:
+            """Recursively updates a dictionary with another dictionary.
+            Returns a set of duplicate keys that were overwritten.
+            """
+            duplicates = set[str]()
             for k, v in update.items():
                 if isinstance(v, dict) and isinstance(original.get(k), dict):
-                    recursive_dict_update(original[k], v)
+                    nested_duplicates = recursive_dict_update(original[k], v)
+                    duplicates |= {f"{k}.{d}" for d in nested_duplicates}
                 else:
+                    if k in original:
+                        duplicates.add(k)
                     original[k] = v
+            return duplicates
 
         delete = set[int]()
         dict_args = defaultdict[str, dict[str, Any]](dict)
+        duplicates = set[str]()
         for i, processed_arg in enumerate(processed_args):
             if i in delete:  # skip if value from previous arg
                 continue
@@ -1535,12 +1543,17 @@ class FlexibleArgumentParser(ArgumentParser):
 
                 # Merge all values with the same key into a single dict
                 arg_dict = create_nested_dict(keys, value)
-                recursive_dict_update(dict_args[key], arg_dict)
+                arg_duplicates = recursive_dict_update(dict_args[key],
+                                                       arg_dict)
+                duplicates |= {f'{key}.{d}' for d in arg_duplicates}
                 delete.add(i)
         # Filter out the dict args we set to None
         processed_args = [
             a for i, a in enumerate(processed_args) if i not in delete
         ]
+        if duplicates:
+            logger.warning("Found duplicate keys %s", ", ".join(duplicates))
+
         # Add the dict args back as if they were originally passed as JSON
         for dict_arg, dict_value in dict_args.items():
             processed_args.append(dict_arg)
