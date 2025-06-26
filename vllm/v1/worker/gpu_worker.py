@@ -117,9 +117,10 @@ class Worker(WorkerBase):
                                        tag: str) -> AbstractContextManager:
         if self.vllm_config.model_config.enable_sleep_mode:
             allocator = CuMemAllocator.get_instance()
-            assert allocator.get_current_usage() == 0, (
-                "Sleep mode can only be "
-                "used for one instance per process.")
+            if tag == "weights":
+                assert allocator.get_current_usage() == 0, (
+                    "Sleep mode can only be "
+                    "used for one instance per process.")
             context = allocator.use_memory_pool(tag=tag)
         else:
             context = nullcontext()
