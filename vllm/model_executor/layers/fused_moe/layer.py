@@ -155,7 +155,8 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 
             # Note : We may want to use FP8 dispatch even otherwise just to
             # reduce datamovement
-            assert moe.quant_config.block_shape is not None
+            assert (moe.quant_config is not None
+                    and moe.quant_config.block_shape is not None)
             use_fp8_dispatch = (
                 moe.quant_config.quant_dtype == current_platform.fp8_dtype()
                 and moe.quant_config.block_shape[1] == DEEPEP_QUANT_BLOCK_SIZE)
