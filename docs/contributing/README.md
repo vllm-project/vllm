@@ -29,6 +29,8 @@ See <gh-file:LICENSE>.
 Depending on the kind of development you'd like to do (e.g. Python, CUDA), you can choose to build vLLM with or without compilation.
 Check out the [building from source][build-from-source] documentation for details.
 
+For an optimized workflow when iterating on C++/CUDA kernels, see the [Incremental Compilation Workflow](./incremental_build.md) for recommendations.
+
 ### Building the docs with MkDocs
 
 #### Introduction to MkDocs
@@ -93,25 +95,27 @@ For additional features and advanced configurations, refer to the official [MkDo
 
 ## Testing
 
-```bash
-pip install -r requirements/dev.txt
+??? note "Commands"
 
-# Linting, formatting and static type checking
-pre-commit install --hook-type pre-commit --hook-type commit-msg
+    ```bash
+    pip install -r requirements/dev.txt
 
-# You can manually run pre-commit with
-pre-commit run --all-files
+    # Linting, formatting and static type checking
+    pre-commit install --hook-type pre-commit --hook-type commit-msg
 
-# To manually run something from CI that does not run
-# locally by default, you can run:
-pre-commit run mypy-3.9 --hook-stage manual --all-files
+    # You can manually run pre-commit with
+    pre-commit run --all-files
 
-# Unit tests
-pytest tests/
+    # To manually run something from CI that does not run
+    # locally by default, you can run:
+    pre-commit run mypy-3.9 --hook-stage manual --all-files
 
-# Run tests for a single test file with detailed output
-pytest -s -v tests/test_logger.py
-```
+    # Unit tests
+    pytest tests/
+
+    # Run tests for a single test file with detailed output
+    pytest -s -v tests/test_logger.py
+    ```
 
 !!! tip
     Since the <gh-file:docker/Dockerfile> ships with Python 3.12, all tests in CI (except `mypy`) are run with Python 3.12.
@@ -186,6 +190,7 @@ The PR needs to meet the following code quality standards:
 
 ### Adding or Changing Kernels
 
+When actively developing or modifying kernels, using the [Incremental Compilation Workflow](./incremental_build.md) is highly recommended for faster build times.
 Each custom kernel needs a schema and one or more implementations to be registered with PyTorch.
 
 - Make sure custom ops are registered following PyTorch guidelines:

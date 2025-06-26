@@ -5,6 +5,15 @@ import pytest
 import vllm
 from vllm.compilation.counter import compilation_counter
 from vllm.config import VllmConfig
+from vllm.utils import _is_torch_equal_or_newer
+
+
+def test_version():
+    assert _is_torch_equal_or_newer('2.8.0.dev20250624+cu128', '2.8.0.dev')
+    assert _is_torch_equal_or_newer('2.8.0a0+gitc82a174', '2.8.0.dev')
+    assert _is_torch_equal_or_newer('2.8.0', '2.8.0.dev')
+    assert _is_torch_equal_or_newer('2.8.1', '2.8.0.dev')
+    assert not _is_torch_equal_or_newer('2.7.1', '2.8.0.dev')
 
 
 def test_use_cudagraphs_dynamic(monkeypatch):

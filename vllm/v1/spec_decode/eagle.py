@@ -148,7 +148,7 @@ class EagleProposer:
             assert self.runner is not None
 
             # FIXME: need to consider multiple kv_cache_groups
-            attn_metadata = self.runner.attn_metadata_builder.build(
+            attn_metadata = self.runner.attn_metadata_builders[0].build(
                 common_prefix_len=0,
                 common_attn_metadata=common_attn_metadata,
             )
