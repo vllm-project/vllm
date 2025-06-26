@@ -148,9 +148,15 @@ else()
 endif()
 
 #
-# Build oneDNN for W8A8 GEMM kernels (only for x86-AVX512 platforms)
-#
-if (AVX512_FOUND AND NOT AVX512_DISABLED)
+# Build oneDNN for W8A8 GEMM kernels (only for x86-AVX512 /ARM platforms)
+# Flag to enable ACL kernels for AARCH64 platforms
+if ( VLLM_BUILD_ACL STREQUAL "ON")
+    set(USE_ACL ON)
+else()
+    set(USE_ACL OFF)
+endif()
+
+if ((AVX512_FOUND AND NOT AVX512_DISABLED) OR ASIMD_FOUND)
     FetchContent_Declare(
         oneDNN
         GIT_REPOSITORY https://github.com/oneapi-src/oneDNN.git
@@ -158,6 +164,15 @@ if (AVX512_FOUND AND NOT AVX512_DISABLED)
         GIT_PROGRESS TRUE
         GIT_SHALLOW TRUE
     )
+
+    if(USE_ACL)
+        find_library(ARM_COMPUTE_LIBRARY NAMES arm_compute PATHS $ENV{ACL_ROOT_DIR}/build/)
+        if(NOT ARM_COMPUTE_LIBRARY)
+            message(FATAL_ERROR "Could not find ARM Compute Library: please set ACL_ROOT_DIR")
+        endif()
+        set(ONEDNN_AARCH64_USE_ACL "ON")
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wl,-rpath,$ENV{ACL_ROOT_DIR}/build/")
+        endif()
 
     set(ONEDNN_LIBRARY_TYPE "STATIC")
     set(ONEDNN_BUILD_DOC "OFF")
@@ -232,6 +247,11 @@ if (AVX512_FOUND AND NOT AVX512_DISABLED)
         "csrc/cpu/shm.cpp"
         ${VLLM_EXT_SRC})
 elseif(POWER10_FOUND)
+    set(VLLM_EXT_SRC
+        "csrc/cpu/quant.cpp"
+        ${VLLM_EXT_SRC})
+endif()
+if (ASIMD_FOUND)
     set(VLLM_EXT_SRC
         "csrc/cpu/quant.cpp"
         ${VLLM_EXT_SRC})
