@@ -196,7 +196,7 @@ class CoordinatorProc:
 
                 if publish_front in events:
                     buffer = publish_front.recv()
-                    if buffer == b'\x01':
+                    if buffer in (b'\x01', b'\x00'):
                         # Ignore subscription messages.
                         continue
 
