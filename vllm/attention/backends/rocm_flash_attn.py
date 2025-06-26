@@ -695,13 +695,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
             num_blocks = kv_cache.shape[1]
             block_size = kv_cache.shape[2] // (self.num_kv_heads *
                                                self.head_size)
-            from vllm.attention.ops.rocm_aiter_paged_attn import (
-                AITERPagedAttention)
 
-            AITERPagedAttention.is_asm_supported = (
-                self.head_size == 128
-                and self.num_heads // self.num_kv_heads <= 16
-                and self.kv_cache_dtype in ["int8", "fp8", "fp8_e4m3"])
             k_scale = torch.empty((self.num_kv_heads, num_blocks * block_size),
                                   dtype=torch.float32,
                                   device=kv_cache.device)

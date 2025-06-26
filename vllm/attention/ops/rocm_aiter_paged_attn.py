@@ -13,7 +13,6 @@ FP8_DTYPE = current_platform.fp8_dtype()
 
 
 class AITERPagedAttention(PagedAttention):
-    is_asm_supported: bool = False
 
     @staticmethod
     def write_to_paged_cache(
@@ -66,37 +65,18 @@ class AITERPagedAttention(PagedAttention):
         if output is None:
             output = torch.empty_like(query)
         block_size = value_cache.shape[3]
-        if kv_cache_dtype not in ["int8", "fp8", "fp8_e4m3"]:
-            max_num_blocks_per_seq = cdiv(max_seq_len, block_size)
-            rocm_aiter.pa_fwd_asm(Q=query,
-                                  K=key_cache,
-                                  V=value_cache,
-                                  block_tables=block_tables,
-                                  context_lens=seq_lens,
-                                  max_num_blocks=max_num_blocks_per_seq,
-                                  K_QScale=None,
-                                  V_QScale=None,
-                                  out_=output)
-
-            return output
-
-        assert AITERPagedAttention.is_asm_supported, (
-            "Asm Layout is not supported."
-            "Thus FP8 kvcache is not supported.")
+        max_num_blocks_per_seq = cdiv(max_seq_len, block_size)
+        is_8bit_kvcache = kv_cache_dtype in ["int8", "fp8", "fp8_e4m3"]
 
         if "fp8" in kv_cache_dtype:
             key_cache = key_cache.view(torch.float8_e4m3fnuz)
             value_cache = value_cache.view(torch.float8_e4m3fnuz)
 
-        if blocksparse_vert_stride is not None and blocksparse_vert_stride > 1:
-            # use blocksparse paged attention
-            block_size = value_cache.size(-1)
-            assert (blocksparse_block_size > 0 and
-                    blocksparse_block_size % block_size == 0), \
-                (f"{blocksparse_block_size=} needs to be a multiple of"
-                 f"{block_size=} used in block_tables.")
-
-        max_num_blocks_per_seq = cdiv(max_seq_len, block_size)
+            if (blocksparse_vert_stride is not None
+                    and blocksparse_vert_stride > 1):
+                assert NotImplementedError(
+                    "Blocksparse paged attention is not "
+                    "supported for fp8 kvcache.")
 
         rocm_aiter.pa_fwd_asm(Q=query,
                               K=key_cache,
@@ -104,8 +84,8 @@ class AITERPagedAttention(PagedAttention):
                               block_tables=block_tables,
                               context_lens=seq_lens,
                               max_num_blocks=max_num_blocks_per_seq,
-                              K_QScale=k_scale,
-                              V_QScale=v_scale,
+                              K_QScale=k_scale if is_8bit_kvcache else None,
+                              V_QScale=v_scale if is_8bit_kvcache else None,
                               out_=output)
 
         return output
