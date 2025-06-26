@@ -291,6 +291,10 @@ def test_dict_args(parser):
         # Test '-' and '.' in value
         "--hf_overrides.key14.key15",
         "-minus.and.dot",
+        # Test array values
+        "-O.custom_ops+",
+        "quant_fp8",
+        "-O.custom_ops+=silu_mul,rms_norm",
     ]
     parsed_args = parser.parse_args(args)
     assert parsed_args.model_name == "something.something"
@@ -319,6 +323,7 @@ def test_dict_args(parser):
         "level": 1,
         "use_inductor": True,
         "backend": "custom",
+        "custom_ops": ["quant_fp8", "silu_mul", "rms_norm"],
     }
 
 

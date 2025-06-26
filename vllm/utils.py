@@ -1513,6 +1513,8 @@ class FlexibleArgumentParser(ArgumentParser):
                 if isinstance(v, dict) and isinstance(original.get(k), dict):
                     nested_duplicates = recursive_dict_update(original[k], v)
                     duplicates |= {f"{k}.{d}" for d in nested_duplicates}
+                elif isinstance(v, list) and isinstance(original.get(k), list):
+                    original[k] += v
                 else:
                     if k in original:
                         duplicates.add(k)
@@ -1534,6 +1536,10 @@ class FlexibleArgumentParser(ArgumentParser):
                 else:
                     value_str = processed_args[i + 1]
                     delete.add(i + 1)
+
+                if processed_arg.endswith("+"):
+                    processed_arg = processed_arg[:-1]
+                    value_str = json.dumps(list(value_str.split(",")))
 
                 key, *keys = processed_arg.split(".")
                 try:
