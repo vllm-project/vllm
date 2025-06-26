@@ -294,9 +294,8 @@ def _min_tokens_validate(
     ref_num_out_tokens = len(request_params.out_tokens)
     min_reached = ref_num_out_tokens >= MIN_TOKENS_LEN_THRESHOLD
     ref_all_stop_token_ids = request_params.params.all_stop_token_ids
-    mt_lp: MinTokensLogitsProcessor = (
-        test_fakes.sampling_metadata.logitsprocs.get_logitprocs_by_cls(
-            MinTokensLogitsProcessor)[0])
+    mt_lp: MinTokensLogitsProcessor = next(
+        test_fakes.get_logitsprocs_by_cls(MinTokensLogitsProcessor))
     assert isinstance(mt_lp, MinTokensLogitsProcessor)
     min_tok = mt_lp.min_toks.get(batch_index, None)
 

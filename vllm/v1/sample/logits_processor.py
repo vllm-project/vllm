@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 import dataclasses
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
+from itertools import chain
 from typing import Optional, Union
 
 import torch
@@ -209,15 +210,15 @@ class LogitsProcessorManager:
     non_argmax_invariant: list[LogitsProcessor] = field(
         default_factory=list)  # non-argmax-invariant logitsprocs
 
-    def get_logitprocs_by_cls(
-            self, cls: type[LogitsProcessor]) -> list[LogitsProcessor]:
-        """Find logits processor by id, if it exists"""
-        return [lp for lp in self.all if isinstance(lp, cls)]
+    def get_logitsprocs_by_cls(
+            self, cls: type[LogitsProcessor]) -> Iterator[LogitsProcessor]:
+        """Yield logits processors of a specific class."""
+        return (lp for lp in self.all if isinstance(lp, cls))
 
     @property
-    def all(self) -> list[LogitsProcessor]:
-        """List of all logits processors"""
-        return self.argmax_invariant + self.non_argmax_invariant
+    def all(self) -> Iterator[LogitsProcessor]:
+        """Iterable over all logits processors."""
+        return chain(self.argmax_invariant, self.non_argmax_invariant)
 
 
 ###### ----- Built-in LogitsProcessor impls below here

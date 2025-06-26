@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Iterator
 from enum import Enum
 from typing import NamedTuple, Optional
 
@@ -172,11 +173,14 @@ class LogitsprocsTestFakes(NamedTuple):
     logits: torch.Tensor
     sampling_metadata: SamplingMetadata
 
-    def get_logitsproc_by_id(self, id: str) -> LogitsProcessor:
-        """Shorthand for getting a specific logitproc from SamplingMetadata"""
-        return self.sampling_metadata.logitsprocs.get_logitprocs_by_cls(id)
+    def get_logitsprocs_by_cls(
+        self,
+        cls: type[LogitsProcessor],
+    ) -> Iterator[LogitsProcessor]:
+        """Shorthand for getting specific logitsprocs from SamplingMetadata"""
+        return self.sampling_metadata.logitsprocs.get_logitsprocs_by_cls(cls)
 
-    def get_logitsprocs(self) -> list[LogitsProcessor]:
+    def get_logitsprocs(self) -> Iterator[LogitsProcessor]:
         return self.sampling_metadata.logitsprocs.all
 
 
@@ -197,6 +201,6 @@ def fake_apply_logitsprocs(
     """Imitate application of logits processors in engine core"""
     logits = test_fakes.logits[torch.tensor(slice_indices,
                                             dtype=torch.long)].clone()
-    for processor in test_fakes.sampling_metadata.logitsprocs.all:
+    for processor in test_fakes.get_logitsprocs():
         logits = processor.apply(logits)
     return logits
