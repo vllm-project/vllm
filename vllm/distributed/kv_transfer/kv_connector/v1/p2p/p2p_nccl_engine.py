@@ -461,6 +461,7 @@ class P2pNcclEngine:
                     if isinstance(tensor, tuple):
                         addr, _, _ = tensor
                         self.pool.free(addr)
+            logger.info("🔵get_finished, request_id:%s", request_id)
 
         # TODO: 1)Avoid polling. 2)Validate chunked prefill and preemption.
         num_layers = len(forward_context.no_compile_layers)
