@@ -30,7 +30,7 @@ from collections import namedtuple
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from multiprocessing import shared_memory
-from typing import Any, Callable, Optional, Union
+from typing import Any, Callable, List, Optional, Union
 from unittest.mock import patch
 
 import torch
@@ -381,7 +381,7 @@ class GroupCoordinator:
                               dim: int) -> torch.Tensor:
         return self.device_communicator.all_gather(input_, dim)
     
-    def all_gatherv(self, input_: Union[torch.Tensor, List[torch.Tensor]], dim: int = 0, sizes: Optional[List[int]] = None)
+    def all_gatherv(self, input_: Union[torch.Tensor, List[torch.Tensor]], dim: int = 0, sizes: Optional[List[int]] = None):
         return self.device_communicator.all_gatherv(input_, dim, sizes)
 
     def reduce_scatter(self,

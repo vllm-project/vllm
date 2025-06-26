@@ -324,8 +324,8 @@ class NCCLLibrary:
         # when we pass int to a function, it will be converted to `ctypes.c_int`
         # by ctypes automatically
         self.NCCL_CHECK(self._funcs["ncclReduce"](sendbuff, recvbuff, count,
-                                                     datatype, op, root, comm,
-                                                     stream))
+                                                  datatype, op, root, comm,
+                                                  stream))
 
     def ncclReduceScatter(self, sendbuff: buffer_type, recvbuff: buffer_type,
                           count: int, datatype: int, op: int, comm: ncclComm_t,

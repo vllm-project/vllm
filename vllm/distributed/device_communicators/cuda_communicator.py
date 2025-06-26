@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional
+from typing import List, Optional, Union
 
 import torch
 from torch.distributed import ProcessGroup
@@ -167,16 +167,8 @@ class CudaCommunicator(DeviceCommunicatorBase):
             self.all2all_manager.destroy()
             self.all2all_manager = None
 
-    """
-    Allgather with support for list of tensors and varying sizes per rank.
-    Example:
-    Instead of:
-        ... = get_ep_group().dispatch(...)
-    Use this:
-        ... = get_dp_group().all_gatherv([topk_weights, topk_ids, a1q, a1q_scale], dim=0, sizes=get_forward_context().dp_metadata.num_tokens_across_dp_cpu)
-    """
     def all_gatherv(self, input_: Union[torch.Tensor, List[torch.Tensor]], dim: int = 0, sizes: Optional[List[int]] = None):
-        assert dim == 0, "only dim 0 all-gather is supported"
+        assert dim == 0, "only dim 0 all-gatherv is supported"
         world_size = self.world_size
         pynccl_comm = self.pynccl_comm
         assert pynccl_comm is not None and not pynccl_comm.disabled
@@ -186,23 +178,24 @@ class CudaCommunicator(DeviceCommunicatorBase):
             if sizes is not None:
                 assert len(sizes) == world_size
                 assert input_.shape[dim] == sizes[self.rank_in_group]
+                output_size = (sum(sizes), ) + input_size[1:]
                 # 'sizes' is not needed if all inputs in the same group have the same shape
                 if all(s == sizes[0] for s in sizes):
                     sizes = None
-                output_size = (sum(sizes),) + input_size[1:]
             else:
-                output_size = (input_size[0] * world_size,) + input_size[1:]
+                output_size = (input_size[0] * world_size, ) + input_size[1:]
             # Allocate output tensor.
             output_tensor = torch.empty(
                 output_size, dtype=input_.dtype, device=input_.device
             )
             pynccl_comm.all_gather(output_tensor, input_, sizes=sizes)
+            return output_tensor
 
         if isinstance(input_, torch.Tensor):
             return _all_gather_single(input_, sizes)
 
-        pynccl_comm.group_start()
         output_list = []
+        pynccl_comm.group_start()
         for inp in input_:
             output_list.append(_all_gather_single(inp, sizes=sizes))
         pynccl_comm.group_end()
