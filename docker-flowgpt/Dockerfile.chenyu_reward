@@ -1,0 +1,29 @@
+FROM vllm/vllm-openai:v0.9.1
+
+WORKDIR /app/vllm
+
+# 安装依赖
+RUN apt-get update && apt-get install -y git curl vim && rm -rf /var/lib/apt/lists/*
+
+# ✅ 添加 numpy 依赖（否则 torch 会报错找不到 numpy）
+RUN pip install numpy
+# 安装 flash-attn 库
+RUN pip install flash-attn
+# 拷贝你的 vllm 源码与模型
+COPY vllm /app/vllm
+COPY reward_model_hf /app/reward_model_hf
+RUN VLLM_USE_PRECOMPILED=1 pip install --editable .
+
+# 暴露端口
+EXPOSE 8000
+
+ENTRYPOINT ["python3", "-m", "vllm.entrypoints.api_server"]
+
+# 启动命令
+CMD [\
+  "--model", "/app/reward_model_hf",\
+  "--tokenizer", "/app/reward_model_hf",\
+  "--trust-remote-code",\
+  "--port", "8000",\
+  "--enforce-eager"\
+]
