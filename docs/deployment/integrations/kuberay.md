@@ -38,6 +38,10 @@ This guide shows how to serve a large language model on Kubernetes with vLLM and
 
 #### Create a GPU-enabled GKE cluster
 
+Each model replica consumes two GPUs through tensor parallelism.
+Create a cluster with two `g2-standard-24` nodes, for a total of four NVIDIA L4 GPUs.
+
+
 ```bash
 gcloud container clusters create kuberay-gpu-cluster \
   --machine-type=g2-standard-24 \
@@ -45,10 +49,7 @@ gcloud container clusters create kuberay-gpu-cluster \
   --num-nodes=2 \
   --accelerator=type=nvidia-l4,count=2,gpu-driver-version=latest
 ```
-
-Each model replica consumes two NVIDIA L4 GPUs through tensor parallelism.
-
-Alternatively, set up a two-GPU on-premises Kubernetes cluster before continuing.
+Alternatively, set up a four-GPU on-premises Kubernetes cluster before continuing.
 
 #### Install the KubeRay operator
 
