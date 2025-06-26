@@ -504,7 +504,7 @@ class P2pNcclEngine:
         assert tensor.device == self.device, (
             f"this nccl communicator is created to work on {self.device}, "
             f"but the input tensor is on {tensor.device}")
-        stream = stream if stream is not None else torch.cuda.current_stream()
+        stream = stream if stream is not None else current_stream()
         event = torch.cuda.Event()
         self.nccl.ncclSend(buffer_type(tensor.data_ptr()), tensor.numel(),
                            ncclDataTypeEnum.from_torch(tensor.dtype), dst,
@@ -516,7 +516,7 @@ class P2pNcclEngine:
         assert tensor.device == self.device, (
             f"this nccl communicator is created to work on {self.device}, "
             f"but the input tensor is on {tensor.device}")
-        stream = stream if stream is not None else torch.cuda.current_stream()
+        stream = stream if stream is not None else current_stream()
         event = torch.cuda.Event()
         self.nccl.ncclRecv(buffer_type(tensor.data_ptr()), tensor.numel(),
                            ncclDataTypeEnum.from_torch(tensor.dtype), src,
