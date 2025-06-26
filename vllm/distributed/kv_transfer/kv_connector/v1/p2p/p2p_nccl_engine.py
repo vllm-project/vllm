@@ -426,7 +426,7 @@ class P2pNcclEngine:
                 response.decode())
             return False
 
-        self._send(comm, tensor_id, tensor, rank ^ 1, self.send_stream)
+        self._send(comm, tensor_id, tensor.to(self.device), rank ^ 1, self.send_stream)
 
         if self.send_type == "PUT_ASYNC":
             self._have_sent_tensor_id(tensor_id)
