@@ -2,7 +2,7 @@
 
 import random
 from collections.abc import Callable
-from typing import NamedTuple, Optional
+from typing import NamedTuple, Optional, Union
 
 import numpy as np
 import pytest
@@ -17,14 +17,13 @@ from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.utils import is_pin_memory_available
 from vllm.v1.sample.logits_processor import (BatchUpdate, BatchUpdateBuilder,
+                                             LogitBiasLogitsProcessor,
+                                             LogitsProcessor,
+                                             MinPLogitsProcessor,
                                              MinTokensLogitsProcessor,
                                              MoveDirectionality,
                                              init_builtin_logitsprocs)
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.worker.utils import (STR_LOGITS_BIAS_LOGITPROC_ID,
-                                  STR_MIN_P_LOGITPROC_ID,
-                                  STR_MIN_TOKENS_LOGITPROC_ID,
-                                  STR_NO_LOGITPROC)
 
 PIN_MEMORY_AVAILABLE = is_pin_memory_available()
 MAX_NUM_REQS = 256
@@ -37,6 +36,10 @@ CUDA_DEVICES = [
 MAX_NUM_PROMPT_TOKENS = 64
 MIN_TOKENS_LEN_THRESHOLD = 5
 REQS_PER_LOGITPROC = 50
+STR_NO_LOGITPROC = "none"
+
+# LogitsProcessor subclass or "none"
+LogitprocID = Union[type[LogitsProcessor], str]
 
 
 class LogitsProcsRequestParams:
@@ -45,11 +48,11 @@ class LogitsProcsRequestParams:
     Params can be customized based on the enabled logitproc
     """
     workload_index: int
-    logitproc_id: str  # Logitproc enabled, specified by str id
+    logitproc_id: LogitprocID  # Logitproc enabled, specified by str id
     out_tokens: list[int]  # Output tokens required for min tokens test
     params: SamplingParams  # Settings customized for logitproc
 
-    def __init__(self, workload_index: int, logitproc_id: str):
+    def __init__(self, workload_index: int, logitproc_id: LogitprocID):
         self.workload_index = workload_index
         self.logitproc_id = logitproc_id
         # Number of output tokens is randomly 0 or twice the min-tokens
@@ -123,7 +126,8 @@ def _generate_test_fakes(batch_size: int, device: str) -> LogitsprocsTestFakes:
     )
 
 
-def _sampling_params_from_logitproc(logitproc_id: str) -> SamplingParams:
+def _sampling_params_from_logitproc(
+        logitproc_id: LogitprocID) -> SamplingParams:
     """Customize request SamplingParams for a specified logitproc"""
     # SamplingParams for req with no logitproc
     kwargs = {"min_p": 0.0, "logit_bias": None, "min_tokens": 0}
@@ -292,7 +296,7 @@ def _min_tokens_validate(
     ref_all_stop_token_ids = request_params.params.all_stop_token_ids
     mt_lp: MinTokensLogitsProcessor = (
         test_fakes.sampling_metadata.logitsprocs.get_logitprocs_by_cls(
-            STR_MIN_TOKENS_LOGITPROC_ID))
+            MinTokensLogitsProcessor)[0])
     assert isinstance(mt_lp, MinTokensLogitsProcessor)
     min_tok = mt_lp.min_toks.get(batch_index, None)
 
@@ -393,13 +397,13 @@ class LogitsprocTestHelpers(NamedTuple):
 logitsprocs_test_mapping = {
     STR_NO_LOGITPROC:
     LogitsprocTestHelpers(eval_fxn=_none_validate),
-    STR_LOGITS_BIAS_LOGITPROC_ID:
+    LogitBiasLogitsProcessor:
     LogitsprocTestHelpers(gen_request_fxn=_logit_bias_params,
                           eval_fxn=_logit_bias_validate),
-    STR_MIN_P_LOGITPROC_ID:
+    MinPLogitsProcessor:
     LogitsprocTestHelpers(gen_request_fxn=_min_p_params,
                           eval_fxn=_min_p_validate),
-    STR_MIN_TOKENS_LOGITPROC_ID:
+    MinTokensLogitsProcessor:
     LogitsprocTestHelpers(gen_request_fxn=_min_tokens_params,
                           eval_fxn=_min_tokens_validate),
 }

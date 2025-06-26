@@ -7,12 +7,6 @@ import torch
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.v1.kv_cache_interface import KVCacheGroupSpec
 
-# Logits processor id strs
-STR_NO_LOGITPROC = "none"
-STR_MIN_P_LOGITPROC_ID = "min_p"
-STR_MIN_TOKENS_LOGITPROC_ID = "min_tokens"
-STR_LOGITS_BIAS_LOGITPROC_ID = "logit_bias"
-
 
 def sanity_check_mm_encoder_outputs(
     mm_embeddings: MultiModalEmbeddings,
