@@ -8,8 +8,10 @@ import time
 import uuid
 from threading import Thread
 from typing import Optional
+from unittest.mock import MagicMock
 
 import pytest
+import torch
 from transformers import AutoTokenizer
 
 from tests.utils import multi_gpu_test
@@ -517,3 +519,72 @@ def test_startup_failure(monkeypatch: pytest.MonkeyPatch):
         )
 
     assert "Engine core initialization failed" in str(e_info.value)
+
+
+@create_new_process_for_each_test()
+def test_engine_core_proc_instantiation_cuda_empty(
+        monkeypatch: pytest.MonkeyPatch):
+    """
+    Test that EngineCoreProc can be instantiated when CUDA_VISIBLE_DEVICES
+    is empty. This ensures the engine frontend does not need access to GPUs.
+    """
+
+    from vllm.v1.engine.core import EngineCoreProc
+    from vllm.v1.executor.abstract import Executor
+
+    # Create a simple mock executor instead of a complex custom class
+    mock_executor_class = MagicMock(spec=Executor)
+
+    def create_mock_executor(vllm_config):
+        mock_executor = MagicMock()
+
+        # Only implement the methods that are actually called during init
+        from vllm.v1.kv_cache_interface import FullAttentionSpec
+        mock_spec = FullAttentionSpec(block_size=16,
+                                      num_kv_heads=1,
+                                      head_size=64,
+                                      dtype=torch.float16,
+                                      use_mla=False)
+
+        mock_executor.get_kv_cache_specs.return_value = [{
+            "default": mock_spec
+        }]
+        mock_executor.determine_available_memory.return_value = [
+            1024 * 1024 * 1024
+        ]
+        mock_executor.initialize_from_config.return_value = None
+        mock_executor.max_concurrent_batches = 1
+
+        return mock_executor
+
+    mock_executor_class.side_effect = create_mock_executor
+
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_USE_V1", "1")
+        m.setenv("CUDA_VISIBLE_DEVICES", "")  # No CUDA devices
+
+        from vllm.v1.utils import EngineZmqAddresses
+
+        def mock_startup_handshake(self, handshake_socket, on_head_node,
+                                   parallel_config):
+            return EngineZmqAddresses(inputs=["tcp://127.0.0.1:5555"],
+                                      outputs=["tcp://127.0.0.1:5556"],
+                                      coordinator_input=None,
+                                      coordinator_output=None)
+
+        # Background processes are not important here
+        m.setattr(EngineCoreProc, "startup_handshake", mock_startup_handshake)
+
+        vllm_config = EngineArgs(
+            model="deepseek-ai/DeepSeek-V2-Lite",
+            trust_remote_code=True).create_engine_config()
+        engine_core_proc = EngineCoreProc(
+            vllm_config=vllm_config,
+            on_head_node=True,
+            handshake_address="tcp://127.0.0.1:12345",
+            executor_class=mock_executor_class,
+            log_stats=False,
+            engine_index=0,
+        )
+
+        engine_core_proc.shutdown()
