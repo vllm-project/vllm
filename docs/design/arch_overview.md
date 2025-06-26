@@ -22,31 +22,33 @@ server.
 
 Here is a sample of `LLM` class usage:
 
-```python
-from vllm import LLM, SamplingParams
+??? Code
 
-# Define a list of input prompts
-prompts = [
-    "Hello, my name is",
-    "The capital of France is",
-    "The largest ocean is",
-]
+    ```python
+    from vllm import LLM, SamplingParams
 
-# Define sampling parameters
-sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
+    # Define a list of input prompts
+    prompts = [
+        "Hello, my name is",
+        "The capital of France is",
+        "The largest ocean is",
+    ]
 
-# Initialize the LLM engine with the OPT-125M model
-llm = LLM(model="facebook/opt-125m")
+    # Define sampling parameters
+    sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
-# Generate outputs for the input prompts
-outputs = llm.generate(prompts, sampling_params)
+    # Initialize the LLM engine with the OPT-125M model
+    llm = LLM(model="facebook/opt-125m")
 
-# Print the generated outputs
-for output in outputs:
-    prompt = output.prompt
-    generated_text = output.outputs[0].text
-    print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
-```
+    # Generate outputs for the input prompts
+    outputs = llm.generate(prompts, sampling_params)
+
+    # Print the generated outputs
+    for output in outputs:
+        prompt = output.prompt
+        generated_text = output.outputs[0].text
+        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+    ```
 
 More API details can be found in the [Offline Inference](#offline-inference-api) section of the API docs.
 
@@ -178,32 +180,34 @@ vision-language model.
 
     To avoid accidentally passing incorrect arguments, the constructor is now keyword-only. This ensures that the constructor will raise an error if old configurations are passed. vLLM developers have already made this change for all models within vLLM. For out-of-tree registered models, developers need to update their models, for example by adding shim code to adapt the old constructor signature to the new one:
 
-    ```python
-    class MyOldModel(nn.Module):
-        def __init__(
-            self,
-            config,
-            cache_config: Optional[CacheConfig] = None,
-            quant_config: Optional[QuantizationConfig] = None,
-            lora_config: Optional[LoRAConfig] = None,
-            prefix: str = "",
-        ) -> None:
-            ...
+    ??? Code
 
-    from vllm.config import VllmConfig
-    class MyNewModel(MyOldModel):
-        def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-            config = vllm_config.model_config.hf_config
-            cache_config = vllm_config.cache_config
-            quant_config = vllm_config.quant_config
-            lora_config = vllm_config.lora_config
-            super().__init__(config, cache_config, quant_config, lora_config, prefix)
+        ```python
+        class MyOldModel(nn.Module):
+            def __init__(
+                self,
+                config,
+                cache_config: Optional[CacheConfig] = None,
+                quant_config: Optional[QuantizationConfig] = None,
+                lora_config: Optional[LoRAConfig] = None,
+                prefix: str = "",
+            ) -> None:
+                ...
 
-    if __version__ >= "0.6.4":
-        MyModel = MyNewModel
-    else:
-        MyModel = MyOldModel
-    ```
+        from vllm.config import VllmConfig
+        class MyNewModel(MyOldModel):
+            def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+                config = vllm_config.model_config.hf_config
+                cache_config = vllm_config.cache_config
+                quant_config = vllm_config.quant_config
+                lora_config = vllm_config.lora_config
+                super().__init__(config, cache_config, quant_config, lora_config, prefix)
+
+        if __version__ >= "0.6.4":
+            MyModel = MyNewModel
+        else:
+            MyModel = MyOldModel
+        ```
 
     This way, the model can work with both old and new versions of vLLM.
 
