@@ -163,6 +163,7 @@ def make_quantized_test_activations(
         a_scale = torch.stack(a_scale)
 
         if not per_act_token_quant and block_shape is None:
+            assert a_scale is not None
             a_scale = a_scale.view(E, 1, 1)
 
     return a, a_q, a_scale

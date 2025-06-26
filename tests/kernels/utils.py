@@ -1115,6 +1115,8 @@ def torch_experts(
                                                      w2_scale[i], block_shape,
                                                      out.dtype)
             else:
+                assert (a_scale is not None and w1_scale is not None
+                        and w2_scale is not None)
                 f32 = torch.float32
                 scales = a_scale if a_scale.numel() == 1 else a_scale[mask]
                 tmp1 = a[mask].to(f32) * scales
