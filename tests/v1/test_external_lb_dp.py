@@ -31,7 +31,7 @@ class ExternalLBServerManager:
         self.api_server_count = api_server_count
         self.base_server_args = base_server_args
         self.servers: list[tuple[RemoteOpenAIServer, list[str]]] = []
-        self.server_threads = []
+        self.server_threads: list[threading.Thread] = []
 
     def __enter__(self) -> list[tuple[RemoteOpenAIServer, list[str]]]:
         """Start all server instances for external LB mode."""
