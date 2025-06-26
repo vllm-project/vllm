@@ -77,8 +77,8 @@ class MistralToolParser(ToolParser):
         self.bot_token_id = self.vocab.get(self.bot_token)
         self.tool_call_regex = re.compile(r"\[{.*}\]", re.DOTALL)
         if _is_fn_name_regex_support(self.model_tokenizer):
-            self.fn_name_regex = re.compile(r'([a-zA-Z0-9_-]+)(\{.*?\})',
-                                            re.DOTALL)
+            self.fn_name_regex = re.compile(
+                r'([a-zA-Z0-9_-]+)(\{[\s\S]*?\})(?=\s*$|,|\s)', re.DOTALL)
         else:
             self.fn_name_regex = None
 
