@@ -131,16 +131,19 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 
   // Quantization
 #ifdef __AVX512F__
+  at::Tag stride_tag = at::Tag::needs_fixed_stride_order;
   // Compute int8 quantized tensor for given scaling factor.
   ops.def(
       "static_scaled_int8_quant(Tensor! out, Tensor input, Tensor scale,"
-      "Tensor? azp) -> ()");
+      "Tensor? azp) -> ()",
+      {stride_tag});
   ops.impl("static_scaled_int8_quant", torch::kCPU, &static_scaled_int8_quant);
 
   // Compute int8 quantized tensor and scaling factor
   ops.def(
       "dynamic_scaled_int8_quant(Tensor! out, Tensor input, Tensor! scale, "
-      "Tensor!? azp) -> ()");
+      "Tensor!? azp) -> ()",
+      {stride_tag});
   ops.impl("dynamic_scaled_int8_quant", torch::kCPU,
            &dynamic_scaled_int8_quant);
   // W8A8 GEMM, supporting symmetric per-tensor or per-row/column
@@ -148,7 +151,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def(
       "cutlass_scaled_mm(Tensor! out, Tensor a,"
       "                  Tensor b, Tensor a_scales,"
-      "                  Tensor b_scales, Tensor? bias) -> ()");
+      "                  Tensor b_scales, Tensor? bias) -> ()",
+      {stride_tag});
   ops.impl("cutlass_scaled_mm", torch::kCPU, &int8_scaled_mm);
   // w8a8 GEMM, supporting asymmetric per-tensor or per-row/column
   // quantization.
@@ -156,7 +160,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "cutlass_scaled_mm_azp(Tensor! out, Tensor a,"
       "                  Tensor b, Tensor a_scales,"
       "                  Tensor b_scales, Tensor azp_adj,"
-      "                  Tensor? azp, Tensor? bias) -> ()");
+      "                  Tensor? azp, Tensor? bias) -> ()",
+      {stride_tag});
   ops.impl("cutlass_scaled_mm_azp", torch::kCPU, &int8_scaled_mm_azp);
 #elif defined(__powerpc64__)
   // Compute int8 quantized tensor for given scaling factor.
