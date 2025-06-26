@@ -173,17 +173,12 @@ class Platform:
 
     @classmethod
     def device_id_to_physical_device_id(cls, device_id: int):
-        if cls.device_control_env_var in os.environ:
+        # Treat empty device control env var as unset. This is a valid
+        # configuration in Ray setups where the engine is launched in
+        # a CPU-only placement group located on a GPU node.
+        if cls.device_control_env_var in os.environ and os.environ[
+                cls.device_control_env_var] != "":
             device_ids = os.environ[cls.device_control_env_var].split(",")
-            if device_ids == [""]:
-                msg = (f"{cls.device_control_env_var} is set to empty string, "
-                       "which means current platform support is disabled. If "
-                       "you are using ray, please unset the environment "
-                       f"variable `{cls.device_control_env_var}` inside the "
-                       "worker/actor. Check "
-                       "https://github.com/vllm-project/vllm/issues/8402 for "
-                       "more information.")
-                raise RuntimeError(msg)
             physical_device_id = device_ids[device_id]
             return int(physical_device_id)
         else:
