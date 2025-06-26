@@ -33,7 +33,9 @@ def _run_test(
                      skip_tokenizer_init=True) as vllm_model:
         vllm_model.encode(prompt)
 
+
 MODELS = ["christian-pinto/Prithvi-EO-2.0-300M-TL-VLLM"]
+
 
 @pytest.mark.parametrize("model", MODELS)
 def test_models_image(
