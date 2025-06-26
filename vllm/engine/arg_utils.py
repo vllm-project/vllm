@@ -1338,7 +1338,8 @@ class EngineArgs:
                 and not envs.is_set("VLLM_ATTENTION_BACKEND")
             ) or envs.VLLM_ATTENTION_BACKEND == "FLASH_ATTN_VLLM_V1"
             supported = False
-            if current_platform.is_rocm():
+            if (current_platform.is_rocm() or current_platform.device_name
+                    == "hpu"):  # handle hpu also for OOT platform
                 supported = True
             elif fp8_attention and will_use_fa:
                 from vllm.attention.utils.fa_utils import (
