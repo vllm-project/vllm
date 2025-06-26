@@ -15,7 +15,7 @@ See [vLLM performance dashboard](https://perf.vllm.ai) for the latest performanc
 
 **Benchmarking Duration**: about 1hr.
 
-**For benchmarking developers**: please try your best to constraint the duration of benchmarking to about 1 hr so that it won't take forever to run.
+**For benchmarking developers**: please try your best to constrain the duration of benchmarking to about 1 hr so that it won't take forever to run.
 
 ## Nightly benchmark quick overview
 

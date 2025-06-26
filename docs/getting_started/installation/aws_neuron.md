@@ -54,9 +54,15 @@ pip install -U -r requirements/neuron.txt
 VLLM_TARGET_DEVICE="neuron" pip install -e .
 ```
 
+<<<<<<< HEAD:docs/getting_started/installation/aws_neuron.md
 AWS Neuron maintains a [Github fork of vLLM](https://github.com/aws-neuron/upstreaming-to-vllm/tree/neuron-2.23-vllm-v0.7.2) at
 <https://github.com/aws-neuron/upstreaming-to-vllm/tree/neuron-2.23-vllm-v0.7.2>, which contains several features in addition to what's
 available on vLLM V0. Please utilize the AWS Fork for the following features:
+=======
+AWS Neuron maintains a [GitHub fork of vLLM](https://github.com/aws-neuron/upstreaming-to-vllm/tree/neuron-2.23-vllm-v0.7.2) at 
+    [https://github.com/aws-neuron/upstreaming-to-vllm/tree/neuron-2.23-vllm-v0.7.2](https://github.com/aws-neuron/upstreaming-to-vllm/tree/neuron-2.23-vllm-v0.7.2), which contains several features in addition to what's 
+    available on vLLM V0. Please utilize the AWS Fork for the following features:
+>>>>>>> 7918a2584 (fixing small errors):docs/getting_started/installation/ai_accelerator/neuron.inc.md
 
 - Llama-3.2 multi-modal support
 - Multi-node distributed inference

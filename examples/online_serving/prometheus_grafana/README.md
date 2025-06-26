@@ -1,6 +1,6 @@
 # Prometheus and Grafana
 
-This is a simple example that shows you how to connect vLLM metric logging to the Prometheus/Grafana stack. For this example, we launch Prometheus and Grafana via Docker. You can checkout other methods through [Prometheus](https://prometheus.io/) and [Grafana](https://grafana.com/) websites.
+This is a simple example that shows you how to connect vLLM metric logging to the Prometheus/Grafana stack. For this example, we launch Prometheus and Grafana via Docker. You can check out other methods through [Prometheus](https://prometheus.io/) and [Grafana](https://grafana.com/) websites.
 
 Install:
 
@@ -47,7 +47,7 @@ Navigate to [`http://localhost:3000`](http://localhost:3000). Log in with the de
 
 Navigate to [`http://localhost:3000/connections/datasources/new`](http://localhost:3000/connections/datasources/new) and select Prometheus.
 
-On Prometheus configuration page, we need to add the `Prometheus Server URL` in `Connection`. For this setup, Grafana and Prometheus are running in separate containers, but Docker creates DNS name for each containers. You can just use `http://prometheus:9090`.
+On Prometheus configuration page, we need to add the `Prometheus Server URL` in `Connection`. For this setup, Grafana and Prometheus are running in separate containers, but Docker creates DNS names for each containers. You can just use `http://prometheus:9090`.
 
 Click `Save & Test`. You should get a green check saying "Successfully queried the Prometheus API.".
 

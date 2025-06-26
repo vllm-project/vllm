@@ -142,11 +142,11 @@ Building the Docker image from source is the recommended way to use vLLM with RO
 
 #### (Optional) Build an image with ROCm software stack
 
-Build a docker image from <gh-file:docker/Dockerfile.rocm_base> which setup ROCm software stack needed by the vLLM.
+Build a docker image from <gh-file:docker/Dockerfile.rocm_base> which sets up ROCm software stack needed by the vLLM.
 **This step is optional as this rocm_base image is usually prebuilt and store at [Docker Hub](https://hub.docker.com/r/rocm/vllm-dev) under tag `rocm/vllm-dev:base` to speed up user experience.**
 If you choose to build this rocm_base image yourself, the steps are as follows.
 
-It is important that the user kicks off the docker build using buildkit. Either the user put DOCKER_BUILDKIT=1 as environment variable when calling docker build command, or the user needs to setup buildkit in the docker daemon configuration /etc/docker/daemon.json as follows and restart the daemon:
+It is important that the user kicks off the docker build using buildkit. Either the user put DOCKER_BUILDKIT=1 as environment variable when calling docker build command, or the user needs to set up buildkit in the docker daemon configuration /etc/docker/daemon.json as follows and restart the daemon:
 
 ```json
 {
@@ -167,7 +167,7 @@ DOCKER_BUILDKIT=1 docker build \
 #### Build an image with vLLM
 
 First, build a docker image from <gh-file:docker/Dockerfile.rocm> and launch a docker container from the image.
-It is important that the user kicks off the docker build using buildkit. Either the user put `DOCKER_BUILDKIT=1` as environment variable when calling docker build command, or the user needs to setup buildkit in the docker daemon configuration /etc/docker/daemon.json as follows and restart the daemon:
+It is important that the user kicks off the docker build using buildkit. Either the user put `DOCKER_BUILDKIT=1` as environment variable when calling docker build command, or the user needs to set up buildkit in the docker daemon configuration /etc/docker/daemon.json as follows and restart the daemon:
 
 ```bash
 {
