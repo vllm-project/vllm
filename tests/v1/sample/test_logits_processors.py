@@ -39,7 +39,7 @@ REQS_PER_LOGITPROC = 50
 STR_NO_LOGITPROC = "none"
 
 # LogitsProcessor subclass or "none"
-LogitprocID = Union[type[LogitsProcessor], str]
+LogitprocType = Union[type[LogitsProcessor], str]
 
 
 class LogitsProcsRequestParams:
@@ -48,19 +48,19 @@ class LogitsProcsRequestParams:
     Params can be customized based on the enabled logitproc
     """
     workload_index: int
-    logitproc_id: LogitprocID  # Logitproc enabled, specified by str id
+    logitproc_type: LogitprocType  # Logitproc enabled, specified by str id
     out_tokens: list[int]  # Output tokens required for min tokens test
     params: SamplingParams  # Settings customized for logitproc
 
-    def __init__(self, workload_index: int, logitproc_id: LogitprocID):
+    def __init__(self, workload_index: int, logitproc_type: LogitprocType):
         self.workload_index = workload_index
-        self.logitproc_id = logitproc_id
+        self.logitproc_type = logitproc_type
         # Number of output tokens is randomly 0 or twice the min-tokens
         # threshold which will be used in testing. Output token values
         # don't matter *for these tests* so use 0 as a dummy value
         self.out_tokens = ([0] *
                            (MIN_TOKENS_LEN_THRESHOLD * random.randint(0, 2)))
-        self.params = _sampling_params_from_logitproc(logitproc_id)
+        self.params = _sampling_params_from_logitproc(logitproc_type)
 
     def __str__(self):
         """For debugging"""
@@ -127,37 +127,37 @@ def _generate_test_fakes(batch_size: int, device: str) -> LogitsprocsTestFakes:
 
 
 def _sampling_params_from_logitproc(
-        logitproc_id: LogitprocID) -> SamplingParams:
+        logitproc_type: LogitprocType) -> SamplingParams:
     """Customize request SamplingParams for a specified logitproc"""
     # SamplingParams for req with no logitproc
     kwargs = {"min_p": 0.0, "logit_bias": None, "min_tokens": 0}
-    if fxn := logitsprocs_test_mapping[logitproc_id].gen_request_fxn:
+    if fxn := logitsprocs_test_mapping[logitproc_type].gen_request_fxn:
         fxn(kwargs)
     return SamplingParams(**kwargs)
 
 
 def _generate_mixed_logitsprocs_batch_params(
     reqs_per_logitproc: int,
-    logitsprocs_ids: list[str],
+    logitsprocs_types: list[str],
 ) -> list[LogitsProcsRequestParams]:
     """Define key params for a batch of requests with a different
     logitproc enabled per request.
     
     The batch will have `reqs_per_logitproc` repeats for all
-    `logitsprocs_ids` under test, including the case where
+    `logitsprocs_types` under test, including the case where
     no logitsproc is enabled. The batch is randomly shuffled. The
     size of the batch is `reqs_per_logitproc` times
-    `n = len(logitsprocs_ids)`
+    `n = len(logitsprocs_types)`
 
     Args:
       reqs_per_logitproc: number of requests using each logitproc
-      logitsprocs_ids: logitsprocs under test
+      logitsprocs_types: logitsprocs under test
 
     Returns:
       List of per-request params which configure the engine for that request's
       enabled logitproc
     """
-    batch_size = len(logitsprocs_ids) * reqs_per_logitproc
+    batch_size = len(logitsprocs_types) * reqs_per_logitproc
     # Generate multiple repeats of key params for each logitproc;
     # apply random inverse permutation to the iteration
     # over logitsprocs, such that logitsprocs are shuffled.
@@ -165,7 +165,7 @@ def _generate_mixed_logitsprocs_batch_params(
     return [
         LogitsProcsRequestParams(
             workload_index=idx,
-            logitproc_id=logitsprocs_ids[pdx // reqs_per_logitproc])
+            logitproc_type=logitsprocs_types[pdx // reqs_per_logitproc])
         for idx, pdx in enumerate(batch_perm)
     ]
 
@@ -411,11 +411,11 @@ logitsprocs_test_mapping = {
 
 def _get_test_cases() -> list[list[str]]:
     """Each test case is a set of logitsprocs"""
-    logitsprocs_ids = list(logitsprocs_test_mapping.keys())
-    return [[STR_NO_LOGITPROC]] + [[logitproc_id, STR_NO_LOGITPROC]
-                                   for logitproc_id in logitsprocs_ids
-                                   if logitproc_id != STR_NO_LOGITPROC
-                                   ] + [logitsprocs_ids]
+    logitsprocs_types = list(logitsprocs_test_mapping.keys())
+    return [[STR_NO_LOGITPROC]] + [[logitproc_type, STR_NO_LOGITPROC]
+                                   for logitproc_type in logitsprocs_types
+                                   if logitproc_type != STR_NO_LOGITPROC
+                                   ] + [logitsprocs_types]
 
 
 def _generate_fake_step_update(
@@ -550,7 +550,7 @@ def _assert_valid(
         request_params = persistent_batch[batch_index]
         # Invoke the appropriate validation function for
         # the logitproc employed by this request
-        fxn = logitsprocs_test_mapping[request_params.logitproc_id].eval_fxn
+        fxn = logitsprocs_test_mapping[request_params.logitproc_type].eval_fxn
         fxn(test_fakes=test_fakes,
             persistent_batch=persistent_batch,
             logits_new=logits_w_lp,
@@ -571,7 +571,7 @@ def test_logitsprocs(device: str, reqs_per_logitproc: int,
     # logitproc, or no logitproc at all
     workload_params = _generate_mixed_logitsprocs_batch_params(
         reqs_per_logitproc=reqs_per_logitproc,
-        logitsprocs_ids=logitsprocs_under_test)
+        logitsprocs_types=logitsprocs_under_test)
     workload_size = len(workload_params)
 
     # Create fake test data structures for testing.
