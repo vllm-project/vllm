@@ -48,8 +48,8 @@ if TYPE_CHECKING:
 
 # s_tensor_list, d_tensor_list, s_indices, d_indices, direction
 CopyBlocksOp = Callable[[
-    dict[str, torch.Tensor], dict[str,
-                                  torch.Tensor], list[int], list[int], Literal
+    dict[str, torch.Tensor], dict[
+        str, torch.Tensor], list[int], list[int], Literal["h2d", "d2h"]
 ], None]
 
 logger = init_logger(__name__)
