@@ -52,8 +52,11 @@ class CachedRequestState:
     def get_token_id(self, idx: int) -> int:
         if idx < self.num_prompt_tokens:
             return self.prompt_token_ids[idx]
-        else:
+        elif idx - self.num_prompt_tokens < len(self.output_token_ids):
             return self.output_token_ids[idx - self.num_prompt_tokens]
+        # This is now precomputed, so we create a fallback if the idx is invalid
+        else:
+            return -1  # Invalid token id
 
 
 class InputBatch:
