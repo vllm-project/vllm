@@ -18,7 +18,7 @@
 /vllm/entrypoints @aarnphm
 CMakeLists.txt @tlrmchlsmth
 
-# Any change to the VllmConfig changes can have large user-facing impact,
+# Any change to the VllmConfig changes can have a large user-facing impact,
 # so spam a lot of people
 /vllm/config.py @simon-mo @WoosukKwon @youkaichao @robertgshaw2-redhat @mgoin @tlrmchlsmth @roadhouse
 
