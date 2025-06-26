@@ -913,9 +913,12 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         start_index = 0
         combined_selected_tokens: list[torch.Tensor] = []
         combined_logprobs: list[LogprobsLists] = []
-        # for kv transfer
-        finished_sending: set[str] = set()
-        finished_recving: set[str] = set()
+
+        # NOTE: setup current batch's metadata for kv connector.
+        # Currently, only verified with NixlConnector
+        with set_forward_context(None, self.vllm_config):
+            self.maybe_setup_kv_connector(scheduler_output)
+
         while start_index < self.input_batch.num_reqs:
             attn_metadata, logits_indices, padded_num_reqs, num_reqs,\
                 end_index = self._prepare_inputs(scheduler_output, start_index)
@@ -927,19 +930,11 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     attn_metadata,
                     self.vllm_config,
                     num_tokens=scheduler_output.total_num_scheduled_tokens):
-                self.maybe_setup_kv_connector(scheduler_output)
                 hidden_states = self.model(
                     input_ids=input_ids,
                     positions=self.position_ids,
                     inputs_embeds=inputs_embeds,
                 )
-                self.maybe_wait_for_kv_save()
-                _finished_sending, _finished_recving = (
-                    self.get_finished_kv_transfers(scheduler_output))
-                if _finished_sending:
-                    finished_sending.update(_finished_sending)
-                if _finished_recving:
-                    finished_recving.update(_finished_recving)
             hidden_states = self.select_hidden_states(hidden_states,
                                                       logits_indices)
             logits = self.compute_logits(hidden_states)
@@ -969,6 +964,14 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 combined_logprobs.append(logprobs.tolists())
 
             start_index = end_index
+
+        # NOTE: current kv load and save get h2d/d2h copies involved.
+        # Those copies are blocking. Once they become async., kv_save
+        # should be called right after each single forward pass,
+        # instead of the forwards of the entire input batch.
+        self.maybe_wait_for_kv_save()
+        finished_sending, finished_recving = (
+            self.get_finished_kv_transfers(scheduler_output))
 
         selected_token_ids = torch.cat(combined_selected_tokens, dim=0)
         if tpu_sampling_metadata.logprobs:
