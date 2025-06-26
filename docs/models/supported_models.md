@@ -178,7 +178,7 @@ Alternatively, you can [open an issue on GitHub](https://github.com/vllm-project
 
 If you prefer, you can use the Hugging Face CLI to [download a model](https://huggingface.co/docs/huggingface_hub/guides/cli#huggingface-cli-download) or specific files from a model repository:
 
-```console
+```bash
 # Download a model
 huggingface-cli download HuggingFaceH4/zephyr-7b-beta
 
@@ -193,7 +193,7 @@ huggingface-cli download HuggingFaceH4/zephyr-7b-beta eval_results.json
 
 Use the Hugging Face CLI to [manage models](https://huggingface.co/docs/huggingface_hub/guides/manage-cache#scan-your-cache) stored in local cache:
 
-```console
+```bash
 # List cached models
 huggingface-cli scan-cache
 

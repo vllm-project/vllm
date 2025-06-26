@@ -48,13 +48,7 @@ class PallasAttentionBackend(AttentionBackend):
     ) -> tuple[int, ...]:
         padded_head_size = cdiv(
             head_size, TPU_HEAD_SIZE_ALIGNMENT) * TPU_HEAD_SIZE_ALIGNMENT
-        num_blocks = num_blocks * head_size // padded_head_size
-        if padded_head_size != head_size:
-            logger.warning_once(
-                "head size is padded to %d, and num_blocks is adjusted to %d"
-                " accordingly", padded_head_size, num_blocks)
-        head_size = padded_head_size
-        return (num_blocks, block_size, num_kv_heads * 2, head_size)
+        return (num_blocks, block_size, num_kv_heads * 2, padded_head_size)
 
     @staticmethod
     def swap_blocks(
@@ -76,6 +70,11 @@ class PallasAttentionBackend(AttentionBackend):
                              max_num_page_per_req)
         min_page_size = 1 << (min_page_size - 1).bit_length()
         return min_page_size
+
+    @staticmethod
+    def get_max_num_seqs(model_len: int, page_size: int) -> int:
+        num_page_per_req = cdiv(model_len, page_size)
+        return 1024 * 1024 // 2 // num_page_per_req // 4
 
     # TPU has limited SREGs (scalar registers), if page_size is too small, we
     # can spill SREGs easily which leads to bad performance. The strategy we

@@ -155,6 +155,11 @@ class EngineCoreClient(ABC):
                        kwargs: Optional[dict[str, Any]] = None) -> list[_R]:
         raise NotImplementedError
 
+    def dp_engines_running(self) -> bool:
+        """Returns True id data parallel engines are collectively in a
+        running state."""
+        raise NotImplementedError
+
     async def get_output_async(self) -> EngineCoreOutputs:
         raise NotImplementedError
 
@@ -282,6 +287,9 @@ class InprocClient(EngineCoreClient):
                        kwargs: Optional[dict[str, Any]] = None) -> list[_R]:
         return self.engine_core.collective_rpc(method, timeout, args, kwargs)
 
+    def dp_engines_running(self) -> bool:
+        return False
+
 
 @dataclass
 class BackgroundResources:
@@ -383,6 +391,9 @@ class MPClient(EngineCoreClient):
             local_start_index = parallel_config.data_parallel_rank_local
             dp_size = parallel_config.data_parallel_size
             dp_rank = parallel_config.data_parallel_rank
+
+            # State used for data parallel.
+            self.engines_running = False
 
             # SPMD mode is where there is an LLM instance per DP rank and
             # one core engine per LLM, see
@@ -539,6 +550,9 @@ class MPClient(EngineCoreClient):
         while self.pending_messages and self.pending_messages[-1][0].done:
             self.pending_messages.pop()
 
+    def dp_engines_running(self) -> bool:
+        return self.engines_running
+
 
 def _process_utility_output(output: UtilityOutput,
                             utility_results: dict[int, AnyFuture]):
@@ -562,6 +576,7 @@ class SyncMPClient(MPClient):
             log_stats=log_stats,
         )
 
+        self.is_dp = self.vllm_config.parallel_config.data_parallel_size > 1
         self.outputs_queue = queue.Queue[Union[EngineCoreOutputs, Exception]]()
 
         # Ensure that the outputs socket processing thread does not have
@@ -623,6 +638,8 @@ class SyncMPClient(MPClient):
         outputs = self.outputs_queue.get()
         if isinstance(outputs, Exception):
             raise self._format_exception(outputs) from None
+        if outputs.wave_complete is not None:
+            self.engines_running = False
         return outputs
 
     def _send_input(self, request_type: EngineCoreRequestType, request: Any):
@@ -650,6 +667,8 @@ class SyncMPClient(MPClient):
         return future.result()
 
     def add_request(self, request: EngineCoreRequest) -> None:
+        if self.is_dp:
+            self.engines_running = True
         self._send_input(EngineCoreRequestType.ADD, request)
 
     def abort_requests(self, request_ids: list[str]) -> None:
@@ -911,7 +930,6 @@ class DPAsyncMPClient(AsyncMPClient):
                  client_addresses: Optional[dict[str, str]] = None,
                  client_index: int = 0):
         self.current_wave = 0
-        self.engines_running = False
         # To route aborts to the correct engine.
         self.reqs_in_flight: dict[str, CoreEngine] = {}
 
