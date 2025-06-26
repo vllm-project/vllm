@@ -230,7 +230,8 @@ class MediaConnector:
         Load video from a HTTP or base64 data URL.
         """
         image_io = ImageMediaIO(image_mode=image_mode)
-        video_io = VideoMediaIO(image_io, **self.video_media_io_kwargs)
+        video_io = VideoMediaIO(image_io,
+                                **self.video_media_io_kwargs)  # type: ignore
 
         return self.load_from_url(
             video_url,
@@ -250,7 +251,8 @@ class MediaConnector:
         By default, the image is converted into RGB format.
         """
         image_io = ImageMediaIO(image_mode=image_mode)
-        video_io = VideoMediaIO(image_io, **self.video_media_io_kwargs)
+        video_io = VideoMediaIO(image_io,
+                                **self.video_media_io_kwargs)  # type: ignore
 
         return await self.load_from_url_async(
             video_url,
