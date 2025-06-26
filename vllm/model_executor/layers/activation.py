@@ -16,6 +16,7 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.utils import LazyDict
 
+from torch._dynamo import allow_in_graph
 
 @CustomOp.register("xielu")
 class XIELU(CustomOp):
@@ -29,27 +30,35 @@ class XIELU(CustomOp):
 
     def __init__(self, alpha_p_init=0.8, alpha_n_init=0.8, beta=0.5, eps=-1e-6):
         super().__init__()
+        # Initialize parameters (good)
         self.alpha_p = nn.Parameter(torch.log(torch.exp(torch.tensor(alpha_p_init)) - 1.0).unsqueeze(0))
         self.alpha_n = nn.Parameter(torch.log(torch.exp(torch.tensor(alpha_n_init - beta)) - 1.0).unsqueeze(0))
         self.beta = beta
         self.eps = torch.tensor(eps, dtype=torch.bfloat16, device='cuda')
 
+        # Default to native implementation
         self._forward_method = self.forward_native
+
         if current_platform.is_cuda_alike():
             try:
-                # XIELUfn/XIELUPy works but XIELU runs into Dynamo Errors
-                from xielu.ops.wrappers import XIELU, XIELUfn, XIELUPy
-                self._xielu_cuda = XIELUPy()
-                self._xielu_cuda.alpha_p = self.alpha_p
-                self._xielu_cuda.alpha_n = self.alpha_n
-                self._xielu_cuda.beta = self.beta
-                self._xielu_cuda.eps = self.eps
+                from xielu.ops.wrappers import XIELU as XIELUCUDA
+                
+                # Create CUDA instance without Dynamo interference first
+                self._xielu_cuda = XIELUCUDA(
+                    alpha_p=self.alpha_p,
+                    alpha_n=self.alpha_n,
+                    beta=self.beta,
+                    eps=self.eps
+                )
+                
+                # Mark the forward method as Dynamo-compatible
+                self.forward_cuda = allow_in_graph(self._xielu_cuda.forward)
                 self._forward_method = self.forward_cuda
-            except (AttributeError, RuntimeError) as e:
-                warnings.warn(f"CUDA xIELU not found (error: {e}), defaulting to Python implementation")
+                
+            except Exception as e:
+                warnings.warn(f"CUDA xIELU not available: {e}")
 
     def forward_native(self, x: torch.Tensor) -> torch.Tensor:
-        # TODO optimize to precompute
         alpha_p = F.softplus(self.alpha_p)
         alpha_n = self.beta + F.softplus(self.alpha_n)
         return torch.where(
@@ -58,12 +67,8 @@ class XIELU(CustomOp):
             alpha_n * torch.expm1(torch.min(x, self.eps)) - alpha_n * x + self.beta * x
         )
 
-    def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
-        # alpha_p = F.softplus(self.alpha_p)
-        # alpha_n = self.beta + F.softplus(self.alpha_n)
-        # use this optimally with precomputed alpha_p and alpha_n
-        # return self._xielu_cuda.forward_inference(x)
-        return self._xielu_cuda.forward(x)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self._forward_method(x)
 
 
 @CustomOp.register("fatrelu_and_mul")
