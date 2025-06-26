@@ -381,7 +381,6 @@ def invoke_moe_batched_triton_kernel(
     grid = (expert_num_tokens.size(0), triton.cdiv(max_num_tokens, BLOCK_M) *
             triton.cdiv(B.size(1), BLOCK_N))
 
-    # ?????
     A_scale = maybe_fix_scales(A_scale, expert_num_tokens.shape[0])
 
     if B_scale is not None and B_scale.ndim == 1:

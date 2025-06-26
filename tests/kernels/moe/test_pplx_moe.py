@@ -20,7 +20,7 @@ except ImportError:
 
 from tests.kernels.moe.utils import make_test_weights, naive_batched_moe
 from tests.kernels.utils import torch_experts
-from tests.kernels.quant_utils import batched_dequant
+from tests.kernels.quant_utils import dequant
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe import fused_topk, override_config
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
@@ -42,7 +42,7 @@ requires_pplx = pytest.mark.skipif(
 )
 
 PPLX_COMBOS = [
-    # TODO: figure out why this fails
+    # TODO: figure out why this fails, seems to be test problem
     #(1, 128, 128),
 
     (2, 128, 512),
@@ -53,12 +53,6 @@ PPLX_COMBOS = [
     (64, 1024, 512),
     (222, 2048, 1024),
     (256, 1408, 2048),
-
-    #(6, 1408, 2048),
-    #(16, 1408, 2048),
-    #(199, 1408, 2048),
-    #(200, 1408, 2048),
-    #(256, 1408, 2048),
 ]
 
 NUM_EXPERTS = [8, 64]
@@ -268,12 +262,16 @@ def pplx_prepare_finalize(
         dp_size,
     )
 
+    assert a.shape[0] == topk_ids.shape[0]
+
     a_chunk = chunk_by_rank(a, rank, world_size).to(device)
     chunk_topk_weight = chunk_by_rank(topk_weight, rank, world_size).to(device)
     chunk_topk_ids = chunk_by_rank(topk_ids, rank, world_size).to(device)
 
+    assert a_chunk.shape[0] == chunk_topk_ids.shape[0]
+
     out = torch.full(
-        (max_num_tokens, hidden_dim),
+        a_chunk.shape,
         torch.nan,
         dtype=a.dtype,
         device=device,
@@ -306,7 +304,7 @@ def pplx_prepare_finalize(
     #print(f"B_A_SCALE = {b_a.shape}, {b_a_scale.shape if b_a_scale is not None else None}, {per_act_token_quant} {block_shape}, {a_chunk.shape}")
     # TOOD: shouldn't need batched_dequant
 
-    b_a = dummy_work(batched_dequant(b_a, b_a_scale, block_shape, per_act_token_quant, a.dtype))
+    b_a = dummy_work(dequant(b_a, b_a_scale, block_shape, per_act_token_quant, a.dtype))
 
     prepare_finalize.finalize(
         out,
@@ -368,8 +366,6 @@ def _pplx_prepare_finalize(
         nvshmem_finalize()
 
 
-# TODO (bnell): this test point does not work for M==1 due to how the test
-# is written, not due to limitations of the pplx kernels.
 @pytest.mark.parametrize("mnk", PPLX_COMBOS)
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
@@ -444,7 +440,7 @@ def pplx_moe(
     hidden_dim = a.shape[1]
     num_experts = w1.shape[0]
     topk = topk_ids.shape[1]
-    max_num_tokens = round_up(rank_chunk(a.shape[0], 0, world_size), 64)
+    max_num_tokens = round_up(rank_chunk(a.shape[0], 0, world_size), 16)
 
     hidden_dim_bytes, scale_bytes = pplx_hidden_dim_scale_bytes(
         max_num_tokens,

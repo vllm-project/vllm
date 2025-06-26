@@ -196,8 +196,6 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         # There's not much point setting this unless it is != indices.size(0)
         bound_m: Optional[torch.Tensor] = None
 
-        #print(f"DISPATCH START")
-
         self.a2a.dispatch(
             out_expert_num_tokens=expert_num_tokens,
             out_expert_x=expert_x,
@@ -207,8 +205,6 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             indices=topk_ids,
             bound_m=bound_m,
         )
-
-        #print(f"DISPATCH END")
 
         if expert_x_scale is not None:
             expert_x_scale = expert_x_scale[:, :, :orig_a_scale_block_shape]
@@ -231,6 +227,9 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         #assert topk_ids.size(0) == num_tokens, (
         #    f"{topk_ids.size(0)} == {num_tokens}")
+        assert topk_ids.size() == topk_weights.size(), (
+            f"{topk_ids.size()} == {topk_weights.size()}"
+        )
         assert output.size(0) <= self.max_num_tokens, (
             f"{output.size(0)} <= {self.max_num_tokens}")
         assert output.size(1) == fused_expert_output.size(-1)
@@ -239,12 +238,8 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         if apply_router_weight_on_input:
             topk_weights = torch.ones_like(topk_weights)
 
-        #print(f"COMBINE START")
-
         self.a2a.combine(out_tokens=output,
                          indices=topk_ids,
                          weights=topk_weights,
                          expert_y=fused_expert_output,
                          bound_m=bound_m)
-
-        #print(f"COMBINE END")

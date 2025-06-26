@@ -454,10 +454,6 @@ class FusedMoEModularKernel(torch.nn.Module):
         if global_num_experts == -1:
             global_num_experts = local_num_experts
 
-        #def maybe_shape(x):
-        #    return x.shape if x is not None else None
-        #print(f"PROBLEM topk={topk_ids.size(1)} E={global_num_experts}/{local_num_experts}, M={a1.shape[0]}, N={w1.size(1)}, K={a1.shape[1]}, {w1_scale.shape}, {w2_scale.shape}, {maybe_shape(a1_scale)}, {maybe_shape(a2_scale)} pt={self.fused_experts.per_act_token_quant} bs={self.fused_experts.block_shape}")
-
         (a1q, a1q_scale, expert_num_tokens, _expert_topk_ids,
          _expert_topk_weights) = self.prepare_finalize.prepare(
              a1,
