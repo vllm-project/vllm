@@ -202,15 +202,3 @@ def test_deepgemm_vs_triton(mnk, topk, num_experts):
         num_experts=num_experts,
         block_size=BLOCK_SIZE,
     )
-
-
-if __name__ == "__main__":
-    run_single_case(
-        m=1024,
-        n=1024,
-        k=512,
-        topk=2,
-        num_experts=32,
-        block_size=BLOCK_SIZE,
-    )
-    print("DeepGEMM standalone test passed ✅")
