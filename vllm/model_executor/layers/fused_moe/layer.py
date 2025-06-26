@@ -45,7 +45,8 @@ if current_platform.is_cuda_alike():
         from .pplx_prepare_finalize import PplxPrepareAndFinalize
     if has_deepep:
         from .deepep_ht_prepare_finalize import DeepEPHTPrepareAndFinalize
-        from .deepep_ll_prepare_finalize import DeepEPLLPrepareAndFinalize
+        from .deepep_ll_prepare_finalize import (DEEPEP_QUANT_BLOCK_SIZE,
+                                                 DeepEPLLPrepareAndFinalize)
 else:
     fused_experts = None  # type: ignore
     FusedMoEPermuteExpertsUnpermute = None  # type: ignore
@@ -53,6 +54,8 @@ else:
 if is_rocm_aiter_moe_enabled():
     from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (  # noqa: E501
         rocm_aiter_grouped_topk as grouped_topk)
+elif current_platform.is_cpu():
+    pass
 else:
     from vllm.model_executor.layers.fused_moe.fused_moe import grouped_topk
 if current_platform.is_tpu():
@@ -60,10 +63,6 @@ if current_platform.is_tpu():
 else:
     fused_moe_pallas = None  # type: ignore
 logger = init_logger(__name__)
-
-# Note: this limit is somewhat arbitrary and might be changed later.
-# The size of the activations will be E x MOE_DP_CHUNK_SIZE x hidden_dim.
-MOE_DP_CHUNK_SIZE = 256
 
 
 @dataclass
@@ -218,7 +217,12 @@ class MoEConfig:
     # TODO: add more quantization params, blocked, per-token, etc.
     block_size: int = 128
 
-    max_num_tokens: int = MOE_DP_CHUNK_SIZE
+    max_num_tokens: int = envs.VLLM_MOE_DP_CHUNK_SIZE
+
+    def __post_init__(self):
+        if self.dp_size > 1:
+            logger.debug("Using MOEConfig::max_num_tokens=%d",
+                         self.max_num_tokens)
 
     @property
     def tp_size(self):
@@ -376,6 +380,13 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                 all2all_manager.world_size)
             handle = all2all_manager.get_handle(all_to_all_args)
 
+            # Note : We may want to use FP8 dispatch even otherwise just to
+            # reduce datamovement
+            assert act_quant_block_size is not None
+            use_fp8_dispatch = (quant_dtype == current_platform.fp8_dtype()
+                                and act_quant_block_size[1]
+                                == DEEPEP_QUANT_BLOCK_SIZE)
+
             # Note (varun): Whether to use FP8 dispatch or not needs some
             # profiling. Turning it off for now.
             prepare_finalize = DeepEPLLPrepareAndFinalize(
@@ -385,7 +396,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                 max_tokens_per_rank=moe.max_num_tokens,
                 quant_dtype=quant_dtype,
                 block_shape=act_quant_block_size,
-                use_fp8_dispatch=False,
+                use_fp8_dispatch=use_fp8_dispatch,
             )
 
         self.topk_indices_dtype = None
@@ -852,13 +863,11 @@ class FusedMoE(torch.nn.Module):
         self.global_num_experts = num_experts
 
         # For smuggling this layer into the fused moe custom op
-        self.use_direct_call = self.dp_size == 1
-        if not self.use_direct_call:
-            compilation_config = vllm_config.compilation_config
-            if prefix in compilation_config.static_forward_context:
-                raise ValueError("Duplicate layer name: {}".format(prefix))
-            compilation_config.static_forward_context[prefix] = self
-            self.layer_name = prefix
+        compilation_config = vllm_config.compilation_config
+        if prefix in compilation_config.static_forward_context:
+            raise ValueError("Duplicate layer name: {}".format(prefix))
+        compilation_config.static_forward_context[prefix] = self
+        self.layer_name = prefix
 
         # Determine expert maps
         if self.use_ep:
@@ -913,7 +922,7 @@ class FusedMoE(torch.nn.Module):
             moe_parallel_config=self.moe_parallel_config,
             in_dtype=params_dtype,
             quant_dtype=quant_dtype,
-            max_num_tokens=MOE_DP_CHUNK_SIZE,
+            max_num_tokens=envs.VLLM_MOE_DP_CHUNK_SIZE,
         )
         self.moe_config = moe
         self.quant_config = quant_config
@@ -952,12 +961,12 @@ class FusedMoE(torch.nn.Module):
                 or self.moe_parallel_config.use_deepep_ll_kernels):
             act_dtype = vllm_config.model_config.dtype
             self.batched_hidden_states = torch.zeros(
-                (MOE_DP_CHUNK_SIZE, self.hidden_size),
+                (envs.VLLM_MOE_DP_CHUNK_SIZE, self.hidden_size),
                 dtype=act_dtype,
                 device=torch.cuda.current_device())
 
             self.batched_router_logits = torch.zeros(
-                (MOE_DP_CHUNK_SIZE, self.global_num_experts),
+                (envs.VLLM_MOE_DP_CHUNK_SIZE, self.global_num_experts),
                 dtype=act_dtype,
                 device=torch.cuda.current_device())
 
@@ -1352,11 +1361,8 @@ class FusedMoE(torch.nn.Module):
 
     def forward(self, hidden_states: torch.Tensor,
                 router_logits: torch.Tensor):
-        if self.use_direct_call:
-            return self.forward_impl(hidden_states, router_logits)
-        else:
-            return torch.ops.vllm.moe_forward(hidden_states, router_logits,
-                                              self.layer_name)
+        return torch.ops.vllm.moe_forward(hidden_states, router_logits,
+                                          self.layer_name)
 
     def forward_impl_chunked(self, full_hidden_states: torch.Tensor,
                              full_router_logits: torch.Tensor):

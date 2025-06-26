@@ -39,11 +39,23 @@ This living user guide outlines a few known **important changes and limitations*
 For each item, our progress towards V1 support falls into one of the following states:
 
 - **🚀 Optimized**: Nearly fully optimized, with no further work currently planned.
-- **🟢 Functional**: Fully operational, with ongoing optimizations.  
-- **🚧 WIP**: Under active development.  
-- **🟡 Planned**: Scheduled for future implementation (some may have open PRs/RFCs).  
+- **🟢 Functional**: Fully operational, with ongoing optimizations.
+- **🚧 WIP**: Under active development.
+- **🟡 Planned**: Scheduled for future implementation (some may have open PRs/RFCs).
 - **🟠 Delayed**: Temporarily dropped in V1 but planned to be re-introduced later.
 - **🔴 Deprecated**: Not planned for V1 unless there is strong demand.
+
+!!! note
+    vLLM V1’s unified scheduler treats both prompt and output tokens the same
+    way by using a simple dictionary (e.g., `{request_id: num_tokens}`) to dynamically
+    allocate a fixed token budget per request, enabling features like chunked prefills,
+    prefix caching, and speculative decoding without a strict separation between prefill
+    and decode phases.
+
+The V1 scheduler supports multiple scheduling policies, including First-Come,
+First-Served (FCFS) and priority-based scheduling (where requests are processed
+based on assigned priority, with FCFS as a tie-breaker), configurable via the
+`--scheduling-policy` argument.
 
 ### Hardware
 
@@ -66,38 +78,44 @@ For each item, our progress towards V1 support falls into one of the following s
 
 ### Models
 
-| Model Type | Status |
-|-----------------|-----------------------------------------------------------------------------------|
-| **Decoder-only Models**                     | <nobr>🚀 Optimized</nobr>                                                          |
-| **Encoder-Decoder Models**                  | <nobr>🟠 Delayed</nobr>                                                            |
-| **Embedding Models**                        | <nobr>🚧 WIP ([PR #16188](https://github.com/vllm-project/vllm/pull/16188))</nobr> |
-| **Mamba Models**                            | <nobr>🚧 WIP ([PR #19327](https://github.com/vllm-project/vllm/pull/19327))</nobr> |
-| **Multimodal Models**                       | <nobr>🟢 Functional</nobr>                                                         |
+| Model Type                  | Status                                                                             |
+|-----------------------------|------------------------------------------------------------------------------------|
+| **Decoder-only Models**     | <nobr>🚀 Optimized</nobr>                                                          |
+| **Encoder-Decoder Models**  | <nobr>🟠 Delayed</nobr>                                                            |
+| **Embedding Models**        | <nobr>🟢 Functional</nobr>                                                         |
+| **Mamba Models**            | <nobr>🚧 WIP ([PR #19327](https://github.com/vllm-project/vllm/pull/19327))</nobr> |
+| **Multimodal Models**       | <nobr>🟢 Functional</nobr>                                                         |
 
-vLLM V1 currently excludes model architectures with the `SupportsV0Only` protocol,
-and the majority fall into the following categories:
+vLLM V1 currently excludes model architectures with the `SupportsV0Only` protocol.
 
-**Embedding Models**  
-The initial support will be provided by [PR #16188](https://github.com/vllm-project/vllm/pull/16188).
+!!! tip
+
+    This corresponds to the V1 column in our [list of supported models][supported-models].
+
+See below for the status of models that are not yet supported or have more features planned in V1.
+
+#### Embedding Models
+
+The initial basic support is now functional.
 
 Later, we will consider using [hidden states processor](https://github.com/vllm-project/vllm/issues/12249),
 which is based on [global logits processor](https://github.com/vllm-project/vllm/pull/13360)
 to enable simultaneous generation and embedding using the same engine instance in V1.
 
-**Mamba Models**  
+#### Mamba Models
+
 Models using selective state-space mechanisms instead of standard transformer attention (e.g., `MambaForCausalLM`, `JambaForCausalLM`)
 will be supported via [PR #19327](https://github.com/vllm-project/vllm/pull/19327).
 
-**Encoder-Decoder Models**  
-vLLM V1 is currently optimized for decoder-only transformers.
-Models requiring cross-attention between separate encoder and decoder are not yet supported (e.g., `BartForConditionalGeneration`, `MllamaForConditionalGeneration`).
+#### Encoder-Decoder Models
 
-For a complete list of supported models, see the [list of supported models](https://docs.vllm.ai/en/latest/models/supported_models.html).
+Models requiring cross-attention between separate encoder and decoder (e.g., `BartForConditionalGeneration`, `MllamaForConditionalGeneration`)
+are not yet supported.
 
 ### Features
 
-| Feature | Status |
-|-----------------|-----------------------------------------------------------------------------------|
+| Feature                                     | Status                                                                            |
+|---------------------------------------------|-----------------------------------------------------------------------------------|
 | **Prefix Caching**                          | <nobr>🚀 Optimized</nobr>                                                         |
 | **Chunked Prefill**                         | <nobr>🚀 Optimized</nobr>                                                         |
 | **LoRA**                                    | <nobr>🚀 Optimized</nobr>                                                         |
