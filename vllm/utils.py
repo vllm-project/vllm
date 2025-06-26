@@ -1515,6 +1515,8 @@ class FlexibleArgumentParser(ArgumentParser):
         delete = set[int]()
         dict_args = defaultdict[str, dict[str, Any]](dict)
         for i, processed_arg in enumerate(processed_args):
+            if i in delete:  # skip if value from previous arg
+                continue
             if processed_arg.startswith("-") and "." in processed_arg:
                 if "=" in processed_arg:
                     processed_arg, value_str = processed_arg.split("=", 1)

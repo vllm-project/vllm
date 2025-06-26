@@ -287,6 +287,9 @@ def test_dict_args(parser):
         "true",
         "--hf_overrides.key12.key13",
         "null",
+        # Test '-' and '.' in value
+        "--hf_overrides.key14.key15",
+        "-minus.and.dot",
     ]
     parsed_args = parser.parse_args(args)
     assert parsed_args.model_name == "something.something"
@@ -307,6 +310,9 @@ def test_dict_args(parser):
         "key12": {
             "key13": None,
         },
+        "key14": {
+            "key15": "-minus.and.dot",
+        }
     }
     assert parsed_args.compilation_config == {
         "level": 1,
