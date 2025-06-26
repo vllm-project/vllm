@@ -1,4 +1,4 @@
-# Temporarily used for x86 CPU backend to avoid performance regression of torch>=2.6.0+cpu,
+# Temporarily used for x86 CPU backend to avoid performance regression of torch>2.6.0+cpu,
 # see https://github.com/pytorch/pytorch/pull/151218
 cmake>=3.26.1
 ninja
