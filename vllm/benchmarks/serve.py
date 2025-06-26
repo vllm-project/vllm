@@ -632,6 +632,12 @@ def add_cli_args(parser: argparse.ArgumentParser):
         "the endpoint type will be used as the label.",
     )
     parser.add_argument(
+        "--backend",
+        type=str,
+        default="vllm",
+        choices=list(ASYNC_REQUEST_FUNCS.keys()),
+    )
+    parser.add_argument(
         "--base-url",
         type=str,
         default=None,
