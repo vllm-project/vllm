@@ -25,7 +25,7 @@ Using KubeRay reduces the operational burden and simplifies integration of Ray +
 
 ### Example: Serve an LLM using vLLM on KubeRay
 
-This guide demonstrates how to Serve a Large Language Model with vLLM on Kubernetes using KubeRay. The guide deploys the `meta-llama/Meta-Llama-3-8B-Instruct` model from Hugging Face and can be run on Google Kubernetes Engine (GKE) or on a local k8s deployment.
+This guide shows how to serve a large language model on Kubernetes with vLLM and KubeRay. The example deploys the `meta-llama/Meta-Llama-3-8B-Instruct` model from Hugging Face and runs on Google Kubernetes Engine (GKE) or a local Kubernetes cluster.
 
 
 #### Prerequisites
@@ -46,14 +46,13 @@ gcloud container clusters create kuberay-gpu-cluster \
   --accelerator=type=nvidia-l4,count=2,gpu-driver-version=latest
 ```
 
-Each model replica will consume two NVIDIA L4 GPUs via tensor parallelism.
+Each model replica consumes two NVIDIA L4 GPUs through tensor parallelism.
 
-Alternatively, set up a two GPU cluster on your on-prem k8s cluster and continue.
+Alternatively, set up a two-GPU on-premises Kubernetes cluster before continuing.
 
 #### Install the KubeRay operator
 
-Follow the [official installation guide](https://docs.ray.io/en/latest/cluster/kubernetes/getting-started/kuberay-operator-installation.html)
-to install the latest stable KubeRay operator from the Helm repository.
+Install the latest stable KubeRay operator by following the [official installation guide](https://docs.ray.io/en/latest/cluster/kubernetes/getting-started/kuberay-operator-installation.html).
 
 #### Store the Hugging Face token as a Kubernetes secret
 
@@ -68,7 +67,7 @@ kubectl create secret generic hf-secret \
 #### Deploy a `RayService` that serves the model
 
 [This YAML](https://github.com/ray-project/kuberay/blob/564524cd0690cc4e389fd9e484959626fa15b0ce/ray-operator/config/samples/vllm/ray-service.vllm.yaml) defines a minimal Ray cluster and Ray Serve application that serves the LLama3 8B model using vLLM.
-Stand up the cluster using the YAML:
+Create the cluster with the YAML manifest:
 
 
 ```bash
@@ -90,8 +89,7 @@ Establish a port-fowarding session for the Serve app:
 kubectl port-forward svc/llama-3-8b-serve-svc 8000
 ```
 
-Note that KubeRay creates this Kubernetes Service after all the Pods in the cluster are running
-and the Ray Serve apps are running. This process can take a few minutes.
+KubeRay creates the Kubernetes Service only after all Pods and Ray Serve applications start. The process can take a few minutes.
 
 Now send a prompt to the model:
 
