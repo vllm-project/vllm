@@ -3,7 +3,7 @@
 import bisect
 import gc
 import time
-from typing import TYPE_CHECKING, Optional, Union, cast
+from typing import TYPE_CHECKING, Literal, Optional, Union, cast
 from unittest.mock import patch
 
 import numpy as np
@@ -1710,22 +1710,16 @@ def copy_kv_blocks(
     dst_kv_caches: dict[str, torch.Tensor],
     src_block_ids: list[int],
     dst_block_ids: list[int],
-    direction: str,
+    direction: Literal["h2d", "d2h"],
 ) -> None:
     """Copy kv blocks between different buffers."""
-    direction = direction.strip().lower()
-    assert direction in ("h2d", "d2h",), \
-           (f"Invalid direction: {direction}")
-
     if not src_kv_caches or not dst_kv_caches or \
        not src_block_ids or not dst_block_ids or \
        len(src_block_ids) != len(dst_block_ids):
         return
 
-    _, src_kv_cache = next(iter(src_kv_caches.items()))
-    src_device = src_kv_cache.device
-    _, dst_kv_cache = next(iter(dst_kv_caches.items()))
-    dst_device = dst_kv_cache.device
+    src_device = next(iter(src_kv_caches.values())).device
+    dst_device = next(iter(dst_kv_caches.values())).device
 
     src_indices, dst_indices = _make_src_and_dst_indices(
         src_block_ids=src_block_ids,
@@ -1739,8 +1733,6 @@ def copy_kv_blocks(
         src_tensor = src_kv_caches[layer_name]
         dst_tensor = dst_kv_caches[layer_name]
         _copy_fn(src_tensor, dst_tensor, src_indices, dst_indices)
-
-    return
 
 
 def replace_set_lora(model):

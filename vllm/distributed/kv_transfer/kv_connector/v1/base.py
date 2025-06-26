@@ -32,7 +32,7 @@ The class provides the following primitives:
 
 import enum
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Literal, Optional
 
 import torch
 
@@ -48,7 +48,8 @@ if TYPE_CHECKING:
 
 # s_tensor_list, d_tensor_list, s_indices, d_indices, direction
 CopyBlocksOp = Callable[[
-    dict[str, torch.Tensor], dict[str, torch.Tensor], list[int], list[int], str
+    dict[str, torch.Tensor], dict[str,
+                                  torch.Tensor], list[int], list[int], Literal
 ], None]
 
 logger = init_logger(__name__)

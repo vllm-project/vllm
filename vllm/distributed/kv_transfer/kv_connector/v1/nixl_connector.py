@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
+import logging
 import math
 import queue
 import threading
@@ -977,10 +978,11 @@ class NixlConnectorWorker:
             local_block_ids = meta.local_block_ids
             self.copy_blocks(self.host_xfer_buffers, self.device_kv_caches,
                              local_block_ids, local_block_ids, "h2d")
-            logger.debug(
-                "synced recved kv of request[%s] to device kv buffer,"
-                "local_block_ids: %s. ", req_id,
-                ",".join(map(str, meta.local_block_ids)))
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "synced recved kv of request[%s] to device kv buffer,"
+                    "local_block_ids: %s. ", req_id,
+                    ",".join(map(str, meta.local_block_ids)))
         return
 
     def save_kv_to_host(self, metadata: NixlConnectorMetadata):
@@ -993,11 +995,12 @@ class NixlConnectorWorker:
             # local prefill requests only
             if not meta.do_remote_decode:
                 continue
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "save_load_kv for request[%s] to host xfer buffer."
+                    "local_block_ids: %s. ", req_id,
+                    ",".join(map(str, meta.local_block_ids)))
             # blocking
-            logger.debug(
-                "save_load_kv for request[%s] to host xfer buffer."
-                "local_block_ids: %s. ", req_id,
-                ",".join(map(str, meta.local_block_ids)))
             self.copy_blocks(self.device_kv_caches, self.host_xfer_buffers,
                              meta.local_block_ids, meta.local_block_ids, "d2h")
         return
@@ -1022,7 +1025,7 @@ class NixlConnectorWorker:
                 "and %s requests done recving", self.tp_rank,
                 len(done_sending), len(done_recving))
 
-        if self.use_host_buffer and self.copy_blocks is not None:
+        if self.use_host_buffer:
             for req_id in done_recving:
                 meta = self._recving_metadata.pop(req_id)
                 assert meta, (f"{req_id} not found in recving_metadata list")
