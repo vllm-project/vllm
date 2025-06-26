@@ -3,8 +3,6 @@
 """Attention layer with FlashInfer."""
 from __future__ import annotations
 
-import functools
-import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -18,8 +16,6 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionType)
 from vllm.attention.layer import Attention
 from vllm.config import VllmConfig, get_layers_from_vllm_config
-from vllm.distributed.kv_transfer.kv_connector.utils import (
-    get_kv_connector_cache_layout)
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.flash_attn import use_cascade_attention
 from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
@@ -34,19 +30,8 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 FLASHINFER_WORKSPACE_BUFFER_SIZE = 256 * 1024 * 1024
-FLASHINFER_KV_CACHE_LAYOUT: str = os.getenv("FLASHINFER_KV_CACHE_LAYOUT",
-                                            "").upper()
 
 logger = init_logger(__name__)
-
-
-@functools.lru_cache
-def get_flashinfer_kv_cache_layout():
-    # Override with format specified by the user.
-    cache_layout = FLASHINFER_KV_CACHE_LAYOUT
-    if not cache_layout:
-        cache_layout = get_kv_connector_cache_layout()
-    return cache_layout
 
 
 class FlashInferBackend(AttentionBackend):
@@ -305,7 +290,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self._num_prefills = num_prefills
         self._num_decode_tokens = num_decode_tokens
         self._num_prefill_tokens = num_prefill_tokens
-        self._kv_cache_layout = None
 
         return modified_batch
 
@@ -316,11 +300,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 dtype=torch.uint8,
                 device=self.runner.device)
         return self._workspace_buffer
-
-    def get_kv_cache_layout(self):
-        if self._kv_cache_layout is None:
-            self._kv_cache_layout = get_flashinfer_kv_cache_layout()
-        return self._kv_cache_layout
 
     def _get_prefill_wrapper(self):
         if self._prefill_wrapper is None:
