@@ -261,13 +261,18 @@ if [ "$TARGETPLATFORM" != "linux/arm64" ]; then \
     if [[ "$CUDA_VERSION" == 12.8* ]]; then \
         uv pip install --system https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl; \
     else \
-        git clone https://github.com/flashinfer-ai/flashinfer.git --single-branch --branch v0.2.6.post1 --recursive && \
-        # Needed to build AOT kernels
-        (cd flashinfer && \
-            python3 -m flashinfer.aot && \
-            uv pip install --system --no-build-isolation . \
-        ) && \
-        rm -rf flashinfer; \
+      # keep whatever was in TORCH_CUDA_ARCH_LIST, but drop 7.0
+      export TORCH_CUDA_ARCH_LIST="$(echo "$TORCH_CUDA_ARCH_LIST" \
+          | tr ' ' '\n'                 \   # break into one-per-line
+          | grep -v '^7\.0$'            \   # kill 7.0
+          | paste -sd' ' -              )"  # collapse back to space-separated
+      echo "Building for archs: $TORCH_CUDA_ARCH_LIST" && \
+      git clone https://github.com/flashinfer-ai/flashinfer.git \
+                --single-branch --branch v0.2.6.post1 --recursive && \
+      (cd flashinfer && \
+          python3 -m flashinfer.aot && \
+          uv pip install --system --no-build-isolation .) && \
+      rm -rf flashinfer; \
     fi \
 fi
 COPY examples examples
