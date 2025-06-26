@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Union
 
 import numpy as np
 import torch
@@ -168,7 +168,8 @@ def prepare_mamba2_metadata(
 
 
 def update_metadata(x: torch.Tensor, query_start_loc: torch.Tensor,
-                    mamba2_metadata: Mamba2Metadata | Mamba2AttentionMetadata):
+                    mamba2_metadata: Union[Mamba2Metadata,
+                                           Mamba2AttentionMetadata]):
     """
     this is triggered upon handling a new input at the first layer
     """
