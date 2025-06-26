@@ -828,6 +828,32 @@ def load_tarsier(question: str, image_urls: list[str]) -> ModelRequestData:
     )
 
 
+def load_tarsier2(question: str, image_urls: list[str]) -> ModelRequestData:
+    model_name = "omni-research/Tarsier2-Recap-7b"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        trust_remote_code=True,
+        max_model_len=32768,
+        limit_mm_per_prompt={"image": len(image_urls)},
+        hf_overrides={"architectures": ["Tarsier2ForConditionalGeneration"]},
+    )
+
+    prompt = (
+        "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
+        f"<|im_start|>user\n<|vision_start|>{'<|image_pad|>' * len(image_urls)}"
+        f"<|vision_end|>{question}<|im_end|>\n"
+        "<|im_start|>assistant\n"
+    )
+    image_data = [fetch_image(url) for url in image_urls]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+        image_data=image_data,
+    )
+
+
 model_example_map = {
     "aria": load_aria,
     "aya_vision": load_aya_vision,
@@ -853,6 +879,7 @@ model_example_map = {
     "qwen2_5_vl": load_qwen2_5_vl,
     "smolvlm": load_smolvlm,
     "tarsier": load_tarsier,
+    "tarsier2": load_tarsier2,
 }
 
 
