@@ -519,32 +519,29 @@ class NixlConnectorWorker:
                                    remote_engine_id: EngineId, meta: ReqMeta):
         # Do NIXL handshake in background and add to _ready_requests when done.
         with self._handshake_lock:
-            if remote_engine_id not in self._remote_agents:
-                fut = self._handshake_futures.get(remote_engine_id)
-                if fut is None:
-                    fut = self._handshake_initiation_executor.submit(
-                        self._nixl_handshake, meta.remote_host,
-                        meta.remote_port)
-                    self._handshake_futures[remote_engine_id] = fut
+            fut = self._handshake_futures.get(remote_engine_id)
+            if fut is None:
+                fut = self._handshake_initiation_executor.submit(
+                    self._nixl_handshake, meta.remote_host, meta.remote_port)
+                self._handshake_futures[remote_engine_id] = fut
 
-                    def done_callback(f: Future[dict[int, str]],
-                                      eid=remote_engine_id):
-                        with self._handshake_lock:
-                            del self._handshake_futures[eid]
-                            try:
-                                self._remote_agents[eid] = f.result()
-                            except Exception:
-                                logger.exception("Handshake with %s failed",
-                                                 eid)
+                def done_callback(f: Future[dict[int, str]],
+                                  eid=remote_engine_id):
+                    with self._handshake_lock:
+                        del self._handshake_futures[eid]
+                        try:
+                            self._remote_agents[eid] = f.result()
+                        except Exception:
+                            logger.exception("Handshake with %s failed", eid)
 
-                    fut.add_done_callback(done_callback)
+                fut.add_done_callback(done_callback)
 
-                # TODO: handle failure state of future in the
-                # callback, we want to fail the request in this case.
-                def request_ready(_f: Future[Any], entry=(req_id, meta)):
-                    self._ready_requests.put(entry)
+            # TODO: handle failure state of future in the
+            # callback, we want to fail the request in this case.
+            def request_ready(_f: Future[Any], entry=(req_id, meta)):
+                self._ready_requests.put(entry)
 
-                fut.add_done_callback(request_ready)
+            fut.add_done_callback(request_ready)
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in nixl."""
