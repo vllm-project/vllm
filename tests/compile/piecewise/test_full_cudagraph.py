@@ -147,6 +147,7 @@ def test_lower_max_num_seqs(model, supported):
         llm.generate(["Hello, my name is"] * 10)
 
 
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Skip if not cuda")
 def test_full_cudagraph_with_invalid_backend():
     with temporary_environ({
             "VLLM_USE_V1": "1",

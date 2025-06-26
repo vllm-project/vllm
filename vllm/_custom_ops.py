@@ -5,7 +5,6 @@ import contextlib
 from typing import TYPE_CHECKING, Optional, Union
 
 import torch
-import torch.library
 
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -594,7 +593,7 @@ if hasattr(torch.ops._C, "ggml_dequantize"):
         quant_type: int,
         row: torch.SymInt,
     ) -> torch.Tensor:
-        return torch.empty((1, row), dtype=X.dtype, device=W.device)
+        return torch.empty((X.shape[0], row), dtype=X.dtype, device=W.device)
 
     @register_fake("_C::ggml_mul_mat_a8")
     def _ggml_mul_mat_a8_fake(
@@ -1276,7 +1275,7 @@ def scaled_fp8_quant(
             torch.ops._C.dynamic_scaled_fp8_quant(output, input, scale)
     else:
         # num_token_padding not implemented for this case
-        assert (scale.numel() == 1 or num_token_padding is None)
+        assert (scale.numel() == 1 and num_token_padding is None)
         torch.ops._C.static_scaled_fp8_quant(output, input, scale)
 
     return output, scale
@@ -1522,15 +1521,6 @@ def moe_align_block_size(topk_ids: torch.Tensor, num_experts: int,
     torch.ops._moe_C.moe_align_block_size(topk_ids, num_experts, block_size,
                                           sorted_token_ids, experts_ids,
                                           num_tokens_post_pad)
-
-
-def sgl_moe_align_block_size(topk_ids: torch.Tensor, num_experts: int,
-                             block_size: int, sorted_token_ids: torch.Tensor,
-                             experts_ids: torch.Tensor,
-                             num_tokens_post_pad: torch.Tensor) -> None:
-    torch.ops._moe_C.sgl_moe_align_block_size(topk_ids, num_experts,
-                                              block_size, sorted_token_ids,
-                                              experts_ids, num_tokens_post_pad)
 
 
 def moe_wna16_gemm(input: torch.Tensor, output: torch.Tensor,
