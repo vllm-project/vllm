@@ -39,6 +39,8 @@ def test_can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch):
             "num_local_experts": 2,
             # Otherwise there will not be any expert layers
             "first_k_dense_replace": 0,
+            # To avoid OOM on DeepSeek-V3
+            "n_routed_experts": 2,
         })
 
         if hasattr(hf_config, "vision_config"):
