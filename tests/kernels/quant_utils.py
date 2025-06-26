@@ -5,9 +5,10 @@ from typing import Optional, Union
 
 import torch
 
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    group_broadcast)
 from vllm.platforms import current_platform
 from vllm.utils import round_up
-from vllm.model_executor.layers.quantization.utils.quant_utils import group_broadcast
 
 # Using the default value (240.0) from pytorch will cause accuracy
 # issue on dynamic quantization models. Here use 224.0 for rocm.
@@ -220,6 +221,7 @@ def native_per_token_group_quant_int8(x,
 
 DEFAULT_BLOCK_SHAPE = [128, 128]
 
+
 def per_block_cast_to_fp8(
     x: torch.Tensor,
     block_shape: list[int] = DEFAULT_BLOCK_SHAPE,
@@ -227,10 +229,9 @@ def per_block_cast_to_fp8(
     block_m, block_n = block_shape
     assert x.dim() == 2
     m, n = x.shape
-    x_padded = torch.zeros(
-        (round_up(m, block_m), round_up(n, block_n)),
-        dtype=x.dtype,
-        device=x.device)
+    x_padded = torch.zeros((round_up(m, block_m), round_up(n, block_n)),
+                           dtype=x.dtype,
+                           device=x.device)
     x_padded[:m, :n] = x
     x_view = x_padded.view(-1, block_m, x_padded.size(1) // block_n, block_n)
     x_amax = x_view.abs().float().amax(dim=(1, 3), keepdim=True).clamp(1e-4)
@@ -248,10 +249,9 @@ def per_block_cast_to_int8(
     block_m, block_n = block_shape
     assert x.dim() == 2
     m, n = x.shape
-    x_padded = torch.zeros(
-        (round_up(m, block_m), round_up(n, block_n)),
-        dtype=x.dtype,
-        device=x.device)
+    x_padded = torch.zeros((round_up(m, block_m), round_up(n, block_n)),
+                           dtype=x.dtype,
+                           device=x.device)
     x_padded[:m, :n] = x
     x_view = x_padded.view(-1, block_m, x_padded.size(1) // block_n, block_n)
     x_amax = x_view.abs().float().amax(dim=(1, 3), keepdim=True).clamp(1e-4)
@@ -292,8 +292,6 @@ def native_batched_masked_quant_matmul(
     num_expert_tokens_cpu = num_expert_tokens_cpu.to(device="cpu")
     num_experts = num_expert_tokens.size(0)
 
-    f32 = torch.float32
-
     for e in range(num_experts):
         num_tokens = num_expert_tokens_cpu[e]
         if A.dtype.itemsize == 1 and block_shape is not None:
@@ -305,7 +303,8 @@ def native_batched_masked_quant_matmul(
             assert A_scale is not None and B_scale is not None
             A_dq = dequant(A[e], A_scale[e], block_shape, per_act_token_quant)
             B_dq = dequant(B[e], B_scale[e], block_shape, per_act_token_quant)
-            C[e, :num_tokens, :] = (A_dq[:num_tokens] @ B_dq.transpose(0, 1)).to(C.dtype)
+            C[e, :num_tokens, :] = (
+                A_dq[:num_tokens] @ B_dq.transpose(0, 1)).to(C.dtype)
         else:
             assert A_scale is None
             assert B_scale is None

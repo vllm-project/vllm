@@ -13,7 +13,6 @@ from vllm.model_executor.layers.fused_moe.fused_moe import (
     get_config_dtype_str, try_get_optimal_moe_config)
 from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache, moe_kernel_quantize_input)
-from vllm.model_executor.layers.quantization.utils.quant_utils import group_broadcast
 
 
 @triton.jit
@@ -595,8 +594,6 @@ class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         assert hidden_states.dim() == 3
         assert expert_num_tokens is not None
 
-        max_num_tokens = self.max_num_tokens
-        num_dp = self.world_size // self.dp_size
         num_local_experts = w1.size(0)
         assert num_local_experts == w1.size(0), (
             f"{num_local_experts} == {w1.size(0)}")

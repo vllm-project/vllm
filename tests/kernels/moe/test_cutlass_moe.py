@@ -100,13 +100,15 @@ class MOETensors8Bit(MOETensors):
         if False:
             _, a_scale = ops.scaled_fp8_quant(
                 moe_tensors_fp16.a, use_per_token_if_dynamic=per_act_token)
-            a_q, _ = ops.scaled_fp8_quant(moe_tensors_fp16.a,
-                                          a_scale,
-                                          use_per_token_if_dynamic=per_act_token)
+            a_q, _ = ops.scaled_fp8_quant(
+                moe_tensors_fp16.a,
+                a_scale,
+                use_per_token_if_dynamic=per_act_token)
         else:
-            a_q, a_scale = ops.scaled_fp8_quant(moe_tensors_fp16.a,
-                                                None,
-                                                use_per_token_if_dynamic=per_act_token)
+            a_q, a_scale = ops.scaled_fp8_quant(
+                moe_tensors_fp16.a,
+                None,
+                use_per_token_if_dynamic=per_act_token)
 
         w1_q = torch.empty((e, 2 * n, k), device="cuda", dtype=q_dtype)
         w2_q = torch.empty((e, k, n), device="cuda", dtype=q_dtype)
@@ -209,7 +211,7 @@ def run_8_bit(moe_tensors: MOETensors8Bit,
         'topk_ids': topk_ids,
         'w1_scale': moe_tensors.w1_scale,
         'w2_scale': moe_tensors.w2_scale,
-        'a1_scale': None #moe_tensors.a_scale
+        'a1_scale': None  #moe_tensors.a_scale
     }
 
     num_experts = moe_tensors.w1.size(0)
@@ -262,7 +264,8 @@ def test_cutlass_moe_8_bit_no_graph(
 
         cutlass_output = run_8_bit(mt, topk_weights, topk_ids)
 
-        # Note 5.5 only needed for larger problem sizes, 5 works ok for the rest.
+        # Note 5.5 only needed for larger problem sizes, 5 works ok for
+        # the rest.
         torch.testing.assert_close(triton_output,
                                    cutlass_output,
                                    atol=5.5e-2,

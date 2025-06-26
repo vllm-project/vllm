@@ -6,10 +6,9 @@ import itertools
 import pytest
 import torch
 
-from tests.kernels.quant_utils import (native_per_token_group_quant_fp8,
-                                       native_w8a8_block_matmul,
-                                       per_block_cast_to_fp8)
 from tests.kernels.moe.utils import make_test_weights
+from tests.kernels.quant_utils import (native_per_token_group_quant_fp8,
+                                       native_w8a8_block_matmul)
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import fused_experts
@@ -56,7 +55,8 @@ OUT_DTYPES = [torch.bfloat16]  # [torch.float32, torch.half, torch.bfloat16]
 SEEDS = [0]
 
 
-def torch_w8a8_block_fp8_moe(a, w1, w2, w1_s, w2_s, topk_weight, topk_ids, block_shape):
+def torch_w8a8_block_fp8_moe(a, w1, w2, w1_s, w2_s, topk_weight, topk_ids,
+                             block_shape):
     """Fused moe with block-wise quantization using native torch."""
     B, D = a.shape
     topk = topk_ids.size(1)
@@ -116,7 +116,11 @@ def test_w8a8_block_fp8_fused_moe(M, N, K, E, topk, block_size, dtype, seed,
     a = torch.randn((M, K), dtype=dtype) / 10
     score = torch.randn((M, E), dtype=dtype)
 
-    _, w1, w1_s, _, w2, w2_s = make_test_weights(E, N, K, dtype, torch.float8_e4m3fn,
+    _, w1, w1_s, _, w2, w2_s = make_test_weights(E,
+                                                 N,
+                                                 K,
+                                                 dtype,
+                                                 torch.float8_e4m3fn,
                                                  per_act_token_quant=False,
                                                  block_shape=block_size)
 
@@ -203,8 +207,8 @@ def _moe_unpermute(out, inv_perm, topk, K, topk_weight):
     return (tmp_out * topk_weight.view(M, -1, 1).to(out.dtype)).sum(dim=1)
 
 
-def deep_gemm_w8a8_block_fp8_moe(M, K, a, w1, w2, w1_s, w2_s, topk_weight, topk_ids,
-                                 block_shape):
+def deep_gemm_w8a8_block_fp8_moe(M, K, a, w1, w2, w1_s, w2_s, topk_weight,
+                                 topk_ids, block_shape):
     """Fused moe with block-wise quantization using DeepGemm grouped gemm."""
     num_groups = w1.shape[0]
     M, K = a.shape
@@ -265,7 +269,11 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed,
     a = torch.randn((M, K), dtype=dtype) / 10
     score = torch.randn((M, E), dtype=dtype)
 
-    _, w1, w1_s, _, w2, w2_s = make_test_weights(E, N, K, dtype, torch.float8_e4m3fn,
+    _, w1, w1_s, _, w2, w2_s = make_test_weights(E,
+                                                 N,
+                                                 K,
+                                                 dtype,
+                                                 torch.float8_e4m3fn,
                                                  per_act_token_quant=False,
                                                  block_shape=block_size)
 
@@ -281,12 +289,14 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed,
 
     # Set the context to avoid lots of warning spam.
     with set_current_vllm_config(vllm_config):
-        if False and M >= 128:
+        if M >= 128:
             ref_out = deep_gemm_w8a8_block_fp8_moe(M, K, a, w1, w2, w1_s, w2_s,
-                                                   topk_weights, topk_ids, block_size)
+                                                   topk_weights, topk_ids,
+                                                   block_size)
         else:
-            ref_out = torch_w8a8_block_fp8_moe(a, w1, w2, w1_s, w2_s, topk_weights,
-                                               topk_ids, block_size)
+            ref_out = torch_w8a8_block_fp8_moe(a, w1, w2, w1_s, w2_s,
+                                               topk_weights, topk_ids,
+                                               block_size)
 
         if use_compile:
             deep_gemm_moe_fp8_fn = torch.compile(deep_gemm_moe_fp8,

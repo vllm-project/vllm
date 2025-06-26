@@ -387,8 +387,10 @@ class FusedMoEModularKernel(torch.nn.Module):
         self.fused_experts = fused_experts
         assert prepare_finalize.activation_format == \
             fused_experts.activation_formats[0], (
-                f"{prepare_finalize.__class__.__name__}.{prepare_finalize.activation_format} == "
-                f"{fused_experts.__class__.__name__}.{fused_experts.activation_formats[0]}")
+                f"{prepare_finalize.__class__.__name__}."
+                f"{prepare_finalize.activation_format} == "
+                f"{fused_experts.__class__.__name__}."
+                f"{fused_experts.activation_formats[0]}")
 
     def forward(
         self,

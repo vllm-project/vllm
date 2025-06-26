@@ -47,7 +47,8 @@ def pplx_hidden_dim_scale_bytes(
         hidden_dim_bytes = hidden_dim * in_dtype.itemsize
         hidden_scale_bytes = 0
 
-    return round_up(hidden_dim_bytes, align), round_up(hidden_scale_bytes, align)
+    return round_up(hidden_dim_bytes, align), round_up(hidden_scale_bytes,
+                                                       align)
 
 
 # The max_num_tokens, world_size and dp_size must be the same

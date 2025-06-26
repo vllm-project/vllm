@@ -20,9 +20,7 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8)
 from vllm.platforms import current_platform
-from vllm.utils import cdiv, has_deep_ep, has_deep_gemm
 
-from tests.kernels.quant_utils import per_block_cast_to_fp8
 from .deepep_utils import ProcessGroupInfo, parallel_launch
 from .utils import make_test_weights
 
@@ -71,7 +69,8 @@ def make_block_quant_fp8_weights(
     """
     Return weights w1q, w2q, w1_scale, w2_scale
     """
-    w1, w1q, w1_scale, w2, w2q, w2_scale = make_test_weights(e, n, k, torch.bfloat16, torch.float8_e4m3fn, block_size)
+    w1, w1q, w1_scale, w2, w2q, w2_scale = make_test_weights(
+        e, n, k, torch.bfloat16, torch.float8_e4m3fn, block_size)
     return w1q, w2q, w1_scale, w2_scale
 
 

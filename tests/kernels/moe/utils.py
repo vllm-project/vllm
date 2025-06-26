@@ -5,6 +5,8 @@ from typing import Optional
 import torch
 
 import vllm._custom_ops as ops
+from tests.kernels.quant_utils import (per_block_cast_to_fp8,
+                                       per_block_cast_to_int8)
 from vllm.model_executor.layers.fused_moe import fused_experts
 from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
     BatchedPrepareAndFinalize, BatchedTritonExperts, NaiveBatchedExperts)
@@ -12,10 +14,8 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEModularKernel)
 from vllm.model_executor.layers.fused_moe.utils import (
     moe_kernel_quantize_input)
-from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    per_token_group_quant_fp8)
 from vllm.utils import round_up
-from tests.kernels.quant_utils import per_block_cast_to_fp8, per_block_cast_to_int8
+
 
 def triton_moe(
     a: torch.Tensor,
@@ -70,7 +70,7 @@ def batched_moe(
             max_num_tokens=max_num_tokens,
             world_size=1,
             dp_size=1,
-            use_fp8_w8a8=quant_dtype==torch.float8_e4m3fn,
+            use_fp8_w8a8=quant_dtype == torch.float8_e4m3fn,
             per_act_token_quant=per_act_token_quant,
             block_shape=block_shape,
         ),
@@ -112,14 +112,19 @@ def naive_batched_moe(
             max_num_tokens=max_num_tokens,
             dp_size=1,
             world_size=1,
-            use_fp8_w8a8=quant_dtype==torch.float8_e4m3fn,
+            use_fp8_w8a8=quant_dtype == torch.float8_e4m3fn,
             per_act_token_quant=per_act_token_quant,
             block_shape=block_shape,
         ),
     )
 
-    return fused_experts(a, w1, w2, topk_weight, topk_ids,
-                         w1_scale=w1_scale, w2_scale=w2_scale,
+    return fused_experts(a,
+                         w1,
+                         w2,
+                         topk_weight,
+                         topk_ids,
+                         w1_scale=w1_scale,
+                         w2_scale=w2_scale,
                          a1_scale=a1_scale,
                          a2_scale=a2_scale)
 
@@ -148,7 +153,8 @@ def make_quantized_test_activations(
     a_scale = None
 
     if quant_dtype is not None:
-        assert quant_dtype == torch.float8_e4m3fn or quant_dtype == torch.int8, "only fp8/int8 supported"
+        assert (quant_dtype == torch.float8_e4m3fn
+                or quant_dtype == torch.int8), "only fp8/int8 supported"
         a_q = torch.zeros_like(a, dtype=quant_dtype)
         a_scale = [None] * E
         for e in range(E):
@@ -169,7 +175,8 @@ def moe_quantize_weights(
     per_token_quant: bool,
     block_shape: Optional[list[int]],
 ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
-    assert quant_dtype == torch.float8_e4m3fn or quant_dtype == torch.int8, "only fp8/int8 supported"
+    assert (quant_dtype == torch.float8_e4m3fn
+            or quant_dtype == torch.int8), "only fp8/int8 supported"
 
     if block_shape is not None:
         assert not per_token_quant
@@ -179,9 +186,11 @@ def moe_quantize_weights(
             w, w_s = per_block_cast_to_fp8(w, block_shape)
     else:
         if quant_dtype == torch.int8:
-            w, w_s = ops.scaled_int8_quant(w, w_s, use_per_token_if_dynamic=per_token_quant)
+            w, w_s = ops.scaled_int8_quant(
+                w, w_s, use_per_token_if_dynamic=per_token_quant)
         else:
-            w, w_s = ops.scaled_fp8_quant(w, w_s, use_per_token_if_dynamic=per_token_quant)
+            w, w_s = ops.scaled_fp8_quant(
+                w, w_s, use_per_token_if_dynamic=per_token_quant)
 
     return w, w_s
 
@@ -233,6 +242,8 @@ def make_test_weights(
 ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], torch.Tensor,
            torch.Tensor, Optional[torch.Tensor]]:
     return (
-        *make_test_weight(e, 2*n, k, in_dtype, quant_dtype, block_shape, per_act_token_quant),
-        *make_test_weight(e, k, n, in_dtype, quant_dtype, block_shape, per_act_token_quant),
+        *make_test_weight(e, 2 * n, k, in_dtype, quant_dtype, block_shape,
+                          per_act_token_quant),
+        *make_test_weight(e, k, n, in_dtype, quant_dtype, block_shape,
+                          per_act_token_quant),
     )

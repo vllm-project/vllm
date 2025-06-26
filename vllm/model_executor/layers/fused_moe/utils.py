@@ -100,15 +100,13 @@ def _fp8_perm(m: torch.Tensor, idx: torch.Tensor) -> torch.Tensor:
 
 
 # TODO(bnell): better name
-def maybe_fix_scales(scales: Optional[torch.Tensor], num_experts: int) -> Optional[torch.Tensor]:
+def maybe_fix_scales(scales: Optional[torch.Tensor],
+                     num_experts: int) -> Optional[torch.Tensor]:
     if scales is not None and scales.ndim < 3:
         if scales.numel() == 1:
             scales = scales.view(1)
-            scales = torch.repeat_interleave(
-                scales,
-                num_experts,
-                dim=0
-            ).view(num_experts, 1, 1)
+            scales = torch.repeat_interleave(scales, num_experts,
+                                             dim=0).view(num_experts, 1, 1)
         else:
             scales = scales.view(num_experts, -1, scales.size(-1))
 

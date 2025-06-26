@@ -17,8 +17,8 @@ from transformers.models.mixtral.modeling_mixtral import MixtralSparseMoeBlock
 import vllm.model_executor.layers.fused_moe  # noqa
 from tests.kernels.utils import opcheck, stack_and_dev, torch_moe
 from vllm.config import VllmConfig, set_current_vllm_config
-from vllm.forward_context import set_forward_context
 from vllm.distributed.parallel_state import init_distributed_environment
+from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.fused_moe import fused_moe
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     fused_topk, modular_triton_fused_moe)
