@@ -1072,6 +1072,11 @@ class BaseProcessingInfo:
         Subclasses can override this method to handle
         specific kwargs from model config or user inputs.
         """
+        # "truncation" is a common runtime kwarg
+        # but is almost never used as an init kwarg
+        kwargs = kwargs.copy()
+        kwargs.pop("truncation", None)
+
         return self.ctx.get_hf_processor(**kwargs)
 
     @abstractmethod
