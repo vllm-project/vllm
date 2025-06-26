@@ -351,7 +351,7 @@ class EngineArgs:
     video_media_io_kwargs: dict[str,
                                 object] = get_field(MultiModalConfig,
                                                     "video_media_io_kwargs")
-    mm_placeholder_str_override: dict[str, int] = \
+    mm_placeholder_str_override: dict[str, str] = \
         get_field(MultiModalConfig, "mm_placeholder_str_override")
     mm_processor_kwargs: Optional[Dict[str, Any]] = \
         MultiModalConfig.mm_processor_kwargs
