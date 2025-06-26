@@ -1,21 +1,23 @@
 ---
-title: Adding a New Model
+title: Summary
 ---
 [](){ #new-model }
 
-This section provides more information on how to integrate a [PyTorch](https://pytorch.org/) model into vLLM.
+!!! important
+    Many decoder language models can now be automatically loaded using the [Transformers backend][transformers-backend] without having to implement them in vLLM. See if `vllm serve <model>` works first!
 
-Contents:
+vLLM models are specialized [PyTorch](https://pytorch.org/) models that take advantage of various [features][compatibility-matrix] to optimize their performance.
 
-- [Basic](basic.md)
-- [Registration](registration.md)
-- [Tests](tests.md)
-- [Multimodal](multimodal.md)
+The complexity of integrating a model into vLLM depends heavily on the model's architecture.
+The process is considerably straightforward if the model shares a similar architecture with an existing model in vLLM.
+However, this can be more complex for models that include new operators (e.g., a new attention mechanism).
 
-!!! note
-    The complexity of adding a new model depends heavily on the model's architecture.
-    The process is considerably straightforward if the model shares a similar architecture with an existing model in vLLM.
-    However, for models that include new operators (e.g., a new attention mechanism), the process can be a bit more complex.
+Read through these pages for a step-by-step guide:
+
+- [Basic Model](basic.md)
+- [Registering a Model](registration.md)
+- [Unit Testing](tests.md)
+- [Multi-Modal Support](multimodal.md)
 
 !!! tip
     If you are encountering issues while integrating your model into vLLM, feel free to open a [GitHub issue](https://github.com/vllm-project/vllm/issues)
