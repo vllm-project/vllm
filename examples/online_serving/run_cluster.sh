@@ -20,11 +20,21 @@
 #         --worker \
 #         /abs/path/to/huggingface/cache \
 #         -e VLLM_HOST_IP=<worker_node_ip>
-#
+# 
+# Each worker requires a unique VLLM_HOST_IP value.
 # Keep each terminal session open. Closing a session stops the associated Ray
 # node and thereby shuts down the entire cluster.
 # Every machine must be reachable at the supplied IP address.
-# Each worker requires a unique VLLM_HOST_IP value.
+#
+# The container is named "node". To open a shell inside the container after
+# launch, use:
+#       docker exec -it node /bin/bash
+#
+# Then, you can execute vLLM commands on the Ray cluster as if it were a
+# single machine, e.g. vllm serve ...
+#
+# To stop the container, use:
+#       docker stop node
 
 # Check for minimum number of required arguments.
 if [ $# -lt 4 ]; then
@@ -73,14 +83,3 @@ docker run \
     -v "${PATH_TO_HF_HOME}:/root/.cache/huggingface" \
     "${ADDITIONAL_ARGS[@]}" \
     "${DOCKER_IMAGE}" -c "${RAY_START_CMD}"
-
-#
-# The container is named "node". To open a shell inside the container after
-# launch, use:
-#       docker exec -it node /bin/bash
-#
-# Then, you can execute vLLM commands on the Ray cluster as if it were a
-# single machine, e.g. vllm serve ...
-#
-# To stop the container, use:
-#       docker stop node
