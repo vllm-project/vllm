@@ -2349,7 +2349,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 # check if the attention backends enforce to have separate
                 # routines for mix prefill-decode and pure decode phase
                 if attn_metadata_builder_i.force_separate_routine is not None \
-                    and self.compilation_config.separate_attention_rountine\
+                    and self.compilation_config.separate_attention_routine\
                     != attn_metadata_builder_i.force_separate_routine:
 
                     expected = attn_metadata_builder_i.force_separate_routine
