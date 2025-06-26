@@ -39,6 +39,8 @@ class RayCudaCommunicator(Communicator):
 
     The Ray Compiled Graph execution uses this communicator to support
     communication between actors in the group.
+
+    This class is not thread-safe.
     """
 
     _nccl = NCCLLibrary()
@@ -52,11 +54,46 @@ class RayCudaCommunicator(Communicator):
         cuda_stream: Optional[torch.cuda.Stream],
         use_communication_streams: bool = False,
     ):
+        """
+        Initialize a RayCudaCommunicator that can be used to communicate with
+        other GPU actors.
+
+        This method blocks until the same call has been made on all other
+        actors in the group, with the same arguments for world_size and
+        comm_id.
+
+        NOTE: A concurrent RayCudaCommunicator can coexist with this one
+        but using the two groups concurrently on different CUDA streams
+        may cause deadlock.
+        See
+        https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/usage/
+        communicators.html#using-multiple-nccl-communicators-concurrently.
+
+        If the user can guarantee that all involved actors execute the same ops
+        in the same order, then the other RayCudaCommunicator should use the
+        given `cuda_stream`, and there will not be a concurrency issue.
+        Otherwise, the other stream needs to synchronize with the given
+        `cuda_stream` before and after it launches NCCL ops, e.g., at the
+        beginning and end of a DAG task.
+
+        Args:
+            world_size: The number of participating actors/devices.
+            comm_id: A unique communicator ID returned by ncclGetUniqueId().
+            rank: The rank of this actor. If None, then the caller is not a
+                participant of the RayCudaCommunicator group.
+            actor_handles: A list of actor handles, in rank order.
+            cuda_stream: A CUDA stream to dispatch NCCL ops to. If rank is
+                specified, then this must be specified too.
+            use_communication_streams: Whether to use dedicated send and recv
+                streams for communication. If True, communication and
+                computation can be overlapped to improve performance.
+        """
         self._world_size = world_size
         self._rank: Optional[int] = rank
         self._actor_handles = actor_handles
         self._use_communication_streams = use_communication_streams
 
+        device = None
         if rank is not None:
             assert ray.get_gpu_ids(
             ), "RayCudaCommunicator has no GPUs assigned"
@@ -86,8 +123,7 @@ class RayCudaCommunicator(Communicator):
             self._cuda_stream = cuda_stream
 
             if use_communication_streams:
-                device = AcceleratorContext.get().get_accelerator_devices()[0]
-
+                assert device is not None, "Device should have been set"
                 self._send_stream = torch.cuda.Stream(device=device)
                 self._recv_stream = torch.cuda.Stream(device=device)
             else:
