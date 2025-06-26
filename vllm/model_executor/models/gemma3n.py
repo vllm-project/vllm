@@ -454,7 +454,6 @@ class Gemma3nDecoderLayer(nn.Module):
             eps=config.rms_norm_eps,
         )
 
-        assert config.hidden_activation == "gelu_pytorch_tanh"
         self.act_fn = _ACTIVATION_REGISTRY[config.hidden_activation]
 
     def forward(
