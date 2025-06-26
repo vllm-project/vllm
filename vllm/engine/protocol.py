@@ -298,7 +298,7 @@ class EngineClient(ABC):
     async def start_object_graph(self) -> None:
         """Start object graph the engine"""
         ...
-    
+
     @abstractmethod
     async def stop_object_graph(self) -> None:
         """Stop object graph the engine"""

@@ -2930,7 +2930,9 @@ def _is_torch_equal_or_newer(torch_version: str, target: str) -> bool:
     torch_version = version.parse(torch_version)
     return torch_version >= version.parse(target)
 
+
 class GrowingMemoryObjGraph:
+
     def __init__(self):
         from vllm import envs
         if not envs.VLLM_OBJ_GRAPH_DIR:
@@ -2939,7 +2941,6 @@ class GrowingMemoryObjGraph:
         os.makedirs(self._obj_graph_dir, exist_ok=True)
 
         self._start_state = False
-
 
     def start(self) -> str:
         import objgraph
@@ -2995,7 +2996,7 @@ class GrowingMemoryObjGraph:
             except IndexError:
                 logger.warning("Type %s has no available objects", gt[0])
                 continue
-        
+
         # Generate back reference graph
         objgraph.show_backrefs(
             obj,

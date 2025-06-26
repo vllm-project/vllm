@@ -139,12 +139,12 @@ class WorkerBase:
     def vocab_size(self) -> int:
         """Get vocabulary size from model configuration."""
         return self.model_config.get_vocab_size()
-        
+
     def start_object_graph(self):
         if self.obj_graph is None:
             raise RuntimeError("Object graph is not enabled.")
         return self.obj_graph.start()
-    
+
     def stop_object_graph(self):
         if self.obj_graph is None:
             raise RuntimeError("Object graph is not enabled.")

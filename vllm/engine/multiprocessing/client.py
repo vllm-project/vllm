@@ -616,14 +616,14 @@ class MQLLMEngineClient(EngineClient):
 
         await self._send_one_way_rpc_request(
             request=RPCUProfileRequest.STOP_PROFILE, socket=self.input_socket)
-        
+
     async def start_object_graph(self) -> None:
         """Start object graph the engine"""
 
         await self._send_one_way_rpc_request(
             request=RPCUObjectGraphRequest.START_OBJECT_GRAPH,
             socket=self.input_socket)
-        
+
     async def stop_object_graph(self) -> None:
         """Stop object graph the engine"""
 
