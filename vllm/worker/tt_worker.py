@@ -206,6 +206,21 @@ class TTWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         else:
             # Note: includes num vision tokens for multi-modal
             max_tokens_all_users = 131072
+
+        # To fit a max batch with (max_tokens_all_users / max batch) per user,
+        # allocate an extra block_size per user since vLLM uses a worst-case
+        # heuristic and assumes each touched block will require a new
+        # allocation. E.g. batch 32, block 64 needs an extra 2048 tokens.
+        max_batch = self.scheduler_config.max_num_seqs
+        max_tokens_all_users += self.cache_config.block_size * max_batch
+
+        # For multi-step, to fit (max_tokens_all_users / max batch) per user,
+        # allocate an extra num_lookahead_slots (num_scheduler_steps - 1 when
+        # not using speculative decoding) per user.
+        # E.g. batch 32, num_lookahead_slots 9 needs 288 extra tokens.
+        max_tokens_all_users += (self.scheduler_config.num_lookahead_slots *
+                                 max_batch)
+
         num_tt_blocks = math.ceil(max_tokens_all_users /
                                   self.cache_config.block_size)
         num_tt_blocks = int(
