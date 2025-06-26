@@ -366,10 +366,10 @@ run_serving_tests() {
       # wait until the server is alive
       if wait_for_server; then
         echo ""
-        echo "vllm server is up and running."
+        echo "vLLM server is up and running."
       else
         echo ""
-        echo "vllm failed to start within the timeout period."
+        echo "vLLM failed to start within the timeout period."
       fi
     else
       server_command="Using Remote Server $REMOTE_HOST $REMOTE_PORT"

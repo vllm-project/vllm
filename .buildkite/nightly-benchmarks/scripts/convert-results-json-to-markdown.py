@@ -79,7 +79,7 @@ def results_to_json(latency, throughput, serving):
     )
 
 
-def get_size(bytes, suffix="B"):
+def get_size_with_unit(bytes, suffix="B"):
     """
     Scale bytes to its proper format
     e.g:
@@ -174,26 +174,21 @@ if __name__ == "__main__":
     throughput_results = pd.DataFrame.from_dict(throughput_results)
 
     svmem = psutil.virtual_memory()
-    libnuma_found = util.find_spec("numa") is not None
-    cpuinfo_found = util.find_spec("cpuinfo") is not None
-    if libnuma_found and cpuinfo_found:
-        from cpuinfo import get_cpu_info
+    platform_data = {
+        "Physical cores": [psutil.cpu_count(logical=False)],
+        "Total cores": [psutil.cpu_count(logical=True)],
+        "Total Memory": [get_size_with_unit(svmem.total)],
+    }
+
+    if util.find_spec("numa") is not None:
         from numa import info
 
-        numa_size = info.get_num_configured_nodes()
-        platform_data = {
-            "CPU Brand": [get_cpu_info()["brand_raw"]],
-            "Physical cores": [psutil.cpu_count(logical=False)],
-            "Total cores": [psutil.cpu_count(logical=True)],
-            "Total Memory": [get_size(svmem.total)],
-            "Total NUMA nodes": [numa_size],
-        }
-    else:
-        platform_data = {
-            "Physical cores": [psutil.cpu_count(logical=False)],
-            "Total cores": [psutil.cpu_count(logical=True)],
-            "Total Memory": [get_size(svmem.total)],
-        }
+        platform_data["Total NUMA nodes"] = [info.get_num_configured_nodes()]
+
+    if util.find_spec("cpuinfo") is not None:
+        from cpuinfo import get_cpu_info
+
+        platform_data["CPU Brand"] = [get_cpu_info()["brand_raw"]]
 
     platform_results = pd.DataFrame.from_dict(
         platform_data, orient="index", columns=["Platform Info"]

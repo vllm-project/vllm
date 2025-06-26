@@ -39,11 +39,11 @@ bash .buildkite/nightly-benchmarks/scripts/run-performance-benchmarks.sh
 
 Runtime environment variables:
 - `ON_CPU`: set the value to '1' on Intel® Xeon® Processors. Default value is 0.
-- `SERVING_JSON`: assign a json file instead of the default one for serving tests. Default value is empty string.
-- `LATENCY_JSON`: assign a json file instead of the default one for latency tests. Default value is empty string.
-- `THROUGHPUT_JSON`: assign a json file instead of the default one for throughout tests. Default value is empty string.
-- `REMOTE_HOST`: set the remote vLLM IP to benchmark on a remote vLLM service. Default value is empty string.
-- `REMOTE_PORT`: set the remote vLLM Port to benchmark on a remote vLLM service. Default value is empty string.
+- `SERVING_JSON`: JSON file to use for the serving tests. Default value is empty string (use default file).
+- `LATENCY_JSON`: JSON file to use for the latency tests. Default value is empty string (use default file).
+- `THROUGHPUT_JSON`: JSON file to use for the throughout tests. Default value is empty string (use default file).
+- `REMOTE_HOST`: IP for the remote vLLM service to benchmark. Default value is empty string.
+- `REMOTE_PORT`: Port for the remote vLLM service to benchmark. Default value is empty string.
 
 Nightly benchmark will be triggered when:
 - Every commit for those PRs with `perf-benchmarks` label and `nightly-benchmarks` label.
@@ -133,9 +133,9 @@ If you do not see the table, please wait till the benchmark finish running.
 The json version of the table (together with the json version of the benchmark) will be also attached to the markdown file.
 The raw benchmarking results (in the format of json files) are in the `Artifacts` tab of the benchmarking.
 
-The `compare-json-results.py` helps to compare benchmark results json files converted using `convert-results-json-to-markdown.py`.
-Once users trigger the benchmark script manually, the results will be generated under benchmark/results folder along with the benchmark_results.md and benchmark_results.json.  
-This `compare-json-results.py` compares two benchmark_results.json files with performance ratio among Output Tput, Median TTFT and Median TPOT.
+The `compare-json-results.py` helps to compare benchmark results JSON files converted using `convert-results-json-to-markdown.py`.
+When run, benchmark script generates results under `benchmark/results` folder, along with the `benchmark_results.md` and `benchmark_results.json`.
+`compare-json-results.py` compares two `benchmark_results.json` files and provides performance ratio e.g. for Output Tput, Median TTFT and Median TPOT.
 
 Here is an example using the script to compare result_a and result_b without detail test name.
 `python3 compare-json-results.py -f results_a/benchmark_results.json -f results_b/benchmark_results.json --ignore_test_name`
