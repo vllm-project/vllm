@@ -144,7 +144,6 @@ class GeluAndMulSparse(CustomOp):
         gate_proj = self._gaussian_topk(gate_proj) # sparsity
         activations = self.act_fn(gate_proj) # gelu
         down_proj = self.down_proj(activations * up_proj)
-    The function computes x -> x[:d] * silu(x[d:]) where d = x.shape[-1] // 2.
     Shapes:
         x: (num_tokens, 2 * d) or (batch_size, seq_len, 2 * d)
         return: (num_tokens, d) or (batch_size, seq_len, d)

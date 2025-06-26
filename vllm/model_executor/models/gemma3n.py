@@ -181,7 +181,7 @@ class Gemma3nLaurelBlock(nn.Module):
         self.linear_right = RowParallelLinear(laurel_rank,
                                               hidden_size,
                                               bias=False,
-                                              prefix=f"{prefix}.linear_left",
+                                              prefix=f"{prefix}.linear_right",
                                               return_bias=False)
         self.post_laurel_norm = RMSNorm(
             hidden_size=hidden_size,
