@@ -4303,17 +4303,14 @@ class VllmConfig:
     """Quantization configuration."""
     compilation_config: CompilationConfig = field(
         default_factory=CompilationConfig)
-    """`torch.compile` configuration for the model.
+    """`torch.compile` and cudagraph capture configuration for the model.
 
-    When it is a number (0, 1, 2, 3), it will be interpreted as the
-    optimization level.
+    As a shorthand, `-O<n>` can be used to directly specify the compilation
+    level `n`: `-O3` is equivalent to `-O.level=3` (same as `-O='{"level":3}'`).
 
     NOTE: level 0 is the default level without any optimization. level 1 and 2
     are for internal testing only. level 3 is the recommended level for
     production.
-
-    Following the convention of traditional compilers, using `-O` without space
-    is also supported. `-O3` is equivalent to `-O 3`.
 
     You can specify the full compilation config like so:
     `{"level": 3, "cudagraph_capture_sizes": [1, 2, 4, 8]}`
