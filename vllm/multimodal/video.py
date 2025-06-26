@@ -53,7 +53,10 @@ class VideoLoader:
 
     @classmethod
     @abstractmethod
-    def load_bytes(cls, data: bytes, num_frames: int = -1) -> npt.NDArray:
+    def load_bytes(cls,
+                   data: bytes,
+                   num_frames: int = -1,
+                   **kwargs) -> npt.NDArray:
         raise NotImplementedError
 
 
@@ -99,7 +102,10 @@ class OpenCVVideoBackend(VideoLoader):
         return api_pref
 
     @classmethod
-    def load_bytes(cls, data: bytes, num_frames: int = -1) -> npt.NDArray:
+    def load_bytes(cls,
+                   data: bytes,
+                   num_frames: int = -1,
+                   **kwargs) -> npt.NDArray:
         import cv2
 
         backend = cls().get_cv2_video_api()
@@ -144,18 +150,21 @@ class VideoMediaIO(MediaIO[npt.NDArray]):
     def __init__(
         self,
         image_io: ImageMediaIO,
-        *,
         num_frames: int = 32,
+        **kwargs,
     ) -> None:
         super().__init__()
 
         self.image_io = image_io
         self.num_frames = num_frames
+        self.kwargs = kwargs
         video_loader_backend = envs.VLLM_VIDEO_LOADER_BACKEND
         self.video_loader = VIDEO_LOADER_REGISTRY.load(video_loader_backend)
 
     def load_bytes(self, data: bytes) -> npt.NDArray:
-        return self.video_loader.load_bytes(data, self.num_frames)
+        return self.video_loader.load_bytes(data,
+                                            num_frames=self.num_frames,
+                                            **self.kwargs)
 
     def load_base64(self, media_type: str, data: str) -> npt.NDArray:
         if media_type.lower() == "video/jpeg":

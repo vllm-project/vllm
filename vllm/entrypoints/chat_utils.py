@@ -723,6 +723,7 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         self._tracker = tracker
 
         self._connector = MediaConnector(
+            video_media_io_kwargs=self._tracker._model_config.video_media_io_kwargs,
             allowed_local_media_path=tracker.allowed_local_media_path,
         )
 
@@ -763,7 +764,6 @@ class MultiModalContentParser(BaseMultiModalContentParser):
     def parse_video(self, video_url: str) -> None:
         video = self._connector.fetch_video(
             video_url=video_url,
-            num_frames=self._tracker._model_config.video_num_frames
         )
 
         placeholder = self._tracker.add("video", video)
@@ -777,7 +777,8 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
 
         self._tracker = tracker
         self._connector = MediaConnector(
-            allowed_local_media_path=tracker.allowed_local_media_path,
+            video_media_io_kwargs=self._tracker._model_config.video_media_io_kwargs,
+            allowed_local_media_path=tracker.allowed_local_media_path
         )
 
     def parse_image(self, image_url: str) -> None:
@@ -821,7 +822,6 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
     def parse_video(self, video_url: str) -> None:
         video = self._connector.fetch_video_async(
             video_url=video_url,
-            num_frames=self._tracker._model_config.video_num_frames
         )
 
         placeholder = self._tracker.add("video", video)

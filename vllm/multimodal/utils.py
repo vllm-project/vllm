@@ -38,12 +38,14 @@ class MediaConnector:
 
     def __init__(
         self,
+        video_media_io_kwargs: dict[str, object],
         connection: HTTPConnection = global_http_connection,
         *,
         allowed_local_media_path: str = "",
     ) -> None:
         super().__init__()
 
+        self.video_media_io_kwargs: dict[str, object] = video_media_io_kwargs
         self.connection = connection
 
         if allowed_local_media_path:
@@ -221,7 +223,6 @@ class MediaConnector:
     def fetch_video(
         self,
         video_url: str,
-        num_frames: int,
         *,
         image_mode: str = "RGB",
     ) -> npt.NDArray:
@@ -229,7 +230,7 @@ class MediaConnector:
         Load video from a HTTP or base64 data URL.
         """
         image_io = ImageMediaIO(image_mode=image_mode)
-        video_io = VideoMediaIO(image_io, num_frames=num_frames)
+        video_io = VideoMediaIO(image_io, **self.video_media_io_kwargs)
 
         return self.load_from_url(
             video_url,
@@ -240,7 +241,6 @@ class MediaConnector:
     async def fetch_video_async(
         self,
         video_url: str,
-        num_frames: int,
         *,
         image_mode: str = "RGB",
     ) -> npt.NDArray:
@@ -250,7 +250,7 @@ class MediaConnector:
         By default, the image is converted into RGB format.
         """
         image_io = ImageMediaIO(image_mode=image_mode)
-        video_io = VideoMediaIO(image_io, num_frames=num_frames)
+        video_io = VideoMediaIO(image_io, **self.video_media_io_kwargs)
 
         return await self.load_from_url_async(
             video_url,
@@ -270,7 +270,7 @@ class MediaConnector:
         return image_embedding_io.load_base64("", data)
 
 
-global_media_connector = MediaConnector()
+global_media_connector = MediaConnector(video_media_io_kwargs={})
 """The global [`MediaConnector`][vllm.multimodal.utils.MediaConnector]
 instance used by vLLM."""
 
