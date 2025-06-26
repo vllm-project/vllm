@@ -37,10 +37,10 @@ from vllm.transformers_utils.configs import (ChatGLMConfig, Cohere2Config,
                                              MedusaConfig, MiniMaxText01Config,
                                              MiniMaxVL01Config, MllamaConfig,
                                              MLPSpeculatorConfig, MPTConfig,
-                                             NemotronConfig, OvisConfig,
-                                             RWConfig, SkyworkR1VChatConfig,
-                                             SolarConfig, Telechat2Config,
-                                             UltravoxConfig)
+                                             NemotronConfig, NVLM_D_Config,
+                                             OvisConfig, RWConfig,
+                                             SkyworkR1VChatConfig, SolarConfig,
+                                             Telechat2Config, UltravoxConfig)
 # yapf: enable
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.utils import resolve_obj_by_qualname
@@ -75,6 +75,7 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = {
     "minimax_text_01": MiniMaxText01Config,
     "minimax_vl_01": MiniMaxVL01Config,
     "nemotron": NemotronConfig,
+    "NVLM_D": NVLM_D_Config,
     "ovis": OvisConfig,
     "solar": SolarConfig,
     "skywork_chat": SkyworkR1VChatConfig,
@@ -356,7 +357,6 @@ def get_config(
                     revision=revision,
                     code_revision=code_revision,
                     token=os.getenv('HF_TOKEN', None),
-                    has_no_defaults_at_init=True,
                     **kwargs,
                 )
             except ValueError as e:
