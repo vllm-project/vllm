@@ -4140,9 +4140,9 @@ class CompilationConfig:
 
     @classmethod
     def from_cli(cls, cli_value: str) -> "CompilationConfig":
-        """Parse the CLI value for the compilation config."""
-        if cli_value in ["0", "1", "2", "3"]:
-            return cls(level=int(cli_value))
+        """Parse the CLI value for the compilation config.
+        -O1, -O2, -O3, etc. is handled in FlexibleArgumentParser.
+        """
         return TypeAdapter(CompilationConfig).validate_json(cli_value)
 
     def __post_init__(self) -> None:

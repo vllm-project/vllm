@@ -1483,10 +1483,10 @@ class FlexibleArgumentParser(ArgumentParser):
                 else:
                     key = pattern.sub(repl, arg, count=1)
                     processed_args.append(key)
-            elif arg.startswith('-O') and arg != '-O' and len(arg) == 2:
-                # allow -O flag to be used without space, e.g. -O3
-                processed_args.append('-O')
-                processed_args.append(arg[2:])
+            elif arg.startswith('-O') and arg != '-O' and arg[2] != '.':
+                # allow -O flag to be used without space, e.g. -O3 or -Odecode
+                # -O.<...> handled later
+                processed_args.append(f'-O.level={arg[2:]}')
             else:
                 processed_args.append(arg)
 
@@ -1515,11 +1515,11 @@ class FlexibleArgumentParser(ArgumentParser):
         delete = set[int]()
         dict_args = defaultdict[str, dict[str, Any]](dict)
         for i, processed_arg in enumerate(processed_args):
-            if processed_arg.startswith("--") and "." in processed_arg:
+            if processed_arg.startswith("-") and "." in processed_arg:
                 if "=" in processed_arg:
                     processed_arg, value_str = processed_arg.split("=", 1)
                     if "." not in processed_arg:
-                        # False positive, . was only in the value
+                        # False positive, '.' was only in the value
                         continue
                 else:
                     value_str = processed_args[i + 1]
