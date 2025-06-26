@@ -58,7 +58,8 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               TokenizeCompletionRequest,
                                               TokenizeResponse,
                                               TranscriptionRequest,
-                                              TranscriptionResponse)
+                                              TranscriptionResponse,
+                                              TranslationRequest)
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.openai.tool_parsers import ToolParser
 # yapf: enable
@@ -89,9 +90,8 @@ CompletionLikeRequest = Union[CompletionRequest, DetokenizeRequest,
 
 ChatLikeRequest = Union[ChatCompletionRequest, EmbeddingChatRequest,
                         TokenizeChatRequest]
-
-AnyRequest = Union[CompletionLikeRequest, ChatLikeRequest,
-                   TranscriptionRequest]
+SpeechToTextRequest = Union[TranscriptionRequest, TranslationRequest]
+AnyRequest = Union[CompletionLikeRequest, ChatLikeRequest, SpeechToTextRequest]
 
 AnyResponse = Union[
     CompletionResponse,

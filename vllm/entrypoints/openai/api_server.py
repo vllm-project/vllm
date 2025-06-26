@@ -73,6 +73,8 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               TokenizeResponse,
                                               TranscriptionRequest,
                                               TranscriptionResponse,
+                                              TranslationRequest,
+                                              TranslationResponse,
                                               UnloadLoRAAdapterRequest)
 # yapf: enable
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
@@ -88,7 +90,7 @@ from vllm.entrypoints.openai.serving_score import ServingScores
 from vllm.entrypoints.openai.serving_tokenization import (
     OpenAIServingTokenization)
 from vllm.entrypoints.openai.serving_transcription import (
-    OpenAIServingTranscription)
+    OpenAIServingTranscription, OpenAIServingTranslation)
 from vllm.entrypoints.openai.tool_parsers import ToolParserManager
 from vllm.entrypoints.utils import (cli_env_setup, load_aware_call,
                                     with_cancellation)
@@ -399,6 +401,10 @@ def tokenization(request: Request) -> OpenAIServingTokenization:
 
 def transcription(request: Request) -> OpenAIServingTranscription:
     return request.app.state.openai_serving_transcription
+
+
+def translation(request: Request) -> OpenAIServingTranslation:
+    return request.app.state.openai_serving_translation
 
 
 def engine_client(request: Request) -> EngineClient:
@@ -769,6 +775,47 @@ async def create_transcriptions(raw_request: Request,
                             status_code=generator.code)
 
     elif isinstance(generator, TranscriptionResponse):
+        return JSONResponse(content=generator.model_dump())
+
+    return StreamingResponse(content=generator, media_type="text/event-stream")
+
+
+@router.post("/v1/audio/translations",
+             responses={
+                 HTTPStatus.OK.value: {
+                     "content": {
+                         "text/event-stream": {}
+                     }
+                 },
+                 HTTPStatus.BAD_REQUEST.value: {
+                     "model": ErrorResponse
+                 },
+                 HTTPStatus.UNPROCESSABLE_ENTITY.value: {
+                     "model": ErrorResponse
+                 },
+                 HTTPStatus.INTERNAL_SERVER_ERROR.value: {
+                     "model": ErrorResponse
+                 },
+             })
+@with_cancellation
+@load_aware_call
+async def create_translations(request: Annotated[TranslationRequest,
+                                                 Form()],
+                              raw_request: Request):
+    handler = translation(raw_request)
+    if handler is None:
+        return base(raw_request).create_error_response(
+            message="The model does not support Translations API")
+
+    audio_data = await request.file.read()
+    generator = await handler.create_translation(audio_data, request,
+                                                 raw_request)
+
+    if isinstance(generator, ErrorResponse):
+        return JSONResponse(content=generator.model_dump(),
+                            status_code=generator.code)
+
+    elif isinstance(generator, TranslationResponse):
         return JSONResponse(content=generator.model_dump())
 
     return StreamingResponse(content=generator, media_type="text/event-stream")
@@ -1243,6 +1290,12 @@ async def init_app_state(
         chat_template_content_format=args.chat_template_content_format,
     )
     state.openai_serving_transcription = OpenAIServingTranscription(
+        engine_client,
+        model_config,
+        state.openai_serving_models,
+        request_logger=request_logger,
+    ) if model_config.runner_type == "transcription" else None
+    state.openai_serving_translation = OpenAIServingTranslation(
         engine_client,
         model_config,
         state.openai_serving_models,
