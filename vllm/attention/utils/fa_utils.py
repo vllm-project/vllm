@@ -18,9 +18,6 @@ elif current_platform.is_xpu():
     reshape_and_cache_flash = ops.reshape_and_cache_flash
     flash_attn_varlen_func = ops.flash_attn_varlen_func
     get_scheduler_metadata = ops.get_scheduler_metadata
-else:
-    from vllm import _custom_ops as ops
-    reshape_and_cache_flash = ops.reshape_and_cache_flash
 
 
 def get_flash_attn_version(requires_alibi: bool = False) -> Optional[int]:
