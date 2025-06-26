@@ -723,7 +723,7 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         self._tracker = tracker
 
         self._connector = MediaConnector(
-            video_media_io_kwargs=self._tracker._model_config.video_media_io_kwargs,
+            media_io_kwargs=self._tracker._model_config.media_io_kwargs,
             allowed_local_media_path=tracker.allowed_local_media_path,
         )
 
@@ -777,7 +777,7 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
 
         self._tracker = tracker
         self._connector = MediaConnector(
-            video_media_io_kwargs=self._tracker._model_config.video_media_io_kwargs,
+            media_io_kwargs=self._tracker._model_config.media_io_kwargs,
             allowed_local_media_path=tracker.allowed_local_media_path
         )
 

@@ -231,25 +231,36 @@ def test_limit_mm_per_prompt_parser(arg, expected):
     assert args.limit_mm_per_prompt == expected
 
 
-@pytest.mark.parametrize(("arg", "expected"), [
-    (None, dict()),
-    ('{"num_frames": 123}', {
-        "num_frames": 123
-    }),
-    ('{"num_frames": 123, "fps": 1.0, "foo": "bar"}', {
-        "num_frames": 123,
-        "fps": 1.0,
-        "foo": "bar"
-    }),
-])
-def test_video_media_io_kwargs_parser(arg, expected):
+@pytest.mark.parametrize(
+    ("arg", "expected"),
+    [
+        (None, dict()),
+        ('{"video": {"num_frames": 123} }', {
+            "video": {
+                "num_frames": 123
+            }
+        }),
+        (
+            '{"video": {"num_frames": 123, "fps": 1.0, "foo": "bar"}, "image": {"foo": "bar"} }',  # noqa
+            {
+                "video": {
+                    "num_frames": 123,
+                    "fps": 1.0,
+                    "foo": "bar"
+                },
+                "image": {
+                    "foo": "bar"
+                }
+            }),
+    ])
+def test_media_io_kwargs_parser(arg, expected):
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
     if arg is None:
         args = parser.parse_args([])
     else:
-        args = parser.parse_args(["--video-media-io-kwargs", arg])
+        args = parser.parse_args(["--media-io-kwargs", arg])
 
-    assert args.video_media_io_kwargs == expected
+    assert args.media_io_kwargs == expected
 
 
 @pytest.mark.parametrize(("arg", "expected"), [

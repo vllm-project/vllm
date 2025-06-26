@@ -44,7 +44,7 @@ def convert_image_mode(image: Image.Image, to_mode: str):
 
 class ImageMediaIO(MediaIO[Image.Image]):
 
-    def __init__(self, *, image_mode: str = "RGB") -> None:
+    def __init__(self, image_mode: str = "RGB", **kwargs) -> None:
         super().__init__()
 
         self.image_mode = image_mode

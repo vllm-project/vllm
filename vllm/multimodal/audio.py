@@ -83,6 +83,9 @@ class AudioResampler:
 
 class AudioMediaIO(MediaIO[tuple[npt.NDArray, float]]):
 
+    def __init__(self, **kwargs) -> None:
+        super().__init__()
+
     def load_bytes(self, data: bytes) -> tuple[npt.NDArray, float]:
         return librosa.load(BytesIO(data), sr=None)
 

@@ -348,9 +348,8 @@ class EngineArgs:
         get_field(TokenizerPoolConfig, "extra_config")
     limit_mm_per_prompt: dict[str, int] = \
         get_field(MultiModalConfig, "limit_per_prompt")
-    video_media_io_kwargs: dict[str,
-                                object] = get_field(MultiModalConfig,
-                                                    "video_media_io_kwargs")
+    media_io_kwargs: dict[str, object] = get_field(MultiModalConfig,
+                                                   "media_io_kwargs")
     mm_placeholder_str_override: dict[str, str] = \
         get_field(MultiModalConfig, "mm_placeholder_str_override")
     mm_processor_kwargs: Optional[Dict[str, Any]] = \
@@ -719,9 +718,8 @@ class EngineArgs:
         )
         multimodal_group.add_argument("--limit-mm-per-prompt",
                                       **multimodal_kwargs["limit_per_prompt"])
-        multimodal_group.add_argument(
-            "--video-media-io-kwargs",
-            **multimodal_kwargs["video_media_io_kwargs"])
+        multimodal_group.add_argument("--media-io-kwargs",
+                                      **multimodal_kwargs["media_io_kwargs"])
         multimodal_group.add_argument(
             "--mm-placeholder-str-override",
             **multimodal_kwargs["mm_placeholder_str_override"])
@@ -949,7 +947,7 @@ class EngineArgs:
             enable_prompt_embeds=self.enable_prompt_embeds,
             served_model_name=self.served_model_name,
             limit_mm_per_prompt=self.limit_mm_per_prompt,
-            video_media_io_kwargs=self.video_media_io_kwargs,
+            media_io_kwargs=self.media_io_kwargs,
             mm_placeholder_str_override=self.mm_placeholder_str_override,
             use_async_output_proc=not self.disable_async_output_proc,
             config_format=self.config_format,
