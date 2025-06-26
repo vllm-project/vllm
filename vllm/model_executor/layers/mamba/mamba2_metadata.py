@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import math
 from dataclasses import dataclass
 from typing import Optional, Union
 
@@ -12,7 +11,8 @@ from vllm.attention.backends.placeholder_attn import (
     PlaceholderAttentionMetadata)
 from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.platforms import current_platform
-from vllm.v1.attention.backends.mamba_attn import Mamba2AttentionMetadata
+from vllm.v1.attention.backends.mamba_attn import (
+    Mamba2AttentionMetadata, _query_start_loc_to_chunk_indices_offsets)
 
 
 @dataclass
@@ -63,42 +63,6 @@ def get_platform_metadata_classes() -> tuple[type[AttentionMetadata], ...]:
                 PlaceholderAttentionMetadata)
     raise ValueError(
         f"Unsupported platform for Mamba2: {current_platform.device_type}")
-
-
-def _query_start_loc_to_chunk_indices_offsets(query_start_loc: torch.Tensor,
-                                              chunk_size: int,
-                                              total_seqlens: int):
-
-    cu_seqlens = query_start_loc[1:]  # remove prepended 0
-
-    # outputs will have length expansion of chunks that do not divide
-    # chunk_size
-    N = math.ceil(total_seqlens / chunk_size) + (cu_seqlens[:-1] % chunk_size
-                                                 > 0).sum()
-    chunk_indices = torch.arange(N,
-                                 dtype=torch.int,
-                                 device=query_start_loc.device)
-    chunk_offsets = torch.zeros((N, ),
-                                dtype=torch.int,
-                                device=query_start_loc.device)
-
-    p = 0  # num of insertions
-    for s, e in zip(cu_seqlens[:-1], cu_seqlens[1:]):
-
-        # if does not divide chunk_size, then there is one chunk insertion
-        p += (s % chunk_size > 0)
-
-        # get the dimensions
-        # - the + 1 for _e is to shift the boundary by one chunk
-        # - this shifting is not needed if chunk_size divides e
-        _s, _e = s // chunk_size + p, e // chunk_size + p + (e % chunk_size
-                                                             > 0)
-
-        # adjust inidces and offsets
-        chunk_indices[_s:_e] -= p
-        chunk_offsets[_s] = s % chunk_size
-
-    return chunk_indices, chunk_offsets
 
 
 def prepare_mamba2_metadata(
