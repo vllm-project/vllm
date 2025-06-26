@@ -14,18 +14,21 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
 from vllm.attention.layer import Attention
 from vllm.attention.ops.merge_attn_states import merge_attn_states
 from vllm.attention.utils.fa_utils import (flash_attn_supports_fp8,
-                                           flash_attn_varlen_func,
-                                           get_flash_attn_version,
-                                           get_scheduler_metadata,
-                                           reshape_and_cache_flash)
+                                           get_flash_attn_version)
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils import cdiv
 from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder, CommonAttentionMetadata, get_kv_cache_layout,
     make_local_attention_virtual_batches)
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.block_table import BlockTable
+
+if current_platform.is_cuda():
+    from vllm.attention.utils.fa_utils import (flash_attn_varlen_func,
+                                               get_scheduler_metadata,
+                                               reshape_and_cache_flash)
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
