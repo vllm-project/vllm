@@ -85,8 +85,11 @@ def test_batched_mm(num_experts: int, max_tokens_per_expert: int, K: int,
 
     use_fp8_w8a8 = dtype == torch.float8_e4m3fn
 
-    if block_shape is not None and not use_fp8_w8a8:
+    if (per_act_token_quant or block_shape is not None) and not use_fp8_w8a8:
         pytest.skip("Don't test blocking for non-quantized types.")
+
+    if per_act_token_quant and block_shape is not None:
+        pytest.skip("Skip illegal quantization test.")
 
     if dtype.itemsize == 1:
         act_dtype = torch.bfloat16
@@ -201,11 +204,11 @@ def test_fused_moe_batched_experts(
 
     use_fp8_w8a8 = dtype == torch.float8_e4m3fn
 
-    if not use_fp8_w8a8 and per_act_token_quant and block_shape is not None:
+    if not use_fp8_w8a8 and (per_act_token_quant or block_shape is not None):
         pytest.skip("Skip quantization test for non-quantized type")
 
     if per_act_token_quant and block_shape is not None or topk > e:
-        pytest.skip("Skip illegal quantization test")
+        pytest.skip("Skip illegal quantization test.")
 
     a = torch.randn((m, k), device="cuda", dtype=torch.bfloat16) / 10
     score = torch.randn((m, e), device="cuda", dtype=torch.bfloat16)
@@ -226,9 +229,18 @@ def test_fused_moe_batched_experts(
 
     with set_current_vllm_config(vllm_config):
         topk_weight, topk_ids, _ = fused_topk(a, score, topk, False)
-        batched_output = batched_moe(a, w1, w2, topk_weight, topk_ids, w1_s,
-                                     w2_s, quant_dtype, per_act_token_quant,
-                                     block_shape)
+        batched_output = batched_moe(
+            a,
+            w1,
+            w2,
+            topk_weight,
+            topk_ids,
+            w1_scale=w1_s,
+            w2_scale=w2_s,
+            quant_dtype=quant_dtype,
+            per_act_token_quant=per_act_token_quant,
+            block_shape=block_shape,
+        )
         baseline_output = torch_experts(
             a,
             w1,
@@ -240,9 +252,19 @@ def test_fused_moe_batched_experts(
             quant_dtype=quant_dtype,
             per_act_token_quant=per_act_token_quant,
             block_shape=block_shape)
-        triton_output = triton_moe(a, w1, w2, topk_weight, topk_ids, w1_s,
-                                   w2_s, quant_dtype, per_act_token_quant,
-                                   block_shape)
+
+        triton_output = triton_moe(
+            a,
+            w1,
+            w2,
+            topk_weight,
+            topk_ids,
+            w1_scale=w1_s,
+            w2_scale=w2_s,
+            quant_dtype=quant_dtype,
+            per_act_token_quant=per_act_token_quant,
+            block_shape=block_shape,
+        )
 
     torch.testing.assert_close(triton_output,
                                baseline_output,

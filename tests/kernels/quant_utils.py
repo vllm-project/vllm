@@ -6,7 +6,8 @@ from typing import Optional, Union
 import torch
 
 from vllm.platforms import current_platform
-from vllm.utils import cdiv
+from vllm.utils import round_up
+from vllm.model_executor.layers.quantization.utils.quant_utils import group_broadcast
 
 # Using the default value (240.0) from pytorch will cause accuracy
 # issue on dynamic quantization models. Here use 224.0 for rocm.
@@ -167,7 +168,7 @@ def native_per_token_group_quant_fp8(x,
                                      dtype=torch.float8_e4m3fn):
     """Function to perform per-token-group quantization on an input tensor
     `x` using native torch."""
-    assert x.shape[-1] % group_size == 0, ("the last dimension of `x` cannot "
+    assert x.shape[-1] % group_size == 0, ("the last dimension of `x` must "
                                            "be divisible by `group_size`")
     assert x.is_contiguous(), "`x` is not contiguous"
 
@@ -197,7 +198,7 @@ def native_per_token_group_quant_int8(x,
     quantized tensor along with the scaling factor used for quantization.
     """
     assert (x.shape[-1] % group_size == 0
-            ), "the last dimension of `x` cannot be divisible by `group_size`"
+            ), "the last dimension of `x` must be divisible by `group_size`"
     assert x.is_contiguous(), "`x` is not contiguous"
 
     iinfo = torch.iinfo(dtype)
@@ -217,17 +218,21 @@ def native_per_token_group_quant_int8(x,
     return x_q, x_s
 
 
+DEFAULT_BLOCK_SHAPE = [128, 128]
+
 def per_block_cast_to_fp8(
-        x: torch.Tensor,
-        block_size_n: int = 128) -> tuple[torch.Tensor, torch.Tensor]:
+    x: torch.Tensor,
+    block_shape: list[int] = DEFAULT_BLOCK_SHAPE,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    block_m, block_n = block_shape
     assert x.dim() == 2
     m, n = x.shape
     x_padded = torch.zeros(
-        (cdiv(m, 128) * 128, cdiv(n, block_size_n) * block_size_n),
+        (round_up(m, block_m), round_up(n, block_n)),
         dtype=x.dtype,
         device=x.device)
     x_padded[:m, :n] = x
-    x_view = x_padded.view(-1, 128, x_padded.size(1) // 128, block_size_n)
+    x_view = x_padded.view(-1, block_m, x_padded.size(1) // block_n, block_n)
     x_amax = x_view.abs().float().amax(dim=(1, 3), keepdim=True).clamp(1e-4)
     x_scaled = (x_view * (448.0 / x_amax)).to(torch.float8_e4m3fn)
     x_scaled_sub = x_scaled.view_as(x_padded)[:m, :n].contiguous()
@@ -235,14 +240,53 @@ def per_block_cast_to_fp8(
     return x_scaled_sub, scales
 
 
+# TODO: fix this
+def per_block_cast_to_int8(
+    x: torch.Tensor,
+    block_shape: list[int] = DEFAULT_BLOCK_SHAPE,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    block_m, block_n = block_shape
+    assert x.dim() == 2
+    m, n = x.shape
+    x_padded = torch.zeros(
+        (round_up(m, block_m), round_up(n, block_n)),
+        dtype=x.dtype,
+        device=x.device)
+    x_padded[:m, :n] = x
+    x_view = x_padded.view(-1, block_m, x_padded.size(1) // block_n, block_n)
+    x_amax = x_view.abs().float().amax(dim=(1, 3), keepdim=True).clamp(1e-4)
+    x_scaled = (x_view * (448.0 / x_amax)).to(torch.int8)
+    x_scaled_sub = x_scaled.view_as(x_padded)[:m, :n].contiguous()
+    scales = (x_amax / 448.0).view(x_view.size(0), x_view.size(2))
+    return x_scaled_sub, scales
+
+
+def dequant(
+    t: torch.Tensor,
+    scale: Optional[torch.Tensor],
+    block_shape: Optional[list[int]],
+    per_act_token_quant: bool,
+    out_dtype: Optional[torch.dtype] = torch.float32,
+) -> torch.Tensor:
+    if scale is not None:
+        f32 = torch.float32
+        if per_act_token_quant or block_shape is None:
+            return (t.to(f32) * scale).to(out_dtype)
+        else:
+            return (t.to(f32) * group_broadcast(scale, t.shape)).to(out_dtype)
+    else:
+        return t.to(out_dtype)
+
+
 def native_batched_masked_quant_matmul(
     A: torch.Tensor,
     B: torch.Tensor,
     C: torch.Tensor,
     num_expert_tokens: torch.Tensor,
-    A_scale: Optional[torch.Tensor],
-    B_scale: Optional[torch.Tensor],
-    block_shape: Optional[list[int]],
+    A_scale: Optional[torch.Tensor] = None,
+    B_scale: Optional[torch.Tensor] = None,
+    block_shape: Optional[list[int]] = None,
+    per_act_token_quant: bool = False,
 ) -> torch.Tensor:
     num_expert_tokens_cpu = num_expert_tokens.clone()
     num_expert_tokens_cpu = num_expert_tokens_cpu.to(device="cpu")
@@ -259,9 +303,9 @@ def native_batched_masked_quant_matmul(
             C[e, :num_tokens, :] = tmp[:num_tokens, :]
         elif A.dtype.itemsize == 1 and block_shape is None:
             assert A_scale is not None and B_scale is not None
-            C[e, :num_tokens, :] = (
-                (A[e, :num_tokens, :].to(f32) * A_scale[e]).to(C.dtype)
-                @ (B[e].transpose(0, 1).to(f32) * B_scale[e]).to(C.dtype))
+            A_dq = dequant(A[e], A_scale[e], block_shape, per_act_token_quant)
+            B_dq = dequant(B[e], B_scale[e], block_shape, per_act_token_quant)
+            C[e, :num_tokens, :] = (A_dq[:num_tokens] @ B_dq.transpose(0, 1)).to(C.dtype)
         else:
             assert A_scale is None
             assert B_scale is None

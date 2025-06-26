@@ -1067,6 +1067,8 @@ def torch_experts(
     expert_map: Optional[torch.Tensor] = None,
     w1_scale: Optional[torch.Tensor] = None,
     w2_scale: Optional[torch.Tensor] = None,
+    a1_scale: Optional[torch.Tensor] = None,
+    a2_scale: Optional[torch.Tensor] = None,
     quant_dtype: Optional[torch.dtype] = None,
     per_act_token_quant=False,
     block_shape: Optional[list[int]] = None,
@@ -1113,12 +1115,14 @@ def torch_experts(
                                                      w2_scale[i], block_shape,
                                                      out.dtype)
             else:
-                compute_type = torch.bfloat16
-                tmp1 = a[mask].to(compute_type) @ w1[i].transpose(
-                    0, 1).to(compute_type)
+                f32 = torch.float32
+                scales = a_scale if a_scale.numel() == 1 else a_scale[mask]
+                tmp1 = a[mask].to(f32) * scales
+                w1_dq = (w1[i].to(f32) * w1_scale[i]).transpose(0, 1)
+                tmp1 = tmp1 @ w1_dq
                 tmp2 = SiluAndMul()(tmp1)
-                out[mask] = (tmp2 @ w2[i].transpose(0, 1).to(compute_type)).to(
-                    out.dtype)
+                w2_dq = (w2[i].to(f32) * w2_scale[i]).transpose(0, 1)
+                out[mask] = (tmp2 @ w2_dq).to(out.dtype)
 
     return (out.view(M, -1, w2.shape[1]) *
             topk_weight.view(M, -1, 1).to(out.dtype)).sum(dim=1)

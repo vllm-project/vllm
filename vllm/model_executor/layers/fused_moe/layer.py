@@ -14,6 +14,7 @@ from torch.nn.parameter import UninitializedParameter
 import vllm.envs as envs
 from vllm.config import get_current_vllm_config
 from vllm.distributed import (get_dp_group, get_ep_group,
+                              get_world_group,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
 from vllm.distributed.eplb.eplb_state import EplbState
@@ -166,6 +167,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                 max_tokens_per_rank=moe.max_num_tokens,
                 world_size=all2all_manager.world_size,
                 dp_size=all2all_manager.dp_world_size,
+                use_fp8_dispatch=use_fp8_dispatch,
             )
 
         self.topk_indices_dtype = None
@@ -233,8 +235,10 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             self.rocm_aiter_fused_experts = None  # type: ignore
 
     def select_gemm_impl(
-            self, prepare_finalize: FusedMoEPrepareAndFinalize,
-            moe: FusedMoEConfig) -> FusedMoEPermuteExpertsUnpermute:
+        self,
+        prepare_finalize: FusedMoEPrepareAndFinalize,
+        moe: FusedMoEConfig,
+    ) -> FusedMoEPermuteExpertsUnpermute:
 
         assert self.fused_experts == fused_experts
 
@@ -641,21 +645,18 @@ class FusedMoE(torch.nn.Module):
             params_dtype = torch.get_default_dtype()
         self.params_dtype = params_dtype
 
-        if ep_size is not None:
-            all2all_manager = get_ep_group().device_communicator.all2all_manager
-            world_size = (all2all_manager.world_size
-                          if all2all_manager is not None else 1)
-        else:
-            world_size = 1
+        tp_size_ = (tp_size if tp_size is not None else
+                    get_tensor_model_parallel_world_size())
+        dp_size_ = (dp_size if dp_size is not None else
+                    get_dp_group().world_size)
+        world_size_ = get_world_group().world_size
 
         vllm_config = get_current_vllm_config()
         self.moe_parallel_config: FusedMoEParallelConfig = (
             FusedMoEParallelConfig.make(
-                tp_size_=(tp_size if tp_size is not None else
-                          get_tensor_model_parallel_world_size()),
-                dp_size_=(dp_size if dp_size is not None else
-                          get_dp_group().world_size),
-                world_size_=world_size,
+                tp_size_=tp_size_,
+                dp_size_=dp_size_,
+                world_size_=world_size_,
                 vllm_parallel_config=vllm_config.parallel_config))
 
         self.global_num_experts = num_experts + num_redundant_experts

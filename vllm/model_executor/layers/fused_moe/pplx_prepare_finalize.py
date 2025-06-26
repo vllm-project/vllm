@@ -20,6 +20,9 @@ def pplx_hidden_dim_scale_bytes(
     per_act_token_quant: bool,
     block_shape: Optional[list[int]],
 ):
+    # All pplx byte sizes must be 16-byte aligned.
+    align = 16
+
     # For blocked per token: set to
     #   ceil_div(hidden_dim, block_size) * sizeof(float32)
     # For per-token: set to 4 * sizeof(float32) (x4 for alignment)
@@ -27,28 +30,24 @@ def pplx_hidden_dim_scale_bytes(
         assert quant_dtype.itemsize == 1
         hidden_dim_bytes = hidden_dim * quant_dtype.itemsize
         elem_size = torch.float32.itemsize
-        align = 16
 
         if per_act_token_quant:
             # per-token
             assert block_shape is None
-            hidden_scale_bytes = round_up(max_num_tokens * elem_size, align)
+            hidden_scale_bytes = max_num_tokens * elem_size
         elif block_shape is not None:
             # per-group
             block_size = block_shape[1]
             num_blocks = cdiv(hidden_dim, block_size)
-            hidden_scale_bytes = round_up(num_blocks * elem_size, align)
+            hidden_scale_bytes = num_blocks * elem_size
         else:
             # per-tensor
-            # ?
-            hidden_scale_bytes = round_up(elem_size, align)
+            hidden_scale_bytes = elem_size
     else:
         hidden_dim_bytes = hidden_dim * in_dtype.itemsize
         hidden_scale_bytes = 0
 
-    #print(f"pplx bytes {hidden_dim_bytes}, {hidden_scale_bytes}")
-
-    return hidden_dim_bytes, hidden_scale_bytes
+    return round_up(hidden_dim_bytes, align), round_up(hidden_scale_bytes, align)
 
 
 # The max_num_tokens, world_size and dp_size must be the same
@@ -114,8 +113,9 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         repeat_rows = 1 if quant_config.per_act_token_quant else a1.shape[0]
         a1q, a1q_scale = moe_kernel_quantize_input(
             a1, (None if quant_config.per_act_token_quant else a1_scale),
-            quant_config.quant_dtype, quant_config.per_act_token_quant,
-            quant_config.block_shape)
+            quant_dtype=quant_config.quant_dtype,
+            per_act_token_quant=quant_config.per_act_token_quant,
+            block_shape=quant_config.block_shape)
 
         if a1q_scale is not None:
             a1q_scale = a1q_scale.repeat(repeat_rows, repeat_cols)

@@ -1274,7 +1274,8 @@ def scaled_fp8_quant(
             scale = torch.zeros(1, device=input.device, dtype=torch.float32)
             torch.ops._C.dynamic_scaled_fp8_quant(output, input, scale)
     else:
-        assert scale.numel() == 1
+        # num_token_padding not implemented for this case
+        assert (scale.numel() == 1 and num_token_padding is None), f"{scale.shape} {num_token_padding}"
         torch.ops._C.static_scaled_fp8_quant(output, input, scale)
 
     return output, scale

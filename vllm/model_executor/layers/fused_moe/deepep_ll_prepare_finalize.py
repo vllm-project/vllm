@@ -7,7 +7,7 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.utils import (
-    moe_kernel_quantize_input)
+    moe_kernel_quantize_input, maybe_fix_scales)
 
 # DeepEP kernels quantize dispatch inputs in 128 element chunks.
 DEEPEP_QUANT_BLOCK_SIZE = 128
@@ -90,44 +90,20 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         assert isinstance(x, torch.Tensor)
 
-        # TODO (bnell):
-        # Check if there is a block_shape / or if we can infer the quantization
-        # schemes from the scales.
-        _per_act_token_quant = False
-        if all([v is None for v in [block_shape, a1_scale, a2_scale]
-                ]) and quant_dtype is not None:
-            # Quantization required despite none of the inputs suggesting
-            # quantization. Fallback to per_token_dynamic quant.
-            #print(f"DYNAMIC")
-            _per_act_token_quant = True
-        else:
-            _per_act_token_quant = (
-                (block_shape is not None)
-                or (a1_scale is not None and a1_scale.numel() != 1)
-                or (a2_scale is not None and a2_scale.numel() != 1))
-            #print(f"{block_shape} {a1_scale} {a2_scale}")
-
-        # assert per_act_token_quant == (
-        #     (block_shape is not None)
-        #     or (a1_scale is not None and a1_scale.numel() != 1)
-        #     or (a2_scale is not None and a2_scale.numel() != 1))
-
-        # TODO(bnell)
-        assert per_act_token_quant == _per_act_token_quant, \
-            f"{per_act_token_quant} == {_per_act_token_quant}"
+        assert not per_act_token_quant
 
         num_experts, max_tokens, hidden_dim = x.size()
 
         # TODO (varun): Optimization - Use a batched version of quant
         x = x.view((-1, hidden_dim))
         x, x_scales = moe_kernel_quantize_input(x, a1_scale, quant_dtype,
-                                                _per_act_token_quant,
+                                                per_act_token_quant,
                                                 block_shape)
         x = x.view((num_experts, -1, hidden_dim))
 
-        if _per_act_token_quant:
+        if quant_dtype is not None:
             assert x_scales is not None
-            x_scales = x_scales.view(num_experts, max_tokens, -1)
+            x_scales = maybe_fix_scales(x_scales, num_experts)
 
         return x, x_scales
 

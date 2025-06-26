@@ -78,10 +78,19 @@ class FusedMoEQuantConfig:
         per_out_ch_quant: bool = False,
         block_shape: Optional[list[int]] = None,
     ) -> "FusedMoEQuantConfig":
-        quant_dtype = get_config_quant_dtype(use_fp8_w8a8=use_fp8_w8a8,
-                                             use_int8_w8a8=use_int8_w8a8,
-                                             use_int8_w8a16=use_int8_w8a16,
-                                             use_int4_w4a16=use_int4_w4a16)
+        assert sum([int(flag) for flag in [
+            use_fp8_w8a8,
+            use_int8_w8a8,
+            use_int8_w8a16,
+            use_int4_w4a16,
+        ]]) <= 1, "Quantization flags are mutually exclusive."
+
+        quant_dtype = get_config_quant_dtype(
+            use_fp8_w8a8=use_fp8_w8a8,
+            use_int8_w8a8=use_int8_w8a8,
+            use_int8_w8a16=use_int8_w8a16,
+            use_int4_w4a16=use_int4_w4a16,
+        )
         return FusedMoEQuantConfig(
             quant_dtype,
             per_act_token_quant,

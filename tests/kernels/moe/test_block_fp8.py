@@ -9,9 +9,10 @@ import torch
 from tests.kernels.quant_utils import (native_per_token_group_quant_fp8,
                                        native_w8a8_block_matmul,
                                        per_block_cast_to_fp8)
+from tests.kernels.moe.utils import make_test_weights
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.fused_moe import fused_moe
+from vllm.model_executor.layers.fused_moe import fused_experts
 from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
     _valid_deep_gemm_shape, deep_gemm_moe_fp8)
 from vllm.model_executor.layers.fused_moe.fused_moe import (
@@ -55,13 +56,13 @@ OUT_DTYPES = [torch.bfloat16]  # [torch.float32, torch.half, torch.bfloat16]
 SEEDS = [0]
 
 
-def torch_w8a8_block_fp8_moe(a, w1, w2, w1_s, w2_s, score, topk, block_shape):
+def torch_w8a8_block_fp8_moe(a, w1, w2, w1_s, w2_s, topk_weight, topk_ids, block_shape):
     """Fused moe with block-wise quantization using native torch."""
     B, D = a.shape
+    topk = topk_ids.size(1)
     a = a.view(B, -1, D).repeat(1, topk, 1).reshape(-1, D)
     out = torch.zeros(B * topk, w2.shape[1], dtype=a.dtype, device=a.device)
-    score = torch.softmax(score, dim=-1, dtype=torch.float32)
-    topk_weight, topk_ids = torch.topk(score, topk)
+
     topk_weight = topk_weight.view(-1)
     topk_ids = topk_ids.view(-1)
 
@@ -112,33 +113,12 @@ def test_w8a8_block_fp8_fused_moe(M, N, K, E, topk, block_size, dtype, seed,
 
     monkeypatch.setenv("VLLM_FUSED_MOE_CHUNK_SIZE", "8192")
 
-    factor_for_scale = 1e-2
-    fp8_info = torch.finfo(torch.float8_e4m3fn)
-    fp8_max, fp8_min = fp8_info.max, fp8_info.min
-
     a = torch.randn((M, K), dtype=dtype) / 10
-
-    w1_bf16 = (torch.rand(
-        (E, 2 * N, K), dtype=torch.bfloat16) - 0.5) * 2 * fp8_max
-    w1 = w1_bf16.clamp(min=fp8_min, max=fp8_max).to(torch.float8_e4m3fn)
-    del w1_bf16
-
-    w2_bf16 = (torch.rand((E, K, N), dtype=torch.bfloat16) - 0.5) * 2 * fp8_max
-    w2 = w2_bf16.clamp(min=fp8_min, max=fp8_max).to(torch.float8_e4m3fn)
-    del w2_bf16
-
-    block_n, block_k = block_size[0], block_size[1]
-    n_tiles_w1 = (2 * N + block_n - 1) // block_n
-    n_tiles_w2 = (K + block_n - 1) // block_n
-    k_tiles_w1 = (K + block_k - 1) // block_k
-    k_tiles_w2 = (N + block_k - 1) // block_k
-
-    w1_s = torch.rand(
-        (E, n_tiles_w1, k_tiles_w1), dtype=torch.float32) * factor_for_scale
-    w2_s = torch.rand(
-        (E, n_tiles_w2, k_tiles_w2), dtype=torch.float32) * factor_for_scale
-
     score = torch.randn((M, E), dtype=dtype)
+
+    _, w1, w1_s, _, w2, w2_s = make_test_weights(E, N, K, dtype, torch.float8_e4m3fn,
+                                                 per_act_token_quant=False,
+                                                 block_shape=block_size)
 
     m_fused_moe = modular_triton_fused_moe(use_fp8_w8a8=True,
                                            use_int8_w8a8=False,
@@ -147,45 +127,45 @@ def test_w8a8_block_fp8_fused_moe(M, N, K, E, topk, block_size, dtype, seed,
                                            per_act_token_quant=False,
                                            block_shape=block_size)
 
+    topk_weights, topk_ids, _ = fused_topk(a, score.float(), topk, False)
+
     # Set the context to avoid lots of warning spam.
     with set_current_vllm_config(vllm_config):
-        out = fused_moe(
+        ref_out = torch_w8a8_block_fp8_moe(
             a,
             w1,
             w2,
-            score,
-            topk,
-            renormalize=False,
+            w1_s,
+            w2_s,
+            topk_weights,
+            topk_ids,
+            block_size,
+        )
+
+        out = fused_experts(
+            a,
+            w1,
+            w2,
+            topk_weights,
+            topk_ids,
             use_fp8_w8a8=True,
             w1_scale=w1_s,
             w2_scale=w2_s,
             block_shape=block_size,
         )
-        ref_out = torch_w8a8_block_fp8_moe(a, w1, w2, w1_s, w2_s, score, topk,
-                                           block_size)
 
-        topk_weights, topk_ids, _ = fused_topk(a, score, topk, False)
-        m_out = m_fused_moe(a,
-                            w1,
-                            w2,
-                            topk_weights,
-                            topk_ids,
-                            global_num_experts=E,
-                            w1_scale=w1_s,
-                            w2_scale=w2_s)
+        m_out = m_fused_moe(
+            a,
+            w1,
+            w2,
+            topk_weights,
+            topk_ids,
+            w1_scale=w1_s,
+            w2_scale=w2_s,
+        )
 
-    #print(f"{out.sum()=}")
-    #print(f"{ref_out.sum()=}")
-
-    rel_diff = (torch.mean(
-        torch.abs(out.to(torch.float32) - ref_out.to(torch.float32))) /
-                torch.mean(torch.abs(ref_out.to(torch.float32))))
-    assert rel_diff < 0.03
-
-    rel_diff = (torch.mean(
-        torch.abs(m_out.to(torch.float32) - ref_out.to(torch.float32))) /
-                torch.mean(torch.abs(ref_out.to(torch.float32))))
-    assert rel_diff < 0.03
+    torch.testing.assert_close(out, ref_out, atol=0.03, rtol=0.03)
+    torch.testing.assert_close(m_out, ref_out, atol=0.03, rtol=0.03)
 
 
 def fp8_perm(m, idx):
@@ -221,15 +201,13 @@ def _moe_unpermute(out, inv_perm, topk, K, topk_weight):
     return (tmp_out * topk_weight.view(M, -1, 1).to(out.dtype)).sum(dim=1)
 
 
-def deep_gemm_w8a8_block_fp8_moe(M, K, a, w1, w2, w1_s, w2_s, score, topk,
+def deep_gemm_w8a8_block_fp8_moe(M, K, a, w1, w2, w1_s, w2_s, topk_weight, topk_ids,
                                  block_shape):
     """Fused moe with block-wise quantization using DeepGemm grouped gemm."""
     num_groups = w1.shape[0]
     M, K = a.shape
     N = w2.shape[-1]
-
-    topk_weight, topk_ids, token_expert_indices = fused_topk(
-        a, score.float(), topk, False)
+    topk = topk_ids.size(1)
 
     block_m = deep_gemm.get_m_alignment_for_contiguous_layout()
 
@@ -282,40 +260,12 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed,
     block_size = [block_m, block_m]
     dtype = torch.bfloat16
 
-    fp8_info = torch.finfo(torch.float8_e4m3fn)
-    fp8_max, fp8_min = fp8_info.max, fp8_info.min
-
     a = torch.randn((M, K), dtype=dtype) / 10
-
-    w1_bf16 = ((torch.rand((E, 2 * N, K), dtype=torch.bfloat16) - 0.5) * 2 *
-               fp8_max).clamp(min=fp8_min, max=fp8_max)
-
-    w2_bf16 = ((torch.rand((E, K, N), dtype=torch.bfloat16) - 0.5) * 2 *
-               fp8_max).clamp(min=fp8_min, max=fp8_max)
-
     score = torch.randn((M, E), dtype=dtype)
 
-    block_n, block_k = block_size[0], block_size[1]
-    n_tiles_w1 = ((2 * N) + block_n - 1) // block_n
-    k_tiles_w1 = (K + block_k - 1) // block_k
-    n_tiles_w2 = (K + block_n - 1) // block_n
-    k_tiles_w2 = (N + block_k - 1) // block_k
-
-    w1 = torch.empty_like(w1_bf16, dtype=torch.float8_e4m3fn)
-    w2 = torch.empty_like(w2_bf16, dtype=torch.float8_e4m3fn)
-
-    w1_s = torch.empty((E, n_tiles_w1, k_tiles_w1), dtype=torch.float32)
-    w2_s = torch.empty((E, n_tiles_w2, k_tiles_w2), dtype=torch.float32)
-
-    w1_s = deep_gemm.get_col_major_tma_aligned_tensor(w1_s).contiguous()
-    w2_s = deep_gemm.get_col_major_tma_aligned_tensor(w2_s).contiguous()
-
-    assert w1_s.shape == (E, (2 * N + 127) // 128, (K + 127) // 128)
-    assert (w2.shape[-2] + block_n - 1) // block_n == w2_s.shape[-2]
-
-    for i in range(E):
-        w1[i], w1_s[i] = per_block_cast_to_fp8(w1_bf16[i])
-        w2[i], w2_s[i] = per_block_cast_to_fp8(w2_bf16[i])
+    _, w1, w1_s, _, w2, w2_s = make_test_weights(E, N, K, dtype, torch.float8_e4m3fn,
+                                                 per_act_token_quant=False,
+                                                 block_shape=block_size)
 
     # Note: for now use_compile will error out if the problem size is
     # large enough to trigger chunking. I'm leaving the flag and
@@ -325,17 +275,16 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed,
     use_cudagraph = (chunk_size < M and N >= 1024 and K >= 1024
                      and current_platform.is_cuda_alike())
 
+    topk_weights, topk_ids, _ = fused_topk(a, score.float(), topk, False)
+
     # Set the context to avoid lots of warning spam.
     with set_current_vllm_config(vllm_config):
-        if M >= 128:
+        if False and M >= 128:
             ref_out = deep_gemm_w8a8_block_fp8_moe(M, K, a, w1, w2, w1_s, w2_s,
-                                                   score, topk, block_size)
+                                                   topk_weights, topk_ids, block_size)
         else:
-            ref_out = torch_w8a8_block_fp8_moe(a, w1, w2, w1_s, w2_s, score,
-                                               topk, block_size)
-
-        topk_weights, topk_ids, token_expert_indices = fused_topk(
-            a, score.float(), topk, False)
+            ref_out = torch_w8a8_block_fp8_moe(a, w1, w2, w1_s, w2_s, topk_weights,
+                                               topk_ids, block_size)
 
         if use_compile:
             deep_gemm_moe_fp8_fn = torch.compile(deep_gemm_moe_fp8,
@@ -361,11 +310,4 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed,
             graph.replay()
             torch.cuda.synchronize()
 
-    #print(f"{out.sum()=}")
-    #print(f"{ref_out.sum()=}")
-
-    rel_diff = (torch.mean(
-        torch.abs(out.to(torch.float32) - ref_out.to(torch.float32))) /
-                torch.mean(torch.abs(ref_out.to(torch.float32))))
-
-    assert rel_diff < 0.03
+    torch.testing.assert_close(out, ref_out, atol=0.03, rtol=0.03)

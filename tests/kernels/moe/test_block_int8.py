@@ -8,6 +8,7 @@ import torch
 
 from tests.kernels.quant_utils import (native_per_token_group_quant_int8,
                                        native_w8a8_block_matmul)
+from tests.kernels.moe.utils import make_test_weights
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import fused_moe
@@ -85,31 +86,34 @@ def test_w8a8_block_int8_fused_moe(M, N, K, E, topk, block_size, dtype, seed):
     torch.manual_seed(seed)
     # Use a smaller factor for scale initialization to prevent large
     # values/overflow especially when output dtype might be float16
-    factor_for_scale = 1e-2
-    int8_info = torch.iinfo(torch.int8)
-    int8_max, int8_min = int8_info.max, int8_info.min
+    # factor_for_scale = 1e-2
+    # int8_info = torch.iinfo(torch.int8)
+    # int8_max, int8_min = int8_info.max, int8_info.min
 
     a = torch.randn((M, K), dtype=dtype) / 10
-
-    w1_fp32 = (torch.rand(
-        (E, 2 * N, K), dtype=torch.float32) - 0.5) * 2 * int8_max
-    w1 = w1_fp32.clamp(min=int8_min, max=int8_max).to(torch.int8)
-
-    w2_fp32 = (torch.rand((E, K, N), dtype=torch.float32) - 0.5) * 2 * int8_max
-    w2 = w2_fp32.clamp(min=int8_min, max=int8_max).to(torch.int8)
-
-    block_n, block_k = block_size[0], block_size[1]
-    n_tiles_w1 = (2 * N + block_n - 1) // block_n
-    n_tiles_w2 = (K + block_n - 1) // block_n
-    k_tiles_w1 = (K + block_k - 1) // block_k
-    k_tiles_w2 = (N + block_k - 1) // block_k
-
-    w1_s = (torch.rand(
-        (E, n_tiles_w1, k_tiles_w1), dtype=torch.float32) * factor_for_scale)
-    w2_s = (torch.rand(
-        (E, n_tiles_w2, k_tiles_w2), dtype=torch.float32) * factor_for_scale)
-
     score = torch.randn((M, E), dtype=dtype)
+
+    # w1_fp32 = (torch.rand(
+    #     (E, 2 * N, K), dtype=torch.float32) - 0.5) * 2 * int8_max
+    # w1 = w1_fp32.clamp(min=int8_min, max=int8_max).to(torch.int8)
+
+    # w2_fp32 = (torch.rand((E, K, N), dtype=torch.float32) - 0.5) * 2 * int8_max
+    # w2 = w2_fp32.clamp(min=int8_min, max=int8_max).to(torch.int8)
+
+    # block_n, block_k = block_size[0], block_size[1]
+    # n_tiles_w1 = (2 * N + block_n - 1) // block_n
+    # n_tiles_w2 = (K + block_n - 1) // block_n
+    # k_tiles_w1 = (K + block_k - 1) // block_k
+    # k_tiles_w2 = (N + block_k - 1) // block_k
+
+    # w1_s = (torch.rand(
+    #     (E, n_tiles_w1, k_tiles_w1), dtype=torch.float32) * factor_for_scale)
+    # w2_s = (torch.rand(
+    #     (E, n_tiles_w2, k_tiles_w2), dtype=torch.float32) * factor_for_scale)
+
+    _, w1, w1_s, _, w2, w2_s = make_test_weights(E, N, K, dtype, torch.int8,
+                                                 per_act_token_quant=False,
+                                                 block_shape=block_size)
 
     # Set the context to avoid lots of warning spam.
     with set_current_vllm_config(vllm_config):
@@ -129,7 +133,4 @@ def test_w8a8_block_int8_fused_moe(M, N, K, E, topk, block_size, dtype, seed):
                                             block_size)
 
     # Check results
-    rel_diff = (torch.mean(
-        torch.abs(out.to(torch.float32) - ref_out.to(torch.float32))) /
-                torch.mean(torch.abs(ref_out.to(torch.float32))))
-    assert rel_diff < 0.06
+    torch.testing.assert_close(out, ref_out, atol=0.06, rtol=0.06)

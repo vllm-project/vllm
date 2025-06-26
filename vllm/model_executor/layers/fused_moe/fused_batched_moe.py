@@ -13,6 +13,7 @@ from vllm.model_executor.layers.fused_moe.fused_moe import (
     get_config_dtype_str, try_get_optimal_moe_config)
 from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache, moe_kernel_quantize_input)
+from vllm.model_executor.layers.quantization.utils.quant_utils import group_broadcast
 
 
 @triton.jit
@@ -466,6 +467,8 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         for expert_id in range(first_expert, last_expert):
             topks = torch.any(topk_ids == expert_id, dim=1).flatten()
             rows = torch.count_nonzero(topks.flatten())
+            if rows == 0:
+                continue
             idx = expert_id - first_expert
             b_a1[idx, :rows, :] = a1[:topks.numel()][topks]
             tokens_per_expert[idx] = rows
@@ -502,7 +505,6 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             output[topks] = output[topks] + rhs
 
 
-# XXXX BatchedNaiveExperts
 class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
     """
     A reference MoE expert class that operates on expert batched format,
@@ -601,12 +603,6 @@ class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
         N = w1.size(1) // 2
 
-        # Not cudagraph friendly
-        assert (torch.compiler.is_compiling()
-                or torch.cuda.is_current_stream_capturing()
-                or torch.all(expert_num_tokens <= max_num_tokens * num_dp)), (
-                    f"{expert_num_tokens} <= {max_num_tokens * num_dp}")
-
         for expert in range(num_local_experts):
             # Indexing expert_num_tokens doesn't work w/cudagraphs or inductor
             if (torch.compiler.is_compiling()
@@ -614,6 +610,10 @@ class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
                 num = hidden_states.shape[1]
             else:
                 num = int(expert_num_tokens[expert].item())
+
+            if num == 0:
+                continue
+
             tmp = _resize_cache(workspace2, (num, N))
             input = hidden_states[expert, :num, :] @ w1[expert].transpose(0, 1)
             self.activation(activation, tmp, input)
@@ -658,6 +658,10 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         self.max_num_tokens = max_num_tokens
         self.world_size = world_size
         self.dp_size = dp_size
+        assert world_size > 0
+        assert dp_size > 0
+        assert dp_size <= world_size
+        assert max_num_tokens > 0
 
     @property
     def activation_formats(
@@ -761,7 +765,6 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
             raise ValueError(
                 f"Unsupported compute_type: {hidden_states.dtype}")
 
-        #print(f"shape: E={E}, M={num_tokens}, N={N}, K={K}, top_k={top_k_num}")
         # We can reuse the memory between these because by the time we need
         # cache3, we're done with cache1
         intermediate_cache1 = _resize_cache(workspace13,
