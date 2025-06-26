@@ -424,6 +424,10 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
                                              trust_remote_code=True,
                                              speculative_model="yuhuili/EAGLE-LLaMA3-Instruct-8B",
                                              tokenizer="meta-llama/Meta-Llama-3-8B-Instruct"),  # noqa: E501
+    "EagleLlama4ForCausalLM": _HfExamplesInfo("ronaldbxu/EAGLE-Llama-4-Maverick-17B-128E-Instruct",
+                                             trust_remote_code=True,
+                                             speculative_model="ronaldbxu/EAGLE-Llama-4-Maverick-17B-128E-Instruct",
+                                             tokenizer="meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8"),
     "Eagle3LlamaForCausalLM": _HfExamplesInfo("yuhuili/EAGLE3-LLaMA3.1-Instruct-8B",  # noqa: E501
                                             trust_remote_code=True,
                                             speculative_model="yuhuili/EAGLE3-LLaMA3.1-Instruct-8B",
