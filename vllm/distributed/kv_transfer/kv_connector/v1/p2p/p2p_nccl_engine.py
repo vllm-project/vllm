@@ -254,6 +254,8 @@ class P2pNcclEngine:
                 else:
                     self.buffer_size -= (tensor.element_size() *
                                          tensor.numel())
+                logger.info("🔵[PUT]Recv From %s, tensor_id:%s, rank:%d",
+                            remote_address, tensor_id, self.rank)
             else:
                 logger.warning("🔴[PUT]Recv From %s, tensor_id:%s, rank:%d",
                                remote_address, tensor_id, self.rank)
@@ -313,9 +315,16 @@ class P2pNcclEngine:
                     tensor = torch.empty(data["shape"],
                                          dtype=getattr(torch, data["dtype"]),
                                          device=self.device)
+                except torch.cuda.OutOfMemoryError:
+                    self.router_socket.send_multipart([remote_address, b"1"])
+                    tensor = None
+                    logger.warning(
+                        "🔴[PUT]Recv Tensor, Out Of Memory, %s👈%s, "
+                        "data:%s", self.zmq_address, remote, data)
+                else:
                     self.router_socket.send_multipart([remote_address, b"0"])
                     comm, rank = self.comms[remote]
-                    self._recv(comm, tensor, rank ^ 1, self.recv_stream)
+                    self._recv(comm, tensor_id, tensor, rank ^ 1, self.recv_stream)
                     tensor_size = tensor.element_size() * tensor.numel()
                     if (self.buffer_size + tensor_size
                             > self.buffer_size_threshold):
@@ -329,17 +338,14 @@ class P2pNcclEngine:
                     else:
                         self.buffer_size += tensor_size
 
-                except torch.cuda.OutOfMemoryError:
-                    self.router_socket.send_multipart([remote_address, b"1"])
-                    tensor = None
-                    logger.warning(
-                        "🔴[PUT]Recv Tensor, Out Of Memory, %s👈%s, "
-                        "data:%s", self.zmq_address, remote, data)
-
                 with self.recv_store_cv:
                     self.recv_store[tensor_id] = tensor
                     self._have_received_tensor_id(tensor_id)
                     self.recv_store_cv.notify()
+
+                logger.info(
+                    "🔵[PUT]Recv Tensor, %s👈%s, is_success:%s, data:%s",
+                    self.zmq_address, remote, tensor is not None, data)
 
             elif data["cmd"] == "GET":
                 tensor_id = data["tensor_id"]
@@ -465,16 +471,16 @@ class P2pNcclEngine:
                 if (num_layers == len(
                         self.send_request_id_to_tensor_ids[request_id])):
                     finished_sending.add(request_id)
-            for request_id in finished_sending:
-                self.send_request_id_to_tensor_ids.pop(request_id, None)
+            # for request_id in finished_sending:
+            #     self.send_request_id_to_tensor_ids.pop(request_id, None)
         # Retrieve requests that have already received the KV cache.
         finished_recving: set[str] = set()
         for request_id in self.recv_request_id_to_tensor_ids:
             if num_layers == len(
                     self.recv_request_id_to_tensor_ids[request_id]):
                 finished_recving.add(request_id)
-        for request_id in finished_recving:
-            self.recv_request_id_to_tensor_ids.pop(request_id, None)
+        # for request_id in finished_recving:
+        #     self.recv_request_id_to_tensor_ids.pop(request_id, None)
 
         # TODO: Add failed requests (e.g., transmission errors)
         return finished_sending or None, finished_recving or None
@@ -493,7 +499,7 @@ class P2pNcclEngine:
             sock.send(msgpack.dumps(data))
             time.sleep(3)
 
-    def _send(self, comm, tensor: torch.Tensor, dst: int, stream=None):
+    def _send(self, comm, tensor_id: str, tensor: torch.Tensor, dst: int, stream=None):
         assert tensor.device == self.device, (
             f"this nccl communicator is created to work on {self.device}, "
             f"but the input tensor is on {tensor.device}")
@@ -504,9 +510,10 @@ class P2pNcclEngine:
             self.nccl.ncclSend(buffer_type(tensor.data_ptr()), tensor.numel(),
                                ncclDataTypeEnum.from_torch(tensor.dtype), dst,
                                comm, cudaStream_t(stream.cuda_stream))
+            logger.info("🔵_send, tensor_id:%s", tensor_id)
         stream.synchronize()
 
-    def _recv(self, comm, tensor: torch.Tensor, src: int, stream=None):
+    def _recv(self, comm, tensor_id: str, tensor: torch.Tensor, src: int, stream=None):
         assert tensor.device == self.device, (
             f"this nccl communicator is created to work on {self.device}, "
             f"but the input tensor is on {tensor.device}")
@@ -517,6 +524,7 @@ class P2pNcclEngine:
             self.nccl.ncclRecv(buffer_type(tensor.data_ptr()), tensor.numel(),
                                ncclDataTypeEnum.from_torch(tensor.dtype), src,
                                comm, cudaStream_t(stream.cuda_stream))
+            logger.info("🔵_recv, tensor_id:%s", tensor_id)
         stream.synchronize()
 
     def close(self) -> None:
