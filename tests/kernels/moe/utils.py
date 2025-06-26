@@ -154,12 +154,6 @@ def make_quantized_test_activations(
         for e in range(E):
             a_q[e], a_scale[e] = moe_kernel_quantize_input(
                 a[e], None, quant_dtype, per_act_token_quant, block_shape)
-            # if block_shape is not None:
-            #     a_q[e], a_scale[e] = per_token_group_quant_fp8(
-            #         a[e], block_shape[1])
-            # else:
-            #     a_q[e], a_scale[e] = ops.scaled_fp8_quant(
-            #         a[e], None, use_per_token_if_dynamic=per_act_token_quant)
         a_scale = torch.stack(a_scale)
 
         if not per_act_token_quant and block_shape is None:
