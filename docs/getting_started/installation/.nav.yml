@@ -3,5 +3,5 @@ nav:
   - gpu.md
   - cpu.md
   - google_tpu.md
-  - intel_gaudi.md
   - aws_neuron.md
+  - intel_gaudi.md
