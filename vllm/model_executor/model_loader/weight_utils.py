@@ -772,6 +772,10 @@ def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> Optional[str]:
     qkv_proj_scale_names = [
         ".self_attn.qkv_proj.k_scale", ".self_attn.qkv_proj.v_scale"
     ]
+    # Handle Qwen3 MoE models naming
+    qkqkv_proj_scale_names = [
+        ".self_attn.qkqkv_proj.k_scale", ".self_attn.qkqkv_proj.v_scale"
+    ]
     for scale_name in possible_scale_names:
         if name.endswith(scale_name):
             if any(mo_scale_name in name
@@ -784,6 +788,12 @@ def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> Optional[str]:
                 # Handle qkv_proj scale parameters
                 remapped_name = name.replace(
                     f".self_attn.qkv_proj{scale_name}",
+                    f".self_attn.attn{scale_name}")
+            elif any(qkqkv_scale_name in name
+                     for qkqkv_scale_name in qkqkv_proj_scale_names):
+                # Handle qkqkv_proj scale parameters
+                remapped_name = name.replace(
+                    f".self_attn.qkqkv_proj{scale_name}",
                     f".self_attn.attn{scale_name}")
             else:
                 remapped_name = name.replace(scale_name, f".attn{scale_name}")
