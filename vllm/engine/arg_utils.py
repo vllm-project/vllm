@@ -1292,6 +1292,11 @@ class EngineArgs:
             disable_hybrid_kv_cache_manager,
         )
 
+        if not model_config.is_multimodal_model and self.default_mm_loras:
+            raise ValueError(
+                "Default modality-specific LoRA(s) were provided for a "
+                "non multimodal model")
+
         lora_config = LoRAConfig(
             bias_enabled=self.enable_lora_bias,
             max_lora_rank=self.max_lora_rank,
