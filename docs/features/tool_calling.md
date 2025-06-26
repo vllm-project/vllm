@@ -15,44 +15,46 @@ vllm serve meta-llama/Llama-3.1-8B-Instruct \
 
 Next, make a request to the model that should result in it using the available tools:
 
-```python
-from openai import OpenAI
-import json
+??? Code
 
-client = OpenAI(base_url="http://localhost:8000/v1", api_key="dummy")
+    ```python
+    from openai import OpenAI
+    import json
 
-def get_weather(location: str, unit: str):
-    return f"Getting the weather for {location} in {unit}..."
-tool_functions = {"get_weather": get_weather}
+    client = OpenAI(base_url="http://localhost:8000/v1", api_key="dummy")
 
-tools = [{
-    "type": "function",
-    "function": {
-        "name": "get_weather",
-        "description": "Get the current weather in a given location",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "location": {"type": "string", "description": "City and state, e.g., 'San Francisco, CA'"},
-                "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}
-            },
-            "required": ["location", "unit"]
+    def get_weather(location: str, unit: str):
+        return f"Getting the weather for {location} in {unit}..."
+    tool_functions = {"get_weather": get_weather}
+
+    tools = [{
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "description": "Get the current weather in a given location",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "location": {"type": "string", "description": "City and state, e.g., 'San Francisco, CA'"},
+                    "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}
+                },
+                "required": ["location", "unit"]
+            }
         }
-    }
-}]
+    }]
 
-response = client.chat.completions.create(
-    model=client.models.list().data[0].id,
-    messages=[{"role": "user", "content": "What's the weather like in San Francisco?"}],
-    tools=tools,
-    tool_choice="auto"
-)
+    response = client.chat.completions.create(
+        model=client.models.list().data[0].id,
+        messages=[{"role": "user", "content": "What's the weather like in San Francisco?"}],
+        tools=tools,
+        tool_choice="auto"
+    )
 
-tool_call = response.choices[0].message.tool_calls[0].function
-print(f"Function called: {tool_call.name}")
-print(f"Arguments: {tool_call.arguments}")
-print(f"Result: {get_weather(**json.loads(tool_call.arguments))}")
-```
+    tool_call = response.choices[0].message.tool_calls[0].function
+    print(f"Function called: {tool_call.name}")
+    print(f"Arguments: {tool_call.arguments}")
+    print(f"Result: {get_weather(**json.loads(tool_call.arguments))}")
+    ```
 
 Example output:
 
@@ -226,6 +228,25 @@ AI21's Jamba-1.5 models are supported.
 
 Flags: `--tool-call-parser jamba`
 
+### xLAM Models (`xlam`)
+
+The xLAM tool parser is designed to support models that generate tool calls in various JSON formats. It detects function calls in several different output styles:
+
+1. Direct JSON arrays: Output strings that are JSON arrays starting with `[` and ending with `]`
+2. Thinking tags: Using `<think>...</think>` tags containing JSON arrays
+3. Code blocks: JSON in code blocks (```json ...```)
+4. Tool calls tags: Using `[TOOL_CALLS]` or `<tool_call>...</tool_call>` tags
+
+Parallel function calls are supported, and the parser can effectively separate text content from tool calls.
+
+Supported models:
+* Salesforce Llama-xLAM models: `Salesforce/Llama-xLAM-2-8B-fc-r`, `Salesforce/Llama-xLAM-2-70B-fc-r`
+* Qwen-xLAM models: `Salesforce/xLAM-1B-fc-r`, `Salesforce/xLAM-3B-fc-r`, `Salesforce/Qwen-xLAM-32B-fc-r`
+
+Flags:
+* For Llama-based xLAM models: `--tool-call-parser xlam --chat-template examples/tool_chat_template_xlam_llama.jinja`
+* For Qwen-based xLAM models: `--tool-call-parser xlam --chat-template examples/tool_chat_template_xlam_qwen.jinja`
+
 ### Qwen Models
 
 For Qwen2.5, the chat template in tokenizer_config.json has already included support for the Hermes-style tool use. Therefore, you can use the `hermes` parser to enable tool calls for Qwen models. For more detailed information, please refer to the official [Qwen documentation](https://qwen.readthedocs.io/en/latest/framework/function_call.html#vllm)
@@ -282,53 +303,55 @@ A tool parser plugin is a Python file containing one or more ToolParser implemen
 
 Here is a summary of a plugin file:
 
-```python
+??? Code
 
-# import the required packages
+    ```python
 
-# define a tool parser and register it to vllm
-# the name list in register_module can be used
-# in --tool-call-parser. you can define as many
-# tool parsers as you want here.
-@ToolParserManager.register_module(["example"])
-class ExampleToolParser(ToolParser):
-    def __init__(self, tokenizer: AnyTokenizer):
-        super().__init__(tokenizer)
+    # import the required packages
 
-    # adjust request. e.g.: set skip special tokens
-    # to False for tool call output.
-    def adjust_request(
-            self, request: ChatCompletionRequest) -> ChatCompletionRequest:
-        return request
+    # define a tool parser and register it to vllm
+    # the name list in register_module can be used
+    # in --tool-call-parser. you can define as many
+    # tool parsers as you want here.
+    @ToolParserManager.register_module(["example"])
+    class ExampleToolParser(ToolParser):
+        def __init__(self, tokenizer: AnyTokenizer):
+            super().__init__(tokenizer)
 
-    # implement the tool call parse for stream call
-    def extract_tool_calls_streaming(
-        self,
-        previous_text: str,
-        current_text: str,
-        delta_text: str,
-        previous_token_ids: Sequence[int],
-        current_token_ids: Sequence[int],
-        delta_token_ids: Sequence[int],
-        request: ChatCompletionRequest,
-    ) -> Union[DeltaMessage, None]:
-        return delta
+        # adjust request. e.g.: set skip special tokens
+        # to False for tool call output.
+        def adjust_request(
+                self, request: ChatCompletionRequest) -> ChatCompletionRequest:
+            return request
 
-    # implement the tool parse for non-stream call
-    def extract_tool_calls(
-        self,
-        model_output: str,
-        request: ChatCompletionRequest,
-    ) -> ExtractedToolCallInformation:
-        return ExtractedToolCallInformation(tools_called=False,
-                                            tool_calls=[],
-                                            content=text)
+        # implement the tool call parse for stream call
+        def extract_tool_calls_streaming(
+            self,
+            previous_text: str,
+            current_text: str,
+            delta_text: str,
+            previous_token_ids: Sequence[int],
+            current_token_ids: Sequence[int],
+            delta_token_ids: Sequence[int],
+            request: ChatCompletionRequest,
+        ) -> Union[DeltaMessage, None]:
+            return delta
 
-```
+        # implement the tool parse for non-stream call
+        def extract_tool_calls(
+            self,
+            model_output: str,
+            request: ChatCompletionRequest,
+        ) -> ExtractedToolCallInformation:
+            return ExtractedToolCallInformation(tools_called=False,
+                                                tool_calls=[],
+                                                content=text)
+
+    ```
 
 Then you can use this plugin in the command line like this.
 
-```console
+```bash
     --enable-auto-tool-choice \
     --tool-parser-plugin <absolute path of the plugin file>
     --tool-call-parser example \
