@@ -615,6 +615,8 @@ class Gemma3nTextModel(nn.Module):
             hidden_states_0 = self.get_input_embeddings(input_ids)
 
         # Per layer inputs.
+        if input_ids is None:
+            raise ValueError("Passing None for input ids is not supported.")
         per_layer_inputs = self.get_per_layer_input_embeddings(input_ids)
         per_layer_inputs = per_layer_inputs.reshape(
             -1, self.config.num_hidden_layers,

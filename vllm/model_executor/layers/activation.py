@@ -149,9 +149,7 @@ class GeluAndMulSparse(CustomOp):
         return: (num_tokens, d) or (batch_size, seq_len, d)
     """
 
-    def __init__(self,
-                 activation_sparsity: float = 0.0,
-                 approximate: str = "none"):
+    def __init__(self, activation_sparsity: float, approximate: str = "none"):
         super().__init__()
         # Gelu.
         self.approximate = approximate
