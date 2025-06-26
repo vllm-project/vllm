@@ -1382,8 +1382,7 @@ class FusedMoE(torch.nn.Module):
     def forward(self, hidden_states: torch.Tensor,
                 router_logits: torch.Tensor):
         return torch.ops.vllm.moe_forward(hidden_states, router_logits,
-                                          self.layer_name,
-                                          self.layer_index)
+                                          self.layer_name, self.layer_index)
 
     def forward_impl_chunked(self, full_hidden_states: torch.Tensor,
                              full_router_logits: torch.Tensor):

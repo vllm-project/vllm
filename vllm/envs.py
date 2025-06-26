@@ -928,11 +928,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # generations on machines < 100 for compressed-tensors
     # models
     "VLLM_USE_NVFP4_CT_EMULATIONS":
-    lambda: bool(int(os.getenv("VLLM_USE_NVFP4_CT_EMULATIONS", "0")))
-  
+    lambda: bool(int(os.getenv("VLLM_USE_NVFP4_CT_EMULATIONS", "0"))),
+
     # Collects expert routing histogram per layer
     "VLLM_COLLECT_EXPERT_USAGE_HISTOGRAM":
-    lambda: bool(int(os.getenv("VLLM_COLLECT_EXPERT_USAGE_HISTOGRAM", "0"))),
+    lambda: bool(int(os.getenv("VLLM_COLLECT_EXPERT_USAGE_HISTOGRAM", "0")))
 }
 
 # --8<-- [end:env-vars-definition]
