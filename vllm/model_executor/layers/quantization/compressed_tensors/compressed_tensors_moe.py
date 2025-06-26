@@ -245,40 +245,38 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
         layer.w2_weight_scale_2 = torch.nn.Parameter(
             1 / layer.w2_weight_global_scale.data, requires_grad=False)
 
-        if not self.use_marlin:
-            # swizzle weight scales
-            layer.w13_blockscale_swizzled = torch.nn.Parameter(
-                self.swizzle_blockscale(layer.w13_weight_scale),
-                requires_grad=False)
-
-            layer.w2_blockscale_swizzled = torch.nn.Parameter(
-                self.swizzle_blockscale(layer.w2_weight_scale),
-                requires_grad=False)
-
-            # w13
-            w13_input_global_scale = layer.w13_input_global_scale.max(
-                dim=1).values.to(torch.float32)
-
-            layer.g1_alphas = torch.nn.Parameter(
-                ((1 / w13_input_global_scale) * layer.w13_weight_scale_2),
-                requires_grad=False)
-
-            layer.w13_input_scale_quant = torch.nn.Parameter(
-                (w13_input_global_scale), requires_grad=False)
-
-            del w13_input_global_scale
-
-            # w2
-            layer.g2_alphas = torch.nn.Parameter(
-                ((1 / layer.w2_input_global_scale) *
-                 layer.w2_weight_scale_2).to(torch.float32),
-                requires_grad=False)
-
-            layer.w2_input_scale_quant = torch.nn.Parameter(
-                (layer.w2_input_global_scale), requires_grad=False)
-
         if self.use_marlin:
             prepare_moe_fp4_layer_for_marlin(layer)
+            return
+
+        # swizzle weight scales
+        layer.w13_blockscale_swizzled = torch.nn.Parameter(
+            self.swizzle_blockscale(layer.w13_weight_scale),
+            requires_grad=False)
+
+        layer.w2_blockscale_swizzled = torch.nn.Parameter(
+            self.swizzle_blockscale(layer.w2_weight_scale),
+            requires_grad=False)
+
+        # w13
+        w13_input_global_scale = layer.w13_input_global_scale.max(
+            dim=1).values.to(torch.float32)
+
+        layer.g1_alphas = torch.nn.Parameter(
+            ((1 / w13_input_global_scale) * layer.w13_weight_scale_2),
+            requires_grad=False)
+
+        layer.w13_input_scale_quant = torch.nn.Parameter(
+            (w13_input_global_scale), requires_grad=False)
+
+        # w2
+        layer.g2_alphas = torch.nn.Parameter(
+            ((1 / layer.w2_input_global_scale) * layer.w2_weight_scale_2).to(
+                torch.float32),
+            requires_grad=False)
+
+        layer.w2_input_scale_quant = torch.nn.Parameter(
+            (layer.w2_input_global_scale), requires_grad=False)
 
     def apply(
         self,
@@ -330,10 +328,10 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
         assert activation == "silu", "Only SiLU activation is supported."
         assert not apply_router_weight_on_input, (
             "Router weight on input is not "
-            "supported for ModelOptNvFp4FusedMoE.")
+            "supported for CompressedTensorsW4A4MoeMethod.")
         assert expert_map is None, ("Expert Parallelism / expert_map "
                                     "is currently not supported for "
-                                    "ModelOptNvFp4FusedMoE.")
+                                    "CompressedTensorsW4A4MoeMethod.")
 
         from vllm.model_executor.layers.fused_moe.cutlass_moe import (
             cutlass_moe_fp4)
