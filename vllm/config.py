@@ -1871,6 +1871,8 @@ class ParallelConfig:
             except DistNetworkError as e:
                 # We only want to retry when the root cause is EADDRINUSE.
                 if "EADDRINUSE" in str(e):
+                    logger.warning(
+                        "Address already in use. Retrying with a new port.")
                     last_exc = e
                     continue  # try again with a new port
                 raise e
