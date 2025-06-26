@@ -695,10 +695,17 @@ class ROCmFlashAttentionImpl(AttentionImpl):
             num_blocks = kv_cache.shape[1]
             block_size = kv_cache.shape[2] // (self.num_kv_heads *
                                                self.head_size)
-            k_scale = torch.empty((num_blocks, self.num_kv_heads, block_size),
+            from vllm.attention.ops.rocm_aiter_paged_attn import (
+                AITERPagedAttention)
+
+            AITERPagedAttention.is_asm_supported = (
+                self.head_size == 128
+                and self.num_heads // self.num_kv_heads <= 16
+                and self.kv_cache_dtype in ["int8", "fp8", "fp8_e4m3"])
+            k_scale = torch.empty((self.num_kv_heads, num_blocks * block_size),
                                   dtype=torch.float32,
                                   device=kv_cache.device)
-            v_scale = torch.empty((num_blocks, self.num_kv_heads, block_size),
+            v_scale = torch.empty((self.num_kv_heads, num_blocks * block_size),
                                   dtype=torch.float32,
                                   device=kv_cache.device)
             self.aiter_kv_scales_initialized = True
@@ -938,6 +945,32 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                     layer._k_scale,
                     layer._v_scale,
                     output_scale,
+                )
+            elif is_rocm_aiter_paged_attn_enabled():
+                if output_scale is not None:
+                    raise NotImplementedError(
+                        "fused output quantization only supported for Triton"
+                        " implementation in ROCMFlashAttentionImpl for now")
+                paged_attn.forward_decode(
+                    decode_query.contiguous(),
+                    key_cache,
+                    value_cache,
+                    (decode_meta.block_tables
+                     if self.attn_type != AttentionType.ENCODER_DECODER else
+                     decode_meta.cross_block_tables),
+                    (decode_meta.seq_lens_tensor
+                     if self.attn_type != AttentionType.ENCODER_DECODER else
+                     decode_meta.encoder_seq_lens_tensor),
+                    (decode_meta.max_decode_seq_len
+                     if self.attn_type != AttentionType.ENCODER_DECODER else
+                     decode_meta.max_encoder_seq_len),
+                    self.kv_cache_dtype,
+                    self.num_kv_heads,
+                    self.scale,
+                    self.alibi_slopes,
+                    layer._k_scale,
+                    layer._v_scale,
+                    output=output[num_prefill_tokens:],
                 )
             else:
                 # PagedAttention does not support fused quant, manually quantize
