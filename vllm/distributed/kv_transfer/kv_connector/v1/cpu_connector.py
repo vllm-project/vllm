@@ -893,7 +893,7 @@ class CPUConnector(KVConnectorBase_V1):
         p_ready_reqs = self._kv_receiver.get_finished(len(self._gpu_kv_caches))
         ret = set()
         for p_req_id in p_ready_reqs:
-            if d_req_id := self._decode_req_id_to_prefill_req_id.get(p_req_id):
+            if d_req_id := self._prefill_req_id_to_decode_req_id.get(p_req_id):
                 # We have seen the corresponding decode request before.
                 # Therefore, we can return the request id.
                 ret.add(d_req_id)
