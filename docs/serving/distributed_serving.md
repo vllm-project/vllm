@@ -50,7 +50,7 @@ vllm serve gpt2 \
 
 ## Run vLLM on multiple nodes
 
-When a single node lacks sufficient GPUs to hold the model, deploy vLLM across multiple nodes. This requires the Ray distibuted as the runtime engine. Ensure that every node provides an identical execution environment, including the model path and Python packages. Container images are the recommended pattern for, as they provide a convenient way to keep environments consistent and to hide host heterogeneity.
+When a single node lacks sufficient GPUs to hold the model, deploy vLLM across multiple nodes. This requires Ray as the runtime engine. Ensure that every node provides an identical execution environment, including the model path and Python packages. Container images are the recommended pattern here, as they provide a convenient way to keep environments consistent and to hide host heterogeneity.
 
 
 
