@@ -356,6 +356,7 @@ def get_config(
                     revision=revision,
                     code_revision=code_revision,
                     token=os.getenv('HF_TOKEN', None),
+                    has_no_defaults_at_init=True,
                     **kwargs,
                 )
             except ValueError as e:
