@@ -7,7 +7,6 @@
 #  - Chih-Chieh Yang <chih.chieh.yang@ibm.com>
 #  - Thomas Parnell <tpa@zurich.ibm.com>
 
-import aiter
 import torch
 
 from vllm.platforms import current_platform
@@ -305,7 +304,7 @@ def chunked_prefill_paged_decode(
         )
         max_logits = torch.empty_like(exp_sums)
 
-        aiter.paged_attention_rocm(
+        torch.ops.aiter.paged_attention_rocm(
             output,
             exp_sums,
             max_logits,

@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from functools import cache
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type
 
-import aiter
 import torch
 
 import vllm.envs as envs
@@ -914,7 +913,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                 )
                 max_logits = torch.empty_like(exp_sums)
 
-                aiter.paged_attention_rocm(
+                torch.ops.aiter.paged_attention_rocm(
                     output[num_prefill_tokens:],
                     exp_sums,
                     max_logits,

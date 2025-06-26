@@ -579,7 +579,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                     v_scale=layer._v_scale,
                 )
 
-            aiter.paged_attention_v1(
+            torch.ops.aiter.paged_attention_v1(
                 output[:num_actual_tokens],
                 attn_metadata.workspace_buffer,
                 query[:num_actual_tokens],
