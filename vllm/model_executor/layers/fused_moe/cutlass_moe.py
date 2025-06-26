@@ -299,7 +299,7 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
     ):
         assert w1_zp is None, "w1_zp is not supported in CUTLASS MoE"
         assert w2_zp is None, "w2_zp is not supported in CUTLASS MoE"
-        activation_callable = lambda i, o: self.activation(activation, i, o)
+        activation_callable = lambda o, i: self.activation(activation, o, i)
         in_dtype = hidden_states.dtype
         run_cutlass_moe_fp8(
             output, hidden_states, w1, w2, topk_ids, activation_callable,
