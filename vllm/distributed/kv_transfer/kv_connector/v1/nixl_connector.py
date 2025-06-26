@@ -522,7 +522,8 @@ class NixlConnectorWorker:
             fut = self._handshake_futures.get(remote_engine_id)
             if fut is None:
                 fut = self._handshake_initiation_executor.submit(
-                    self._nixl_handshake, meta.remote_host, meta.remote_port)
+                    self._nixl_handshake, meta.remote_host, meta.remote_port,
+                    meta.tp_size)
                 self._handshake_futures[remote_engine_id] = fut
 
                 def done_callback(f: Future[dict[int, str]],
