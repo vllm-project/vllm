@@ -37,73 +37,8 @@ class OpenAIServingTranscription(OpenAISpeechToText):
                          model_config=model_config,
                          models=models,
                          request_logger=request_logger,
-<<<<<<< sangbumlikeagod/bugfix/fix-whisper-prompt-tag
-                         return_tokens_as_token_ids=return_tokens_as_token_ids)
-
-        self.default_sampling_params = (
-            self.model_config.get_diff_sampling_param())
-        processor = cached_get_processor(model_config.model)
-        self.max_audio_clip_s = processor.feature_extractor.chunk_length
-        self.model_sr = processor.feature_extractor.sampling_rate
-        self.hop_length = processor.feature_extractor.hop_length
-
-        if self.default_sampling_params:
-            logger.info(
-                "Overwriting default completion sampling param with: %s",
-                self.default_sampling_params)
-
-    async def _preprocess_transcription(
-        self,
-        request: TranscriptionRequest,
-        audio_data: bytes,
-    ) -> tuple[list[PromptType], float]:
-        # Validate request
-        # TODO language should be optional and can be guessed.
-        # For now we default to en. See
-        # https://github.com/huggingface/transformers/blob/main/src/transformers/models/whisper/generation_whisper.py#L1520
-        lang_token = f"<|{request.language}|>" if request.language else "<|en|>"
-        if request.language:
-            if request.language in ISO639_1_SUPPORTED_LANGS:
-                pass
-            elif request.language in ISO639_1_OTHER_LANGS:
-                logger.warning(
-                    "The selected language %s has limited accuracy with"
-                    " reported WER>=0.5. Results may be less accurate "
-                    "for this choice.", request.language)
-            else:
-                raise ValueError(
-                    f"Unsupported language: {request.language}."
-                    "Language should be one of:" +
-                    f" {list(ISO639_1_SUPPORTED_LANGS.values())}" +
-                    f"or {list(ISO639_1_OTHER_LANGS.values())}")
-
-        if len(audio_data) / 1024**2 > MAX_AUDIO_CLIP_FILESIZE_MB:
-            raise ValueError("Maximum file size exceeded.")
-
-        with io.BytesIO(audio_data) as bytes_:
-            y, sr = librosa.load(bytes_)
-
-        duration = librosa.get_duration(y=y, sr=sr)
-        chunks = [y] if duration < 30 else self._split_audio(y, sr)
-        prompts = []
-        for i, chunk in enumerate(chunks):
-            prompt = {
-                "encoder_prompt": {
-                    "prompt": "",
-                    "multi_modal_data": {
-                        "audio": (chunk, sr),
-                    },
-                },
-                "decoder_prompt":
-                f"<|prev|>{request.prompt}<|startoftranscript|>{lang_token}<|transcribe|><|notimestamps|>"
-                if i == 0 else ""
-            }
-            prompts.append(cast(PromptType, prompt))
-        return prompts, duration
-=======
                          return_tokens_as_token_ids=return_tokens_as_token_ids,
                          task_type="transcribe")
->>>>>>> main
 
     async def create_transcription(
         self, audio_data: bytes, request: TranscriptionRequest,
