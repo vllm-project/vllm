@@ -6,7 +6,7 @@
 import json
 import time
 from http import HTTPStatus
-from typing import Annotated, Any, ClassVar, Literal, Optional, Union
+from typing import Annotated, Any, ClassVar, Dict, List, Literal, Optional, Union
 
 import regex as re
 import torch
@@ -1849,6 +1849,12 @@ class DetokenizeResponse(OpenAIBaseModel):
     prompt: str
 
 
+class TokenizerInfoResponse(OpenAIBaseModel):
+    """Response containing tokenizer configuration equivalent to tokenizer_config.json"""
+    tokenizer_class: str
+    model_config = ConfigDict(extra="allow")
+    
+    
 class LoadLoRAAdapterRequest(BaseModel):
     lora_name: str
     lora_path: str

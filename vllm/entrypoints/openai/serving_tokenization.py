@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
-from typing import Final, Optional, Union
+import re
+from functools import lru_cache
+from typing import Any, Dict, Final, List, Optional, Tuple, Union
 
 import jinja2
 from fastapi import Request
@@ -17,11 +18,15 @@ from vllm.entrypoints.openai.protocol import (DetokenizeRequest,
                                               ErrorResponse,
                                               TokenizeChatRequest,
                                               TokenizeRequest,
-                                              TokenizeResponse)
+                                              TokenizeResponse,
+                                              TokenizerInfoResponse)
 # yapf: enable
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.logger import init_logger
+from vllm.transformers_utils.tokenizer import (AnyTokenizer, decode_tokens,
+                                               encode_tokens)
+from vllm.transformers_utils.tokenizers import MistralTokenizer
 
 logger = init_logger(__name__)
 
@@ -155,3 +160,54 @@ class OpenAIServingTokenization(OpenAIServing):
         input_text = prompt_input["prompt"]
 
         return DetokenizeResponse(prompt=input_text)
+
+    async def get_tokenizer_info(
+            self) -> Union[TokenizerInfoResponse, ErrorResponse]:
+        """Get comprehensive tokenizer information."""
+        try:
+            tokenizer = await self.engine_client.get_tokenizer()
+            info = TokenizerInfo(tokenizer, self.model_config,
+                                 self.chat_template).to_dict()
+            return TokenizerInfoResponse(**info)
+        except Exception as e:
+            return self.create_error_response(
+                f"Failed to get tokenizer info: {str(e)}")
+
+
+class TokenizerInfo:
+
+    def __init__(self, tokenizer: AnyTokenizer, model_config: ModelConfig,
+                 chat_template: Optional[str]):
+        self.tokenizer = tokenizer
+        self.model_config = model_config
+        self.chat_template = chat_template
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Return the tokenizer configuration."""
+        return self._get_tokenizer_config()
+
+    # Use the tokenizer's init_kwargs as the base (this contains the original config)
+    def _get_tokenizer_config(self) -> Dict[str, Any]:
+        """Get tokenizer configuration directly from the tokenizer object."""
+        config = dict(self.tokenizer.init_kwargs) if hasattr(self.tokenizer, 'init_kwargs') and self.tokenizer.init_kwargs else {}
+        
+        # Remove file path fields
+        config.pop('vocab_file', None)
+        config.pop('merges_file', None)
+        
+        config = self._make_json_serializable(config)
+        config['tokenizer_class'] = self.tokenizer.__class__.__bases__[0].__name__
+        if self.chat_template:
+            config['chat_template'] = self.chat_template
+        return config
+
+    def _make_json_serializable(self, obj):
+        """Convert any non-JSON-serializable objects to serializable format."""
+        if hasattr(obj, 'content'): 
+            return obj.content
+        elif isinstance(obj, dict):
+            return {k: self._make_json_serializable(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [self._make_json_serializable(item) for item in obj]
+        else:
+            return obj

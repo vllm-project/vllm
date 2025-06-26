@@ -73,6 +73,7 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               ResponsesResponse, ScoreRequest,
                                               ScoreResponse, TokenizeRequest,
                                               TokenizeResponse,
+                                              TokenizerInfoResponse,
                                               TranscriptionRequest,
                                               TranscriptionResponse,
                                               TranslationRequest,
@@ -523,6 +524,15 @@ async def detokenize(request: DetokenizeRequest, raw_request: Request):
     assert_never(generator)
 
 
+@router.get("/get_tokenizer_info")
+async def get_tokenizer_info(raw_request: Request):
+    """Get comprehensive tokenizer information."""
+    result = await tokenization(raw_request).get_tokenizer_info()
+    return JSONResponse(
+        content=result.model_dump(),
+        status_code=result.code if isinstance(result, ErrorResponse) else 200)
+    
+    
 @router.get("/v1/models")
 async def show_available_models(raw_request: Request):
     handler = models(raw_request)
