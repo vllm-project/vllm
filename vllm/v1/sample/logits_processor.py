@@ -212,12 +212,19 @@ class LogitsProcessorManager:
 
     def get_logitsprocs_by_cls(
             self, cls: type[LogitsProcessor]) -> Iterator[LogitsProcessor]:
-        """Yield logits processors of a specific class."""
+        """Yield logits processors of a specific class.
+        
+        Args:
+          cls: :class:`LogitsProcessor` subclass
+
+        Returns:
+          Iterator over logits processors
+        """
         return (lp for lp in self.all if isinstance(lp, cls))
 
     @property
     def all(self) -> Iterator[LogitsProcessor]:
-        """Iterable over all logits processors."""
+        """Iterator over all logits processors."""
         return chain(self.argmax_invariant, self.non_argmax_invariant)
 
 
