@@ -1,0 +1,79 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: vllm-vm
+  namespace: caching
+spec:
+  securityContext:
+    fsGroup: 1000
+    fsGroupChangePolicy: OnRootMismatch
+  containers:
+    - name: my-node-app
+      image: quay.io/diego_castan/my-node-app:latest
+      securityContext:
+        privileged: true
+        runAsUser: 0
+        runAsGroup: 0
+      args:
+        - "-c"
+        - |
+          apt-get update -y
+          apt-get install -y vmtouch
+          while true; do sleep 10000; done
+      command:
+        - /bin/bash
+      env:
+        - name: NVIDIA_VISIBLE_DEVICES
+          value: "0" # Limit PyTorch to GPU 0
+        - name: CUDA_VISIBLE_DEVICES
+          value: "0"
+        - name: HUGGING_FACE_HUB_TOKEN
+          valueFrom:
+            secretKeyRef:
+              key: token
+              name: hf-token-secret-llama3
+        - name: VLLM_NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+      resources:
+        limits:
+          cpu: "10"
+          memory: 20G
+          nvidia.com/gpu: 1 # Make sure this matches available GPUs
+        requests:
+          cpu: "2"
+          memory: 16Gi
+          nvidia.com/gpu: 1
+      volumeMounts:
+        - name: startuptimelogslib
+          mountPath: /dev/startuptimelogs
+        - name: dmflib
+          mountPath: /dev/dmf
+        - name: shm
+          mountPath: /dev/shm
+        - name: nvme2
+          mountPath: /nvme2
+        - name: udev
+          mountPath: /run/udev
+  volumes:
+    - name: startuptimelogslib
+      configMap:
+        name: startuptimelogslib
+        optional: true
+    - name: dmflib
+      configMap:
+        name: dmflib
+        optional: true
+    - name: nvme2
+      persistentVolumeClaim:
+        claimName: llama-3-8b
+    - name: shm
+      emptyDir:
+        medium: Memory
+        sizeLimit: "2Gi"
+    - name: udev
+      hostPath:
+        path: /run/udev
+        type: Directory
+  restartPolicy: Never
