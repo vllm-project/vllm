@@ -35,20 +35,22 @@ Studies have shown that FP8 E4M3 quantization typically only minimally degrades 
 
 Here is an example of how to enable FP8 quantization:
 
-```python
-# To calculate kv cache scales on the fly enable the calculate_kv_scales
-# parameter
+??? Code
 
-from vllm import LLM, SamplingParams
+    ```python
+    # To calculate kv cache scales on the fly enable the calculate_kv_scales
+    # parameter
 
-sampling_params = SamplingParams(temperature=0.7, top_p=0.8)
-llm = LLM(model="meta-llama/Llama-2-7b-chat-hf",
-          kv_cache_dtype="fp8",
-          calculate_kv_scales=True)
-prompt = "London is the capital of"
-out = llm.generate(prompt, sampling_params)[0].outputs[0].text
-print(out)
-```
+    from vllm import LLM, SamplingParams
+
+    sampling_params = SamplingParams(temperature=0.7, top_p=0.8)
+    llm = LLM(model="meta-llama/Llama-2-7b-chat-hf",
+            kv_cache_dtype="fp8",
+            calculate_kv_scales=True)
+    prompt = "London is the capital of"
+    out = llm.generate(prompt, sampling_params)[0].outputs[0].text
+    print(out)
+    ```
 
 The `kv_cache_dtype` argument specifies the data type for KV cache storage:
 - `"auto"`: Uses the model's default "unquantized" data type
@@ -63,7 +65,7 @@ For optimal model quality when using FP8 KV Cache, we recommend using calibrated
 
 First, install the required dependencies:
 
-```console
+```bash
 pip install llmcompressor
 ```
 
@@ -71,67 +73,69 @@ pip install llmcompressor
 
 Here's a complete example using `meta-llama/Llama-3.1-8B-Instruct` (most models can use this same pattern):
 
-```python
-from datasets import load_dataset
-from transformers import AutoModelForCausalLM, AutoTokenizer
-from llmcompressor.transformers import oneshot
+??? Code
 
-# Select model and load it
-MODEL_ID = "meta-llama/Llama-3.1-8B-Instruct"
-model = AutoModelForCausalLM.from_pretrained(MODEL_ID, device_map="auto", torch_dtype="auto")
-tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
+    ```python
+    from datasets import load_dataset
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from llmcompressor.transformers import oneshot
 
-# Select calibration dataset
-DATASET_ID = "HuggingFaceH4/ultrachat_200k"
-DATASET_SPLIT = "train_sft"
+    # Select model and load it
+    MODEL_ID = "meta-llama/Llama-3.1-8B-Instruct"
+    model = AutoModelForCausalLM.from_pretrained(MODEL_ID, device_map="auto", torch_dtype="auto")
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
 
-# Configure calibration parameters
-NUM_CALIBRATION_SAMPLES = 512  # 512 samples is a good starting point
-MAX_SEQUENCE_LENGTH = 2048
+    # Select calibration dataset
+    DATASET_ID = "HuggingFaceH4/ultrachat_200k"
+    DATASET_SPLIT = "train_sft"
 
-# Load and preprocess dataset
-ds = load_dataset(DATASET_ID, split=DATASET_SPLIT)
-ds = ds.shuffle(seed=42).select(range(NUM_CALIBRATION_SAMPLES))
+    # Configure calibration parameters
+    NUM_CALIBRATION_SAMPLES = 512  # 512 samples is a good starting point
+    MAX_SEQUENCE_LENGTH = 2048
 
-def process_and_tokenize(example):
-    text = tokenizer.apply_chat_template(example["messages"], tokenize=False)
-    return tokenizer(
-        text,
-        padding=False,
-        max_length=MAX_SEQUENCE_LENGTH,
-        truncation=True,
-        add_special_tokens=False,
+    # Load and preprocess dataset
+    ds = load_dataset(DATASET_ID, split=DATASET_SPLIT)
+    ds = ds.shuffle(seed=42).select(range(NUM_CALIBRATION_SAMPLES))
+
+    def process_and_tokenize(example):
+        text = tokenizer.apply_chat_template(example["messages"], tokenize=False)
+        return tokenizer(
+            text,
+            padding=False,
+            max_length=MAX_SEQUENCE_LENGTH,
+            truncation=True,
+            add_special_tokens=False,
+        )
+
+    ds = ds.map(process_and_tokenize, remove_columns=ds.column_names)
+
+    # Configure quantization settings
+    recipe = """
+    quant_stage:
+        quant_modifiers:
+            QuantizationModifier:
+                kv_cache_scheme:
+                    num_bits: 8
+                    type: float
+                    strategy: tensor
+                    dynamic: false
+                    symmetric: true
+    """
+
+    # Apply quantization
+    oneshot(
+        model=model,
+        dataset=ds,
+        recipe=recipe,
+        max_seq_length=MAX_SEQUENCE_LENGTH,
+        num_calibration_samples=NUM_CALIBRATION_SAMPLES,
     )
 
-ds = ds.map(process_and_tokenize, remove_columns=ds.column_names)
-
-# Configure quantization settings
-recipe = """
-quant_stage:
-    quant_modifiers:
-        QuantizationModifier:
-            kv_cache_scheme:
-                num_bits: 8
-                type: float
-                strategy: tensor
-                dynamic: false
-                symmetric: true
-"""
-
-# Apply quantization
-oneshot(
-    model=model,
-    dataset=ds,
-    recipe=recipe,
-    max_seq_length=MAX_SEQUENCE_LENGTH,
-    num_calibration_samples=NUM_CALIBRATION_SAMPLES,
-)
-
-# Save quantized model: Llama-3.1-8B-Instruct-FP8-KV
-SAVE_DIR = MODEL_ID.split("/")[1] + "-FP8-KV"
-model.save_pretrained(SAVE_DIR, save_compressed=True)
-tokenizer.save_pretrained(SAVE_DIR)
-```
+    # Save quantized model: Llama-3.1-8B-Instruct-FP8-KV
+    SAVE_DIR = MODEL_ID.split("/")[1] + "-FP8-KV"
+    model.save_pretrained(SAVE_DIR, save_compressed=True)
+    tokenizer.save_pretrained(SAVE_DIR)
+    ```
 
 The above script will create a folder in your current directory containing your quantized model (e.g., `Llama-3.1-8B-Instruct-FP8-KV`) with calibrated scales.
 
