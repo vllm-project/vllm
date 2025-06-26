@@ -254,8 +254,8 @@ class P2pNcclEngine:
                 else:
                     self.buffer_size -= (tensor.element_size() *
                                          tensor.numel())
-                logger.info("🔵[PUT]Recv From %s, tensor_id:%s, rank:%d",
-                            remote_address, tensor_id, self.rank)
+                logger.debug("🔵[PUT]Recv From %s, tensor_id:%s, rank:%d",
+                             remote_address, tensor_id, self.rank)
             else:
                 logger.warning("🔴[PUT]Recv From %s, tensor_id:%s, rank:%d",
                                remote_address, tensor_id, self.rank)
@@ -461,7 +461,7 @@ class P2pNcclEngine:
                     if isinstance(tensor, tuple):
                         addr, _, _ = tensor
                         self.pool.free(addr)
-            logger.info("🔵get_finished, request_id:%s", request_id)
+            logger.debug("🔵get_finished, request_id:%s", request_id)
 
         # TODO: 1)Avoid polling. 2)Validate chunked prefill and preemption.
         num_layers = len(forward_context.no_compile_layers)
