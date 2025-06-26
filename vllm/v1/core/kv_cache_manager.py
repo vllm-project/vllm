@@ -67,6 +67,7 @@ class KVCacheBlocks:
 
 class KVCacheManagerInterface(ABC):
 
+    @property
     @abstractmethod
     def usage(self) -> float:
         raise NotImplementedError
