@@ -232,8 +232,8 @@ class OpenAISpeechToText(OpenAIServing):
                     },
                 },
                 "decoder_prompt":
-                (f"<|startoftranscript|>{lang_token}"
-                 f"<|{self.task_type}|><|notimestamps|>{request.prompt}")
+                (f"<|prev|>{request.prompt}<|startoftranscript|>{lang_token}"
+                 f"<|{self.task_type}|><|notimestamps|>")
             }
             prompts.append(cast(PromptType, prompt))
         return prompts, duration
