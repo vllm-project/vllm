@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional
+from typing import Any, Optional
 
 import ray
 import torch
@@ -48,7 +48,7 @@ class RayCudaCommunicator(Communicator):
     def __init__(
         self,
         world_size: int,
-        comm_id: tuple,
+        comm_id: Any,
         rank: Optional[int],
         actor_handles: list["ray.actor.ActorHandle"],
         cuda_stream: Optional[torch.cuda.Stream],
@@ -108,12 +108,11 @@ class RayCudaCommunicator(Communicator):
 
             pg = RayStatelessProcessGroup(rank, world_size)
             device = AcceleratorContext.get().get_accelerator_devices()[0]
-            self._pynccl = PyNcclCommunicator(pg,
-                                              device=device,
-                                              unique_id=comm_id)
+            self._pynccl: Optional[PyNcclCommunicator] = PyNcclCommunicator(
+                pg, device=device, unique_id=comm_id)
         else:
             # Driver does not have a rank.
-            self._pynccl = None
+            self._pynccl: Optional[PyNcclCommunicator] = None
 
         self._cuda_stream: Optional[torch.cuda.Stream] = None
         self._send_stream: Optional[torch.cuda.Stream] = None
@@ -186,6 +185,7 @@ class RayCudaCommunicator(Communicator):
             raise RayChannelError("RayCudaCommunicator has been destroyed.")
 
         if self._use_communication_streams:
+            assert self._send_stream is not None
             # We observed that if all recv/compute/send operations run on GPU,
             # since there is no synchronization, the CPU execution loop may be
             # far ahead of the GPU operations and lead to runtime failures.
@@ -222,6 +222,7 @@ class RayCudaCommunicator(Communicator):
         buf = allocator(shape, dtype)
 
         if self._use_communication_streams:
+            assert self._recv_stream is not None
             # We observed that if all recv/compute/send operations run on GPU,
             # since there is no synchronization, the CPU execution loop may be
             # far ahead of the GPU operations and lead to runtime failures.
@@ -233,6 +234,7 @@ class RayCudaCommunicator(Communicator):
         else:
             self._pynccl.recv(buf, peer_rank, stream=self._recv_stream)
 
+            assert self._cuda_stream is not None
             # Buffer values are undefined if NCCL ops are aborted. Therefore, we
             # need to synchronize here and check that the channel is still
             # open to ensure that the receive buffer is valid.
@@ -300,5 +302,5 @@ class RayCudaCommunicator(Communicator):
         return "nccl"
 
     @classmethod
-    def generate_communicator_id(cls) -> str:
+    def generate_communicator_id(cls) -> Any:
         return cls._nccl.ncclGetUniqueId()
