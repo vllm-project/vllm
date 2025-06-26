@@ -20,7 +20,7 @@ After provisioning sufficient resources, run vLLM. Find a log message that looks
 
 ## Run vLLM on a single node
 
-vLLM supports distributed tensor-parallel and pipeline-parallel inference and serving. The current implementation includes [Megatron-LM's tensor parallel algorithm](https://arxiv.org/pdf/1909.08053.pdf). 
+vLLM supports distributed tensor-parallel and pipeline-parallel inference and serving. The current implementation includes [Megatron-LM's tensor parallel algorithm](https://arxiv.org/pdf/1909.08053.pdf).
 
 vLLM's default distributed runtimes are [Ray](https://github.com/ray-project/ray) for multi-node inference and Python's native `multiprocessing` for single-node inference. Override the default by setting `distributed_executor_backend` in the `LLM` class or `--distributed-executor-backend` in the API server using `mp` for multiprocessing or `ray` for Ray.
 
@@ -51,8 +51,6 @@ vllm serve gpt2 \
 ## Run vLLM on multiple nodes
 
 When a single node lacks sufficient GPUs to hold the model, deploy vLLM across multiple nodes. This requires Ray as the runtime engine. Ensure that every node provides an identical execution environment, including the model path and Python packages. Container images are the recommended pattern here, as they provide a convenient way to keep environments consistent and to hide host heterogeneity.
-
-
 
 ### Starting a Ray cluster using containers
 
@@ -85,7 +83,6 @@ Keep the shells running these commands open; closing a shell terminates the clus
 !!! warning
     For security, set `VLLM_HOST_IP` to an address on a private network segment. Traffic sent over this network is unencrypted, and the endpoints exchange data in a format that can be exploited to execute arbitrary code if an adversary gains network access. Ensure that untrusted parties cannot reach the network.
 
-
 !!! warning
     Download the model on every node (to the same path) or store the model on a distributed file system accessible by all nodes.
 
@@ -96,7 +93,7 @@ From any node, enter a container and run `ray status` and `ray list nodes` to ve
 !!! warning
     Alternatively, set up the Ray cluster using KubeRay. See the [KubeRay vLLM documentation](https://docs.ray.io/en/latest/cluster/kubernetes/examples/vllm-rayservice.html) for details.
 
-### Executing vLLM commands on a running cluster 
+### Executing vLLM commands on a running cluster
 
 !!! warning
      If Ray is running inside containers, run the commands in the remainder of this guide *inside the containers*. To open a shell inside a container, connect to a node and use `docker exec -it node /bin/bash`.
@@ -130,7 +127,6 @@ Search the logs for the transport method. Entries containing `[send] via NET/Soc
 
 !!! warning
     After starting the Ray cluster, verify GPU-to-GPU communication across nodes. Configuring it up properly can be non-trivial. Refer to the [sanity check script][troubleshooting-incorrect-hardware-driver] for details. If additional environment variables are required for communication configuration, append them to `run_cluster.sh`, for example `-e NCCL_SOCKET_IFNAME=eth0`. Setting environment variables during cluster creation is recommended because the variables propogate to all nodes. In contrast, setting environment variables in the shell affects only the local node. See <gh-issue:6803> for more information.
-
 
 !!! warning
     The error message `Error: No available node types can fulfill resource request` can appear even when the cluster has enough GPUs. The issue often occurs when nodes have multiple IP addresses and vLLM cannot select the correct one. Ensure that vLLM and Ray use the same IP address by setting `VLLM_HOST_IP` in `run_cluster.sh` (with a different value on each node). Use `ray status` and `ray list nodes` to verify the chosen IP address. See <gh-issue:7815> for more information.

@@ -27,7 +27,6 @@ Using KubeRay reduces the operational burden and simplifies integration of Ray +
 
 This guide shows how to serve a large language model on Kubernetes with vLLM and KubeRay. The example deploys the `meta-llama/Meta-Llama-3-8B-Instruct` model from Hugging Face and runs on Google Kubernetes Engine (GKE) or a local Kubernetes cluster.
 
-
 #### Prerequisites
 
 * A Hugging Face account and an access token with read permission for gated
@@ -41,7 +40,6 @@ This guide shows how to serve a large language model on Kubernetes with vLLM and
 Each model replica consumes two GPUs through tensor parallelism.
 Create a cluster with two `g2-standard-24` nodes, for a total of four NVIDIA L4 GPUs.
 
-
 ```bash
 gcloud container clusters create kuberay-gpu-cluster \
   --machine-type=g2-standard-24 \
@@ -49,11 +47,12 @@ gcloud container clusters create kuberay-gpu-cluster \
   --num-nodes=2 \
   --accelerator=type=nvidia-l4,count=2,gpu-driver-version=latest
 ```
+
 Alternatively, set up a four-GPU on-premises Kubernetes cluster before continuing.
 
 #### Install the KubeRay operator
 
-Install the latest stable KubeRay operator by following the 
+Install the latest stable KubeRay operator by following the
 [official installation guide](https://docs.ray.io/en/latest/cluster/kubernetes/getting-started/kuberay-operator-installation.html).
 
 Note that the KubeRay operator must be installed on the CPU node in order for
@@ -74,7 +73,6 @@ kubectl create secret generic hf-secret \
 [This YAML](https://github.com/ray-project/kuberay/blob/564524cd0690cc4e389fd9e484959626fa15b0ce/ray-operator/config/samples/vllm/ray-service.vllm.yaml) defines a minimal Ray cluster and Ray Serve application that serves the LLama3 8B model using vLLM.
 Create the cluster with the YAML manifest:
 
-
 ```bash
 kubectl apply -f https://github.com/ray-project/kuberay/blob/564524cd0690cc4e389fd9e484959626fa15b0ce/ray-operator/config/samples/vllm/ray-service.vllm.yaml
 ```
@@ -84,7 +82,6 @@ Wait until the `RayService` reports **RUNNING** and **HEALTHY** before continuin
 ```bash
 kubectl get rayservice llama-3-8b -o yaml
 ```
-
 
 #### Expose the HTTP endpoint and send a prompt
 

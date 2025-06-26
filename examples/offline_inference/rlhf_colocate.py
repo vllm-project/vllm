@@ -51,6 +51,7 @@ class MyLLM(LLM):
             assigned to this worker.
         **kwargs: Keyword arguments forwarded to ``vllm.LLM``.
     """
+
     def __init__(self, *args, bundle_indices: list, **kwargs):
         # Prevent Ray from manipulating the top-level CUDA_VISIBLE_DEVICES variable.
         os.environ.pop("CUDA_VISIBLE_DEVICES", None)
@@ -68,6 +69,7 @@ class RayTrainingActor:
     the CUDA IPC handles so that colocated vLLM workers can map tensors
     directly.
     """
+
     def __init__(self):
         # Ray sets CUDA_VISIBLE_DEVICES to the GPUs assigned to this actor.
         from transformers import AutoModelForCausalLM

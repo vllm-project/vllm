@@ -43,6 +43,7 @@ from vllm.utils import get_ip, get_open_port
 
 class MyLLM(LLM):
     """Configure the vLLM worker for Ray placement group execution."""
+
     def __init__(self, *args, **kwargs):
         # Remove the top-level CUDA_VISIBLE_DEVICES variable set by Ray.
         os.environ.pop("CUDA_VISIBLE_DEVICES", None)

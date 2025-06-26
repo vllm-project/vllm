@@ -29,12 +29,12 @@ The available APIs depend on the model type:
 Ray Data LLM is an alternative offline inference API that uses vLLM as the underlying engine.
 This API adds several batteries-included capabilities that simplify large-scale, GPU-efficient inference:
 
-* Streaming execution processes datasets that exceed aggregate cluster memory.
-* Automatic sharding, load balancing, and autoscaling distribute work across a Ray cluster with built-in fault tolerance.
-* Continuous batching keeps vLLM replicas saturated and maximizes GPU utilization.
-* Transparent support for tensor and pipeline parallelism enables efficient multi-GPU inference.
+- Streaming execution processes datasets that exceed aggregate cluster memory.
+- Automatic sharding, load balancing, and autoscaling distribute work across a Ray cluster with built-in fault tolerance.
+- Continuous batching keeps vLLM replicas saturated and maximizes GPU utilization.
+- Transparent support for tensor and pipeline parallelism enables efficient multi-GPU inference.
 
-The following example shows how to run batched inference with Ray Data and vLLM: 
+The following example shows how to run batched inference with Ray Data and vLLM:
 <gh-file:examples/offline_inference/batch_llm_inference.py>
 
 For more information about the Ray Data LLM API, see the [Ray Data LLM documentation](https://docs.ray.io/en/latest/data/working-with-llms.html).
