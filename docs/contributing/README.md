@@ -153,7 +153,7 @@ Using `-s` with `git commit` will automatically add this header.
 
 !!! tip
 If you develop using PyCharm, there is a `Show Commit Options` icon to the right of the `Commit and Push...` button in the `Commit` window.
-Opening it will bring up a `git` window where you can modify the `Author` and enable `Sign-off commit`. 
+Opening it will bring up a `git` window where you can modify the `Author` and enable `Sign-off commit`.
 This ensures that all your commits are automatically signed-off by PyCharm.
 
 ### PR Title and Classification
