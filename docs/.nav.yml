@@ -48,7 +48,12 @@ nav:
     - General:
       - glob: contributing/*
         flatten_single_child_sections: true
-    - Model Implementation: contributing/model
+    - Model Implementation: 
+      - contributing/model/README.md
+      - contributing/model/basic.md
+      - contributing/model/registration.md
+      - contributing/model/tests.md
+      - contributing/model/multimodal.md
     - Design Documents:
       - V0: design
       - V1: design/v1
