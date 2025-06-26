@@ -122,6 +122,9 @@ _TEXT_GENERATION_MODELS = {
     # [Encoder-decoder]
     "BartModel": ("bart", "BartForConditionalGeneration"),
     "BartForConditionalGeneration": ("bart", "BartForConditionalGeneration"),
+    # Support HunYuan Dense and MoE
+    "HunYuanDenseV1ForCausalLM": ("hunyuan_v1_dense", "HunYuanDenseV1ForCausalLM"),
+    "HunYuanMoEV1ForCausalLM": ("hunyuan_v1_moe", "HunYuanMoEV1ForCausalLM"),
 }
 
 _EMBEDDING_MODELS = {
