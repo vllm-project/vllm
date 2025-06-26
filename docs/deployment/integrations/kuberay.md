@@ -33,8 +33,8 @@ This guide shows how to serve a large language model on Kubernetes with vLLM and
 * A Hugging Face account and an access token with read permission for gated
   repositories.
 * Access to the `meta-llama/Meta-Llama-3-8B-Instruct` model on Hugging Face.
-* Optional: the Google Cloud SDK (`gcloud`) and `kubectl` authenticated against the target
-  project.
+* Optional: the Google Cloud SDK (`gcloud`) and `kubectl` [authenticated against the target
+  project](https://cloud.google.com/kubernetes-engine/docs/how-to/cluster-access-for-kubectl#store_info).
 
 #### Create a GPU-enabled GKE cluster
 
@@ -54,6 +54,9 @@ Alternatively, set up a two-GPU on-premises Kubernetes cluster before continuing
 
 Install the latest stable KubeRay operator by following the 
 [official installation guide](https://docs.ray.io/en/latest/cluster/kubernetes/getting-started/kuberay-operator-installation.html).
+
+Note that the KubeRay operator must be installed on the CPU node in order for
+the CRD to taint the GPU node pool correctly.
 
 #### Store the Hugging Face token as a Kubernetes secret
 
