@@ -2,6 +2,11 @@
 # Usage: ./install_nixl.sh [--force]
 
 FORCE=false
+
+GDRCOPY_VERSION="2.5"
+UCX_VERSION="1.18.1"
+NIXL_VERSION="0.3.0"
+
 if [ "$1" == "--force" ]; then
     FORCE=true
 fi
@@ -31,9 +36,9 @@ pip install meson ninja pybind11
 
 if [ ! -e "/dev/gdrdrv" ] || [ "$FORCE" = true ]; then
     echo "Installing gdrcopy\n"
-    wget https://github.com/NVIDIA/gdrcopy/archive/refs/tags/v2.5.tar.gz
-    tar xzf v2.5.tar.gz; rm v2.5.tar.gz
-    cd gdrcopy-2.5
+    wget https://github.com/NVIDIA/gdrcopy/archive/refs/tags/v${GDRCOPY_VERSION}.tar.gz
+    tar xzf v${GDRCOPY_VERSION}.tar.gz; rm v${GDRCOPY_VERSION}.tar.gz
+    cd gdrcopy-${GDRCOPY_VERSION}
     make prefix=$GDR_HOME CUDA=$CUDA_HOME all install
     
     if $SUDO; then
@@ -41,7 +46,7 @@ if [ ! -e "/dev/gdrdrv" ] || [ "$FORCE" = true ]; then
         sudo ./insmod.sh
     else
         echo "Skipping insmod.sh - sudo not available"
-        echo "Please run 'sudo ./gdrcopy-2.5/insmod.sh' manually if needed"
+        echo "Please run 'sudo ./gdrcopy-${GDRCOPY_VERSION}/insmod.sh' manually if needed"
     fi
     
     cd ..
@@ -51,9 +56,9 @@ fi
 
 if ! command -v ucx_info &> /dev/null || [ "$FORCE" = true ]; then
     echo "Installing UCX"
-    wget https://github.com/openucx/ucx/releases/download/v1.18.0/ucx-1.18.0.tar.gz
-    tar xzf ucx-1.18.0.tar.gz; rm ucx-1.18.0.tar.gz
-    cd ucx-1.18.0
+    wget https://github.com/openucx/ucx/releases/download/v${UCX_VERSION}/ucx-${UCX_VERSION}.tar.gz
+    tar xzf ucx-${UCX_VERSION}.tar.gz; rm ucx-${UCX_VERSION}.tar.gz
+    cd ucx-${UCX_VERSION}
     
     # Checking Mellanox NICs
     MLX_OPTS=""
@@ -95,9 +100,9 @@ fi
 
 if ! command -v nixl_test &> /dev/null || [ "$FORCE" = true ]; then
     echo "Installing NIXL"
-    wget https://github.com/ai-dynamo/nixl/archive/refs/tags/0.2.0.tar.gz
-    tar xzf 0.2.0.tar.gz; rm 0.2.0.tar.gz
-    cd nixl-0.2.0
+    wget https://github.com/ai-dynamo/nixl/archive/refs/tags/${NIXL_VERSION}.tar.gz
+    tar xzf ${NIXL_VERSION}.tar.gz; rm ${NIXL_VERSION}.tar.gz
+    cd nixl-${NIXL_VERSION}
     meson setup build --prefix=$NIXL_HOME -Ducx_path=$UCX_HOME
     cd build
     ninja
