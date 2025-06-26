@@ -14,7 +14,7 @@ from unittest.mock import patch
 import pytest
 import torch
 import zmq
-from vllm_test_utils.monitor import monitor
+from vllm_test_utils.vllm_test_utils.monitor import monitor
 
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.utils import (CacheInfo, FlexibleArgumentParser, LRUCache,
