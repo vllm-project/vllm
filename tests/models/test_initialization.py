@@ -31,8 +31,9 @@ def test_can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch):
 
         text_config = hf_config.get_text_config()
 
-        # There should be at least one expert per group
-        num_experts = getattr(text_config, 'n_group', 2)
+        # Ensure at least 2 expert per group
+        # Since `grouped_topk` assums top-2
+        num_experts = getattr(text_config, 'n_group', 1) * 2
 
         text_config.update({
             "num_layers": 1,
