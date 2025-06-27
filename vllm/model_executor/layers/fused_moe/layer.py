@@ -1186,9 +1186,9 @@ class FusedMoE(torch.nn.Module):
         logical_replica_count: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
-        Route the input hidden states to the top-k experts based on the 
+        Route the input hidden states to the top-k experts based on the
         router logits.
-        
+
         Returns:
             (topk_weights, topk_ids) (tuple[torch.Tensor, torch.Tensor]):
             The weights and *global physical* expert ids of the top-k experts.
@@ -1299,7 +1299,7 @@ class FusedMoE(torch.nn.Module):
 
             topk_ids = topk_ids.to(dtype=indices_type)
 
-        assert topk_ids.dtype == indices_type
+        assert topk_ids.dtype == indices_type or indices_type is None
 
         return topk_weights, topk_ids
 
