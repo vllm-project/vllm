@@ -41,6 +41,16 @@ steps:
   # TODO: add `--strict` once warnings in docstrings are fixed
   - mkdocs build
 
+- label: Pytorch Nightly Dependency Override Check # 2min
+  # if this test fails, it means the nightly torch version is not compatible with some
+  # of the dependencies. Please check the error message and add the package to whitelist
+  # in /vllm/tools/generate_nightly_torch_test.py
+  soft_fail: true
+  source_file_dependencies:
+  - requirements/nightly_torch_test.txt
+  commands:
+  - bash standalone_tests/pytorch_nightly_dependency.sh
+
 - label: Async Engine, Inputs, Utils, Worker Test # 24min
   mirror_hardwares: [amdexperimental]
   source_file_dependencies:
@@ -767,7 +777,7 @@ steps:
     - bash weight_loading/run_model_weight_loading_test.sh -c weight_loading/models.txt
 
 - label: Weight Loading Multiple GPU Test - Large Models # optional
-  mirror_hardwares: [amdexperimental] 
+  mirror_hardwares: [amdexperimental]
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
   gpu: a100
