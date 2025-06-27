@@ -32,6 +32,8 @@ class RequestOutput:
 @dataclass
 class MockModelConfig:
     use_async_output_proc = True
+    media_io_kwargs = {}
+    mm_placeholder_str_override = {}
 
 
 class MockEngine:
