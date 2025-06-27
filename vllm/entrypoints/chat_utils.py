@@ -75,6 +75,28 @@ class ChatCompletionContentPartImageEmbedsParam(TypedDict, total=False):
     """The type of the content part."""
 
 
+class ChatCompletionContentPartTensorsParam(TypedDict, total=False):
+    tensors: Required[Union[str, dict[str, str]]]
+    """
+    The tensors. It can be either:
+    - A single base64 string.
+    - A dictionary where each value is a base64 string.
+    """
+    type: Required[Literal["tensors"]]
+    """The type of the content part."""
+
+
+class ChatCompletionContentPartTensorsParam(TypedDict, total=False):
+    tensors: Required[Union[str, dict[str, str]]]
+    """
+    The tensors. It can be either:
+    - A single base64 string.
+    - A dictionary where each value is a base64 string.
+    """
+    type: Required[Literal["tensors"]]
+    """The type of the content part."""
+
+
 class VideoURL(TypedDict, total=False):
     url: Required[str]
     """
@@ -695,8 +717,9 @@ class BaseMultiModalContentParser(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def parse_image_embeds(self,
-                           image_embeds: Union[str, dict[str, str]]) -> None:
+    def parse_tensors(self,
+                           tensor_encodings: Union[str, dict[str, str]],
+                           modality_str: ModalityStr) -> None:
         raise NotImplementedError
 
     @abstractmethod
@@ -729,18 +752,22 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         placeholder = self._tracker.add("image", image)
         self._add_placeholder(placeholder)
 
-    def parse_image_embeds(self,
-                           image_embeds: Union[str, dict[str, str]]) -> None:
-        if isinstance(image_embeds, dict):
-            embeds = {
-                k: self._connector.fetch_image_embedding(v)
-                for k, v in image_embeds.items()
+    def parse_tensors(self,
+                           tensor_encodings: Union[str, dict[str, str]],
+                           modality_str: ModalityStr) -> None:
+        if modality_str not in ["image_embeds","tensors"]:
+            raise Exception("tensors are acceptable only as part "
+                            "of 'image_embeds' or 'tensors' modalities.")
+        if isinstance(tensor_encodings, dict):
+            tensors = {
+                k: self._connector.fetch_tensor_encoding(v)
+                for k, v in tensor_encodings.items()
             }
-            placeholder = self._tracker.add("image_embeds", embeds)
+            placeholder = self._tracker.add(modality_str, tensors)
 
-        if isinstance(image_embeds, str):
-            embedding = self._connector.fetch_image_embedding(image_embeds)
-            placeholder = self._tracker.add("image_embeds", embedding)
+        if isinstance(tensor_encodings, str):
+            tensor= self._connector.fetch_tensor_encoding(tensor_encodings)
+            placeholder = self._tracker.add("image_embeds", tensor)
 
         self._add_placeholder(placeholder)
 
@@ -780,23 +807,27 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         placeholder = self._tracker.add("image", image_coro)
         self._add_placeholder(placeholder)
 
-    def parse_image_embeds(self,
-                           image_embeds: Union[str, dict[str, str]]) -> None:
+    def parse_tensors(self,
+                           tensor_encodings: Union[str, dict[str, str]],
+                           modality_str: ModalityStr) -> None:
         future: asyncio.Future[Union[str, dict[str, str]]] = asyncio.Future()
 
-        if isinstance(image_embeds, dict):
-            embeds = {
-                k: self._connector.fetch_image_embedding(v)
-                for k, v in image_embeds.items()
+        if modality_str not in ["image_embeds","tensors"]:
+            raise Exception("tensors are acceptable only as part "
+                            "of 'image_embeds' or 'tensors' modalities.")
+        if isinstance(tensor_encodings, dict):
+            tensors= {
+                k: self._connector.fetch_tensor_encoding(v)
+                for k, v in tensor_encodings.items()
             }
-            future.set_result(embeds)
+            future.set_result(tensors)
 
-        if isinstance(image_embeds, str):
-            embedding = self._connector.\
-                fetch_image_embedding(image_embeds)
-            future.set_result(embedding)
+        if isinstance(tensors, str):
+            tensor= self._connector.\
+                fetch_tensor_encoding(tensor_encodings)
+            future.set_result(tensor)
 
-        placeholder = self._tracker.add("image_embeds", future)
+        placeholder = self._tracker.add(modality_str, future)
         self._add_placeholder(placeholder)
 
     def parse_audio(self, audio_url: str) -> None:
@@ -817,6 +848,8 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
 
         placeholder = self._tracker.add("video", video)
         self._add_placeholder(placeholder)
+
+
 
 
 def validate_chat_template(chat_template: Optional[Union[Path, str]]):
@@ -915,6 +948,7 @@ def _get_full_multimodal_text_prompt(placeholder_counts: dict[str, int],
 # No need to validate using Pydantic again
 _TextParser = partial(cast, ChatCompletionContentPartTextParam)
 _ImageEmbedsParser = partial(cast, ChatCompletionContentPartImageEmbedsParam)
+_TensorsParser = partial(cast, ChatCompletionContentPartTensorsParam)
 _InputAudioParser = partial(cast, ChatCompletionContentPartInputAudioParam)
 _RefusalParser = partial(cast, ChatCompletionContentPartRefusalParam)
 # Need to validate url objects
@@ -935,6 +969,8 @@ MM_PARSER_MAP: dict[
     lambda part: _ImageParser(part).get("image_url", {}).get("url", None),
     "image_embeds":
     lambda part: _ImageEmbedsParser(part).get("image_embeds", None),
+    "tensors":
+    lambda part: _TensorsParser(part).get("tensors", None),
     "audio_url":
     lambda part: _AudioParser(part).get("audio_url", {}).get("url", None),
     "input_audio":
@@ -1004,7 +1040,7 @@ def _parse_chat_message_content_mm_part(
 
 
 VALID_MESSAGE_CONTENT_MM_PART_TYPES = ("text", "refusal", "image_url",
-                                       "image_embeds",
+                                       "image_embeds", "tensors",
                                        "audio_url", "input_audio", "video_url")
 
 
@@ -1081,8 +1117,12 @@ def _parse_chat_message_content_part(
         return {'type': 'image'} if wrap_dicts else None
     if part_type == "image_embeds":
         content = cast(Union[str, dict[str, str]], content)
-        mm_parser.parse_image_embeds(content)
+        mm_parser.parse_tensors(content,"image_embeds")
         return {'type': 'image'} if wrap_dicts else None
+    if part_type == "tensors":
+        content = cast(Union[str, dict[str, str]], content)
+        mm_parser.parse_tensors(content,"tensors")
+        return {'type': 'tensors'} if wrap_dicts else None
     if part_type == "audio_url":
         str_content = cast(str, content)
         mm_parser.parse_audio(str_content)

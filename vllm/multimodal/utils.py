@@ -258,16 +258,16 @@ class MediaConnector:
             fetch_timeout=envs.VLLM_VIDEO_FETCH_TIMEOUT,
         )
 
-    def fetch_image_embedding(
+    def fetch_tensor_encoding(
         self,
         data: str,
     ) -> torch.Tensor:
         """
         Load image embedding from a URL.
         """
-        image_embedding_io = ImageEmbeddingMediaIO()
+        tensor_encoding_io = ImageEmbeddingMediaIO()
 
-        return image_embedding_io.load_base64("", data)
+        return tensor_encoding_io.load_base64("", data)
 
 
 global_media_connector = MediaConnector()
