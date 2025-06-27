@@ -521,10 +521,11 @@ class P2pNcclEngine:
             f"but the input tensor is on {tensor.device}")
         stream = stream if stream is not None else current_stream()
         event = torch.cuda.Event()
-        self.nccl.ncclRecv(buffer_type(tensor.data_ptr()), tensor.numel(),
-                           ncclDataTypeEnum.from_torch(tensor.dtype), src,
-                           comm, cudaStream_t(stream.cuda_stream))
-        event.record(stream)
+        with torch.cuda.stream(stream):
+            self.nccl.ncclRecv(buffer_type(tensor.data_ptr()), tensor.numel(),
+                               ncclDataTypeEnum.from_torch(tensor.dtype), src,
+                               comm, cudaStream_t(stream.cuda_stream))
+            event.record(stream)
         event.synchronize()
 
     def close(self) -> None:
