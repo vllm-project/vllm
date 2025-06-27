@@ -93,10 +93,7 @@ class OpenAISpeechToText(OpenAIServing):
         # For now we default to en. See
         # https://github.com/huggingface/transformers/blob/main/src/transformers/models/whisper/generation_whisper.py#L1520
         lang = request.language or "en"
-        if (request.language and not self.model_cls.
-                validate_language(  # type: ignore[attr-defined]
-                    request.language)):
-            raise ValueError(f"Unsupported language: {request.language}.")
+        self.model_cls.validate_language(lang)  # type: ignore[attr-defined]
 
         if len(audio_data) / 1024**2 > MAX_AUDIO_CLIP_FILESIZE_MB:
             raise ValueError("Maximum file size exceeded.")

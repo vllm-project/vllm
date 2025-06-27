@@ -848,7 +848,11 @@ class WhisperForConditionalGeneration(nn.Module, SupportsTranscription,
                 " reported WER>=0.5. Results may be less accurate "
                 "for this choice.", language)
             return True
-        return False
+        else:
+            raise ValueError(f"Unsupported language: {language}."
+                             "Language should be one of:" +
+                             f" {list(ISO639_1_SUPPORTED_LANGS.values())}" +
+                             f"or {list(ISO639_1_OTHER_LANGS.values())}")
 
     @classmethod
     def get_decoder_prompt(cls, language: str, task_type: str,
