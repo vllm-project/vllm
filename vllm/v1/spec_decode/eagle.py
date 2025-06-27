@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import Any, Optional
+
 import torch
 import torch.nn as nn
 
@@ -169,7 +171,7 @@ class EagleProposer:
         self.positions[:num_tokens] = target_positions
         self.hidden_states[:num_tokens] = target_hidden_states
 
-        with set_forward_context(per_layer_attn_metadata,
+        with set_forward_context(None,
                                  self.vllm_config,
                                  num_tokens=num_input_tokens):
             ret_hidden_states = self.model(
@@ -369,8 +371,10 @@ class EagleProposer:
     def dummy_run(
         self,
         num_tokens: int,
+        attn_metadata: Optional[dict[str, Any]],
     ) -> None:
-        with set_forward_context(None, self.vllm_config,
+        with set_forward_context(attn_metadata,
+                                 self.vllm_config,
                                  num_tokens=num_tokens):
             self.model(
                 self.input_ids[:num_tokens],
