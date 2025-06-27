@@ -222,6 +222,10 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
     def supports_chunking(self) -> bool:
         return not self.use_batched_format
 
+    def requires_expert_tokens_meta(self) -> bool:
+        # Batched format requires the expert_num_tokens.
+        return self.use_batched_format
+
     def workspace_shapes(
         self,
         a: torch.Tensor,
@@ -232,6 +236,7 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
         topk: int,
         global_num_experts: int,
         local_num_experts: int,
+        expert_tokens_meta: Optional[mk.ExpertTokensMeta],
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
         workspace1: tuple[int, ...] = ()
         workspace2: tuple[int, ...] = ()
@@ -265,11 +270,16 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
         a2_scale: Optional[torch.Tensor],
         workspace13: torch.Tensor,
         workspace2: torch.Tensor,
-        expert_num_tokens: Optional[torch.Tensor],
+        expert_tokens_meta: Optional[mk.ExpertTokensMeta],
     ):
         assert w1_zp is None, "w1_zp is not supported in CUTLASS MoE"
         assert w2_zp is None, "w2_zp is not supported in CUTLASS MoE"
         activation_callable = lambda i, o: self.activation(activation, i, o)
+
+        expert_num_tokens = None
+        if expert_tokens_meta:
+            expert_num_tokens = expert_tokens_meta.local_expert_num_tokens_gpu
+
         run_cutlass_moe_fp8(output, hidden_states, w1, w2, topk_ids,
                             activation_callable, global_num_experts,
                             expert_map, w1_scale, w2_scale, a1q_scale,

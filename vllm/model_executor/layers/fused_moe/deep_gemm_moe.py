@@ -73,9 +73,13 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def supports_chunking(self) -> bool:
         return True
 
+    def requires_expert_tokens_meta(self) -> bool:
+        return True
+
     def workspace_shapes(
         self, a: torch.Tensor, aq: torch.Tensor, M: int, N: int, K: int,
-        topk: int, global_num_experts: int, local_num_experts: int
+        topk: int, global_num_experts: int, local_num_experts: int,
+        expert_tokens_meta: Optional[mk.ExpertTokensMeta]
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
         # We use global_num_experts due to how moe_align_block_size handles
         # expert_maps.
@@ -106,7 +110,7 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         a2_scale: Optional[torch.Tensor],
         workspace13: torch.Tensor,
         workspace2: torch.Tensor,
-        expert_num_tokens: Optional[torch.Tensor],
+        expert_tokens_meta: Optional[mk.ExpertTokensMeta],
     ):
         import deep_gemm as dg
 

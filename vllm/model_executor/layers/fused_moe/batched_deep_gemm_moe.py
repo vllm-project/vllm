@@ -13,7 +13,6 @@ logger = init_logger(__name__)
 
 has_deep_gemm = importlib.util.find_spec("deep_gemm") is not None
 
-
 @triton.jit
 def _silu_mul_fp8_quant_deep_gemm(
     # Pointers ------------------------------------------------------------
@@ -204,6 +203,9 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def supports_chunking(self) -> bool:
         return False
 
+    def requires_expert_tokens_meta(self) -> bool:
+        return True 
+
     def workspace_shapes(
         self,
         a: torch.Tensor,
@@ -214,6 +216,7 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         topk: int,
         global_num_experts: int,
         local_num_experts: int,
+        expert_tokens_meta: Optional[mk.ExpertTokensMeta],
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
         assert a.dim() == 2
         # FIXME (varun): We should be able to dispatch only from the leader
@@ -247,10 +250,13 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         a2_scale: Optional[torch.Tensor],
         workspace13: torch.Tensor,
         workspace2: torch.Tensor,
-        expert_num_tokens: Optional[torch.Tensor],
+        expert_tokens_meta: Optional[mk.ExpertTokensMeta],
     ):
         import deep_gemm as dg
         assert hidden_states.ndim == 3
+        assert expert_tokens_meta is not None
+
+        expert_num_tokens = expert_tokens_meta.local_expert_num_tokens_gpu
 
         a1q = hidden_states
         _, N, K = w1.size()

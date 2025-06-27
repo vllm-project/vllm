@@ -1545,6 +1545,9 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def supports_chunking(self) -> bool:
         return True
 
+    def requires_expert_tokens_meta(self) -> bool:
+        return False
+
     def workspace_shapes(
         self,
         a: torch.Tensor,
@@ -1555,6 +1558,7 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         topk: int,
         global_num_experts: int,
         local_num_experts: int,
+        expert_tokens_meta: Optional[mk.ExpertTokensMeta],
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
         workspace1 = (M, topk, max(N * 2, K))
         workspace2 = (M, topk, N)
@@ -1579,7 +1583,7 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         a2_scale: Optional[torch.Tensor],
         workspace13: torch.Tensor,
         workspace2: torch.Tensor,
-        expert_num_tokens: Optional[torch.Tensor],
+        expert_tokens_meta: Optional[mk.ExpertTokensMeta]
     ):
         # Check constraints.
         if self.use_int4_w4a16:

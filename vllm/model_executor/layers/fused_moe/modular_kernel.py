@@ -3,6 +3,7 @@
 from abc import ABC, abstractmethod
 from math import prod
 from typing import Optional
+from dataclasses import dataclass
 
 import torch
 
@@ -82,6 +83,19 @@ def _moe_problem_size(
     return E, M, N, K, topk
 
 
+@dataclass
+class ExpertTokensMeta: 
+  """
+  Metadata information about tokens routing
+  """
+  local_expert_num_tokens_gpu: torch.Tensor
+  local_expert_num_tokens_sum: Optional[int] = None
+
+  def maybe_compute_local_expert_num_tokens_sum(self) -> None:
+    if self.local_expert_num_tokens_sum is not None:
+      return
+    self.local_expert_num_tokens_sum = torch.sum(self.local_expert_num_tokens_gpu).item()
+
 class FusedMoEPrepareAndFinalize(ABC):
     """
     An abstract base class for the [Quantize-Prepare] and [Finalize] steps
@@ -99,7 +113,7 @@ class FusedMoEPrepareAndFinalize(ABC):
         num_experts: int,
         expert_map: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor],
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[ExpertTokensMeta],
                Optional[torch.Tensor], Optional[torch.Tensor]]:
         """
         Perform any quantization (and/or) dispatching needed
@@ -119,8 +133,7 @@ class FusedMoEPrepareAndFinalize(ABC):
         Returns a tuple of:
         - quantized + dispatched a.
         - quantized + dispatched a1_scales.
-        - Optional tensor as big as number of local experts that contains the
-          number of tokens assigned to each local expert.
+        - Optional ExpertTokensMeta
         - Optional dispatched expert topk IDs
         - Optional dispatched expert topk weight
         """
@@ -186,6 +199,14 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def requires_expert_tokens_meta(self) -> bool:
+      """
+      A flag indicating whether or not this class needs the ExpertTokensMeta
+      for its fused_experts implementation.
+      """
+      raise NotImplementedError
+
+    @abstractmethod
     def workspace_shapes(
         self,
         a: torch.Tensor,
@@ -196,6 +217,7 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         topk: int,
         global_num_experts: int,
         local_num_experts: int,
+        expert_tokens_meta: Optional[ExpertTokensMeta],
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
         """
         Compute the shapes for the temporary and final outputs of the two gemms
@@ -248,7 +270,7 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         a2_scale: Optional[torch.Tensor],
         workspace13: torch.Tensor,
         workspace2: torch.Tensor,
-        expert_num_tokens: Optional[torch.Tensor],
+        expert_tokens_meta: Optional[ExpertTokensMeta],
     ):
         """
         This function computes the intermediate result of a Mixture of Experts
@@ -281,8 +303,8 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
           must be large enough to hold output of either MoE gemm.
         - workspace2 (torch.Tensor): A scratch tensor used for the activation
           function.
-        - expert_num_tokens: An optional tensor containing the number of tokens
-          assigned to each expert when using batched experts format input.
+        - expert_num_tokens_meta: Optional metadata information regarding the
+          number of tokens routed to each local expert.
         """
         raise NotImplementedError
 

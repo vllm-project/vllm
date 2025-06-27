@@ -40,6 +40,11 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         return ((dge is None or dge.supports_chunking())
                 and (te is None or te.supports_chunking()))
 
+    def requires_expert_tokens_meta(self) -> bool:
+        dge = self.deep_gemm_experts
+        te = self.triton_experts
+        return ((dge is not None and dge.requires_expert_tokens_meta()) or (te is not None and te.requires_expert_tokens_meta()))
+
     def workspace_shapes(
         self,
         a: torch.Tensor,
@@ -50,6 +55,7 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         topk: int,
         global_num_experts: int,
         local_num_experts: int,
+        expert_tokens_meta: Optional[mk.ExpertTokensMeta]
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
         # Note: the deep gemm workspaces are strictly larger than the triton
         # workspaces so we can be pessimistic here and allocate for DeepGemm
@@ -57,11 +63,13 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         if self.allow_deep_gemm and _valid_deep_gemm_shape(M, N, K):
             assert self.deep_gemm_expert is not None
             return self.deep_gemm_expert.workspace_shapes(
-                a, aq, M, N, K, topk, global_num_experts, local_num_experts)
+                a, aq, M, N, K, topk, global_num_experts, local_num_experts,
+                expert_tokens_meta)
         else:
             return self.triton_expert.workspace_shapes(a, aq, M, N, K, topk,
                                                        global_num_experts,
-                                                       local_num_experts)
+                                                       local_num_experts,
+                                                       expert_tokens_meta)
 
     def apply(
         self,
@@ -81,7 +89,7 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         a2_scale: Optional[torch.Tensor],
         workspace13: torch.Tensor,
         workspace2: torch.Tensor,
-        expert_num_tokens: Optional[torch.Tensor],
+        expert_tokens_meta: Optional[mk.ExpertTokensMeta],
     ):
         N = w1.size(1)
 
@@ -108,5 +116,5 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
             a2_scale,
             workspace13,
             workspace2,
-            expert_num_tokens,
+            expert_tokens_meta,
         )

@@ -513,6 +513,9 @@ class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def supports_chunking(self) -> bool:
         return False
 
+    def requires_expert_tokens_meta(self) -> bool:
+        return True 
+
     def workspace_shapes(
         self,
         a: torch.Tensor,
@@ -523,6 +526,7 @@ class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         topk: int,
         global_num_experts: int,
         local_num_experts: int,
+        expert_tokens_meta: Optional[mk.ExpertTokensMeta],
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
         assert a.dim() == 2
         num_dp = self.dp_size
@@ -549,10 +553,11 @@ class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         a2_scale: Optional[torch.Tensor],
         workspace13: torch.Tensor,
         workspace2: torch.Tensor,
-        expert_num_tokens: Optional[torch.Tensor],
+        expert_tokens_meta: Optional[mk.ExpertTokensMeta],
     ):
         assert hidden_states.dim() == 3
-        assert expert_num_tokens is not None
+        assert expert_tokens_meta is not None
+        expert_num_tokens = expert_tokens_meta.local_expert_num_tokens_gpu
 
         max_num_tokens = self.max_num_tokens
         num_dp = self.world_size // self.dp_size
@@ -618,6 +623,9 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def supports_chunking(self) -> bool:
         return False
 
+    def requires_expert_tokens_meta(self) -> bool:
+        return True
+
     def workspace_shapes(
         self,
         a: torch.Tensor,
@@ -628,6 +636,7 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         topk: int,
         global_num_experts: int,
         local_num_experts: int,
+        expert_tokens_meta: Optional[mk.ExpertTokensMeta],
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
         assert a.dim() == 2
         num_dp = self.world_size // self.dp_size
@@ -657,7 +666,7 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         a2_scale: Optional[torch.Tensor],
         workspace13: torch.Tensor,
         workspace2: torch.Tensor,
-        expert_num_tokens: Optional[torch.Tensor],
+        expert_tokens_meta: Optional[mk.ExpertTokensMeta]
     ):
         # Check constraints.
         if self.use_int4_w4a16:
@@ -675,6 +684,8 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         assert hidden_states.dtype in [
             torch.float32, torch.float16, torch.bfloat16, torch.float8_e4m3fn
         ]
+        assert expert_tokens_meta is not None
+        expert_num_tokens = expert_tokens_meta.local_expert_num_tokens_gpu
 
         E, max_num_tokens, N, K, top_k_num = mk._moe_problem_size(
             hidden_states, w1, w2, topk_ids)
