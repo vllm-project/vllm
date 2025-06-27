@@ -1698,13 +1698,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self, max_gen_len: int, sampled_token_ids: torch.Tensor,
             discard_sampled_tokens_req_indices: np.ndarray) -> list[list[int]]:
         """
-        Returns valid sampled tokens in a list of lists based on max gen length and discard indices
+        Returns valid sampled tokens in a list of lists
 
         Parameters:
         ----------
         - max_gen_len: Maximum length of the generated tokens
         - sampled_token_ids: Tensor of sampled token IDs
-        - discard_sampled_tokens_req_indices: Indices of requests that should not be sampled
+        - discard_sampled_tokens_req_indices: Indices that should not be sampled
         """
 
         if max_gen_len == 1:
