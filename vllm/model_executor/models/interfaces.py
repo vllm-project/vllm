@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Iterable, MutableSequence
+from collections.abc import Container, Iterable, MutableSequence
 from typing import (TYPE_CHECKING, ClassVar, Literal, Optional, Protocol,
                     Union, overload, runtime_checkable)
 
@@ -598,6 +598,22 @@ class SupportsTranscription(Protocol):
     """The interface required for all models that support transcription."""
 
     supports_transcription: ClassVar[Literal[True]] = True
+
+    @classmethod
+    def get_decoder_prompt(cls, language: str, task_type: str,
+                           prompt: str) -> str:
+        """Get the decoder prompt for the ASR model."""
+        ...
+
+    @classmethod
+    def get_supported_languages(cls) -> Container[str]:
+        """Get the supported ISO639_1 languages for the model."""
+        ...
+
+    @classmethod
+    def supports_language(cls, language: str) -> bool:
+        """Check if the model supports a specific ISO639_1 language."""
+        return language in cls.get_supported_languages()
 
 
 @overload
