@@ -67,7 +67,7 @@ class ConfigValidator(ast.NodeVisitor):
                       (isinstance(d, ast.Name) and ((id := d.id) == 'config' or id == 'dataclass')) or
                       (isinstance(d, ast.Call) and (isinstance(d.func, ast.Name) and (id := d.func.id) == 'dataclass'))]
 
-        if len(decorators) == 2 and decorators[0] != decorators[1]:
+        if set(decorators) == {'config', 'dataclass'}:
             validate_class(node)
 
         self.generic_visit(node)
@@ -83,19 +83,19 @@ def validate_class(class_node: ast.ClassDef):
                 continue
 
             if isinstance(stmt.target, ast.Name):
-                fieldName = stmt.target.id
+                field_name = stmt.target.id
                 if stmt.value is None:
-                    fail(f"Field '{fieldName}' in {class_node.name} must have a default value.", stmt)
+                    fail(f"Field '{field_name}' in {class_node.name} must have a default value.", stmt)
 
-                if fieldName not in attr_docs:
-                    fail(f"Field '{fieldName}' in {class_node.name} must have a docstring.", stmt)
+                if field_name not in attr_docs:
+                    fail(f"Field '{field_name}' in {class_node.name} must have a docstring.", stmt)
 
                 if isinstance(stmt.annotation, ast.Subscript) and isinstance(stmt.annotation.value, ast.Name) \
                     and stmt.annotation.value.id == "Union" and isinstance(stmt.annotation.slice, ast.Tuple):
                     args = stmt.annotation.slice.elts
                     literal_args = [arg for arg in args if isinstance(arg, ast.Subscript) and isinstance(arg.value, ast.Name) and arg.value.id == "Literal"]
                     if len(literal_args) > 1:
-                        fail(f"Field '{fieldName}' in {class_node.name} must use a single "
+                        fail(f"Field '{field_name}' in {class_node.name} must use a single "
                                "Literal type. Please use 'Literal[Literal1, Literal2]' "
                                "instead of 'Union[Literal1, Literal2]'.", stmt)
 
