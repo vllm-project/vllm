@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import importlib
 from abc import abstractmethod
 from dataclasses import dataclass
 from enum import Enum
@@ -25,6 +24,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
     is_rocm_aiter_moe_enabled)
+from vllm.model_executor.layers.fused_moe.utils import has_deepep, has_pplx
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.utils import set_weight_attrs
@@ -32,18 +32,15 @@ from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
 from vllm.utils import direct_register_custom_op
 
-has_pplx = importlib.util.find_spec("pplx_kernels") is not None
-has_deepep = importlib.util.find_spec("deep_ep") is not None
-
 if current_platform.is_cuda_alike():
     from .fused_batched_moe import BatchedTritonExperts
     from .fused_moe import TritonExperts, fused_experts
     from .modular_kernel import (FusedMoEModularKernel,
                                  FusedMoEPermuteExpertsUnpermute,
                                  FusedMoEPrepareAndFinalize)
-    if has_pplx:
+    if has_pplx():
         from .pplx_prepare_finalize import PplxPrepareAndFinalize
-    if has_deepep:
+    if has_deepep():
         from .deepep_ht_prepare_finalize import DeepEPHTPrepareAndFinalize
         from .deepep_ll_prepare_finalize import (DEEPEP_QUANT_BLOCK_SIZE,
                                                  DeepEPLLPrepareAndFinalize)

@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import enum
-import importlib
 from enum import Enum
 from typing import Callable, Optional
 
@@ -16,6 +15,7 @@ from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEMethodBase,
                                                   FusedMoeWeightScaleSupported)
+from vllm.model_executor.layers.fused_moe.utils import has_pplx
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compressed_tensors_wNa16 import (  # noqa
     WNA16_SUPPORTED_BITS, WNA16_SUPPORTED_TYPES_MAP)
 from vllm.model_executor.layers.quantization.utils import replace_parameter
@@ -30,12 +30,10 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
-has_pplx = importlib.util.find_spec("pplx_kernels") is not None
-
 if current_platform.is_cuda_alike():
     from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
         BatchedPrepareAndFinalize)
-    if has_pplx:
+    if has_pplx():
         from vllm.model_executor.layers.fused_moe.pplx_prepare_finalize import (
             PplxPrepareAndFinalize)
 
@@ -569,7 +567,7 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
             use_batched_format=True,
         )
 
-        if has_pplx and isinstance(
+        if has_pplx() and isinstance(
                 prepare_finalize,
             (BatchedPrepareAndFinalize, PplxPrepareAndFinalize)):
             # no expert_map support in this case

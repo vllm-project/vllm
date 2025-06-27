@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import functools
-import importlib.util
 from typing import Any, Callable, Optional, Union
 
 import torch
@@ -16,6 +15,7 @@ from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEMethodBase,
                                                   FusedMoeWeightScaleSupported)
+from vllm.model_executor.layers.fused_moe.utils import has_deep_gemm
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -42,8 +42,6 @@ from vllm.scalar_type import scalar_types
 ACTIVATION_SCHEMES = ["static", "dynamic"]
 
 logger = init_logger(__name__)
-
-has_deep_gemm = importlib.util.find_spec("deep_gemm") is not None
 
 
 def _is_col_major(x: torch.Tensor) -> bool:
@@ -451,7 +449,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         # Check for DeepGemm support.
         self.allow_deep_gemm = False
         if envs.VLLM_USE_DEEP_GEMM:
-            if not has_deep_gemm:
+            if not has_deep_gemm():
                 logger.warning_once("Failed to import DeepGemm kernels.")
             elif not self.block_quant:
                 logger.warning_once("Model is not block quantized. Not using "

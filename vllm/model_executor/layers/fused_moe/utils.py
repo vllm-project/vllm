@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import importlib.util
 import socket
 from contextlib import closing
+from functools import cache
 from math import prod
 from typing import Optional
 
@@ -13,6 +15,38 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 from vllm.model_executor.layers.quantization.utils.int8_utils import (
     per_token_group_quant_int8, per_token_quant_int8)
 from vllm.utils import cdiv
+
+# -----------------------------------------------------------------------------
+# Optional kernel availability helpers (cached)
+# -----------------------------------------------------------------------------
+
+
+@cache
+def _has_module(module_name: str) -> bool:
+    """Return True if *module_name* can be found in the current environment.
+
+    The result is cached so that subsequent queries for the same module incur
+    no additional overhead.
+    """
+    return importlib.util.find_spec(module_name) is not None
+
+
+def has_pplx() -> bool:  # noqa: D401 – imperative mood preferred here
+    """Whether the optional `pplx_kernels` package is available."""
+
+    return _has_module("pplx_kernels")
+
+
+def has_deepep() -> bool:  # noqa: D401
+    """Whether the optional `deep_ep` package is available."""
+
+    return _has_module("deep_ep")
+
+
+def has_deep_gemm() -> bool:  # noqa: D401
+    """Whether the optional `deep_gemm` package is available."""
+
+    return _has_module("deep_gemm")
 
 
 def _resize_cache(x: torch.Tensor, v: tuple[int, ...]) -> torch.Tensor:
