@@ -70,6 +70,12 @@ class _HfExamplesInfo:
     length that is too large to fit into memory in CI.
     """
 
+    revision: Optional[str] = None
+    """
+    The specific revision (commit hash, tag, or branch) to use for the model.
+    If not specified, the default revision will be used.
+    """
+
     def check_transformers_version(
         self,
         *,
@@ -208,7 +214,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                          trust_remote_code=True),
     "MiniMaxText01ForCausalLM": _HfExamplesInfo("MiniMaxAI/MiniMax-Text-01",
                                                 trust_remote_code=True,
-                                                is_available_online=False),
+                                                revision="a59aa9cbc53b9fb8742ca4e9e1531b9802b6fdc3"),  # noqa: E501
     "MiniMaxM1ForCausalLM": _HfExamplesInfo("MiniMaxAI/MiniMax-M1-40k",
                                             trust_remote_code=True),
     "MistralForCausalLM": _HfExamplesInfo("mistralai/Mistral-7B-Instruct-v0.1"),
