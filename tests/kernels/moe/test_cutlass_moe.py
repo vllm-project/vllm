@@ -240,6 +240,7 @@ def test_cutlass_moe_8_bit_no_graph(
     per_act_token: bool,
     per_out_ch: bool,
     monkeypatch,
+    ep_size: Optional[int] = None,
 ):
     current_platform.seed_everything(7)
     monkeypatch.setenv("VLLM_FUSED_MOE_CHUNK_SIZE", "8192")
@@ -258,7 +259,13 @@ def test_cutlass_moe_8_bit_no_graph(
         triton_output = fused_experts(mt.a_d, mt.w1_d, mt.w2_d, topk_weights,
                                       topk_ids)
 
-        cutlass_output = run_8_bit(mt, topk_weights, topk_ids, per_act_token)
+        if ep_size is not None:
+            assert e % ep_size == 0, "Cannot distribute experts evenly"
+            number_local_experts = e // ep_size
+        else:
+            number_local_experts = None
+        cutlass_output = run_8_bit(mt, topk_weights, topk_ids, per_act_token,
+                                   number_local_experts)
 
         # Note 5.5 only needed for larger problem sizes, 5 works ok for
         # the rest.
@@ -345,37 +352,18 @@ def test_cutlass_moe_8_bit_EP(
     ep_size: int,
     monkeypatch,
 ):
-    current_platform.seed_everything(7)
-    monkeypatch.setenv("VLLM_FUSED_MOE_CHUNK_SIZE", "8192")
-    with set_current_vllm_config(vllm_config):
-        mt = MOETensors8Bit.make_moe_tensors_8bit(m, k, n, e, per_act_token,
-                                                  per_out_channel)
-
-        score = torch.randn((m, e), device="cuda", dtype=torch.half)
-        topk_weights, topk_ids, _ = fused_topk(mt.a,
-                                               score,
-                                               topk,
-                                               renormalize=False)
-
-        # Note that we are using the dequantized versions of the tensors.
-        # Using a, w1 and w2 directly results in minor output differences.
-        triton_output = fused_experts(mt.a_d, mt.w1_d, mt.w2_d, topk_weights,
-                                      topk_ids)
-
-        assert e % ep_size == 0, "Cannot distribute experts evenly"
-        cutlass_output = run_8_bit(mt,
-                                   topk_weights,
-                                   topk_ids,
-                                   per_act_token,
-                                   num_local_experts=e // ep_size)
-
-        torch.testing.assert_close(triton_output,
-                                   cutlass_output,
-                                   atol=5e-2,
-                                   rtol=1e-2)
+    test_cutlass_moe_8_bit_no_graph(m, n, k, e, topk, per_act_token,
+                                    per_out_channel, monkeypatch, ep_size)
 
 
-@pytest.mark.parametrize("m,n,k,topk", [(1, 8192, 5120, 31)])
+LARGE_MNK_FACTORS = [
+    (1, 8192, 5120, 31),
+    (32768, 1024, 1024, 16),
+    (65536, 512, 1024, 16),
+]
+
+
+@pytest.mark.parametrize("m,n,k,topk", LARGE_MNK_FACTORS)
 @pytest.mark.parametrize("e", [128])
 @pytest.mark.parametrize("per_act_token", [False])
 @pytest.mark.parametrize("per_out_channel", [True])
@@ -393,33 +381,10 @@ def test_cutlass_moe_8_bit_EP_large(
     per_act_token: bool,
     per_out_channel: bool,
     ep_size: int,
+    monkeypatch,
 ):
-    current_platform.seed_everything(7)
-    with set_current_vllm_config(vllm_config):
-        mt = MOETensors8Bit.make_moe_tensors_8bit(m, k, n, e, per_act_token,
-                                                  per_out_channel)
-
-        score = torch.randn((m, e), device="cuda", dtype=torch.half)
-        topk_weights, topk_ids, _ = fused_topk(mt.a,
-                                               score,
-                                               topk,
-                                               renormalize=False)
-
-        # Note that we are using the dequantized versions of the tensors.
-        # Using a, w1 and w2 directly results in minor output differences.
-        triton_output = fused_experts(mt.a_d, mt.w1_d, mt.w2_d, topk_weights,
-                                      topk_ids)
-
-        assert e % ep_size == 0, "Cannot distribute experts evenly"
-        cutlass_output = run_8_bit(mt,
-                                   topk_weights,
-                                   topk_ids,
-                                   num_local_experts=e // ep_size)
-
-        torch.testing.assert_close(triton_output,
-                                   cutlass_output,
-                                   atol=5e-2,
-                                   rtol=1e-2)
+    test_cutlass_moe_8_bit_no_graph(m, n, k, e, topk, per_act_token,
+                                    per_out_channel, monkeypatch, ep_size)
 
 
 @pytest.mark.parametrize("m,n,k,topk", [(1, 8192, 5120, 31)])
