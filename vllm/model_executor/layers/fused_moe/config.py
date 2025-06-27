@@ -16,7 +16,6 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.utils import cdiv
 
-
 logger = init_logger(__name__)
 
 
@@ -71,8 +70,8 @@ class FusedMoEQuantConfig:
     # add detailed quant info for input, intermediates, weights, etc?
 
     def __post_init__(self):
-        assert (not self.per_act_token_quant or
-                self.block_shape is None), "illegal quantization"
+        assert (not self.per_act_token_quant
+                or self.block_shape is None), "illegal quantization"
 
     @property
     def is_quantized(self) -> bool:

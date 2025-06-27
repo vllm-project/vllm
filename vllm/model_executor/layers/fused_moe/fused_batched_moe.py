@@ -576,6 +576,7 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                     quant_config.per_act_token_quant,
                     quant_config.block_shape,
                 )
+                assert b_s is not None
                 if quant_config.is_per_act_token:
                     b_a1_scale[idx, :rows] = b_s[:rows]
                 else:
@@ -733,6 +734,7 @@ class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
             tmp = _resize_cache(workspace2, (num, N))
 
             if self.quant_config.is_quantized:
+                assert a1q_scale is not None and w1_scale is not None
                 input = self.dequant(hidden_states[expert, :, :],
                                      a1q_scale[expert])
                 w1_dq = self.dequant(w1[expert], w1_scale[expert])
@@ -744,6 +746,7 @@ class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
             self.activation(activation, tmp, input.to(tmp.dtype))
 
             if self.quant_config.is_quantized:
+                assert w2_scale is not None
                 w2_dq = self.dequant(w2[expert], w2_scale[expert])
             else:
                 w2_dq = w2[expert]
@@ -814,6 +817,7 @@ def batched_moe_kernel_quantize_input(
                     per_act_token_quant,
                     block_shape,
                 )
+                assert tmp_scale is not None
                 A_q_scale[e, :tmp_scale.shape[0]] = tmp_scale
 
         return A_q, A_q_scale
