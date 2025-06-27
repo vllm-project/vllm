@@ -974,17 +974,10 @@ class NixlConnectorWorker:
             remote_xfer_side_handle,
             remote_block_descs_ids,
             notif_msg=notif_id,
-            skip_desc_merge=True,  # this causes the issue to emerge immediately.
         )
 
         # Begin async xfer.
-        start = time.perf_counter()
         self.nixl_wrapper.transfer(handle)
-        end = time.perf_counter()
-        print(f"self.nixl_wrapper.transfer() TIME: {end-start}")
-        if end - start > 0.2:
-            print(f"{local_block_ids=}")
-            print(f"{remote_block_ids=}")
 
         # Use handle to check completion in future step().
         # TODO (NickLucche) surface xfer elapsed time
