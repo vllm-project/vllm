@@ -246,8 +246,7 @@ def get_model_architecture(
     elif model_config.task == "classify":
         # Cannot automatically run as_seq_cls_model,
         # otherwise it will cause a circular reference on is_cross_encoder_model
-        from vllm.model_executor.models.interfaces import SupportsCrossEncoding
-        assert isinstance(model_cls, SupportsCrossEncoding)
+        pass
     elif model_config.task == "reward":
         model_cls = as_reward_model(model_cls)
 

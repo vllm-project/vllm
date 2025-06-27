@@ -332,7 +332,7 @@ class PoolerHead(nn.Module):
                     pooled_data = F.sigmoid(pooled_data)
 
         # shape:
-        # classify & score -> (batch_size, num_classes)
+        # classify (& score) -> (batch_size, num_classes)
         # embed -> (batch_size, embedding_dim) or list(embedding_dim)
         #          (batch_size, dimensions) or list(dimensions) if using MRL
         return pooled_data

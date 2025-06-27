@@ -189,7 +189,6 @@ def as_seq_cls_model(cls: _T) -> _T:
             **kwargs: Any,
         ) -> None:
             super().__init__(vllm_config=vllm_config, prefix=prefix, **kwargs)
-            self.verify_and_update_config(vllm_config)
 
             config = vllm_config.model_config.hf_config
             quant_config = vllm_config.quant_config
@@ -205,11 +204,6 @@ def as_seq_cls_model(cls: _T) -> _T:
                                            bias=False,
                                            prefix=maybe_prefix(
                                                prefix, "score"))
-
-        def verify_and_update_config(self, vllm_config):
-            # Leave an interface for validating and modifying model_config
-            # for slightly different models
-            pass
 
         def forward(
             self,
