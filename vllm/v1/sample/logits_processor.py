@@ -210,18 +210,6 @@ class LogitsProcessorManager:
     non_argmax_invariant: list[LogitsProcessor] = field(
         default_factory=list)  # non-argmax-invariant logitsprocs
 
-    def get_logitsprocs_by_cls(
-            self, cls: type[LogitsProcessor]) -> Iterator[LogitsProcessor]:
-        """Yield logits processors of a specific class.
-        
-        Args:
-          cls: :class:`LogitsProcessor` subclass
-
-        Returns:
-          Iterator over logits processors
-        """
-        return (lp for lp in self.all if isinstance(lp, cls))
-
     @property
     def all(self) -> Iterator[LogitsProcessor]:
         """Iterator over all logits processors."""

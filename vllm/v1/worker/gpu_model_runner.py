@@ -61,7 +61,6 @@ from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.medusa import MedusaProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
-from vllm.v1.spec_decode.utils import is_spec_decode_supported
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.block_table import BlockTable
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
@@ -204,6 +203,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             pin_memory=self.pin_memory,
             vocab_size=self.model_config.get_vocab_size(),
             block_sizes=[self.cache_config.block_size],
+            is_spec_decode=bool(self.vllm_config.speculative_config),
         )
 
         self.use_cuda_graph = (
@@ -1660,7 +1660,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Skip requests that require sampling parameters that are not
             # supported with speculative decoding.
             req_id = self.input_batch.req_ids[i]
-            if not is_spec_decode_supported(req_id, self.input_batch):
+            if req_id in self.input_batch.spec_decode_unsupported_reqs:
                 draft_token_ids.append([])
                 continue
 
@@ -2290,6 +2290,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 pin_memory=self.pin_memory,
                 vocab_size=self.model_config.get_vocab_size(),
                 block_sizes=block_sizes,
+                is_spec_decode=bool(self.vllm_config.speculative_config),
             )
 
     def _allocate_kv_cache_tensors(

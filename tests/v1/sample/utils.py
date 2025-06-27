@@ -185,7 +185,8 @@ class LogitsprocsTestFakes(NamedTuple):
         Returns:
           Iterator over logits processors
         """
-        return self.sampling_metadata.logitsprocs.get_logitsprocs_by_cls(cls)
+        return (lp for lp in self.sampling_metadata.logitsprocs.all
+                if isinstance(lp, cls))
 
     def get_logitsprocs(self) -> Iterator[LogitsProcessor]:
         """Iterator over all logits processors."""
