@@ -35,17 +35,22 @@ HYBRID_MODELS = [
     "Zyphra/Zamba2-1.2B-instruct",
     "hmellor/tiny-random-BambaForCausalLM",
     "ibm-ai-platform/Bamba-9B-v1",
+    # Note: I'm not seeing the same output from vLLM V0 vs. HF transformers
+    # for Nemotron-H-8B; currently only compare vLLM V0 vs. vLLM V1
+    "nvidia/Nemotron-H-8B-Base-8K",
 ]
 
 V1_SUPPORTED_MODELS = [
     "mistralai/Mamba-Codestral-7B-v0.1",
     "ibm-ai-platform/Bamba-9B-v1",
     "Zyphra/Zamba2-1.2B-instruct",
+    "nvidia/Nemotron-H-8B-Base-8K",
 ]
 
 ATTN_BLOCK_SIZES = {
     "ibm-ai-platform/Bamba-9B-v1": 528,
     "Zyphra/Zamba2-1.2B-instruct": 80,
+    "nvidia/Nemotron-H-8B-Base-8K": 528,
 }
 
 # Avoid OOM
@@ -65,7 +70,10 @@ def test_models(
     num_logprobs: int,
 ) -> None:
     with hf_runner(model) as hf_model:
-        if model != "mistralai/Mamba-Codestral-7B-v0.1":
+        if model not in [
+                "mistralai/Mamba-Codestral-7B-v0.1",
+                "nvidia/Nemotron-H-8B-Base-8K"
+        ]:
             hf_outputs = hf_model.generate_greedy_logprobs_limit(
                 example_prompts, max_tokens, num_logprobs)
         else:
