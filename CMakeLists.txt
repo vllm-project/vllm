@@ -513,6 +513,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       CUDA_ARCHS "${FP4_ARCHS}")
     list(APPEND VLLM_EXT_SRC "${SRCS}")
     list(APPEND VLLM_GPU_FLAGS "-DENABLE_NVFP4=1")
+    list(APPEND VLLM_GPU_FLAGS "-DENABLE_CUTLASS_MOE_SM100=1")
     message(STATUS "Building NVFP4 for archs: ${FP4_ARCHS}")
   else()
     message(STATUS "Not building NVFP4 as no compatible archs were found.")
@@ -547,8 +548,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # if it's possible to compile MoE kernels that use its output.
   cuda_archs_loose_intersection(SCALED_MM_ARCHS "9.0a" "${CUDA_ARCHS}")
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.3 AND SCALED_MM_ARCHS)
-    set(SRCS "csrc/quantization/cutlass_w8a8/moe/grouped_mm_c3x.cu"
-             "csrc/quantization/cutlass_w8a8/moe/moe_data.cu")
+    set(SRCS "csrc/quantization/cutlass_w8a8/moe/grouped_mm_c3x.cu")
     set_gencode_flags_for_srcs(
       SRCS "${SRCS}"
       CUDA_ARCHS "${SCALED_MM_ARCHS}")
@@ -565,6 +565,16 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
                      "in CUDA target architectures")
     endif()
   endif()
+
+  # moe_data.cu is used by all CUTLASS MoE kernels.
+  cuda_archs_loose_intersection(CUTLASS_MOE_DATA_ARCHS "9.0a;10.0a" "${CUDA_ARCHS}")
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.3 AND CUTLASS_MOE_DATA_ARCHS)
+    set(SRCS "csrc/quantization/cutlass_w8a8/moe/moe_data.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${SRCS}"
+      CUDA_ARCHS "${CUTLASS_MOE_DATA_ARCHS}")
+    list(APPEND VLLM_EXT_SRC "${SRCS}")
+  endif() 
 
   #
   # Machete kernels
