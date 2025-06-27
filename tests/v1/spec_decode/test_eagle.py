@@ -10,8 +10,8 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, SpeculativeConfig,
                          VllmConfig)
 from vllm.model_executor.models.llama import LlamaForCausalLM
-from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.platforms import current_platform
+from vllm.v1.spec_decode.eagle import EagleProposer
 
 model_dir = "meta-llama/Llama-3.1-8B-Instruct"
 eagle_dir = "yuhuili/EAGLE-LLaMA3.1-Instruct-8B"
@@ -39,15 +39,17 @@ def _create_proposer(method: str, k: int) -> EagleProposer:
         num_speculative_tokens=k,
     )
 
-    vllm_config = VllmConfig(model_config=model_config,
-                             cache_config=CacheConfig(),
-                             speculative_config=speculative_config,
-                             device_config=DeviceConfig(device=current_platform.device_name),
-                             parallel_config=ParallelConfig(),
-                             load_config=LoadConfig(),
-                             scheduler_config=SchedulerConfig())
+    vllm_config = VllmConfig(
+        model_config=model_config,
+        cache_config=CacheConfig(),
+        speculative_config=speculative_config,
+        device_config=DeviceConfig(device=current_platform.device_name),
+        parallel_config=ParallelConfig(),
+        load_config=LoadConfig(),
+        scheduler_config=SchedulerConfig())
 
-    return EagleProposer(vllm_config=vllm_config, device=current_platform.device_name)
+    return EagleProposer(vllm_config=vllm_config,
+                         device=current_platform.device_name)
 
 
 def test_prepare_inputs():
