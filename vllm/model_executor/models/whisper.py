@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
-from collections.abc import Container, Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from typing import Optional, TypedDict, Union
 
 import torch
@@ -839,11 +839,7 @@ class WhisperForConditionalGeneration(nn.Module, SupportsTranscription,
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     @classmethod
-    def get_supported_languages(cls) -> Container[str]:
-        return ISO639_1_SUPPORTED_LANGS | ISO639_1_OTHER_LANGS
-
-    @classmethod
-    def supports_language(cls, language: str) -> bool:
+    def validate_language(cls, language: str) -> bool:
         if language in ISO639_1_SUPPORTED_LANGS:
             return True
         elif language in ISO639_1_OTHER_LANGS:
@@ -857,8 +853,8 @@ class WhisperForConditionalGeneration(nn.Module, SupportsTranscription,
     @classmethod
     def get_decoder_prompt(cls, language: str, task_type: str,
                            prompt: str) -> str:
-        return f"<|startoftranscript|><|{language}|><|{task_type}|>"
-        f"<|notimestamps|>{prompt}"
+        return (f"<|startoftranscript|><|{language}|><|{task_type}|>"
+                f"<|notimestamps|>{prompt}")
 
 
 def _create_fake_bias_for_k_proj(

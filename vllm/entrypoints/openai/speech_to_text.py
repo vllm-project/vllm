@@ -94,13 +94,9 @@ class OpenAISpeechToText(OpenAIServing):
         # https://github.com/huggingface/transformers/blob/main/src/transformers/models/whisper/generation_whisper.py#L1520
         lang = request.language or "en"
         if (request.language and not self.model_cls.
-                supports_language(  # type: ignore[attr-defined]
+                validate_language(  # type: ignore[attr-defined]
                     request.language)):
-            raise ValueError(
-                f"Unsupported language: {request.language}."
-                "Language should be one of:" +
-                f" {list(self.model_cls.get_supported_languages())}"  # type: ignore[attr-defined]
-            )
+            raise ValueError(f"Unsupported language: {request.language}.")
 
         if len(audio_data) / 1024**2 > MAX_AUDIO_CLIP_FILESIZE_MB:
             raise ValueError("Maximum file size exceeded.")
@@ -124,9 +120,9 @@ class OpenAISpeechToText(OpenAIServing):
                     },
                 },
                 "decoder_prompt":
-                self.model_cls.get_decoder_prompt(
-                    lang, self.task_type,
-                    request.prompt)  # type: ignore[attr-defined]
+                self.model_cls.
+                get_decoder_prompt(  # type: ignore[attr-defined]
+                    lang, self.task_type, request.prompt)
             }
             prompts.append(cast(PromptType, prompt))
         return prompts, duration
