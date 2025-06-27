@@ -287,3 +287,62 @@ def ep_gather(
         BLOCK_D=BLOCK_D,
     )
     return
+
+
+def deepgemm_moe_permute(aq: torch.Tensor,
+                         aq_scale: torch.Tensor,
+                         topk_ids: torch.Tensor,
+                         expert_num_tokens: torch.Tensor,
+                         sum_expert_num_tokens: int,
+                         expert_map: Optional[torch.Tensor],
+                         aq_out: Optional[torch.Tensor] = None):
+
+    assert aq.ndim == 2
+    H = aq.size(1)
+    num_experts = expert_num_tokens.size(0)
+
+    M_sum = sum_expert_num_tokens
+    device = aq.device
+
+    expert_start_loc = torch.empty((num_experts),
+                                   device=device,
+                                   dtype=torch.int32)
+
+    if aq_out is None:
+        aq_out = torch.empty((M_sum, H), device=device, dtype=aq.dtype)
+    assert aq_out.shape == (M_sum, H)
+
+    aq_scale_out = torch.empty((M_sum, H // 128),
+                               device=device,
+                               dtype=torch.float32)
+    expert_ids = torch.empty((M_sum), device=device, dtype=torch.int32)
+    inv_perm = torch.empty(topk_ids.shape, device=device, dtype=torch.int32)
+
+    ep_scatter(recv_x=aq,
+               recv_x_scale=aq_scale,
+               recv_topk=topk_ids,
+               num_recv_tokens_per_expert=expert_num_tokens,
+               expert_start_loc=expert_start_loc,
+               expert_map=expert_map,
+               output_tensor=aq_out,
+               output_tensor_scale=aq_scale_out,
+               m_indices=expert_ids,
+               output_index=inv_perm)
+
+    return aq_out, aq_scale_out, expert_ids, inv_perm
+
+
+def deepgemm_unpermute_and_reduce(
+        a: torch.Tensor,  # Grouped gemm output
+        topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
+        inv_perm: torch.Tensor,
+        expert_map: Optional[torch.Tensor],
+        output: torch.Tensor):
+
+    return ep_gather(input_tensor=a,
+                     recv_topk_ids=topk_ids,
+                     recv_topk_weight=topk_weights,
+                     input_index=inv_perm,
+                     expert_map=expert_map,
+                     output_tensor=output)
