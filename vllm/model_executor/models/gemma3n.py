@@ -730,29 +730,7 @@ class Gemma3nTextModel(nn.Module):
         return loaded_params
 
 
-class Gemma3nModel(nn.Module):
-
-    def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__()
-        self.language_model = Gemma3nTextModel(vllm_config=vllm_config,
-                                               prefix=maybe_prefix(
-                                                   prefix, "language_model"))
-
-    def forward(
-        self,
-        input_ids: Optional[torch.Tensor],
-        positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-        **kwargs,
-    ) -> torch.Tensor:
-        return self.language_model(input_ids=input_ids,
-                                   positions=positions,
-                                   inputs_embeds=inputs_embeds,
-                                   **kwargs)
-
-
-class Gemma3nForConditionalGeneration(nn.Module):
+class Gemma3nForCausalLM(nn.Module):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -771,7 +749,7 @@ class Gemma3nForConditionalGeneration(nn.Module):
         del lora_config  # Unused.
         super().__init__()
         self.config = config
-        self.model = Gemma3nModel(vllm_config=vllm_config,
+        self.model = Gemma3nTextModel(vllm_config=vllm_config,
                                   prefix=maybe_prefix(prefix, "model"))
         self.logits_processor = LogitsProcessor(
             config.text_config.vocab_size,
