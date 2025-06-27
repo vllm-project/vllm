@@ -84,12 +84,10 @@ class QuickAllReduce:
         are in the same node.
         """
         self.disabled = True
-        if not current_platform.is_rocm():
-            # Custom allreduce and custom quick allreduce share the
-            # --disable_custom_all_reduce flag. Since custom allreduce is
-            # only enabled on MI300 series, we can simply check for ROCm here.
+        if not self._rocm_arch_available():
             logger.debug(
-                "Custom quick allreduce is only supported on ROCm platform.")
+                "Custom quick allreduce is only supported on ROCm MI300 series."
+            )
             return
 
         if not quick_ar:
@@ -212,6 +210,19 @@ class QuickAllReduce:
             else ops.qr_max_size()
         self.create_shared_buffer()
         self.disabled = False
+
+    def _rocm_arch_available(self):
+        if not current_platform.is_rocm():
+            return False
+        try:
+            props = torch.cuda.get_device_properties(0)
+            gcn_arch = getattr(props, "gcnArchName", "")
+            supported_archs = ['gfx94', 'gfx95']
+            return any(gfx in gcn_arch for gfx in supported_archs)
+        except Exception as e:
+            logger.warning("Failed to determine ROCm for quick allreduce: %s",
+                           e)
+            return False
 
     def create_shared_buffer(self):
         """
