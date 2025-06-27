@@ -61,7 +61,7 @@ def test_rms_norm(
         out = torch.empty_like(x)
         residual_out = torch.empty_like(residual)
         opcheck(torch.ops._C.fused_add_rms_norm,
-                (out, residual_out, x, residual, layer.weight.data,
+                (out, x, residual_out, residual, layer.weight.data,
                  layer.variance_epsilon))
     else:
         opcheck(torch.ops._C.rms_norm,
@@ -93,9 +93,12 @@ def test_fused_rms_norm_quant(
     x *= scale
     if add_residual:
         residual = torch.randn_like(x) * scale
+        residual_out = torch.empty_like(residual)
         residual_fused = residual.clone()
+        residual_out_fused = torch.empty_like(residual_fused)
     else:
         residual = residual_fused = None
+        residual_out = residual_out_fused = None
 
     out_norm = torch.empty_like(x)
     out_quant = torch.empty_like(x, dtype=FP8_DTYPE)
@@ -105,27 +108,27 @@ def test_fused_rms_norm_quant(
 
     if add_residual:
         torch.ops._C.fused_add_rms_norm_static_fp8_quant(
-            out_quant_fused, x, residual_fused, weight, quant_scale_t, 1e-6)
+            out_quant_fused, x, residual_out_fused, residual_fused, weight,
+            quant_scale_t, 1e-6)
 
         # Unfused kernel is in-place so it goes second
         # Also use a separate clone of x to avoid modifying the input
         x_unfused = x.clone()
         out_unfused = torch.empty_like(x_unfused)
-        residual_out = torch.empty_like(residual)
-        torch.ops._C.fused_add_rms_norm(out_unfused, residual_out, x_unfused,
+        torch.ops._C.fused_add_rms_norm(out_unfused, x_unfused, residual_out,
                                         residual, weight, 1e-6)
         torch.ops._C.static_scaled_fp8_quant(out_quant, out_unfused,
                                              quant_scale_t)
 
         torch.cuda.synchronize()
-        torch.testing.assert_close(residual_fused,
+        torch.testing.assert_close(residual_out_fused,
                                    residual_out,
                                    atol=1e-2,
                                    rtol=1e-2)
 
-        opcheck(
-            torch.ops._C.fused_add_rms_norm_static_fp8_quant,
-            (out_quant_fused, x, residual_fused, weight, quant_scale_t, 1e-6))
+        opcheck(torch.ops._C.fused_add_rms_norm_static_fp8_quant,
+                (out_quant_fused, x, residual_out_fused, residual_fused,
+                 weight, quant_scale_t, 1e-6))
     else:
         torch.ops._C.rms_norm_static_fp8_quant(out_quant_fused, x, weight,
                                                quant_scale_t, 1e-6)
