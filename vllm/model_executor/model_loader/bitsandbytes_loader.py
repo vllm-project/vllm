@@ -410,8 +410,8 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                 if not hasattr(model, "get_expert_mapping"):
                     raise AttributeError(
                         f"MoE Model {type(model).__name__} does not support "
-                        "BitsAndBytes quantization yet. "
-                        "No 'get_expert_mapping' found.")
+                        "BitsAndBytes quantization yet. Ensure this model has "
+                        "a 'get_expert_mapping' method.")
                 # Get the corresponding weight name using module name and
                 # get_expert_mapping.
                 expert_mapping = model.get_expert_mapping()
@@ -422,7 +422,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                     self.target_modules.append(rep_name)
 
         assert (self.target_modules
-                ), "vllm currently does not support BNB quantization for"
+                ), "vLLM currently does not support BNB quantization for"
         f" {type(model).__name__}"
 
     def load_weights(self, model: nn.Module,
@@ -670,10 +670,11 @@ def maybe_fuse_moe_quant_states(model: nn.Module,
                 len(w3_states_lst))
         w13_absmax_lst = []
         w2_absmax_lst = []
-        w13_shape_lst = []
-        w2_shape_lst = []
-        for w1_qs, w2_qs, w3_qs in zip(w1_states_lst, w2_states_lst,
-                                        w3_states_lst):
+        w13_total_dim0 = 0
+        w2_total_dim0 = 0
+        for w1_qs, w2_qs, w3_qs in zip(
+            w1_states_lst, w2_states_lst, w3_states_lst
+        ):
             assert w1_qs.shape == w3_qs.shape
             assert w1_qs.blocksize == w2_qs.blocksize == w3_qs.blocksize
             assert w1_qs.dtype == w2_qs.dtype == w3_qs.dtype
@@ -681,33 +682,21 @@ def maybe_fuse_moe_quant_states(model: nn.Module,
             w13_absmax_lst.append(w1_qs.absmax)
             w13_absmax_lst.append(w3_qs.absmax)
             w2_absmax_lst.append(w2_qs.absmax)
-            w13_shape_lst.append(w1_qs.shape)
-            w13_shape_lst.append(w3_qs.shape)
-            w2_shape_lst.append(w2_qs.shape)
-        # FIXME dimension is dirty
-        w13_dim0 = 0
-        w13_dim1 = w13_shape_lst[0][1]
-        for shape in w13_shape_lst:
-            w13_dim0 += shape[0]
+            w13_total_dim0 += w1_qs.shape[0] + w3_qs.shape[0]
+            w2_total_dim0 += w2_qs.shape[0]
 
-        w2_dim0 = 0
-        w2_dim1 = w2_shape_lst[0][1]
-        for shape in w2_shape_lst:
-            w2_dim0 += shape[0]
         w13_absmax = torch.cat(w13_absmax_lst)
         w2_absmax = torch.cat(w2_absmax_lst)
         # Create fused quantization state for w13.
-        w13_qs = QuantState(
-            absmax=w13_absmax,
-            shape=(w13_dim0, w13_dim1),
+        w13_qs = QuantState(absmax=w13_absmax,
+            shape=(w13_total_dim0, w1_states_lst[0].shape[1]),
             code=w1_states_lst[0].code,
             blocksize=w1_states_lst[0].blocksize,
             dtype=w1_states_lst[0].dtype,
         )
         # Create fused quantization state for w2.
-        w2_qs = QuantState(
-            absmax=w2_absmax,
-            shape=(w2_dim0, w2_dim1),
+        w2_qs = QuantState(absmax=w2_absmax,
+            shape=(w2_total_dim0,  w2_states_lst[0].shape[1]),
             code=w2_states_lst[0].code,
             blocksize=w2_states_lst[0].blocksize,
             dtype=w2_states_lst[0].dtype,
