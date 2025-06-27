@@ -29,7 +29,7 @@ def get_prometheus_metrics(
         response = requests.get(server.url_for("metrics"), timeout=10)
         response.raise_for_status()
 
-        metrics = {}
+        metrics: dict[str, dict[str, float]] = {}
         for line in response.text.split('\n'):
             line = line.strip()
             # Skip comments and empty lines
@@ -67,6 +67,7 @@ def get_prometheus_metrics(
         return metrics
     except Exception as e:
         pytest.fail(f"Failed to fetch Prometheus metrics: {e}")
+        return {}
 
 
 def get_engine_request_counts(
@@ -91,7 +92,7 @@ def get_engine_request_counts(
                 if part.startswith('engine='):
                     engine_id = part.split('=')[1].strip('"')
                     if engine_id not in engine_counts:
-                        engine_counts[engine_id] = 0
+                        engine_counts[engine_id] = 0.0
                     engine_counts[engine_id] += count
 
     return engine_counts
@@ -102,7 +103,6 @@ def check_request_balancing(server: RemoteOpenAIServer):
     
     Args:
         server: The RemoteOpenAIServer instance
-        test_name: Optional name for the test (used in print statements)
     """
     dp_size = int(DP_SIZE)
     if dp_size <= 1:

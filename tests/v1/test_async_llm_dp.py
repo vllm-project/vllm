@@ -120,6 +120,7 @@ async def test_load(output_kind: RequestOutputKind,
                 asyncio.create_task(
                     generate(engine, request_id, prompt, output_kind,
                              NUM_EXPECTED_TOKENS)))
+            # Short sleep to ensure that requests are distributed.
             await asyncio.sleep(0.01)
         # Confirm that we got all the EXPECTED tokens from the requests.
         done, pending = await asyncio.wait(tasks,
