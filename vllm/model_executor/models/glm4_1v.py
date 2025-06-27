@@ -720,6 +720,7 @@ class Glm4vVisionTransformer(nn.Module):
         cu_seqlens: torch.Tensor,
     ) -> tuple[Optional[int], Optional[list[int]]]:
         max_seqlen, seqlens = None, None
+        seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
         if self.attn_backend == _Backend.FLASH_ATTN:
             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
         return max_seqlen, seqlens
