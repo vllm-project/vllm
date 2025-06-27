@@ -22,7 +22,7 @@ from vllm.model_executor.layers.quantization.quark.quark_moe import (
     QuarkW4A4MXFp4MoEMethod)
 from vllm.platforms import current_platform
 
-from .reference_mxfp4 import qdq_mxfp4_torch, dq_mxfp4_torch
+from .reference_mxfp4 import dq_mxfp4_torch, qdq_mxfp4_torch
 
 QUARK_MXFP4_AVAILABLE = importlib.util.find_spec(
     "quark") is not None and version.parse(
