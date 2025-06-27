@@ -225,6 +225,10 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         else:
             raise ValueError(f"Unsupported FusedMoe activation: {activation}")
 
+    def enable_chunking(self):
+        return envs.VLLM_ENABLE_FUSED_MOE_ACTIVATION_CHUNKING and \
+          self.supports_chunking()
+
     @abstractmethod
     def apply(
         self,
@@ -400,7 +404,7 @@ class FusedMoEModularKernel(torch.nn.Module):
         else:
             _, M, N, K, top_k = _moe_problem_size(a1q, w1, w2, topk_ids)
 
-            if self.fused_experts.supports_chunking():
+            if self.fused_experts.enable_chunking():
                 CHUNK_SIZE = envs.VLLM_FUSED_MOE_CHUNK_SIZE
                 num_chunks = cdiv(M, CHUNK_SIZE)
             else:
@@ -426,10 +430,10 @@ class FusedMoEModularKernel(torch.nn.Module):
 
             # We can reuse the memory between cache1 and cache3 because by the
             # time we need cache3, we're done with cache1.
-            workspace13 = torch.zeros(prod(workspace13_shape),
+            workspace13 = torch.empty(prod(workspace13_shape),
                                       device=a1.device,
                                       dtype=workspace_dtype)
-            workspace2 = torch.zeros(prod(workspace2_shape),
+            workspace2 = torch.empty(prod(workspace2_shape),
                                      device=a1.device,
                                      dtype=workspace_dtype)
 

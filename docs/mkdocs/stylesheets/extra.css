@@ -71,3 +71,40 @@ body[data-md-color-scheme="slate"] .md-nav__item--section > label.md-nav__link .
   -webkit-mask-image: var(--md-admonition-icon--important);
           mask-image: var(--md-admonition-icon--important);
 }
+
+/* Make label fully visible on hover */
+.md-content__button[href*="edit"]:hover::after {
+  opacity: 1;
+}
+
+/* Hide edit button on generated docs/examples pages */
+@media (min-width: 960px) {
+  .md-content__button[href*="docs/examples/"] {
+    display: none !important;
+  }
+}
+
+.md-content__button-wrapper {
+  position: absolute;
+  top: 0.6rem;
+  right: 0.8rem;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 0.4rem;
+  z-index: 1;
+}
+
+.md-content__button-wrapper a {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 24px;
+  width: 24px;
+  color: var(--md-default-fg-color);
+  text-decoration: none;
+}
+
+.md-content__button-wrapper a:hover {
+  color: var(--md-accent-fg-color);
+}
