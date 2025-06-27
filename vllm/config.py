@@ -4856,6 +4856,8 @@ def update_config(config: DataclassInstanceT,
             assert isinstance(value, dict), (
                 f"Overrides to {type(config)}.{field_name} must be a dict"
                 f"  or {type(current_value)}, but got {type(value)}")
-            value = update_config(current_value, value)
+            value = update_config(
+                current_value,  # type: ignore[type-var]
+                value)
         processed_overrides[field_name] = value
     return replace(config, **processed_overrides)
