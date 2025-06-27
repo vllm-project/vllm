@@ -4832,7 +4832,6 @@ def assert_hashable(text):
 
 
 T = TypeVar("T")
-DataclassT = TypeVar("DataclassT", bound="DataclassInstance")
 
 
 def get_layers_from_vllm_config(vllm_config: VllmConfig,
@@ -4845,7 +4844,7 @@ def get_layers_from_vllm_config(vllm_config: VllmConfig,
     }
 
 
-def update_config(config: DataclassT, overrides: dict[str, Any]) -> DataclassT:
+def update_config(config: T, overrides: dict[str, Any]) -> T:
     processed_overrides = {}
     for field_name, value in overrides.items():
         assert hasattr(
