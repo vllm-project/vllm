@@ -136,20 +136,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 "apply_router_weight_on_input is only implemented for topk=1")
             a1 = a1 * topk_weights.to(a1.dtype)
 
-        # Check if there is a block_shape / or if we can infer the quantization
-        # schemes from the scales.
-        per_token_quant = None
-        if all([
-                x is None
-                for x in [quant_config.block_shape, a1_scale, a2_scale]
-        ]) and quant_config.quant_dtype is not None:
-            # Quantization required despite none of the inputs suggesting
-            # quantization. Fallback to per_token_dynamic quant.
-            per_token_quant = True
-        else:
-            per_token_quant = False
-
-        if per_token_quant:
+        if quant_config.per_act_token_quant:
             a1q, a1q_scale = moe_kernel_quantize_input(
                 a1,
                 a1_scale,
