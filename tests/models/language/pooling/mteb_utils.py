@@ -43,7 +43,7 @@ class VllmMtebEncoder(mteb.Encoder):
         # issues by randomizing the order.
         r = self.rng.permutation(len(sentences))
         sentences = [sentences[i] for i in r]
-        outputs = self.model.encode(sentences, use_tqdm=False)
+        outputs = self.model.embed(sentences, use_tqdm=False)
         embeds = np.array(outputs)
         embeds = embeds[np.argsort(r)]
         return embeds
@@ -250,16 +250,19 @@ def mteb_test_rerank_models(hf_runner,
     with vllm_runner(model_info.name,
                      task="score",
                      max_model_len=None,
+                     max_num_seqs=8,
                      **vllm_extra_kwargs) as vllm_model:
 
+        model_config = vllm_model.model.llm_engine.model_config
+
         if model_info.architecture:
-            assert (model_info.architecture
-                    in vllm_model.model.llm_engine.model_config.architectures)
+            assert (model_info.architecture in model_config.architectures)
+        assert model_config.hf_config.num_labels == 1
 
         vllm_main_score = run_mteb_rerank(VllmMtebEncoder(vllm_model),
                                           tasks=MTEB_RERANK_TASKS,
                                           languages=MTEB_RERANK_LANGS)
-        vllm_dtype = vllm_model.model.llm_engine.model_config.dtype
+        vllm_dtype = model_config.dtype
 
     with hf_runner(model_info.name, is_cross_encoder=True,
                    dtype="float32") as hf_model:
