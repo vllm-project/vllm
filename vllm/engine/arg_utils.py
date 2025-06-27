@@ -348,8 +348,9 @@ class EngineArgs:
         get_field(TokenizerPoolConfig, "extra_config")
     limit_mm_per_prompt: dict[str, int] = \
         get_field(MultiModalConfig, "limit_per_prompt")
-    media_io_kwargs: dict[str, Any] = get_field(MultiModalConfig,
-                                                "media_io_kwargs")
+    media_io_kwargs: dict[str, dict[str,
+                                    Any]] = get_field(MultiModalConfig,
+                                                      "media_io_kwargs")
     mm_placeholder_str_override: dict[str, str] = \
         get_field(MultiModalConfig, "mm_placeholder_str_override")
     mm_processor_kwargs: Optional[Dict[str, Any]] = \

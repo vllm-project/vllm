@@ -32,7 +32,7 @@ class RequestOutput:
 @dataclass
 class MockModelConfig:
     use_async_output_proc = True
-    media_io_kwargs: dict[str, Any] = field(default_factory=dict)
+    media_io_kwargs: dict[str, dict[str, Any]] = field(default_factory=dict)
     mm_placeholder_str_override: dict[str, str] = field(default_factory=dict)
 
 

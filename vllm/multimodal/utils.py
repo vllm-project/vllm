@@ -38,15 +38,15 @@ class MediaConnector:
 
     def __init__(
         self,
-        media_io_kwargs: Optional[dict[str, Any]] = None,
+        media_io_kwargs: Optional[dict[str, dict[str, Any]]] = None,
         connection: HTTPConnection = global_http_connection,
         *,
         allowed_local_media_path: str = "",
     ) -> None:
         super().__init__()
 
-        self.media_io_kwargs: dict[
-            str, Any] = media_io_kwargs if media_io_kwargs else {}
+        self.media_io_kwargs: dict[str, dict[
+            str, Any]] = media_io_kwargs if media_io_kwargs else {}
         self.connection = connection
 
         if allowed_local_media_path:
