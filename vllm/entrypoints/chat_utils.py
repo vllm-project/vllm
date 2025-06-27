@@ -86,17 +86,6 @@ class ChatCompletionContentPartTensorsParam(TypedDict, total=False):
     """The type of the content part."""
 
 
-class ChatCompletionContentPartTensorsParam(TypedDict, total=False):
-    tensors: Required[Union[str, dict[str, str]]]
-    """
-    The tensors. It can be either:
-    - A single base64 string.
-    - A dictionary where each value is a base64 string.
-    """
-    type: Required[Literal["tensors"]]
-    """The type of the content part."""
-
-
 class VideoURL(TypedDict, total=False):
     url: Required[str]
     """
@@ -490,7 +479,7 @@ def resolve_chat_template_content_format(
 
 
 
-ModalityStr = Literal["image", "audio", "video", "image_embeds"]
+ModalityStr = Literal["image", "audio", "video", "image_embeds","tensors"]
 _T = TypeVar("_T")
 
 
