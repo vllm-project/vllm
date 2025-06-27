@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
 import os
+import re
 
 import openai  # use the official client for correctness check
 import pytest
@@ -30,34 +31,37 @@ def get_prometheus_metrics(
         response.raise_for_status()
 
         metrics: dict[str, dict[str, float]] = {}
+
+        # Regex patterns for Prometheus metrics
+        metric_with_labels = re.compile(
+            r'^([a-zA-Z_:][a-zA-Z0-9_:]*)\{([^}]*)\}\s+([\d\.\-\+e]+)$')
+        metric_simple = re.compile(
+            r'^([a-zA-Z_:][a-zA-Z0-9_:]*)\s+([\d\.\-\+e]+)$')
+
         for line in response.text.split('\n'):
             line = line.strip()
             # Skip comments and empty lines
             if not line or line.startswith('#'):
                 continue
 
-            # Parse metric lines (format: metric_name{labels} value)
-            if '{' in line and '}' in line:
-                # Extract metric name, labels, and value
-                metric_part, value_part = line.rsplit(' ', 1)
-                metric_name = metric_part.split('{')[0]
-                labels_part = metric_part[metric_part.
-                                          find('{'):metric_part.rfind('}') + 1]
+            # Try to match metric with labels first
+            match = metric_with_labels.match(line)
+            if match:
+                metric_name, labels_part, value_str = match.groups()
                 try:
-                    value = float(value_part)
+                    value = float(value_str)
+                    if metric_name not in metrics:
+                        metrics[metric_name] = {}
+                    metrics[metric_name][f'{{{labels_part}}}'] = value
                 except ValueError:
                     continue
-
-                if metric_name not in metrics:
-                    metrics[metric_name] = {}
-                metrics[metric_name][labels_part] = value
-            elif ' ' in line:
-                # Simple metric without labels
-                parts = line.rsplit(' ', 1)
-                if len(parts) == 2:
-                    metric_name, value_part = parts
+            else:
+                # Try simple metric without labels
+                match = metric_simple.match(line)
+                if match:
+                    metric_name, value_str = match.groups()
                     try:
-                        value = float(value_part)
+                        value = float(value_str)
                         if metric_name not in metrics:
                             metrics[metric_name] = {}
                         metrics[metric_name][''] = value
@@ -82,18 +86,16 @@ def get_engine_request_counts(
 
     # Look for request success metrics with engine labels
     success_metrics = metrics.get("vllm:request_success_total", {})
+    engine_pattern = re.compile(r'engine="([^"]*)"')
+
     for labels, count in success_metrics.items():
-        # Parse engine index from labels like
-        # {model_name="...", engine="0", finished_reason="..."}
-        if 'engine=' in labels:
-            # Extract engine value from labels
-            for part in labels.replace('{', '').replace('}', '').split(','):
-                part = part.strip()
-                if part.startswith('engine='):
-                    engine_id = part.split('=')[1].strip('"')
-                    if engine_id not in engine_counts:
-                        engine_counts[engine_id] = 0.0
-                    engine_counts[engine_id] += count
+        # Extract engine ID from labels using regex
+        match = engine_pattern.search(labels)
+        if match:
+            engine_id = match.group(1)
+            if engine_id not in engine_counts:
+                engine_counts[engine_id] = 0.0
+            engine_counts[engine_id] += count
 
     return engine_counts
 
