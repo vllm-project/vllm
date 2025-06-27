@@ -29,7 +29,8 @@ HYBRID_MODELS = [
     "hmellor/tiny-random-BambaForCausalLM",
     "ibm-ai-platform/Bamba-9B-v1",
     "nvidia/Nemotron-H-8B-Base-8K",
-    "ibm-granite/granite-4.0-tiny-preview"
+    "ibm-granite/granite-4.0-tiny-preview",
+    "tiiuae/Falcon-H1-0.5B-Base",
 ]
 
 HF_UNSUPPORTED_MODELS = [
@@ -53,6 +54,7 @@ V1_SUPPORTED_MODELS = [
     "Zyphra/Zamba2-1.2B-instruct",
     "nvidia/Nemotron-H-8B-Base-8K",
     "ibm-granite/granite-4.0-tiny-preview",
+    "tiiuae/Falcon-H1-0.5B-Base",
 ]
 
 ATTN_BLOCK_SIZES = {
@@ -60,6 +62,7 @@ ATTN_BLOCK_SIZES = {
     "Zyphra/Zamba2-1.2B-instruct": 80,
     "nvidia/Nemotron-H-8B-Base-8K": 528,
     "ibm-granite/granite-4.0-tiny-preview": 400,
+    "tiiuae/Falcon-H1-0.5B-Base": 800,
 }
 
 # Avoid OOM
