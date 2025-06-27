@@ -3,9 +3,8 @@
 
 from abc import abstractmethod
 from collections.abc import Iterable
-from dataclasses import dataclass
 from enum import Enum
-from typing import Callable, Literal, Optional, Union, overload
+from typing import Callable, Literal, Optional, overload
 
 import torch
 import torch.nn.functional as F
