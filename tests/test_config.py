@@ -87,24 +87,24 @@ class _TestNestedConfig:
 
 def test_update_config():
     # Simple update
-    config = _TestConfigFields(a=0)
-    new_config = update_config(config, {"a": 42})
-    assert new_config.a == 42
+    config1 = _TestConfigFields(a=0)
+    new_config1 = update_config(config1, {"a": 42})
+    assert new_config1.a == 42
     # Nonexistent field
     with pytest.raises(AssertionError):
-        new_config = update_config(config, {"nonexistent": 1})
+        new_config1 = update_config(config1, {"nonexistent": 1})
     # Nested update with dataclass
-    config = _TestNestedConfig()
+    config2 = _TestNestedConfig()
     new_inner_config = _TestConfigFields(a=1, c="new_value")
-    new_config = update_config(config, {"a": new_inner_config})
-    assert new_config.a == new_inner_config
+    new_config2 = update_config(config2, {"a": new_inner_config})
+    assert new_config2.a == new_inner_config
     # Nested update with dict
-    config = _TestNestedConfig()
-    new_config = update_config(config, {"a": {"c": "new_value"}})
-    assert new_config.a.c == "new_value"
+    config3 = _TestNestedConfig()
+    new_config3 = update_config(config3, {"a": {"c": "new_value"}})
+    assert new_config3.a.c == "new_value"
     # Nested update with invalid type
     with pytest.raises(AssertionError):
-        new_config = update_config(config, {"a": "new_value"})
+        new_config3 = update_config(config3, {"a": "new_value"})
 
 
 @pytest.mark.parametrize(
