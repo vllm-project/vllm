@@ -265,7 +265,8 @@ class InputPreprocessor:
         prompt: Union[str, list[int]],
         mm_data: MultiModalDataDict,
         mm_processor_kwargs: Optional[Mapping[str, object]],
-        lora_request: Optional[LoRARequest],
+        tokenization_kwargs: Optional[dict[str, Any]] = None,
+        lora_request: Optional[LoRARequest] = None,
         return_mm_hashes: bool = False,
     ) -> MultiModalInputs:
         """
@@ -280,15 +281,19 @@ class InputPreprocessor:
         if mm_processor_kwargs is None:
             mm_processor_kwargs = {}
 
-        return mm_processor.apply(prompt, mm_data, mm_processor_kwargs,
-                                  return_mm_hashes)
+        return mm_processor.apply(prompt,
+                                  mm_data,
+                                  hf_processor_mm_kwargs=mm_processor_kwargs,
+                                  tokenization_kwargs=tokenization_kwargs,
+                                  return_mm_hashes=return_mm_hashes)
 
     async def _process_multimodal_async(
         self,
         prompt: Union[str, list[int]],
         mm_data: MultiModalDataDict,
         mm_processor_kwargs: Optional[Mapping[str, object]],
-        lora_request: Optional[LoRARequest],
+        tokenization_kwargs: Optional[dict[str, Any]] = None,
+        lora_request: Optional[LoRARequest] = None,
         return_mm_hashes: bool = False,
     ) -> MultiModalInputs:
         """
@@ -302,8 +307,11 @@ class InputPreprocessor:
         if mm_processor_kwargs is None:
             mm_processor_kwargs = {}
 
-        return mm_processor.apply(prompt, mm_data, mm_processor_kwargs,
-                                  return_mm_hashes)
+        return mm_processor.apply(prompt,
+                                  mm_data,
+                                  hf_processor_mm_kwargs=mm_processor_kwargs,
+                                  tokenization_kwargs=tokenization_kwargs,
+                                  return_mm_hashes=return_mm_hashes)
 
     def _process_embeds(
         self,
@@ -338,6 +346,7 @@ class InputPreprocessor:
     def _process_tokens(
         self,
         parsed_content: TokensPrompt,
+        tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[LoRARequest] = None,
         return_mm_hashes: bool = False,
     ) -> Union[TokenInputs, MultiModalInputs]:
@@ -350,6 +359,7 @@ class InputPreprocessor:
                 prompt_token_ids,
                 multi_modal_data,
                 parsed_content.get("mm_processor_kwargs"),
+                tokenization_kwargs=tokenization_kwargs,
                 lora_request=lora_request,
                 return_mm_hashes=return_mm_hashes,
             )
@@ -367,6 +377,7 @@ class InputPreprocessor:
     async def _process_tokens_async(
         self,
         parsed_content: TokensPrompt,
+        tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[LoRARequest] = None,
         return_mm_hashes: bool = False,
     ) -> Union[TokenInputs, MultiModalInputs]:
@@ -379,6 +390,7 @@ class InputPreprocessor:
                 prompt_token_ids,
                 multi_modal_data,
                 parsed_content.get("mm_processor_kwargs"),
+                tokenization_kwargs=tokenization_kwargs,
                 lora_request=lora_request,
                 return_mm_hashes=return_mm_hashes,
             )
@@ -404,16 +416,11 @@ class InputPreprocessor:
 
         inputs: Union[TokenInputs, MultiModalInputs]
         if multi_modal_data := parsed_content.get("multi_modal_data"):
-            mm_processor_kwargs = {}
-            if tokenization_kwargs is not None:
-                mm_processor_kwargs.update(tokenization_kwargs)
-            if (processor_kwargs := parsed_content.get("mm_processor_kwargs")):
-                mm_processor_kwargs.update(processor_kwargs)
-
             inputs = self._process_multimodal(
                 prompt_text,
                 multi_modal_data,
-                mm_processor_kwargs,
+                parsed_content.get("mm_processor_kwargs"),
+                tokenization_kwargs=tokenization_kwargs,
                 lora_request=lora_request,
                 return_mm_hashes=return_mm_hashes,
             )
@@ -448,6 +455,7 @@ class InputPreprocessor:
                 prompt_text,
                 multi_modal_data,
                 parsed_content.get("mm_processor_kwargs"),
+                tokenization_kwargs=tokenization_kwargs,
                 lora_request=lora_request,
                 return_mm_hashes=return_mm_hashes,
             )

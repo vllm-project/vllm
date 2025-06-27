@@ -204,12 +204,13 @@ class DeepseekVL2MultiModalProcessor(
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         if mm_data:
             processed_outputs = self.info.ctx.call_hf_processor(
                 self.info.get_hf_processor(**mm_kwargs),
                 dict(prompt=prompt, **mm_data),
-                mm_kwargs,
+                dict(**mm_kwargs, **tok_kwargs),
             )
             pixel_values = processed_outputs["pixel_values"]
             # split pixel values into patches corresponding to each image

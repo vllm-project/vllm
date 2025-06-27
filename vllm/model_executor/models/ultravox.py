@@ -144,6 +144,7 @@ class UltravoxMultiModalProcessor(
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         # Text-only input not supported in composite processor
         if not mm_data.get("audios", []):
@@ -169,6 +170,7 @@ class UltravoxMultiModalProcessor(
             prompt=prompt,
             mm_data=item_processor_data,
             mm_kwargs=mm_kwargs,
+            tok_kwargs=tok_kwargs,
         )
         output['audio_features'] = output.pop('audio_values')
 

@@ -1777,6 +1777,7 @@ def resolve_mm_processor_kwargs(
     # inferred from the function signature alone.
     # For these cases, we must maintain a list of explicit rules
     if type(callable).__name__ in ("UltravoxProcessor", ):
+        mm_processor_kwargs.pop("padding", None)
         mm_processor_kwargs.pop("truncation", None)
 
     return mm_processor_kwargs

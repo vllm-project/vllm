@@ -237,7 +237,7 @@ class PixtralDummyInputsBuilder(BaseDummyInputsBuilder[PixtralProcessingInfo]):
         dummy_text = self.get_dummy_text(mm_counts)
         dummy_mm_data = self.get_dummy_mm_data(seq_len, mm_counts)
         dummy_images = dummy_mm_data.get("image", [])
-        processor_kwargs = {"truncation": False}
+        tokenization_kwargs = {"truncation": False}
 
         request = ChatCompletionRequest(messages=[
             UserMessage(content=[
@@ -250,7 +250,7 @@ class PixtralDummyInputsBuilder(BaseDummyInputsBuilder[PixtralProcessingInfo]):
 
         return ProcessorInputs(prompt=dummy_tokens,
                                mm_data=dummy_mm_data,
-                               hf_processor_mm_kwargs=processor_kwargs)
+                               tokenization_kwargs=tokenization_kwargs)
 
 
 class PixtralMultiModalProcessor(BaseMultiModalProcessor[PixtralProcessingInfo]
