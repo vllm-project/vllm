@@ -71,6 +71,7 @@ if TYPE_CHECKING:
     ConfigType = type[DataclassInstance]
     HfOverrides = Union[dict, Callable[[type], type]]
 else:
+    DataclassInstance = Any
     PlacementGroup = Any
     PretrainedConfig = Any
     ExecutorBase = Any
@@ -87,7 +88,7 @@ else:
                            "vllm.model_executor.models")
 
 logger = init_logger(__name__)
-
+DataclassInstanceT = TypeVar("DataclassInstanceT", bound=DataclassInstance)
 ConfigT = TypeVar("ConfigT", bound=ConfigType)
 
 TaskOption = Literal["auto", "generate", "embedding", "embed", "classify",
@@ -4844,7 +4845,8 @@ def get_layers_from_vllm_config(vllm_config: VllmConfig,
     }
 
 
-def update_config(config: T, overrides: dict[str, Any]) -> T:
+def update_config(config: DataclassInstanceT,
+                  overrides: dict[str, Any]) -> DataclassInstanceT:
     processed_overrides = {}
     for field_name, value in overrides.items():
         assert hasattr(
