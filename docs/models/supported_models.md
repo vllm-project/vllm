@@ -393,6 +393,9 @@ Specified using `--task generate`.
 !!! note
     Currently, the ROCm version of vLLM supports Mistral and Mixtral only for context lengths up to 4096.
 
+!!! note
+    Only text inputs are currently supported for `Gemma3nForConditionalGeneration`. To use this model, please upgrade Hugging Face Transformers to version 4.53.0.
+
 ### Pooling Models
 
 See [this page](./pooling_models.md) for more information on how to use pooling models.
