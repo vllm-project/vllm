@@ -15,7 +15,6 @@ from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEMethodBase,
                                                   FusedMoeWeightScaleSupported)
-from vllm.model_executor.layers.fused_moe.utils import has_deep_gemm
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -38,6 +37,7 @@ from vllm.model_executor.parameter import (BlockQuantScaleParameter,
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
+from vllm.utils import has_deep_gemm
 
 ACTIVATION_SCHEMES = ["static", "dynamic"]
 

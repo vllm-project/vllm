@@ -12,14 +12,13 @@ import torch
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.utils import has_deep_gemm
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     scaled_dequantize)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     CUTLASS_BLOCK_FP8_SUPPORTED)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils import cdiv, direct_register_custom_op
+from vllm.utils import cdiv, direct_register_custom_op, has_deep_gemm
 
 logger = init_logger(__name__)
 

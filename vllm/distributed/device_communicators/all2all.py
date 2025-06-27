@@ -7,7 +7,7 @@ import torch.distributed as dist
 
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.utils import has_deepep, has_pplx
+from vllm.utils import has_deepep, has_pplx
 
 from .base_device_communicator import All2AllManagerBase, Cache
 

@@ -3,10 +3,9 @@ import logging
 
 import torch
 
-from vllm.model_executor.layers.fused_moe.utils import has_deep_gemm
 from vllm.platforms import current_platform
 from vllm.triton_utils import triton
-from vllm.utils import direct_register_custom_op
+from vllm.utils import direct_register_custom_op, has_deep_gemm
 
 if has_deep_gemm():
     import deep_gemm

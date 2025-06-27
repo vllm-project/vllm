@@ -11,9 +11,10 @@ from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import (
     _moe_permute)
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP)
-from vllm.model_executor.layers.fused_moe.utils import (
-    _resize_cache, has_deep_gemm, per_token_group_quant_fp8)
-from vllm.utils import round_up
+from vllm.model_executor.layers.fused_moe.utils import _resize_cache
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    per_token_group_quant_fp8)
+from vllm.utils import has_deep_gemm, round_up
 
 logger = init_logger(__name__)
 
