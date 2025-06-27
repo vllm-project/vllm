@@ -4,7 +4,7 @@
 import asyncio
 from contextlib import suppress
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Optional
 from unittest.mock import MagicMock
 
 from vllm.config import MultiModalConfig
@@ -40,7 +40,7 @@ class MockModelConfig:
     allowed_local_media_path: str = ""
     encoder_config = None
     generation_config: str = "auto"
-    media_io_kwargs: dict[str, object] = field(default_factory=dict)
+    media_io_kwargs: dict[str, Any] = field(default_factory=dict)
     mm_placeholder_str_override: dict[str, str] = field(default_factory=dict)
 
     def get_diff_sampling_param(self):

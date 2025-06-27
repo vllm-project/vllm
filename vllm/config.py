@@ -356,7 +356,7 @@ class ModelConfig:
     limit_mm_per_prompt: dict[str, int] = field(default_factory=dict)
     """Maximum number of data items per modality per prompt. Only applicable
     for multimodal models."""
-    media_io_kwargs: dict[str, object] = field(default_factory=dict)
+    media_io_kwargs: dict[str, Any] = field(default_factory=dict)
     """Additional args passed to process media inputs, keyed by modalities. 
     For example, to set num_frames for video, set 
     `--media-io-kwargs '{"video": {"num_frames": 40} }'` """
@@ -3008,7 +3008,7 @@ class MultiModalConfig:
     `{"images": 16, "videos": 2}`
     """
 
-    media_io_kwargs: dict[str, object] = field(default_factory=dict)
+    media_io_kwargs: dict[str, Any] = field(default_factory=dict)
     """Additional args passed to process media inputs, keyed by modalities. 
     For example, to set num_frames for video, set 
     `--media-io-kwargs '{"video": {"num_frames": 40} }'` """

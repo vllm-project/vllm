@@ -38,7 +38,7 @@ class MediaConnector:
 
     def __init__(
         self,
-        media_io_kwargs: Optional[dict[str, object]] = None,
+        media_io_kwargs: Optional[dict[str, Any]] = None,
         connection: HTTPConnection = global_http_connection,
         *,
         allowed_local_media_path: str = "",
@@ -46,7 +46,7 @@ class MediaConnector:
         super().__init__()
 
         self.media_io_kwargs: dict[
-            str, object] = media_io_kwargs if media_io_kwargs else {}
+            str, Any] = media_io_kwargs if media_io_kwargs else {}
         self.connection = connection
 
         if allowed_local_media_path:
@@ -152,8 +152,7 @@ class MediaConnector:
         """
         Load audio from a URL.
         """
-        audio_io = AudioMediaIO(**self.media_io_kwargs.get("audio",
-                                                           {}))  # type: ignore
+        audio_io = AudioMediaIO(**self.media_io_kwargs.get("audio", {}))
 
         return self.load_from_url(
             audio_url,
@@ -168,8 +167,7 @@ class MediaConnector:
         """
         Asynchronously fetch audio from a URL.
         """
-        audio_io = AudioMediaIO(**self.media_io_kwargs.get("audio",
-                                                           {}))  # type: ignore
+        audio_io = AudioMediaIO(**self.media_io_kwargs.get("audio", {}))
 
         return await self.load_from_url_async(
             audio_url,
@@ -189,8 +187,7 @@ class MediaConnector:
         By default, the image is converted into RGB format.
         """
         image_io = ImageMediaIO(image_mode=image_mode,
-                                **self.media_io_kwargs.get("image",
-                                                           {}))  # type: ignore
+                                **self.media_io_kwargs.get("image", {}))
 
         try:
             return self.load_from_url(
@@ -214,8 +211,7 @@ class MediaConnector:
         By default, the image is converted into RGB format.
         """
         image_io = ImageMediaIO(image_mode=image_mode,
-                                **self.media_io_kwargs.get("image",
-                                                           {}))  # type: ignore
+                                **self.media_io_kwargs.get("image", {}))
 
         try:
             return await self.load_from_url_async(
@@ -237,11 +233,9 @@ class MediaConnector:
         Load video from a HTTP or base64 data URL.
         """
         image_io = ImageMediaIO(image_mode=image_mode,
-                                **self.media_io_kwargs.get("image",
-                                                           {}))  # type: ignore
+                                **self.media_io_kwargs.get("image", {}))
         video_io = VideoMediaIO(image_io,
-                                **self.media_io_kwargs.get("video",
-                                                           {}))  # type: ignore
+                                **self.media_io_kwargs.get("video", {}))
 
         return self.load_from_url(
             video_url,
@@ -261,11 +255,9 @@ class MediaConnector:
         By default, the image is converted into RGB format.
         """
         image_io = ImageMediaIO(image_mode=image_mode,
-                                **self.media_io_kwargs.get("image",
-                                                           {}))  # type: ignore
+                                **self.media_io_kwargs.get("image", {}))
         video_io = VideoMediaIO(image_io,
-                                **self.media_io_kwargs.get("video",
-                                                           {}))  # type: ignore
+                                **self.media_io_kwargs.get("video", {}))
 
         return await self.load_from_url_async(
             video_url,
