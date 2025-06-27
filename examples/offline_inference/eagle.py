@@ -48,6 +48,7 @@ def parse_args():
     parser.add_argument("--enable_chunked_prefill", action="store_true")
     parser.add_argument("--max_num_batched_tokens", type=int, default=2048)
     parser.add_argument("--temp", type=float, default=0)
+    parser.add_argument("--compilation_config", type=str, default="")
     return parser.parse_args()
 
 
@@ -94,6 +95,9 @@ def main():
             "max_model_len": max_model_len,
         },
         disable_log_stats=False,
+        compilation_config=(
+            json.loads(args.compilation_config) if args.compilation_config else None
+        ),
     )
 
     sampling_params = SamplingParams(temperature=args.temp, max_tokens=256)
