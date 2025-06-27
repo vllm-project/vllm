@@ -1773,13 +1773,6 @@ def resolve_mm_processor_kwargs(
     # time values over the initialization time values.
     mm_processor_kwargs = {**init_mm_kwargs, **runtime_mm_kwargs}
 
-    # Some processors have disallowed kwargs which cannot be
-    # inferred from the function signature alone.
-    # For these cases, we must maintain a list of explicit rules
-    if type(callable).__name__ in ("UltravoxProcessor", ):
-        mm_processor_kwargs.pop("padding", None)
-        mm_processor_kwargs.pop("truncation", None)
-
     return mm_processor_kwargs
 
 

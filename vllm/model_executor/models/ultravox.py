@@ -166,6 +166,10 @@ class UltravoxMultiModalProcessor(
 
         item_processor_data = dict(**mm_data, audios=audios)
 
+        # some tokenizer kwargs are incompatible with UltravoxProcessor
+        tok_kwargs.pop("padding", None)
+        tok_kwargs.pop("truncation", None)
+
         output = super()._call_hf_processor(
             prompt=prompt,
             mm_data=item_processor_data,
