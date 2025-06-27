@@ -279,7 +279,7 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
 
         expert_num_tokens = None
         if expert_tokens_meta:
-            expert_num_tokens = expert_tokens_meta.local_expert_num_tokens_gpu
+            expert_num_tokens = expert_tokens_meta.expert_num_tokens_gpu
 
         run_cutlass_moe_fp8(output, hidden_states, w1, w2, topk_ids,
                             activation_callable, global_num_experts,

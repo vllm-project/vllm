@@ -86,16 +86,10 @@ def _moe_problem_size(
 @dataclass
 class ExpertTokensMeta:
     """
-  Metadata information about tokens routing
-  """
-    local_expert_num_tokens_gpu: torch.Tensor
-    local_expert_num_tokens_sum: Optional[int] = None
-
-    def maybe_compute_local_expert_num_tokens_sum(self) -> None:
-        if self.local_expert_num_tokens_sum is not None:
-            return
-        self.local_expert_num_tokens_sum = torch.sum(
-            self.local_expert_num_tokens_gpu).item()
+    Metadata information about tokens routing
+    """
+    expert_num_tokens_gpu: torch.Tensor
+    expert_num_tokens_cpu: Optional[torch.Tensor]
 
 
 class FusedMoEPrepareAndFinalize(ABC):

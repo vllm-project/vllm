@@ -258,7 +258,7 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         assert hidden_states.ndim == 3
         assert expert_tokens_meta is not None
 
-        expert_num_tokens = expert_tokens_meta.local_expert_num_tokens_gpu
+        expert_num_tokens = expert_tokens_meta.expert_num_tokens_gpu
 
         a1q = hidden_states
         _, N, K = w1.size()

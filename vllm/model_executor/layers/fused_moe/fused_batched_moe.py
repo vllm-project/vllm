@@ -558,7 +558,7 @@ class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
     ):
         assert hidden_states.dim() == 3
         assert expert_tokens_meta is not None
-        expert_num_tokens = expert_tokens_meta.local_expert_num_tokens_gpu
+        expert_num_tokens = expert_tokens_meta.expert_num_tokens_gpu
 
         max_num_tokens = self.max_num_tokens
         num_dp = self.world_size // self.dp_size
@@ -676,7 +676,7 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
             torch.float32, torch.float16, torch.bfloat16, torch.float8_e4m3fn
         ]
         assert expert_tokens_meta is not None
-        expert_num_tokens = expert_tokens_meta.local_expert_num_tokens_gpu
+        expert_num_tokens = expert_tokens_meta.expert_num_tokens_gpu
 
         E, max_num_tokens, N, K, top_k_num = mk._moe_problem_size(
             hidden_states, w1, w2, topk_ids)
