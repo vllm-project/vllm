@@ -561,11 +561,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Refresh batch metadata with any pending updates.
         self.input_batch.refresh_metadata()
 
-    def _add_multimodal_inputs_to_model_args(
+    def _maybe_add_multimodal_kwargs(
             self,
             model_kwargs: dict[str, Any],
-            scheduler_output: "SchedulerOutput",
-            num_reqs: int = -1):
+            scheduler_output: "SchedulerOutput" = None,
+            num_reqs: int = -1,
+    ):
+
+        if not self.model_supports_multimodal_raw_input:
+            return
+
         # Multi-modal data.
         if scheduler_output:
             multi_modal_kwargs_list = []
@@ -588,28 +593,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         model_kwargs.update(multi_modal_kwargs)
 
-    def _maybe_add_multimodal_kwargs(
-            self,
-            model_kwargs: dict[str, Any],
-            scheduler_output: "SchedulerOutput" = None,
-            num_reqs: int = -1):
-
-        if self.model_supports_multimodal_raw_input:
-            self._add_multimodal_inputs_to_model_args(model_kwargs,
-                                                      scheduler_output,
-                                                      num_reqs)
-
-    def _maybe_compute_attn_prefix(
-        self,
-        scheduler_output: "SchedulerOutput",
-    ) -> list[int]:
-        return [0] * len(self.kv_cache_config.kv_cache_groups)
-
-    def _maybe_prepare_additional_inputs(self,
-                                         scheduler_output: "SchedulerOutput",
-                                         token_indices: torch.Tensor):
-        pass
-
+ 
     def _get_cumsum_and_arange(
         self,
         num_tokens: np.ndarray,
