@@ -563,7 +563,7 @@ def test_engine_core_proc_instantiation_cuda_empty(
         m.setenv("VLLM_USE_V1", "1")
         m.setenv("CUDA_VISIBLE_DEVICES", "")  # No CUDA devices
 
-        from vllm.v1.utils import EngineZmqAddresses
+        from vllm.v1.engine.utils import EngineZmqAddresses
 
         def mock_startup_handshake(self, handshake_socket, on_head_node,
                                    parallel_config):
@@ -580,7 +580,7 @@ def test_engine_core_proc_instantiation_cuda_empty(
             trust_remote_code=True).create_engine_config()
         engine_core_proc = EngineCoreProc(
             vllm_config=vllm_config,
-            on_head_node=True,
+            local_client=True,
             handshake_address="tcp://127.0.0.1:12345",
             executor_class=mock_executor_class,
             log_stats=False,
