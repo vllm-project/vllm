@@ -293,6 +293,7 @@ def _try_extract_ast(chat_template: str) -> Optional[jinja2.nodes.Template]:
         return None
 
 
+@lru_cache(maxsize=32)
 def _detect_content_format(
     chat_template: str,
     *,
