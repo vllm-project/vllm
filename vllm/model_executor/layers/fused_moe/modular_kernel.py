@@ -96,7 +96,7 @@ class ExpertTokensMeta:
                        device: str) -> "ExpertTokensMeta":
         expert_num_tokens_cpu = torch.tensor(expert_num_tokens_list,
                                              device="cpu",
-                                             dtype=torch.int32),
+                                             dtype=torch.int32)
         return ExpertTokensMeta(
             expert_num_tokens_cpu=expert_num_tokens_cpu,
             expert_num_tokens_gpu=expert_num_tokens_cpu.to(device))

@@ -15,7 +15,7 @@ from vllm.triton_utils import tl, triton
 @triton.jit
 def apply_expert_map(expert_map, expert_id):
     if expert_id != -1:
-        expert_id = tl.load(expert_map + expert_id)
+        expert_id = tl.load(expert_map + expert_id).to(tl.int64)
     return expert_id
 
 
@@ -298,6 +298,7 @@ def deepgemm_moe_permute(aq: torch.Tensor,
                          aq_out: Optional[torch.Tensor] = None):
 
     assert aq.ndim == 2
+    assert topk_ids.dtype == torch.int64, "Only int64 supported for now"
     H = aq.size(1)
     num_experts = expert_num_tokens.size(0)
 

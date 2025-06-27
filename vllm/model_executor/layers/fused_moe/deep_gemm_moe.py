@@ -133,6 +133,7 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
             aq=a1q,
             aq_scale=a1q_scale,
             topk_ids=topk_ids,
+            expert_map=expert_map,
             expert_num_tokens=expert_num_tokens,
             sum_expert_num_tokens=M_sum,
             aq_out=_resize_cache(workspace2.view(dtype=torch.float8_e4m3fn),
@@ -159,11 +160,11 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         dg.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
             (a2q, a2q_scale), (w2, w2_scale), mm2_out, expert_ids)
 
-        torch.index_select(mm2_out, 0, inv_perm, out=output)
         deepgemm_unpermute_and_reduce(a=mm2_out,
                                       topk_ids=topk_ids,
                                       topk_weights=topk_weights,
                                       inv_perm=inv_perm,
+                                      expert_map=expert_map,
                                       output=output)
 
 

@@ -38,7 +38,7 @@ if has_deep_ep:
     from vllm.model_executor.layers.fused_moe.deepep_ll_prepare_finalize import (  # noqa: E501
         DeepEPLLPrepareAndFinalize)
 
-    from .deepep_utils import DeepEPHTArgs, DeepEPLLArgs, make_deepep_a2a
+    from .utils import DeepEPHTArgs, DeepEPLLArgs, make_deepep_a2a
 
 if has_deep_gemm:
     from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
