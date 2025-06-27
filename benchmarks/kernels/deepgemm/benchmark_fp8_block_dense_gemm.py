@@ -85,12 +85,6 @@ def benchmark_shape(m: int,
 
     # === DeepGEMM Implementation ===
     def deepgemm_gemm():
-        # A quantization is inside the loop as it depends on activations
-        # A_deepgemm, A_scale_deepgemm = per_token_cast_to_fp8(A)
-        # A_deepgemm, A_scale_deepgemm = per_token_group_quant_fp8(
-        #     A, block_size[1])
-        # A_scale_aligned = get_col_major_tma_aligned_tensor(A_scale_deepgemm)
-        # C_deepgemm = torch.empty((m, n), device='cuda', dtype=torch.bfloat16)
         deep_gemm.gemm_fp8_fp8_bf16_nt((A_deepgemm, A_scale_deepgemm),
                                        (B_deepgemm, B_scale_deepgemm),
                                        C_deepgemm)
@@ -98,8 +92,6 @@ def benchmark_shape(m: int,
 
     # === vLLM Triton Implementation ===
     def vllm_triton_gemm():
-        # A quantization is inside the loop as it depends on activations
-        # A_vllm, A_scale_vllm = per_token_group_quant_fp8(A, block_size[1])
         return w8a8_block_fp8_matmul(A_vllm,
                                      B_vllm,
                                      A_scale_vllm,
@@ -109,9 +101,6 @@ def benchmark_shape(m: int,
 
     # === vLLM CUTLASS Implementation ===
     def vllm_cutlass_gemm():
-        # A quantization is inside the loop as it depends on activations
-        # A_vllm_cutlass, A_scale_vllm_cutlass = per_token_group_quant_fp8(
-        #     A, block_size[1], column_major_scales=True)
         return ops.cutlass_scaled_mm(A_vllm_cutlass,
                                      B_vllm.T,
                                      scale_a=A_scale_vllm_cutlass,

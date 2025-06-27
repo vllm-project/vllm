@@ -21,6 +21,7 @@ from vllm.attention.layer import Attention
 from vllm.compilation.counter import compilation_counter
 from vllm.config import (CompilationLevel, VllmConfig,
                          get_layers_from_vllm_config)
+from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
@@ -33,6 +34,8 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.model_loader import TensorizerLoader, get_model_loader
+from vllm.model_executor.models.interfaces import (has_step_pooler,
+                                                   is_mixture_of_experts)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.multimodal.utils import group_mm_inputs_by_modality
@@ -149,6 +152,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Sampler
         self.sampler = Sampler()
 
+        self.eplb_state: Optional[EplbState] = None
+        """
+        State of the expert parallelism load balancer.
+
+        Will be lazily initialized when the model is loaded.
+        """
+
         # Lazy initializations
         # self.model: nn.Module  # Set after load_model
         # Initialize in initialize_kv_cache
@@ -261,6 +271,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 dtype=torch.int64,
                 device="cpu",
                 pin_memory=self.pin_memory)
+            self.mrope_positions_np = self.mrope_positions_cpu.numpy()
 
         # Only relevant for models using ALiBi (e.g, MPT)
         self.use_alibi = check_use_alibi(model_config)
@@ -888,15 +899,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 dst_start = mrope_pos_ptr
                 dst_end = mrope_pos_ptr + completion_part_len
 
-                self.mrope_positions_cpu[:, dst_start:dst_end] = \
-                    MRotaryEmbedding.get_next_input_positions_tensor(
-                        req.mrope_position_delta,
-                        context_len=num_computed_tokens +
-                        prompt_part_len,
-                        seq_len=num_computed_tokens +
-                        prompt_part_len +
-                        completion_part_len,
-                    )
+                MRotaryEmbedding.get_next_input_positions_tensor(
+                    out=self.mrope_positions_np,
+                    out_offset=dst_start,
+                    mrope_position_delta=req.mrope_position_delta,
+                    context_len=num_computed_tokens + prompt_part_len,
+                    num_new_tokens=completion_part_len,
+                )
 
                 mrope_pos_ptr += completion_part_len
 
@@ -1177,6 +1186,24 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if k == "residual" and is_residual_scattered else v[:num_tokens]
             for k, v in self.intermediate_tensors.items()
         })
+
+    def eplb_step(self,
+                  is_dummy: bool = False,
+                  is_profile: bool = False) -> None:
+        """
+        Step for the EPLB (Expert Parallelism Load Balancing) state.
+        """
+        if not self.parallel_config.enable_eplb:
+            return
+
+        assert self.eplb_state is not None
+        assert is_mixture_of_experts(self.model)
+        self.eplb_state.step(
+            self.model,
+            is_dummy,
+            is_profile,
+            log_stats=self.parallel_config.eplb_log_balancedness,
+        )
 
     def get_dp_padding(self,
                        num_tokens: int) -> tuple[int, Optional[torch.Tensor]]:
@@ -1595,6 +1622,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if has_kv_transfer_group():
             get_kv_transfer_group().clear_connector_metadata()
 
+        self.eplb_step()
+
         return ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
@@ -1708,6 +1737,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 )
                 model_loader.load_weights(self.model,
                                           model_config=self.model_config)
+            if has_step_pooler(self.model):
+                self.input_batch.logits_processing_needs_token_ids = True
             if self.lora_config:
                 self.model = self.load_lora_model(self.model,
                                                   self.model_config,
@@ -1726,6 +1757,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     self.model_memory_usage / GiB_bytes,
                     time_after_load - time_before_load)
         prepare_communication_buffer_for_model(self.model)
+
+        if is_mixture_of_experts(
+                self.model) and self.parallel_config.enable_eplb:
+            logger.info("EPLB is enabled for model %s.",
+                        self.model_config.model)
+            self.eplb_state = EplbState.build(
+                self.model,
+                self.device,
+                self.parallel_config,
+            )
 
     def save_tensorized_model(
         self,
@@ -1885,6 +1926,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self,
         num_tokens: int,
         capture_attn_cudagraph: bool = False,
+        skip_eplb: bool = False,
+        is_profile: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
 
         # Padding for DP
@@ -1980,6 +2023,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if self.speculative_config and self.speculative_config.use_eagle():
                 assert isinstance(self.drafter, EagleProposer)
                 self.drafter.dummy_run(num_tokens)
+
+        # This is necessary to avoid blocking DP.
+        # For dummy runs, we typically skip EPLB since we don't have any real
+        # requests to process.
+        # However, in DP settings, there may be cases when some DP ranks do
+        # not have any requests to process, so they're executing dummy batches.
+        # In such cases, we still have to trigger EPLB to make sure
+        # ranks execute the rearrangement in synchronization.
+        if not skip_eplb:
+            self.eplb_step(is_dummy=True, is_profile=is_profile)
 
         logit_indices = np.cumsum(num_scheduled_tokens) - 1
         return hidden_states, hidden_states[logit_indices]
@@ -2173,8 +2226,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Cache the dummy encoder outputs.
             self.encoder_cache["tmp"] = dict(enumerate(dummy_encoder_outputs))
 
+        # Add `is_profile` here to pre-allocate communication buffers
         hidden_states, last_hidden_states \
-            = self._dummy_run(self.max_num_tokens)
+            = self._dummy_run(self.max_num_tokens, is_profile=True)
         if get_pp_group().is_last_rank:
             if self.is_pooling_model:
                 output = self._dummy_pooler_run(hidden_states)
@@ -2208,10 +2262,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             for num_tokens in tqdm(reversed(self.cudagraph_batch_sizes),
                                    desc="Capturing CUDA graphs",
                                    total=len(self.cudagraph_batch_sizes)):
+                # We skip EPLB here since we don't want to record dummy metrics
                 for _ in range(
                         self.compilation_config.cudagraph_num_of_warmups):
-                    self._dummy_run(num_tokens, capture_attn_cudagraph=full_cg)
-                self._dummy_run(num_tokens, capture_attn_cudagraph=full_cg)
+                    self._dummy_run(num_tokens,
+                                    capture_attn_cudagraph=full_cg,
+                                    skip_eplb=True)
+                self._dummy_run(num_tokens,
+                                capture_attn_cudagraph=full_cg,
+                                skip_eplb=True)
 
         end_time = time.perf_counter()
         end_free_gpu_memory = torch.cuda.mem_get_info()[0]
