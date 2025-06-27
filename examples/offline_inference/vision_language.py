@@ -255,13 +255,14 @@ def run_glm4_1v(questions: list[str], modality: str) -> ModelRequestData:
     engine_args = EngineArgs(
         model=model_name,
         max_model_len=4096,
-        max_num_seqs=5,
+        max_num_seqs=2,
         mm_processor_kwargs={
             "min_pixels": 28 * 28,
             "max_pixels": 1280 * 28 * 28,
             "fps": 1,
         },
-        limit_mm_per_prompt={"image": 1},
+        limit_mm_per_prompt={modality: 1},
+        enforce_eager=True,
     )
 
     if modality == "image":
@@ -1150,6 +1151,7 @@ model_example_map = {
     "fuyu": run_fuyu,
     "gemma3": run_gemma3,
     "glm4v": run_glm4v,
+    "glm4_1v": run_glm4_1v,
     "h2ovl_chat": run_h2ovl,
     "idefics3": run_idefics3,
     "internvl_chat": run_internvl,
@@ -1208,10 +1210,11 @@ def get_multi_modal_input(args):
     if args.modality == "video":
         # Input video and question
         video = VideoAsset(name="baby_reading", num_frames=args.num_frames).np_ndarrays
+        metadata = VideoAsset(name="baby_reading", num_frames=args.num_frames).metadata
         vid_questions = ["Why is this video funny?"]
 
         return {
-            "data": video,
+            "data": [(video, metadata)] if args.model_type == "glm4_1v" else video,
             "questions": vid_questions,
         }
 
