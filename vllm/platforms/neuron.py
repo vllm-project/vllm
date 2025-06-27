@@ -130,7 +130,7 @@ class NeuronPlatform(Platform):
         nxd_framework = NeuronFramework.NEURONX_DISTRIBUTED_INFERENCE.value
         on_framework = NeuronFramework.OPTIMUM_NEURON.value
         if specified_framework == tnx_framework and tnx_installed:
-            return self.TRANSFORMERS_NEURONX
+            return NeuronFramework.TRANSFORMERS_NEURONX
 
         if ((specified_framework == nxd_framework and nxd_installed)
                 or (specified_framework is None and nxd_installed)):
