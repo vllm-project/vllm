@@ -55,6 +55,7 @@ class TorchAOConfig(QuantizationConfig):
             os.environ["VLLM_DISABLE_COMPILE_CACHE"] = "1"
             logger.info("Using TorchAO: Setting VLLM_DISABLE_COMPILE_CACHE=1")
         """
+        super().__init__()
         self.torchao_config = torchao_config
         self.skip_modules = skip_modules or []
 

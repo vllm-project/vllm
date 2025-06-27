@@ -508,10 +508,13 @@ class SupportsQuant:
             instance.quant_config = quant_config
 
             # apply model mappings to config for proper config-model matching
-            if instance.hf_to_vllm_mapper is not None:
+            # NOTE: `TransformersForCausalLM` is not supported due to how this
+            # class defines `hf_to_vllm_mapper` as a post-init `@property`.
+            # After this is fixed, get `instance.hf_to_vllm_mapper` directly
+            if getattr(instance, "hf_to_vllm_mapper", None) is not None:
                 instance.quant_config.apply_vllm_mapper(
                     instance.hf_to_vllm_mapper)
-            if instance.packed_modules_mapping is not None:
+            if getattr(instance, "packed_modules_mapping", None) is not None:
                 instance.quant_config.packed_modules_mapping.update(
                     instance.packed_modules_mapping)
 

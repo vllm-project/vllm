@@ -58,7 +58,9 @@ def _make_synced_weight_loader(original_weight_loader):
 
 
 def get_packed_modules_mapping(model: torch.nn.Module) -> dict[str, list[str]]:
-    parent_map = copy.deepcopy(getattr(model, "packed_modules_mapping", {}))
+    parent_map = getattr(model, "packed_modules_mapping", None)
+    parent_map = {} if parent_map is None else parent_map
+    parent_map = copy.deepcopy(parent_map)
 
     # don't infer mapping if the model has defined it explicitly.
     if parent_map:

@@ -415,7 +415,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                 "The required method 'load_weights' is not defined in class"
                 f" {type(model).__name__}.")
 
-        if not hasattr(model, "packed_modules_mapping"):
+        if getattr(model, "packed_modules_mapping", None) is None:
             raise AttributeError(
                 f"Model {type(model).__name__} does not support BitsAndBytes "
                 "quantization yet. No 'packed_modules_mapping' found.")
