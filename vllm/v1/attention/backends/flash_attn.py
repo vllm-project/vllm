@@ -14,10 +14,14 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
 from vllm.attention.layer import Attention
 from vllm.attention.ops.merge_attn_states import merge_attn_states
 from vllm.attention.utils.fa_utils import (flash_attn_supports_fp8,
-                                           flash_attn_varlen_func,
                                            get_flash_attn_version,
-                                           get_scheduler_metadata,
-                                           reshape_and_cache_flash)
+                                           is_flash_attn_varlen_func_available)
+
+if is_flash_attn_varlen_func_available():
+    from vllm.attention.utils.fa_utils import (flash_attn_varlen_func,
+                                               get_scheduler_metadata,
+                                               reshape_and_cache_flash)
+
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
 from vllm.utils import cdiv
