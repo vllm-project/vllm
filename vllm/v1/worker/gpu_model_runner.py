@@ -1722,9 +1722,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         return draft_token_ids
 
     def update_config(self, overrides: dict[str, Any]) -> None:
+        allowed_config_names = {"load_config", "model_config"}
         for config_name, config_overrides in overrides.items():
-            assert hasattr(self,
-                           config_name), f"Unknown config `{config_name}`"
+            assert config_name in allowed_config_names, \
+                f"Config `{config_name}` not supported. " \
+                f"Allowed configs: {allowed_config_names}"
             config = getattr(self, config_name)
             new_config = update_config(config, config_overrides)
             setattr(self, config_name, new_config)
