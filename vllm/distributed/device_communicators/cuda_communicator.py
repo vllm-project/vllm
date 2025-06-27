@@ -8,6 +8,7 @@ from torch.distributed import ProcessGroup
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 
 from .base_device_communicator import DeviceCommunicatorBase
 
@@ -41,6 +42,8 @@ class CudaCommunicator(DeviceCommunicatorBase):
             CustomAllreduce)
         from vllm.distributed.device_communicators.pynccl import (
             PyNcclCommunicator)
+        from vllm.distributed.device_communicators.quick_all_reduce import (
+            QuickAllReduce)
 
         self.pynccl_comm: Optional[PyNcclCommunicator] = None
         if use_pynccl and self.world_size > 1:
@@ -50,6 +53,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
             )
 
         self.ca_comm: Optional[CustomAllreduce] = None
+        self.qr_comm: Optional[QuickAllReduce] = None
         if use_custom_allreduce and self.world_size > 1:
             # Initialize a custom fast all-reduce implementation.
             self.ca_comm = CustomAllreduce(
@@ -57,6 +61,14 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 device=self.device,
             )
 
+            if current_platform.is_rocm():
+                # Initialize a custom quick all-reduce implementation for AMD.
+                # Quick reduce is designed as a complement to custom allreduce.
+                # Based on quickreduce (https://github.com/mk1-project/quickreduce).
+                # If it's a rocm, 'use_custom_allreduce==True' means it must
+                # currently be an MI300 series.
+                self.qr_comm = QuickAllReduce(group=self.cpu_group,
+                                              device=self.device)
         if self.use_all2all:
             all2all_backend = envs.VLLM_ALL2ALL_BACKEND
             if all2all_backend == "naive":
@@ -79,8 +91,14 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 raise ValueError(f"Unknown all2all backend: {all2all_backend}")
 
     def all_reduce(self, input_):
-        # always try custom allreduce first,
-        # and then pynccl.
+        # always try quick reduce first, then custom allreduce,
+        # and then pynccl. (quick reduce just for ROCM MI3*)
+        qr_comm = self.qr_comm
+        if qr_comm is not None and not qr_comm.disabled and \
+            qr_comm.should_quick_allreduce(input_):
+            out = qr_comm.quick_all_reduce(input_)
+            assert out is not None
+            return out
         ca_comm = self.ca_comm
         if ca_comm is not None and not ca_comm.disabled and \
             ca_comm.should_custom_ar(input_):
