@@ -102,10 +102,6 @@ class TestTensors:
         rank_tokens = torch.randn(
             (config.m, config.k), device="cuda", dtype=token_dtype) / 10
         rank_token_scales = None
-        if config.dtype == torch.float8_e4m3fn:
-            # low_latency_mode kernels dont support per-token quant.
-            _, rank_token_scales = ops.scaled_fp8_quant(
-                rank_tokens, use_per_token_if_dynamic=not low_latency_mode)
 
         topk = torch.randint(low=0,
                              high=config.num_experts,

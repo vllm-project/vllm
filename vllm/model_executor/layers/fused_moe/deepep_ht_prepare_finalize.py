@@ -157,7 +157,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 a1,
                 a1_scale,
                 quant_dtype=quant_config.quant_dtype,
-                per_act_token_quant=False,
+                per_act_token_quant=True,
                 block_shape=quant_config.block_shape,
             )
             (expert_x, expert_x_scale, expert_num_tokens, expert_topk_ids,
