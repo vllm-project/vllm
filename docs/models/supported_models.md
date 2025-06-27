@@ -336,6 +336,7 @@ Specified using `--task generate`.
 | `GemmaForCausalLM`                                | Gemma                                               | `google/gemma-2b`, `google/gemma-1.1-2b-it`, etc.                                                                                                                            | ✅︎                     | ✅︎                          | ✅︎                     |
 | `Gemma2ForCausalLM`                               | Gemma 2                                             | `google/gemma-2-9b`, `google/gemma-2-27b`, etc.                                                                                                                              | ✅︎                     | ✅︎                          | ✅︎                     |
 | `Gemma3ForCausalLM`                               | Gemma 3                                             | `google/gemma-3-1b-it`, etc.                                                                                                                                                 | ✅︎                     | ✅︎                          | ✅︎                     |
+| `Gemma3nForConditionalGeneration`                  | Gemma 3n                                             | `google/gemma-3n-E2B-it`, `google/gemma-3n-E4B-it`, etc.                                                                                                                                                 |                      |                           | ✅︎                     |
 | `GlmForCausalLM`                                  | GLM-4                                               | `THUDM/glm-4-9b-chat-hf`, etc.                                                                                                                                               | ✅︎                     | ✅︎                          | ✅︎                     |
 | `Glm4ForCausalLM`                                 | GLM-4-0414                                          | `THUDM/GLM-4-32B-0414`, etc.                                                                                                                                                 | ✅︎                     | ✅︎                          | ✅︎                     |
 | `GPT2LMHeadModel`                                 | GPT-2                                               | `gpt2`, `gpt2-xl`, etc.                                                                                                                                                      |                        | ✅︎                          | ✅︎                     |
@@ -391,6 +392,9 @@ Specified using `--task generate`.
 
 !!! note
     Currently, the ROCm version of vLLM supports Mistral and Mixtral only for context lengths up to 4096.
+
+!!! note
+    Only text inputs are currently supported for `Gemma3nForConditionalGeneration`. To use this model, please upgrade Hugging Face Transformers to version 4.53.0.
 
 ### Pooling Models
 
