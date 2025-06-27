@@ -10,7 +10,6 @@ from typing import Callable, Literal, Optional, TypeVar, Union, cast
 
 import numpy as np
 from fastapi import Request
-
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.logger import RequestLogger
@@ -24,10 +23,9 @@ from vllm.entrypoints.openai.serving_engine import (OpenAIServing,
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
-from vllm.outputs import RequestOutput
 from vllm.transformers_utils.processor import cached_get_processor
 from vllm.utils import PlaceholderModule
-
+from vllm.sampling_params import SamplingParams
 try:
     import librosa
 except ImportError:
@@ -191,8 +189,8 @@ class OpenAISpeechToText(OpenAIServing):
         self,
         request: SpeechToTextRequest,
         audio_data: bytes,
-        previous_text : str,
-    ) -> tuple[list[PromptType], float]:
+        previous_text :list[str],
+    ) -> AsyncGenerator[tuple[list[PromptType], float]]:
         # Validate request
         # TODO language should be optional and can be guessed.
         # For now we default to en. See
@@ -223,7 +221,6 @@ class OpenAISpeechToText(OpenAIServing):
 
         duration = librosa.get_duration(y=y, sr=sr)
         chunks = [y] if duration < 30 else self._split_audio(y, int(sr))
-        prompts = []
         for chunk in chunks:
             prompt = {
                 "encoder_prompt": {
@@ -236,9 +233,8 @@ class OpenAISpeechToText(OpenAIServing):
                 (f"<|prev|>{request.prompt}<|startoftranscript|>{lang_token}"
                  f"<|{self.task_type}|><|notimestamps|>{previous_text}")
             }
-            prompts.append(cast(PromptType, prompt))
-        return prompts, duration
-
+            yield (cast(PromptType, prompt), duration)
+            
     async def _create_speech_to_text(
         self,
         audio_data: bytes,
@@ -283,8 +279,8 @@ class OpenAISpeechToText(OpenAIServing):
                 return self.create_error_response(
                     f"Currently do not support PromptAdapter for "
                     f"{self.task_type.title()}.")
-            previous_text = ""
-            prompts, duration_s = await self._preprocess_speech_to_text(
+            previous_text = [""]
+            asyncPromptGenerator = self._preprocess_transcription(
                 request=request,
                 audio_data=audio_data,
                 previous_text=previous_text
@@ -294,8 +290,6 @@ class OpenAISpeechToText(OpenAIServing):
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(str(e))
 
-        list_result_generator: Optional[list[AsyncGenerator[RequestOutput,
-                                                            None]]] = None
         try:
             # Unlike most decoder-only models, whisper generation length is not
             # constrained by the size of the input audio, which is mapped to a
@@ -303,50 +297,54 @@ class OpenAISpeechToText(OpenAIServing):
             default_max_tokens = self.model_config.max_model_len
             sampling_params = request.to_sampling_params(
                 default_max_tokens, self.default_sampling_params)
-
-            self._log_inputs(
-                request_id,
-                prompts[0]['decoder_prompt'],  # type: ignore
-                params=sampling_params,
-                lora_request=None,
-                prompt_adapter_request=None)
-
-            list_result_generator = [
-                self.engine_client.generate(
+            # streaming response.
+            if request.stream:
+                return stream_generator_method(request, asyncPromptGenerator,
+                                            request_id, request_metadata,
+                                            sampling_params)
+            
+            # Non-streaming response.
+            text= ""
+            async for (prompt, _) in asyncPromptGenerator:
+                partial_text = ""
+                if text == "":
+                    self._log_inputs(
+                        request_id,
+                        prompt['decoder_prompt'],  # type: ignore
+                        params=sampling_params,
+                        lora_request=None,
+                        prompt_adapter_request=None
+                    )
+                    
+                request_prompt = self.engine_client.generate(
                     prompt,
                     sampling_params,
                     request_id,
-                ) for prompt in prompts
-            ]
-        except ValueError as e:
-            # TODO: Use a vllm-specific Validation Error
-            return self.create_error_response(str(e))
+                )
+                async for op in request_prompt:
+                    partial_text += op.outputs[0].text
+                    
+                previous_text[0] = ' '.join(
+                    partial_text.strip()
+                    .split(' ')[-10:]
+                )
+                text += partial_text
 
-        if request.stream:
-            return stream_generator_method(request, list_result_generator,
-                                           request_id, request_metadata,
-                                           duration_s)
-        # Non-streaming response.
-        try:
-            assert list_result_generator is not None
-            text = ""
-            for result_generator in list_result_generator:
-                async for op in result_generator:
-                    text += op.outputs[0].text
-            return cast(T, response_class(text=text))
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
 
+        return cast(T, response_class(text=text))
+
     async def _speech_to_text_stream_generator(
         self,
         request: SpeechToTextRequest,
-        list_result_generator: list[AsyncGenerator[RequestOutput, None]],
+        async_result_generator: AsyncGenerator[tuple[list[PromptType], float]],
         request_id: str,
         request_metadata: RequestResponseMetadata,
-        audio_duration_s: float,
+        sampling_params : SamplingParams,
         chunk_object_type: Literal["translation.chunk", "transcription.chunk"],
         response_stream_choice_class: Union[
             type[TranscriptionResponseStreamChoice],
@@ -367,11 +365,17 @@ class OpenAISpeechToText(OpenAIServing):
             else False
 
         try:
-            for result_generator in list_result_generator:
+            async for (prompt, duration_s) in async_result_generator:
+                result_generator = self.engine_client.generate(
+                    prompt,
+                    sampling_params,
+                    request_id,
+                )
                 async for res in result_generator:
                     # On first result.
                     if res.prompt_token_ids is not None:
-                        # Do not account the 4-tokens `<|startoftranscript|>..`
+                        # Do not account the 4-tokens 
+                        # `<|startoftranscript|>..`
                         # Could be negative when language token
                         # is not specified.
                         num_prompt_tokens = max(
@@ -381,9 +385,11 @@ class OpenAISpeechToText(OpenAIServing):
                         # One indicator of the encoder amount of processing
                         # is the log-mel spectogram length.
                         num_prompt_tokens += ceil(
-                            audio_duration_s * self.model_sr / self.hop_length)
+                            duration_s * self.model_sr 
+                            / self.hop_length)
 
-                    # We need to do it here, because if there are exceptions in
+                    # We need to do it here, 
+                    # because if there are exceptions in
                     # the result_generator, it needs to be sent as the FIRST
                     # response (by the try...catch).
 
@@ -406,17 +412,18 @@ class OpenAISpeechToText(OpenAIServing):
                             stop_reason=output.stop_reason)
 
                     chunk = stream_response_class(id=request_id,
-                                                  object=chunk_object_type,
-                                                  created=created_time,
-                                                  choices=[choice_data],
-                                                  model=model_name)
+                                                object=chunk_object_type,
+                                                created=created_time,
+                                                choices=[choice_data],
+                                                model=model_name)
 
                     # handle usage stats if requested & if continuous
                     if include_continuous_usage:
                         chunk.usage = UsageInfo(
                             prompt_tokens=num_prompt_tokens,
                             completion_tokens=completion_tokens,
-                            total_tokens=num_prompt_tokens + completion_tokens,
+                            total_tokens=num_prompt_tokens 
+                            + completion_tokens,
                         )
 
                     data = chunk.model_dump_json(exclude_unset=True)
