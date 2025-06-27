@@ -746,8 +746,8 @@ class NixlConnectorWorker:
             remote_block_size = nixl_agent_meta.block_len // (
                 self.slot_size_bytes * tp_ratio)
             if self._use_flashinfer:
-                # With flashinfer, KV are sent in the same message.
-                remote_block_size /= 2
+                # Account for joint KV in FlashInfer.
+                remote_block_size //= 2
 
             assert nixl_agent_meta.block_len == self.block_len * tp_ratio, (
                 "Remote P worker KV layer cache must be of shape [2, N, "
