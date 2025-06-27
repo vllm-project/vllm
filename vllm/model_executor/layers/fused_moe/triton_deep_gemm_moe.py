@@ -43,18 +43,12 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def requires_expert_tokens_meta(self) -> bool:
         dge = self.deep_gemm_experts
         te = self.triton_experts
-        return ((dge is not None and dge.requires_expert_tokens_meta()) or (te is not None and te.requires_expert_tokens_meta()))
+        return ((dge is not None and dge.requires_expert_tokens_meta())
+                or (te is not None and te.requires_expert_tokens_meta()))
 
     def workspace_shapes(
-        self,
-        a: torch.Tensor,
-        aq: torch.Tensor,
-        M: int,
-        N: int,
-        K: int,
-        topk: int,
-        global_num_experts: int,
-        local_num_experts: int,
+        self, a: torch.Tensor, aq: torch.Tensor, M: int, N: int, K: int,
+        topk: int, global_num_experts: int, local_num_experts: int,
         expert_tokens_meta: Optional[mk.ExpertTokensMeta]
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
         # Note: the deep gemm workspaces are strictly larger than the triton
@@ -77,6 +71,7 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         hidden_states: torch.Tensor,
         w1: torch.Tensor,
         w2: torch.Tensor,
+        topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         activation: str,
         global_num_experts: int,

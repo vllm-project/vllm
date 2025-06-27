@@ -76,7 +76,8 @@ class BatchedTritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def requires_expert_tokens_meta(self) -> bool:
         bdge = self.batched_deep_gemm_experts
         bte = self.batched_triton_experts
-        return ((bdge is not None and bdge.requires_expert_tokens_meta())  or (bte is not None and bte.requires_expert_tokens_meta()))
+        return ((bdge is not None and bdge.requires_expert_tokens_meta())
+                or (bte is not None and bte.requires_expert_tokens_meta()))
 
     def workspace_shapes(
         self,
@@ -103,26 +104,16 @@ class BatchedTritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
                 a, aq, M, N, K, topk, global_num_experts, local_num_experts,
                 expert_tokens_meta)
 
-    def apply(
-        self,
-        output: torch.Tensor,
-        hidden_states: torch.Tensor,
-        w1: torch.Tensor,
-        w2: torch.Tensor,
-        topk_ids: torch.Tensor,
-        activation: str,
-        global_num_experts: int,
-        expert_map: Optional[torch.Tensor],
-        w1_scale: Optional[torch.Tensor],
-        w2_scale: Optional[torch.Tensor],
-        w1_zp: Optional[torch.Tensor],
-        w2_zp: Optional[torch.Tensor],
-        a1q_scale: Optional[torch.Tensor],
-        a2_scale: Optional[torch.Tensor],
-        workspace13: torch.Tensor,
-        workspace2: torch.Tensor,
-        expert_tokens_meta: Optional[mk.ExpertTokensMeta]
-    ):
+    def apply(self, output: torch.Tensor, hidden_states: torch.Tensor,
+              w1: torch.Tensor, w2: torch.Tensor, topk_weights: torch.Tensor,
+              topk_ids: torch.Tensor, activation: str, global_num_experts: int,
+              expert_map: Optional[torch.Tensor],
+              w1_scale: Optional[torch.Tensor],
+              w2_scale: Optional[torch.Tensor], w1_zp: Optional[torch.Tensor],
+              w2_zp: Optional[torch.Tensor], a1q_scale: Optional[torch.Tensor],
+              a2_scale: Optional[torch.Tensor], workspace13: torch.Tensor,
+              workspace2: torch.Tensor,
+              expert_tokens_meta: Optional[mk.ExpertTokensMeta]):
         use_batched_deep_gemm_experts = (self.allow_deep_gemm
                                          and self.batched_deep_gemm_experts
                                          is not None)

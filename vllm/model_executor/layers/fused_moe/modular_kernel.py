@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from math import prod
 from typing import Optional
-from dataclasses import dataclass
 
 import torch
 
@@ -84,17 +84,19 @@ def _moe_problem_size(
 
 
 @dataclass
-class ExpertTokensMeta: 
-  """
+class ExpertTokensMeta:
+    """
   Metadata information about tokens routing
   """
-  local_expert_num_tokens_gpu: torch.Tensor
-  local_expert_num_tokens_sum: Optional[int] = None
+    local_expert_num_tokens_gpu: torch.Tensor
+    local_expert_num_tokens_sum: Optional[int] = None
 
-  def maybe_compute_local_expert_num_tokens_sum(self) -> None:
-    if self.local_expert_num_tokens_sum is not None:
-      return
-    self.local_expert_num_tokens_sum = torch.sum(self.local_expert_num_tokens_gpu).item()
+    def maybe_compute_local_expert_num_tokens_sum(self) -> None:
+        if self.local_expert_num_tokens_sum is not None:
+            return
+        self.local_expert_num_tokens_sum = torch.sum(
+            self.local_expert_num_tokens_gpu).item()
+
 
 class FusedMoEPrepareAndFinalize(ABC):
     """
@@ -113,8 +115,9 @@ class FusedMoEPrepareAndFinalize(ABC):
         num_experts: int,
         expert_map: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[ExpertTokensMeta],
-               Optional[torch.Tensor], Optional[torch.Tensor]]:
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor],
+               Optional[ExpertTokensMeta], Optional[torch.Tensor],
+               Optional[torch.Tensor]]:
         """
         Perform any quantization (and/or) dispatching needed
         for this kernel.
@@ -200,11 +203,11 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
 
     @abstractmethod
     def requires_expert_tokens_meta(self) -> bool:
-      """
+        """
       A flag indicating whether or not this class needs the ExpertTokensMeta
       for its fused_experts implementation.
       """
-      raise NotImplementedError
+        raise NotImplementedError
 
     @abstractmethod
     def workspace_shapes(
@@ -258,6 +261,7 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         hidden_states: torch.Tensor,
         w1: torch.Tensor,
         w2: torch.Tensor,
+        topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         activation: str,
         global_num_experts: int,
@@ -282,6 +286,7 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
           layer.
         - w1 (torch.Tensor): The first set of expert weights.
         - w2 (torch.Tensor): The second set of expert weights.
+        - topk_weights (torch.Tensor): A map of row to expert weights.
         - topk_ids (torch.Tensor): A map of row to expert id.
         - activation (str): The activation function to apply after the first
           MoE layer.

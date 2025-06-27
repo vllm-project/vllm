@@ -13,6 +13,7 @@ logger = init_logger(__name__)
 
 has_deep_gemm = importlib.util.find_spec("deep_gemm") is not None
 
+
 @triton.jit
 def _silu_mul_fp8_quant_deep_gemm(
     # Pointers ------------------------------------------------------------
@@ -204,7 +205,7 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         return False
 
     def requires_expert_tokens_meta(self) -> bool:
-        return True 
+        return True
 
     def workspace_shapes(
         self,
@@ -238,6 +239,7 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         hidden_states: torch.Tensor,
         w1: torch.Tensor,
         w2: torch.Tensor,
+        topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         activation: str,
         global_num_experts: int,
