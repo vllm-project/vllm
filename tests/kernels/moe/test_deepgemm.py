@@ -6,7 +6,6 @@ Compare DeepGEMM path against the Triton fallback inside vLLM's fused_experts.
 
 import importlib
 import math
-import os
 
 import pytest
 import torch
@@ -189,37 +188,38 @@ NUM_EXPERTS = [32]
 @requires_deep_gemm
 def test_deepgemm_vs_triton(mnk, topk, num_experts, monkeypatch):
 
-    os.environ["VLLM_USE_DEEP_GEMM"] = "1"
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_USE_DEEP_GEMM", "1")
 
-    _fused_moe_mod = importlib.import_module(
-        "vllm.model_executor.layers.fused_moe.fused_moe")
+        _fused_moe_mod = importlib.import_module(
+            "vllm.model_executor.layers.fused_moe.fused_moe")
 
-    call_counter = {"cnt": 0}
+        call_counter = {"cnt": 0}
 
-    orig_fn = _fused_moe_mod.deep_gemm_moe_fp8
+        orig_fn = _fused_moe_mod.deep_gemm_moe_fp8
 
-    def _spy_deep_gemm_moe_fp8(*args, **kwargs):
-        call_counter["cnt"] += 1
-        return orig_fn(*args, **kwargs)
+        def _spy_deep_gemm_moe_fp8(*args, **kwargs):
+            call_counter["cnt"] += 1
+            return orig_fn(*args, **kwargs)
 
-    monkeypatch.setattr(_fused_moe_mod, "deep_gemm_moe_fp8",
-                        _spy_deep_gemm_moe_fp8)
+        monkeypatch.setattr(_fused_moe_mod, "deep_gemm_moe_fp8",
+                            _spy_deep_gemm_moe_fp8)
 
-    m, n, k = mnk
+        m, n, k = mnk
 
-    if topk > num_experts:
-        pytest.skip(f"topk={topk} > num_experts={num_experts}")
+        if topk > num_experts:
+            pytest.skip(f"topk={topk} > num_experts={num_experts}")
 
-    run_single_case(
-        m=m,
-        n=n,
-        k=k,
-        topk=topk,
-        num_experts=num_experts,
-        block_size=BLOCK_SIZE,
-    )
+        run_single_case(
+            m=m,
+            n=n,
+            k=k,
+            topk=topk,
+            num_experts=num_experts,
+            block_size=BLOCK_SIZE,
+        )
 
-    # ensure that the DeepGEMM path was indeed taken.
-    assert call_counter["cnt"] == 1, \
-        f"DeepGEMM path was not executed during the test. " \
-        f"Call counter: {call_counter['cnt']}"
+        # ensure that the DeepGEMM path was indeed taken.
+        assert call_counter["cnt"] == 1, \
+            f"DeepGEMM path was not executed during the test. " \
+            f"Call counter: {call_counter['cnt']}"
