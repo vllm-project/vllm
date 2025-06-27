@@ -222,9 +222,17 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         assert self.handle is not None
 
+        H = output.size(1)
+        num_tokens = topk_ids.size(0)
+        fe_numel = fused_expert_output.numel()
+
         # fused_expert_output can have 0 tokens - This happens when none of the
         # tokens from the all2all reach this EP rank.
-        if fused_expert_output.numel() != 0:
+        is_fe_empty: bool = fe_numel == 0
+        is_fe_reduced: bool = fe_numel == (num_tokens * H)
+        do_apply_weights_and_reduce: bool = not (is_fe_empty or is_fe_reduced)
+
+        if do_apply_weights_and_reduce:
             fused_expert_output = self._apply_weights_and_reduce(
                 num_tokens=topk_ids.size(0),
                 fused_expert_output=fused_expert_output,
