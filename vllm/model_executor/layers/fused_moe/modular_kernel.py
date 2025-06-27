@@ -473,6 +473,10 @@ class FusedMoEModularKernel(torch.nn.Module):
             e = min(s + out_chunk_size, fused_out.size(0))
             return fused_out[s:e]
 
+        def slice_expert_tokens_meta(
+                chunk_topk_ids: torch.Tensor) -> torch.Tensor:
+            pass
+
         for chunk_idx in range(num_chunks):
             c_a1q, c_a1q_scale, c_a2_scale, c_topk_ids, c_topk_weights = (
                 slice_input_tensors(chunk_idx))

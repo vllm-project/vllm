@@ -162,6 +162,45 @@ __global__ void moe_align_block_size_small_batch_expert_kernel(
   }
 }
 
+template <typename scalar_t>
+__global__ void compute_expert_num_tokens_kernel(
+    const scalar_t* __restrict__ topk_ids,
+    const int32_t* __restrict__ expert_map, int32_t* expert_num_tokens,
+    int32_t* sum_expert_num_tokens, const int64_t num_experts,
+    const size_t numel) {
+  extern __shared__ int32_t shared_mem[];
+
+  for (int x = threadIdx.x; x < num_experts; x += blockDim.x) {
+    shared_mem[x] = 0;
+  }
+  __syncthreads();
+
+  int stride = gridDim.x * blockDim.x;
+  int expert_count = 0;
+  for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < numel; i += stride) {
+    int expert_id = topk_ids[i];
+    if (expert_map && expert_id != -1) {
+      expert_id = expert_map[expert_id];
+    }
+
+    bool const valid_expert = expert_id >= 0 && expert_id < num_experts;
+    if (!valid_expert) {
+      continue;
+    }
+
+    atomicAdd(&shared_mem[expert_id], 1);
+    expert_count++;
+  }
+
+  __syncthreads();
+
+  for (int x = threadIdx.x; x < num_experts; x += blockDim.x) {
+    atomicAdd(&expert_num_tokens[x], shared_mem[x]);
+  }
+
+  atomicAdd(sum_expert_num_tokens, expert_count);
+}
+
 }  // namespace moe
 }  // namespace vllm
 
@@ -276,4 +315,42 @@ void moe_sum(torch::Tensor& input,   // [num_tokens, topk, hidden_size]
       at::sum_out(output, input, 1);
       break;
   }
+}
+
+void compute_expert_num_tokens(
+    torch::Tensor& topk_ids,               // [M, num_topk]
+    torch::Tensor& expert_num_tokens,      // [local_num_experts]
+    torch::Tensor& sum_expert_num_tokens,  // [1]
+    const int64_t local_num_experts,
+    std::optional<torch::Tensor> const& expert_map  // [global_num_experts]
+) {
+  TORCH_CHECK(expert_num_tokens.dtype() == torch::kInt32);
+  TORCH_CHECK(sum_expert_num_tokens.dtype() == torch::kInt32);
+  TORCH_CHECK(expert_num_tokens.size(0) == local_num_experts);
+  TORCH_CHECK(topk_ids.dtype() == torch.kInt64);
+
+  if (expert_map) {
+    TORCH_CHECK(expert_map->dtype() == torch::kInt32);
+  }
+  const int num_sms{at::cuda::getDeviceProperties(topk_ids.device().index())
+                        ->multiProcessorCount};
+
+  const int topk_numel = topk_ids.numel();
+  dim3 block(std::min(topk_numel, 1024));
+
+  const int num_blocks = ((topk_numel - 1 / block.x) + 1);
+  dim3 grid(std::min(num_sms, num_blocks));
+
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(topk_ids));
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+  size_t shared_mem_size = local_num_experts * sizeof(int32_t);
+
+  vllm::moe::compute_expert_num_tokens_kernel<torch::kInt64>
+      <<<grid, block, shared_mem_size, stream>>>(
+          topk_ids.data_ptr<scalar_t>(),
+          expert_map ? expert_map->data_ptr<int32_t>() : nullptr,
+          expert_num_tokens.data_ptr<int32_t>(),
+          sum_expert_num_tokens.data_ptr<int32_t>(), local_num_experts,
+          topk_numel);
 }
