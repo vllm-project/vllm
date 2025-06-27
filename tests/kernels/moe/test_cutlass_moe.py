@@ -195,6 +195,7 @@ def run_with_expert_maps(num_experts: int, num_local_experts: int,
 def run_8_bit(moe_tensors: MOETensors8Bit,
               topk_weights: torch.Tensor,
               topk_ids: torch.Tensor,
+              per_act_token: bool,
               num_local_experts: Optional[int] = None) -> torch.Tensor:
     assert not any([
         t is None for t in [
@@ -211,6 +212,7 @@ def run_8_bit(moe_tensors: MOETensors8Bit,
         'topk_ids': topk_ids,
         'w1_scale': moe_tensors.w1_scale,
         'w2_scale': moe_tensors.w2_scale,
+        'per_act_token': per_act_token,
         'a1_scale': None  #moe_tensors.a_scale
     }
 
@@ -262,7 +264,7 @@ def test_cutlass_moe_8_bit_no_graph(
         triton_output = fused_experts(mt.a_d, mt.w1_d, mt.w2_d, topk_weights,
                                       topk_ids)
 
-        cutlass_output = run_8_bit(mt, topk_weights, topk_ids)
+        cutlass_output = run_8_bit(mt, topk_weights, topk_ids, per_act_token)
 
         # Note 5.5 only needed for larger problem sizes, 5 works ok for
         # the rest.
@@ -313,7 +315,8 @@ def test_cutlass_moe_8_bit_cuda_graph(
         stream = torch.cuda.Stream()
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph, stream=stream):
-            cutlass_output = run_8_bit(mt, topk_weights, topk_ids)
+            cutlass_output = run_8_bit(mt, topk_weights, topk_ids,
+                                       per_act_token)
 
         torch.cuda.synchronize()
         graph.replay()
@@ -369,6 +372,7 @@ def test_cutlass_moe_8_bit_EP(
         cutlass_output = run_8_bit(mt,
                                    topk_weights,
                                    topk_ids,
+                                   per_act_token,
                                    num_local_experts=e // ep_size)
 
         torch.testing.assert_close(triton_output,
