@@ -90,9 +90,14 @@ class FusedMoEQuantConfig:
     def is_per_tensor(self) -> bool:
         return not self.per_act_token_quant and self.block_shape is None
 
-    def scale_shape(self, max_tokens: int, hidden_dim: int) -> Optional[tuple[int, int]]:
+    def scale_shape(
+        self,
+        max_tokens: int,
+        hidden_dim: int,
+    ) -> Optional[tuple[int, int]]:
         if self.is_quantized:
             if self.is_grouped:
+                assert self.block_shape is not None
                 _, block_k = self.block_shape
                 k_tiles = cdiv(hidden_dim, block_k)
                 return (max_tokens, k_tiles)
@@ -107,10 +112,11 @@ class FusedMoEQuantConfig:
         self,
         num_experts: int,
         max_tokens: int,
-        hidden_dim: int
+        hidden_dim: int,
     ) -> Optional[tuple[int, int, int]]:
         if self.is_quantized:
             scale_shape = self.scale_shape(max_tokens, hidden_dim)
+            assert scale_shape is not None
             return (num_experts, *scale_shape)
         else:
             return None
