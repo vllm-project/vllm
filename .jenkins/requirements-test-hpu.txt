@@ -1,3 +1,4 @@
 lm_eval==0.4.8
 pytest
 pytest_asyncio
+transformers==4.52.4 # workaround for Qwen2.5 issue with transformers 4.53.0
