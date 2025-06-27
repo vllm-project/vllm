@@ -4,6 +4,7 @@ import asyncio
 import os
 import threading
 import time
+from contextlib import AsyncExitStack
 
 import openai  # use the official client for correctness check
 import pytest
@@ -23,8 +24,12 @@ class ExternalLBServerManager:
     """Manages data parallel vLLM server instances for external
     load balancer testing."""
 
-    def __init__(self, model_name: str, dp_size: int, api_server_count: int,
-                 base_server_args: list, tp_size: int = TP_SIZE):
+    def __init__(self,
+                 model_name: str,
+                 dp_size: int,
+                 api_server_count: int,
+                 base_server_args: list,
+                 tp_size: int = TP_SIZE):
         self.model_name = model_name
         self.dp_size = dp_size
         self.tp_size = tp_size
@@ -60,13 +65,13 @@ class ExternalLBServerManager:
                 try:
                     # Start the server
                     server = RemoteOpenAIServer(
-                        self.model_name, sargs, auto_port=False,
+                        self.model_name,
+                        sargs,
+                        auto_port=False,
                         env_dict={"CUDA_VISIBLE_DEVICES": str(r)})
                     server.__enter__()
-                    print(
-                        f"Server rank {r} started successfully with "
-                        f"{self.api_server_count} API servers"
-                    )
+                    print(f"Server rank {r} started successfully with "
+                          f"{self.api_server_count} API servers")
                     self.servers.append((server, sargs))
                 except Exception as e:
                     print(f"Failed to start server rank {r}: {e}")
@@ -113,7 +118,7 @@ def default_server_args():
     ]
 
 
-@pytest.fixture(scope="module", params=[1 , 4])
+@pytest.fixture(scope="module", params=[1, 4])
 def servers(request, default_server_args):
     api_server_count = request.param
     with ExternalLBServerManager(MODEL_NAME, DP_SIZE, api_server_count,
@@ -124,20 +129,11 @@ def servers(request, default_server_args):
 @pytest_asyncio.fixture
 async def clients(servers: list[tuple[RemoteOpenAIServer, list[str]]]):
     # Create a client for each server
-    async_clients = []
-    for server, _ in servers:
-        client = await server.get_async_client().__aenter__()
-        async_clients.append(client)
-
-    try:
-        yield async_clients
-    finally:
-        # Clean up all clients
-        for client in async_clients:
-            try:
-                await client.__aexit__(None, None, None)
-            except Exception as e:
-                print(f"Error closing client: {e}")
+    async with AsyncExitStack() as stack:
+        yield [
+            await stack.enter_context(server.get_async_client())
+            for server, _ in servers
+        ]
 
 
 @pytest.mark.asyncio
@@ -145,10 +141,9 @@ async def clients(servers: list[tuple[RemoteOpenAIServer, list[str]]]):
     "model_name",
     [MODEL_NAME],
 )
-async def test_external_lb_single_completion(
-        clients: list[openai.AsyncOpenAI],
-        servers: list[tuple[RemoteOpenAIServer, list[str]]],
-        model_name: str) -> None:
+async def test_external_lb_single_completion(clients: list[
+    openai.AsyncOpenAI], servers: list[tuple[RemoteOpenAIServer, list[str]]],
+                                             model_name: str) -> None:
 
     async def make_request(client: openai.AsyncOpenAI):
         completion = await client.completions.create(
@@ -208,12 +203,12 @@ async def test_external_lb_single_completion(
     assert all(completion is not None for completion in results)
 
     _, server_args = servers[0]
+    api_server_count = (
+        server_args.count('--api-server-count')
+        and server_args[server_args.index('--api-server-count') + 1] or 1)
     print(
         f"Successfully completed external LB test with {len(clients)} servers "
-        f"(API server count: {server_args.count('--api-server-count') 
-            and server_args[server_args.index(
-            '--api-server-count') + 1] or '1'})"
-    )
+        f"(API server count: {api_server_count})")
 
 
 @pytest.mark.asyncio
@@ -303,9 +298,8 @@ async def test_external_lb_completion_streaming(clients: list[
     assert all(results), "Not all streaming requests completed successfully."
 
     _, server_args = servers[0]
-    print(
-        f"Successfully completed external LB streaming test with "
-        f"(API server count: {server_args.count('--api-server-count')
-                              and server_args[server_args.index(
-            '--api-server-count') + 1] or '1'})"
-    )
+    api_server_count = (
+        server_args.count('--api-server-count')
+        and server_args[server_args.index('--api-server-count') + 1] or 1)
+    print(f"Successfully completed external LB streaming test with "
+          f"{len(clients)} servers (API server count: {api_server_count})")
