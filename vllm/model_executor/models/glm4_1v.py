@@ -508,94 +508,79 @@ class Glm4vVisionEmbeddings(nn.Module):
 
         self.num_patches = (self.image_size // self.patch_size)**2
         self.num_positions = self.num_patches
-                                               self.embed_dim)
-        self.register_buffer(
-            "position_ids",
-            torch.arange(self.num_positions).expand((1, -1)),
-            persistent=False,
-        )
+        self.position_embedding = nn.Embedding(self.num_positions, self.embed_dim)
+        self.register_buffer("position_ids", torch.arange(self.num_positions).expand((1, -1)), persistent=False)
 
-    def adapt_position_encoding(
-        self,
-        lengths: torch.Tensor,
-        image_shapes: torch.Tensor,
-        h_coords: torch.Tensor,
-        w_coords: torch.Tensor,
-    ):
+    def forward(self, embeddings, lengths, image_shapes, h_coords, w_coords) -> torch.Tensor:
         """
-        Adapt position encoding using 2D interpolation.
+        Forward pass with integrated position encoding adaptation using 2D interpolation.
 
         Args:
-            lengths (torch.Tensor): Sequence lengths for each image in
-            the batch.
-            image_shapes (torch.Tensor): Tensor of shape [batch_size, 3]
-            representing the image shapes (t, h, w).
-            h_coords (torch.Tensor): Tensor of shape [total_seq]
-            representing the h coordinate for each patch.
-            w_coords (torch.Tensor): Tensor of shape [total_seq]
-            representing the w coordinate for each patch.
+            embeddings: Input embeddings tensor
+            lengths (torch.Tensor): Sequence lengths for each image in the batch.
+            image_shapes (torch.Tensor): Tensor of shape [batch_size, 3] representing the image shapes (t, h, w).
+            h_coords (torch.Tensor): Tensor of shape [total_seq] representing the h coordinate for each patch.
+            w_coords (torch.Tensor): Tensor of shape [total_seq] representing the w coordinate for each patch.
 
         Returns:
-            torch.Tensor: Adapted position encoding tensor
-            of shape [total_seq, hidden_size].
+            torch.Tensor: Embeddings with adapted position encoding added.
         """
+        # Get position embedding parameters
         pos_embed_weight = self.position_embedding.weight
-
         hidden_size = pos_embed_weight.shape[1]
         total_seq = h_coords.shape[0]
         device = pos_embed_weight.device
+
+        # Move coordinates to correct device
         h_coords, w_coords = h_coords.to(device), w_coords.to(device)
+
+        # Handle empty sequence case
         if total_seq == 0:
-            return torch.empty(0,
-                               hidden_size,
-                               device=device,
-                               dtype=pos_embed_weight.dtype)
-        if isinstance(lengths, list):
-            lengths = torch.tensor(lengths, device=device, dtype=torch.long)
-        if not isinstance(image_shapes, torch.Tensor):
-            image_shapes = torch.tensor(image_shapes,
-                                        device=device,
-                                        dtype=torch.long)
-        image_shapes = image_shapes.expand(len(lengths), -1)
-        orig_size_sq = pos_embed_weight.shape[0]
-        orig_size = int(orig_size_sq**0.5)
+            adapted_pos_embed = torch.empty(0, hidden_size, device=device, dtype=pos_embed_weight.dtype)
+        else:
+            # Convert inputs to tensors if needed
+            if isinstance(lengths, list):
+                lengths = torch.tensor(lengths, device=device, dtype=torch.long)
+            if not isinstance(image_shapes, torch.Tensor):
+                image_shapes = torch.tensor(image_shapes, device=device, dtype=torch.long)
 
-        pos_embed_2d = pos_embed_weight.view(orig_size, orig_size, hidden_size)
-        pos_embed_2d = pos_embed_2d.permute(2, 0, 1).unsqueeze(0)
-        target_h_list = [
-            image_shapes[i, 1].repeat(lengths[i]) for i in range(len(lengths))
-        ]
-        target_w_list = [
-            image_shapes[i, 2].repeat(lengths[i]) for i in range(len(lengths))
-        ]
-        target_h = torch.cat(target_h_list)
-        target_w = torch.cat(target_w_list)
-        h_coords_float = h_coords.float()
-        w_coords_float = w_coords.float()
-        target_h_float = target_h.float()
-        target_w_float = target_w.float()
-        norm_w = ((w_coords_float + 0.5) / target_w_float) * 2 - 1
-        norm_h = ((h_coords_float + 0.5) / target_h_float) * 2 - 1
-        grid = torch.stack((norm_w, norm_h), dim=-1)
-        grid = grid.unsqueeze(0).unsqueeze(2)
-        pos_embed_2d_fp32 = pos_embed_2d.float()
-        grid_fp32 = grid.float()
-        interpolated_embed_fp32 = F.grid_sample(
-            pos_embed_2d_fp32,
-            grid_fp32,
-            mode="bicubic",
-            align_corners=False,
-            padding_mode="border",
-        )
-        adapted_pos_embed_fp32 = (
-            interpolated_embed_fp32.squeeze(0).squeeze(-1).permute(1, 0))
-        adapted_pos_embed = adapted_pos_embed_fp32.to(pos_embed_weight.dtype)
-        return adapted_pos_embed
+            # Prepare 2D position embedding
+            orig_size_sq = pos_embed_weight.shape[0]
+            orig_size = int(orig_size_sq**0.5)
+            pos_embed_2d = (
+                pos_embed_weight.view(orig_size, orig_size, hidden_size)
+                .permute(2, 0, 1)
+                .unsqueeze(0)
+                .to(device=device, dtype=torch.float32)
+            )
 
-    def forward(self, embeddings, lengths, image_shapes, h_coords,
-                w_coords) -> torch.Tensor:
-        adapted_pos_embed = self.adapt_position_encoding(
-            lengths, image_shapes, h_coords, w_coords)
+            # Calculate target dimensions for each patch
+            target_h = torch.cat([image_shapes[i, 1].repeat(lengths[i]) for i in range(len(lengths))]).to(
+                device=device, dtype=torch.float32
+            )
+            target_w = torch.cat([image_shapes[i, 2].repeat(lengths[i]) for i in range(len(lengths))]).to(
+                device=device, dtype=torch.float32
+            )
+
+            # Normalize coordinates to [-1, 1] range for grid_sample
+            h_coords = h_coords.to(device=device, dtype=torch.float32)
+            w_coords = w_coords.to(device=device, dtype=torch.float32)
+            norm_w = ((w_coords + 0.5) / target_w) * 2 - 1
+            norm_h = ((h_coords + 0.5) / target_h) * 2 - 1
+
+            # Create sampling grid
+            grid = torch.stack((norm_w, norm_h), dim=-1).unsqueeze(0).unsqueeze(2)
+
+            # Perform bicubic interpolation
+            interpolated_embed_fp32 = F.grid_sample(
+                pos_embed_2d, grid, mode="bicubic", align_corners=False, padding_mode="border"
+            )
+
+            # Reshape and convert back to original dtype
+            adapted_pos_embed_fp32 = interpolated_embed_fp32.squeeze(0).squeeze(-1).permute(1, 0)
+            adapted_pos_embed = adapted_pos_embed_fp32.to(pos_embed_weight.dtype).to(embeddings.device)
+
+        # Add adapted position encoding to embeddings
         embeddings = embeddings + adapted_pos_embed
         return embeddings
 
@@ -1360,12 +1345,16 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         device = self.visual.device
         flat_grid_thw = torch.cat([torch.tensor([[1, h, w]] * t, device=device) for t, h, w in grid_thw])
-
+        print(flat_grid_thw)
+        print(flat_grid_thw.shape)
         if video_input["type"] == "video_embeds":
             video_embeds = video_input["video_embeds"].type(self.visual.dtype)
         else:
             pixel_values_videos = video_input["pixel_values_videos"].type(
                 self.visual.dtype)
+            print("========")
+            print(pixel_values_videos)
+            print(pixel_values_videos.shape)
             video_embeds = self.visual(pixel_values_videos, grid_thw=flat_grid_thw)
 
         # Split concatenated embeddings for each video item.
