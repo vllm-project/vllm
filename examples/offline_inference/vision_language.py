@@ -257,8 +257,7 @@ def run_glm4_1v(questions: list[str], modality: str) -> ModelRequestData:
         max_model_len=4096,
         max_num_seqs=2,
         mm_processor_kwargs={
-            "min_pixels": 28 * 28,
-            "max_pixels": 1280 * 28 * 28,
+            "size": {"shortest_edge": 12544, "longest_edge": 47040000},
             "fps": 1,
         },
         limit_mm_per_prompt={modality: 1},
