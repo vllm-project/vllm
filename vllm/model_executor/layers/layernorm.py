@@ -35,7 +35,7 @@ def fused_add_rms_norm(
         variance_epsilon: float) -> tuple[torch.Tensor, torch.Tensor]:
     from vllm import _custom_ops as ops
     out = torch.empty_like(x)
-    residual_out = torch.empty(residual)
+    residual_out = torch.empty_like(residual)
     ops.fused_add_rms_norm(
         out,
         x,
