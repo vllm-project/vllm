@@ -96,7 +96,7 @@ class TestBackend:
         compile_config = get_current_vllm_config().compilation_config
         self.inductor_config = compile_config.inductor_compile_config
         self.inductor_config['force_disable_caches'] = True
-        self.test_pass = TestPassManager(*passes)
+        self.test_pass = TestPassManager(*passes, check_fn=check_fn)
         self.inductor_config['post_grad_custom_post_pass'] = self.test_pass
 
     def __call__(self, graph: fx.GraphModule, example_inputs):

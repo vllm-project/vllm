@@ -34,8 +34,11 @@ def test_attention_fusion(example_prompts, monkeypatch, model: str,
     torch._dynamo.reset()
 
     monkeypatch.setenv("VLLM_USE_V1", str(int(use_v1)))
-    monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
     monkeypatch.setenv("VLLM_USE_TRITON_FLASH_ATTN", str(int(use_triton_fa)))
+    # avoid pickling issues for custom pass
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    #
+    monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
 
     # Prompt 4 seems too open-ended, differs between fused and unfused
     # (both outputs look reasonable though)
@@ -127,6 +130,7 @@ def test_attention_fusion(example_prompts, monkeypatch, model: str,
         # TODO maybe add register method
         backend = TestBackend(LazyInitPass(AttnFusionPass, vllm_config),
                               check_fn=check)
+        print(backend)
 
         llm2 = LLM(model,
                    compilation_config=compile_config,
