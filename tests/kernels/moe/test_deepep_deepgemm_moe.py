@@ -22,7 +22,7 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8)
 from vllm.platforms import current_platform
 
-from .deepep_utils import ProcessGroupInfo, parallel_launch
+from .utils import ProcessGroupInfo, parallel_launch
 
 has_deep_ep = importlib.util.find_spec("deep_ep") is not None
 
