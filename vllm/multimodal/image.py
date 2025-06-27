@@ -48,6 +48,12 @@ class ImageMediaIO(MediaIO[Image.Image]):
         super().__init__()
 
         self.image_mode = image_mode
+        # `kwargs` contains custom arguments from
+        # --media-io-kwargs for this modality.
+        # They can be passed to the underlying
+        # media loaders (e.g. custom implementations)
+        # for flexible control.
+        self.kwargs = kwargs
 
     def load_bytes(self, data: bytes) -> Image.Image:
         image = Image.open(BytesIO(data))

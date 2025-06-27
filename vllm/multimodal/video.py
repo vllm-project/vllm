@@ -157,6 +157,11 @@ class VideoMediaIO(MediaIO[npt.NDArray]):
 
         self.image_io = image_io
         self.num_frames = num_frames
+        # `kwargs` contains custom arguments from
+        # --media-io-kwargs for this modality.
+        # They can be passed to the underlying
+        # media loaders (e.g. custom implementations)
+        # for flexible control.
         self.kwargs = kwargs
         video_loader_backend = envs.VLLM_VIDEO_LOADER_BACKEND
         self.video_loader = VIDEO_LOADER_REGISTRY.load(video_loader_backend)
