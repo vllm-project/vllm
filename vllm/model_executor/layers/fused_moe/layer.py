@@ -1743,7 +1743,8 @@ def moe_forward_fake(hidden_states: torch.Tensor, router_logits: torch.Tensor,
 direct_register_custom_op(
     op_name="moe_forward",
     op_func=moe_forward,
-    mutates_args=[],
+    mutates_args=["hidden_states"],
     fake_impl=moe_forward_fake,
     dispatch_key=current_platform.dispatch_key,
+    tags=(torch.Tag.needs_fixed_stride_order, ),
 )
