@@ -166,7 +166,7 @@ class MllamaMultiModalProcessor(EncDecMultiModalProcessor[MllamaProcessingInfo]
         prompt: Union[str, list[int]],
         mm_data: MultiModalDataDict,
         hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Mapping[str, object],
+        tokenization_kwargs: Optional[Mapping[str, object]] = None,
         return_mm_hashes: bool = False,
     ) -> MultiModalEncDecInputs:
         mm_inputs = super().apply(prompt, mm_data, hf_processor_mm_kwargs,

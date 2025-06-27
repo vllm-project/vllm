@@ -621,6 +621,7 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
                 prompt=prompts,  # type: ignore
                 mm_data=mm_data,
                 mm_kwargs=mm_kwargs,
+                tok_kwargs={},
             )
         else:
             inputs = defaultdict[str, list[torch.Tensor]](list)
@@ -633,6 +634,7 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
                         for k, v in mm_data.items()
                     },
                     mm_kwargs=mm_kwargs,
+                    tok_kwargs={},
                 )
 
                 for k, v in inputs_one.items():
