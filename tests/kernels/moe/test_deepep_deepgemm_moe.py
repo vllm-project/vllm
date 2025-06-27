@@ -21,7 +21,7 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8)
 from vllm.platforms import current_platform
 
-from .deepep_utils import ProcessGroupInfo, parallel_launch
+from .parallel_utils import ProcessGroupInfo, parallel_launch
 from .utils import make_test_weights
 
 if has_deep_ep():
@@ -30,7 +30,7 @@ if has_deep_ep():
     from vllm.model_executor.layers.fused_moe.deepep_ll_prepare_finalize import (  # noqa: E501
         DeepEPLLPrepareAndFinalize)
 
-    from .utils import DeepEPHTArgs, DeepEPLLArgs, make_deepep_a2a
+    from .parallel_utils import DeepEPHTArgs, DeepEPLLArgs, make_deepep_a2a
 
 if has_deep_gemm():
     import deep_gemm

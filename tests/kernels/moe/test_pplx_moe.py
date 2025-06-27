@@ -31,7 +31,7 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
 from vllm.platforms import current_platform
 from vllm.utils import round_up
 
-from .deepep_utils import ProcessGroupInfo, parallel_launch
+from .parallel_utils import ProcessGroupInfo, parallel_launch
 
 requires_pplx = pytest.mark.skipif(
     not has_pplx,
