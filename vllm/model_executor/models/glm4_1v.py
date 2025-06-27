@@ -962,9 +962,15 @@ class Glm4vDummyInputsBuilder(BaseDummyInputsBuilder[Glm4vProcessingInfo]):
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
 
+        hf_config = self.info.get_hf_config()
         hf_processor = self.info.get_hf_processor()
+        tokenizer = self.info.get_tokenizer()
+
         image_token: str = hf_processor.image_token
-        video_token: str = hf_processor.video_token
+        video_token_ids = [hf_config.video_start_token_id,
+                           hf_processor.video_token_id,
+                           hf_config.video_end_token_id]
+        video_token = tokenizer.decode(video_token_ids)
 
         return image_token * num_images + video_token * num_videos
 
@@ -1026,45 +1032,46 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
         mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         mm_data = dict(mm_data)
+        processor = self.info.get_hf_processor(**mm_kwargs)
 
         # GLM-4.1V use `image_token_id` as video placeholder, we need to
-        # replace it with `video_token_id` for video processing.
+        # replace it with `video_token_id` for video processing. So we
+        # separate video processing from image processing.
         if "videos" in mm_data and isinstance(mm_data["videos"], list) and len(mm_data["videos"]) > 0:
-            videos_list = []
-            video_metadata_list = []
 
-            video_mm_data = dict()
+            video_grid_thw_lst = []
+            pixel_values_videos_lst = []
             for item in mm_data.pop("videos", []):
                 video_array, metadata = item
-                if isinstance(video_array, np.ndarray):
-                    videos_list.append(video_array)
-                    video_metadata_list.append(metadata)
 
-            video_mm_data["videos"] = videos_list
-            video_mm_data["video_metadata"] = video_metadata_list
+                video_mm_data = dict()
+                video_mm_data["videos"] = video_array
+                video_mm_data["video_metadata"] = metadata
 
-            video_outputs = super()._call_hf_processor(
-                prompt=prompt,
-                mm_data=video_mm_data,
-                mm_kwargs=mm_kwargs,
+                video_outputs = super()._call_hf_processor(
+                    prompt=prompt,
+                    mm_data=video_mm_data,
+                    mm_kwargs=mm_kwargs,
+                )
+                input_ids = video_outputs.pop("input_ids")
+                prompt = processor.tokenizer.batch_decode(input_ids)[0]
+
+                grid_t = len(video_outputs["video_grid_thw"])
+                _, grid_h, grid_w = video_outputs["video_grid_thw"][0]
+                grid_thw = torch.tensor([[grid_t, grid_h, grid_w]])
+
+                video_grid_thw_lst.append(grid_thw)
+                pixel_values_videos_lst.append(video_outputs["pixel_values_videos"])
+
+            video_outputs = dict(
+                pixel_values_videos=torch.cat(pixel_values_videos_lst),
+                video_grid_thw=torch.cat(video_grid_thw_lst),
             )
-            # input_ids = video_outputs["input_ids"]
-
-            grid_t = len(video_outputs["video_grid_thw"])
-            _, grid_h, grid_w = video_outputs["video_grid_thw"][0]
-            video_outputs["video_grid_thw"] = torch.tensor([[grid_t, grid_h, grid_w]])
-
-            # input_ids = video_outputs.pop("input_ids")
-            video_outputs = {
-                k: v
-                for k, v in video_outputs.items()
-                if k in ("pixel_values_videos", "video_grid_thw")
-            }
-            # input_ids[input_ids==processor.image_token_id] = processor.video_token_id
-            # prompt = processor.tokenizer.batch_decode(input_ids)[0]
+            input_ids[input_ids==processor.image_token_id] = processor.video_token_id
+            prompt = processor.tokenizer.batch_decode(input_ids)[0]
         else:
             video_outputs = dict()
-        
+
         processed_outputs = super()._call_hf_processor(
             prompt=prompt,
             mm_data=mm_data,
@@ -1075,20 +1082,6 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
             **video_outputs,
         )
         return BatchFeature(combined_outputs)
-
-    def _hf_processor_applies_updates(
-        self,
-        prompt_text: str,
-        mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> bool:
-        base_result = super()._hf_processor_applies_updates(
-            prompt_text=prompt_text,
-            mm_items=mm_items,
-            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
-        )
-
-        return base_result and mm_items.get_count("video", strict=False) == 0
 
     def _get_mm_fields_config(
         self,
@@ -1107,10 +1100,13 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
         image_processor = self.info.get_image_processor(
             **hf_processor_mm_kwargs)
         tokenizer = self.info.get_tokenizer()
-        vocab = tokenizer.get_vocab()
+        hf_config = self.info.get_hf_config()
 
-        boi_token_id = vocab["<|begin_of_image|>"]
-        eoi_token_id = vocab["<|end_of_image|>"]
+        boi_token_id = hf_config.image_start_token_id
+        eoi_token_id = hf_config.image_end_token_id
+
+        bov_token_id = hf_config.video_start_token_id
+        eov_token_id = hf_config.video_end_token_id
 
         merge_length = image_processor.merge_size**2
 
@@ -1130,11 +1126,13 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
             num_tokens_per_frame = int(grid_thw[1:].prod()) // merge_length
 
             placeholder = []
+            placeholder.append(bov_token_id)
             for frame_idx in frames_idx_token:
                 placeholder.append(boi_token_id)
                 placeholder.extend([hf_processor.video_token_id] * num_tokens_per_frame)
                 placeholder.append(eoi_token_id)
                 placeholder.extend(frame_idx)
+            placeholder.append(eov_token_id)
             return placeholder
 
         return [
@@ -1145,7 +1143,7 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
             ),
             PromptReplacement(
                 modality="video",
-                target=hf_processor.video_token,
+                target="<|begin_of_video|><|video|><|end_of_video|>",
                 replacement=get_video_replacement_glm4v,
             ),
         ]
