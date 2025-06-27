@@ -837,7 +837,7 @@ class NixlConnectorWorker:
                 len(done_sending), len(done_recving))
 
         # Handle timeout to avoid stranding blocks on remote.
-        now = time.perf_counter()
+        now = time.monotonic()
         timed_out_requests: list[str] = []
         for req_id, finish_time in self._reqs_to_send.items():
             if finish_time < 0:
@@ -1081,8 +1081,7 @@ class NixlConnectorWorker:
 
         # Use handle to check completion in future step().
         # TODO (NickLucche) surface xfer elapsed time
-        self._recving_transfers[request_id].append(
-            (handle, time.perf_counter()))
+        self._recving_transfers[request_id].append((handle, time.monotonic()))
 
     def _get_block_descs_ids(self,
                              engine_id: str,
