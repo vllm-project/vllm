@@ -114,7 +114,8 @@ class ScaledMMReduceScatterPattern(BasePattern):
     def register(self, pm_pass: PatternMatcherPass):
 
         def pattern(input: torch.Tensor, mat2: torch.Tensor,
-                    scale_a: torch.Tensor, scale_b: torch.Tensor):
+                    scale_a: torch.Tensor,
+                    scale_b: torch.Tensor) -> torch.Tensor:
             scaled_mm = torch.ops.aten._scaled_mm.default(input,
                                                           mat2=mat2,
                                                           scale_a=scale_a,
@@ -130,7 +131,8 @@ class ScaledMMReduceScatterPattern(BasePattern):
             return reduce_scatter
 
         def replacement(input: torch.Tensor, mat2: torch.Tensor,
-                        scale_a: torch.Tensor, scale_b: torch.Tensor):
+                        scale_a: torch.Tensor,
+                        scale_b: torch.Tensor) -> torch.Tensor:
             gemm_rs = torch.ops.symm_mem.fused_scaled_matmul_reduce_scatter(
                 input,
                 mat2,
@@ -166,7 +168,7 @@ class AllGatherScaledMMPattern(BasePattern):
             weight: torch.Tensor,
             scale_a: torch.Tensor,
             scale_b: torch.Tensor,
-        ) -> tuple[torch.Tensor, torch.Tensor]:
+        ) -> torch.Tensor:
             all_gather = torch.ops.vllm.all_gather.default(
                 x,
                 dim=0,
@@ -181,9 +183,9 @@ class AllGatherScaledMMPattern(BasePattern):
                                                      scale_result=None,
                                                      out_dtype=self.dtype)
 
-        def replacement(
-                x: torch.Tensor, weight: torch.Tensor, scale_a: torch.Tensor,
-                scale_b: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        def replacement(x: torch.Tensor, weight: torch.Tensor,
+                        scale_a: torch.Tensor,
+                        scale_b: torch.Tensor) -> torch.Tensor:
             ag_output, mm_outputs = torch.ops.symm_mem.fused_all_gather_scaled_matmul(  # noqa
                 x,
                 [weight],

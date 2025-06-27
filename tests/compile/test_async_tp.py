@@ -95,18 +95,20 @@ class TestAGMMModel(torch.nn.Module):
         return [torch.ops.symm_mem.fused_all_gather_matmul.default]
 
 
-class TestScaledMMRSModel(torch.nn.Module):
+class _BaseScaledMMModel(torch.nn.Module):
 
     def __init__(self, hidden_size=16, dtype=torch.float16):
         super().__init__()
         self.hidden_size = hidden_size
         self.dtype = dtype
-
         self.weight = torch.empty([hidden_size, hidden_size], dtype=FP8_DTYPE)\
             .contiguous().transpose(0, 1)
 
         # Initialize scale_b for _scaled_mm.
         self.scale_b = torch.ones(1, self.hidden_size, dtype=torch.float32)
+
+
+class TestScaledMMRSModel(_BaseScaledMMModel):
 
     def forward(self, input: torch.Tensor):
         """
@@ -130,17 +132,7 @@ class TestScaledMMRSModel(torch.nn.Module):
         return [torch.ops.symm_mem.fused_scaled_matmul_reduce_scatter.default]
 
 
-class TestAGScaledMMModel(torch.nn.Module):
-
-    def __init__(self, hidden_size=16, dtype=torch.float16):
-        super().__init__()
-        self.hidden_size = hidden_size
-        self.dtype = dtype
-        self.weight = torch.empty([hidden_size, hidden_size], dtype=FP8_DTYPE)\
-            .contiguous().transpose(0, 1)
-
-        # Initialize scale_b for _scaled_mm.
-        self.scale_b = torch.ones(1, self.hidden_size, dtype=torch.float32)
+class TestAGScaledMMModel(_BaseScaledMMModel):
 
     def forward(self, input: torch.Tensor):
         """
@@ -172,11 +164,17 @@ class TestAGScaledMMModel(torch.nn.Module):
 @pytest.mark.parametrize("batch_size", [8])
 @pytest.mark.parametrize("seq_len", [16])
 @pytest.mark.parametrize("hidden_size", [16])
-@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.skipif(envs.VLLM_TARGET_DEVICE not in ["cuda"],
                     reason="Only test on CUDA")
 def test_async_tp_pass_replace(test_model: str, batch_size: int, seq_len: int,
                                hidden_size: int, dtype: torch.dtype):
+    if test_model in (TestScaledMMRSModel,
+                      TestAGScaledMMModel) and dtype == torch.float16:
+        pytest.skip(
+            "TestScaledMMRSModel and TestAGScaledMMModel do not support float16"
+        )
+
     num_processes = 2
 
     def run_torch_spawn(fn, nprocs):
