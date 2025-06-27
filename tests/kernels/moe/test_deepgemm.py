@@ -6,6 +6,7 @@ Compare DeepGEMM path against the Triton fallback inside vLLM's fused_experts.
 
 import importlib
 import math
+import os
 
 import pytest
 import torch
@@ -168,6 +169,8 @@ def run_single_case(m, n, k, topk, num_experts, block_size):
     assert diff < 0.001, f'Dice error: {diff:.5f} (m={m}, k={k}, n={n})'
 
 
+# Note: W1 has shape (E, 2N, K), so N = 512
+# can trigger the deepgemm path.
 MNKs = [
     (1024, 512, 128),
     (1024, 512, 512),
@@ -185,10 +188,24 @@ NUM_EXPERTS = [32]
 @pytest.mark.parametrize("topk", TOPKS)
 @pytest.mark.parametrize("num_experts", NUM_EXPERTS)
 @requires_deep_gemm
-def test_deepgemm_vs_triton(mnk, topk, num_experts):
-    import os
-    os.environ['VLLM_USE_DEEP_GEMM'] = "1"
-    torch.manual_seed(7)
+def test_deepgemm_vs_triton(mnk, topk, num_experts, monkeypatch):
+
+    os.environ["VLLM_USE_DEEP_GEMM"] = "1"
+
+    _fused_moe_mod = importlib.import_module(
+        "vllm.model_executor.layers.fused_moe.fused_moe")
+
+    call_counter = {"cnt": 0}
+
+    orig_fn = _fused_moe_mod.deep_gemm_moe_fp8
+
+    def _spy_deep_gemm_moe_fp8(*args, **kwargs):
+        call_counter["cnt"] += 1
+        return orig_fn(*args, **kwargs)
+
+    monkeypatch.setattr(_fused_moe_mod, "deep_gemm_moe_fp8",
+                        _spy_deep_gemm_moe_fp8)
+
     m, n, k = mnk
 
     if topk > num_experts:
@@ -202,3 +219,8 @@ def test_deepgemm_vs_triton(mnk, topk, num_experts):
         num_experts=num_experts,
         block_size=BLOCK_SIZE,
     )
+
+    # ensure that the DeepGEMM path was indeed taken.
+    assert call_counter["cnt"] == 1, \
+        f"DeepGEMM path was not executed during the test. " \
+        f"Call counter: {call_counter['cnt']}"
