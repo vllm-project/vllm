@@ -509,7 +509,7 @@ steps:
     - pip freeze | grep -E 'torch'
     - pytest -v -s models/language -m core_model
 
-- label: Language Models Test (Hybrid) # TBD min
+- label: Language Models Test (Hybrid) # 35 min
   mirror_hardwares: [amdexperimental]
   torch_nightly: true
   source_file_dependencies:

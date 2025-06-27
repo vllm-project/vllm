@@ -9,6 +9,9 @@ from vllm.sampling_params import SamplingParams
 
 from ...utils import check_logprobs_close, check_outputs_equal
 
+# Mark all tests as hybrid
+pytestmark = pytest.mark.hybrid_model
+
 # NOTE: The first model in each list is taken as the primary model,
 # meaning that it will be used in all tests in this file
 # The rest of the models will only be tested by test_models
@@ -44,7 +47,6 @@ V1_SUPPORTED_MODELS = [
 MAX_NUM_SEQS = 4
 
 
-@pytest.mark.hybrid_model
 @pytest.mark.parametrize("model", SSM_MODELS + HYBRID_MODELS)
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("num_logprobs", [5])
@@ -98,7 +100,6 @@ def test_models(
         )
 
 
-@pytest.mark.hybrid_model
 @pytest.mark.parametrize("model", SSM_MODELS + HYBRID_MODELS)
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("num_logprobs", [5])
@@ -128,7 +129,6 @@ def test_batching(
     )
 
 
-@pytest.mark.hybrid_model
 @pytest.mark.parametrize("model", [SSM_MODELS[0], HYBRID_MODELS[0]])
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("num_logprobs", [5])
@@ -165,7 +165,6 @@ def test_chunked_prefill(
     )
 
 
-@pytest.mark.hybrid_model
 @pytest.mark.parametrize("model", [SSM_MODELS[0], HYBRID_MODELS[0]])
 @pytest.mark.parametrize("max_tokens", [10])
 def test_chunked_prefill_with_parallel_sampling(
@@ -198,7 +197,6 @@ def test_chunked_prefill_with_parallel_sampling(
         vllm_model.generate(example_prompts, sampling_params)
 
 
-@pytest.mark.hybrid_model
 @pytest.mark.parametrize("model", [SSM_MODELS[0], HYBRID_MODELS[0]])
 @pytest.mark.parametrize("max_tokens", [20])
 def test_mamba_cache_cg_padding(
@@ -228,7 +226,6 @@ def test_mamba_cache_cg_padding(
             "Could be related to mamba cache not padded correctly")
 
 
-@pytest.mark.hybrid_model
 @pytest.mark.parametrize("model", [SSM_MODELS[0], HYBRID_MODELS[0]])
 @pytest.mark.parametrize("max_tokens", [20])
 def test_models_preemption_recompute(
@@ -257,7 +254,6 @@ def test_models_preemption_recompute(
     )
 
 
-@pytest.mark.hybrid_model
 @pytest.mark.parametrize("model", [SSM_MODELS[0], HYBRID_MODELS[0]])
 def test_fail_upon_inc_requests_and_finished_requests_lt_available_blocks(
     vllm_runner,
@@ -281,7 +277,6 @@ def test_fail_upon_inc_requests_and_finished_requests_lt_available_blocks(
                     "steps finished requests registered unnecessarily ")
 
 
-@pytest.mark.hybrid_model
 @pytest.mark.parametrize("model", [SSM_MODELS[0], HYBRID_MODELS[0]])
 def test_state_cleanup(
     vllm_runner,
@@ -303,7 +298,6 @@ def test_state_cleanup(
                     "could be related to finished_requests_ids")
 
 
-@pytest.mark.hybrid_model
 @pytest.mark.parametrize("model", [SSM_MODELS[0], HYBRID_MODELS[0]])
 @pytest.mark.parametrize("max_tokens", [64])
 def test_multistep_correctness(
@@ -331,7 +325,6 @@ def test_multistep_correctness(
 
 
 @multi_gpu_test(num_gpus=2)
-@pytest.mark.hybrid_model
 @pytest.mark.parametrize("model", [SSM_MODELS[0], HYBRID_MODELS[0]])
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("num_logprobs", [5])
