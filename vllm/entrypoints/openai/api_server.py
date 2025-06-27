@@ -93,6 +93,8 @@ from vllm.entrypoints.openai.serving_tokenization import (
 from vllm.entrypoints.openai.serving_transcription import (
     OpenAIServingTranscription, OpenAIServingTranslation)
 from vllm.entrypoints.openai.tool_parsers import ToolParserManager
+from vllm.entrypoints.nixl_side_channel_server import (
+    start_nixl_side_channel_server_if_needed)
 from vllm.entrypoints.utils import (cli_env_setup, load_aware_call,
                                     with_cancellation)
 from vllm.logger import init_logger
@@ -916,32 +918,6 @@ if envs.VLLM_SERVER_DEV_MODE:
         server_info = {"vllm_config": str(raw_request.app.state.vllm_config)}
         return JSONResponse(content=server_info)
 
-    @router.get("/get_kv_connector_metadata")
-    @router.get("/get_kv_connector_metadata/{dp_rank}")
-    @router.get("/get_kv_connector_metadata/{dp_rank}/{tp_rank}")
-    async def get_kv_connector_metadata(raw_request: Request,
-                                        dp_rank: Optional[int] = None,
-                                        tp_rank: Optional[int] = None):
-        kv_meta: Optional[dict[str, dict[str, dict[str, Any]]]] = (
-            raw_request.app.state.vllm_config.cache_config.
-            transfer_handshake_metadata)
-
-        if kv_meta is None:
-            return None
-
-        if dp_rank is not None:
-            if dp_rank not in kv_meta:
-                return {}
-            dp_data = kv_meta[dp_rank]
-
-            if tp_rank is not None:
-                if tp_rank not in dp_data:
-                    return {}
-                return {dp_rank: {tp_rank: dp_data[tp_rank]}}
-            else:
-                return {dp_rank: dp_data}
-
-        return kv_meta
 
     @router.post("/reset_prefix_cache")
     async def reset_prefix_cache(raw_request: Request):
@@ -1474,6 +1450,12 @@ async def run_server_worker(listen_address,
         vllm_config = await engine_client.get_vllm_config()
         await init_app_state(engine_client, vllm_config, app.state, args)
 
+        nixl_side_channel_server = None
+        try:
+            nixl_side_channel_server = await start_nixl_side_channel_server_if_needed(vllm_config)
+        except Exception as e:
+            logger.warning("Failed to start NIXL side channel server: %s", e)
+
         logger.info("Starting vLLM API server %d on %s", server_index,
                     listen_address)
         shutdown_task = await serve_http(
@@ -1498,6 +1480,11 @@ async def run_server_worker(listen_address,
     try:
         await shutdown_task
     finally:
+        if nixl_side_channel_server is not None:
+            try:
+                await nixl_side_channel_server.stop_async()
+            except Exception as e:
+                logger.warning("Error stopping NIXL side channel server: %s", e)
         sock.close()
 
 
