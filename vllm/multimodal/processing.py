@@ -1444,14 +1444,17 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         cache: ProcessingCache,
         mm_data_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
+        tokenization_kwargs: Mapping[str, object],
     ) -> tuple[dict[str, list[ProcessingCacheOptionalItem]], dict[
             str, list[object]]]:
         model_id = self.info.model_id
 
         mm_cache_items = {
             modality: [
-                cache.get_item(model_id, modality, item,
-                               hf_processor_mm_kwargs) for item in items
+                cache.get_item(
+                    model_id, modality, item,
+                    dict(**hf_processor_mm_kwargs, **tokenization_kwargs))
+                for item in items
             ]
             for modality, items in mm_data_items.items()
         }
@@ -1471,10 +1474,9 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         return mm_cache_items, mm_missing_data
 
     def _hash_mm_items(
-        self,
-        mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> MultiModalHashes:
+            self, mm_items: MultiModalDataItems,
+            hf_processor_mm_kwargs: Mapping[str, object],
+            tokenization_kwargs: Mapping[str, object]) -> MultiModalHashes:
         """Create MM hashes to be returned (only used in V1)."""
         model_id = self.info.model_id
 
@@ -1482,7 +1484,8 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             modality: [
                 MultiModalHasher.hash_kwargs(model_id=model_id,
                                              **{modality: item},
-                                             **hf_processor_mm_kwargs)
+                                             **hf_processor_mm_kwargs,
+                                             **tokenization_kwargs)
                 for item in items
             ]
             for modality, items in mm_items.items()
@@ -1543,7 +1546,8 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             enable_hf_prompt_update=True,
         )
 
-        mm_hashes = (self._hash_mm_items(mm_data_items, hf_processor_mm_kwargs)
+        mm_hashes = (self._hash_mm_items(mm_data_items, hf_processor_mm_kwargs,
+                                         tokenization_kwargs)
                      if return_mm_hashes else None)
 
         return prompt_ids, mm_kwargs, mm_hashes, is_update_applied
@@ -1573,7 +1577,6 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                 return_mm_hashes=return_mm_hashes,
             )
 
-        # TODO: key by tokenization_kwargs when caching
         (
             mm_cache_items,
             mm_missing_data,
@@ -1581,6 +1584,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             cache=cache,
             mm_data_items=mm_data_items,
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+            tokenization_kwargs=tokenization_kwargs,
         )
 
         # NOTE: `prompt` does not correspond to `mm_missing_data_items`,
