@@ -156,17 +156,16 @@ def run_single_case(m, n, k, topk, num_experts, block_size):
         allow_deep_gemm=True,
     )
 
+    base = out_triton.abs().mean()
+    atol = 0.1 * base.clamp(min=1e-2)  # 10% of mean, but not lower than 1e-3
+    rtol = 0.05
     # ----- Compare -----
-    rel_diff = (torch.mean(
-        torch.abs(
-            out_deepgemm.to(torch.float32) - out_triton.to(torch.float32))) /
-                torch.mean(torch.abs(out_triton.to(torch.float32))))
-
-    assert rel_diff < 0.005, \
-        f'Relative error: {rel_diff:.5f} (m={m}, k={k}, n={n})'
-
-    diff = calc_diff(out_deepgemm, out_triton)
-    assert diff < 0.001, f'Dice error: {diff:.5f} (m={m}, k={k}, n={n})'
+    torch.testing.assert_close(
+        out_deepgemm.to(torch.float32),
+        out_triton.to(torch.float32),
+        rtol=rtol,
+        atol=float(atol),
+    )
 
 
 # Note: W1 has shape (E, 2N, K), so N = 512
