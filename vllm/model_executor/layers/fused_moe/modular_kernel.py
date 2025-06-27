@@ -91,6 +91,16 @@ class ExpertTokensMeta:
     expert_num_tokens_gpu: torch.Tensor
     expert_num_tokens_cpu: Optional[torch.Tensor]
 
+    @staticmethod
+    def make_from_list(expert_num_tokens_list: list[int],
+                       device: str) -> "ExpertTokensMeta":
+        expert_num_tokens_cpu = torch.tensor(expert_num_tokens_list,
+                                             device="cpu",
+                                             dtype=torch.int32),
+        return ExpertTokensMeta(
+            expert_num_tokens_cpu=expert_num_tokens_cpu,
+            expert_num_tokens_gpu=expert_num_tokens_cpu.to(device))
+
 
 class FusedMoEPrepareAndFinalize(ABC):
     """

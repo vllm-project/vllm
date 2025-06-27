@@ -411,8 +411,9 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         num_experts: int,
         expert_map: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor],
-               Optional[torch.Tensor], Optional[torch.Tensor]]:
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor],
+               Optional[mk.ExpertTokensMeta], Optional[torch.Tensor],
+               Optional[torch.Tensor]]:
         assert a1.dim() == 2
         assert topk_ids.dim() == 2
         assert topk_ids.size(0) == a1.size(0)
@@ -450,7 +451,11 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                  first_expert, :rows, :] = a1[:topks.numel()][topks]
             tokens_per_expert[expert_id - first_expert] = rows
 
-        return b_a1, a1_scale, tokens_per_expert, None, None
+        expert_tokens_meta = mk.ExpertTokensMeta(
+            expert_num_tokens_gpu=tokens_per_expert,
+            expert_num_tokens_cpu=None)
+
+        return b_a1, a1_scale, expert_tokens_meta, None, None
 
     def finalize(
         self,
