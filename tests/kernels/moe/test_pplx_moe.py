@@ -675,8 +675,6 @@ def _pplx_moe(
 @pytest.mark.parametrize("mnk", PPLX_COMBOS)
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
-#@pytest.mark.parametrize("e", [32])
-#@pytest.mark.parametrize("topk", [6])
 @pytest.mark.parametrize("dtype", [torch.float8_e4m3fn, torch.bfloat16])
 @pytest.mark.parametrize("world_dp_size", [[2, 1]])
 @pytest.mark.parametrize("per_act_token_quant", [False, True])

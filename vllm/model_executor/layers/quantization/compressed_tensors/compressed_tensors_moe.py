@@ -584,12 +584,11 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
 
         logger.debug("BatchedTritonExperts(%s)", self.__class__.__name__)
 
-        use_batched_format = (prepare_finalize.activation_format ==
-                              FusedMoEActivationFormat.BatchedExperts)
-
-        assert use_batched_format
+        assert (prepare_finalize.activation_format ==
+                FusedMoEActivationFormat.BatchedExperts)
 
         max_num_tokens_per_rank = prepare_finalize.max_num_tokens_per_rank()
+        assert max_num_tokens_per_rank is not None
 
         return BatchedTritonExperts(
             max_num_tokens=max_num_tokens_per_rank,

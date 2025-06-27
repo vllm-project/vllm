@@ -8,7 +8,7 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.utils import (
-    moe_kernel_quantize_input, _validate_scale_shape)
+    _validate_scale_shape, moe_kernel_quantize_input)
 from vllm.utils import cdiv, round_up
 
 
@@ -120,12 +120,8 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             per_act_token_quant=quant_config.per_act_token_quant,
             block_shape=quant_config.block_shape)
 
-        _validate_scale_shape(
-            a1q,
-            a1q_scale,
-            quant_config.per_act_token_quant,
-            quant_config.block_shape
-        )
+        _validate_scale_shape(a1q, a1q_scale, quant_config.per_act_token_quant,
+                              quant_config.block_shape)
 
         if a1q_scale is not None:
             scalar_scales = a1q_scale.numel() == 1
@@ -169,13 +165,15 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             if quant_config.is_per_act_token:
                 token_dim = expert_x.size(1)
                 final_dim = expert_x.size(2)
-                assert final_dim % 4 == 0 #?
+                assert final_dim % float32_size == 0
             elif quant_config.is_per_tensor:
-                token_dim = expert_x.size(1) #XXXXXXXXXXXXXXXXXX
-                final_dim = 4
+                token_dim = expert_x.size(1)
+                final_dim = float32_size
             else:
-                num_blocks = cdiv(expert_x.size(2), quant_config.block_shape[1])
-                final_dim = round_up(num_blocks, 4)
+                assert quant_config.block_shape is not None
+                num_blocks = cdiv(expert_x.size(2),
+                                  quant_config.block_shape[1])
+                final_dim = round_up(num_blocks, float32_size)
                 token_dim = expert_x.size(1)
 
             expert_x_scale_shape = (
@@ -184,7 +182,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 final_dim,
             )
 
-            # XXXX make sure shape matches up with pplx hidden bytes
+            # TODO (bnell): make sure shape matches up with pplx hidden bytes
 
             expert_x_scale = torch.empty(
                 expert_x_scale_shape,
@@ -220,16 +218,16 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
     ) -> None:
-        num_tokens = output.size(0)  # M
         # This argument is optional
         # There's not much point setting this unless it is != topk_ids.size(0)
         bound_m: Optional[torch.Tensor] = None
 
+        # TODO (bnell): fails in test_pplx_moe.py, figure out what's going on
+        #num_tokens = output.size(0)  # M
         #assert topk_ids.size(0) == num_tokens, (
         #    f"{topk_ids.size(0)} == {num_tokens}")
         assert topk_ids.size() == topk_weights.size(), (
-            f"{topk_ids.size()} == {topk_weights.size()}"
-        )
+            f"{topk_ids.size()} == {topk_weights.size()}")
         assert output.size(0) <= self.max_num_tokens, (
             f"{output.size(0)} <= {self.max_num_tokens}")
         assert output.size(1) == fused_expert_output.size(-1)

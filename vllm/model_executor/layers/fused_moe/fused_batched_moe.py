@@ -12,7 +12,8 @@ from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     get_config_dtype_str, try_get_optimal_moe_config)
 from vllm.model_executor.layers.fused_moe.utils import (
-    _resize_cache, moe_kernel_quantize_input)
+    _resize_cache, moe_kernel_quantize_input, normalize_batched_scales_shape,
+    normalize_scales_shape)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     group_broadcast)
 
@@ -381,7 +382,8 @@ def invoke_moe_batched_triton_kernel(
     grid = (expert_num_tokens.size(0), triton.cdiv(max_num_tokens, BLOCK_M) *
             triton.cdiv(B.size(1), BLOCK_N))
 
-    A_scale = maybe_fix_scales(A_scale, expert_num_tokens.shape[0])
+    A_scale = normalize_batched_scales_shape(A_scale,
+                                             expert_num_tokens.shape[0])
 
     if B_scale is not None and B_scale.ndim == 1:
         assert B_scale.numel() == expert_num_tokens.shape[0]
@@ -548,8 +550,8 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         first_expert = num_local_experts * self.rank
         last_expert = first_expert + num_local_experts
 
-        a1_scale = maybe_fix_2d_scales(a1_scale)
-        a2_scale = maybe_fix_2d_scales(a2_scale)
+        a1_scale = normalize_scales_shape(a1_scale)
+        a2_scale = normalize_scales_shape(a2_scale)
 
         for expert_id in range(first_expert, last_expert):
             topks = torch.any(topk_ids == expert_id, dim=1).flatten()
@@ -575,10 +577,8 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                     quant_config.block_shape,
                 )
                 if quant_config.is_per_act_token:
-                    #print(f"B_S1 {b_s.shape}")
                     b_a1_scale[idx, :rows] = b_s[:rows]
                 else:
-                    #print(f"B_S2 {b_s.shape}")
                     b_a1_scale[idx, :b_s.shape[0]] = b_s
             else:
                 b_a1[idx, :rows, :] = rhs
@@ -751,29 +751,6 @@ class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
             output[expert, :num, :] = tmp @ w2_dq.transpose(0, 1).to(tmp.dtype)
 
 
-def maybe_fix_scales(scales: Optional[torch.Tensor],
-                     num_experts: int) -> Optional[torch.Tensor]:
-    if scales is not None and scales.ndim < 3:
-        if scales.numel() == 1:
-            scales = scales.view(1)
-            scales = torch.repeat_interleave(scales, num_experts,
-                                             dim=0).view(num_experts, 1, 1)
-        else:
-            scales = scales.view(num_experts, -1, scales.size(-1))
-
-    return scales
-
-
-def maybe_fix_2d_scales(
-        scales: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
-    if scales is not None:
-        if scales.numel() == 1:
-            scales = scales.view(1, 1)
-        else:
-            scales = scales.view(-1, scales.size(-1))
-    return scales
-
-
 def batched_moe_kernel_quantize_input(
     A: torch.Tensor,
     A_scale: Optional[torch.Tensor],
@@ -785,8 +762,7 @@ def batched_moe_kernel_quantize_input(
     per_act_token_quant: bool,
     block_shape: Optional[list[int]] = None,
 ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
-    # TODO (bnell): fix this
-    if (True or torch.compiler.is_compiling()
+    if (torch.compiler.is_compiling()
             or torch.cuda.is_current_stream_capturing()):
         # Note: this does a bunch of extra work because expert_num_tokens is
         # ignored but it does support torch.compile + cudagraphs.
@@ -798,21 +774,21 @@ def batched_moe_kernel_quantize_input(
                                                    qtype, per_act_token_quant,
                                                    block_shape)
         A_q = A_q.view(E, -1, hidden_dim)
-        A_q_scale = maybe_fix_scales(A_q_scale, E)
+        A_q_scale = normalize_batched_scales_shape(A_q_scale, E)
 
         return A_q, A_q_scale
-
-    if qtype is not None:
-        assert block_shape is not None
+    elif qtype is None:
+        return A, normalize_batched_scales_shape(A_scale, E)
+    else:
         A_q = torch.empty_like(A, dtype=qtype)
 
         if per_act_token_quant:
             assert block_shape is None
             scale_shape = (E, num_tokens, 1)
         elif block_shape is not None:
-            block_n, block_k = block_shape
-            n_tiles = (A.shape[-1] + block_n - 1) // block_n
-            scale_shape = (E, num_tokens, n_tiles)
+            _, block_k = block_shape
+            k_tiles = (A.shape[-1] + block_k - 1) // block_k
+            scale_shape = (E, num_tokens, k_tiles)
         else:
             scale_shape = (E, 1, 1)
 
@@ -820,19 +796,27 @@ def batched_moe_kernel_quantize_input(
                                 dtype=torch.float32,
                                 device=A.device)
 
+        num_experts = expert_num_tokens.numel()
+
+        A_scale = normalize_batched_scales_shape(A_scale, num_experts)
+
         for e in range(E):
             num_tokens = expert_num_tokens[e]
             if num_tokens > 0:
-                A_q[e, :num_tokens, :], tmp_scale = moe_kernel_quantize_input(
+                if A_scale is not None:
+                    scales = A_scale[e, :min(num_tokens, A_scale.shape[1])]
+                else:
+                    scales = None
+                A_q[e, :num_tokens], tmp_scale = moe_kernel_quantize_input(
                     A[e, :num_tokens],
-                    A_scale[e, :min(num_tokens, A_scale.shape[1])]
-                    if A_scale is not None else None, qtype,
-                    per_act_token_quant, block_shape)
+                    scales,
+                    qtype,
+                    per_act_token_quant,
+                    block_shape,
+                )
                 A_q_scale[e, :tmp_scale.shape[0]] = tmp_scale
 
         return A_q, A_q_scale
-    else:
-        return A, A_scale
 
 
 class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
@@ -990,7 +974,7 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         if self.use_fp8_w8a8:
             intermediate_cache1.fill_(0)
 
-        a1q_scale = maybe_fix_scales(a1q_scale, E)
+        a1q_scale = normalize_batched_scales_shape(a1q_scale, E)
 
         # MM1
         invoke_moe_batched_triton_kernel(
@@ -1011,18 +995,9 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
         intermediate_cache2.fill_(0)
 
-        # TODO: use triton utility from batched deep gemm.
-        if False:
-            tmp = torch.empty_like(intermediate_cache2[0])
-            for e in range(E):
-                num_tokens = expert_num_tokens[e]
-                if num_tokens > 0:
-                    self.activation(activation, tmp[:num_tokens],
-                                    intermediate_cache1[e, :num_tokens])
-                    intermediate_cache2[e, :num_tokens] = tmp[:num_tokens]
-        else:
-            self.activation(activation, intermediate_cache2.view(-1, N // 2),
-                            intermediate_cache1.view(-1, N))
+        # TODO (bnell): use triton utility from batched deep gemm.
+        self.activation(activation, intermediate_cache2.view(-1, N // 2),
+                        intermediate_cache1.view(-1, N))
 
         qintermediate_cache2, a2q_scale = batched_moe_kernel_quantize_input(
             intermediate_cache2, a2_scale, max_num_tokens, E, N,

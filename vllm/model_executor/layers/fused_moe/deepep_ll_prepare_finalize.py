@@ -7,7 +7,7 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.utils import (
-    maybe_fix_scales, moe_kernel_quantize_input)
+    moe_kernel_quantize_input, normalize_batched_scales_shape)
 
 # DeepEP kernels quantize dispatch inputs in 128 element chunks.
 DEEPEP_QUANT_BLOCK_SIZE = 128
@@ -104,7 +104,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         if quant_dtype is not None:
             assert x_scales is not None
-            x_scales = maybe_fix_scales(x_scales, num_experts)
+            x_scales = normalize_batched_scales_shape(x_scales, num_experts)
 
         return x, x_scales
 
