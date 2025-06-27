@@ -3994,7 +3994,8 @@ class CompilationConfig:
     - 'none,+op1,+op2' to enable only op1 and op2
 
     By default, all custom ops are enabled when running without Inductor and
-    disabled when running with Inductor (compile_level >= Inductor)."""
+    disabled when running with Inductor: level>=PIECEWISE and use_inductor=True.
+    Inductor generates (fused) Triton kernels for disabled custom ops."""
     splitting_ops: list[str] = field(default_factory=list)
     """A list of ops to split the full graph into subgraphs, used in piecewise
     compilation."""
@@ -4003,10 +4004,13 @@ class CompilationConfig:
     use_inductor: bool = True
     """Whether to use inductor compilation:
 
-    - False: inductor compilation is not used. graph runs in eager.
-    - True: inductor compilation is used. one graph for symbolic shape
-        is compiled. In addition, compile for compile_sizes,
-        using configurations in inductor_compile_config."""
+    - False: inductor compilation is not used. graph runs in eager
+        (custom_ops enabled by default).
+    - True: inductor compilation is used (custom_ops disabled by default).
+        One graph for symbolic shape and one graph per size in compile_sizes
+        are compiled using configurations in inductor_compile_config.
+        
+    This setting is ignored if level<PIECEWISE."""
     compile_sizes: Optional[list[Union[int, str]]] = None
     """Sizes to compile for inductor. In addition
     to integers, it also supports "cudagraph_capture_sizes" to
@@ -4536,19 +4540,6 @@ class VllmConfig:
             self.compilation_config.cudagraph_num_of_warmups = 1
             self.compilation_config.level = CompilationLevel.PIECEWISE
             self.compilation_config.set_splitting_ops_for_v1()
-
-            # The behavior of custom ops with inductor depends on the config:
-            # - If use_inductor=True and custom_ops is empty:
-            #   Inductor generates Triton kernels for all registered custom ops
-            #   (default behavior)
-            # - If use_inductor=True and custom_ops is non-empty:
-            #   Custom CUDA kernels are used for specified ops while inductor
-            #   generates Triton kernels for remaining ops, including misc torch
-            #   ops in the model.
-            if (not self.compilation_config.custom_ops
-                    and self.compilation_config.use_inductor):
-                # Let inductor generate Triton kernels for the custom ops.
-                self.compilation_config.custom_ops = ["none"]
 
         self._set_cudagraph_sizes()
 
