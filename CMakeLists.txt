@@ -648,6 +648,14 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
 # if CUDA endif
 endif()
 
+if (VLLM_GPU_LANG STREQUAL "HIP")
+  # Add QuickReduce kernels
+  list(APPEND VLLM_EXT_SRC
+    "csrc/custom_quickreduce.cu"
+  )
+# if ROCM endif
+endif()
+
 message(STATUS "Enabling C extension.")
 define_gpu_extension_target(
   _C

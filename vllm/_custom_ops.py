@@ -1748,6 +1748,38 @@ def free_shared_buffer(ptr: int) -> None:
     torch.ops._C_custom_ar.free_shared_buffer(ptr)
 
 
+# quick all reduce
+def init_custom_qr(rank: int,
+                   world_size: int,
+                   qr_max_size: Optional[int] = None) -> int:
+    return torch.ops._C_custom_ar.init_custom_qr(rank, world_size, qr_max_size)
+
+
+def qr_destroy(fa: int) -> None:
+    torch.ops._C_custom_ar.qr_destroy(fa)
+
+
+def qr_all_reduce(fa: int,
+                  inp: torch.Tensor,
+                  out: torch.Tensor,
+                  quant_level: int,
+                  cast_bf2half: bool = False) -> None:
+    torch.ops._C_custom_ar.qr_all_reduce(fa, inp, out, quant_level,
+                                         cast_bf2half)
+
+
+def qr_get_handle(fa: int) -> torch.Tensor:
+    return torch.ops._C_custom_ar.qr_get_handle(fa)
+
+
+def qr_open_handles(fa: int, handles: list[torch.Tensor]) -> None:
+    return torch.ops._C_custom_ar.qr_open_handles(fa, handles)
+
+
+def qr_max_size() -> int:
+    return torch.ops._C_custom_ar.qr_max_size()
+
+
 def get_flash_mla_metadata(
     cache_seqlens: torch.Tensor,
     num_heads_per_head_k: int,
