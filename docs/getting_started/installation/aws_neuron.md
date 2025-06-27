@@ -24,7 +24,7 @@ The vLLM Neuron engine can use three different backends (also called frameworks)
 - optimum-neuron is an alternative backend specifically targeting the most recent models from the Hugging Face hub,
 - transformers-neuronx is the legacy Neuron backend, kept for backward compatibility.
 
-## NxD inference backend (default)
+## NxD Inference backend (default)
 
 ### Configure a new environment
 
@@ -154,19 +154,27 @@ Alternatively, users can directly call the NxDI library to trace and compile you
   but the directory does not exist, or the contents are invalid, Neuron will also fallback to a new compilation and store the artifacts
   under this specified path.
 
-## optimum-neuron backend (alternative for latest models)
+## Optimum Neuron backend (alternative for latest models)
 
 The `optimum-neuron` vLLM backend has been designed to ease the deployment of models hosted on the Hugging Face hub.
+It is based on the `optimum-neuron` [library](https://huggingface.co/docs/optimum-neuron/index).
 
-It supports two main modes:
-- it can be used for the inference of pre-exported models directly from the hub,
-- but it allows also the simplified deployment of vanilla models directly without recompilation using [cached artifacts](#hugging-face-neuron-cache).
+As a rule of thumb, the `optimum-neuron` backend supports more recent model architectures than the default (`neuronx-distributed-inference`) backend, such as Qwen3 for instance.
 
-Note that the compilation and export of vanilla models inside vLLM is not supported in the `optimum-neuron` backend, as the export to Neuron can lead to extremely long compilation times. You can still use the default backend for that use case.
+Another benefit of using the `optimum-neuron` backend is to take advantage of the [Hugging Face Neuron cache](https://huggingface.co/docs/optimum-neuron/guides/cache_system) to speed up the deployment of pytorch models.
 
-### Launch a Trn1/Inf2 instance and verify Neuron dependencies
+As a matter of fact, although binary artifacts corresponding to neuron models can be stored on the Hugging Face hub, most models are actually pytorch models.
 
-The easiest way to launch a Trainium or Inferentia instance with pre-installed Neuron dependencies is to launch an Amazon ec2 instance using the [Hugging Face Neuron Deep Learning AMI](https://aws.amazon.com/marketplace/pp/prodview-gr3e6yiscria2).
+For that reason, the `optimum-neuron` vLLM backend not only supports the inference of hub neuron models, but also the simplified deployment
+ of standard pytorch models directly without recompilation using cached artifacts.
+
+This is different from the behaviour of the default backend (`neuronx-distributed-inference`) that will export pytorch models on-the-fly to Neuron.
+
+Note that only a relevant subset of all possible configurations for a given model are cached. You can use the `optimum-cli` to get all [cached configurations](https://huggingface.co/docs/optimum-neuron/guides/cache_system#neuron-model-cache-lookup-inferentia-only) for each model.
+
+### Launch a Trn1/Inf2 instance and verify Optimum Neuron dependencies
+
+The easiest way to launch a Trainium or Inferentia instance with pre-installed Optimum Neuron dependencies is to launch an Amazon ec2 instance using the [Hugging Face Neuron Deep Learning AMI](https://aws.amazon.com/marketplace/pp/prodview-gr3e6yiscria2).
 
 Note: Trn2 instances are not supported by the `optimum-neuron` backend yet.
 
@@ -187,13 +195,6 @@ cd vllm
 pip install -U -r requirements/neuron.txt
 VLLM_TARGET_DEVICE="neuron" pip install -e .
 ```
-
-### Hugging Face Neuron cache
-
-The `optimum-neuron` vLLM backend takes advantage of the [Hugging Face Neuron cache](https://huggingface.co/docs/optimum-neuron/guides/cache_system) to speed up the deployment
-of models hosted on the Hugging Face hub.
-
-Note that only a relevant subset of all possible configurations for a given model are cached. You can use the `optimum-cli` to get all [cached configurations](https://huggingface.co/docs/optimum-neuron/guides/cache_system#neuron-model-cache-lookup-inferentia-only) for each model.
 
 ### Offline inference example
 
@@ -226,7 +227,7 @@ for output in outputs:
 
 ### Online inference example
 
-You can also laucn an Open AI compatibel inference server.
+You can also launch an Open AI compatible inference server.
 
 ```console
 VLLM_NEURON_FRAMEWORK='optimum-neuron' python -m vllm.entrypoints.openai.api_server \
@@ -238,7 +239,7 @@ VLLM_NEURON_FRAMEWORK='optimum-neuron' python -m vllm.entrypoints.openai.api_ser
     --device "neuron"
 ```
 
-## transformers-neuronx backend (legacy)
+## Transformers Neuronx backend (legacy)
 
 ### Configure a new environment
 
