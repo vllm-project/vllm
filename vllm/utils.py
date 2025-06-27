@@ -2422,6 +2422,7 @@ def memory_profiling(
     torch.cuda.empty_cache()
 
     result.after_profile.measure()
+
     diff_profile = result.after_profile - result.before_profile
     diff_from_create = result.after_profile - result.before_create
     result.torch_peak_increase = diff_profile.torch_peak
