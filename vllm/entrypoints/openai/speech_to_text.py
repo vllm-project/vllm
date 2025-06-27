@@ -191,6 +191,7 @@ class OpenAISpeechToText(OpenAIServing):
         self,
         request: SpeechToTextRequest,
         audio_data: bytes,
+        previous_text : str,
     ) -> tuple[list[PromptType], float]:
         # Validate request
         # TODO language should be optional and can be guessed.
@@ -232,8 +233,8 @@ class OpenAISpeechToText(OpenAIServing):
                     },
                 },
                 "decoder_prompt":
-                (f"<|startoftranscript|>{lang_token}"
-                 f"<|{self.task_type}|><|notimestamps|>{request.prompt}")
+                (f"<|prev|>{request.prompt}<|startoftranscript|>{lang_token}"
+                 f"<|{self.task_type}|><|notimestamps|>{previous_text}")
             }
             prompts.append(cast(PromptType, prompt))
         return prompts, duration
@@ -282,10 +283,11 @@ class OpenAISpeechToText(OpenAIServing):
                 return self.create_error_response(
                     f"Currently do not support PromptAdapter for "
                     f"{self.task_type.title()}.")
-
+            previous_text = ""
             prompts, duration_s = await self._preprocess_speech_to_text(
                 request=request,
                 audio_data=audio_data,
+                previous_text=previous_text
             )
 
         except ValueError as e:
