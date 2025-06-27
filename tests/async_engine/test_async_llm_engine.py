@@ -32,8 +32,8 @@ class RequestOutput:
 @dataclass
 class MockModelConfig:
     use_async_output_proc = True
-    media_io_kwargs = {}
-    mm_placeholder_str_override = {}
+    media_io_kwargs: dict[str, object] = {}
+    mm_placeholder_str_override: dict[str, str] = {}
 
 
 class MockEngine:
