@@ -571,6 +571,10 @@ class ModelConfig:
         else:
             self.truncation_side = "right"
 
+        model_info, arch = self.registry.inspect_model_cls(self.architectures)
+        self._model_info = model_info
+        self._architecture = arch
+
         self.pooler_config = self._init_pooler_config()
 
         self.dtype = _get_and_verify_dtype(
@@ -662,7 +666,17 @@ class ModelConfig:
 
     @property
     def architectures(self) -> list[str]:
+        # architectures in the model config.
         return getattr(self.hf_config, "architectures", [])
+
+    @property
+    def architecture(self) -> str:
+        # The architecture vllm actually used.
+        return self._architecture
+
+    @property
+    def model_info(self) -> dict[str, Any]:
+        return self._model_info
 
     def maybe_pull_model_tokenizer_for_s3(self, model: str,
                                           tokenizer: str) -> None:
@@ -1781,6 +1795,25 @@ class ParallelConfig:
     """Backend to use for data parallel, either "mp" or "ray"."""
     enable_expert_parallel: bool = False
     """Use expert parallelism instead of tensor parallelism for MoE layers."""
+    enable_eplb: bool = False
+    """Enable expert parallelism load balancing for MoE layers."""
+    num_redundant_experts: int = 0
+    """Number of redundant experts to use for expert parallelism."""
+    eplb_window_size: int = 1000
+    """Window size for expert load recording."""
+    eplb_step_interval: int = 3000
+    """
+    Interval for rearranging experts in expert parallelism.
+    
+    Note that if this is greater than the EPLB window size, only the metrics
+    of the last `eplb_window_size` steps will be used for rearranging experts.
+    """
+    eplb_log_balancedness: bool = False
+    """
+    Log the balancedness each step of expert parallelism.
+    This is turned off by default since it will cause communication overhead.
+    """
+
     max_parallel_loading_workers: Optional[int] = None
     """Maximum number of parallel loading workers when loading model
     sequentially in multiple batches. To avoid RAM OOM when using tensor
@@ -1851,18 +1884,41 @@ class ParallelConfig:
         return answer
 
     def stateless_init_dp_group(self) -> "ProcessGroup":
+        # NOTE: In high-concurrency scenarios multiple processes
+        # can pick the same (currently free) port through a race
+        # condition when calling `get_open_port()`. When the first
+        # process binds the port the others will subsequently fail
+        # with `torch.distributed.DistNetworkError: EADDRINUSE`.
+        # To make the initialization more robust we retry a few times
+        # with a fresh port whenever this specific error is observed.
+        from torch.distributed import DistNetworkError
+
         from vllm.distributed.utils import (
             stateless_init_torch_distributed_process_group)
 
-        # use gloo since the engine process might not have cuda device
-        dp_group = stateless_init_torch_distributed_process_group(
-            self.data_parallel_master_ip,
-            self.get_next_dp_init_port(),
-            self.data_parallel_rank,
-            self.data_parallel_size,
-            backend="gloo")
+        max_retries = 5
+        last_exc: Optional[Exception] = None
+        for _ in range(max_retries):
+            try:
+                # use gloo since the engine process might not have cuda device
+                return stateless_init_torch_distributed_process_group(
+                    self.data_parallel_master_ip,
+                    self.get_next_dp_init_port(),
+                    self.data_parallel_rank,
+                    self.data_parallel_size,
+                    backend="gloo")
+            except DistNetworkError as e:
+                # We only want to retry when the root cause is EADDRINUSE.
+                if "EADDRINUSE" in str(e):
+                    logger.warning(
+                        "Address already in use. Retrying with a new port.")
+                    last_exc = e
+                    continue  # try again with a new port
+                raise e
 
-        return dp_group
+        # If we get here all retries have failed.
+        assert last_exc is not None
+        raise last_exc
 
     @staticmethod
     def has_unfinished_dp(dp_group: "ProcessGroup",
@@ -1919,6 +1975,20 @@ class ParallelConfig:
             os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
             logger.info("Disabling V1 multiprocessing for external launcher.")
 
+        if self.enable_eplb:
+            if not current_platform.is_cuda():
+                raise ValueError(
+                    "Expert parallelism load balancing is only supported on "
+                    "CUDA devices now.")
+            if self.num_redundant_experts < 0:
+                raise ValueError(
+                    "num_redundant_experts must be non-negative, but got "
+                    f"{self.num_redundant_experts}.")
+        else:
+            if self.num_redundant_experts != 0:
+                raise ValueError(
+                    "num_redundant_experts should be used with EPLB."
+                    f"{self.num_redundant_experts}.")
         if self.distributed_executor_backend is None and self.world_size > 1:
             # We use multiprocessing by default if world_size fits on the
             # current node and we aren't in a ray placement group.
@@ -4423,6 +4493,9 @@ class VllmConfig:
     def __post_init__(self):
         """Verify configs are valid & consistent with each other.
         """
+
+        self.try_verify_and_update_config()
+
         if self.model_config is not None:
             self.model_config.verify_async_output_proc(self.parallel_config,
                                                        self.speculative_config,
@@ -4672,11 +4745,21 @@ class VllmConfig:
             batch_size_capture_list)
 
     def recalculate_max_model_len(self, max_model_len: int):
+        # Can only be called in try_verify_and_update_config
         model_config = self.model_config
         max_model_len = model_config.get_and_verify_max_len(max_model_len)
         self.model_config.max_model_len = max_model_len
         self.scheduler_config.max_model_len = max_model_len
-        self.compute_hash()
+
+    def try_verify_and_update_config(self):
+        architecture = getattr(self.model_config, "architecture", None)
+        if architecture is None:
+            return
+
+        from vllm.model_executor.models.config import MODELS_CONFIG_MAP
+        cls = MODELS_CONFIG_MAP.get(architecture, None)
+        if cls is not None:
+            cls.verify_and_update_config(self)
 
     def __str__(self):
         return (
