@@ -34,7 +34,9 @@ batchsize_forward_time: defaultdict = defaultdict(list)
 class DPMetadata:
     cu_tokens_across_dp_cpu: torch.Tensor
     hidden_states_across_dp: Optional[torch.Tensor] = None
-    router_logits_across_dp: Optional[torch.Tensor] = None
+    topk_ids_across_dp: Optional[torch.Tensor] = None
+    topk_weights_across_dp: Optional[torch.Tensor] = None
+    hidden_states: Optional[torch.Tensor] = None
 
 
 @dataclass
@@ -105,19 +107,11 @@ def set_forward_context(attn_metadata: Any,
         cu_tokens_across_dp_cpu = torch.cumsum(num_tokens_tensor, dim=0)
 
         if current_platform.is_hpu():
-            num_expert_names = [
-                "moe_num_experts",  # Dbrx
-                "num_experts",  # Jamba
-                "n_routed_experts",  # DeepSeek
-                "num_local_experts",  # Mixtral
-            ]
-            num_experts = 0
-            for name in num_expert_names:
-                num_experts = getattr(vllm_config.model_config.hf_text_config,
-                                      name, 0)
-                if num_experts > 0:
-                    break
-            assert num_experts > 0, \
+            num_experts_per_tok = 0
+            num_experts_per_tok = getattr(
+                vllm_config.model_config.hf_text_config, "num_experts_per_tok",
+                0)
+            assert num_experts_per_tok > 0, \
                 "No expert found in the model config.\
                     Please check the model config."
 
@@ -130,11 +124,16 @@ def set_forward_context(attn_metadata: Any,
                 (request_batch_size * dp_size, padded_seq_length, hidden_size),
                 device=device,
                 dtype=dtype)
-            router_logits_across_dp = torch.empty(
-                (batchsize * dp_size, num_experts), device=device, dtype=dtype)
+            topk_ids_across_dp = torch.empty((batchsize * dp_size,\
+                num_experts_per_tok), device=device, dtype=torch.int64)
+            topk_weights_across_dp = torch.empty((batchsize * dp_size,\
+                num_experts_per_tok), device=device, dtype=dtype)
+            hidden_states = torch.empty((batchsize, hidden_size),\
+                device=device, dtype=dtype)
             dp_metadata = DPMetadata(cu_tokens_across_dp_cpu,
                                      hidden_states_across_dp,
-                                     router_logits_across_dp)
+                                     topk_ids_across_dp,
+                                     topk_weights_across_dp, hidden_states)
         else:
             dp_metadata = DPMetadata(cu_tokens_across_dp_cpu)
 

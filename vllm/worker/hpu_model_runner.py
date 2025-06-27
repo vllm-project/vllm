@@ -2481,7 +2481,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                              num_patches=UNSET_NUM_PATCHES,
                              is_lora_profile_run=True,
                              num_iters=1,
-                             align_worker=True)
+                             align_worker=True,
+                             is_dummy_run=True)
         return
 
     def _remove_duplicate_submodules(self):
@@ -2509,9 +2510,10 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                         temperature=0,
                         num_patches=None,
                         num_iters=3,
-                        align_worker=False) -> None:
+                        align_worker=False,
+                        is_dummy_run=False) -> None:
         phase = 'prompt' if is_prompt else 'decode'
-        use_graphs = self._use_graphs(num_patches)
+        use_graphs = is_dummy_run or self._use_graphs(num_patches)
         scenario_name = ("warmup_"
                          f"{phase}_"
                          f"bs{batch_size}_"
@@ -2569,7 +2571,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                     temperature=temperature,
                     ctx=ctx) for i, b in enumerate(blocks)
             ]
-        torch.hpu.synchronize()
+        if not is_dummy_run:
+            torch.hpu.synchronize()
         profiler = None
         if is_pt_profiler_run and self.is_driver_worker:
             profiler = setup_profiler()
@@ -2597,7 +2600,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                                    kv_caches,
                                    intermediate_tensors=intermediate_tensors,
                                    warmup_mode=True,
-                                   ctx_blocks=ctx)
+                                   ctx_blocks=ctx,
+                                   is_dummy_run=is_dummy_run)
             else:  # decode with multi-step
                 inputs = dataclasses.replace(inputs,
                                              is_first_multi_step=True,
@@ -2617,13 +2621,15 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                                    num_steps=2,
                                    seqs=seqs,
                                    ctx_blocks=ctx)
-            torch.hpu.synchronize()
+            if not is_dummy_run:
+                torch.hpu.synchronize()
             if profiler:
                 profiler.step()
         if profiler:
             profiler.stop()
         self.profiler.end()
-        gc.collect()
+        if not is_dummy_run:
+            gc.collect()
 
     def remove_all_loras(self):
         if not self.lora_manager:
@@ -3228,7 +3234,8 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
         warmup_mode=False,
         previous_hidden_states: Optional[torch.Tensor] = None,
         seqs=None,
-        ctx_blocks: int = 1
+        ctx_blocks: int = 1,
+        is_dummy_run: bool = False,
     ) -> Optional[Union[List[SamplerOutput], IntermediateTensors]]:
         use_delayed_sampling = self.use_delayed_sampling and not warmup_mode
         assert not (use_delayed_sampling and num_steps != 1), \
@@ -3482,7 +3489,7 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                             **execute_model_kwargs,
                             selected_token_indices=sampling_metadata.
                             selected_token_indices)
-                        if warmup_mode:
+                        if warmup_mode and not is_dummy_run:
                             torch.hpu.synchronize()
                             import torch.distributed as dist
                             if dist.is_initialized():
@@ -3508,6 +3515,11 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                     LoraMask.setLoraMask(
                         lora_logits_mask.index_select(
                             0, sampling_metadata.selected_token_indices))
+
+                if is_dummy_run:
+                    fake_output = self._delayed_sampler_outputs(model_input)
+                    return [fake_output]
+
                 if not get_pp_group().is_last_rank:
                     return hidden_states
 

@@ -11,6 +11,7 @@ from torch.nn.parameter import Parameter
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEMethodBase,
                                                   FusedMoeWeightScaleSupported)
@@ -951,13 +952,28 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             topk_weights = F.softmax(router_logits, dim=1, dtype=torch.float32)
             topk_weights, topk_ids = torch.topk(topk_weights, top_k, dim=-1)
             topk_weights /= topk_weights.sum(dim=-1, keepdim=True)
-            topk_weights = topk_weights.to(x.dtype)
+        topk_ids = topk_ids.to(torch.int64)
+        topk_weights = topk_weights.to(x.dtype)
+        if layer.dp_size > 1:
+            cu_tokens_across_dp_cpu = get_forward_context(
+            ).dp_metadata.cu_tokens_across_dp_cpu
+
+            topk_ids_across_dp = get_forward_context(
+            ).dp_metadata.topk_ids_across_dp
+            topk_ids = layer.multicast_fn(topk_ids, cu_tokens_across_dp_cpu,
+                                          topk_ids_across_dp)
+
+            topk_weights_across_dp = get_forward_context(
+            ).dp_metadata.topk_weights_across_dp
+            topk_weights = layer.multicast_fn(topk_weights,
+                                              cu_tokens_across_dp_cpu,
+                                              topk_weights_across_dp)
         topk_ids = topk_ids.view(*x.shape[:-1], -1)
         topk_weights = topk_weights.view(*x.shape[:-1], -1)
         output = layer.moe_op(
             x,
-            topk_ids.to(torch.int64),
-            topk_weights.to(x.dtype),
+            topk_ids,
+            topk_weights,
             permuted_weights=True,
             activation=activation,
         )
