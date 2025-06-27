@@ -6,7 +6,7 @@ import os
 import uuid
 from asyncio import CancelledError
 from copy import copy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 import pytest
@@ -32,8 +32,8 @@ class RequestOutput:
 @dataclass
 class MockModelConfig:
     use_async_output_proc = True
-    media_io_kwargs: dict[str, object] = {}
-    mm_placeholder_str_override: dict[str, str] = {}
+    media_io_kwargs: dict[str, object] = field(default_factory=dict)
+    mm_placeholder_str_override: dict[str, str] = field(default_factory=dict)
 
 
 class MockEngine:
