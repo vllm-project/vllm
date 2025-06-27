@@ -267,7 +267,7 @@ void cutlass_scaled_fp4_mm_sm100a(torch::Tensor& D, torch::Tensor const& A,
               B_sf.sizes()[1], ")");
 
   auto out_dtype = D.dtype();
-  at::cuda::CUDAGuard device_guard{(char)A.get_device()};
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(A));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream(A.get_device());
 
   if (out_dtype == at::ScalarType::Half) {
