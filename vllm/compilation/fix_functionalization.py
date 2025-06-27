@@ -66,7 +66,7 @@ class FixFunctionalizationPass(VllmInductorPass):
                 mutated_args = {1: 'result', 2: 'residual_out'}
                 self.defunctionalize(graph, node, mutated_args)
             elif at_target == torch.ops._C.rms_norm_dynamic_per_token_quant.default:  # noqa: E501
-                mutated_args = {1: 'result', 2: 'scale', 3: 'residual'}
+                mutated_args = {1: 'result', 2: 'scale', 3: 'residual_out'}
                 self.defunctionalize(graph, node, mutated_args)
             elif at_target in [
                     torch.ops._C.rms_norm.default,

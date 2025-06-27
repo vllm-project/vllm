@@ -360,6 +360,7 @@ def rms_norm_dynamic_per_token_quant(
     epsilon: float,
     quant_dtype: torch.dtype,
     scale_ub: Optional[torch.Tensor] = None,
+    residual_out: Optional[torch.Tensor] = None,
     residual: Optional[torch.Tensor] = None
 ) -> tuple[torch.Tensor, torch.Tensor]:
     output = torch.empty_like(input, dtype=quant_dtype)
@@ -369,7 +370,7 @@ def rms_norm_dynamic_per_token_quant(
 
     torch.ops._C.rms_norm_dynamic_per_token_quant(output, input, weight,
                                                   scales, epsilon, scale_ub,
-                                                  residual)
+                                                  residual_out, residual)
     return output, scales
 
 
