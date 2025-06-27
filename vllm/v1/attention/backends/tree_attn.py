@@ -380,6 +380,7 @@ class TreeAttentionImpl(AttentionImpl):
             None,  # Skip KV reshape and cache. This class handles it.
             use_irope=use_irope,
         )
+        self.sliding_window = self.prefill_attention_impl.sliding_window
 
     def forward(
         self,

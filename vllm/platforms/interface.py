@@ -61,6 +61,7 @@ class _Backend(enum.Enum):
     DUAL_CHUNK_FLASH_ATTN = enum.auto()
     NO_ATTENTION = enum.auto()
     FLEX_ATTENTION = enum.auto()
+    TREE_ATTN = enum.auto()
 
 
 class PlatformEnum(enum.Enum):
