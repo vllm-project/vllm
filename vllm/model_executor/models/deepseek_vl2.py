@@ -279,6 +279,7 @@ class DeepseekVL2MultiModalProcessor(
         prompt: Union[str, list[int]],
         mm_data_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
+        tokenization_kwargs: dict[str, object],
         *,
         return_mm_hashes: bool,
     ) -> tuple[list[int], MultiModalKwargs, Optional[MultiModalHashes], bool]:
@@ -291,6 +292,7 @@ class DeepseekVL2MultiModalProcessor(
                 prompt=prompt,
                 mm_data_items=mm_data_items,
                 hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+                tokenization_kwargs=tokenization_kwargs,
                 return_mm_hashes=return_mm_hashes,
             )
 
@@ -298,6 +300,7 @@ class DeepseekVL2MultiModalProcessor(
             prompt=prompt,
             mm_data_items=mm_data_items,
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+            tokenization_kwargs=tokenization_kwargs,
             return_mm_hashes=return_mm_hashes,
         )
 
