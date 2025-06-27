@@ -1250,8 +1250,7 @@ def fused_experts_impl(
             "Hidden size mismatch")
     elif use_mxfp4_w4a4:
         # 16bit activation and fp4x2 packed weight
-        assert hidden_states.size(1) // 2 == w1.size(
-            2), "hidden size mismatch"
+        assert hidden_states.size(1) // 2 == w1.size(2), "hidden size mismatch"
     else:
         assert hidden_states.size(1) == w1.size(2), (
             f"Hidden size mismatch {hidden_states.size(1)} != {w1.size(2)}")
