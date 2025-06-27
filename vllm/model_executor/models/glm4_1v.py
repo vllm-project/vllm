@@ -29,6 +29,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from functools import partial
 from typing import Any, Callable, Literal, Optional, TypedDict, Union
 
+import math
 import numpy as np
 import torch
 import torch.nn as nn
@@ -955,6 +956,31 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
 
         return max(max_frames_per_video, 1)
 
+    def _get_video_second_idx(self, metadata: dict[str, Any], total_frames: int) -> list[int]:
+        video_processor = self.get_video_processor()
+
+        video_fps = getattr(metadata, "fps", 2.0)
+        meta_frames = getattr(metadata, "total_num_frames", total_frames)
+        max_frame_idx = meta_frames - 1
+        duration = getattr(metadata, "duration", round(max_frame_idx / video_fps) + 1)
+        if duration <= video_processor.max_duration:
+            n = int(math.floor(duration * video_processor.fps))
+            frame_indices = [min(max_frame_idx, int(math.ceil(i * video_fps / video_processor.fps))) for i in range(n)]
+        else:
+            num_samples = int(video_processor.max_duration * video_processor.fps)
+            if num_samples >= meta_frames:
+                frame_indices = list(range(meta_frames))
+            else:
+                target_seconds = np.linspace(0, duration, num_samples, endpoint=True)
+                frame_indices = [min(max_frame_idx, int(math.ceil(t * video_fps))) for t in target_seconds]
+        full_second_idxs = [int(idx / video_fps) for idx in frame_indices]
+        timestamps_list = full_second_idxs[::2]
+        unique_timestamps = []
+        for idx in range(0, len(timestamps_list)):
+            unique_timestamps.append(timestamps_list[idx])
+        selected_timestamps = unique_timestamps[:total_frames]
+        return selected_timestamps
+
 
 class Glm4vDummyInputsBuilder(BaseDummyInputsBuilder[Glm4vProcessingInfo]):
 
@@ -1121,8 +1147,9 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
             grid_thw = out_mm_kwargs["video_grid_thw"][item_idx]
             assert isinstance(grid_thw, torch.Tensor)
 
-            grid_t = grid_thw[0]
-            frames_idx_token = [tokenizer.encode(str(i), add_special_tokens=False) for i in range(grid_t)]
+            video, metadata = mm_items["video"][item_idx]
+            timestamps = self.info._get_video_second_idx(metadata, len(video))
+            frames_idx_token = [tokenizer.encode(str(i), add_special_tokens=False) for i in timestamps]
             num_tokens_per_frame = int(grid_thw[1:].prod()) // merge_length
 
             placeholder = []
@@ -1396,7 +1423,9 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
-        if multimodal_embeddings is not None:
+        if multimodal_embeddings is not None and len(multimodal_embeddings) != 0 and all(
+            embed.numel() > 0 for embed in multimodal_embeddings
+        ):
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids,
                 inputs_embeds,
