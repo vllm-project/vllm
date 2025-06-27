@@ -722,8 +722,6 @@ class Glm4vVisionTransformer(nn.Module):
         max_seqlen, seqlens = None, None
         if self.attn_backend == _Backend.FLASH_ATTN:
             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
-        elif self.attn_backend == _Backend.XFORMERS:
-            seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
         return max_seqlen, seqlens
 
     def forward(
@@ -1345,16 +1343,11 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         device = self.visual.device
         flat_grid_thw = torch.cat([torch.tensor([[1, h, w]] * t, device=device) for t, h, w in grid_thw])
-        print(flat_grid_thw)
-        print(flat_grid_thw.shape)
         if video_input["type"] == "video_embeds":
             video_embeds = video_input["video_embeds"].type(self.visual.dtype)
         else:
             pixel_values_videos = video_input["pixel_values_videos"].type(
                 self.visual.dtype)
-            print("========")
-            print(pixel_values_videos)
-            print(pixel_values_videos.shape)
             video_embeds = self.visual(pixel_values_videos, grid_thw=flat_grid_thw)
 
         # Split concatenated embeddings for each video item.
