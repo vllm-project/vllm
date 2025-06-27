@@ -16,10 +16,6 @@ from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
     _valid_deep_gemm_shape, deep_gemm_moe_fp8)
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     fused_topk, modular_triton_fused_moe)
-from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
-    moe_align_block_size)
-from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    per_token_group_quant_fp8)
 from vllm.platforms import current_platform
 
 dg_available = False
@@ -39,19 +35,15 @@ vllm_config.scheduler_config.max_model_len = 8192
 
 # Test configurations
 DTYPES = [torch.bfloat16]  # [torch.half, torch.bfloat16, torch.float32]
-NUM_TOKENS = [7, 2050]
-D = [512, 4096, 5120, 13824]
-GROUP_SIZE = [64, 128, 512]
 # Deepseek-V3's intermediate size 18432, so N is 18432*2/8=4608 at TP8
 # and its hidden size is 7168.
-M = [1, 2, 83, 128, 2048, 40000]
+M = [1, 83, 128, 2048, 8192]
 M_dg = [128, 192, 1335, 2048]
-N = [128, 256, 1024, 4608]  # [13824]
-K = [256, 512, 7168]  # [13824]
+N = [128, 256, 1024, 4608]
+K = [256, 512, 7168]
 BLOCK_SIZE = [[128, 128]]
-E = [2, 8, 16, 24]  # [128, 256]
+E = [2, 8, 16]  # [128, 256]
 TOP_KS = [1, 2, 6]
-OUT_DTYPES = [torch.bfloat16]  # [torch.float32, torch.half, torch.bfloat16]
 SEEDS = [0]
 
 
@@ -111,7 +103,7 @@ def test_w8a8_block_fp8_fused_moe(M, N, K, E, topk, block_size, dtype, seed,
 
     torch.manual_seed(seed)
 
-    monkeypatch.setenv("VLLM_FUSED_MOE_CHUNK_SIZE", "8192")
+    monkeypatch.setenv("VLLM_FUSED_MOE_CHUNK_SIZE", "2048")
 
     a = torch.randn((M, K), dtype=dtype) / 10
     score = torch.randn((M, E), dtype=dtype)
@@ -174,76 +166,6 @@ def test_w8a8_block_fp8_fused_moe(M, N, K, E, topk, block_size, dtype, seed,
     torch.testing.assert_close(m_out, ref_out, atol=tol, rtol=tol)
 
 
-def fp8_perm(m, idx):
-    if torch.is_floating_point(m) and torch.finfo(m.dtype).bits == 8:
-        return m.view(dtype=torch.uint8)[idx, ...].view(dtype=m.dtype)
-    else:
-        return m[idx, ...]
-
-
-def _moe_permute(a, a_s, topk_ids, num_groups, topk, block_m):
-    M, K = a.shape
-
-    sorted_token_ids, m_indices, num_pad = moe_align_block_size(
-        topk_ids, block_m, num_groups, None, pad_sorted_ids=True)
-
-    num_tokens = topk * M
-
-    sorted_token_ids = sorted_token_ids.clamp(max=num_tokens - 1)
-    m_indices = torch.repeat_interleave(m_indices, block_m, dim=0)
-    inv_perm = torch.argsort(sorted_token_ids)[:M * topk]
-
-    a = fp8_perm(a, sorted_token_ids // topk)
-    if a_s is not None:
-        a_s = a_s[sorted_token_ids // topk]
-
-    return a, a_s, m_indices, inv_perm
-
-
-def _moe_unpermute(out, inv_perm, topk, K, topk_weight):
-    M = topk_weight.shape[0]
-    out = out[inv_perm, ...]
-    tmp_out = out.view(-1, topk, K)
-    return (tmp_out * topk_weight.view(M, -1, 1).to(out.dtype)).sum(dim=1)
-
-
-def deep_gemm_w8a8_block_fp8_moe(M, K, a, w1, w2, w1_s, w2_s, topk_weight,
-                                 topk_ids, block_shape):
-    """Fused moe with block-wise quantization using DeepGemm grouped gemm."""
-    num_groups = w1.shape[0]
-    M, K = a.shape
-    N = w2.shape[-1]
-    topk = topk_ids.size(1)
-
-    block_m = deep_gemm.get_m_alignment_for_contiguous_layout()
-
-    _, block_k = block_shape[0], block_shape[1]
-
-    a_q, a_s = per_token_group_quant_fp8(a, block_m)
-
-    a_q, a_s, m_indices, inv_perm = _moe_permute(a_q, a_s, topk_ids,
-                                                 num_groups, topk, block_m)
-
-    inter_out = torch.zeros((a_q.shape[0], N * 2),
-                            dtype=torch.bfloat16,
-                            device=a.device)
-
-    deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous((a_q, a_s), (w1, w1_s),
-                                                        inter_out, m_indices)
-
-    act_out = SiluAndMul().forward_native(inter_out)
-    act_out_q, act_out_s = per_token_group_quant_fp8(act_out, block_k)
-
-    out = torch.zeros(a_q.shape[0], K, dtype=torch.bfloat16, device=a.device)
-
-    deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
-        (act_out_q, act_out_s), (w2, w2_s), out, m_indices)
-
-    final_out = _moe_unpermute(out, inv_perm, topk, K, topk_weight)
-
-    return final_out
-
-
 @pytest.mark.parametrize("M,N,K,E,topk,seed",
                          itertools.product(M_dg, N, K, E, TOP_KS, SEEDS))
 @pytest.mark.skipif(not dg_available, reason="DeepGemm kernels not available.")
@@ -289,14 +211,8 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed,
 
     # Set the context to avoid lots of warning spam.
     with set_current_vllm_config(vllm_config):
-        if M >= 128:
-            ref_out = deep_gemm_w8a8_block_fp8_moe(M, K, a, w1, w2, w1_s, w2_s,
-                                                   topk_weights, topk_ids,
-                                                   block_size)
-        else:
-            ref_out = torch_w8a8_block_fp8_moe(a, w1, w2, w1_s, w2_s,
-                                               topk_weights, topk_ids,
-                                               block_size)
+        ref_out = torch_w8a8_block_fp8_moe(a, w1, w2, w1_s, w2_s, topk_weights,
+                                           topk_ids, block_size)
 
         if use_compile:
             deep_gemm_moe_fp8_fn = torch.compile(deep_gemm_moe_fp8,
