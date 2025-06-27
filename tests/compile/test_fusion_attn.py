@@ -1,23 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
-from typing import Optional
 
 import pytest
 import torch._dynamo
 
-from tests.compile.backend import TestBackend
+from tests.compile.backend import LazyInitPass, TestBackend, TestPassManager
 from tests.models.utils import check_outputs_equal
-from vllm.config import set_current_vllm_config
 from vllm import LLM, SamplingParams
 from vllm.compilation.fusion import QUANT_OPS, QuantKey, kFp8StaticTensorSym
 from vllm.compilation.fusion_attn import ATTN_OP, AttnFusionPass
 from vllm.compilation.fx_utils import find_op_nodes
-from vllm.compilation.noop_elimination import NoOpEliminationPass
-from vllm.config import CompilationConfig, CompilationLevel, VllmConfig, ModelConfig, PassConfig
+from vllm.compilation.vllm_inductor_pass import PrinterInductorPass
+from vllm.config import (CompilationConfig, CompilationLevel, ModelConfig,
+                         PassConfig, VllmConfig, get_current_vllm_config,
+                         set_current_vllm_config)
 from vllm.platforms import current_platform
-
-# globals needed for string-import custom Dynamo backend field
-backend: Optional[TestBackend] = None
-backend_unfused: Optional[TestBackend] = None
 
 
 @pytest.mark.parametrize(
@@ -37,9 +33,6 @@ def test_attention_fusion(example_prompts, monkeypatch, model: str,
     # (for some reason the reset at the end is not enough)
     torch._dynamo.reset()
 
-    # Use global backends
-    global backend, backend_unfused
-
     monkeypatch.setenv("VLLM_USE_V1", str(int(use_v1)))
     monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
     monkeypatch.setenv("VLLM_USE_TRITON_FLASH_ATTN", str(int(use_triton_fa)))
@@ -49,56 +42,54 @@ def test_attention_fusion(example_prompts, monkeypatch, model: str,
     prompts = example_prompts[:4] + example_prompts[5:]
 
     compile_config = CompilationConfig(
-        # DYNAMO_AS_IS triggers custom backend & does full Dynamo compilation
-        # DYNAMO_ONCE does not properly propagate shapes.
-        level=CompilationLevel.DYNAMO_AS_IS,
+        level=CompilationLevel.PIECEWISE,
         full_cuda_graph=True,
-        pass_config=PassConfig(),
-        backend="tests.compile.test_fusion_attn.backend_unfused"
+        pass_config=PassConfig(
+            enable_noop=True,
+            enable_attn_fusion=False,
+        ),
+        use_cudagraph=False,
     )
-    model_config = ModelConfig(dtype="bfloat16", )
+    model_config = ModelConfig(dtype="bfloat16")
     vllm_config = VllmConfig(compilation_config=compile_config,
                              model_config=model_config)
-    with set_current_vllm_config(vllm_config):
-        backend_unfused = TestBackend(NoOpEliminationPass(vllm_config))
 
+    vllm_config.compilation_config.inductor_compile_config = {
+        "post_grad_custom_post_pass":
+        PrinterInductorPass("test_print", vllm_config, always=True)
+    }
+    with set_current_vllm_config(vllm_config):
         print("Before ctr 1")
+        backend = TestBackend()  # also force disable caches
         llm = LLM(model,
-                compilation_config=compile_config,
-                gpu_memory_utilization=0.5,
-                max_model_len=2048)
+                  compilation_config=compile_config,
+                  gpu_memory_utilization=0.5,
+                  max_model_len=2048)
         print("After ctr 1")
 
         sampling_params = SamplingParams(temperature=0.0,
-                                        max_tokens=10,
-                                        top_p=0.95)
+                                         max_tokens=10,
+                                         top_p=0.95)
 
         print("Before generate 1")
         unfused_output = llm.generate(prompts, sampling_params)
         print("After generate 1")
-        backend_unfused = None  # Reset backend to make sure llm gets released
         del llm
 
     compile_config = CompilationConfig(
-        # DYNAMO_AS_IS triggers custom backend & does full Dynamo compilation
-        # DYNAMO_ONCE does not properly propagate shapes.
-        level=CompilationLevel.DYNAMO_AS_IS,
+        level=CompilationLevel.PIECEWISE,
         full_cuda_graph=True,
-        pass_config=PassConfig(enable_noop=True, enable_attn_fusion=True),
-        backend="tests.compile.test_fusion_attn.backend"
+        pass_config=PassConfig(
+            enable_noop=True,
+            enable_attn_fusion=False,  # Added manually for checking
+        ),
+        use_cudagraph=False,
     )
     vllm_config = VllmConfig(compilation_config=compile_config,
                              model_config=model_config)
 
-    with set_current_vllm_config(vllm_config):
-        # AttnFusionPass needs attention layers to be registered in config upon init
-        # so we initialize it during compilation.
-        attn_pass = lambda *args, **kw: AttnFusionPass(vllm_config)(*args, **kw)
-        backend = TestBackend(NoOpEliminationPass(vllm_config), attn_pass)
-        llm2 = LLM(model,
-                compilation_config=compile_config,
-                gpu_memory_utilization=0.5,
-                max_model_len=2048)
+    def check(test_pass_manager: TestPassManager):
+        compile_config = get_current_vllm_config().compilation_config
 
         # check support
         attn_fusion_supported = [
@@ -107,23 +98,40 @@ def test_attention_fusion(example_prompts, monkeypatch, model: str,
                                                     quant_key.group_shape)
             for key, layer in compile_config.static_forward_context.items()
         ]
+        print(f"{attn_fusion_supported=}")
+        if any(attn_fusion_supported):
+            # Check quant ops
+            test_pass_manager.check_before_ops([QUANT_OPS[quant_key]],
+                                               fully_replaced=False)
 
-    print(f"{attn_fusion_supported=}")
-    if any(attn_fusion_supported):
-        # Check quant ops
-        backend.check_before_ops([QUANT_OPS[quant_key]], fully_replaced=False)
+        # attention ops present in both, just output_scale param changes
+        attn_nodes_pre = list(
+            find_op_nodes(ATTN_OP, test_pass_manager.graph_pre_pass))
+        attn_nodes_post = list(
+            find_op_nodes(ATTN_OP, test_pass_manager.graph_post_pass))
+        assert len(attn_nodes_pre) == len(attn_nodes_post)
 
-    # attention ops present in both, just output_scale param changes
-    attn_nodes_pre = list(find_op_nodes(ATTN_OP, backend.graph_pre_pass))
-    attn_nodes_post = list(find_op_nodes(ATTN_OP, backend.graph_post_pass))
-    assert len(attn_nodes_pre) == len(attn_nodes_post)
+        for i in range(len(attn_nodes_pre)):
+            assert attn_nodes_pre[i].kwargs["output_scale"] is None
+            fused = attn_nodes_post[i].kwargs["output_scale"] is not None
+            assert fused == attn_fusion_supported[i], \
+                f"Node {i} {'' if fused else 'not '} expected " \
+                f"to have fused output quant"
 
-    for i in range(len(attn_nodes_pre)):
-        assert attn_nodes_pre[i].kwargs["output_scale"] is None
-        fused = attn_nodes_post[i].kwargs["output_scale"] is not None
-        assert fused == attn_fusion_supported[i], \
-            f"Node {i} {'' if fused else 'not '} expected " \
-            f"to have fused output quant"
+    with set_current_vllm_config(vllm_config):
+        # Upon init, AttnFusionPass needs attention layers to be registered
+        # in config so we initialize it during compilation.
+
+        # Backend registers its pass manager into current config
+        # also sets force_disable_caches=True
+        # TODO maybe add register method
+        backend = TestBackend(LazyInitPass(AttnFusionPass, vllm_config),
+                              check_fn=check)
+
+        llm2 = LLM(model,
+                   compilation_config=compile_config,
+                   gpu_memory_utilization=0.5,
+                   max_model_len=2048)
 
     # check outputs
     fused_output = llm2.generate(prompts, sampling_params)
@@ -141,6 +149,3 @@ def test_attention_fusion(example_prompts, monkeypatch, model: str,
 
     # Clean Dynamo cache to avoid polluting other case(s)
     torch._dynamo.reset()
-
-    # Reset backend to make sure llm2 gets released
-    backend = None
