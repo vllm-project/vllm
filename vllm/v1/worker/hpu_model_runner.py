@@ -2145,7 +2145,6 @@ class HPUModelRunner:
         if prompt_profile_cfg or decode_profile_cfg:
             self._generate_profiling(prompt_profile_cfg, decode_profile_cfg)
             raise AssertionError("Finished profiling")
-        self.bucketing_ctx.generate_prompt_buckets()
         kv_caches = self.kv_caches
         max_blocks = int(kv_caches[0][0].size(0) // self.block_size)
         self.bucketing_ctx.generate_prompt_buckets()
@@ -2194,10 +2193,10 @@ class HPUModelRunner:
                     ("HabanaWorker.determine_num_available_blocks needs "
                     "to be called before warming up the model.")
                 #TODO(kzawora): align_workers
-                #mem_post_prompt, prompt_batch_seq, prompt_captured_all = \
-                #    self.warmup_graphs(
-                #    self.bucketing_ctx.prompt_buckets,
-                #    True, kv_caches)
+                mem_post_prompt, prompt_batch_seq, prompt_captured_all = \
+                    self.warmup_graphs(
+                    self.bucketing_ctx.prompt_buckets,
+                    True, kv_caches)
                 mem_post_prompt = 0
                 mem_post_decode, decode_batch_seq, decode_captured_all = \
                     self.warmup_graphs(
