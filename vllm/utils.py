@@ -2415,15 +2415,6 @@ def memory_profiling(
     result.weights_memory = weights_memory
 
     result.before_profile.measure()
-    logger.info("Before Profiling:", "torch_peak:",
-                result.before_profile.torch_peak / GiB_bytes, "torch_mem:",
-                result.before_profile.torch_memory / GiB_bytes,
-                "non_torch_mem:",
-                result.before_profile.non_torch_memory / GiB_bytes,
-                "cuda_mem:", result.before_profile.cuda_memory / GiB_bytes,
-                "free_mem:", result.before_profile.free_memory / GiB_bytes,
-                "total_mem:", result.before_profile.total_memory / GiB_bytes)
-    torch.cuda.memory._record_memory_history()
 
     yield result
 
@@ -2431,15 +2422,6 @@ def memory_profiling(
     torch.cuda.empty_cache()
 
     result.after_profile.measure()
-    logger.info("After Profiling: torch_peak:",
-                result.after_profile.torch_peak / GiB_bytes, "torch_mem:",
-                result.after_profile.torch_memory / GiB_bytes,
-                "non_torch_mem:",
-                result.after_profile.non_torch_memory / GiB_bytes, "cuda_mem:",
-                result.after_profile.cuda_memory / GiB_bytes, "free_mem:",
-                result.after_profile.free_memory / GiB_bytes, "total_mem:",
-                result.after_profile.total_memory / GiB_bytes)
-
     diff_profile = result.after_profile - result.before_profile
     diff_from_create = result.after_profile - result.before_create
     result.torch_peak_increase = diff_profile.torch_peak

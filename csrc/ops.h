@@ -115,6 +115,7 @@ void rms_norm_dynamic_per_token_quant(torch::Tensor& out,
                                       torch::Tensor& scales,
                                       double const epsilon,
                                       std::optional<torch::Tensor> scale_ub,
+                                      std::optional<torch::Tensor> residual_out,
                                       std::optional<torch::Tensor> residual);
 
 void rotary_embedding(torch::Tensor& positions, torch::Tensor& query,

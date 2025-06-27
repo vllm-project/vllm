@@ -400,6 +400,7 @@ class RMSNormDynamicQuantPattern(RMSNormQuantPattern):
                                      scale=scale,
                                      epsilon=self.epsilon,
                                      scale_ub=None,
+                                     residual_out=None,
                                      residual=None)
 
             # result, scale
@@ -471,11 +472,14 @@ class FusedAddRMSNormDynamicQuantPattern(RMSNormQuantPattern):
     def register(self, pm_pass: PatternMatcherPass,
                  record_match: Callable[[MultiOutputMatch], bool]):
 
-        def pattern(result: torch.Tensor, input: torch.Tensor,
+        def pattern(result: torch.Tensor, result_rms: torch.Tensor,
+                    input: torch.Tensor, residual_out: torch.Tensor,
                     residual: torch.Tensor, weight: torch.Tensor,
                     scale: torch.Tensor):
             at = auto_functionalized(RMS_ADD_OP,
+                                     result=result_rms,
                                      input=input,
+                                     residual_out=residual_out,
                                      residual=residual,
                                      weight=weight,
                                      epsilon=self.epsilon)
@@ -488,7 +492,8 @@ class FusedAddRMSNormDynamicQuantPattern(RMSNormQuantPattern):
             # result, residual, scale
             return at1[1], at[2], at1[2]
 
-        def replacement(result: torch.Tensor, input: torch.Tensor,
+        def replacement(result: torch.Tensor, result_rms: torch.Tensor,
+                        input: torch.Tensor, residual_out: torch.Tensor,
                         residual: torch.Tensor, weight: torch.Tensor,
                         scale: torch.Tensor):
             at = auto_functionalized(self.FUSED_OP,
@@ -498,6 +503,7 @@ class FusedAddRMSNormDynamicQuantPattern(RMSNormQuantPattern):
                                      scale=scale,
                                      epsilon=self.epsilon,
                                      scale_ub=None,
+                                     residual_out=residual_out,
                                      residual=residual)
 
             # result, residual, scale
@@ -505,7 +511,9 @@ class FusedAddRMSNormDynamicQuantPattern(RMSNormQuantPattern):
 
         inputs = [
             torch.empty(5, 4, device="cuda", dtype=self.quant_dtype),  # result
+            empty_bf16(5, 4),  # result_rms 
             empty_bf16(5, 4),  # input
+            empty_bf16(5, 4),  # residual_out
             empty_bf16(5, 4),  # residual
             empty_bf16(1, 5),  # weight
             empty_fp32(1, 1)  # scale
