@@ -807,6 +807,8 @@ class OpenAIServing:
                 messages=messages,
                 **_chat_template_kwargs,
             )
+        elif tokenizer is None:
+            request_prompt = "placeholder"
         else:
             request_prompt = apply_hf_chat_template(
                 tokenizer=tokenizer,
@@ -831,7 +833,17 @@ class OpenAIServing:
             request = tool_parser(tokenizer).adjust_request(  # type: ignore
                 request=request)
 
-        if isinstance(request_prompt, str):
+        if tokenizer is None:
+            prompt_inputs = {}
+            if "prompt_token_ids" not in request.additional_data:
+                raise Exception("Request must contain "
+                                "additional_data['prompt_token_ids'] "
+                                "when the tokenizer is not initialised")
+
+            prompt_inputs["prompt_token_ids"] = request.additional_data[
+                "prompt_token_ids"]
+
+        elif isinstance(request_prompt, str):
             prompt_inputs = await self._tokenize_prompt_input_async(
                 request,
                 tokenizer,

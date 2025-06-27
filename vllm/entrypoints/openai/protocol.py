@@ -1109,7 +1109,7 @@ class EmbeddingChatRequest(OpenAIBaseModel):
     model: Optional[str] = None
     messages: list[ChatCompletionMessageParam]
 
-    encoding_format: Literal["float", "base64"] = "float"
+    encoding_format: Literal["float", "base64", "tensors"] = "float"
     dimensions: Optional[int] = None
     user: Optional[str] = None
     truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None

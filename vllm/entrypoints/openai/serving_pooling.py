@@ -25,6 +25,7 @@ from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.utils import _validate_truncation_size
 from vllm.logger import init_logger
+from vllm.multimodal.image import ImageEmbeddingMediaIO
 from vllm.outputs import PoolingOutput, PoolingRequestOutput
 from vllm.utils import merge_async_iterators
 
@@ -33,7 +34,7 @@ logger = init_logger(__name__)
 
 def _get_data(
     output: PoolingOutput,
-    encoding_format: Literal["float", "base64"],
+    encoding_format: Literal["float", "base64", "tensors"],
 ) -> Union[list[float], str]:
     if encoding_format == "float":
         return output.data.tolist()
@@ -43,6 +44,9 @@ def _get_data(
         pt_float32 = output.data.to(dtype=torch.float32)
         pooling_bytes = np.array(pt_float32, dtype="float32").tobytes()
         return base64.b64encode(pooling_bytes).decode("utf-8")
+    elif encoding_format == "tensors":
+        tensor_encoding_io = ImageEmbeddingMediaIO()
+        tensor_encoding_io.encode_base64(output.data)
 
     assert_never(encoding_format)
 
@@ -99,7 +103,11 @@ class OpenAIServingPooling(OpenAIServing):
                 prompt_adapter_request,
             ) = self._maybe_get_adapters(request)
 
-            tokenizer = await self.engine_client.get_tokenizer(lora_request)
+            if not self.model_config.skip_tokenizer_init:
+                tokenizer = await self.engine_client.get_tokenizer(lora_request
+                                                                   )
+            else:
+                tokenizer = None
 
             if prompt_adapter_request is not None:
                 raise NotImplementedError("Prompt adapter is not supported "
@@ -205,7 +213,7 @@ class OpenAIServingPooling(OpenAIServing):
         request_id: str,
         created_time: int,
         model_name: str,
-        encoding_format: Literal["float", "base64"],
+        encoding_format: Literal["float", "base64", "tensors"],
     ) -> PoolingResponse:
         items: list[PoolingResponseData] = []
         num_prompt_tokens = 0

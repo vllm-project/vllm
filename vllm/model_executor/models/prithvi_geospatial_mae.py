@@ -45,7 +45,7 @@ from vllm.sequence import (IntermediateTensors, PoolerOutput,
 class PrithviGeoSpatialMAEProcessingInfo(BaseProcessingInfo):
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
-        return {"image": None}
+        return {"image": None,"tensors":2}
 
 
 class PrithviGeoSpatialMAEInputBuilder(
@@ -101,7 +101,11 @@ class PrithviGeoSpatialMAEMultiModalProcessor(BaseMultiModalProcessor):
         mm_kwargs = {}
 
         for k, v in mm_data.items():
-            mm_kwargs[k] = v
+            if isinstance(v,dict) and k == "tensors":
+                for tensor_name,tensor in v.items():
+                    mm_kwargs[tensor_name] = tensor 
+            else:        
+                mm_kwargs[k] = v
         mm_place_holders = {"image": [PlaceholderRange(offset=0, length=0)]}
 
         multimodal_kwargs_items = [
