@@ -64,13 +64,13 @@ class WeightsMapper:
         return ((out_name, data) for name, data in weights
                 if (out_name := self._map_name(name)) is not None)
 
-    def apply_list(self, values: list[str]):
+    def apply_list(self, values: list[str]) -> list[str]:
         return [
             out_name for name in values
             if (out_name := self._map_name(name)) is not None
         ]
 
-    def apply_dict(self, values: dict[str, Any]):
+    def apply_dict(self, values: dict[str, Any]) -> dict[str, Any]:
         return {
             out_name: value
             for name, value in values.items()
