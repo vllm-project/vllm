@@ -676,11 +676,12 @@ class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         local_num_experts: int,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
         assert a.dim() == 2
-        num_dp = self.dp_size
+        num_dp = self.world_size // self.dp_size
         num_experts = local_num_experts
         workspace13 = (num_experts, self.max_num_tokens * num_dp, K)
         workspace2 = (self.max_num_tokens * num_dp, N)
-        return (workspace13, workspace2, workspace13, a.dtype)
+        output = workspace13
+        return (workspace13, workspace2, output, a.dtype)
 
     def dequant(self, t: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
         assert self.quant_config.is_quantized

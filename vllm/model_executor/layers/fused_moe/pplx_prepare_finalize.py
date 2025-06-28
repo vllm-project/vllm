@@ -32,16 +32,16 @@ def pplx_hidden_dim_scale_bytes(
         elem_size = torch.float32.itemsize
 
         if per_act_token_quant:
-            # per-token
+            # per-token (M x 1)
             assert block_shape is None
             hidden_scale_bytes = elem_size
         elif block_shape is not None:
-            # per-group
+            # per-group (M x K_tiles)
             block_size = block_shape[1]
             num_blocks = cdiv(hidden_dim, block_size)
             hidden_scale_bytes = num_blocks * elem_size
         else:
-            # per-tensor
+            # per-tensor (1 x 1)
             hidden_scale_bytes = elem_size
     else:
         hidden_dim_bytes = hidden_dim * in_dtype.itemsize
@@ -134,6 +134,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             orig_a_scale_block_shape = a1q_scale.shape[-1]
 
             if not quant_config.is_grouped:
+                # TODO (bnell): use group_broadcast instead?
                 a1q_scale = a1q_scale.repeat(repeat_rows, repeat_cols)
 
         assert a1q_scale is None or a1q_scale.ndim == 2, \
@@ -163,23 +164,26 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             float32_size = torch.float32.itemsize
 
             if quant_config.is_per_act_token:
+                # (M x 1) -> (E x M x 1)
                 token_dim = expert_x.size(1)
                 final_dim = expert_x.size(2)
                 assert final_dim % float32_size == 0
             elif quant_config.is_per_tensor:
+                # (1 x 1) -> (E x 1 x 1)
                 token_dim = expert_x.size(1)
-                final_dim = float32_size
+                final_dim = 1
             else:
+                # (M x K_tiles) -> (E x M x K_tiles)
                 assert quant_config.block_shape is not None
                 num_blocks = cdiv(expert_x.size(2),
                                   quant_config.block_shape[1])
-                final_dim = round_up(num_blocks, float32_size)
                 token_dim = expert_x.size(1)
+                final_dim = num_blocks
 
             expert_x_scale_shape = (
                 num_local_experts,
                 token_dim,
-                final_dim,
+                round_up(final_dim, 4)  # or 16?
             )
 
             # TODO (bnell): make sure shape matches up with pplx hidden bytes

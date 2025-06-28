@@ -181,35 +181,40 @@ def _pplx_moe(
     per_out_ch: bool,
     use_internode: bool,
 ):
-    if use_internode:
-        uid = nvshmem_get_unique_id(
-        ) if pgi.rank == 0 else nvshmem_alloc_empty_unique_id()
-        torch.distributed.broadcast(uid, src=0)
-        nvshmem_init(uid, pgi.rank, pgi.world_size)
-    else:
-        group_ranks = list(range(pgi.world_size))
-        cpu_group = torch.distributed.new_group(group_ranks, backend="gloo")
-        group_name = cpu_group.group_name
+    try:
+        if use_internode:
+            uid = nvshmem_get_unique_id(
+            ) if pgi.rank == 0 else nvshmem_alloc_empty_unique_id()
+            torch.distributed.broadcast(uid, src=0)
+            nvshmem_init(uid, pgi.rank, pgi.world_size)
+        else:
+            group_ranks = list(range(pgi.world_size))
+            cpu_group = torch.distributed.new_group(group_ranks,
+                                                    backend="gloo")
+            group_name = cpu_group.group_name
 
-    with set_current_vllm_config(vllm_config):
-        torch_output = torch_experts(a_full, w1_full, w2_full, topk_weights,
-                                     topk_ids)
-        pplx_output = pplx_cutlass_moe(pgi, dp_size, a, w1, w2, w1_scale,
-                                       w2_scale, topk_weights, topk_ids,
-                                       a1_scale, out_dtype, per_act_token,
-                                       per_out_ch, group_name)
+        with set_current_vllm_config(vllm_config):
+            torch_output = torch_experts(a_full, w1_full, w2_full,
+                                         topk_weights, topk_ids)
+            pplx_output = pplx_cutlass_moe(pgi, dp_size, a, w1, w2, w1_scale,
+                                           w2_scale, topk_weights, topk_ids,
+                                           a1_scale, out_dtype, per_act_token,
+                                           per_out_ch, group_name)
 
-        torch_output = chunk_by_rank(torch_output, pgi.rank,
-                                     pgi.world_size).to(pplx_output.device)
+            torch_output = chunk_by_rank(torch_output, pgi.rank,
+                                         pgi.world_size).to(pplx_output.device)
 
-    # Uncomment if more debugging is needed
-    # print("PPLX OUT:", pplx_output)
-    # print("TORCH OUT:", torch_output)
+        # Uncomment if more debugging is needed
+        # print("PPLX OUT:", pplx_output)
+        # print("TORCH OUT:", torch_output)
 
-    torch.testing.assert_close(pplx_output, torch_output, atol=0.05, rtol=0)
-
-    if use_internode:
-        nvshmem_finalize()
+        torch.testing.assert_close(pplx_output,
+                                   torch_output,
+                                   atol=0.05,
+                                   rtol=0)
+    finally:
+        if use_internode:
+            nvshmem_finalize()
 
 
 @pytest.mark.parametrize("m", [2, 224])
