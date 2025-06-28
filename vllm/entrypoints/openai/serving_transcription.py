@@ -63,13 +63,15 @@ class OpenAIServingTranscription(OpenAISpeechToText):
             self, request: TranscriptionRequest,
             result_generator: list[AsyncGenerator[RequestOutput, None]],
             request_id: str, request_metadata: RequestResponseMetadata,
-            sampling_params : SamplingParams) -> AsyncGenerator[str, None]:
+            sampling_params : SamplingParams,
+            previous_context : list[str]) -> AsyncGenerator[str, None]:
         generator = self._speech_to_text_stream_generator(
             request=request,
             async_result_generator=result_generator,
             request_id=request_id,
             request_metadata=request_metadata,
             sampling_params=sampling_params,
+            previous_context=previous_context,
             chunk_object_type="transcription.chunk",
             response_stream_choice_class=TranscriptionResponseStreamChoice,
             stream_response_class=TranscriptionStreamResponse,
@@ -118,13 +120,15 @@ class OpenAIServingTranslation(OpenAISpeechToText):
             self, request: TranslationRequest,
             result_generator: list[AsyncGenerator[RequestOutput, None]],
             request_id: str, request_metadata: RequestResponseMetadata,
-            sampling_params : SamplingParams) -> AsyncGenerator[str, None]:
+            sampling_params : SamplingParams,
+            previous_context : list[str]) -> AsyncGenerator[str, None]:
         generator = self._speech_to_text_stream_generator(
             request=request,
             async_result_generator=result_generator,
             request_id=request_id,
             request_metadata=request_metadata,
             sampling_params=sampling_params,
+            previous_context=previous_context,
             chunk_object_type="translation.chunk",
             response_stream_choice_class=TranslationResponseStreamChoice,
             stream_response_class=TranslationStreamResponse,

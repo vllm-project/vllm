@@ -301,7 +301,7 @@ class OpenAISpeechToText(OpenAIServing):
             if request.stream:
                 return stream_generator_method(request, asyncPromptGenerator,
                                             request_id, request_metadata,
-                                            sampling_params)
+                                            sampling_params, previous_text)
             
             # Non-streaming response.
             text= ""
@@ -326,7 +326,7 @@ class OpenAISpeechToText(OpenAIServing):
                     
                 previous_text[0] = ' '.join(
                     partial_text.strip()
-                    .split(' ')[-10:]
+                    .split(' ')[-5:]
                 )
                 text += partial_text
 
@@ -345,6 +345,7 @@ class OpenAISpeechToText(OpenAIServing):
         request_id: str,
         request_metadata: RequestResponseMetadata,
         sampling_params : SamplingParams,
+        previous_context : list[str],
         chunk_object_type: Literal["translation.chunk", "transcription.chunk"],
         response_stream_choice_class: Union[
             type[TranscriptionResponseStreamChoice],
@@ -366,6 +367,7 @@ class OpenAISpeechToText(OpenAIServing):
 
         try:
             async for (prompt, duration_s) in async_result_generator:
+                partial_text = ""
                 result_generator = self.engine_client.generate(
                     prompt,
                     sampling_params,
@@ -396,6 +398,7 @@ class OpenAISpeechToText(OpenAIServing):
                     # Just one output (n=1) supported.
                     assert len(res.outputs) == 1
                     output = res.outputs[0]
+                    partial_text += res.outputs[0].text
 
                     delta_message = DeltaMessage(content=output.text)
                     completion_tokens += len(output.token_ids)
@@ -428,7 +431,11 @@ class OpenAISpeechToText(OpenAIServing):
 
                     data = chunk.model_dump_json(exclude_unset=True)
                     yield f"data: {data}\n\n"
-
+                    
+                previous_context[0] = ' '.join(
+                    partial_text.strip()
+                    .split(' ')[-5:]
+                )
             # Once the final token is handled, if stream_options.include_usage
             # is sent, send the usage.
             if include_usage:
