@@ -9,6 +9,9 @@ from vllm.sampling_params import SamplingParams
 
 from ...utils import check_logprobs_close, check_outputs_equal
 
+# Mark all tests as hybrid
+pytestmark = pytest.mark.hybrid_model
+
 # NOTE: The first model in each list is taken as the primary model,
 # meaning that it will be used in all tests in this file
 # The rest of the models will only be tested by test_models
