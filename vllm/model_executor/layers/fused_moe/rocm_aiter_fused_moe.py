@@ -302,26 +302,33 @@ def rocm_aiter_grouped_topk(
 
 
 def rocm_aiter_fused_experts(
-        hidden_states: torch.Tensor,
-        w1: torch.Tensor,
-        w2: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        activation: str = "silu",
-        apply_router_weight_on_input: bool = False,
-        use_fp8_w8a8: bool = False,
-        per_channel_quant: bool = False,
-        w1_scale: Optional[torch.Tensor] = None,
-        w2_scale: Optional[torch.Tensor] = None,
-        a1_scale: Optional[torch.Tensor] = None,
-        a2_scale: Optional[torch.Tensor] = None,
-        block_shape: Optional[list[int]] = None) -> torch.Tensor:
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    activation: str = "silu",
+    apply_router_weight_on_input: bool = False,
+    use_fp8_w8a8: bool = False,
+    per_channel_quant: bool = False,
+    w1_scale: Optional[torch.Tensor] = None,
+    w2_scale: Optional[torch.Tensor] = None,
+    a1_scale: Optional[torch.Tensor] = None,
+    a2_scale: Optional[torch.Tensor] = None,
+    block_shape: Optional[list[int]] = None,
+    expert_map: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
 
     activation_method = (ActivationMethod.SILU
                          if activation == "silu" else ActivationMethod.GELU)
     # All AITER Fused MoE kernels are expecting the following datatypes
     topk_weights = topk_weights.to(torch.float32)
     topk_ids = topk_ids.to(torch.int32)
+
+    if expert_map is not None:
+        expert_mask = (expert_map > -1).to(torch.int32)
+    else:
+        expert_mask = None
 
     # w8a8 per-channel quantization
     if per_channel_quant and apply_router_weight_on_input and use_fp8_w8a8:
@@ -346,7 +353,7 @@ def rocm_aiter_fused_experts(
             fc2_smooth_scale=None,
             a16=False,
             per_tensor_quant_scale=None,
-            expert_mask=None,
+            expert_mask=expert_mask,
             activation_method=activation_method)
 
     else:
@@ -380,6 +387,7 @@ def rocm_aiter_fused_experts(
             w2,
             topk_weights,
             topk_ids,
+            expert_mask=expert_mask,
             quant_method=quant_method,
             activation_method=activation_method,
             w1_scale=w1_scale,
