@@ -68,20 +68,13 @@ def parse_args():
         "--max-num-seqs",
         type=int,
         default=64,
-        help=(
-            "Maximum number of sequences used during engine warm-up. "
-            "Lowering this value can substantially reduce peak memory "
-            "consumption and help avoid CUDA OOM errors."
-        ),
+        help=("Maximum number of sequences to be processed in a single iteration."),
     )
     parser.add_argument(
         "--gpu-memory-utilization",
         type=float,
         default=0.8,
-        help=(
-            "Fraction of GPU memory vLLM is allowed to allocate (0-1). "
-            "Setting a smaller value leaves more free memory headroom."
-        ),
+        help=("Fraction of GPU memory vLLM is allowed to allocate (0.0, 1.0]."),
     )
     return parser.parse_args()
 
