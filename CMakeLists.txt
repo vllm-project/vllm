@@ -576,7 +576,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     list(APPEND VLLM_EXT_SRC "${SRCS}")
     message(STATUS "Building moe_data for archs: ${CUTLASS_MOE_DATA_ARCHS}")
   else()
-    if (NOT ${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.3 AND )
+    if (NOT ${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.3 AND CUTLASS_MOE_DATA_ARCHS)
       message(STATUS "Not building moe_data as CUDA Compiler version is "
                      "not >= 12.3, we recommend upgrading to CUDA 12.3 or later "
                      "if you intend on running FP8 quantized MoE models on Hopper or Blackwell.")
