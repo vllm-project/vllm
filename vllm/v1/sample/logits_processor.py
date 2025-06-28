@@ -154,13 +154,13 @@ class BatchUpdateBuilder:
         """
         # Reset removal-sorting logic
         self._is_removed_sorted = False
-        if not any((self.removed, self.moved, self.added)):
+        if not any((self._removed, self.moved, self.added)):
             # No update; short-circuit
             return None
         # Build batch state update
         batch_update = BatchUpdate(
             batch_size=batch_size,
-            removed=self.removed,
+            removed=self._removed,
             moved=self.moved,
             added=self.added,
         )
