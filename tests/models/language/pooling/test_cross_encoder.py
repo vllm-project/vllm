@@ -7,6 +7,8 @@ from .mteb_utils import RerankModelInfo, mteb_test_rerank_models
 RERANK_MODELS = [
     RerankModelInfo("cross-encoder/ms-marco-TinyBERT-L-2-v2",
                     architecture="BertForSequenceClassification"),
+    RerankModelInfo("microsoft/deberta-v2-xlarge-mnli",
+                    architecture="DebertaV2ForSequenceClassification"),
     RerankModelInfo("tomaarsen/Qwen3-Reranker-0.6B-seq-cls",
                     architecture="Qwen3ForSequenceClassification")
 ]

@@ -52,6 +52,7 @@ def test_registry_imports(model_arch):
     ("MllamaForConditionalGeneration", True, False, False),
     ("LlavaForConditionalGeneration", True, True, False),
     ("BertForSequenceClassification", False, False, True),
+    ("DebertaV2ForSequenceClassification", False, False, True),
     ("RobertaForSequenceClassification", False, False, True),
     ("XLMRobertaForSequenceClassification", False, False, True),
 ])

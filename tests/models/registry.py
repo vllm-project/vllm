@@ -312,6 +312,7 @@ _EMBEDDING_EXAMPLE_MODELS = {
 _CROSS_ENCODER_EXAMPLE_MODELS = {
     # [Text-only]
     "BertForSequenceClassification": _HfExamplesInfo("cross-encoder/ms-marco-MiniLM-L-6-v2", v0_only=True),  # noqa: E501
+    "DebertaV2ForSequenceClassification": _HfExamplesInfo("microsoft/deberta-v2-xlarge-mnli", v0_only=True),  # noqa: E501
     "RobertaForSequenceClassification": _HfExamplesInfo("cross-encoder/quora-roberta-base", v0_only=True),  # noqa: E501
     "XLMRobertaForSequenceClassification": _HfExamplesInfo("BAAI/bge-reranker-v2-m3", v0_only=True),  # noqa: E501
     "ModernBertForSequenceClassification": _HfExamplesInfo("Alibaba-NLP/gte-reranker-modernbert-base", v0_only=True),  # noqa: E501
