@@ -28,8 +28,9 @@ SSM_MODELS = [
 
 HYBRID_MODELS = [
     "ai21labs/Jamba-tiny-dev",
-    # NOTE: ibm-granite/granite-4.0-tiny-preview are skipped currently as
-    # it is not yet available in huggingface transformers
+    # NOTE: Currently the test failes due to HF transformers issue fixed in:
+    # https://github.com/huggingface/transformers/pull/39033
+    # We will enable vLLM test for Granite after next HF transformers release.
     # "ibm-granite/granite-4.0-tiny-preview",
     # NOTE: Running Plamo2 in transformers implementation requires to install
     # causal-conv1d package, which is not listed as a test dependency as it's
