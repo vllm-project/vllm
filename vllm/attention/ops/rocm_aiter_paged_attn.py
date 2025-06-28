@@ -25,21 +25,24 @@ class AITERPagedAttention(PagedAttention):
         k_scale: torch.Tensor,
         v_scale: torch.Tensor,
     ) -> None:
-        if kv_cache_dtype not in ["int8", "fp8", "fp8_e4m3"]:
-            PagedAttention.write_to_paged_cache(key, value, key_cache,
-                                                value_cache, slot_mapping,
-                                                kv_cache_dtype, k_scale,
-                                                v_scale)
-        else:
+        is_8bit_kvcache = kv_cache_dtype in ["int8", "fp8", "fp8_e4m3"]
+
+        if is_8bit_kvcache:
             kv_cache_torch_dtype = (FP8_DTYPE
                                     if "fp8" in kv_cache_dtype else torch.int8)
             key_cache = key_cache.view(kv_cache_torch_dtype)
             value_cache = value_cache.view(kv_cache_torch_dtype)
 
-            rocm_aiter.reshape_and_cache(key, value, key_cache, value_cache,
-                                         slot_mapping.flatten(),
-                                         kv_cache_dtype, k_scale, v_scale,
-                                         True)
+        rocm_aiter.reshape_and_cache(
+            key,
+            value,
+            key_cache,
+            value_cache,
+            slot_mapping.flatten(),
+            kv_cache_dtype,
+            k_scale=k_scale if is_8bit_kvcache else None,
+            v_scale=v_scale if is_8bit_kvcache else None,
+            asm_layout=True)
 
     @staticmethod
     def forward_decode(

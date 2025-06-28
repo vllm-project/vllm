@@ -206,6 +206,7 @@ class Attention(nn.Module):
             attn_metadata = get_forward_context().attn_metadata
             if attn_metadata.enable_kv_scales_calculation:
                 self.calc_kv_scales(query, key, value)
+
         if self.use_output:
             output_shape = (output_shape
                             if output_shape is not None else query.shape)

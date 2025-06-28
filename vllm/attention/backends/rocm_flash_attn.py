@@ -946,7 +946,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                         "fused output quantization only supported for Triton"
                         " implementation in ROCMFlashAttentionImpl for now")
                 paged_attn.forward_decode(
-                    decode_query.contiguous(),
+                    decode_query,
                     key_cache,
                     value_cache,
                     (decode_meta.block_tables
