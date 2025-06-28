@@ -9,12 +9,11 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.deep_gemm_permute_unpermute import (
-    deepgemm_moe_permute, deepgemm_unpermute_and_reduce)
+    compute_aligned_M, deepgemm_moe_permute, deepgemm_unpermute_and_reduce)
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP)
 from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache, per_token_group_quant_fp8)
-from vllm.utils import round_up
 
 logger = init_logger(__name__)
 
@@ -64,20 +63,6 @@ def _valid_deep_gemm(hidden_states: torch.Tensor, w1: torch.Tensor,
     return True
 
 
-def _expert_num_tokens_round_up_and_sum(
-        expert_tokens_meta: mk.ExpertTokensMeta) -> int:
-
-    assert expert_tokens_meta.expert_num_tokens_cpu is not None
-
-    def round_up_128(x: int) -> int:
-        return round_up(x, 128)
-
-    # Round up expert_num_tokens to 128
-    expert_num_tokens_cpu = round_up_128(
-        expert_tokens_meta.expert_num_tokens_cpu)
-    return torch.sum(expert_num_tokens_cpu).item()
-
-
 class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def __init__(self):
@@ -96,11 +81,9 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         expert_tokens_meta: Optional[mk.ExpertTokensMeta]
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
 
-        assert expert_tokens_meta is not None
-        assert expert_tokens_meta.expert_num_tokens_cpu is not None
-
         block_m = self.block_shape[0]
-        M_sum = _expert_num_tokens_round_up_and_sum(expert_tokens_meta)
+        M_sum = compute_aligned_M(M, topk, local_num_experts, block_m,
+                                  expert_tokens_meta)
         assert M_sum % block_m == 0
         workspace1 = (M_sum, max(N * 2, K))
         workspace2 = (M_sum, max(N, K))
@@ -139,18 +122,18 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
         assert w2.size(1) == K
 
-        assert expert_tokens_meta is not None
-        expert_num_tokens = expert_tokens_meta.expert_num_tokens_gpu
-        assert expert_tokens_meta.expert_num_tokens_cpu is not None
-        M_sum = _expert_num_tokens_round_up_and_sum(expert_tokens_meta)
+        M_sum = compute_aligned_M(M=topk_ids.size(0),
+                                  num_topk=topk_ids.size(1),
+                                  local_num_experts=local_num_experts,
+                                  alignment=deep_gemm_block_shape()[0],
+                                  expert_tokens_meta=expert_tokens_meta)
 
         a1q, a1q_scale, expert_ids, inv_perm = deepgemm_moe_permute(
             aq=a1q,
             aq_scale=a1q_scale,
             topk_ids=topk_ids,
             expert_map=expert_map,
-            expert_num_tokens=expert_num_tokens,
-            sum_expert_num_tokens=M_sum,
+            expert_tokens_meta=expert_tokens_meta,
             aq_out=_resize_cache(workspace2.view(dtype=torch.float8_e4m3fn),
                                  (M_sum, K)))
 

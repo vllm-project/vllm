@@ -486,9 +486,9 @@ class FusedMoEModularKernel(torch.nn.Module):
             c_a1q, c_a1q_scale, c_a2_scale, c_topk_ids, c_topk_weights = (
                 slice_input_tensors(chunk_idx))
 
-            c_expert_tokens_meta = None
-            if self.fused_experts.requires_expert_tokens_meta():
-                c_expert_tokens_meta = slice_expert_tokens_meta(c_topk_ids)
+            #c_expert_tokens_meta = None
+            #if self.fused_experts.requires_expert_tokens_meta():
+            #    c_expert_tokens_meta = slice_expert_tokens_meta(c_topk_ids)
 
             self._do_fused_experts(fused_out=slice_output_tensor(chunk_idx),
                                    a1=a1,
@@ -507,7 +507,7 @@ class FusedMoEModularKernel(torch.nn.Module):
                                    w2_zp=w2_zp,
                                    a1q_scale=c_a1q_scale,
                                    a2_scale=c_a2_scale,
-                                   expert_tokens_meta=c_expert_tokens_meta)
+                                   expert_tokens_meta=None)
 
         return fused_out
 

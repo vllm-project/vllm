@@ -9,7 +9,35 @@ from typing import Optional
 
 import torch
 
+import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.model_executor.layers.fused_moe.utils import count_expert_num_tokens
 from vllm.triton_utils import tl, triton
+from vllm.utils import round_up
+
+
+def expert_num_tokens_round_up_and_sum(expert_num_tokens: torch.Tensor) -> int:
+
+    def round_up_128(x: int) -> int:
+        return round_up(x, 128)
+
+    # Round up expert_num_tokens to 128
+    ent = round_up_128(expert_num_tokens)
+    return torch.sum(ent).item()
+
+
+def compute_aligned_M(self, M: int, num_topk: int, local_num_experts: int,
+                      alignment: int,
+                      expert_tokens_meta: Optional[mk.ExpertTokensMeta]):
+    if ((expert_tokens_meta is not None)
+            and (expert_tokens_meta.expert_num_tokens_cpu is not None)):
+        return expert_num_tokens_round_up_and_sum(
+            expert_tokens_meta.expert_num_tokens_cpu)
+
+    # expert_num_tokens information is not available on the cpu.
+    # compute the max required size.
+    M_sum = (M * num_topk) + local_num_experts * (alignment - 1)
+    M_sum = round_up(M_sum, alignment)
+    return M_sum
 
 
 @triton.jit
@@ -299,32 +327,51 @@ def ep_gather(
 def deepgemm_moe_permute(aq: torch.Tensor,
                          aq_scale: torch.Tensor,
                          topk_ids: torch.Tensor,
-                         expert_num_tokens: torch.Tensor,
-                         sum_expert_num_tokens: int,
+                         local_num_experts: torch.Tensor,
                          expert_map: Optional[torch.Tensor],
+                         expert_tokens_meta: Optional[mk.ExpertTokensMeta],
                          aq_out: Optional[torch.Tensor] = None):
 
     assert aq.ndim == 2
     assert topk_ids.dtype == torch.int64, "Only int64 supported for now"
     H = aq.size(1)
-    num_experts = expert_num_tokens.size(0)
-
-    M_sum = sum_expert_num_tokens
     device = aq.device
 
-    expert_start_loc = torch.empty((num_experts),
+    M_sum = compute_aligned_M(M=topk_ids.size(0),
+                              num_topk=topk_ids.size(1),
+                              local_num_experts=local_num_experts,
+                              alignment=128,
+                              expert_tokens_meta=expert_tokens_meta)
+
+    expert_start_loc = torch.empty((local_num_experts),
                                    device=device,
                                    dtype=torch.int32)
 
+    assert aq_out is None or aq_out.shape == (M_sum, H)
     if aq_out is None:
         aq_out = torch.empty((M_sum, H), device=device, dtype=aq.dtype)
-    assert aq_out.shape == (M_sum, H)
 
     aq_scale_out = torch.empty((M_sum, H // 128),
                                device=device,
                                dtype=torch.float32)
-    expert_ids = torch.empty((M_sum), device=device, dtype=torch.int32)
+
+    maybe_has_empty_blocks = ((expert_tokens_meta is None)
+                              or (expert_tokens_meta.expert_num_tokens_cpu
+                                  is None))
+    expert_ids_init = torch.zeros if maybe_has_empty_blocks else torch.empty
+
+    expert_ids = expert_ids_init.zeros((M_sum),
+                                       device=device,
+                                       dtype=torch.int32)
     inv_perm = torch.empty(topk_ids.shape, device=device, dtype=torch.int32)
+
+    expert_num_tokens = None
+    if expert_tokens_meta is not None:
+        expert_num_tokens = expert_tokens_meta.expert_num_tokens_gpu
+    else:
+        expert_num_tokens = count_expert_num_tokens(topk_ids,
+                                                    local_num_experts,
+                                                    expert_map)
 
     ep_scatter(recv_x=aq,
                recv_x_scale=aq_scale,
