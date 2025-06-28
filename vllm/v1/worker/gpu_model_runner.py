@@ -2404,6 +2404,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         f"CompilationConfig.full_cuda_graph or use a different"
                         f" attention backend.")
 
+                if self.compilation_config.force_no_split_graph:
+                    assert attn_metadata_builder_i.support_full_cudagraph_only, (  # noqa: E501
+                        f"Full CUDAGraph not supported for "
+                        f"{attn_backend_i.__name__} with "
+                        f"CompilationConfig.force_no_split_graph=True. "
+                        f"Turn off CompilationConfig.force_no_split_graph"
+                        f"or use a different attention backend.")
+
                 # check if the attention backends enforce to have separate
                 # routines for mix prefill-decode and pure decode phase
                 if attn_metadata_builder_i.force_separate_routine is not None \

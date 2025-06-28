@@ -4066,6 +4066,14 @@ class CompilationConfig:
     prefill-decode and pure decode cases. This flag enables us to potentially
     capture the cudagraph separately for each branch.
     """
+    force_no_split_graph: bool = False
+    """
+    Enforce the fx graph to be a flattened full graph instead of a piecewise fx
+    graph with submodules (splited by attention ops, as the default behavior).
+    
+    Maintaining the full graph may offer benefits in some cases, e.g., enabling
+    attention-related custom inductor passes, such as attention+quant fusion.
+    """
 
     pass_config: PassConfig = field(default_factory=PassConfig)
     """Custom inductor passes, see PassConfig for more details"""
@@ -4264,21 +4272,31 @@ class CompilationConfig:
 
     def set_splitting_ops_for_v1(self):
         # NOTE: this function needs to be called
-        # NOTE: When full_cuda_graph is True, instead of setting an empty
-        # list and capture the full cudagraph inside the flattened fx graph,
-        # we keep the piecewise fx graph structure but capture the full
-        # cudagraph outside the fx graph. This reduces some cpu overhead when
-        # the runtime batch_size is not cudagraph captured. This is only
-        # supported for separate_attention_routine.
         if self.separate_attention_routine:
             assert self.full_cuda_graph, (
                 "separate_attention_routine requires "
                 "full_cuda_graph to be True")
-        if not self.splitting_ops:
-            self.splitting_ops = [
-                "vllm.unified_attention",
-                "vllm.unified_attention_with_output",
-            ]
+
+        if self.force_no_split_graph:
+            assert self.full_cuda_graph, (
+                "force_no_split_graph requires full_cuda_graph to be True")
+            assert not self.splitting_ops, (
+                "force_no_split_graph cannot be used together with "
+                "splitting_ops is not empty. Please set splitting_ops"
+                "to [] if you want to use force_no_split_graph.")
+            self.splitting_ops = []
+        else:
+            # NOTE: When full_cuda_graph is True, instead of setting an empty
+            # list and capture the full cudagraph inside the flattened fx
+            # graph, we keep the piecewise fx graph structure but capture the
+            # full cudagraph outside the fx graph. This reduces some cpu
+            # overhead when the runtime batch_size is not cudagraph captured.
+            # see PR #20059.
+            if not self.splitting_ops:
+                self.splitting_ops = [
+                    "vllm.unified_attention",
+                    "vllm.unified_attention_with_output",
+                ]
 
 
 @config

@@ -54,6 +54,12 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
     # enforce separate rountine to be True, False or None (free).
     force_separate_routine: ClassVar[Optional[bool]] = None
 
+    # If the attention backend supports full cudagraph only. Which means,
+    # it supports full cudagraph for both prefill-decode phase and pure
+    # decode phase. Used to check if compilation_config.force_no_split_graph
+    # = True is valid when full cudagraph is enable.
+    support_full_cudagraph_only: ClassVar[bool] = False
+
     @abstractmethod
     def build(self, common_prefix_len: int,
               common_attn_metadata: CommonAttentionMetadata) -> M:
