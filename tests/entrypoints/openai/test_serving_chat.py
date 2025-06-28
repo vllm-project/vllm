@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 from unittest.mock import MagicMock
 
+import pytest
+
 from vllm.config import MultiModalConfig
 from vllm.engine.multiprocessing.client import MQLLMEngineClient
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest
@@ -73,7 +75,8 @@ def test_async_serving_chat_init():
     assert serving_completion.chat_template == CHAT_TEMPLATE
 
 
-def test_serving_chat_should_set_correct_max_tokens():
+@pytest.mark.asyncio
+async def test_serving_chat_should_set_correct_max_tokens():
     mock_engine = MagicMock(spec=MQLLMEngineClient)
     mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
     mock_engine.errored = False
@@ -89,9 +92,6 @@ def test_serving_chat_should_set_correct_max_tokens():
                                      chat_template_content_format="auto",
                                      request_logger=None)
 
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-
     req = ChatCompletionRequest(
         model=MODEL_NAME,
         messages=[{
@@ -102,17 +102,15 @@ def test_serving_chat_should_set_correct_max_tokens():
     )
 
     with suppress(Exception):
-        loop.run_until_complete(serving_chat.create_chat_completion(req))
+        await serving_chat.create_chat_completion(req)
 
     assert mock_engine.generate.call_args.args[1].max_tokens == 93
 
     req.max_tokens = 10
     with suppress(Exception):
-        loop.run_until_complete(serving_chat.create_chat_completion(req))
+        await serving_chat.create_chat_completion(req)
 
     assert mock_engine.generate.call_args.args[1].max_tokens == 10
-
-    loop.close()
 
     # Setting server's max_tokens in the generation_config.json
     # lower than context_window - prompt_tokens
@@ -138,9 +136,6 @@ def test_serving_chat_should_set_correct_max_tokens():
                                      chat_template_content_format="auto",
                                      request_logger=None)
 
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-
     # Test Case 1: No max_tokens specified in request
     req = ChatCompletionRequest(
         model=MODEL_NAME,
@@ -152,7 +147,7 @@ def test_serving_chat_should_set_correct_max_tokens():
     )
 
     with suppress(Exception):
-        loop.run_until_complete(serving_chat.create_chat_completion(req))
+        await serving_chat.create_chat_completion(req)
 
     assert mock_engine.generate.call_args.args[1].max_tokens == 10
 
@@ -160,7 +155,7 @@ def test_serving_chat_should_set_correct_max_tokens():
     req.max_tokens = 15
 
     with suppress(Exception):
-        loop.run_until_complete(serving_chat.create_chat_completion(req))
+        await serving_chat.create_chat_completion(req)
 
     assert mock_engine.generate.call_args.args[1].max_tokens == 10
 
@@ -168,11 +163,9 @@ def test_serving_chat_should_set_correct_max_tokens():
     req.max_tokens = 5
 
     with suppress(Exception):
-        loop.run_until_complete(serving_chat.create_chat_completion(req))
+        await serving_chat.create_chat_completion(req)
 
     assert mock_engine.generate.call_args.args[1].max_tokens == 5
-
-    loop.close()
 
     # Setting server's max_tokens in the generation_config.json
     # higher than context_window - prompt_tokens
@@ -198,9 +191,6 @@ def test_serving_chat_should_set_correct_max_tokens():
                                      chat_template_content_format="auto",
                                      request_logger=None)
 
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-
     # Test case 1: No max_tokens specified, defaults to context_window
     req = ChatCompletionRequest(
         model=MODEL_NAME,
@@ -212,7 +202,7 @@ def test_serving_chat_should_set_correct_max_tokens():
     )
 
     with suppress(Exception):
-        loop.run_until_complete(serving_chat.create_chat_completion(req))
+        await serving_chat.create_chat_completion(req)
 
     assert mock_engine.generate.call_args.args[1].max_tokens == 93
 
@@ -220,7 +210,7 @@ def test_serving_chat_should_set_correct_max_tokens():
     req.max_tokens = 100
 
     with suppress(Exception):
-        loop.run_until_complete(serving_chat.create_chat_completion(req))
+        await serving_chat.create_chat_completion(req)
 
     assert mock_engine.generate.call_args.args[1].max_tokens == 93
 
@@ -228,14 +218,13 @@ def test_serving_chat_should_set_correct_max_tokens():
     req.max_tokens = 5
 
     with suppress(Exception):
-        loop.run_until_complete(serving_chat.create_chat_completion(req))
+        await serving_chat.create_chat_completion(req)
 
     assert mock_engine.generate.call_args.args[1].max_tokens == 5
 
-    loop.close()
 
-
-def test_serving_chat_could_load_correct_generation_config():
+@pytest.mark.asyncio
+async def test_serving_chat_could_load_correct_generation_config():
 
     mock_model_config = MockModelConfig()
     mock_model_config.diff_sampling_param = {
@@ -259,9 +248,6 @@ def test_serving_chat_could_load_correct_generation_config():
                                      chat_template_content_format="auto",
                                      request_logger=None)
 
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-
     req = ChatCompletionRequest(
         model=MODEL_NAME,
         messages=[{
@@ -272,7 +258,7 @@ def test_serving_chat_could_load_correct_generation_config():
     )
 
     with suppress(Exception):
-        loop.run_until_complete(serving_chat.create_chat_completion(req))
+        await serving_chat.create_chat_completion(req)
 
     assert mock_engine.generate.call_args.args[1].temperature == 0.5
     assert mock_engine.generate.call_args.args[1].repetition_penalty == 1.05
@@ -281,7 +267,7 @@ def test_serving_chat_could_load_correct_generation_config():
     req.temperature = 0.1
 
     with suppress(Exception):
-        loop.run_until_complete(serving_chat.create_chat_completion(req))
+        await serving_chat.create_chat_completion(req)
 
     assert mock_engine.generate.call_args.args[1].temperature == 0.1
     assert mock_engine.generate.call_args.args[1].repetition_penalty == 1.05
@@ -290,15 +276,14 @@ def test_serving_chat_could_load_correct_generation_config():
     req.temperature = 0.0
 
     with suppress(Exception):
-        loop.run_until_complete(serving_chat.create_chat_completion(req))
+        await serving_chat.create_chat_completion(req)
 
     assert mock_engine.generate.call_args.args[1].temperature == 0.0
     assert mock_engine.generate.call_args.args[1].repetition_penalty == 1.05
 
-    loop.close()
 
-
-def test_serving_chat_did_set_correct_cache_salt():
+@pytest.mark.asyncio
+async def test_serving_chat_did_set_correct_cache_salt():
     mock_model_config = MockModelConfig()
 
     mock_engine = MagicMock(spec=MQLLMEngineClient)
@@ -317,9 +302,6 @@ def test_serving_chat_did_set_correct_cache_salt():
                                      chat_template_content_format="auto",
                                      request_logger=None)
 
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-
     # Test cache_salt
     req = ChatCompletionRequest(
         model=MODEL_NAME,
@@ -331,13 +313,11 @@ def test_serving_chat_did_set_correct_cache_salt():
 
     # By default cache_salt in the engine prompt is not set
     with suppress(Exception):
-        loop.run_until_complete(serving_chat.create_chat_completion(req))
+        await serving_chat.create_chat_completion(req)
     assert "cache_salt" not in mock_engine.generate.call_args.args[0]
 
     # Test with certain cache_salt
     req.cache_salt = "test_salt"
     with suppress(Exception):
-        loop.run_until_complete(serving_chat.create_chat_completion(req))
+        await serving_chat.create_chat_completion(req)
     assert mock_engine.generate.call_args.args[0]["cache_salt"] == "test_salt"
-
-    loop.close()

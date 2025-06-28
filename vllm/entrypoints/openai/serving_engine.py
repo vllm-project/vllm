@@ -224,20 +224,19 @@ class OpenAIServing:
 
         self._tokenizer_executor = ThreadPoolExecutor(max_workers=1)
 
-    def _set_tokenizer(self, tokenizer):
+        self._async_tokenizer_pool: dict[AnyTokenizer,
+                                         AsyncMicrobatchTokenizer] = {}
+
+    def _get_async_tokenizer(self, tokenizer) -> AsyncMicrobatchTokenizer:
         """
         Return (and cache) an `AsyncMicrobatchTokenizer` bound to the 
         given tokenizer.
         """
-        if not hasattr(self, "_async_tokenizer_pool"):
-            self._async_tokenizer_pool: dict[AnyTokenizer,
-                                             AsyncMicrobatchTokenizer] = {}
-
-        if tokenizer not in self._async_tokenizer_pool:
-            self._async_tokenizer_pool[tokenizer] = AsyncMicrobatchTokenizer(
-                tokenizer)
-
-        return self._async_tokenizer_pool[tokenizer]
+        async_tokenizer = self._async_tokenizer_pool.get(tokenizer)
+        if async_tokenizer is None:
+            async_tokenizer = AsyncMicrobatchTokenizer(tokenizer)
+            self._async_tokenizer_pool[tokenizer] = async_tokenizer
+        return async_tokenizer
 
     async def _preprocess(
         self,
@@ -482,7 +481,7 @@ class OpenAIServing:
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]],
         add_special_tokens: bool,
     ) -> TextTokensPrompt:
-        async_tokenizer = self._set_tokenizer(tokenizer)
+        async_tokenizer = self._get_async_tokenizer(tokenizer)
 
         if (self.model_config.encoder_config is not None
                 and self.model_config.encoder_config.get(
@@ -518,7 +517,7 @@ class OpenAIServing:
         prompt_ids: list[int],
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]],
     ) -> TextTokensPrompt:
-        async_tokenizer = self._set_tokenizer(tokenizer)
+        async_tokenizer = self._get_async_tokenizer(tokenizer)
 
         if truncate_prompt_tokens is None:
             input_ids = prompt_ids
