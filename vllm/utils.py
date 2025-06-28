@@ -2947,7 +2947,7 @@ def has_pplx() -> bool:
     return _has_module("pplx_kernels")
 
 
-def has_deepep() -> bool:
+def has_deep_ep() -> bool:
     """Whether the optional `deep_ep` package is available."""
 
     return _has_module("deep_ep")

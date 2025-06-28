@@ -7,7 +7,7 @@ import torch.distributed as dist
 
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
-from vllm.utils import has_deepep, has_pplx
+from vllm.utils import has_deep_ep, has_pplx
 
 from .base_device_communicator import All2AllManagerBase, Cache
 
@@ -133,7 +133,7 @@ class DeepEPAll2AllManagerBase(All2AllManagerBase):
     """
 
     def __init__(self, cpu_group):
-        assert has_deepep(
+        assert has_deep_ep(
         ), "DeepEP kernels not found. Please follow https://github.com/vllm-project/vllm/blob/main/tools/ep_kernels/README.md to install DeepEP kernels."  # noqa
         super().__init__(cpu_group)
         self.handle_cache = Cache()

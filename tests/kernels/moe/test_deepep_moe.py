@@ -21,11 +21,11 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8)
 from vllm.platforms import current_platform
-from vllm.utils import has_deepep
+from vllm.utils import has_deep_ep
 
 from .deepep_utils import ProcessGroupInfo, parallel_launch
 
-if has_deepep():
+if has_deep_ep():
     from vllm.model_executor.layers.fused_moe.deepep_ht_prepare_finalize import (  # noqa: E501
         DeepEPHTPrepareAndFinalize)
     from vllm.model_executor.layers.fused_moe.deepep_ll_prepare_finalize import (  # noqa: E501
@@ -34,7 +34,7 @@ if has_deepep():
     from .deepep_utils import DeepEPHTArgs, DeepEPLLArgs, make_deepep_a2a
 
 requires_deep_ep = pytest.mark.skipif(
-    not has_deepep(),
+    not has_deep_ep(),
     reason="Requires deep_ep kernels",
 )
 
