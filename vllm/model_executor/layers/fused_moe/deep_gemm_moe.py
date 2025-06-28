@@ -16,10 +16,6 @@ from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache, per_token_group_quant_fp8)
 from vllm.utils import has_deep_gemm, round_up
 
-from vllm.model_executor.layers.quantization.deepgemm import (  # isort:skip
-    m_grouped_gemm_fp8_fp8_bf16_nt_contiguous_deepgemm as
-    m_grouped_gemm_fp8_fp8_bf16_nt_contiguous_deepgemm)
-
 logger = init_logger(__name__)
 
 
