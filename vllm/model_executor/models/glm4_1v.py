@@ -25,23 +25,25 @@
 # limitations under the License.
 """Inference-only GLM-4V model compatible with HuggingFace weights."""
 
+import math
 from collections.abc import Iterable, Mapping, Sequence
 from functools import partial
 from typing import Any, Callable, Literal, Optional, TypedDict, Union
 
-import math
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 from transformers import BatchFeature
-from transformers.video_utils import VideoMetadata
 from transformers.models.glm4v.configuration_glm4v import (Glm4vConfig,
                                                            Glm4vVisionConfig)
 from transformers.models.glm4v.image_processing_glm4v import (
     Glm4vImageProcessor, smart_resize)
-from transformers.models.glm4v.video_processing_glm4v import Glm4vVideoProcessor
+from transformers.models.glm4v.video_processing_glm4v import (
+    Glm4vVideoProcessor)
+from transformers.video_utils import VideoMetadata
+
 from vllm.config import VllmConfig
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
@@ -76,7 +78,7 @@ from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
 from .qwen2_vl import _qwen2vl_field_config, apply_rotary_pos_emb_vision
 from .utils import (AutoWeightsLoader, WeightsMapper,
                     init_vllm_registered_model, maybe_prefix,
-                    merge_multimodal_embeddings, flatten_bn)
+                    merge_multimodal_embeddings)
 from .vision import get_vit_attn_backend
 
 logger = init_logger(__name__)
@@ -507,10 +509,14 @@ class Glm4vVisionEmbeddings(nn.Module):
 
         self.num_patches = (self.image_size // self.patch_size)**2
         self.num_positions = self.num_patches
-        self.position_embedding = nn.Embedding(self.num_positions, self.embed_dim)
-        self.register_buffer("position_ids", torch.arange(self.num_positions).expand((1, -1)), persistent=False)
+        self.position_embedding = nn.Embedding(self.num_positions,
+                                               self.embed_dim)
+        self.register_buffer("position_ids",
+                             torch.arange(self.num_positions).expand((1, -1)),
+                             persistent=False)
 
-    def forward(self, embeddings, lengths, image_shapes, h_coords, w_coords) -> torch.Tensor:
+    def forward(self, embeddings, lengths, image_shapes, h_coords,
+                w_coords) -> torch.Tensor:
         """
         Forward pass with integrated position encoding adaptation using 2D interpolation.
 
@@ -535,31 +541,39 @@ class Glm4vVisionEmbeddings(nn.Module):
 
         # Handle empty sequence case
         if total_seq == 0:
-            adapted_pos_embed = torch.empty(0, hidden_size, device=device, dtype=pos_embed_weight.dtype)
+            adapted_pos_embed = torch.empty(0,
+                                            hidden_size,
+                                            device=device,
+                                            dtype=pos_embed_weight.dtype)
         else:
             # Convert inputs to tensors if needed
             if isinstance(lengths, list):
-                lengths = torch.tensor(lengths, device=device, dtype=torch.long)
+                lengths = torch.tensor(lengths,
+                                       device=device,
+                                       dtype=torch.long)
             if not isinstance(image_shapes, torch.Tensor):
-                image_shapes = torch.tensor(image_shapes, device=device, dtype=torch.long)
+                image_shapes = torch.tensor(image_shapes,
+                                            device=device,
+                                            dtype=torch.long)
 
             # Prepare 2D position embedding
             orig_size_sq = pos_embed_weight.shape[0]
             orig_size = int(orig_size_sq**0.5)
-            pos_embed_2d = (
-                pos_embed_weight.view(orig_size, orig_size, hidden_size)
-                .permute(2, 0, 1)
-                .unsqueeze(0)
-                .to(device=device, dtype=torch.float32)
-            )
+            pos_embed_2d = (pos_embed_weight.view(
+                orig_size, orig_size,
+                hidden_size).permute(2, 0,
+                                     1).unsqueeze(0).to(device=device,
+                                                        dtype=torch.float32))
 
             # Calculate target dimensions for each patch
-            target_h = torch.cat([image_shapes[i, 1].repeat(lengths[i]) for i in range(len(lengths))]).to(
-                device=device, dtype=torch.float32
-            )
-            target_w = torch.cat([image_shapes[i, 2].repeat(lengths[i]) for i in range(len(lengths))]).to(
-                device=device, dtype=torch.float32
-            )
+            target_h = torch.cat([
+                image_shapes[i, 1].repeat(lengths[i])
+                for i in range(len(lengths))
+            ]).to(device=device, dtype=torch.float32)
+            target_w = torch.cat([
+                image_shapes[i, 2].repeat(lengths[i])
+                for i in range(len(lengths))
+            ]).to(device=device, dtype=torch.float32)
 
             # Normalize coordinates to [-1, 1] range for grid_sample
             h_coords = h_coords.to(device=device, dtype=torch.float32)
@@ -568,16 +582,21 @@ class Glm4vVisionEmbeddings(nn.Module):
             norm_h = ((h_coords + 0.5) / target_h) * 2 - 1
 
             # Create sampling grid
-            grid = torch.stack((norm_w, norm_h), dim=-1).unsqueeze(0).unsqueeze(2)
+            grid = torch.stack((norm_w, norm_h),
+                               dim=-1).unsqueeze(0).unsqueeze(2)
 
             # Perform bicubic interpolation
-            interpolated_embed_fp32 = F.grid_sample(
-                pos_embed_2d, grid, mode="bicubic", align_corners=False, padding_mode="border"
-            )
+            interpolated_embed_fp32 = F.grid_sample(pos_embed_2d,
+                                                    grid,
+                                                    mode="bicubic",
+                                                    align_corners=False,
+                                                    padding_mode="border")
 
             # Reshape and convert back to original dtype
-            adapted_pos_embed_fp32 = interpolated_embed_fp32.squeeze(0).squeeze(-1).permute(1, 0)
-            adapted_pos_embed = adapted_pos_embed_fp32.to(pos_embed_weight.dtype).to(embeddings.device)
+            adapted_pos_embed_fp32 = interpolated_embed_fp32.squeeze(
+                0).squeeze(-1).permute(1, 0)
+            adapted_pos_embed = adapted_pos_embed_fp32.to(
+                pos_embed_weight.dtype).to(embeddings.device)
 
         # Add adapted position encoding to embeddings
         embeddings = embeddings + adapted_pos_embed
@@ -835,7 +854,8 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
         temporal_patch_size = vision_config.temporal_patch_size
         if do_resize:
             resized_height, resized_width = smart_resize(
-                num_frames=num_frames if num_frames > temporal_patch_size else temporal_patch_size,
+                num_frames=num_frames
+                if num_frames > temporal_patch_size else temporal_patch_size,
                 height=image_height,
                 width=image_width,
                 factor=patch_size * merge_size,
@@ -861,10 +881,8 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
         return preprocessed_size, num_vision_tokens
 
     def get_image_size_with_most_features(self) -> ImageSize:
-        max_image_size, _ = self._get_vision_info(
-            image_width=9999999,
-            image_height=9999999
-        )
+        max_image_size, _ = self._get_vision_info(image_width=9999999,
+                                                  image_height=9999999)
         return max_image_size
 
     def get_num_image_tokens(
@@ -873,11 +891,10 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
         image_width: int,
         image_height: int,
     ) -> int:
-        _, num_image_tokens = self._get_vision_info(
-            image_width=image_width,
-            image_height=image_height,
-            max_image_pixels=28 * 28 * 2 * 6144
-        )
+        _, num_image_tokens = self._get_vision_info(image_width=image_width,
+                                                    image_height=image_height,
+                                                    max_image_pixels=28 * 28 *
+                                                    2 * 6144)
         return num_image_tokens
 
     def get_max_image_tokens(self) -> int:
@@ -895,12 +912,11 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
         image_height: int,
         num_frames: int,
     ) -> int:
-        _, num_video_tokens = self._get_vision_info(
-            image_width=image_width,
-            image_height=image_height,
-            num_frames=num_frames,
-            max_image_pixels=28 * 28 * 2 * 30000
-        )
+        _, num_video_tokens = self._get_vision_info(image_width=image_width,
+                                                    image_height=image_height,
+                                                    num_frames=num_frames,
+                                                    max_image_pixels=28 * 28 *
+                                                    2 * 30000)
         return num_video_tokens
 
     def _get_max_video_frames(self, max_tokens: int) -> int:
@@ -938,23 +954,36 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
 
         return max(max_frames_per_video, 1)
 
-    def _get_video_second_idx(self, metadata: dict[str, Any], total_frames: int) -> list[int]:
+    def _get_video_second_idx(self, metadata: dict[str, Any],
+                              total_frames: int) -> list[int]:
         video_processor = self.get_video_processor()
 
         video_fps = metadata.get("fps", 2.0)
         meta_frames = metadata.get("total_frames", total_frames)
         max_frame_idx = meta_frames - 1
-        duration = metadata.get("duration", round(max_frame_idx / video_fps) + 1)
+        duration = metadata.get("duration",
+                                round(max_frame_idx / video_fps) + 1)
         if duration <= video_processor.max_duration:
             n = int(math.floor(duration * video_processor.fps))
-            frame_indices = [min(max_frame_idx, int(math.ceil(i * video_fps / video_processor.fps))) for i in range(n)]
+            frame_indices = [
+                min(max_frame_idx,
+                    int(math.ceil(i * video_fps / video_processor.fps)))
+                for i in range(n)
+            ]
         else:
-            num_samples = int(video_processor.max_duration * video_processor.fps)
+            num_samples = int(video_processor.max_duration *
+                              video_processor.fps)
             if num_samples >= meta_frames:
                 frame_indices = list(range(meta_frames))
             else:
-                target_seconds = np.linspace(0, duration, num_samples, endpoint=True)
-                frame_indices = [min(max_frame_idx, int(math.ceil(t * video_fps))) for t in target_seconds]
+                target_seconds = np.linspace(0,
+                                             duration,
+                                             num_samples,
+                                             endpoint=True)
+                frame_indices = [
+                    min(max_frame_idx, int(math.ceil(t * video_fps)))
+                    for t in target_seconds
+                ]
 
         seen, uniq = set(), []
         for idx in frame_indices:
@@ -984,9 +1013,10 @@ class Glm4vDummyInputsBuilder(BaseDummyInputsBuilder[Glm4vProcessingInfo]):
         tokenizer = self.info.get_tokenizer()
 
         image_token: str = hf_processor.image_token
-        video_token_ids = [hf_config.video_start_token_id,
-                           hf_processor.video_token_id,
-                           hf_config.video_end_token_id]
+        video_token_ids = [
+            hf_config.video_start_token_id, hf_processor.video_token_id,
+            hf_config.video_end_token_id
+        ]
         video_token = tokenizer.decode(video_token_ids)
 
         return image_token * num_images + video_token * num_videos
@@ -1054,7 +1084,8 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
         # GLM-4.1V use `image_token_id` as video placeholder, we need to
         # replace it with `video_token_id` for video processing. So we
         # separate video processing from image processing.
-        if "videos" in mm_data and isinstance(mm_data["videos"], list) and len(mm_data["videos"]) > 0:
+        if "videos" in mm_data and isinstance(mm_data["videos"], list) and len(
+                mm_data["videos"]) > 0:
             video_grid_thw_lst = []
             pixel_values_videos_lst = []
             for item in mm_data.pop("videos", []):
@@ -1077,8 +1108,10 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
                     mm_kwargs=mm_kwargs,
                 )
                 input_ids = video_outputs.pop("input_ids")
-                input_ids[input_ids==processor.image_token_id] = processor.video_token_id
-                video_placeholder = processor.tokenizer.batch_decode(input_ids)[0]
+                input_ids[input_ids ==
+                          processor.image_token_id] = processor.video_token_id
+                video_placeholder = processor.tokenizer.batch_decode(
+                    input_ids)[0]
                 prompt = prompt.replace(
                     "<|begin_of_video|><|video|><|end_of_video|>",
                     video_placeholder,
@@ -1089,7 +1122,8 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
                 grid_thw = torch.tensor([[grid_t, grid_h, grid_w]])
 
                 video_grid_thw_lst.append(grid_thw)
-                pixel_values_videos_lst.append(video_outputs["pixel_values_videos"])
+                pixel_values_videos_lst.append(
+                    video_outputs["pixel_values_videos"])
             video_outputs = dict(
                 pixel_values_videos=torch.cat(pixel_values_videos_lst),
                 video_grid_thw=torch.cat(video_grid_thw_lst),
@@ -1148,13 +1182,17 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
 
             video, metadata = mm_items["video"][item_idx]
             timestamps = self.info._get_video_second_idx(metadata, len(video))
-            frames_idx_token = [tokenizer.encode(str(i), add_special_tokens=False) for i in timestamps]
+            frames_idx_token = [
+                tokenizer.encode(str(i), add_special_tokens=False)
+                for i in timestamps
+            ]
             num_tokens_per_frame = int(grid_thw[1:].prod()) // merge_length
             placeholder = []
             placeholder.append(bov_token_id)
             for frame_idx in frames_idx_token:
                 placeholder.append(boi_token_id)
-                placeholder.extend([hf_processor.video_token_id] * num_tokens_per_frame)
+                placeholder.extend([hf_processor.video_token_id] *
+                                   num_tokens_per_frame)
                 placeholder.append(eoi_token_id)
                 placeholder.extend(frame_idx)
             placeholder.append(eov_token_id)
@@ -1345,13 +1383,17 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
         assert grid_thw.ndim == 2
 
         device = self.visual.device
-        flat_grid_thw = torch.cat([torch.tensor([[1, h, w]] * t, device=device) for t, h, w in grid_thw])
+        flat_grid_thw = torch.cat([
+            torch.tensor([[1, h, w]] * t, device=device)
+            for t, h, w in grid_thw
+        ])
         if video_input["type"] == "video_embeds":
             video_embeds = video_input["video_embeds"].type(self.visual.dtype)
         else:
             pixel_values_videos = video_input["pixel_values_videos"].type(
                 self.visual.dtype)
-            video_embeds = self.visual(pixel_values_videos, grid_thw=flat_grid_thw)
+            video_embeds = self.visual(pixel_values_videos,
+                                       grid_thw=flat_grid_thw)
 
         # Split concatenated embeddings for each video item.
         merge_size = self.visual.spatial_merge_size
@@ -1407,9 +1449,9 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
-        if multimodal_embeddings is not None and len(multimodal_embeddings) != 0 and all(
-            embed.numel() > 0 for embed in multimodal_embeddings
-        ):
+        if multimodal_embeddings is not None and len(
+                multimodal_embeddings) != 0 and all(
+                    embed.numel() > 0 for embed in multimodal_embeddings):
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids,
                 inputs_embeds,
