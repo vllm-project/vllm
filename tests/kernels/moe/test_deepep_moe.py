@@ -23,7 +23,7 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 from vllm.platforms import current_platform
 from vllm.utils import has_deep_ep
 
-from .deepep_utils import ProcessGroupInfo, parallel_launch
+from .utils import ProcessGroupInfo, parallel_launch
 
 if has_deep_ep():
     from vllm.model_executor.layers.fused_moe.deepep_ht_prepare_finalize import (  # noqa: E501
