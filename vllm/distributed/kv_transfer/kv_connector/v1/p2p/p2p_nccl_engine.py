@@ -10,7 +10,6 @@ from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, Optional
 
 import msgpack
-import nvtx
 import torch
 import zmq
 
@@ -493,7 +492,6 @@ class P2pNcclEngine:
             sock.send(msgpack.dumps(data))
             time.sleep(3)
 
-    @nvtx.annotate("P2pNcclEngine.send", color="red")
     def _send(self,
               comm,
               tensor_id: str,
@@ -511,7 +509,6 @@ class P2pNcclEngine:
         event.record(stream)
         event.synchronize()
 
-    @nvtx.annotate("P2pNcclEngine.recv", color="blue")
     def _recv(self,
               comm,
               tensor_id: str,
