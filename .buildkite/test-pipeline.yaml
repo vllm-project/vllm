@@ -536,6 +536,17 @@ steps:
     - pip freeze | grep -E 'torch'
     - pytest -v -s models/language -m core_model
 
+- label: Language Models Test (Hybrid) # 35 min
+  mirror_hardwares: [amdexperimental]
+  torch_nightly: true
+  source_file_dependencies:
+  - vllm/
+  - tests/models/language/generation
+  commands:
+    # Install causal-conv1d for plamo2 models here, as it is not compatible with pip-compile.
+    - pip install 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.0.post8'
+    - pytest -v -s models/language/generation -m hybrid_model
+
 - label: Language Models Test (Extended Generation) # 1hr20min
   mirror_hardwares: [amdexperimental]
   optional: true
@@ -545,7 +556,7 @@ steps:
   commands:
     # Install causal-conv1d for plamo2 models here, as it is not compatible with pip-compile.
     - pip install 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.0.post8'
-    - pytest -v -s models/language/generation -m 'not core_model'
+    - pytest -v -s models/language/generation -m '(not core_model) and (not hybrid_model)'
 
 - label: Language Models Test (Extended Pooling)  # 36min
   mirror_hardwares: [amdexperimental]
