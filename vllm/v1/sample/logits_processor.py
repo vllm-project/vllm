@@ -142,14 +142,7 @@ class BatchUpdateBuilder:
             return self._removed.pop()
         return None
 
-    def _reset(self):
-        """Reset batch info at end of step"""
-        self._removed = []
-        self._is_removed_sorted = False
-        self.moved = []
-        self.added = []
-
-    def get_and_reset(self, batch_size: int) -> BatchUpdate:
+    def get_and_reset(self, batch_size: int) -> Optional[BatchUpdate]:
         """Generate a logitsprocs batch update data structure
         and reset internal batch update builder state.
         
@@ -157,15 +150,24 @@ class BatchUpdateBuilder:
           batch_size: current persistent batch size
 
         Returns:
-          Frozen logitsprocs batch update dataclass instance
+          Frozen logitsprocs batch update instance; `None` if no updates
         """
+        # Reset removal-sorting logic
+        self._is_removed_sorted = False
+        if not any((self.removed, self.moved, self.added)):
+            # No update; short-circuit
+            return None
+        # Build batch state update
         batch_update = BatchUpdate(
             batch_size=batch_size,
             removed=self.removed,
             moved=self.moved,
             added=self.added,
         )
-        self._reset()
+        # Reset removed/moved/added update lists
+        self._removed = []
+        self.moved = []
+        self.added = []
         return batch_update
 
 
@@ -190,7 +192,7 @@ class LogitsProcessor(ABC):
     @abstractmethod
     def update_state(
         self,
-        batch_update: BatchUpdate,
+        batch_update: Optional[BatchUpdate],
     ) -> None:
         """Called when there are new output tokens, prior
         to each forward pass.
@@ -245,7 +247,10 @@ class MinPLogitsProcessor(LogitsProcessor):
     def get_min_p_by_index(self, index: int) -> float:
         return float(self.min_p_cpu[index])
 
-    def update_state(self, batch_update: BatchUpdate):
+    def update_state(self, batch_update: Optional[BatchUpdate]):
+        if not batch_update:
+            return
+
         needs_update = False
         # Process added requests.
         for index, params, _ in batch_update.added:
@@ -317,7 +322,10 @@ class LogitBiasLogitsProcessor(LogitsProcessor):
         outcome of argmax in greedy sampling."""
         return False
 
-    def update_state(self, batch_update: BatchUpdate):
+    def update_state(self, batch_update: Optional[BatchUpdate]):
+        if not batch_update:
+            return
+
         # Process added requests.
         needs_update = bool(batch_update.added)
         for index, params, _ in batch_update.added:
@@ -397,46 +405,49 @@ class MinTokensLogitsProcessor(LogitsProcessor):
         of the argmax operation in greedy sampling."""
         return False
 
-    def update_state(self, batch_update: BatchUpdate):
+    def update_state(self, batch_update: Optional[BatchUpdate]):
+        needs_update = False
 
-        # Process added requests.
-        needs_update = bool(batch_update.added)
-        for index, params, output_tok_ids in batch_update.added:
-            if (isinstance(params, SamplingParams)
-                    and (min_tokens := params.min_tokens)
-                    and len(output_tok_ids) < min_tokens):
-                # Replace request metadata at batch index
-                self.min_toks[index] = (min_tokens, output_tok_ids,
-                                        params.all_stop_token_ids)
-            else:
-                # Drop request metadata at batch index
-                self.min_toks.pop(index, None)
+        if batch_update:
+            # Process added requests.
+            needs_update |= bool(batch_update.added)
+            for index, params, output_tok_ids in batch_update.added:
+                if (isinstance(params, SamplingParams)
+                        and (min_tokens := params.min_tokens)
+                        and len(output_tok_ids) < min_tokens):
+                    # Replace request metadata at batch index
+                    self.min_toks[index] = (min_tokens, output_tok_ids,
+                                            params.all_stop_token_ids)
+                else:
+                    # Drop request metadata at batch index
+                    self.min_toks.pop(index, None)
 
-        if self.min_toks:
-            # Process removed requests.
-            for index in batch_update.removed:
-                if self.min_toks.pop(index, None):
-                    needs_update = True
+            if self.min_toks:
+                # Process removed requests.
+                for index in batch_update.removed:
+                    if self.min_toks.pop(index, None):
+                        needs_update = True
 
-            # Process moved requests, unidirectional (a->b) and
-            # swapped (a<->b)
-            for a_index, b_index, direct in batch_update.moved:
-                if direct == MoveDirectionality.UNIDIRECTIONAL:
-                    if (a_entry := self.min_toks.pop(a_index, None)) is None:
-                        if self.min_toks.pop(b_index, None) is not None:
+                # Process moved requests, unidirectional (a->b) and
+                # swapped (a<->b)
+                for a_index, b_index, direct in batch_update.moved:
+                    if direct == MoveDirectionality.UNIDIRECTIONAL:
+                        if (a_entry := self.min_toks.pop(a_index,
+                                                         None)) is None:
+                            if self.min_toks.pop(b_index, None) is not None:
+                                needs_update = True
+                        else:
+                            self.min_toks[b_index] = a_entry
                             needs_update = True
                     else:
-                        self.min_toks[b_index] = a_entry
-                        needs_update = True
-                else:
-                    a_entry = self.min_toks.pop(a_index, None)
-                    if (b_entry := self.min_toks.pop(b_index,
-                                                     None)) is not None:
-                        self.min_toks[a_index] = b_entry
-                        needs_update = True
-                    if a_entry is not None:
-                        self.min_toks[b_index] = a_entry
-                        needs_update = True
+                        a_entry = self.min_toks.pop(a_index, None)
+                        if (b_entry := self.min_toks.pop(b_index,
+                                                         None)) is not None:
+                            self.min_toks[a_index] = b_entry
+                            needs_update = True
+                        if a_entry is not None:
+                            self.min_toks[b_index] = a_entry
+                            needs_update = True
 
         if self.min_toks:
             # Check for any requests that have attained their min tokens.

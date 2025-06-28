@@ -150,7 +150,7 @@ class InputBatch:
         self.top_k_cpu = self.top_k_cpu_tensor.numpy()
         self.top_k_reqs: set[str] = set()
 
-        # Requests with min-p enabled
+        # IDs of requests which do not support spec decoding
         self.spec_decode_unsupported_reqs: set[str] = set()
 
         # Frequency penalty related data structures
@@ -262,9 +262,6 @@ class InputBatch:
         self.batch_update_builder.added.append(
             (req_index, params, request.output_token_ids))
         return req_index
-
-    def has_step_removed_requests(self) -> bool:
-        return self.batch_update_builder.has_removed()
 
     def add_request(
         self,
@@ -482,10 +479,6 @@ class InputBatch:
                     self.allowed_token_ids_mask_cpu_tensor[i1]
         self.block_table.swap_row(i1, i2)
 
-    def _register_move_request(self, from_idx: int, to_idx: int) -> None:
-        self.batch_update_builder.moved.append(
-            (from_idx, to_idx, MoveDirectionality.UNIDIRECTIONAL))
-
     def condense(self) -> None:
         """Slide non-empty requests down into lower, empty indices.
 
@@ -499,7 +492,10 @@ class InputBatch:
           swaps: list of (from,to) swap tuples for moved requests
           empty_req_indices: indices not filled by condensation
         """
-        empty_req_indices = self.batch_update_builder.removed
+        if not (empty_req_indices := self.batch_update_builder.removed):
+            # All removed requests were replaced by added requests, or else no
+            # requests were removed at all. No condense() needed
+            return
         num_reqs = self.num_reqs
         if num_reqs == 0:
             # The batched states are empty.
@@ -582,15 +578,16 @@ class InputBatch:
         del self._req_ids[self.num_reqs:]
         del self.req_output_token_ids[self.num_reqs:]
 
-    def _commit_logit_procs_state_changes(self) -> None:
-        """Apply batch add/remove/permute to logits procs' states"""
+    def update_reset(self):
+        """Apply batch updates, reset input batch at end of step
+        * Apply batch add/remove/permute to logits procs' states
+        * If batch state is modified, update sampling metadata
+        """
         batch_update = self.batch_update_builder.get_and_reset(self.num_reqs)
         for logit_proc in self.logitsprocs.all:
             logit_proc.update_state(batch_update)
-
-    def refresh(self):
-        self._commit_logit_procs_state_changes()
-        self.sampling_metadata = self._make_sampling_metadata()
+        if batch_update:
+            self.sampling_metadata = self._make_sampling_metadata()
 
     def _make_sampling_metadata(self) -> SamplingMetadata:
         num_reqs = self.num_reqs

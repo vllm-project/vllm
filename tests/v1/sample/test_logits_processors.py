@@ -422,7 +422,7 @@ def _generate_fake_step_update(
     workload_params: list[LogitsProcsRequestParams],
     wdx: int,
     batch_update_builder: BatchUpdateBuilder,
-) -> tuple[BatchUpdate, int, int]:
+) -> tuple[Optional[BatchUpdate], int, int]:
     batch_size = len(persistent_batch)
     workload_size = len(workload_params)
     workload_reqs_remaining = workload_size - wdx
@@ -603,7 +603,7 @@ def test_logitsprocs(device: str, reqs_per_logitproc: int,
             wdx=wdx,
             batch_update_builder=batch_update_builder,
         )
-        batch_size = batch_update.batch_size
+        batch_size = len(persistent_batch)
 
         # Apply fake batch update to logitsprocs
         fake_update_logitsprocs_state(test_fakes, batch_update)

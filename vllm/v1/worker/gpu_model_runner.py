@@ -317,7 +317,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # from the KV cache of `shared_kv_cache_layers[layer_name]`.
         self.shared_kv_cache_layers: dict[str, str] = {}
 
-    def _may_reorder_batch(self, scheduler_output: "SchedulerOutput") -> bool:
+    def _may_reorder_batch(self, scheduler_output: "SchedulerOutput") -> None:
         """
         Update the order of requests in the batch based on the attention
         backend's needs. For example, some attention backends (namely MLA) may
@@ -326,12 +326,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         Args:
             scheduler_output: The scheduler output.
-
-        Returns:
-            True if the batch was reordered, False otherwise.
         """
-        batch_reordered = self.attn_metadata_builders[0].reorder_batch(
-            self.input_batch, scheduler_output)
+        self.attn_metadata_builders[0].reorder_batch(self.input_batch,
+                                                     scheduler_output)
 
         # For models with multiple KV cache groups, the groups should agree on
         # the same order of requests. We ensure this by only allowing the first
@@ -340,7 +337,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         for i in range(1, len(self.kv_cache_config.kv_cache_groups)):
             assert not self.attn_metadata_builders[i].reorder_batch(
                 self.input_batch, scheduler_output)
-        return batch_reordered
 
     # Note: used for model runner override.
     def _init_device_properties(self) -> None:
@@ -526,25 +522,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # NOTE(woosuk): `num_tokens` here may include spec decode tokens.
             self.input_batch.num_tokens[req_index] = end_token_index
 
-        # Check if the batch has changed. If not, we can skip copying the
-        # sampling metadata from CPU to GPU.
-        has_removed_requests = self.input_batch.has_step_removed_requests()
-        batch_changed = has_removed_requests or len(req_ids_to_add) > 0
-
         # Add the new or resumed requests to the persistent batch.
         # The smaller empty indices are filled first.
         for req_id in req_ids_to_add:
             req_state = self.requests[req_id]
             self.input_batch.add_request(req_state)
 
-        # Condense the batched states if there are empty indices.
-        if self.input_batch.has_step_removed_requests():
-            self.input_batch.condense()
-
-        batch_reordered = self._may_reorder_batch(scheduler_output)
-
-        if batch_changed or batch_reordered:
-            self.input_batch.refresh()
+        # Condense the batched states if there are gaps left by removed requests
+        self.input_batch.condense()
+        # Allow attention backend to reorder the batch, potentially
+        self._may_reorder_batch(scheduler_output)
+        # Apply batch updates then reset input batch
+        self.input_batch.update_reset()
 
     def _get_cumsum_and_arange(
         self,
