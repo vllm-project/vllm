@@ -41,8 +41,8 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
                 and (te is None or te.supports_chunking()))
 
     def requires_expert_tokens_meta(self) -> bool:
-        dge = self.deep_gemm_experts
-        te = self.triton_experts
+        dge = self.deep_gemm_expert
+        te = self.triton_expert
         return ((dge is not None and dge.requires_expert_tokens_meta())
                 or (te is not None and te.requires_expert_tokens_meta()))
 

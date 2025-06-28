@@ -369,7 +369,7 @@ class FusedMoEModularKernel(torch.nn.Module):
 
         (workspace13_shape, workspace2_shape, fused_out_shape,
          workspace_dtype) = self.fused_experts.workspace_shapes(
-             a1, a1q, M, N, K, topk_ids, global_num_experts, local_num_experts,
+             a1, a1q, M, N, K, top_k, global_num_experts, local_num_experts,
              expert_tokens_meta)
 
         # We can reuse the memory between cache1 and cache3 because by the
@@ -449,7 +449,7 @@ class FusedMoEModularKernel(torch.nn.Module):
 
         # Construct the entire output that can then be processed in chunks
         (_, _, fused_out_shape, _) = self.fused_experts.workspace_shapes(
-            a1, a1q, M, N, K, topk_ids, global_num_experts, local_num_experts,
+            a1, a1q, M, N, K, top_k, global_num_experts, local_num_experts,
             expert_tokens_meta)
         fused_out = torch.empty(fused_out_shape,
                                 device=a1q.device,

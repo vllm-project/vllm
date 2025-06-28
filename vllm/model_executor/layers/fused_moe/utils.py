@@ -17,13 +17,6 @@ from vllm.utils import cdiv
 
 
 @triton.jit
-def apply_expert_map(expert_id, expert_map):
-    if expert_id != -1:
-        expert_id = tl.load(expert_map + expert_id).to(tl.int64)
-    return expert_id
-
-
-@triton.jit
 def _count_expert_num_tokens(topk_ids_ptr, expert_num_tokens_ptr, num_experts,
                              topk_numel, expert_map,
                              HAS_EXPERT_MAP: tl.constexpr,
@@ -39,7 +32,11 @@ def _count_expert_num_tokens(topk_ids_ptr, expert_num_tokens_ptr, num_experts,
         mask = offsets < (topk_numel - x * BLOCK_SIZE)
         expert_ids = tl.load(topk_ids_ptrs, mask=mask, other=-1)
         if HAS_EXPERT_MAP:
-            expert_ids = apply_expert_map(expert_ids, expert_map)
+            expert_map_ptrs = expert_map + expert_ids
+            expert_map_mask = expert_ids >= 0
+            expert_ids = tl.load(expert_map_ptrs,
+                                 mask=expert_map_mask,
+                                 other=-1)
 
         has_curr_expert = tl.where(expert_ids == curr_expert, 1, 0)
         acc = acc + has_curr_expert
@@ -62,6 +59,7 @@ def _resize_cache(x: torch.Tensor, v: tuple[int, ...]) -> torch.Tensor:
 def count_expert_num_tokens(
         topk_ids: torch.Tensor, num_local_experts: int,
         expert_map: Optional[torch.Tensor]) -> torch.Tensor:
+    assert topk_ids.dtype == torch.int64
     expert_num_tokens = torch.empty((num_local_experts),
                                     device=topk_ids.device,
                                     dtype=torch.int32)

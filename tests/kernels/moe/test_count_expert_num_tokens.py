@@ -95,10 +95,21 @@ def do_test_compute_expert_num_tokens(num_tokens: int, num_topk: int,
         ref_total_num_tokens = ref_total_num_tokens.to("cuda")
 
         tt_rank.to_device("cuda")
-        triton_expert_num_tokens = count_expert_num_tokens(
-            tt_rank.topk_ids, num_local_experts, tt.expert_map)
+        # Test with expert_map
+        triton_expert_num_tokens_w_emap = count_expert_num_tokens(
+            tt_rank.topk_ids, num_local_experts, tt_rank.expert_map)
+
+        # Test without expert map
+        topk_ids = tt_rank.expert_map[tt_rank.topk_ids].to(torch.int64)
+        triton_expert_num_tokens_wo_emap = count_expert_num_tokens(
+            topk_ids, num_local_experts, expert_map=None)
+
         torch.testing.assert_close(ref_expert_num_tokens,
-                                   triton_expert_num_tokens,
+                                   triton_expert_num_tokens_w_emap,
+                                   atol=0,
+                                   rtol=0)
+        torch.testing.assert_close(ref_expert_num_tokens,
+                                   triton_expert_num_tokens_wo_emap,
                                    atol=0,
                                    rtol=0)
 
@@ -106,7 +117,7 @@ def do_test_compute_expert_num_tokens(num_tokens: int, num_topk: int,
 @pytest.mark.parametrize(
     "num_tokens", [1, 4, 8, 11, 19, 128, 127, 405, 1024, 3333, 6666, 7317])
 @pytest.mark.parametrize("num_topk", [2, 6, 8])
-@pytest.mark.parametrize("num_experts", [32])
+@pytest.mark.parametrize("num_experts", [64])
 @pytest.mark.parametrize("ep_size", [1, 2, 4])
 def test_compute_expert_num_tokens(num_tokens: int, num_topk: int,
                                    num_experts: int, ep_size: int):
