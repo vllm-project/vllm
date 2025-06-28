@@ -99,6 +99,7 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
             hidden_states,
             w1,
             w2,
+            topk_weights,
             topk_ids,
             activation,
             global_num_experts,

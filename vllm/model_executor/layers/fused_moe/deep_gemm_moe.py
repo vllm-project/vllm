@@ -64,6 +64,20 @@ def _valid_deep_gemm(hidden_states: torch.Tensor, w1: torch.Tensor,
     return True
 
 
+def _expert_num_tokens_round_up_and_sum(
+        expert_tokens_meta: mk.ExpertTokensMeta) -> int:
+
+    assert expert_tokens_meta.expert_num_tokens_cpu is not None
+
+    def round_up_128(x: int) -> int:
+        return round_up(x, 128)
+
+    # Round up expert_num_tokens to 128
+    expert_num_tokens_cpu = round_up_128(
+        expert_tokens_meta.expert_num_tokens_cpu)
+    return torch.sum(expert_num_tokens_cpu).item()
+
+
 class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def __init__(self):
@@ -85,13 +99,8 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         assert expert_tokens_meta is not None
         assert expert_tokens_meta.expert_num_tokens_cpu is not None
 
-        def round_up_128(x: int) -> int:
-            return round_up(x, 128)
-
         block_m = self.block_shape[0]
-        # Round up expert_num_tokens to 128
-        M_sum = round_up_128(
-            expert_tokens_meta.expert_num_tokens_cpu).sum().item()
+        M_sum = _expert_num_tokens_round_up_and_sum(expert_tokens_meta)
         assert M_sum % block_m == 0
         workspace1 = (M_sum, max(N * 2, K))
         workspace2 = (M_sum, max(N, K))
@@ -133,7 +142,7 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         assert expert_tokens_meta is not None
         expert_num_tokens = expert_tokens_meta.expert_num_tokens_gpu
         assert expert_tokens_meta.expert_num_tokens_cpu is not None
-        M_sum = torch.sum(expert_tokens_meta.expert_num_tokens_cpu).item()
+        M_sum = _expert_num_tokens_round_up_and_sum(expert_tokens_meta)
 
         a1q, a1q_scale, expert_ids, inv_perm = deepgemm_moe_permute(
             aq=a1q,
