@@ -88,6 +88,7 @@ def test_can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch):
             model_info.default,
             tokenizer=model_info.tokenizer,
             tokenizer_mode=model_info.tokenizer_mode,
+            revision=model_info.revision,
             speculative_config={
                 "model": model_info.speculative_model,
                 "num_speculative_tokens": 1,
