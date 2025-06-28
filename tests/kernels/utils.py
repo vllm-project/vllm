@@ -1111,7 +1111,8 @@ def torch_experts(
                                                 out.dtype)
                 tmp2 = SiluAndMul()(tmp1)
                 tmp2, b_scale = moe_kernel_quantize_input(
-                    tmp2, None, quant_dtype, per_act_token_quant, block_shape)
+                    tmp2, a2_scale, quant_dtype, per_act_token_quant,
+                    block_shape)
 
                 out[mask] = native_w8a8_block_matmul(tmp2, w2[i], b_scale,
                                                      w2_scale[i], block_shape,

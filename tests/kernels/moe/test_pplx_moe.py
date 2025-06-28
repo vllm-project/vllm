@@ -59,13 +59,6 @@ NUM_EXPERTS = [8, 64]
 TOP_KS = [1, 2, 6]
 DTYPES = [torch.float8_e4m3fn, torch.bfloat16]
 
-# some of these are failing.
-PPLX_COMBOS = [
-    (3, 1024, 2048),
-    (45, 512, 2048),
-    (222, 2048, 1024),
-]
-
 vllm_config = VllmConfig()
 vllm_config.scheduler_config.max_num_seqs = 128
 vllm_config.scheduler_config.max_model_len = 8192
@@ -520,7 +513,9 @@ def pplx_moe(
         world_size=world_size,
         dp_size=dp_size,
         use_fp8_w8a8=quant_dtype == torch.float8_e4m3fn,
-        block_shape=block_shape)
+        block_shape=block_shape,
+        per_act_token_quant=per_act_token_quant,
+    )
 
     fused_experts = FusedMoEModularKernel(
         prepare_finalize,
@@ -701,12 +696,10 @@ def _pplx_moe(
                                    atol=3e-2,
                                    rtol=3e-2)
 
-        tol = 4e-2 if m < 256 else 6e-2
-
         torch.testing.assert_close(pplx_output,
                                    chunked_batch_output,
-                                   atol=tol,
-                                   rtol=tol)
+                                   atol=3e-2,
+                                   rtol=3e-2)
     finally:
         if use_internode:
             nvshmem_finalize()
