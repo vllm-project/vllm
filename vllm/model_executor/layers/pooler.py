@@ -300,7 +300,8 @@ class PoolerHead(nn.Module):
         if any(d is not None for d in dimensions_list):
             # change the output dimension
             assert len(pooled_data) == len(dimensions_list)
-            if set(dimensions_list) == 1 and not isinstance(pooled_data, list):
+            if len(set(dimensions_list)) == 1 and not isinstance(
+                    pooled_data, list):
                 # if all dimensions are the same
                 d = dimensions_list[0]
                 pooled_data = pooled_data[..., :d]
