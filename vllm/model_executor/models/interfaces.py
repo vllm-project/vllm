@@ -599,6 +599,17 @@ class SupportsTranscription(Protocol):
 
     supports_transcription: ClassVar[Literal[True]] = True
 
+    @classmethod
+    def get_decoder_prompt(cls, language: str, task_type: str,
+                           prompt: str) -> str:
+        """Get the decoder prompt for the ASR model."""
+        ...
+
+    @classmethod
+    def validate_language(cls, language: str) -> bool:
+        """Check if the model supports a specific ISO639_1 language."""
+        ...
+
 
 @overload
 def supports_transcription(

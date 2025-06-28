@@ -24,6 +24,7 @@ from vllm.entrypoints.openai.serving_engine import (OpenAIServing,
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
+from vllm.model_executor.model_loader.utils import get_model_architecture
 from vllm.outputs import RequestOutput
 from vllm.transformers_utils.processor import cached_get_processor
 from vllm.utils import PlaceholderModule
@@ -38,118 +39,10 @@ T = TypeVar("T", bound=SpeechToTextResponse)
 
 logger = init_logger(__name__)
 
-# From https://platform.openai.com/docs/guides/speech-to-text/supported-languages
-# TODO these configs should live somewhere with the model so we can support
-# additional ones
-
-ISO639_1_SUPPORTED_LANGS = {
-    "af": "Afrikaans",
-    "ar": "Arabic",
-    "hy": "Armenian",
-    "az": "Azerbaijani",
-    "be": "Belarusian",
-    "bs": "Bosnian",
-    "bg": "Bulgarian",
-    "ca": "Catalan",
-    "zh": "Chinese",
-    "hr": "Croatian",
-    "cs": "Czech",
-    "da": "Danish",
-    "nl": "Dutch",
-    "en": "English",
-    "et": "Estonian",
-    "fi": "Finnish",
-    "fr": "French",
-    "gl": "Galician",
-    "de": "German",
-    "el": "Greek",
-    "he": "Hebrew",
-    "hi": "Hindi",
-    "hu": "Hungarian",
-    "is": "Icelandic",
-    "id": "Indonesian",
-    "it": "Italian",
-    "ja": "Japanese",
-    "kn": "Kannada",
-    "kk": "Kazakh",
-    "ko": "Korean",
-    "lv": "Latvian",
-    "lt": "Lithuanian",
-    "mk": "Macedonian",
-    "ms": "Malay",
-    "mr": "Marathi",
-    "mi": "Maori",
-    "ne": "Nepali",
-    "no": "Norwegian",
-    "fa": "Persian",
-    "pl": "Polish",
-    "pt": "Portuguese",
-    "ro": "Romanian",
-    "ru": "Russian",
-    "sr": "Serbian",
-    "sk": "Slovak",
-    "sl": "Slovenian",
-    "es": "Spanish",
-    "sw": "Swahili",
-    "sv": "Swedish",
-    "tl": "Tagalog",
-    "ta": "Tamil",
-    "th": "Thai",
-    "tr": "Turkish",
-    "uk": "Ukrainian",
-    "ur": "Urdu",
-    "vi": "Vietnamese",
-    "cy": "Welsh"
-}
-ISO639_1_OTHER_LANGS = {
-    "lo": "Lao",
-    "jw": "Javanese",
-    "tk": "Turkmen",
-    "yi": "Yiddish",
-    "so": "Somali",
-    "bn": "Bengali",
-    "nn": "Norwegian Nynorsk",
-    "si": "Sinhala",
-    "yo": "Yoruba",
-    "sa": "Sanskrit",
-    "mi": "Māori",
-    "fo": "Faroese",  # codespell:ignore
-    "mt": "Maltese",
-    "tg": "Tajik",
-    "mg": "Malagasy",
-    "haw": "Hawaiian",
-    "km": "Khmer",
-    "br": "Breton",
-    "ps": "Pashto",
-    "ln": "Lingala",
-    "la": "Latin",
-    "ml": "Malayalam",
-    "sq": "Albanian",
-    "su": "Sundanese",
-    "eu": "Basque",
-    "ka": "Georgian",
-    "uz": "Uzbek",
-    "sn": "Shona",
-    "ht": "Haitian",
-    "as": "Assamese",
-    "mn": "Mongolian",
-    "te": "Telugu",
-    "pa": "Panjabi",
-    "tt": "Tatar",
-    "gu": "Gujarati",
-    "oc": "Occitan",
-    "ha": "Hausa",
-    "ba": "Bashkir",
-    "my": "Burmese",
-    "sd": "Sindhi",
-    "am": "Amharic",
-    "lb": "Luxembourgish",
-    "bo": "Tibetan"
-}
-
 # As per https://platform.openai.com/docs/guides/speech-to-text#overview.
 # TODO configurable
 MAX_AUDIO_CLIP_FILESIZE_MB = 25
+MAX_AUDIO_CLIP_SECONDS = 30
 OVERLAP_CHUNK_SECOND = 1
 MIN_ENERGY_WINDOW_SIZE = 1600  # 1600 ~ 100ms for 16000 Hz audio
 
@@ -177,10 +70,13 @@ class OpenAISpeechToText(OpenAIServing):
         self.default_sampling_params = (
             self.model_config.get_diff_sampling_param())
         processor = cached_get_processor(model_config.model)
-        self.max_audio_clip_s = processor.feature_extractor.chunk_length
+        self.max_audio_clip_s = processor.feature_extractor.chunk_length \
+            if hasattr(processor.feature_extractor, 'chunk_length') \
+            else MAX_AUDIO_CLIP_SECONDS
         self.model_sr = processor.feature_extractor.sampling_rate
         self.hop_length = processor.feature_extractor.hop_length
         self.task_type = task_type
+        self.model_cls, _ = get_model_architecture(model_config)
 
         if self.default_sampling_params:
             logger.info(
@@ -196,21 +92,8 @@ class OpenAISpeechToText(OpenAIServing):
         # TODO language should be optional and can be guessed.
         # For now we default to en. See
         # https://github.com/huggingface/transformers/blob/main/src/transformers/models/whisper/generation_whisper.py#L1520
-        lang_token = f"<|{request.language}|>" if request.language else "<|en|>"
-        if request.language:
-            if request.language in ISO639_1_SUPPORTED_LANGS:
-                pass
-            elif request.language in ISO639_1_OTHER_LANGS:
-                logger.warning(
-                    "The selected language %s has limited accuracy with"
-                    " reported WER>=0.5. Results may be less accurate "
-                    "for this choice.", request.language)
-            else:
-                raise ValueError(
-                    f"Unsupported language: {request.language}."
-                    "Language should be one of:" +
-                    f" {list(ISO639_1_SUPPORTED_LANGS.values())}" +
-                    f"or {list(ISO639_1_OTHER_LANGS.values())}")
+        lang = request.language or "en"
+        self.model_cls.validate_language(lang)  # type: ignore[attr-defined]
 
         if len(audio_data) / 1024**2 > MAX_AUDIO_CLIP_FILESIZE_MB:
             raise ValueError("Maximum file size exceeded.")
@@ -221,7 +104,9 @@ class OpenAISpeechToText(OpenAIServing):
             y, sr = librosa.load(bytes_, sr=self.model_sr)
 
         duration = librosa.get_duration(y=y, sr=sr)
-        chunks = [y] if duration < 30 else self._split_audio(y, int(sr))
+        chunks = [y
+                  ] if duration < self.max_audio_clip_s else self._split_audio(
+                      y, int(sr))
         prompts = []
         for chunk in chunks:
             prompt = {
@@ -232,8 +117,9 @@ class OpenAISpeechToText(OpenAIServing):
                     },
                 },
                 "decoder_prompt":
-                (f"<|startoftranscript|>{lang_token}"
-                 f"<|{self.task_type}|><|notimestamps|>{request.prompt}")
+                self.model_cls.
+                get_decoder_prompt(  # type: ignore[attr-defined]
+                    lang, self.task_type, request.prompt)
             }
             prompts.append(cast(PromptType, prompt))
         return prompts, duration
