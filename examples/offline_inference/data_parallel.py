@@ -64,6 +64,25 @@ def parse_args():
     parser.add_argument(
         "--trust-remote-code", action="store_true", help="Trust remote code."
     )
+    parser.add_argument(
+        "--max-num-seqs",
+        type=int,
+        default=64,
+        help=(
+            "Maximum number of sequences used during engine warm-up. "
+            "Lowering this value can substantially reduce peak memory "
+            "consumption and help avoid CUDA OOM errors."
+        ),
+    )
+    parser.add_argument(
+        "--gpu-memory-utilization",
+        type=float,
+        default=0.8,
+        help=(
+            "Fraction of GPU memory vLLM is allowed to allocate (0-1). "
+            "Setting a smaller value leaves more free memory headroom."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -77,6 +96,8 @@ def main(
     GPUs_per_dp_rank,
     enforce_eager,
     trust_remote_code,
+    max_num_seqs,
+    gpu_memory_utilization,
 ):
     os.environ["VLLM_DP_RANK"] = str(global_dp_rank)
     os.environ["VLLM_DP_RANK_LOCAL"] = str(local_dp_rank)
@@ -127,6 +148,8 @@ def main(
         enforce_eager=enforce_eager,
         enable_expert_parallel=True,
         trust_remote_code=trust_remote_code,
+        max_num_seqs=max_num_seqs,
+        gpu_memory_utilization=gpu_memory_utilization,
     )
     outputs = llm.generate(prompts, sampling_params)
     # Print the outputs.
@@ -181,6 +204,8 @@ if __name__ == "__main__":
                 tp_size,
                 args.enforce_eager,
                 args.trust_remote_code,
+                args.max_num_seqs,
+                args.gpu_memory_utilization,
             ),
         )
         proc.start()
