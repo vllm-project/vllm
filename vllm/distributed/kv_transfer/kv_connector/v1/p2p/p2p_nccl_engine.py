@@ -283,13 +283,7 @@ class P2pNcclEngine:
                            remote_address, tensor_id, data["ret"])
             return None
 
-        tensor = torch.empty(data["shape"],
-                             dtype=getattr(torch, data["dtype"]),
-                             device=self.device)
-
-        self._recv(comm, tensor_id, tensor, rank ^ 1, self.recv_stream)
-
-        return tensor
+        return self._recv(comm, tensor_id, data["shape"], data["dtype"], rank ^ 1, self.recv_stream)
 
     def _listen_for_requests(self):
         while True:
@@ -314,19 +308,9 @@ class P2pNcclEngine:
             elif data["cmd"] == "PUT":
                 tensor_id = data["tensor_id"]
                 try:
-                    tensor = torch.empty(data["shape"],
-                                         dtype=getattr(torch, data["dtype"]),
-                                         device=self.device)
-                except torch.cuda.OutOfMemoryError:
-                    self.router_socket.send_multipart([remote_address, b"1"])
-                    tensor = None
-                    logger.warning(
-                        "🔴[PUT]Recv Tensor, Out Of Memory, %s👈%s, "
-                        "data:%s", self.zmq_address, remote, data)
-                else:
                     self.router_socket.send_multipart([remote_address, b"0"])
                     comm, rank = self.comms[remote]
-                    self._recv(comm, tensor_id, tensor, rank ^ 1, self.recv_stream)
+                    tensor = self._recv(comm, tensor_id, data["shape"], data["dtype"], rank ^ 1, self.recv_stream)
                     tensor_size = tensor.element_size() * tensor.numel()
                     if (self.buffer_size + tensor_size
                             > self.buffer_size_threshold):
@@ -339,6 +323,12 @@ class P2pNcclEngine:
                             remote, data, addr)
                     else:
                         self.buffer_size += tensor_size
+                except torch.cuda.OutOfMemoryError:
+                    self.router_socket.send_multipart([remote_address, b"1"])
+                    tensor = None
+                    logger.warning(
+                        "🔴[PUT]Recv Tensor, Out Of Memory, %s👈%s, "
+                        "data:%s", self.zmq_address, remote, data)
 
                 with self.recv_store_cv:
                     self.recv_store[tensor_id] = tensor
@@ -515,18 +505,18 @@ class P2pNcclEngine:
         event.synchronize()
 
     @nvtx.annotate("P2pNcclEngine.recv", color="blue")
-    def _recv(self, comm, tensor_id: str, tensor: torch.Tensor, src: int, stream=None):
-        assert tensor.device == self.device, (
-            f"this nccl communicator is created to work on {self.device}, "
-            f"but the input tensor is on {tensor.device}")
+    def _recv(self, comm, tensor_id: str, shape: str, dtype: str, src: int, stream=None):
         stream = stream if stream is not None else current_stream()
         event = torch.cuda.Event()
         with torch.cuda.stream(stream):
+            tensor = torch.empty(shape, dtype=getattr(torch, dtype),
+                                 device=self.device)
             self.nccl.ncclRecv(buffer_type(tensor.data_ptr()), tensor.numel(),
                                ncclDataTypeEnum.from_torch(tensor.dtype), src,
                                comm, cudaStream_t(stream.cuda_stream))
             event.record(stream)
         event.synchronize()
+        return tensor
 
     def close(self) -> None:
         self._listener_thread.join()
