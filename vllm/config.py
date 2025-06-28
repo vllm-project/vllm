@@ -1484,7 +1484,7 @@ class CacheConfig:
     sizes up to 32 are supported. On HPU devices, block size defaults to 128.
 
     This config has no static default. If left unspecified by the user, it will
-    be set in `Platform.check_and_update_configs()` based on the current
+    be set in `Platform.check_and_update_config()` based on the current
     platform."""
     gpu_memory_utilization: float = 0.9
     """The fraction of GPU memory to be used for the model executor, which can
