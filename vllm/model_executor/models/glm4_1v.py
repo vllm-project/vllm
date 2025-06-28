@@ -1302,19 +1302,6 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
             video_grid_thw = self._validate_and_reshape_mm_tensor(
                 video_grid_thw, "video grid_thw")
 
-            # num_videos = video_grid_thw.shape[0]
-            # video_metadata = []
-            # for i in range(num_videos):
-            #     grid_t, grid_h, grid_w = video_grid_thw[i].tolist()
-            #     num_frames = grid_t
-            #     video_metadata.append(
-            #         VideoMetadata(
-            #             fps=2.0,
-            #             duration=num_frames / 2.0,
-            #             total_num_frames=num_frames,
-            #             video_backend="pyav",
-            #         ))
-
             return Glm4vVideoPixelInputs(
                 type="pixel_values_videos",
                 # video_metadata=video_metadata,
@@ -1365,6 +1352,10 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
             pixel_values_videos = video_input["pixel_values_videos"].type(
                 self.visual.dtype)
             video_embeds = self.visual(pixel_values_videos, grid_thw=flat_grid_thw)
+
+        from safetensors.torch import save_file
+        print(video_embeds.shape)
+        save_file({"video_embeds": video_embeds}, "/mnt/video_embeds.safetensors")
 
         # Split concatenated embeddings for each video item.
         merge_size = self.visual.spatial_merge_size

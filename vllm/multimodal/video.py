@@ -103,6 +103,7 @@ class OpenCVVideoBackend(VideoLoader):
     def load_bytes(cls,
                    data: bytes,
                    num_frames: int = -1) -> tuple[npt.NDArray, dict]:
+        num_frames = -1
         import cv2
 
         backend = cls().get_cv2_video_api()
