@@ -41,8 +41,6 @@ from transformers.models.glm4v.configuration_glm4v import (Glm4vConfig,
 from transformers.models.glm4v.image_processing_glm4v import (
     Glm4vImageProcessor, smart_resize)
 from transformers.models.glm4v.video_processing_glm4v import Glm4vVideoProcessor
-from transformers.video_utils import VideoMetadata
-
 from vllm.config import VllmConfig
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
@@ -943,9 +941,10 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
         video_processor = self.get_video_processor()
 
         video_fps = getattr(metadata, "fps", 2.0)
-        meta_frames = getattr(metadata, "total_num_frames", total_frames)
+        video_fps = metadata.get("fps", 2.0)
+        meta_frames = metadata.get("total_frames", total_frames)
         max_frame_idx = meta_frames - 1
-        duration = getattr(metadata, "duration", round(max_frame_idx / video_fps) + 1)
+        duration = metadata.get("duration", round(max_frame_idx / video_fps) + 1)
         if duration <= video_processor.max_duration:
             n = int(math.floor(duration * video_processor.fps))
             frame_indices = [min(max_frame_idx, int(math.ceil(i * video_fps / video_processor.fps))) for i in range(n)]
@@ -968,10 +967,9 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
 
         full_second_idxs = [int(idx / video_fps) for idx in frame_indices]
         timestamps_list = full_second_idxs[::2]
-        unique_timestamps = []
+        selected_timestamps = []
         for idx in range(0, len(timestamps_list)):
-            unique_timestamps.append(timestamps_list[idx])
-        selected_timestamps = unique_timestamps[:total_frames]
+            selected_timestamps.append(timestamps_list[idx])
         return selected_timestamps
 
 
@@ -1057,7 +1055,6 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
         # replace it with `video_token_id` for video processing. So we
         # separate video processing from image processing.
         if "videos" in mm_data and isinstance(mm_data["videos"], list) and len(mm_data["videos"]) > 0:
-
             video_grid_thw_lst = []
             pixel_values_videos_lst = []
             for item in mm_data.pop("videos", []):
@@ -1072,7 +1069,6 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
                     mm_data=video_mm_data,
                     mm_kwargs=mm_kwargs,
                 )
-
                 input_ids = video_outputs.pop("input_ids")
                 input_ids[input_ids==processor.image_token_id] = processor.video_token_id
                 video_placeholder = processor.tokenizer.batch_decode(input_ids)[0]
@@ -1087,7 +1083,6 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
 
                 video_grid_thw_lst.append(grid_thw)
                 pixel_values_videos_lst.append(video_outputs["pixel_values_videos"])
-
             video_outputs = dict(
                 pixel_values_videos=torch.cat(pixel_values_videos_lst),
                 video_grid_thw=torch.cat(video_grid_thw_lst),
@@ -1148,7 +1143,6 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
             timestamps = self.info._get_video_second_idx(metadata, len(video))
             frames_idx_token = [tokenizer.encode(str(i), add_special_tokens=False) for i in timestamps]
             num_tokens_per_frame = int(grid_thw[1:].prod()) // merge_length
-
             placeholder = []
             placeholder.append(bov_token_id)
             for frame_idx in frames_idx_token:
@@ -1364,6 +1358,9 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
             pixel_values_videos = video_input["pixel_values_videos"].type(
                 self.visual.dtype)
             video_embeds = self.visual(pixel_values_videos, grid_thw=flat_grid_thw)
+
+        from safetensors.torch import save_file
+        save_file({"video_embeds": video_embeds}, "/mnt/video_embeds.safetensors")
 
         # Split concatenated embeddings for each video item.
         merge_size = self.visual.spatial_merge_size
