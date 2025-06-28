@@ -7,7 +7,6 @@ import time
 import typing
 from collections import deque
 from contextlib import contextmanager
-from enum import Enum
 from typing import TYPE_CHECKING, Any, Optional
 
 import msgpack
@@ -220,17 +219,16 @@ class P2pNcclEngine:
                 logger.info(
                     "⛔[GET]Send to %s, tensor_id:%s, tensor_size:%d,"
                     " buffer_size:%d, oldest_tenser_size:%d, rank:%d",
-                    remote_address, tensor_id, tensor_size,
-                    self.buffer_size, oldest_tenser_size, self.rank)
+                    remote_address, tensor_id, tensor_size, self.buffer_size,
+                    oldest_tenser_size, self.rank)
 
             self.send_store[tensor_id] = tensor
             self.buffer_size += tensor_size
 
         logger.debug(
             "🔵[GET]Send to %s, tensor_id:%s, tensor_size:%d, "
-            "shape:%s, rank:%d, buffer_size:%d(%.2f%%)",
-            remote_address, tensor_id, tensor_size, tensor.shape,
-            self.rank, self.buffer_size,
+            "shape:%s, rank:%d, buffer_size:%d(%.2f%%)", remote_address,
+            tensor_id, tensor_size, tensor.shape, self.rank, self.buffer_size,
             self.buffer_size / self.buffer_size_threshold * 100)
 
         return True
@@ -283,7 +281,8 @@ class P2pNcclEngine:
                            remote_address, tensor_id, data["ret"])
             return None
 
-        return self._recv(comm, tensor_id, data["shape"], data["dtype"], rank ^ 1, self.recv_stream)
+        return self._recv(comm, tensor_id, data["shape"], data["dtype"],
+                          rank ^ 1, self.recv_stream)
 
     def _listen_for_requests(self):
         while True:
@@ -310,7 +309,9 @@ class P2pNcclEngine:
                 try:
                     self.router_socket.send_multipart([remote_address, b"0"])
                     comm, rank = self.comms[remote]
-                    tensor = self._recv(comm, tensor_id, data["shape"], data["dtype"], rank ^ 1, self.recv_stream)
+                    tensor = self._recv(comm, tensor_id, data["shape"],
+                                        data["dtype"], rank ^ 1,
+                                        self.recv_stream)
                     tensor_size = tensor.element_size() * tensor.numel()
                     if (self.buffer_size + tensor_size
                             > self.buffer_size_threshold):
@@ -360,8 +361,8 @@ class P2pNcclEngine:
 
                 if data["ret"] == 0:
                     comm, rank = self.comms[remote]
-                    self._send(comm, tensor_id, tensor.to(self.device), rank ^ 1,
-                               self.send_stream)
+                    self._send(comm, tensor_id, tensor.to(self.device),
+                               rank ^ 1, self.send_stream)
             else:
                 logger.warning(
                     "🚧Unexpected, Received message from %s, data:%s",
@@ -418,7 +419,8 @@ class P2pNcclEngine:
                 response.decode())
             return False
 
-        self._send(comm, tensor_id, tensor.to(self.device), rank ^ 1, self.send_stream)
+        self._send(comm, tensor_id, tensor.to(self.device), rank ^ 1,
+                   self.send_stream)
 
         self._have_sent_tensor_id(tensor_id)
 
@@ -492,7 +494,12 @@ class P2pNcclEngine:
             time.sleep(3)
 
     @nvtx.annotate("P2pNcclEngine.send", color="red")
-    def _send(self, comm, tensor_id: str, tensor: torch.Tensor, dst: int, stream=None):
+    def _send(self,
+              comm,
+              tensor_id: str,
+              tensor: torch.Tensor,
+              dst: int,
+              stream=None):
         assert tensor.device == self.device, (
             f"this nccl communicator is created to work on {self.device}, "
             f"but the input tensor is on {tensor.device}")
@@ -505,11 +512,18 @@ class P2pNcclEngine:
         event.synchronize()
 
     @nvtx.annotate("P2pNcclEngine.recv", color="blue")
-    def _recv(self, comm, tensor_id: str, shape: str, dtype: str, src: int, stream=None):
+    def _recv(self,
+              comm,
+              tensor_id: str,
+              shape: str,
+              dtype: str,
+              src: int,
+              stream=None):
         stream = stream if stream is not None else current_stream()
         event = torch.cuda.Event()
         with torch.cuda.stream(stream):
-            tensor = torch.empty(shape, dtype=getattr(torch, dtype),
+            tensor = torch.empty(shape,
+                                 dtype=getattr(torch, dtype),
                                  device=self.device)
             self.nccl.ncclRecv(buffer_type(tensor.data_ptr()), tensor.numel(),
                                ncclDataTypeEnum.from_torch(tensor.dtype), src,

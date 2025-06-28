@@ -191,7 +191,6 @@ class P2pNcclConnector(KVConnectorBase_V1):
 
         # Load the KV for each request each layer
         for request in metadata.requests:
-            is_success = True
             for layer_name in forward_context.no_compile_layers:
                 attn_layer = forward_context.no_compile_layers[layer_name]
                 kv_cache_layer = attn_layer.kv_cache[ \
@@ -203,14 +202,10 @@ class P2pNcclConnector(KVConnectorBase_V1):
                 if kv_cache is None:
                     logger.warning("🚧src_kv_cache is None, %s",
                                    request.request_id)
-                    is_success = False
                     break
 
                 inject_kv_into_layer(kv_cache_layer, kv_cache,
                                      request.slot_mapping, request.request_id)
-            if is_success:
-                logger.info(
-                    "🔵KV Cache is injected into layer, %s", request.request_id)
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         """Blocking until the KV for a specific layer is loaded into vLLM's
