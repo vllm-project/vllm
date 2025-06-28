@@ -8,7 +8,7 @@ As shown in Figure 1, the overall process of this **PD disaggregation** solution
 1. The client sends an HTTP request to the Proxy/Router's `/v1/completions` interface.  
 2. The Proxy/Router selects a **1P1D (1 Prefill instance + 1 Decode instance)** through either through round-robin or random selection, generates a `request_id` (rules to be introduced later), modifies the `max_tokens` in the HTTP request message to **1**, and then forwards the request to the **P instance**.  
 3. Immediately afterward, the Proxy/Router forwards the **original HTTP request** to the **D instance**.  
-4. The **P instance** performs **Prefill** and then **actively sends the generated KV cache** to the D instance (using **PUT_ASYNC** mode). The D instance's `zmq_addr` can be resolved through the `request_id`.  
+4. The **P instance** performs **Prefill** and then **actively sends the generated KV cache** to the D instance (using **PUT** mode). The D instance's `zmq_addr` can be resolved through the `request_id`.  
 5. The **D instance** has a **dedicated thread** for receiving the KV cache (to avoid blocking the main process). The received KV cache is saved into the **GPU memory buffer**, the size of which is determined by the vLLM startup parameter `kv_buffer_size`. When the GPU buffer is full, the KV cache is stored in the **local Tensor memory pool**.  
 6. During the **Decode**, the D instance's main process retrieves the KV cache (transmitted by the P instance) from either the **GPU buffer** or the **memory pool**, thereby **skipping Prefill**.  
 7. After completing **Decode**, the D instance returns the result to the **Proxy/Router**, which then forwards it to the **client**.
@@ -31,9 +31,9 @@ Each P/D instance periodically sends a heartbeat packet to the Proxy/Router (cur
 
 ## KV Cache Transfer Methods
 
-There are three methods for KVcache transfer: PUT, GET, and PUT_ASYNC. These methods can be specified using the `--kv-transfer-config` and `kv_connector_extra_config` parameters, specifically through the `send_type` field. Both PUT and PUT_ASYNC involve the P instance actively sending KVcache to the D instance. The difference is that PUT is a synchronous transfer method that blocks the main process, while PUT_ASYNC is an asynchronous transfer method. PUT_ASYNC uses a dedicated thread for sending KVcache, which means it does not block the main process. In contrast, the GET method involves the P instance saving the KVcache to the memory buffer after computing the prefill. The D instance then actively retrieves the computed KVcache from the P instance once it has allocated space for the KVcache.
+There are three methods for KVcache transfer: PUT and GET. These methods can be specified using the `--kv-transfer-config` and `kv_connector_extra_config` parameters, specifically through the `send_type` field. PUT involve the P instance actively sending KVcache to the D instance. PUT is an asynchronous transfer method. PUT uses a dedicated thread for sending KVcache, which means it does not block the main process. In contrast, the GET method involves the P instance saving the KVcache to the memory buffer after computing the prefill. The D instance then actively retrieves the computed KVcache from the P instance once it has allocated space for the KVcache.
 
-Experimental results have shown that the performance of these methods, from highest to lowest, is as follows: PUT_ASYNC → GET → PUT.
+Experimental results have shown that the performance of these methods, from highest to lowest, is as follows: PUT → GET.
 
 ## P2P Communication via ZMQ & NCCL
 
@@ -53,7 +53,7 @@ Each NCCL group occupies a certain amount of GPU memory buffer for communication
 
 ## GPU Memory Buffer and Tensor Memory Pool
 
-The trade-off in the size of the memory buffer is as follows: For P instances, the memory buffer is not required in PUT and PUT_ASYNC modes, but it is necessary in GET mode. For D instances, a memory buffer is needed in all three modes. The memory buffer for D instances should not be too large. Similarly, for P instances in GET mode, the memory buffer should also not be too large. The memory buffer of D instances is used to temporarily store KVcache sent by P instances. If it is too large, it will reduce the KVcache space available for normal inference by D instances, thereby decreasing the inference batch size and ultimately leading to a reduction in output throughput. The size of the memory buffer is configured by the parameter `kv_buffer_size`, measured in bytes, and is typically set to 5%～10% of the memory size.
+The trade-off in the size of the memory buffer is as follows: For P instances, the memory buffer is not required in PUT mode, but it is necessary in GET mode. For D instances, a memory buffer is needed in all three modes. The memory buffer for D instances should not be too large. Similarly, for P instances in GET mode, the memory buffer should also not be too large. The memory buffer of D instances is used to temporarily store KVcache sent by P instances. If it is too large, it will reduce the KVcache space available for normal inference by D instances, thereby decreasing the inference batch size and ultimately leading to a reduction in output throughput. The size of the memory buffer is configured by the parameter `kv_buffer_size`, measured in bytes, and is typically set to 5%～10% of the memory size.
 
 If the `--max-num-seqs` parameter for P instances is set to a large value, due to the large batch size, P instances will generate a large amount of KVcache simultaneously. This may exceed the capacity of the memory buffer of D instances, resulting in KVcache loss. Once KVcache is lost, D instances need to recompute Prefill, which is equivalent to performing Prefill twice. Consequently, the time-to-first-token (TTFT) will significantly increase, leading to degraded performance.
 
@@ -88,9 +88,9 @@ To address the above issues, I have designed and developed a local Tensor memory
 - Pay attention to the setting of the `kv_buffer_size` (in bytes). The empirical value is 10% of the GPU memory size. This is related to the kvcache size. If it is too small, the GPU memory buffer for temporarily storing the received kvcache will overflow, causing the kvcache to be stored in the tensor memory pool, which increases latency. If it is too large, the kvcache available for inference will be reduced, leading to a smaller batch size and decreased throughput.
 - For Prefill instances, when using non-GET mode, the `kv_buffer_size` can be set to 1, as Prefill currently does not need to receive kvcache. However, when using GET mode, a larger `kv_buffer_size` is required because it needs to store the kvcache sent to the D instance.
 - You may need to modify the `kv_buffer_size` and `port` in the following commands (if there is a conflict).
-- `PUT_ASYNC` offers the best performance and should be prioritized.
+- `PUT` offers the more performance and should be prioritized.
 - The `--port` must be consistent with the `http_port` in the `--kv-transfer-config`.
-- The `disagg_prefill_proxy_xpyd.py` script will use port 10001 (for receiving client requests) and port 30001 (for receiving service discovery from P and D instances).
+- The `disagg_prefill_proxy_xpyd.py` script will use port 10101 (for receiving client requests) and port 30201 (for receiving service discovery from P and D instances).
 - The node running the proxy must have `quart` installed.
 - Supports multiple nodes; you just need to modify the `proxy_ip` and `proxy_port` in `--kv-transfer-config`.
 - In the following examples, it is assumed that **the proxy's IP is 10.0.1.1**.
@@ -123,7 +123,7 @@ python3 disagg_prefill_proxy_xpyd.py &
         --gpu-memory-utilization 0.9 \
         --disable-log-request \
         --kv-transfer-config \
-        '{"kv_connector":"P2pNcclConnector","kv_role":"kv_producer","kv_buffer_size":"1e1","kv_port":"21001","kv_connector_extra_config":{"proxy_ip":"10.0.1.1","proxy_port":"30001","http_port":"20005","send_type":"PUT_ASYNC","nccl_num_channels":"16"}}' > /var/vllm.log 2>&1 &
+        '{"kv_connector":"P2pNcclConnector","kv_role":"kv_producer","kv_buffer_size":"1e1","kv_port":"21001","kv_connector_extra_config":{"proxy_ip":"10.0.1.1","proxy_port":"30201","http_port":"20005","nccl_num_channels":"16"}}' > /var/vllm.log 2>&1 &
     ```
 
 ### Decode1 (e.g. 10.0.1.3 or 10.0.1.1)
@@ -145,7 +145,7 @@ python3 disagg_prefill_proxy_xpyd.py &
         --gpu-memory-utilization 0.7 \
         --disable-log-request \
         --kv-transfer-config \
-        '{"kv_connector":"P2pNcclConnector","kv_role":"kv_consumer","kv_buffer_size":"8e9","kv_port":"22001","kv_connector_extra_config":{"proxy_ip":"10.0.1.1","proxy_port":"30001","http_port":"20009","send_type":"PUT_ASYNC","nccl_num_channels":"16"}}' > /var/vllm.log 2>&1 &
+        '{"kv_connector":"P2pNcclConnector","kv_role":"kv_consumer","kv_buffer_size":"8e9","kv_port":"22001","kv_connector_extra_config":{"proxy_ip":"10.0.1.1","proxy_port":"30201","http_port":"20009","nccl_num_channels":"16"}}' > /var/vllm.log 2>&1 &
     ```
 
 ### Decode2 (e.g. 10.0.1.4 or 10.0.1.1)
@@ -167,7 +167,7 @@ python3 disagg_prefill_proxy_xpyd.py &
         --gpu-memory-utilization 0.7 \
         --disable-log-request \
         --kv-transfer-config \
-        '{"kv_connector":"P2pNcclConnector","kv_role":"kv_consumer","kv_buffer_size":"8e9","kv_port":"23001","kv_connector_extra_config":{"proxy_ip":"10.0.1.1","proxy_port":"30001","http_port":"20003","send_type":"PUT_ASYNC","nccl_num_channels":"16"}}' > /var/vllm.log 2>&1 &
+        '{"kv_connector":"P2pNcclConnector","kv_role":"kv_consumer","kv_buffer_size":"8e9","kv_port":"23001","kv_connector_extra_config":{"proxy_ip":"10.0.1.1","proxy_port":"30201","http_port":"20003","nccl_num_channels":"16"}}' > /var/vllm.log 2>&1 &
     ```
 
 ### Decode3 (e.g. 10.0.1.5 or 10.0.1.1)
@@ -189,7 +189,7 @@ python3 disagg_prefill_proxy_xpyd.py &
         --gpu-memory-utilization 0.7 \
         --disable-log-request \
         --kv-transfer-config \
-        '{"kv_connector":"P2pNcclConnector","kv_role":"kv_consumer","kv_buffer_size":"8e9","kv_port":"24001","kv_connector_extra_config":{"proxy_ip":"10.0.1.1","proxy_port":"30001","http_port":"20008","send_type":"PUT_ASYNC","nccl_num_channels":"16"}}' > /var/vllm.log 2>&1 &
+        '{"kv_connector":"P2pNcclConnector","kv_role":"kv_consumer","kv_buffer_size":"8e9","kv_port":"24001","kv_connector_extra_config":{"proxy_ip":"10.0.1.1","proxy_port":"30201","http_port":"20008","nccl_num_channels":"16"}}' > /var/vllm.log 2>&1 &
     ```
 
 ## Run 3P1D
@@ -220,7 +220,7 @@ python3 disagg_prefill_proxy_xpyd.py &
         --gpu-memory-utilization 0.9 \
         --disable-log-request \
         --kv-transfer-config \
-        '{"kv_connector":"P2pNcclConnector","kv_role":"kv_producer","kv_buffer_size":"1e1","kv_port":"21001","kv_connector_extra_config":{"proxy_ip":"10.0.1.1","proxy_port":"30001","http_port":"20005","send_type":"PUT_ASYNC","nccl_num_channels":"16"}}' > /var/vllm.log 2>&1 &
+        '{"kv_connector":"P2pNcclConnector","kv_role":"kv_producer","kv_buffer_size":"1e1","kv_port":"21001","kv_connector_extra_config":{"proxy_ip":"10.0.1.1","proxy_port":"30201","http_port":"20005","nccl_num_channels":"16"}}' > /var/vllm.log 2>&1 &
     ```
 
 ### Prefill2 (e.g. 10.0.1.3 or 10.0.1.1)
@@ -242,7 +242,7 @@ python3 disagg_prefill_proxy_xpyd.py &
         --gpu-memory-utilization 0.9 \
         --disable-log-request \
         --kv-transfer-config \
-        '{"kv_connector":"P2pNcclConnector","kv_role":"kv_producer","kv_buffer_size":"1e1","kv_port":"22001","kv_connector_extra_config":{"proxy_ip":"10.0.1.1","proxy_port":"30001","http_port":"20009","send_type":"PUT_ASYNC","nccl_num_channels":"16"}}' > /var/vllm.log 2>&1 &
+        '{"kv_connector":"P2pNcclConnector","kv_role":"kv_producer","kv_buffer_size":"1e1","kv_port":"22001","kv_connector_extra_config":{"proxy_ip":"10.0.1.1","proxy_port":"30201","http_port":"20009","nccl_num_channels":"16"}}' > /var/vllm.log 2>&1 &
     ```
 
 ### Prefill3 (e.g. 10.0.1.4 or 10.0.1.1)
@@ -264,7 +264,7 @@ python3 disagg_prefill_proxy_xpyd.py &
         --gpu-memory-utilization 0.9 \
         --disable-log-request \
         --kv-transfer-config \
-        '{"kv_connector":"P2pNcclConnector","kv_role":"kv_producer","kv_buffer_size":"1e1","kv_port":"23001","kv_connector_extra_config":{"proxy_ip":"10.0.1.1","proxy_port":"30001","http_port":"20003","send_type":"PUT_ASYNC","nccl_num_channels":"16"}}' > /var/vllm.log 2>&1 &
+        '{"kv_connector":"P2pNcclConnector","kv_role":"kv_producer","kv_buffer_size":"1e1","kv_port":"23001","kv_connector_extra_config":{"proxy_ip":"10.0.1.1","proxy_port":"30201","http_port":"20003","nccl_num_channels":"16"}}' > /var/vllm.log 2>&1 &
     ```
 
 ### Decode1 (e.g. 10.0.1.5 or 10.0.1.1)
@@ -286,13 +286,13 @@ python3 disagg_prefill_proxy_xpyd.py &
         --gpu-memory-utilization 0.7 \
         --disable-log-request \
         --kv-transfer-config \
-        '{"kv_connector":"P2pNcclConnector","kv_role":"kv_consumer","kv_buffer_size":"8e9","kv_port":"24001","kv_connector_extra_config":{"proxy_ip":"10.0.1.1","proxy_port":"30001","http_port":"20008","send_type":"PUT_ASYNC","nccl_num_channels":"16"}}' > /var/vllm.log 2>&1 &
+        '{"kv_connector":"P2pNcclConnector","kv_role":"kv_consumer","kv_buffer_size":"8e9","kv_port":"24001","kv_connector_extra_config":{"proxy_ip":"10.0.1.1","proxy_port":"30201","http_port":"20008","nccl_num_channels":"16"}}' > /var/vllm.log 2>&1 &
     ```
 
 # Single request
 
 ```shell
-curl -X POST -s http://10.0.1.1:10001/v1/completions \
+curl -X POST -s http://10.0.1.1:10101/v1/completions \
 -H "Content-Type: application/json" \
 -d '{
     "model": "base_model",
@@ -313,7 +313,7 @@ curl -X POST -s http://10.0.1.1:10001/v1/completions \
         --tokenizer meta-llama/Llama-3.1-8B-Instruct \
         --dataset-name "random" \
         --host 10.0.1.1 \
-        --port 10001 \
+        --port 10101 \
         --random-input-len 1024 \
         --random-output-len 1024 \
         --ignore-eos \
