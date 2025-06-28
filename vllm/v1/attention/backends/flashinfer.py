@@ -544,8 +544,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         num_actual_pages = paged_kv_indices.size(0)
         self.paged_kv_indices[:num_actual_pages].copy_(paged_kv_indices,
                                                        non_blocking=True)
-        # Fill the remaining paged_kv_last_page_len with 1. This is because
-        # flashinfer treats 0 as a full page instead of empty.
         self.paged_kv_indices[num_actual_pages:].fill_(-1)
 
         paged_kv_indptr = torch.cat([
@@ -564,6 +562,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                                              page_size, paged_kv_last_page_len)
         self.paged_kv_last_page_len[:num_reqs].copy_(paged_kv_last_page_len,
                                                      non_blocking=True)
+        # Fill the remaining paged_kv_last_page_len with 1. This is because
+        # flashinfer treats 0 as a full page instead of empty.
         self.paged_kv_last_page_len[num_reqs:].fill_(1)
 
         attn_metadata = FlashInferMetadata(
@@ -601,10 +601,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         Currently, only decode is supported for full cudagraphs with FlashInfer.
         """
         m = common_attn_metadata
-        m.query_start_loc.copy_(torch.arange(m.num_actual_tokens + 1,
-                                             dtype=torch.int32,
-                                             device=self.runner.device),
-                                non_blocking=True)
+
         assert m.num_reqs == m.num_actual_tokens, \
             "FlashInfer only supports decode-only full CUDAGraph capture. " \
             "Make sure all cudagraph capture sizes <= max_num_seq."

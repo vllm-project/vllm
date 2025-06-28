@@ -2309,7 +2309,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             for num_tokens in tqdm(
                     reversed(self.cudagraph_batch_sizes[start_idx:]),
                     desc="Capturing CUDA graphs (mix prefill-decode)",
-                    total=len(self.cudagraph_batch_sizes)):
+                    total=len(self.cudagraph_batch_sizes) - start_idx):
                 for _ in range(
                         self.compilation_config.cudagraph_num_of_warmups):
                     self._dummy_run(
