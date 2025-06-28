@@ -518,9 +518,6 @@ class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def supports_chunking(self) -> bool:
         return False
 
-    def requires_expert_tokens_meta(self) -> bool:
-        return True
-
     def workspace_shapes(
         self,
         a: torch.Tensor,

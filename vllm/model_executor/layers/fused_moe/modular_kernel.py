@@ -8,8 +8,7 @@ from typing import Optional
 import torch
 
 import vllm.envs as envs
-from vllm.model_executor.layers.fused_moe.utils import (
-    _resize_cache, count_expert_num_tokens)
+from vllm.model_executor.layers.fused_moe.utils import _resize_cache
 from vllm.utils import cdiv
 
 #
@@ -206,14 +205,6 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         A flag indicating whether or not this class supports activation
         chunking.
         """
-        raise NotImplementedError
-
-    @abstractmethod
-    def requires_expert_tokens_meta(self) -> bool:
-        """
-      A flag indicating whether or not this class needs the ExpertTokensMeta
-      for its fused_experts implementation.
-      """
         raise NotImplementedError
 
     @abstractmethod
@@ -474,21 +465,9 @@ class FusedMoEModularKernel(torch.nn.Module):
             e = min(s + out_chunk_size, fused_out.size(0))
             return fused_out[s:e]
 
-        def slice_expert_tokens_meta(
-                chunk_topk_ids: torch.Tensor) -> ExpertTokensMeta:
-            expert_num_tokens = count_expert_num_tokens(
-                chunk_topk_ids, local_num_experts, expert_map)
-            return ExpertTokensMeta(expert_num_tokens_gpu=expert_num_tokens,
-                                    expert_num_tokens_cpu=expert_num_tokens.to(
-                                        "cpu", non_blocking=True))
-
         for chunk_idx in range(num_chunks):
             c_a1q, c_a1q_scale, c_a2_scale, c_topk_ids, c_topk_weights = (
                 slice_input_tensors(chunk_idx))
-
-            #c_expert_tokens_meta = None
-            #if self.fused_experts.requires_expert_tokens_meta():
-            #    c_expert_tokens_meta = slice_expert_tokens_meta(c_topk_ids)
 
             self._do_fused_experts(fused_out=slice_output_tensor(chunk_idx),
                                    a1=a1,

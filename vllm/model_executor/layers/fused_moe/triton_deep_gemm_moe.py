@@ -40,12 +40,6 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         return ((dge is None or dge.supports_chunking())
                 and (te is None or te.supports_chunking()))
 
-    def requires_expert_tokens_meta(self) -> bool:
-        dge = self.deep_gemm_expert
-        te = self.triton_expert
-        return ((dge is not None and dge.requires_expert_tokens_meta())
-                or (te is not None and te.requires_expert_tokens_meta()))
-
     def workspace_shapes(
         self, a: torch.Tensor, aq: torch.Tensor, M: int, N: int, K: int,
         topk: int, global_num_experts: int, local_num_experts: int,

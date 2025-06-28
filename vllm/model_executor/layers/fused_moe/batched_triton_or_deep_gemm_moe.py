@@ -73,12 +73,6 @@ class BatchedTritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         return ((bdge is None or bdge.supports_chunking())
                 and (bte is None or bte.supports_chunking()))
 
-    def requires_expert_tokens_meta(self) -> bool:
-        bdge = self.batched_deep_gemm_experts
-        bte = self.batched_triton_experts
-        return ((bdge is not None and bdge.requires_expert_tokens_meta())
-                or (bte is not None and bte.requires_expert_tokens_meta()))
-
     def workspace_shapes(
         self,
         a: torch.Tensor,

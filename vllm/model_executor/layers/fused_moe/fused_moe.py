@@ -1545,9 +1545,6 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def supports_chunking(self) -> bool:
         return True
 
-    def requires_expert_tokens_meta(self) -> bool:
-        return False
-
     def workspace_shapes(
         self,
         a: torch.Tensor,
