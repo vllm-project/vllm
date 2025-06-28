@@ -1,0 +1,30 @@
+services:
+  vllm:
+    image: vllm/vllm-openai:v0.9.1
+    container_name: vllm
+    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    ipc: host
+    ports:
+      - "8000:8000"
+    volumes:
+      - models:/models
+    environment:
+      HUGGING_FACE_HUB_TOKEN: "YOUR TOKEN HERE"
+    restart: always
+    command: >
+      --model YOUR-MODEL-NALE
+      --tensor-parallel-size 2
+      --compilation-config "{\"level\": 3}"
+      --gpu-memory-utilization 0.95 
+      --host 0.0.0.0  
+volumes:
+  models:
+
+
