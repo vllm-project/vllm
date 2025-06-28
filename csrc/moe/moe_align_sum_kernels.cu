@@ -327,7 +327,7 @@ void compute_expert_num_tokens(
   TORCH_CHECK(expert_num_tokens.dtype() == torch::kInt32);
   TORCH_CHECK(sum_expert_num_tokens.dtype() == torch::kInt32);
   TORCH_CHECK(expert_num_tokens.size(0) == local_num_experts);
-  TORCH_CHECK(topk_ids.dtype() == torch.kInt64);
+  TORCH_CHECK(topk_ids.dtype() == torch::kInt64);
 
   if (expert_map) {
     TORCH_CHECK(expert_map->dtype() == torch::kInt32);
@@ -346,9 +346,9 @@ void compute_expert_num_tokens(
 
   size_t shared_mem_size = local_num_experts * sizeof(int32_t);
 
-  vllm::moe::compute_expert_num_tokens_kernel<torch::kInt64>
+  vllm::moe::compute_expert_num_tokens_kernel<int64_t>
       <<<grid, block, shared_mem_size, stream>>>(
-          topk_ids.data_ptr<scalar_t>(),
+          topk_ids.data_ptr<int64_t>(),
           expert_map ? expert_map->data_ptr<int32_t>() : nullptr,
           expert_num_tokens.data_ptr<int32_t>(),
           sum_expert_num_tokens.data_ptr<int32_t>(), local_num_experts,

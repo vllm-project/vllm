@@ -14,6 +14,7 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP)
 from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache, per_token_group_quant_fp8)
+from vllm.utils import round_up
 
 logger = init_logger(__name__)
 
@@ -84,8 +85,13 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         assert expert_tokens_meta is not None
         assert expert_tokens_meta.expert_num_tokens_cpu is not None
 
+        def round_up_128(x: int) -> int:
+            return round_up(x, 128)
+
         block_m = self.block_shape[0]
-        M_sum = torch.sum(expert_tokens_meta.expert_num_tokens_cpu).item()
+        # Round up expert_num_tokens to 128
+        M_sum = round_up_128(
+            expert_tokens_meta.expert_num_tokens_cpu).sum().item()
         assert M_sum % block_m == 0
         workspace1 = (M_sum, max(N * 2, K))
         workspace2 = (M_sum, max(N, K))

@@ -95,7 +95,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             topk_weights=rank_topk_weights,
             # expert_alignment rounds the number of tokens per expert
             # to this value.
-            expert_alignment=128,
+            expert_alignment=1,
             config=self._get_dispatch_config(),
             previous_event=None,
             async_finish=False,

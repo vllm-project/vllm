@@ -10,7 +10,8 @@ from typing import Optional
 import pytest
 import torch
 
-from vllm import _custom_ops as ops
+from vllm.model_executor.layers.fused_moe.deep_gemm_permute_unpermute import (
+    count_expert_num_tokens)
 
 
 @dataclasses.dataclass
@@ -95,44 +96,10 @@ def do_test_compute_expert_num_tokens(num_tokens: int, num_topk: int,
         ref_total_num_tokens = ref_total_num_tokens.to("cuda")
 
         tt_rank.to_device("cuda")
-        # Test with expert map
-        impl_expert_num_tokens = torch.zeros((num_local_experts),
-                                             device="cuda",
-                                             dtype=torch.int32)
-        impl_total_num_tokens = torch.zeros((1),
-                                            device="cuda",
-                                            dtype=torch.int32)
-
-        ops.compute_expert_num_tokens(tt_rank.topk_ids,
-                                      impl_expert_num_tokens,
-                                      impl_total_num_tokens,
-                                      local_num_experts=num_local_experts,
-                                      expert_map=tt_rank.expert_map)
-
+        triton_expert_num_tokens = count_expert_num_tokens(
+            tt_rank.topk_ids, num_local_experts, tt.expert_map)
         torch.testing.assert_close(ref_expert_num_tokens,
-                                   impl_expert_num_tokens,
-                                   atol=0,
-                                   rtol=0)
-        torch.testing.assert_close(ref_total_num_tokens,
-                                   impl_total_num_tokens,
-                                   atol=0,
-                                   rtol=0)
-
-        # Test without expert map
-        impl_expert_num_tokens.fill_(0)
-        impl_total_num_tokens.fill_(0)
-        topk_ids = tt_rank.expert_map[tt_rank.topk_ids]
-        ops.compute_expert_num_tokens(topk_ids,
-                                      impl_expert_num_tokens,
-                                      impl_total_num_tokens,
-                                      local_num_experts=num_local_experts,
-                                      expert_map=None)
-        torch.testing.assert_close(ref_expert_num_tokens,
-                                   impl_expert_num_tokens,
-                                   atol=0,
-                                   rtol=0)
-        torch.testing.assert_close(ref_total_num_tokens,
-                                   impl_total_num_tokens,
+                                   triton_expert_num_tokens,
                                    atol=0,
                                    rtol=0)
 

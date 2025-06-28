@@ -13,10 +13,16 @@ from vllm.triton_utils import tl, triton
 
 
 @triton.jit
-def apply_expert_map(expert_map, expert_id):
+def apply_expert_map(expert_id, expert_map):
     if expert_id != -1:
         expert_id = tl.load(expert_map + expert_id).to(tl.int64)
     return expert_id
+
+
+@triton.jit
+def round_up_128(x: int) -> int:
+    y = 128
+    return ((x + y - 1) // y) * y
 
 
 @triton.jit
@@ -34,6 +40,7 @@ def _fwd_kernel_ep_scatter_1(
     tokens_per_expert = tl.load(num_recv_tokens_per_expert + offset_cumsum,
                                 mask=offset_cumsum < num_experts,
                                 other=0)
+    tokens_per_expert = round_up_128(tokens_per_expert)
     cumsum = tl.cumsum(tokens_per_expert) - tokens_per_expert
     tl.store(expert_start_loc + offset_cumsum,
              cumsum,
@@ -103,7 +110,7 @@ def _fwd_kernel_ep_scatter_2(
                                 topk_index)
 
             if HAS_EXPERT_MAP:
-                expert_id = apply_expert_map(expert_map, expert_id)
+                expert_id = apply_expert_map(expert_id, expert_map)
 
             if expert_id >= 0:
                 dest_token_index = tl.atomic_add(expert_start_loc + expert_id,
@@ -226,7 +233,7 @@ def _fwd_kernel_ep_gather(
                                 cur_token * recv_topk_ids_stride0 + topk_index)
 
             if HAS_EXPERT_MAP:
-                expert_id = apply_expert_map(expert_map, expert_id)
+                expert_id = apply_expert_map(expert_id, expert_map)
 
             if expert_id >= 0:
                 source_token_index = tl.load(input_index +
@@ -287,6 +294,56 @@ def ep_gather(
         BLOCK_D=BLOCK_D,
     )
     return
+
+
+@triton.jit
+def _count_expert_num_tokens(topk_ids_ptr, expert_num_tokens_ptr, num_experts,
+                             topk_numel, expert_map,
+                             HAS_EXPERT_MAP: tl.constexpr,
+                             BLOCK_SIZE: tl.constexpr):
+
+    curr_expert = tl.program_id(0)
+
+    offsets = tl.arange(0, BLOCK_SIZE)
+    topk_ids_ptrs = topk_ids_ptr + offsets
+
+    acc = tl.zeros((BLOCK_SIZE, ), dtype=tl.int32)
+    for x in range(tl.cdiv(topk_numel, BLOCK_SIZE)):
+        mask = offsets < (topk_numel - x * BLOCK_SIZE)
+        expert_ids = tl.load(topk_ids_ptrs, mask=mask, other=-1)
+        if HAS_EXPERT_MAP:
+            expert_ids = apply_expert_map(expert_ids, expert_map)
+
+        has_curr_expert = tl.where(expert_ids == curr_expert, 1, 0)
+        acc = acc + has_curr_expert
+        topk_ids_ptrs += BLOCK_SIZE
+
+    if curr_expert < num_experts:
+        tl.store(expert_num_tokens_ptr + curr_expert, tl.sum(acc))
+
+
+def count_expert_num_tokens(
+        topk_ids: torch.Tensor, num_local_experts: int,
+        expert_map: Optional[torch.Tensor]) -> torch.Tensor:
+    expert_num_tokens = torch.empty((num_local_experts),
+                                    device=topk_ids.device,
+                                    dtype=torch.int32)
+
+    grid = num_local_experts
+    BLOCK_SIZE = min(topk_ids.numel(), 1024)
+    BLOCK_SIZE = triton.next_power_of_2(BLOCK_SIZE)
+
+    _count_expert_num_tokens[(grid, )](
+        topk_ids,
+        expert_num_tokens,
+        num_local_experts,
+        topk_ids.numel(),
+        expert_map,
+        HAS_EXPERT_MAP=expert_map is not None,
+        BLOCK_SIZE=BLOCK_SIZE,
+    )
+
+    return expert_num_tokens
 
 
 def deepgemm_moe_permute(aq: torch.Tensor,
