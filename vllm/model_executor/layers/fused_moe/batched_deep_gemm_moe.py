@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-import importlib.util
 from typing import Optional
 
 import torch
@@ -10,8 +9,6 @@ from vllm.model_executor.layers.fused_moe.utils import _resize_cache
 from vllm.triton_utils import tl, triton
 
 logger = init_logger(__name__)
-
-has_deep_gemm = importlib.util.find_spec("deep_gemm") is not None
 
 
 @triton.jit
