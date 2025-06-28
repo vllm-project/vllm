@@ -697,25 +697,15 @@ def _pplx_moe(
         chunked_torch_output = chunk_by_rank(
             torch_output, pgi.rank, pgi.world_size).to(pplx_output.device)
 
-        #tol = 6e-2 if quant_dtype is not None else 3e-2
-        tol = 3e-2
+        torch.testing.assert_close(batched_output,
+                                   torch_output,
+                                   atol=3e-2,
+                                   rtol=3e-2)
 
-        try:
-            torch.testing.assert_close(batched_output,
-                                       torch_output,
-                                       atol=3e-2,
-                                       rtol=3e-2)
-
-            torch.testing.assert_close(pplx_output,
-                                       chunked_torch_output,
-                                       atol=tol,
-                                       rtol=tol)
-        except Exception:
-            #torch.set_printoptions(profile="full")
-            #print(f"PPLX {pplx_output.shape}\n{pplx_output}")
-            #print(f"TORCH {chunked_torch_output.shape}\n"
-            #      f"{chunked_torch_output}")
-            raise
+        torch.testing.assert_close(pplx_output,
+                                   chunked_torch_output,
+                                   atol=3e-2,
+                                   rtol=3e-2)
     finally:
         if use_internode:
             nvshmem_finalize()
@@ -758,14 +748,12 @@ def _pplx_moe_loop(pgi: ProcessGroupInfo, dp_size: int, use_internode: bool):
 
         if not use_fp8_w8a8 and (per_act_token_quant
                                  or block_shape is not None):
-            #pytest.skip("Skip quantization test for non-quantized type")
             print(
                 f"{test_desc} - Skip quantization test for non-quantized type."
             )
             continue
 
         if per_act_token_quant and block_shape is not None:
-            #pytest.skip("Skip illegal quantization combination.")
             print(f"{test_desc} - Skip illegal quantization combination.")
             continue
 

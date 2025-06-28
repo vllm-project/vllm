@@ -161,29 +161,23 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         expert_x_scale: Optional[torch.Tensor] = None
         if a1q.dtype.itemsize == 1:
-            float32_size = torch.float32.itemsize
-
             if quant_config.is_per_act_token:
-                # (M x 1) -> (E x M x 1)
-                token_dim = expert_x.size(1)
+                # (M x 1) -> (E x M x K)
                 final_dim = expert_x.size(2)
-                assert final_dim % float32_size == 0
             elif quant_config.is_per_tensor:
                 # (1 x 1) -> (E x 1 x 1)
-                token_dim = expert_x.size(1)
                 final_dim = 1
             else:
                 # (M x K_tiles) -> (E x M x K_tiles)
                 assert quant_config.block_shape is not None
                 num_blocks = cdiv(expert_x.size(2),
                                   quant_config.block_shape[1])
-                token_dim = expert_x.size(1)
                 final_dim = num_blocks
 
             expert_x_scale_shape = (
                 num_local_experts,
-                token_dim,
-                round_up(final_dim, 4)  # or 16?
+                expert_x.size(1),
+                round_up(final_dim, 4)  # round up for alignment
             )
 
             # TODO (bnell): make sure shape matches up with pplx hidden bytes
