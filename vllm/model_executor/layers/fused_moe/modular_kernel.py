@@ -8,7 +8,8 @@ from typing import Optional
 import torch
 
 import vllm.envs as envs
-from vllm.model_executor.layers.fused_moe.utils import _resize_cache
+from vllm.model_executor.layers.fused_moe.utils import (
+    _resize_cache, count_expert_num_tokens)
 from vllm.utils import cdiv
 
 #
@@ -474,12 +475,20 @@ class FusedMoEModularKernel(torch.nn.Module):
             return fused_out[s:e]
 
         def slice_expert_tokens_meta(
-                chunk_topk_ids: torch.Tensor) -> torch.Tensor:
-            pass
+                chunk_topk_ids: torch.Tensor) -> ExpertTokensMeta:
+            expert_num_tokens = count_expert_num_tokens(
+                chunk_topk_ids, local_num_experts, expert_map)
+            return ExpertTokensMeta(expert_num_tokens_gpu=expert_num_tokens,
+                                    expert_num_tokens_cpu=expert_num_tokens.to(
+                                        "cpu", non_blocking=True))
 
         for chunk_idx in range(num_chunks):
             c_a1q, c_a1q_scale, c_a2_scale, c_topk_ids, c_topk_weights = (
                 slice_input_tensors(chunk_idx))
+
+            c_expert_tokens_meta = None
+            if self.fused_experts.requires_expert_tokens_meta():
+                c_expert_tokens_meta = slice_expert_tokens_meta(c_topk_ids)
 
             self._do_fused_experts(fused_out=slice_output_tensor(chunk_idx),
                                    a1=a1,
@@ -498,7 +507,7 @@ class FusedMoEModularKernel(torch.nn.Module):
                                    w2_zp=w2_zp,
                                    a1q_scale=c_a1q_scale,
                                    a2_scale=c_a2_scale,
-                                   expert_tokens_meta=expert_tokens_meta)
+                                   expert_tokens_meta=c_expert_tokens_meta)
 
         return fused_out
 
