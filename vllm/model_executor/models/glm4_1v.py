@@ -1068,12 +1068,18 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
                 video_mm_data["video_metadata"] = metadata
 
                 video_outputs = super()._call_hf_processor(
-                    prompt=prompt,
+                    prompt="<|begin_of_video|><|video|><|end_of_video|>",
                     mm_data=video_mm_data,
                     mm_kwargs=mm_kwargs,
                 )
+
                 input_ids = video_outputs.pop("input_ids")
-                prompt = processor.tokenizer.batch_decode(input_ids)[0]
+                input_ids[input_ids==processor.image_token_id] = processor.video_token_id
+                video_placeholder = processor.tokenizer.batch_decode(input_ids)[0]
+                prompt = prompt.replace(
+                    "<|begin_of_video|><|video|><|end_of_video|>",
+                    video_placeholder,
+                )
 
                 grid_t = len(video_outputs["video_grid_thw"])
                 _, grid_h, grid_w = video_outputs["video_grid_thw"][0]
@@ -1086,8 +1092,6 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
                 pixel_values_videos=torch.cat(pixel_values_videos_lst),
                 video_grid_thw=torch.cat(video_grid_thw_lst),
             )
-            input_ids[input_ids==processor.image_token_id] = processor.video_token_id
-            prompt = processor.tokenizer.batch_decode(input_ids)[0]
         else:
             video_outputs = dict()
 
