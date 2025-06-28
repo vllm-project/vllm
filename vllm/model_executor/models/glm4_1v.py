@@ -36,6 +36,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 from transformers import BatchFeature
+from transformers.video_utils import VideoMetadata
 from transformers.models.glm4v.configuration_glm4v import (Glm4vConfig,
                                                            Glm4vVisionConfig)
 from transformers.models.glm4v.image_processing_glm4v import (
@@ -940,7 +941,6 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
     def _get_video_second_idx(self, metadata: dict[str, Any], total_frames: int) -> list[int]:
         video_processor = self.get_video_processor()
 
-        video_fps = getattr(metadata, "fps", 2.0)
         video_fps = metadata.get("fps", 2.0)
         meta_frames = metadata.get("total_frames", total_frames)
         max_frame_idx = meta_frames - 1
@@ -1060,9 +1060,16 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
             for item in mm_data.pop("videos", []):
                 video_array, metadata = item
 
+                metadata = VideoMetadata(
+                    total_num_frames=metadata["total_frames"],
+                    fps=metadata["fps"],
+                    duration=metadata["duration"],
+                    video_backend=metadata["video_backend"],
+                )
+
                 video_mm_data = dict()
-                video_mm_data["videos"] = video_array
-                video_mm_data["video_metadata"] = metadata
+                video_mm_data["videos"] = [[video_array]]
+                video_mm_data["video_metadata"] = [[metadata]]
 
                 video_outputs = super()._call_hf_processor(
                     prompt="<|begin_of_video|><|video|><|end_of_video|>",
@@ -1358,9 +1365,6 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
             pixel_values_videos = video_input["pixel_values_videos"].type(
                 self.visual.dtype)
             video_embeds = self.visual(pixel_values_videos, grid_thw=flat_grid_thw)
-
-        from safetensors.torch import save_file
-        save_file({"video_embeds": video_embeds}, "/mnt/video_embeds.safetensors")
 
         # Split concatenated embeddings for each video item.
         merge_size = self.visual.spatial_merge_size
