@@ -267,7 +267,7 @@ class TransformersModel(nn.Module):
                 self.config.global_attention_layers, list):
             global_attention_layers = self.config.global_attention_layers
         else:
-            global_attention_layers = None
+            global_attention_layers = []
 
         for i in range(start, end):
             sliding_window = None
