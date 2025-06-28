@@ -1353,10 +1353,6 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
                 self.visual.dtype)
             video_embeds = self.visual(pixel_values_videos, grid_thw=flat_grid_thw)
 
-        from safetensors.torch import save_file
-        print(video_embeds.shape)
-        save_file({"video_embeds": video_embeds}, "/mnt/video_embeds.safetensors")
-
         # Split concatenated embeddings for each video item.
         merge_size = self.visual.spatial_merge_size
         sizes = grid_thw.prod(-1) // merge_size // merge_size
