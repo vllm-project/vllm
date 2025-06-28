@@ -1091,6 +1091,22 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
             for item in mm_data.pop("videos", []):
                 video_array, metadata = item
 
+                # FIXME(Isotr0py): Activate the below logic after we can disable
+                # resampling from video loader backend.
+                # assert metadata["total_frames"] == len(video_array), (
+                #     f"Total frames {metadata['total_frames']} does not "
+                #     f"match the length of video array {len(video_array)}.")
+
+                # NOTE: Temporary workaround for resampled videos.
+                # this can cause a divergence with HF implementation if
+                # the input video is resampled in advance.
+                if metadata["total_frames"] != len(video_array):
+                    logger.warning(
+                        f"Total frames in metadata ({metadata['total_frames']}) does not "
+                        f"match the length of video array {len(video_array)}. This can "
+                        "be because the video is resampled in advance. "
+                        "This may cause a divergence with HF implementation.")
+                    metadata["total_frames"] = len(video_array)
                 metadata = VideoMetadata(
                     total_num_frames=metadata["total_frames"],
                     fps=metadata["fps"],
