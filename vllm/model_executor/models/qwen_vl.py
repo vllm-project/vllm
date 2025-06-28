@@ -620,7 +620,8 @@ class QwenVLMultiModalProcessor(BaseMultiModalProcessor[QwenVLProcessingInfo]):
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(
             pixel_values=MultiModalFieldConfig.batched("image"),
-            image_embeds=MultiModalFieldConfig.batched("image"),
+            input_features=MultiModalFieldConfig.batched("audio"),
+            input_features_mask=MultiModalFieldConfig.batched("audio"),
         )
 
     def _get_prompt_updates(
