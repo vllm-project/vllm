@@ -156,8 +156,6 @@ def use_rocm_custom_paged_attention(
                 and kv_cache_dtype == "auto"
                 and envs.VLLM_ROCM_CUSTOM_PAGED_ATTN)
 
-    _use_aiter_pa: Optional[bool] = None
-
 
 @cache
 def use_rocm_aiter_paged_attention(
