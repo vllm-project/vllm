@@ -7,6 +7,7 @@ import time
 import typing
 from collections import deque
 from contextlib import contextmanager
+from enum import Enum
 from typing import TYPE_CHECKING, Any, Optional
 
 import msgpack
@@ -118,20 +119,19 @@ class P2pNcclEngine:
                                      1024**3)  # GB
 
         # The sending type includes tree mutually exclusive options:
-        # PUT, GET, PUT_ASYNC.
+        # PUT, GET.
         self.send_type = self.config.get_from_extra_config("send_type", "PUT")
         if self.send_type == "GET":
             # tensor_id: torch.Tensor
             self.send_store: dict[str, torch.Tensor] = {}
         else:
-            # PUT or PUT_ASYNC
+            # PUT
             # tensor_id: torch.Tensor
             self.send_queue: deque[list[Any]] = deque()
             self.send_request_id_to_tensor_ids: dict[str, set[str]] = {}
-            if self.send_type == "PUT_ASYNC":
-                self._send_thread = threading.Thread(target=self._send_async,
-                                                     daemon=True)
-                self._send_thread.start()
+            self._send_thread = threading.Thread(target=self._send_async,
+                                                 daemon=True)
+            self._send_thread.start()
 
         # tensor_id: torch.Tensor/(addr, dtype, shape)
         self.recv_store: dict[str, Any] = {}
@@ -200,37 +200,38 @@ class P2pNcclEngine:
                 self.recv_store[tensor_id] = tensor
                 self.recv_store_cv.notify()
             return True
-        else:
-            if self.send_type == "PUT":
-                return self._send_sync(tensor_id, tensor, remote_address)
-            elif self.send_type == "PUT_ASYNC":
-                with self.send_queue_cv:
-                    self.send_queue.append([tensor_id, remote_address, tensor])
-                    self.send_queue_cv.notify()
-            else:  # GET
-                with self.send_store_cv:
-                    tensor_size = tensor.element_size() * tensor.numel()
-                    while (self.buffer_size + tensor_size
-                           > self.buffer_size_threshold):
-                        oldest_tenser_id = next(iter(self.send_store))
-                        oldest_tenser = self.send_store.pop(oldest_tenser_id)
-                        oldest_tenser_size = oldest_tenser.element_size(
-                        ) * oldest_tenser.numel()
-                        self.buffer_size -= oldest_tenser_size
-                        logger.info(
-                            "⛔[GET]Send to %s, tensor_id:%s, tensor_size:%d,"
-                            " buffer_size:%d, oldest_tenser_size:%d, rank:%d",
-                            remote_address, tensor_id, tensor_size,
-                            self.buffer_size, oldest_tenser_size, self.rank)
 
-                    self.send_store[tensor_id] = tensor
-                    self.buffer_size += tensor_size
-                    logger.debug(
-                        "🔵[GET]Send to %s, tensor_id:%s, tensor_size:%d, "
-                        "shape:%s, rank:%d, buffer_size:%d(%.2f%%)",
-                        remote_address, tensor_id, tensor_size, tensor.shape,
-                        self.rank, self.buffer_size,
-                        self.buffer_size / self.buffer_size_threshold * 100)
+        if self.send_type == "PUT":
+            with self.send_queue_cv:
+                self.send_queue.append([tensor_id, remote_address, tensor])
+                self.send_queue_cv.notify()
+            return True
+
+        # GET
+        with self.send_store_cv:
+            tensor_size = tensor.element_size() * tensor.numel()
+            while (self.buffer_size + tensor_size
+                   > self.buffer_size_threshold):
+                oldest_tenser_id = next(iter(self.send_store))
+                oldest_tenser = self.send_store.pop(oldest_tenser_id)
+                oldest_tenser_size = oldest_tenser.element_size(
+                ) * oldest_tenser.numel()
+                self.buffer_size -= oldest_tenser_size
+                logger.info(
+                    "⛔[GET]Send to %s, tensor_id:%s, tensor_size:%d,"
+                    " buffer_size:%d, oldest_tenser_size:%d, rank:%d",
+                    remote_address, tensor_id, tensor_size,
+                    self.buffer_size, oldest_tenser_size, self.rank)
+
+            self.send_store[tensor_id] = tensor
+            self.buffer_size += tensor_size
+
+        logger.debug(
+            "🔵[GET]Send to %s, tensor_id:%s, tensor_size:%d, "
+            "shape:%s, rank:%d, buffer_size:%d(%.2f%%)",
+            remote_address, tensor_id, tensor_size, tensor.shape,
+            self.rank, self.buffer_size,
+            self.buffer_size / self.buffer_size_threshold * 100)
 
         return True
 
@@ -239,7 +240,7 @@ class P2pNcclEngine:
         tensor_id: str,
         remote_address: typing.Optional[str] = None,
     ) -> torch.Tensor:
-        if self.send_type == "PUT" or self.send_type == "PUT_ASYNC":
+        if self.send_type == "PUT":
             with self.recv_store_cv:
                 if tensor_id not in self.recv_store:
                     logger.warning(
@@ -429,8 +430,7 @@ class P2pNcclEngine:
 
         self._send(comm, tensor_id, tensor.to(self.device), rank ^ 1, self.send_stream)
 
-        if self.send_type == "PUT_ASYNC":
-            self._have_sent_tensor_id(tensor_id)
+        self._have_sent_tensor_id(tensor_id)
 
         return True
 
@@ -530,7 +530,6 @@ class P2pNcclEngine:
 
     def close(self) -> None:
         self._listener_thread.join()
-        if self.send_type == "PUT_ASYNC":
-            self._send_thread.join()
+        self._send_thread.join()
         if self._ping_thread is not None:
             self._ping_thread.join()
