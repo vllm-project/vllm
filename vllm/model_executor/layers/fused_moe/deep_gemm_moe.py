@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import functools
 import importlib.util
 from typing import Optional
 
@@ -8,8 +7,9 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.deep_gemm_permute_unpermute import (
-    compute_aligned_M, deepgemm_moe_permute, deepgemm_unpermute_and_reduce)
+from vllm.model_executor.layers.fused_moe.deep_gemm_utils import (
+    compute_aligned_M, deep_gemm_block_shape, deepgemm_moe_permute,
+    deepgemm_unpermute_and_reduce)
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP)
 from vllm.model_executor.layers.fused_moe.utils import (
@@ -18,14 +18,6 @@ from vllm.model_executor.layers.fused_moe.utils import (
 logger = init_logger(__name__)
 
 has_deep_gemm = importlib.util.find_spec("deep_gemm") is not None
-
-
-@functools.cache
-def deep_gemm_block_shape() -> list[int]:
-    # Lazy import to avoid CUDA initialization problems.
-    import deep_gemm as dg
-    block = dg.get_m_alignment_for_contiguous_layout()
-    return [block, block]
 
 
 def _valid_deep_gemm_shape(M: int, N: int, K: int):

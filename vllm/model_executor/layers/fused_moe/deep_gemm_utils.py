@@ -5,6 +5,7 @@ Taken from https://github.com/ModelTC/lightllm/blob/main/lightllm/common/fused_m
 and updated to fit vllm needs and terminology.
 """
 
+import functools
 from typing import Optional
 
 import torch
@@ -13,6 +14,14 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.utils import count_expert_num_tokens
 from vllm.triton_utils import tl, triton
 from vllm.utils import round_up
+
+
+@functools.cache
+def deep_gemm_block_shape() -> list[int]:
+    # Lazy import to avoid CUDA initialization problems.
+    import deep_gemm as dg
+    block = dg.get_m_alignment_for_contiguous_layout()
+    return [block, block]
 
 
 def expert_num_tokens_round_up_and_sum(expert_num_tokens: torch.Tensor) -> int:
@@ -337,10 +346,13 @@ def deepgemm_moe_permute(aq: torch.Tensor,
     H = aq.size(1)
     device = aq.device
 
+    block_m = deep_gemm_block_shape()[0]
+    block_k = deep_gemm_block_shape()[1]
+
     M_sum = compute_aligned_M(M=topk_ids.size(0),
                               num_topk=topk_ids.size(1),
                               local_num_experts=local_num_experts,
-                              alignment=128,
+                              alignment=block_m,
                               expert_tokens_meta=expert_tokens_meta)
 
     expert_start_loc = torch.empty((local_num_experts),
@@ -351,7 +363,7 @@ def deepgemm_moe_permute(aq: torch.Tensor,
     if aq_out is None:
         aq_out = torch.empty((M_sum, H), device=device, dtype=aq.dtype)
 
-    aq_scale_out = torch.empty((M_sum, H // 128),
+    aq_scale_out = torch.empty((M_sum, H // block_k),
                                device=device,
                                dtype=torch.float32)
 
