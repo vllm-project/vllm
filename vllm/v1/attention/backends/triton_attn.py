@@ -74,7 +74,6 @@ class TritonAttentionMetadata:
 class TritonAttentionMetadataBuilder(
         AttentionMetadataBuilder[TritonAttentionMetadata]):
     full_cudagraph_supported: ClassVar[bool] = True
-    force_separate_routine: ClassVar[Optional[bool]] = None
 
     def __init__(self, runner: "GPUModelRunner", kv_cache_spec: AttentionSpec,
                  block_table: BlockTable):

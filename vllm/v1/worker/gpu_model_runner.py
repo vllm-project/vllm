@@ -1362,13 +1362,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # If attention doesn't support CUDA Graphs for this batch, we skip them,
         # and turn back to the piecewise CUDA graphs. Or if full_cuda_graph is
         # False, we always turn to the piecewise CUDA graphs.
-        skip_attention_cuda_graphs = not attention_cuda_graphs \
-                if self.full_cuda_graph else True
+        skip_attention_cuda_graphs = not self.full_cuda_graph or not attention_cuda_graphs  # noqa: E501
         # Note: When skip_attention_cuda_graphs is always False and
         # compilition_config.separate_attention_routine is True, as in FA2,
         # this flag helps to determine the correct routine for the full
         # cudagraph.
-        is_pure_decoding = num_scheduled_tokens == self.input_batch.num_reqs
+        is_pure_decode = num_scheduled_tokens == self.input_batch.num_reqs
 
         # Run the model.
         # Use persistent buffers for CUDA graphs.
@@ -1378,7 +1377,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_tokens=num_input_tokens,
                 num_tokens_across_dp=num_tokens_across_dp,
                 skip_attention_cuda_graphs=skip_attention_cuda_graphs,
-                is_pure_decoding=is_pure_decoding,
+                is_pure_decode=is_pure_decode,
         ):
             self.maybe_setup_kv_connector(scheduler_output)
 
@@ -1934,7 +1933,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self,
         num_tokens: int,
         capture_attn_cudagraph: Union[bool, Literal["auto"]] = False,
-        is_pure_decoding: bool = False,
+        is_pure_decode: bool = False,
         skip_eplb: bool = False,
         is_profile: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -1957,9 +1956,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         num_scheduled_tokens = np.array(num_scheduled_tokens_list,
                                         dtype=np.int32)
 
-        # [Bugfix] This lets FA2 to correctly activate the optimized routine
-        # for pure decoding, i.e., Flashdecoding + an optimization for GQA/MQA.
-        max_query_len = 1 if is_pure_decoding else num_tokens
+        # This lets FA2 to correctly activate the optimized routine for
+        # pure decoding, i.e., Flashdecoding + an optimization for GQA/MQA.
+        max_query_len = 1 if is_pure_decode else num_tokens
 
         attn_metadata: Optional[dict[str, Any]] = None
         skip_attention_cuda_graphs = True
@@ -2038,7 +2037,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     num_tokens=num_tokens,
                     num_tokens_across_dp=num_tokens_across_dp,
                     skip_attention_cuda_graphs=skip_attention_cuda_graphs,
-                    is_pure_decoding=is_pure_decoding):
+                    is_pure_decode=is_pure_decode):
                 outputs = model(
                     input_ids=input_ids,
                     positions=positions,
@@ -2290,7 +2289,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         with graph_capture(device=self.device):
             full_cg = self.full_cuda_graph
 
-
             # If full_cuda_graph is true, automatically determine whether or
             # not to capture the attention for the mix prefill-decode (general)
             # phase, based on the attention backends.
@@ -2304,9 +2302,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                    and len(self.cudagraph_batch_sizes) > 0 \
                    and self.cudagraph_batch_sizes[0] == 1:
                 start_idx = 1
-                
+
             # We skip EPLB here since we don't want to record dummy metrics
-            
+
             # Capture the mix prefill-decode (general usage) cudagraphs
             for num_tokens in tqdm(
                     reversed(self.cudagraph_batch_sizes[start_idx:]),
@@ -2317,12 +2315,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     self._dummy_run(
                         num_tokens,
                         capture_attn_cudagraph=capture_attn_cudagraph_general,
-                        is_pure_decoding=False,
+                        is_pure_decode=False,
                         skip_eplb=True)
                 self._dummy_run(
                     num_tokens,
                     capture_attn_cudagraph=capture_attn_cudagraph_general,
-                    is_pure_decoding=False,
+                    is_pure_decode=False,
                     skip_eplb=True)
 
             if self.vllm_config.compilation_config.separate_attention_routine:
@@ -2340,13 +2338,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                             self.compilation_config.cudagraph_num_of_warmups):
                         self._dummy_run(num_tokens,
                                         capture_attn_cudagraph=full_cg,
-                                        is_pure_decoding=True,
+                                        is_pure_decode=True,
                                         skip_eplb=True)
                     self._dummy_run(num_tokens,
                                     capture_attn_cudagraph=full_cg,
-                                    is_pure_decoding=True,
+                                    is_pure_decode=True,
                                     skip_eplb=True)
-
 
         end_time = time.perf_counter()
         end_free_gpu_memory = torch.cuda.mem_get_info()[0]

@@ -33,11 +33,115 @@ class ConcreteSizeEntry:
     cudagraph: Optional[torch.cuda.CUDAGraph] = None
     output: Optional[Any] = None
 
+    cudagraph_runnable: Optional[Callable] = None
+
     # for cudagraph debugging, track the input addresses
     # during capture, and check if they are the same during replay
     input_addresses: Optional[list[int]] = None
 
     usage_type: Optional[str] = None
+
+
+class CUDAGraphWrapper:
+    """
+    A wrapper class for cudagraphs functionality.
+
+    This class creates a cudagraph runnable for a given `ConcreteSizeEntry`,
+    taking responsibility of capturing cudagraph and running the replay.
+    """
+
+    def __init__(self, vllm_config: VllmConfig):
+        self.vllm_config = vllm_config
+        self.compilation_config = vllm_config.compilation_config
+        self.is_debugging_mode = envs.VLLM_LOGGING_LEVEL == "DEBUG"
+
+    def create_cudagraph_runnable(
+            self, entry: ConcreteSizeEntry,
+            cudagraph_runnable_config: dict[str, Any]) -> Any:
+        graph_pool = cudagraph_runnable_config["graph_pool"]
+        assert graph_pool is not None
+        debug_capturing = cudagraph_runnable_config.get(
+            "debug_capturing", True)
+        gc_disable = cudagraph_runnable_config.get("gc_disable", False)
+        weak_ref_output = cudagraph_runnable_config.get(
+            "weak_ref_output", True)
+
+        def cudagraph_runnable(*args):
+            if entry.cudagraph is None:
+                if entry.num_finished_warmup < self.compilation_config.cudagraph_num_of_warmups:  # noqa
+                    entry.num_finished_warmup += 1
+                    if debug_capturing:
+                        logger.debug(
+                            "Warming up %s/%s of %s usage for shape %s",
+                            entry.num_finished_warmup,
+                            self.compilation_config.cudagraph_num_of_warmups,
+                            entry.usage_type, entry.runtime_shape)
+                    return entry.runnable(*args)
+
+                if debug_capturing:
+                    # Since we capture cudagraph for many different shapes and
+                    # capturing is fast, we don't need to log it for every
+                    # shape. We only log it in the debug mode.
+                    logger.debug(
+                        "Capturing a cudagraph of %s usage for shape %s",
+                        entry.usage_type, entry.runtime_shape)
+
+                input_addresses = [
+                    x.data_ptr() for x in args if isinstance(x, torch.Tensor)
+                ]
+                entry.input_addresses = input_addresses
+                cudagraph = torch.cuda.CUDAGraph()
+
+                with ExitStack() as stack:
+                    if gc_disable:
+                        # during every model forward, we will capture
+                        # many pieces of cudagraphs (roughly one per layer).
+                        # running gc again and again across layers will
+                        # make the cudagraph capture very slow.
+                        # therefore, we only run gc for the first graph,
+                        # and disable gc for the rest of the graphs.
+                        stack.enter_context(patch("gc.collect", lambda: None))
+                        stack.enter_context(
+                            patch("torch.cuda.empty_cache", lambda: None))
+
+                    # mind-exploding: carefully manage the reference and memory.
+                    with torch.cuda.graph(cudagraph, pool=graph_pool):
+                        # `output` is managed by pytorch's cudagraph pool
+                        output = entry.runnable(*args)
+                        if weak_ref_output:
+                            # by converting it to weak ref,
+                            # the original `output` will immediately be released
+                            # to save memory. It is only safe to do this for
+                            # the last graph, because the output of the last
+                            # graph will not be used by any other cuda graph.
+                            output = weak_ref_tensors(output)
+
+                # here we always use weak ref for the output
+                # to save memory
+                entry.output = weak_ref_tensors(output)
+                entry.cudagraph = cudagraph
+
+                compilation_counter.num_cudagraph_captured += 1
+
+                # important: we need to return the output, rather than
+                # the weak ref of the output, so that pytorch can correctly
+                # manage the memory during cuda graph capture
+                return output
+
+            if self.is_debugging_mode:
+                # check if the input addresses are the same
+                new_input_addresses = [
+                    x.data_ptr() for x in args if isinstance(x, torch.Tensor)
+                ]
+                assert new_input_addresses == entry.input_addresses, (
+                    "Input addresses for cudagraphs are different during "
+                    f"replay. Expected {entry.input_addresses}, got "
+                    f"{new_input_addresses}")
+
+            entry.cudagraph.replay()
+            return entry.output
+
+        return cudagraph_runnable
 
 
 class CUDAPiecewiseBackend:
@@ -72,6 +176,8 @@ class CUDAPiecewiseBackend:
         self.is_last_graph = (
             piecewise_compile_index == total_piecewise_compiles - 1)
 
+        self.is_full_graph = total_piecewise_compiles == 1
+
         self.compile_sizes: set[int] = set(
             self.compilation_config.compile_sizes)
         self.cudagraph_capture_sizes: set[int] = set(
@@ -94,12 +200,16 @@ class CUDAPiecewiseBackend:
         # and updates during the compilation process, so we need to copy it
         self.to_be_compiled_sizes: set[int] = self.compile_sizes.copy()
         for shape in self.compile_sizes.union(self.cudagraph_capture_sizes):
+            usage_type = "full/general" if self.is_full_graph else \
+                            "piecewise/general"
             self.concrete_size_entries[shape] = ConcreteSizeEntry(
                 runtime_shape=shape,
                 need_to_compile=shape in self.compile_sizes,
                 use_cudagraph=shape in self.cudagraph_capture_sizes,
-                usage_type="piecewise(general)",  # for logging only
+                usage_type=usage_type,  # for debug logging only
             )
+
+        self.cudagraph_wrapper = CUDAGraphWrapper(vllm_config)
 
     def check_for_ending_compilation(self):
         if self.is_last_graph and not self.to_be_compiled_sizes:
@@ -151,78 +261,17 @@ class CUDAPiecewiseBackend:
         if not entry.use_cudagraph or not skip_attention_cuda_graphs:
             return entry.runnable(*args)
 
-        if entry.cudagraph is None:
-            if entry.num_finished_warmup < self.compilation_config.cudagraph_num_of_warmups:  # noqa
-                entry.num_finished_warmup += 1
-                if self.is_first_graph:
-                    logger.debug(
-                        "Warming up %s/%s of %s usage for shape %s",
-                        entry.num_finished_warmup,
-                        self.compilation_config.cudagraph_num_of_warmups,
-                        entry.usage_type, runtime_shape)
-                return entry.runnable(*args)
-
-            if self.is_first_graph:
-                # Since we capture cudagraph for many different shapes and
-                # capturing is fast, we don't need to log it for every shape.
-                # We only log it in the debug mode.
-                logger.debug("Capturing a cudagraph of %s usage for shape %s",
-                             entry.usage_type, runtime_shape)
-
-            input_addresses = [
-                x.data_ptr() for x in args if isinstance(x, torch.Tensor)
-            ]
-            entry.input_addresses = input_addresses
-            cudagraph = torch.cuda.CUDAGraph()
-
-            with ExitStack() as stack:
-                if not self.is_first_graph:
-                    # during every model forward, we will capture
-                    # many pieces of cudagraphs (roughly one per layer).
-                    # running gc again and again across layers will
-                    # make the cudagraph capture very slow.
-                    # therefore, we only run gc for the first graph,
-                    # and disable gc for the rest of the graphs.
-                    stack.enter_context(patch("gc.collect", lambda: None))
-                    stack.enter_context(
-                        patch("torch.cuda.empty_cache", lambda: None))
-
-                # mind-exploding: carefully manage the reference and memory.
-                with torch.cuda.graph(cudagraph, pool=self.graph_pool):
-                    # `output` is managed by pytorch's cudagraph pool
-                    output = entry.runnable(*args)
-                    if self.is_last_graph:
-                        # by converting it to weak ref,
-                        # the original `output` will immediately be released
-                        # to save memory. It is only safe to do this for
-                        # the last graph, because the output of the last graph
-                        # will not be used by any other cuda graph.
-                        output = weak_ref_tensors(output)
-
-            # here we always use weak ref for the output
-            # to save memory
-            entry.output = weak_ref_tensors(output)
-            entry.cudagraph = cudagraph
-
-            compilation_counter.num_cudagraph_captured += 1
-
-            # important: we need to return the output, rather than
-            # the weak ref of the output, so that pytorch can correctly
-            # manage the memory during cuda graph capture
-            return output
-
-        if self.is_debugging_mode:
-            # check if the input addresses are the same
-            new_input_addresses = [
-                x.data_ptr() for x in args if isinstance(x, torch.Tensor)
-            ]
-            assert new_input_addresses == entry.input_addresses, (
-                "Input addresses for cudagraphs are different during replay."
-                f" Expected {entry.input_addresses}, got {new_input_addresses}"
-            )
-
-        entry.cudagraph.replay()
-        return entry.output
+        if entry.cudagraph_runnable is None:
+            cudagraph_runnable_config = {
+                "graph_pool": self.graph_pool,
+                "debug_capturing": self.is_first_graph,
+                "gc_disable": not self.is_first_graph,
+                "weak_ref_output": self.is_last_graph,
+            }
+            entry.cudagraph_runnable = \
+                self.cudagraph_wrapper.create_cudagraph_runnable(entry,
+                                                    cudagraph_runnable_config)
+        return entry.cudagraph_runnable(*args)
 
 
 class FullCudagraphWrapper:
@@ -269,6 +318,8 @@ class FullCudagraphWrapper:
                     usage_type="decode",
                 )
 
+        self.cudagraph_wrapper = CUDAGraphWrapper(vllm_config)
+
     def __call__(self, *args) -> Any:
         if not self.first_run_finished:
             self.first_run_finished = True
@@ -287,7 +338,7 @@ class FullCudagraphWrapper:
         # as a whole.
 
         concrete_size_entries = self.concrete_size_entries
-        if self.separate_attention_routine and forward_context.is_pure_decoding:
+        if self.separate_attention_routine and forward_context.is_pure_decode:
             concrete_size_entries = self.concrete_size_entries_decode
 
         if runtime_shape not in concrete_size_entries:
@@ -302,60 +353,10 @@ class FullCudagraphWrapper:
         if not entry.use_cudagraph:
             return entry.runnable(*args)
 
-        if entry.cudagraph is None:
-            if entry.num_finished_warmup < self.compilation_config.cudagraph_num_of_warmups:  # noqa
-                entry.num_finished_warmup += 1
-                logger.debug("Warming up %s/%s of %s usage for shape %s",
-                             entry.num_finished_warmup,
-                             self.compilation_config.cudagraph_num_of_warmups,
-                             entry.usage_type, runtime_shape)
-                return entry.runnable(*args)
+        if entry.cudagraph_runnable is None:
+            cudagraph_runnable_config = {"graph_pool": self.graph_pool}
+            entry.cudagraph_runnable = \
+                self.cudagraph_wrapper.create_cudagraph_runnable(entry,
+                                                    cudagraph_runnable_config)
 
-            # Since we capture cudagraph for many different shapes and
-            # capturing is fast, we don't need to log it for every shape.
-            # We only log it in the debug mode.
-
-            logger.debug("Capturing a cudagraph of %s usage for shape %s",
-                         entry.usage_type, runtime_shape)
-
-            input_addresses = [
-                x.data_ptr() for x in args if isinstance(x, torch.Tensor)
-            ]
-            entry.input_addresses = input_addresses
-            cudagraph = torch.cuda.CUDAGraph()
-
-            with ExitStack(), \
-                torch.cuda.graph(cudagraph, pool=self.graph_pool):
-                # mind-exploding: carefully manage the reference and memory.
-
-                # `output` is managed by pytorch's cudagraph pool
-                output = entry.runnable(*args)
-                # by converting it to weak ref,
-                # the original `output` will immediately be released
-                # to save memory.
-                output = weak_ref_tensors(output)
-
-            # here we always use weak ref for the output
-            # to save memory
-            entry.output = weak_ref_tensors(output)
-            entry.cudagraph = cudagraph
-
-            compilation_counter.num_cudagraph_captured += 1
-
-            # important: we need to return the output, rather than
-            # the weak ref of the output, so that pytorch can correctly
-            # manage the memory during cuda graph capture
-            return output
-
-        if self.is_debugging_mode:
-            # check if the input addresses are the same
-            new_input_addresses = [
-                x.data_ptr() for x in args if isinstance(x, torch.Tensor)
-            ]
-            assert new_input_addresses == entry.input_addresses, (
-                "Input addresses for cudagraphs are different during replay."
-                f" Expected {entry.input_addresses}, got {new_input_addresses}"
-            )
-
-        entry.cudagraph.replay()
-        return entry.output
+        return entry.cudagraph_runnable(*args)

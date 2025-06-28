@@ -98,7 +98,7 @@ class ForwardContext:
     # cudagraphs that skip the attention part. By default true, we use piecewise
     # cudagraphs.
     skip_attention_cuda_graphs: bool = True
-    is_pure_decoding: bool = False
+    is_pure_decode: bool = False
 
 
 _forward_context: Optional[ForwardContext] = None
@@ -120,7 +120,7 @@ def set_forward_context(
     num_tokens: Optional[int] = None,
     num_tokens_across_dp: Optional[torch.Tensor] = None,
     skip_attention_cuda_graphs: bool = True,
-    is_pure_decoding: bool = False,
+    is_pure_decode: bool = False,
 ):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
@@ -146,7 +146,7 @@ def set_forward_context(
         attn_metadata=attn_metadata,
         dp_metadata=dp_metadata,
         skip_attention_cuda_graphs=skip_attention_cuda_graphs,
-        is_pure_decoding=is_pure_decoding,
+        is_pure_decode=is_pure_decode,
     )
 
     try:
