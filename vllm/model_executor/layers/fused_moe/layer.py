@@ -34,7 +34,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
-from vllm.utils import direct_register_custom_op, has_deep_ep, has_pplx
+from vllm.utils import direct_register_custom_op, has_deepep, has_pplx
 
 if current_platform.is_cuda_alike():
     from .fused_batched_moe import BatchedTritonExperts

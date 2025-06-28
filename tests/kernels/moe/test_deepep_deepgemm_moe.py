@@ -20,6 +20,7 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8)
 from vllm.platforms import current_platform
+from vllm.utils import has_deep_ep, has_deep_gemm
 
 from .parallel_utils import ProcessGroupInfo, parallel_launch
 from .utils import make_test_weights
@@ -33,7 +34,6 @@ if has_deep_ep():
     from .parallel_utils import DeepEPHTArgs, DeepEPLLArgs, make_deepep_a2a
 
 if has_deep_gemm():
-    import deep_gemm
 
     from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
         BatchedDeepGemmExperts)
