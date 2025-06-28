@@ -956,6 +956,16 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
             else:
                 target_seconds = np.linspace(0, duration, num_samples, endpoint=True)
                 frame_indices = [min(max_frame_idx, int(math.ceil(t * video_fps))) for t in target_seconds]
+
+        seen, uniq = set(), []
+        for idx in frame_indices:
+            if idx not in seen:
+                seen.add(idx)
+                uniq.append(idx)
+        if len(uniq) & 1:
+            uniq.append(uniq[-1])
+        frame_indices = uniq
+
         full_second_idxs = [int(idx / video_fps) for idx in frame_indices]
         timestamps_list = full_second_idxs[::2]
         unique_timestamps = []
