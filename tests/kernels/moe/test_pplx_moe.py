@@ -7,7 +7,7 @@ Run `pytest tests/kernels/test_pplx_moe.py`.
 import itertools
 import textwrap
 import traceback
-from typing import Optional
+from typing import Callable, Optional
 
 import pytest
 import torch
@@ -404,8 +404,9 @@ def _pplx_prepare_finalize(
 @pytest.mark.parametrize("per_act_token_quant", [False, True])
 @pytest.mark.parametrize("block_shape", [None, [128, 128]])
 @pytest.mark.parametrize("use_internode", [False])
+@pytest.mark.skip(reason="Too slow, run manually for debugging.")
 @requires_pplx
-def test_pplx_prepare_finalize(
+def test_pplx_prepare_finalize_slow(
     mnk: tuple[int, int, int],
     e: int,
     topk: int,
@@ -593,6 +594,7 @@ def _pplx_moe(
     w2: torch.Tensor,
     score: torch.Tensor,
     topk: int,
+    num_experts: int,
     w1_s: Optional[torch.Tensor] = None,
     w2_s: Optional[torch.Tensor] = None,
     quant_dtype: Optional[torch.dtype] = None,
@@ -705,81 +707,6 @@ def _pplx_moe(
             nvshmem_finalize()
 
 
-def format_result(msg, ex=None):
-    if ex is not None:
-        x = str(ex)
-        newx = x.strip(" \n\t")[:16]
-        if len(newx) < len(x):
-            newx = newx + " ..."
-
-        prefix = "E\t"
-        print(f"{textwrap.indent(traceback.format_exc(), prefix)}")
-        print(f"FAILED {msg} - {newx}\n")
-    else:
-        print(f"PASSED {msg}")
-
-
-def _pplx_moe_loop(pgi: ProcessGroupInfo, dp_size: int, use_internode: bool):
-    current_platform.seed_everything(7)
-    #combos = itertools.product(PPLX_COMBOS, NUM_EXPERTS, TOP_KS, DTYPES,
-    #                           [False, True], [None, [128, 128]])
-    combos = itertools.product(PPLX_COMBOS, NUM_EXPERTS, TOP_KS, DTYPES,
-                               [True], [None])
-    exceptions = []
-    count = 0
-    for mnk, e, topk, dtype, per_act_token_quant, block_shape in combos:
-        count = count + 1
-        m, n, k = mnk
-
-        if dtype == torch.float8_e4m3fn:
-            use_fp8_w8a8 = True
-            quant_dtype = dtype
-        else:
-            use_fp8_w8a8 = False
-            quant_dtype = None
-
-        test_desc = (f"test_pplx_moe[mnk={mnk}, e={e}, topk={topk}, "
-                     f"dtype={dtype}, per_act_token={per_act_token_quant}, "
-                     f"block_shape={block_shape}")
-
-        if not use_fp8_w8a8 and (per_act_token_quant
-                                 or block_shape is not None):
-            print(
-                f"{test_desc} - Skip quantization test for non-quantized type."
-            )
-            continue
-
-        if per_act_token_quant and block_shape is not None:
-            print(f"{test_desc} - Skip illegal quantization combination.")
-            continue
-
-        a = torch.randn((m, k), device="cuda", dtype=torch.bfloat16) / 10
-        score = torch.randn((m, e), device="cuda", dtype=torch.bfloat16)
-
-        _, w1, w1_s, _, w2, w2_s = make_test_weights(
-            e,
-            n,
-            k,
-            quant_dtype=quant_dtype,
-            block_shape=block_shape,
-            per_act_token_quant=per_act_token_quant,
-        )
-
-        try:
-            _pplx_moe(pgi, dp_size, a, w1, w2, score, topk, w1_s, w2_s,
-                      quant_dtype, per_act_token_quant, block_shape,
-                      use_internode)
-            format_result(test_desc)
-        except Exception as ex:
-            format_result(test_desc, ex)
-            exceptions.append(ex)
-
-    if len(exceptions) > 0:
-        raise RuntimeError(
-            f"{len(exceptions)} of {count} tests failed in child process, "
-            f"rank={pgi.rank}.")
-
-
 @pytest.mark.parametrize("mnk", PPLX_COMBOS)
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
@@ -829,9 +756,115 @@ def test_pplx_moe_slow(
         per_act_token_quant=per_act_token_quant,
     )
 
-    parallel_launch(world_size, _pplx_moe, dp_size, a, w1, w2, score, topk,
+    parallel_launch(world_size, _pplx_moe, dp_size, a, w1, w2, score, topk, e,
                     w1_s, w2_s, quant_dtype, per_act_token_quant, block_shape,
                     use_internode)
+
+
+def _pplx_test_loop(pgi: ProcessGroupInfo, dp_size: int, use_internode: bool,
+                    make_weights: bool, test_fn: Callable):
+
+    def format_result(msg, ex=None):
+        if ex is not None:
+            x = str(ex)
+            newx = x.strip(" \n\t")[:16]
+            if len(newx) < len(x):
+                newx = newx + " ..."
+
+            prefix = "E\t"
+            print(f"{textwrap.indent(traceback.format_exc(), prefix)}")
+            print(f"FAILED {msg} - {newx}\n")
+        else:
+            print(f"PASSED {msg}")
+
+    current_platform.seed_everything(7)
+    combos = itertools.product(PPLX_COMBOS, NUM_EXPERTS, TOP_KS, DTYPES,
+                               [False, True], [None, [128, 128]])
+    exceptions = []
+    count = 0
+    for mnk, e, topk, dtype, per_act_token_quant, block_shape in combos:
+        count = count + 1
+        m, n, k = mnk
+
+        if dtype == torch.float8_e4m3fn:
+            use_fp8_w8a8 = True
+            quant_dtype = dtype
+        else:
+            use_fp8_w8a8 = False
+            quant_dtype = None
+
+        test_desc = (f"test_pplx_moe[mnk={mnk}, e={e}, topk={topk}, "
+                     f"dtype={dtype}, per_act_token={per_act_token_quant}, "
+                     f"block_shape={block_shape}")
+
+        if not use_fp8_w8a8 and (per_act_token_quant
+                                 or block_shape is not None):
+            print(
+                f"{test_desc} - Skip quantization test for non-quantized type."
+            )
+            continue
+
+        if per_act_token_quant and block_shape is not None:
+            print(f"{test_desc} - Skip illegal quantization combination.")
+            continue
+
+        a = torch.randn((m, k), device="cuda", dtype=torch.bfloat16) / 10
+        score = torch.randn((m, e), device="cuda", dtype=torch.bfloat16)
+
+        args = dict()
+        if make_weights:
+            _, w1, w1_s, _, w2, w2_s = make_test_weights(
+                e,
+                n,
+                k,
+                quant_dtype=quant_dtype,
+                block_shape=block_shape,
+                per_act_token_quant=per_act_token_quant,
+            )
+            args["w1"] = w1
+            args["w2"] = w2
+            args["w1_s"] = w1_s
+            args["w2_s"] = w2_s
+
+        try:
+            test_fn(
+                pgi=pgi,
+                dp_size=dp_size,
+                a=a,
+                score=score,
+                topk=topk,
+                num_experts=e,
+                quant_dtype=quant_dtype,
+                per_act_token_quant=per_act_token_quant,
+                block_shape=block_shape,
+                use_internode=use_internode,
+                **args,
+            )
+            format_result(test_desc)
+        except Exception as ex:
+            format_result(test_desc, ex)
+            exceptions.append(ex)
+
+    if len(exceptions) > 0:
+        raise RuntimeError(
+            f"{len(exceptions)} of {count} tests failed in child process, "
+            f"rank={pgi.rank}.")
+    else:
+        print(f"{count} of {count} tests passed in child process, "
+              f"rank={pgi.rank}.")
+
+
+@pytest.mark.parametrize("world_dp_size", [[2, 1]])
+@pytest.mark.parametrize("use_internode", [False])
+@requires_pplx
+def test_pplx_prepare_finalize(
+    world_dp_size: tuple[int, int],
+    use_internode: bool,
+):
+    current_platform.seed_everything(7)
+    world_size, dp_size = world_dp_size
+    parallel_launch(world_size, _pplx_test_loop, dp_size, use_internode, False,
+                    _pplx_prepare_finalize)
 
 
 @pytest.mark.parametrize("world_dp_size", [[2, 1]])
@@ -843,4 +876,5 @@ def test_pplx_moe(
 ):
     current_platform.seed_everything(7)
     world_size, dp_size = world_dp_size
-    parallel_launch(world_size, _pplx_moe_loop, dp_size, use_internode)
+    parallel_launch(world_size, _pplx_test_loop, dp_size, use_internode, True,
+                    _pplx_moe)
