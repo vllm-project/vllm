@@ -155,7 +155,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             a1 = a1 * rank_topk_weights.to(a1.dtype)
 
         # Dispatch
-        yield_and_switch_from_compute_to_comm_impl(schedule="default")
+        # yield_and_switch_from_compute_to_comm_impl(schedule="default")
         expert_x, expert_num_tokens, handle, event, hook = \
                 self.buffers[a2a_idx].low_latency_dispatch(a1,
                                                 rank_topk_ids,
@@ -165,7 +165,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                                                 async_finish=False,
                                                 return_recv_hook=False)
         self.handles[a2a_idx] = handle
-        yield_and_switch_from_comm_to_compute_impl(schedule="default")
+        # yield_and_switch_from_comm_to_compute_impl(schedule="default")
 
         expert_x, expert_x_scale = self._do_quant(expert_x, a1_scale, a2_scale,
                                                   a1.dtype)
@@ -188,7 +188,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             combine_topk_weights = torch.ones_like(topk_weights)
 
         # TODO (varun) : Enable zero copy mode
-        yield_and_switch_from_compute_to_comm_impl(schedule="default")
+        # yield_and_switch_from_compute_to_comm_impl(schedule="default")
         _, event, hook = self.buffers[a2a_idx].low_latency_combine(
             fused_expert_output,
             topk_ids,
@@ -199,5 +199,5 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             return_recv_hook=False,
             out=output)
         # event.current_stream_wait()
-        yield_and_switch_from_comm_to_compute_impl(schedule="default")
+        # yield_and_switch_from_comm_to_compute_impl(schedule="default")
 

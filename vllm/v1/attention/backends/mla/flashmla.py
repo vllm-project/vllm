@@ -94,7 +94,7 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
 
                 # Num splits is per-batch, varying size (batch_size,)
                 n = num_splits.size(0)
-                logger.info(f"N: {n} num splits {self.cg_buf_num_splits.size(0)}")
+                # logger.info(f"N: {n} num splits {self.cg_buf_num_splits.size(0)}")
                 # make sure static buffer is large enough
                 assert n <= self.cg_buf_num_splits.size(0)
                 num_splits_view = self.cg_buf_num_splits[:n]

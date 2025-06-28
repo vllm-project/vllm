@@ -47,7 +47,6 @@ class UnquantizedEmbeddingMethod(QuantizeMethodBase):
 
     def embedding(self, layer: torch.nn.Module,
                   input_: torch.Tensor) -> torch.Tensor:
-        print("SHOULDNT BE HERE DURING CAPTURE")
         return F.embedding(input_, layer.weight)
 
 

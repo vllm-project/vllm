@@ -30,7 +30,6 @@ class UBatchContext:
         self.id = id
         self.comm_stream = comm_stream
         self.compute_stream = compute_stream
-        self.original_stream = current_stream()
         self.forward_context = None  #fwd_ctx
         self.cpu_wait_event = cpu_wait_event
         self.cpu_signal_event = cpu_signal_event
@@ -58,7 +57,7 @@ class UBatchContext:
         self.cpu_signal_event.set()
         self.cpu_wait_event.clear()
         self.current_stream = self.compute_stream
-        torch.cuda.set_stream(self.original_stream)
+        torch.cuda.set_stream(self.current_stream)
         return False
 
     def _restore_context(self):
@@ -76,26 +75,31 @@ class UBatchContext:
         pass
 
     def _signal_comm_done(self):
+        assert False
         self.ctx_valid_state()
         self.gpu_comm_done_event.record(self.comm_stream)
 
     def _signal_compute_done(self):
+        assert False
         self.ctx_valid_state()
         self.gpu_compute_done_event.record(self.compute_stream)
 
     def _wait_compute_done(self):
+        assert False
         # print(f"{self.id} Waiting on COMPUTE stream", flush=True)
         self.ctx_valid_state()
         self.comm_stream.wait_event(self.gpu_compute_done_event)
         # print("Compute stream done", flush=True)
 
     def _wait_comm_done(self):
+        assert False
         # print(f"{self.id} Waiting on COMM stream", flush=True)
         self.ctx_valid_state()
         self.compute_stream.wait_event(self.gpu_comm_done_event)
         # print("Comm stream done", flush=True)
 
     def stream_string(self):
+        assert False
         if current_stream() == self.compute_stream:
             assert self.current_stream == self.compute_stream
             return "COMPUTE"
@@ -114,6 +118,7 @@ class UBatchContext:
         # print(f"UBatchContext: {self.id} resuming CPU", flush=True)
 
     def yield_and_switch_from_compute_to_comm(self):
+        assert False
         assert current_stream() == self.compute_stream
         # dp_rank = get_dp_group().rank_in_group
         # print(f"DP: {dp_rank} UB: {self.id} "
@@ -129,6 +134,7 @@ class UBatchContext:
         self._wait_compute_done()
 
     def yield_and_switch_from_comm_to_compute(self):
+        assert False
         assert current_stream() == self.comm_stream
         # dp_rank = get_dp_group().rank_in_group
         # print(f"DP: {dp_rank} UB: {self.id} "

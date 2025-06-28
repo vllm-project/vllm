@@ -84,7 +84,7 @@ def main(args, dp_size, local_dp_rank, global_dp_rank, dp_master_ip,
         "The president of the United States is",
         "The capital of France is",
         "The future of AI is",
-    ] * 100
+    ] * 5
     # import random
     # import string
     # prompts = [''.join(random.choices(string.ascii_letters, k=128)) for _ in range(2048)]
