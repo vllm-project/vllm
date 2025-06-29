@@ -194,11 +194,15 @@ def rank_chunk(num: int, r: int, w: int) -> int:
     return (num // w) + (1 if r < rem else 0)
 
 
-def chunk_by_rank(t: Optional[torch.Tensor], r: int,
-                  w: int) -> Optional[torch.Tensor]:
+def chunk_by_rank(t: torch.Tensor, r: int, w: int) -> torch.Tensor:
+    chunk = rank_chunk(t.shape[0], r, w)
+    return t[(r * chunk):(r + 1) * chunk]
+
+
+def maybe_chunk_by_rank(t: Optional[torch.Tensor], r: int,
+                        w: int) -> Optional[torch.Tensor]:
     if t is not None:
-        chunk = rank_chunk(t.shape[0], r, w)
-        return t[(r * chunk):(r + 1) * chunk]
+        return chunk_by_rank(t, r, w)
     else:
         return t
 
@@ -531,8 +535,8 @@ def pplx_moe(
     # Chunking weights like this only works for batched format
     w1_chunk = chunk_by_rank(w1, rank, world_size)
     w2_chunk = chunk_by_rank(w2, rank, world_size)
-    w1_scale_chunk = chunk_by_rank(w1_scale, rank, world_size)
-    w2_scale_chunk = chunk_by_rank(w2_scale, rank, world_size)
+    w1_scale_chunk = maybe_chunk_by_rank(w1_scale, rank, world_size)
+    w2_scale_chunk = maybe_chunk_by_rank(w2_scale, rank, world_size)
     a1_scale_chunk = chunk_scales_by_rank(a1_scale, rank, world_size)
     a2_scale_chunk = chunk_scales_by_rank(a2_scale, rank, world_size)
 
