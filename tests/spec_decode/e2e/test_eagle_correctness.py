@@ -370,6 +370,10 @@ def test_llama2_eagle_e2e_greedy_correctness(vllm_runner, common_llm_kwargs,
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
+        # 2 for small prompt, 256//16 for generated.
+        "num_gpu_blocks_override": 2 + 256 // 16,
+        "max_model_len": (2 + 256 // 16) * 16,
+
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
 
@@ -420,6 +424,10 @@ def test_llama3_eagle_e2e_greedy_correctness(vllm_runner, common_llm_kwargs,
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
+        # 2 for small prompt, 256//16 for generated.
+        "num_gpu_blocks_override": 2 + 256 // 16,
+        "max_model_len": (2 + 256 // 16) * 16,
+
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
 
