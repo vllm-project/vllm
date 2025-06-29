@@ -265,8 +265,8 @@ macro(set_gencode_flags_for_srcs)
 endmacro()
 
 #
-# For the given `SRC_CUDA_ARCHS` list of gencode versions in the form 
-#  `<major>.<minor>[letter]` compute the "loose intersection" with the 
+# For the given `SRC_CUDA_ARCHS` list of gencode versions in the form
+#  `<major>.<minor>[letter]` compute the "loose intersection" with the
 #  `TGT_CUDA_ARCHS` list of gencodes. We also support the `+PTX` suffix in
 #  `SRC_CUDA_ARCHS` which indicates that the PTX code should be built when there
 #  is a CUDA_ARCH in `TGT_CUDA_ARCHS` that is equal to or larger than the
@@ -278,7 +278,7 @@ endmacro()
 #  in `SRC_CUDA_ARCHS` that is less or equal to the version in `TGT_CUDA_ARCHS`.
 # We have special handling for x.0a, if x.0a is in `SRC_CUDA_ARCHS` and x.0 is
 #  in `TGT_CUDA_ARCHS` then we should remove x.0a from `SRC_CUDA_ARCHS` and add
-#  x.0a to the result (and remove x.0 from TGT_CUDA_ARCHS). 
+#  x.0a to the result (and remove x.0 from TGT_CUDA_ARCHS).
 # The result is stored in `OUT_CUDA_ARCHS`.
 #
 # Example:
@@ -313,21 +313,16 @@ function(cuda_archs_loose_intersection OUT_CUDA_ARCHS SRC_CUDA_ARCHS TGT_CUDA_AR
   # if x.0a is in SRC_CUDA_ARCHS and x.0 is in CUDA_ARCHS then we should
   # remove x.0a from SRC_CUDA_ARCHS and add x.0a to _CUDA_ARCHS
   set(_CUDA_ARCHS)
-  if ("9.0a" IN_LIST _SRC_CUDA_ARCHS)
-    list(REMOVE_ITEM _SRC_CUDA_ARCHS "9.0a")
-    if ("9.0" IN_LIST TGT_CUDA_ARCHS)
-      list(REMOVE_ITEM _TGT_CUDA_ARCHS "9.0")
-      set(_CUDA_ARCHS "9.0a")
+  foreach(_arch ${_SRC_CUDA_ARCHS})
+    if(_arch MATCHES "\\a$")
+      list(REMOVE_ITEM _SRC_CUDA_ARCHS "${_arch}")
+      string(REPLACE "a" "" _base "${_arch}")
+      if ("${_base}" IN_LIST TGT_CUDA_ARCHS)
+        list(REMOVE_ITEM _TGT_CUDA_ARCHS "${_base}")
+        list(APPEND _CUDA_ARCHS "${_arch}")
+      endif()
     endif()
-  endif()
-
-  if ("10.0a" IN_LIST _SRC_CUDA_ARCHS)
-    list(REMOVE_ITEM _SRC_CUDA_ARCHS "10.0a")
-    if ("10.0" IN_LIST TGT_CUDA_ARCHS)
-      list(REMOVE_ITEM _TGT_CUDA_ARCHS "10.0")
-      set(_CUDA_ARCHS "10.0a")
-    endif()
-  endif()
+  endforeach()
 
   list(SORT _SRC_CUDA_ARCHS COMPARE NATURAL ORDER ASCENDING)
 
@@ -359,7 +354,7 @@ function(cuda_archs_loose_intersection OUT_CUDA_ARCHS SRC_CUDA_ARCHS TGT_CUDA_AR
   endforeach()
 
   list(REMOVE_DUPLICATES _CUDA_ARCHS)
-  
+
   # reapply +PTX suffix to architectures that requested PTX
   set(_FINAL_ARCHS)
   foreach(_arch ${_CUDA_ARCHS})
@@ -370,7 +365,7 @@ function(cuda_archs_loose_intersection OUT_CUDA_ARCHS SRC_CUDA_ARCHS TGT_CUDA_AR
     endif()
   endforeach()
   set(_CUDA_ARCHS ${_FINAL_ARCHS})
-  
+
   set(${OUT_CUDA_ARCHS} ${_CUDA_ARCHS} PARENT_SCOPE)
 endfunction()
 
