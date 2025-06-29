@@ -58,7 +58,7 @@ def _moe_unpermute_and_reduce(
     curr_hidden: torch.Tensor,
     inv_perm: Optional[torch.Tensor],
     topk_weight: torch.Tensor,
-    apply_router_weight_on_input: bool,
+    apply_weights: bool,
 ) -> None:
     """
     Unpermute the final result and apply topk_weights, then perform the final
@@ -69,7 +69,7 @@ def _moe_unpermute_and_reduce(
     if inv_perm is not None:
         curr_hidden = curr_hidden[inv_perm, ...]
     curr_hidden = curr_hidden.view(-1, topk, K)
-    if not apply_router_weight_on_input:
+    if apply_weights:
         curr_hidden.mul_(topk_weight.view(M, -1, 1))
     ops.moe_sum(curr_hidden, out)
 

@@ -64,16 +64,17 @@ class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
         fused_expert_output: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
-        apply_router_weight_on_input: bool,
+        do_moe_apply_weights: bool,
+        do_moe_reduce: bool,
     ) -> None:
+        if not (do_moe_apply_weights or do_moe_reduce):
+            return
 
-        H = output.size(1)
-        num_tokens = topk_ids.size(0)
-        fe_numel = fused_expert_output.numel()
-        is_fe_reduced: bool = fe_numel == (num_tokens * H)
-        do_apply_weights_and_reduce: bool = not is_fe_reduced
+        if do_moe_apply_weights:
+            assert do_moe_reduce, (
+                "Reduce happens after apply. finalize's "
+                "responsibility is to ensure weight application and reduction "
+                "happens by the end of its lifetime.")
 
-        if do_apply_weights_and_reduce:
-            _moe_unpermute_and_reduce(output, fused_expert_output, None,
-                                      topk_weights,
-                                      apply_router_weight_on_input)
+        _moe_unpermute_and_reduce(output, fused_expert_output, None,
+                                  topk_weights, do_moe_apply_weights)

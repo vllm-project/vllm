@@ -463,8 +463,19 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         fused_expert_output: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
-        apply_router_weight_on_input: bool,
+        do_moe_apply_weights: bool,
+        do_moe_reduce: bool,
     ) -> None:
+
+        if not (do_moe_apply_weights or do_moe_reduce):
+            return
+
+        if do_moe_apply_weights:
+            assert do_moe_reduce, (
+                "Reduce happens after apply. finalize's "
+                "responsibility is to ensure weight application and reduction "
+                "happens by the end of its lifetime.")
+
         num_tokens = topk_ids.size(0)
         num_local_experts = fused_expert_output.size(0)
         K = fused_expert_output.size(-1)
@@ -480,7 +491,7 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             topks = torch.any(matching_tokens, dim=1).flatten()
             rows = torch.count_nonzero(topks)
             rhs = fused_expert_output[expert_id - first_expert, :rows, :]
-            if not apply_router_weight_on_input:
+            if do_moe_apply_weights:
                 rhs.mul_(topk_weights[matching_tokens].view(rhs.size(0), 1))
             output[topks] = output[topks] + rhs
 

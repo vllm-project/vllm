@@ -155,7 +155,8 @@ class FusedMoEPrepareAndFinalize(ABC):
         fused_expert_output: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
-        apply_router_weight_on_input: bool,
+        do_moe_apply_weights: bool,
+        do_moe_reduce: bool,
     ) -> None:
         """
         Perform any combine plus apply weights and perform a reduction on the
@@ -165,8 +166,9 @@ class FusedMoEPrepareAndFinalize(ABC):
           experts, it will have (M, topk, K) shape.
         - topk_weights: The weights to be applied to the fused_experts_output.
         - topk_ids: The topk_ids.
-        - apply_router_weight_on_input: When False, apply the weights to
-          fused_expert_output.
+        - do_moe_apply_weights: Applies the topk weights to the
+          fused_expert_output
+        - do_moe_reduce: Reduce/Sum weighted fused_expert_ouptut
         """
         raise NotImplementedError
 
@@ -206,7 +208,7 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
     """
 
     @abstractmethod
-    def fused_experts_traits() -> FusedExpertsTraits:
+    def fused_experts_traits(self) -> FusedExpertsTraits:
         """
         Get fused_experts traits of the implementation.
         """
@@ -357,6 +359,7 @@ class FusedMoEModularKernel(torch.nn.Module):
         super().__init__()
         self.prepare_finalize = prepare_finalize
         self.fused_experts = fused_experts
+        self.fused_experts_traits = fused_experts.fused_experts_traits()
 
     def _do_fused_experts(
             self, fused_out: Optional[torch.Tensor], a1: torch.Tensor,
@@ -606,7 +609,14 @@ class FusedMoEModularKernel(torch.nn.Module):
                 a2_scale=a2_scale,
                 expert_tokens_meta=expert_tokens_meta)
 
-        self.prepare_finalize.finalize(output, fused_out, topk_weights,
-                                       topk_ids, apply_router_weight_on_input)
+        self.prepare_finalize.finalize(
+            output,
+            fused_out,
+            topk_weights,
+            topk_ids,
+            do_moe_apply_weights=not (
+                apply_router_weight_on_input
+                or self.fused_experts_traits.does_moe_apply_weights),
+            do_moe_reduce=not self.fused_experts_traits.does_moe_reduce)
 
         return output

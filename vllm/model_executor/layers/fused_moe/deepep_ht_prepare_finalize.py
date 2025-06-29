@@ -192,53 +192,50 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         return (expert_x, expert_x_scale, expert_tokens_meta, expert_topk_ids,
                 expert_topk_weights)
 
-    def _apply_weights_and_reduce(self, num_tokens: int,
-                                  fused_expert_output: torch.Tensor,
-                                  topk_weights: torch.Tensor,
-                                  apply_router_weight_on_input: bool,
-                                  output_dtype: torch.dtype):
+    def _apply_weights_inplace(self, fused_expert_output: torch.Tensor,
+                               topk_weights: torch.Tensor) -> torch.Tensor:
+        assert fused_expert_output.ndim == 3, (
+            "Expected fused_expert_output shape M x topk x H but got "
+            f"{fused_expert_output.shape}")
 
-        hidden_dim = fused_expert_output.size(-1)
-        if fused_expert_output.ndim == 2:
-            fused_expert_output = fused_expert_output.view(
-                num_tokens, -1, hidden_dim)
+        m = fused_expert_output.size(0)
+        fused_expert_output.mul_(topk_weights.view(m, -1, 1))
 
-        if not apply_router_weight_on_input:
-            # The DeepEP combine kernels don't do the topk weight
-            # multiplication. We multiply the weights locally.
-            m_x_topk = fused_expert_output.size(0)
-            fused_expert_output.mul_(topk_weights.view(m_x_topk, -1, 1))
+    def _moe_reduce(self, fused_expert_output: torch.Tensor,
+                    output_dtype) -> torch.Tensor:
 
-        out = torch.empty((num_tokens, hidden_dim),
+        assert fused_expert_output.ndim == 3, (
+            "Expected fused_expert_output shape M x topk x H but got "
+            f"{fused_expert_output.shape}")
+
+        num_tokens, _, hidden_size = fused_expert_output.size()
+        out = torch.empty((num_tokens, hidden_size),
                           device=fused_expert_output.device,
                           dtype=output_dtype)
         ops.moe_sum(fused_expert_output, out)
-
         return out
 
     def finalize(self, output: torch.Tensor, fused_expert_output: torch.Tensor,
                  topk_weights: torch.Tensor, topk_ids: torch.Tensor,
-                 apply_router_weight_on_input: bool) -> None:
+                 do_moe_apply_weights: bool, do_moe_reduce: bool) -> None:
+
+        if do_moe_apply_weights:
+            assert do_moe_reduce, (
+                "Reduce happens after apply. finalize's "
+                "responsibility is to ensure weight application and reduction "
+                "happens by the end of its lifetime.")
 
         assert self.handle is not None
 
-        H = output.size(1)
-        num_tokens = topk_ids.size(0)
-        fe_numel = fused_expert_output.numel()
-
         # fused_expert_output can have 0 tokens - This happens when none of the
         # tokens from the all2all reach this EP rank.
-        is_fe_empty: bool = fe_numel == 0
-        is_fe_reduced: bool = fe_numel == (num_tokens * H)
-        do_apply_weights_and_reduce: bool = not (is_fe_empty or is_fe_reduced)
-
-        if do_apply_weights_and_reduce:
-            fused_expert_output = self._apply_weights_and_reduce(
-                num_tokens=topk_ids.size(0),
-                fused_expert_output=fused_expert_output,
-                topk_weights=topk_weights,
-                apply_router_weight_on_input=apply_router_weight_on_input,
-                output_dtype=output.dtype)
+        is_fe_empty: bool = fused_expert_output.numel() == 0
+        if not is_fe_empty():
+            if do_moe_apply_weights:
+                self._apply_weights_inplace(fused_expert_output, topk_weights)
+            if do_moe_reduce:
+                fused_expert_output = self._moe_reduce(
+                    fused_expert_output, output_dtype=output.dtype)
 
         combined_x, _, event = self.buffer.combine(
             x=fused_expert_output,

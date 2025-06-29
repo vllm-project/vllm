@@ -140,8 +140,10 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         fused_expert_output: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
-        apply_router_weight_on_input: bool,
+        do_moe_apply_weights: bool,
+        do_moe_reduce: bool,
     ) -> None:
+        assert do_moe_reduce, "Reduction happens in the all2all combine kernel"
         num_tokens = output.size(0)  # M
         # This argument is optional
         # There's not much point setting this unless it is != topk_ids.size(0)
@@ -154,7 +156,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         assert output.size(1) == fused_expert_output.size(-1)
 
         # Set weights to 1 if we did them in dispatch. This is hacky.
-        if apply_router_weight_on_input:
+        if not do_moe_apply_weights:
             topk_weights = torch.ones_like(topk_weights)
 
         self.a2a.combine(out_tokens=output,

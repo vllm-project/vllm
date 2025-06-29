@@ -169,12 +169,14 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
     def finalize(self, output: torch.Tensor, fused_expert_output: torch.Tensor,
                  topk_weights: torch.Tensor, topk_ids: torch.Tensor,
-                 apply_router_weight_on_input: bool) -> None:
+                 do_moe_apply_weights: bool, do_moe_reduce: bool) -> None:
 
+        assert do_moe_reduce, (
+            "Reduction happens in the low_latency_combine kernel")
         assert self.handle is not None
 
         combine_topk_weights = topk_weights
-        if apply_router_weight_on_input:
+        if not do_moe_apply_weights:
             # weights have already been applied.
             combine_topk_weights = torch.ones_like(topk_weights)
 
