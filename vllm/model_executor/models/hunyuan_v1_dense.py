@@ -31,7 +31,7 @@ import torch
 from torch import nn
 from transformers import PretrainedConfig
 
-from vllm.attention import Attention
+from vllm.attention import Attention, AttentionType
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
@@ -168,17 +168,13 @@ class HunYuanAttention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
 
-        is_neox_style = True
-        if quant_config is not None and quant_config.get_name() == "gguf":
-            is_neox_style = False
-
         self.rotary_emb = get_rope(
             self.head_dim,
             rotary_dim=self.head_dim,
             max_position=max_position_embeddings,
             base=rope_theta,
             rope_scaling=rope_scaling,
-            is_neox_style=is_neox_style,
+            is_neox_style=True,
         )
         self.attn = Attention(
             self.num_heads,
@@ -283,17 +279,13 @@ class HunYuanCrossAttention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
 
-        is_neox_style = True
-        if quant_config is not None and quant_config.get_name() == "gguf":
-            is_neox_style = False
-
         self.rotary_emb = get_rope(
             self.head_dim,
             rotary_dim=self.head_dim,
             max_position=max_position_embeddings,
             base=rope_theta,
             rope_scaling=rope_scaling,
-            is_neox_style=is_neox_style,
+            is_neox_style=True,
         )
         self.attn = Attention(
             self.num_heads,
@@ -303,6 +295,7 @@ class HunYuanCrossAttention(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
+            attn_type=AttentionType.ENCODER_DECODER,
         )
 
         if self.use_qk_norm:
@@ -364,9 +357,9 @@ class HunYuanDecoderLayer(nn.Module):
         attention_bias = getattr(config, "attention_bias", False) or getattr(
             config, "bias", False)
         cla_factor = _get_cla_factor(config)
-        attention_type = ("cross" if layer_id >= 0
-                          and layer_id % cla_factor != 0 else "self")
-        if attention_type == "self":
+        attention_type = (AttentionType.ENCODER_DECODER if layer_id >= 0
+                          and layer_id % cla_factor != 0 else AttentionType.DECODER)
+        if attention_type == AttentionType.DECODER:
             self.self_attn = HunYuanAttention(
                 config=config,
                 hidden_size=self.hidden_size,
@@ -382,7 +375,7 @@ class HunYuanDecoderLayer(nn.Module):
                 prefix=f"{prefix}.self_attn",
                 layer_id=layer_id,
             )
-        elif attention_type == "cross":
+        elif attention_type == AttentionType.ENCODER_DECODER:
             self.self_attn = HunYuanCrossAttention(
                 config=config,
                 hidden_size=self.hidden_size,
@@ -705,8 +698,6 @@ class HunYuanDenseV1ForCausalLM(nn.Module):
             is_found = False
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
-                    continue
-                if "mlp.experts" in name:
                     continue
                 # cross layer only have q_proj, skip qkv pack
                 if weight_name == ".q_proj":
