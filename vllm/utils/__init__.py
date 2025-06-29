@@ -531,7 +531,7 @@ class AsyncMicrobatchTokenizer:
         self._loop = asyncio.get_running_loop()
         self._queues: dict[tuple, asyncio.Queue[tuple[str, object, dict,
                                                       asyncio.Future]]] = {}
-        self._batcher_tasks: dict[tuple, asyncio.Task] = {}
+        self._batcher_tasks: list[asyncio.Task] = []
 
         # Single worker that owns the blocking tokenizer.
         self._executor = ThreadPoolExecutor(max_workers=1)
@@ -556,8 +556,7 @@ class AsyncMicrobatchTokenizer:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
-    def _get_queue(self, loop: asyncio.AbstractEventLoop,
-                   key: tuple):
+    def _get_queue(self, loop: asyncio.AbstractEventLoop, key: tuple):
         """Return the queue for key, creating queue 
         and batcher task if needed."""
         queue = self._queues.get(key)
@@ -649,7 +648,7 @@ class AsyncMicrobatchTokenizer:
                             fut.set_exception(e)
 
     def __del__(self):
-        for task in self._batcher_tasks.values():
+        for task in self._batcher_tasks:
             if not task.done():
                 task.cancel()
 
