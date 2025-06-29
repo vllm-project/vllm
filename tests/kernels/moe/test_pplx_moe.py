@@ -404,7 +404,7 @@ def _pplx_prepare_finalize(
 @pytest.mark.parametrize("per_act_token_quant", [False, True])
 @pytest.mark.parametrize("block_shape", [None, [128, 128]])
 @pytest.mark.parametrize("use_internode", [False])
-@pytest.mark.skip(reason="Too slow, run manually for debugging.")
+@pytest.mark.optional
 @requires_pplx
 def test_pplx_prepare_finalize_slow(
     mnk: tuple[int, int, int],
@@ -715,7 +715,7 @@ def _pplx_moe(
 @pytest.mark.parametrize("per_act_token_quant", [False, True])
 @pytest.mark.parametrize("block_shape", [None, [128, 128]])
 @pytest.mark.parametrize("use_internode", [False])
-@pytest.mark.skip(reason="Too slow, run manually for debugging.")
+@pytest.mark.optional
 @requires_pplx
 def test_pplx_moe_slow(
     mnk: tuple[int, int, int],
