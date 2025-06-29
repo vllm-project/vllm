@@ -25,6 +25,10 @@ def test_can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch):
     if model_arch == "GraniteSpeechForConditionalGeneration":
         pytest.skip("Avoid OOM")
 
+    # FIXME: Enable once V1 is supported
+    if model_arch == "EagleLlama4ForCausalLM":
+        pytest.skip("Not supported on V0 engine")
+
     # Avoid OOM and reduce initialization time by only using 1 layer
     def hf_overrides(hf_config: PretrainedConfig) -> PretrainedConfig:
         hf_config.update(model_info.hf_overrides)
