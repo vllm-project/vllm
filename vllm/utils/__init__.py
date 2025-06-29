@@ -562,14 +562,22 @@ class AsyncMicrobatchTokenizer:
         queue = self._queues.get(key)
         if queue is None:
             self._queues[key] = queue = asyncio.Queue()
-            self._batcher_tasks.append(
-                loop.create_task(self._batch_loop(queue)))
+            if key[0] == "encode":
+                self._batcher_tasks.append(
+                    loop.create_task(self._batch_encode_loop(queue)))
+            else:
+                assert key[0] == "decode", \
+                    f"Unknown operation type: {key[0]}."
+                self._batcher_tasks.append(
+                    loop.create_task(self._batch_decode_loop(queue)))
         return queue
 
-    async def _batch_loop(self, queue: asyncio.Queue):
+    async def _batch_encode_loop(self, queue: asyncio.Queue):
         while True:
             first_item = await queue.get()
             batch = [first_item]
+            prompts = []
+            kwargs_list = []
             deadline = self._loop.time() + self.batch_wait_timeout_s
 
             while len(batch) < self.max_batch_size:
@@ -579,73 +587,79 @@ class AsyncMicrobatchTokenizer:
                 try:
                     item = await asyncio.wait_for(queue.get(), timeout)
                     batch.append(item)
+                    prompts.append(item[1])
+                    kwargs_list.append(item[2])
                 except asyncio.TimeoutError:
                     break
 
-            # Split by op type
-            encode_items = [it for it in batch if it[0] == "encode"]
-            decode_items = [it for it in batch if it[0] == "decode"]
+            # If every request uses identical kwargs we can run a single
+            # batched tokenizer call for a big speed-up.
+            can_batch = all(kw == kwargs_list[0] for kw in kwargs_list)
 
-            # ---------------- Encode ----------------
-            if encode_items:
-                prompts = [it[1] for it in encode_items]
-                kwargs_list = [it[2] for it in encode_items]
+            if can_batch and len(prompts) > 1:
 
-                # If every request uses identical kwargs we can run a single
-                # batched tokenizer call for a big speed-up.
-                can_batch = all(kw == kwargs_list[0] for kw in kwargs_list)
+                def encode_fn(prompts=prompts, kwargs_list=kwargs_list):
+                    """Tokenize the micro-batch in one call
+                    and split results."""
+                    grouped = self.tokenizer(prompts, **kwargs_list[0])
+                    single_encodings = []
+                    for i in range(len(prompts)):
+                        data_i = {k: v[i] for k, v in grouped.items()}
+                        single_encodings.append(BatchEncoding(data_i))
+                    return single_encodings
+            else:
 
-                if can_batch and len(prompts) > 1:
+                def encode_fn(prompts=prompts, kwargs_list=kwargs_list):
+                    """Tokenize each prompt individually (fallback)."""
+                    return [
+                        self.tokenizer(p, **kw)
+                        for p, kw in zip(prompts, kwargs_list)
+                    ]
 
-                    def encode_fn(prompts=prompts, kwargs_list=kwargs_list):
-                        """Tokenize the micro-batch in one call 
-                        and split results."""
-                        grouped = self.tokenizer(prompts, **kwargs_list[0])
-                        single_encodings = []
-                        for i in range(len(prompts)):
-                            data_i = {k: v[i] for k, v in grouped.items()}
-                            single_encodings.append(BatchEncoding(data_i))
-                        return single_encodings
-                else:
+            try:
+                results = await self._loop.run_in_executor(
+                    self._executor, encode_fn)
+                for (_, _, _, fut), res in zip(batch, results):
+                    if not fut.done():
+                        fut.set_result(res)
+            except Exception as e:
+                for (_, _, _, fut) in batch:
+                    if not fut.done():
+                        fut.set_exception(e)
 
-                    def encode_fn(prompts=prompts, kwargs_list=kwargs_list):
-                        """Tokenize each prompt individually (fallback)."""
-                        return [
-                            self.tokenizer(p, **kw)
-                            for p, kw in zip(prompts, kwargs_list)
-                        ]
+    async def _batch_decode_loop(self, queue: asyncio.Queue):
+        while True:
+            first_item = await queue.get()
+            batch = [first_item]
+            token_ids_list = []
+            deadline = self._loop.time() + self.batch_wait_timeout_s
 
+            while len(batch) < self.max_batch_size:
+                timeout = deadline - self._loop.time()
+                if timeout <= 0:
+                    break
                 try:
-                    results = await self._loop.run_in_executor(
-                        self._executor, encode_fn)
-                    for (_, _, _, fut), res in zip(encode_items, results):
-                        if not fut.done():
-                            fut.set_result(res)
-                except Exception as e:  # pragma: no cover – exception path
-                    for (_, _, _, fut) in encode_items:
-                        if not fut.done():
-                            fut.set_exception(e)
+                    item = await asyncio.wait_for(queue.get(), timeout)
+                    batch.append(item)
+                    token_ids_list.append(item[1])
+                except asyncio.TimeoutError:
+                    break
 
-            # ---------------- Decode ----------------
-            if decode_items:
-                token_id_batches = [it[1] for it in decode_items]
-                decode_kwargs = decode_items[0][2]
-
-                def _decode_batch(token_id_batches=token_id_batches,
-                                  decode_kwargs=decode_kwargs):
-                    return self.tokenizer.batch_decode(token_id_batches,
+            def _decode_batch(token_ids_list=token_ids_list,
+                                  decode_kwargs=batch[0][2]):
+                    return self.tokenizer.batch_decode(token_ids_list,
                                                        **decode_kwargs)
 
-                try:
-                    results = await self._loop.run_in_executor(
-                        self._executor, _decode_batch)
-                    for (_, _, _, fut), res in zip(decode_items, results):
-                        if not fut.done():
-                            fut.set_result(res)
-                except Exception as e:
-                    for (_, _, _, fut) in decode_items:
-                        if not fut.done():
-                            fut.set_exception(e)
+            try:
+                results = await self._loop.run_in_executor(
+                    self._executor, _decode_batch)
+                for (_, _, _, fut), res in zip(batch, results):
+                    if not fut.done():
+                        fut.set_result(res)
+            except Exception as e:
+                for (_, _, _, fut) in batch:
+                    if not fut.done():
+                        fut.set_exception(e)
 
     def __del__(self):
         for task in self._batcher_tasks:
