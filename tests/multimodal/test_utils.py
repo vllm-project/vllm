@@ -167,7 +167,10 @@ async def test_fetch_image_error_conversion():
 @pytest.mark.parametrize("video_url", TEST_VIDEO_URLS)
 @pytest.mark.parametrize("num_frames", [-1, 32, 1800])
 async def test_fetch_video_http(video_url: str, num_frames: int):
-    connector = MediaConnector()
+    connector = MediaConnector(
+        media_io_kwargs={"video": {
+            "num_frames": num_frames,
+        }})
 
     video_sync = connector.fetch_video(video_url)
     video_async = await connector.fetch_video_async(video_url)
