@@ -1246,6 +1246,7 @@ class FusedMoE(torch.nn.Module):
             param.materialize(final_shape, dtype=loaded_weight.dtype)
 
         expert_data = param.data if full_load else param.data[expert_id]
+
         # Case input scale: input_scale loading is only supported for fp8
         if "input_scale" in weight_name:
             # this is needed for compressed-tensors only
@@ -1273,6 +1274,7 @@ class FusedMoE(torch.nn.Module):
                              tp_rank=self.tp_rank)
             return True if return_success else None
 
+        # TODO @dsikka: ModelOpt should follow the proper MoE loading pattern
         if "ModelOpt" in quant_method_name:
             if ('weight_scale_2' in weight_name
                     or 'input_scale' in weight_name):
@@ -1289,7 +1291,7 @@ class FusedMoE(torch.nn.Module):
                     tp_rank=self.tp_rank)
             return True if return_success else None
 
-        # Case weight scales, zero_points and offset
+        # Case weight scales, zero_points and offset, weight/input global scales
         if ("scale" in weight_name or "zero" in weight_name
                 or "offset" in weight_name):
             # load the weight scales and zp based on the quantization scheme
