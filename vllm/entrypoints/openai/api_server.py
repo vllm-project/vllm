@@ -97,6 +97,7 @@ from vllm.entrypoints.utils import (cli_env_setup, load_aware_call,
                                     with_cancellation)
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
+from vllm.tracing import get_root_span, init_tracer
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
 from vllm.transformers_utils.tokenizer import MistralTokenizer
@@ -1431,6 +1432,9 @@ async def run_server_worker(listen_address,
                             **uvicorn_kwargs) -> None:
     """Run a single API server worker."""
 
+    tracer = init_tracer(__name__)
+    startup_root_span = get_root_span(tracer, "vllm.startup")
+
     if args.tool_parser_plugin and len(args.tool_parser_plugin) > 3:
         ToolParserManager.import_tool_parser(args.tool_parser_plugin)
 
@@ -1445,10 +1449,14 @@ async def run_server_worker(listen_address,
         app = build_app(args)
 
         vllm_config = await engine_client.get_vllm_config()
-        await init_app_state(engine_client, vllm_config, app.state, args)
+        with tracer.start_as_current_span("vllm.api_server.init_app_state"):
+            await init_app_state(engine_client, vllm_config, app.state, args)
 
         logger.info("Starting vLLM API server %d on %s", server_index,
                     listen_address)
+
+        startup_root_span.end()
+
         shutdown_task = await serve_http(
             app,
             sock=sock,

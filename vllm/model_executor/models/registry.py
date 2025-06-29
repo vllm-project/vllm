@@ -20,6 +20,7 @@ import cloudpickle
 import torch.nn as nn
 
 from vllm.logger import init_logger
+from vllm.tracing import get_tracer
 
 from .interfaces import (has_inner_state, has_noops, is_attention_free,
                          is_hybrid, supports_cross_encoding,
@@ -28,6 +29,7 @@ from .interfaces import (has_inner_state, has_noops, is_attention_free,
 from .interfaces_base import is_text_generation_model
 
 logger = init_logger(__name__)
+tracer = get_tracer(__name__)
 
 # yapf: disable
 _TEXT_GENERATION_MODELS = {
@@ -338,6 +340,7 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
     class_name: str
 
     # Performed in another process to avoid initializing CUDA
+    @tracer.start_as_current_span("vllm.model_registry.inspect_model")
     def inspect_model_cls(self) -> _ModelInfo:
         return _run_in_subprocess(
             lambda: _ModelInfo.from_model_cls(self.load_model_cls()))

@@ -42,6 +42,7 @@ from vllm.multimodal.utils import group_mm_inputs_by_modality
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
+from vllm.tracing import get_tracer, set_span_attributes
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
                         GiB_bytes, LazyLoader, async_tensor_h2d, cdiv,
                         check_use_alibi, get_dtype_size,
@@ -85,6 +86,7 @@ else:
         "xgrammar.kernels.apply_token_bitmask_inplace_torch_compile")
 
 logger = init_logger(__name__)
+tracer = get_tracer(__name__)
 
 
 class GPUModelRunner(LoRAModelRunnerMixin):
@@ -1721,6 +1723,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 draft_token_ids.append(drafter_output.tolist())
         return draft_token_ids
 
+    @tracer.start_as_current_span("vllm.engine_core.model_runner.load_model")
     def load_model(self) -> None:
         logger.info("Starting to load model %s...", self.model_config.model)
         with DeviceMemoryProfiler() as m:  # noqa: SIM117
@@ -1757,6 +1760,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     self.model_memory_usage / GiB_bytes,
                     time_after_load - time_before_load)
         prepare_communication_buffer_for_model(self.model)
+        set_span_attributes({
+            'model.name':
+            self.model_config.model,
+            'model.dtype':
+            str(self.model_config.dtype),
+            'model.config_format':
+            self.model_config.config_format,
+            'model.load_format':
+            self.load_config.load_format,
+            'model.memory_usage_gib':
+            self.model_memory_usage / GiB_bytes,
+        })
 
         if is_mixture_of_experts(
                 self.model) and self.parallel_config.enable_eplb:
@@ -2156,6 +2171,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 raise e
         return pooler_output
 
+    @tracer.start_as_current_span("vllm.engine_core.model_runner.profile_run")
     def profile_run(self) -> None:
         # Profile with multimodal encoder & encoder cache.
         # TODO: handle encoder-decoder models once we support them.
@@ -2241,6 +2257,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.encoder_cache.clear()
         gc.collect()
 
+    @tracer.start_as_current_span(
+        "vllm.engine_core.model_runner.model_capture")
     def capture_model(self) -> None:
         if not self.use_cuda_graph:
             logger.warning(
@@ -2277,6 +2295,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         elapsed_time = end_time - start_time
         cuda_graph_size = start_free_gpu_memory - end_free_gpu_memory
         # This usually takes 5~20 seconds.
+        set_span_attributes({
+            'cuda_graph.size_gib':
+            cuda_graph_size / (1 << 30),
+            'cuda_graph.num_batches':
+            len(self.cudagraph_batch_sizes),
+            'cuda_graph.num_warmups':
+            self.vllm_config.compilation_config.cudagraph_num_of_warmups,
+        })
         logger.info("Graph capturing finished in %.0f secs, took %.2f GiB",
                     elapsed_time, cuda_graph_size / (1 << 30))
 

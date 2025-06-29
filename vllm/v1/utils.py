@@ -232,6 +232,7 @@ class CoreEngineProcManager:
         start_index: int,
         local_start_index: int,
         vllm_config: VllmConfig,
+        traceparent: dict,
         on_head_node: bool,
         handshake_address: str,
         executor_class: type[Executor],
@@ -251,10 +252,12 @@ class CoreEngineProcManager:
             local_index = local_start_index + index
             global_index = start_index + index
             # Start EngineCore in background process.
+
             self.processes.append(
                 context.Process(target=target_fn,
                                 name=f"EngineCore_{global_index}",
                                 kwargs=common_kwargs | {
+                                    "traceparent": traceparent,
                                     "dp_rank": global_index,
                                     "local_dp_rank": local_index,
                                 }))
