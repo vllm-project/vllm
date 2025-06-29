@@ -145,7 +145,7 @@ class OpenCVVideoBackend(VideoLoader):
 
         # Use transformers transformers.video_utils.VideoMetadata format
         metadata = {
-            "total_frames": total_frames_num,
+            "total_num_frames": total_frames_num,
             "fps": original_fps,
             "duration": duration,
             "video_backend": "opencv"

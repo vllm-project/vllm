@@ -87,7 +87,7 @@ def video_get_metadata(path: str) -> dict[str, Any]:
     duration = total_frames / fps if fps > 0 else 0
 
     metadata = {
-        "total_frames": total_frames,
+        "total_num_frames": total_frames,
         "fps": fps,
         "duration": duration,
         "video_backend": "opencv"

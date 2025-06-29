@@ -820,7 +820,7 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
         return self.ctx.tokenizer
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
-        return {"image": None, "video": None}
+        return {"image": None, "video": 1}
 
     def get_image_processor(self) -> Glm4vImageProcessor:
         return self.get_hf_processor().image_processor
@@ -951,7 +951,7 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
         video_processor = self.get_video_processor()
 
         video_fps = metadata.get("fps", 2.0)
-        meta_frames = metadata.get("total_frames", total_frames)
+        meta_frames = metadata.get("total_num_frames", total_frames)
         max_frame_idx = meta_frames - 1
         duration = metadata.get("duration",
                                 round(max_frame_idx / video_fps) + 1)
@@ -1055,7 +1055,7 @@ class Glm4vDummyInputsBuilder(BaseDummyInputsBuilder[Glm4vProcessingInfo]):
             video_metadata = {
                 "fps": 2.0,
                 "duration": num_frames / 2.0,
-                "total_frames": num_frames,
+                "total_num_frames": num_frames,
                 "video_backend": "opencv",
             }
             video_item = (video.copy(), video_metadata)
@@ -1087,15 +1087,15 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
 
                 # FIXME(Isotr0py): Activate the below logic after we can disable
                 # resampling from video loader backend.
-                # assert metadata["total_frames"] == len(video_array), (
-                #     f"Total frames {metadata['total_frames']} does not "
+                # assert metadata["total_num_frames"] == len(video_array), (
+                #     f"Total frames {metadata['total_num_frames']} does not "
                 #     f"match the length of video array {len(video_array)}.")
 
                 # NOTE: Temporary workaround for resampled videos.
                 # this can cause a divergence with HF implementation if
                 # the input video is resampled in advance.
 
-                if metadata["total_frames"] != len(video_array):
+                if metadata["total_num_frames"] != len(video_array):
                     logger.warning(
                         "Total frames in metadata "
                         "(%s) does not match the length of "
@@ -1103,16 +1103,11 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
                         "be because the video is resampled "
                         "in advance. This may cause "
                         "a divergence with HF implementation.",
-                        metadata["total_frames"],
+                        metadata["total_num_frames"],
                         len(video_array),
                     )
-                    metadata["total_frames"] = len(video_array)
-                metadata = VideoMetadata(
-                    total_num_frames=metadata["total_frames"],
-                    fps=metadata["fps"],
-                    duration=metadata["duration"],
-                    video_backend=metadata["video_backend"],
-                )
+                    metadata["total_num_frames"] = len(video_array)
+                metadata = VideoMetadata(**metadata)
 
                 video_mm_data = dict()
                 video_mm_data["videos"] = [[video_array]]
