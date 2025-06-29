@@ -542,35 +542,32 @@ class AsyncMicrobatchTokenizer:
     async def __call__(self, prompt, **kwargs):
         fut: asyncio.Future = self._loop.create_future()
         key = self._queue_key("encode", kwargs)
-        queue = self._ensure_queue_and_batcher(self._loop, key)
+        queue = self._get_queue(self._loop, key)
         await queue.put(("encode", prompt, kwargs, fut))
         return await fut
 
     async def decode(self, token_ids, **kwargs):
         fut: asyncio.Future = self._loop.create_future()
         key = self._queue_key("decode", kwargs)
-        queue = self._ensure_queue_and_batcher(self._loop, key)
+        queue = self._get_queue(self._loop, key)
         await queue.put(("decode", token_ids, kwargs, fut))
         return await fut
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
-    def _ensure_queue_and_batcher(self, loop: asyncio.AbstractEventLoop,
-                                  key: tuple):
+    def _get_queue(self, loop: asyncio.AbstractEventLoop,
+                   key: tuple):
         """Return the queue for key, creating queue 
         and batcher task if needed."""
-        if key not in self._queues:
-            self._queues[key] = asyncio.Queue()
-
-        if key not in self._batcher_tasks or self._batcher_tasks[key].done():
-            self._batcher_tasks[key] = loop.create_task(
-                self._batch_loop(self._queues[key]))
-
-        return self._queues[key]
+        queue = self._queues.get(key)
+        if queue is None:
+            self._queues[key] = queue = asyncio.Queue()
+            self._batcher_tasks.append(
+                loop.create_task(self._batch_loop(queue)))
+        return queue
 
     async def _batch_loop(self, queue: asyncio.Queue):
-        """Runs until the queue stays empty long enough to finish."""
         while True:
             first_item = await queue.get()
             batch = [first_item]
@@ -650,10 +647,6 @@ class AsyncMicrobatchTokenizer:
                     for (_, _, _, fut) in decode_items:
                         if not fut.done():
                             fut.set_exception(e)
-
-            # If queue is empty, exit and let new requests spawn a fresh task
-            if queue.empty():
-                return
 
     def __del__(self):
         for task in self._batcher_tasks.values():
