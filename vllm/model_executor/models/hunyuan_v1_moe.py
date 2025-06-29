@@ -58,53 +58,13 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
 from .utils import PPMissingLayer, is_pp_missing_parameter, make_layers
-from .hunyuan_v1_dense import HunYuanAttention, HunYuanCrossAttention
+from .hunyuan_v1_dense import HunYuanAttention, HunYuanCrossAttention, HunYuanMLP
 
 
 def _get_cla_factor(config: PretrainedConfig) -> int:
     if not getattr(config, "use_cla", False):
         return 1
     return getattr(config, "cla_share_factor", 1)
-
-
-class HunYuanMLP(nn.Module):
-
-    def __init__(
-        self,
-        hidden_size: int,
-        intermediate_size: int,
-        hidden_act: str,
-        quant_config: Optional[QuantizationConfig] = None,
-        bias: bool = False,
-        prefix: str = "",
-        reduce_results: bool = True,
-    ) -> None:
-        super().__init__()
-        self.gate_up_proj = MergedColumnParallelLinear(
-            input_size=hidden_size,
-            output_sizes=[intermediate_size] * 2,
-            bias=bias,
-            quant_config=quant_config,
-            prefix=f"{prefix}.gate_up_proj",
-        )
-        self.down_proj = RowParallelLinear(
-            input_size=intermediate_size,
-            output_size=hidden_size,
-            bias=bias,
-            quant_config=quant_config,
-            prefix=f"{prefix}.down_proj",
-            reduce_results=reduce_results,
-        )
-        if hidden_act != "silu":
-            raise ValueError(f"Unsupported activation: {hidden_act}. "
-                             "Only silu is supported for now.")
-        self.act_fn = SiluAndMul()
-
-    def forward(self, x):
-        gate_up, _ = self.gate_up_proj(x)
-        x = self.act_fn(gate_up)
-        x, _ = self.down_proj(x)
-        return x
 
 
 class HunYuanSparseMoeBlock(nn.Module):
