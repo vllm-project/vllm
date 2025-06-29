@@ -101,7 +101,6 @@ class Ernie4_5_MoeMoE(nn.Module):
         self,
         config: PretrainedConfig,
         quant_config: Optional[QuantizationConfig] = None,
-        tp_size: Optional[int] = None,
         prefix: str = "",
     ):
         super().__init__()
