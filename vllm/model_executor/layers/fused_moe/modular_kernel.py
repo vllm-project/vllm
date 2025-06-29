@@ -372,7 +372,8 @@ class FusedMoEModularKernel(torch.nn.Module):
                                  device=a1.device,
                                  dtype=workspace_dtype)
 
-        assert fused_out is None or fused_out.shape == fused_out_shape
+        assert fused_out is None or fused_out.shape == fused_out_shape, (
+            f"fused_out {fused_out.shape} but expected {fused_out_shape}")
         if fused_out is None:
             # reuse workspace13 for the output
             fused_out = _resize_cache(workspace13, fused_out_shape)

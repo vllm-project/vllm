@@ -1559,7 +1559,7 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
         workspace1 = (M, topk, max(N * 2, K))
         workspace2 = (M, topk, N)
-        output = (M, topk, K)
+        output = (M, K)
         return (workspace1, workspace2, output, a.dtype)
 
     def apply(self, output: torch.Tensor, hidden_states: torch.Tensor,
@@ -1628,6 +1628,8 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
                                             (num_tokens, top_k_num, N))
         intermediate_cache2 = _resize_cache(workspace2,
                                             (num_tokens * top_k_num, N // 2))
+        intermediate_cache3 = _resize_cache(workspace13,
+                                            (num_tokens, top_k_num, K))
 
         sorted_token_ids, expert_ids, num_tokens_post_padded = (
             moe_align_block_size(topk_ids, config['BLOCK_SIZE_M'],
@@ -1665,15 +1667,15 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
         invoke_fused_moe_kernel(qintermediate_cache2,
                                 w2,
-                                output,
+                                intermediate_cache3,
                                 a2q_scale,
                                 w2_scale,
                                 w2_zp,
-                                None,
+                                topk_weights,
                                 sorted_token_ids,
                                 expert_ids,
                                 num_tokens_post_padded,
-                                False,
+                                True,
                                 1,
                                 config,
                                 compute_type=compute_type,
@@ -1683,6 +1685,9 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
                                 use_int4_w4a16=self.use_int4_w4a16,
                                 per_channel_quant=self.per_channel_quant,
                                 block_shape=self.block_shape)
+
+        ops.moe_sum(intermediate_cache3.view(*intermediate_cache3.size()),
+                    output)
 
 
 def modular_triton_fused_moe(
