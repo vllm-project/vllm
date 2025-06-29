@@ -578,8 +578,8 @@ class AsyncMicrobatchTokenizer:
         while True:
             first_item = await queue.get()
             batch = [first_item]
-            prompts = []
-            kwargs_list = []
+            prompts = [first_item[1]]
+            kwargs_list = [first_item[2]]
             deadline = self._loop.time() + self.batch_wait_timeout_s
 
             while len(batch) < self.max_batch_size:
@@ -628,7 +628,7 @@ class AsyncMicrobatchTokenizer:
         while True:
             first_item = await queue.get()
             batch = [first_item]
-            token_ids_list = []
+            token_ids_list = [first_item[1]]
             deadline = self._loop.time() + self.batch_wait_timeout_s
 
             while len(batch) < self.max_batch_size:
