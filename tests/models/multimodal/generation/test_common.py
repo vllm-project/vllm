@@ -311,7 +311,7 @@ VLM_TEST_SETTINGS = {
     ),
     "glm4_1v": VLMTestInfo(
         models=["THUDM/GLM-4.1V-9B-Thinking"],
-        test_type=VLMTestType.IMAGE,
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
         prompt_formatter=lambda img_prompt: f"<|user|>\n{img_prompt}<|assistant|>",  # noqa: E501
         img_idx_to_prompt=lambda idx: "<|begin_of_image|><|image|><|end_of_image|>", # noqa: E501
         video_idx_to_prompt=lambda idx: "<|begin_of_video|><|video|><|end_of_video|>", # noqa: E501
