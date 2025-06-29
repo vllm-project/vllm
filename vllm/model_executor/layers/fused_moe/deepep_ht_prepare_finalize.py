@@ -147,7 +147,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             # quantization. Fallback to per_token_dynamic quant.
             per_token_quant = True
         else:
-            per_token_quant = ((quant_config.block_shape is not None) or
+            per_token_quant = ((quant_config.block_shape is None) or
                                (a1_scale is not None and a1_scale.numel() != 1)
                                or (a2_scale is not None
                                    and a2_scale.numel() != 1))

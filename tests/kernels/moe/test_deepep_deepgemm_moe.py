@@ -17,8 +17,6 @@ from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEModularKernel)
-from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    per_token_group_quant_fp8)
 from vllm.platforms import current_platform
 from vllm.utils import has_deep_ep, has_deep_gemm
 
@@ -81,6 +79,7 @@ class TestConfig:
     k: int
     n: int
     num_experts: int
+    per_act_token_quant: bool
     block_size: list[int]
     # configs for testing low-latency kernels
     low_latency: bool
@@ -99,8 +98,7 @@ class TestTensors:
     def make(config: TestConfig, rank) -> "TestTensors":
 
         dtype = torch.bfloat16
-        topk, m, k, block_size = (config.topk, config.m, config.k,
-                                  config.block_size)
+        topk, m, k = (config.topk, config.m, config.k)
 
         fp8_info = torch.finfo(torch.float8_e4m3fn)
         fp8_max, fp8_min = fp8_info.max, fp8_info.min
@@ -108,9 +106,7 @@ class TestTensors:
         rank_tokens = torch.randn(
             (m, k), device=torch.cuda.current_device(), dtype=dtype) / 10.0
         rank_tokens = rank_tokens.clamp(min=fp8_min, max=fp8_max)
-
-        block_k = block_size[1]
-        _, rank_token_scales = per_token_group_quant_fp8(rank_tokens, block_k)
+        rank_token_scales = None
 
         topk_ids = torch.randint(
             low=0,
@@ -150,11 +146,12 @@ def make_ll_modular_kernel(pg: ProcessGroup, pgi: ProcessGroupInfo,
         q_dtype=q_dtype,
         block_shape=test_config.block_size)
 
-    fused_experts = BatchedDeepGemmExperts(max_num_tokens=max_tokens_per_rank,
-                                           world_size=pgi.world_size,
-                                           dp_size=dp_size,
-                                           block_shape=test_config.block_size,
-                                           per_act_token_quant=False)
+    fused_experts = BatchedDeepGemmExperts(
+        max_num_tokens=max_tokens_per_rank,
+        world_size=pgi.world_size,
+        dp_size=dp_size,
+        block_shape=test_config.block_size,
+        per_act_token_quant=test_config.per_act_token_quant)
     mk = FusedMoEModularKernel(prepare_finalize=a2a,
                                fused_experts=fused_experts)
     return mk
@@ -393,6 +390,7 @@ def test_ht_deepep_deepgemm_moe(mnk: tuple[int, int, int], num_experts: int,
                         k=k,
                         n=n,
                         num_experts=num_experts,
+                        per_act_token_quant=False,
                         block_size=block_size,
                         low_latency=False,
                         use_fp8_dispatch=None)
@@ -450,6 +448,7 @@ def test_ll_deepep_deepgemm_moe(
         k=k,
         n=n,
         num_experts=num_experts,
+        per_act_token_quant=False,
         block_size=block_size,
         low_latency=True,
         use_fp8_dispatch=use_fp8_dispatch,
