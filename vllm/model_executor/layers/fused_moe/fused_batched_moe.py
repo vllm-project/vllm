@@ -518,6 +518,11 @@ class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def supports_chunking(self) -> bool:
         return False
 
+    def fused_experts_traits(self) -> mk.FusedExpertsTraits:
+        return mk.FusedExpertsTraits(supports_chunking=False,
+                                     does_moe_apply_weights=False,
+                                     does_moe_reduce=False)
+
     def workspace_shapes(
         self,
         a: torch.Tensor,
@@ -623,11 +628,10 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         assert not use_int4_w4a16, "NYI"
         assert self.block_shape is None, "NYI"
 
-    def supports_chunking(self) -> bool:
-        return False
-
-    def requires_expert_tokens_meta(self) -> bool:
-        return True
+    def fused_experts_traits(self) -> mk.FusedExpertsTraits:
+        return mk.FusedExpertsTraits(supports_chunking=False,
+                                     does_moe_apply_weights=False,
+                                     does_moe_reduce=False)
 
     def workspace_shapes(
         self,

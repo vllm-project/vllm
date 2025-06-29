@@ -219,8 +219,14 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
         self.per_out_ch = per_out_ch
         self.use_batched_format = use_batched_format
 
-    def supports_chunking(self) -> bool:
+    def _supports_chunking(self) -> bool:
         return not self.use_batched_format
+
+    def fused_experts_traits(self) -> mk.FusedExpertsTraits:
+        return mk.FusedExpertsTraits(
+            supports_chunking=self._supports_chunking(),
+            does_moe_apply_weights=False,
+            does_moe_reduce=False)
 
     def workspace_shapes(
         self,

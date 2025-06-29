@@ -67,11 +67,22 @@ class BatchedTritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         assert (self.batched_deep_gemm_experts is not None
                 or self.batched_triton_experts is not None)
 
-    def supports_chunking(self) -> bool:
-        bdge = self.batched_deep_gemm_experts
-        bte = self.batched_triton_experts
-        return ((bdge is None or bdge.supports_chunking())
-                and (bte is None or bte.supports_chunking()))
+    def fused_experts_traits(self) -> mk.FusedExpertsTraits:
+        if (self.batched_deep_gemm_experts is not None
+                and self.batched_triton_experts is not None):
+            # both implementations are available.
+            bdge_traits = self.batched_deep_gemm_experts.fused_experts_traits()
+            bte_traits = self.batched_triton_experts.fused_experts_traits()
+            assert bte_traits == bdge_traits, (
+                "Make sure that both implementations have the same traits so "
+                "we can pick and choose in apply()")
+            return bte_traits
+
+        impl = (self.batched_deep_gemm_experts
+                if self.batched_deep_gemm_experts is not None else
+                self.batched_triton_experts)
+        assert impl is not None
+        return impl.fused_experts_traits()
 
     def workspace_shapes(
         self,

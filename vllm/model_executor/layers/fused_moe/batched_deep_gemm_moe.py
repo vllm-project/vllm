@@ -201,8 +201,10 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         assert (len(self.block_shape) == 2 and all(
             [v == self.DEEPGEMM_BLOCK_SHAPE for v in self.block_shape]))
 
-    def supports_chunking(self) -> bool:
-        return False
+    def fused_experts_traits(self) -> mk.FusedExpertsTraits:
+        return mk.FusedExpertsTraits(supports_chunking=False,
+                                     does_moe_apply_weights=False,
+                                     does_moe_reduce=False)
 
     def workspace_shapes(
         self,

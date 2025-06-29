@@ -61,8 +61,10 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         super().__init__()
         self.block_shape = deep_gemm_block_shape()
 
-    def supports_chunking(self) -> bool:
-        return True
+    def fused_experts_traits(self) -> mk.FusedExpertsTraits:
+        return mk.FusedExpertsTraits(supports_chunking=True,
+                                     does_moe_apply_weights=True,
+                                     does_moe_reduce=True)
 
     def workspace_shapes(
         self, a: torch.Tensor, aq: torch.Tensor, M: int, N: int, K: int,

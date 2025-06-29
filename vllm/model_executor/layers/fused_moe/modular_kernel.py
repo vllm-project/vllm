@@ -192,11 +192,25 @@ class FusedMoEPrepareAndFinalize(ABC):
         raise NotImplementedError
 
 
+@dataclass
+class FusedExpertsTraits:
+    supports_chunking: bool
+    does_moe_apply_weights: bool
+    does_moe_reduce: bool
+
+
 class FusedMoEPermuteExpertsUnpermute(ABC):
     """
     An abstract base class for the [Permute-Experts-Unpermute] step described
     above.
     """
+
+    @abstractmethod
+    def fused_experts_traits() -> FusedExpertsTraits:
+        """
+        Get fused_experts traits of the implementation.
+        """
+        raise NotImplementedError
 
     # TODO (bnell): make this return a CHUNK_SIZE or None instead?
     @abstractmethod

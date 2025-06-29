@@ -34,11 +34,20 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         self.deep_gemm_expert = DeepGemmExperts(
         ) if self.allow_deep_gemm else None
 
-    def supports_chunking(self) -> bool:
-        dge = self.deep_gemm_expert
-        te = self.triton_expert
-        return ((dge is None or dge.supports_chunking())
-                and (te is None or te.supports_chunking()))
+    def fused_experts_traits(self) -> mk.FusedExpertsTraits:
+        if self.deep_gemm_expert is not None and self.triton_expert is not None:
+            # both implementations are available.
+            dge_traits = self.deep_gemm_expert.fused_experts_traits()
+            te_traits = self.triton_expert.fused_experts_traits()
+            assert te_traits == dge_traits, (
+                "Make sure that both implementations have the same traits so "
+                "we can pick and choose in apply()")
+            return te_traits
+
+        impl = (self.deep_gemm_expert
+                if self.deep_gemm_expert is not None else self.triton_expert)
+        assert impl is not None
+        return impl.fused_experts_traits()
 
     def workspace_shapes(
         self, a: torch.Tensor, aq: torch.Tensor, M: int, N: int, K: int,
