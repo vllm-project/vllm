@@ -1542,9 +1542,6 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
                                       use_int4_w4a16=use_int4_w4a16)
         self.per_channel_quant = per_channel_quant
 
-    def supports_chunking(self) -> bool:
-        return True
-
     def fused_experts_traits(self) -> mk.FusedExpertsTraits:
         return mk.FusedExpertsTraits(supports_chunking=True,
                                      does_moe_apply_weights=True,

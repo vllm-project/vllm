@@ -526,9 +526,6 @@ class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         self.world_size = world_size
         self.dp_size = dp_size
 
-    def supports_chunking(self) -> bool:
-        return False
-
     def fused_experts_traits(self) -> mk.FusedExpertsTraits:
         return mk.FusedExpertsTraits(supports_chunking=False,
                                      does_moe_apply_weights=False,

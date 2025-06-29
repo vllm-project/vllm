@@ -214,15 +214,6 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         """
         raise NotImplementedError
 
-    # TODO (bnell): make this return a CHUNK_SIZE or None instead?
-    @abstractmethod
-    def supports_chunking(self) -> bool:
-        """
-        A flag indicating whether or not this class supports activation
-        chunking.
-        """
-        raise NotImplementedError
-
     @abstractmethod
     def workspace_shapes(
         self,
@@ -266,7 +257,7 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
 
     def enable_chunking(self):
         return envs.VLLM_ENABLE_FUSED_MOE_ACTIVATION_CHUNKING and \
-          self.supports_chunking()
+          self.fused_experts_traits().supports_chunking
 
     @abstractmethod
     def apply(
@@ -432,7 +423,8 @@ class FusedMoEModularKernel(torch.nn.Module):
         CHUNK_SIZE = envs.VLLM_FUSED_MOE_CHUNK_SIZE
         num_chunks = cdiv(M, CHUNK_SIZE)
 
-        if not self.fused_experts.supports_chunking() or num_chunks == 1:
+        if not self.fused_experts.fused_experts_traits(
+        ).supports_chunking or num_chunks == 1:
             return self._do_fused_experts(
                 fused_out=None,
                 a1=a1,
