@@ -121,6 +121,8 @@ _TEXT_GENERATION_MODELS = {
     "TeleFLMForCausalLM": ("teleflm", "TeleFLMForCausalLM"),
     "XverseForCausalLM": ("llama", "LlamaForCausalLM"),
     "Zamba2ForCausalLM": ("zamba2", "Zamba2ForCausalLM"),
+    "Ernie4_5_ForCausalLM": ("ernie45", "Ernie4_5_ForCausalLM"),
+    "Ernie4_5_MoeForCausalLM": ("ernie45_moe", "Ernie4_5_MoeForCausalLM"),
     # [Encoder-decoder]
     "BartModel": ("bart", "BartForConditionalGeneration"),
     "BartForConditionalGeneration": ("bart", "BartForConditionalGeneration"),

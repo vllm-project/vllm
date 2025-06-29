@@ -261,6 +261,10 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "Zamba2ForCausalLM": _HfExamplesInfo("Zyphra/Zamba2-7B-instruct"),
     "MiMoForCausalLM": _HfExamplesInfo("XiaomiMiMo/MiMo-7B-RL",
                                         trust_remote_code=True),
+    "Ernie4_5_ForCausalLM": _HfExamplesInfo("baidu/ERNIE-4.5-0.3B-PT",
+                                        trust_remote_code=True),
+    "Ernie4_5_MoeForCausalLM": _HfExamplesInfo("baidu/ERNIE-4.5-21B-A3B-PT",
+                                        trust_remote_code=True),
     # [Encoder-decoder]
     "BartModel": _HfExamplesInfo("facebook/bart-base"),
     "BartForConditionalGeneration": _HfExamplesInfo("facebook/bart-large-cnn"),
