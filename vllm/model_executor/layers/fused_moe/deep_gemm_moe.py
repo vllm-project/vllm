@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
-import importlib.util
 from typing import Optional
 
 import torch
@@ -12,13 +11,12 @@ from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import (
     _moe_permute)
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP)
-from vllm.model_executor.layers.fused_moe.utils import (
-    _resize_cache, per_token_group_quant_fp8)
-from vllm.utils import round_up
+from vllm.model_executor.layers.fused_moe.utils import _resize_cache
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    per_token_group_quant_fp8)
+from vllm.utils import has_deep_gemm, round_up
 
 logger = init_logger(__name__)
-
-has_deep_gemm = importlib.util.find_spec("deep_gemm") is not None
 
 
 @functools.cache
@@ -41,14 +39,14 @@ def _valid_deep_gemm(hidden_states: torch.Tensor, w1: torch.Tensor,
     gemm kernel.  All of M, N, K and the quantization block_shape must be
     aligned by `dg.get_m_alignment_for_contiguous_layout()`.
     """
-    if not has_deep_gemm:
+    if not has_deep_gemm():
         logger.debug("DeepGemm disabled: deep_gemm not available.")
         return False
 
     M = hidden_states.size(0)
     _, K, N = w2.size()
     if not _valid_deep_gemm_shape(M, N, K):
-        logger.debug("DeepGemm disabled: unalinged problem size.")
+        logger.debug("DeepGemm disabled: unaligned problem size.")
         return False
 
     if (w1.dtype != torch.float8_e4m3fn or w2.dtype != torch.float8_e4m3fn):
@@ -143,9 +141,10 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         quant_out = _resize_cache(workspace13.view(dtype=torch.float8_e4m3fn),
                                   (M_sum, N // 2))
         mm2_out = _resize_cache(workspace2, (M_sum, K))
+        # import pdb; pdb.set_trace()
 
-        dg.m_grouped_fp8_gemm_nt_contiguous((a1q, a1q_scale), (w1, w1_scale),
-                                            mm1_out, expert_ids)
+        dg.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
+            (a1q, a1q_scale), (w1, w1_scale), mm1_out, expert_ids)
 
         self.activation(activation, act_out, mm1_out.view(-1, N))
 
@@ -154,8 +153,9 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
                                                    self.block_shape[1],
                                                    column_major_scales=True,
                                                    out_q=quant_out)
-        dg.m_grouped_fp8_gemm_nt_contiguous((a2q, a2q_scale), (w2, w2_scale),
-                                            mm2_out, expert_ids)
+
+        dg.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
+            (a2q, a2q_scale), (w2, w2_scale), mm2_out, expert_ids)
 
         torch.index_select(mm2_out, 0, inv_perm, out=output)
 

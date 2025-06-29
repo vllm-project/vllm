@@ -6,7 +6,6 @@ fp8 block-quantized case.
 """
 
 import dataclasses
-import importlib
 from typing import Optional
 
 import pytest
@@ -21,18 +20,11 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8)
 from vllm.platforms import current_platform
+from vllm.utils import has_deep_ep, has_deep_gemm
 
-from .deepep_utils import ProcessGroupInfo, parallel_launch
+from .utils import ProcessGroupInfo, parallel_launch
 
-has_deep_ep = importlib.util.find_spec("deep_ep") is not None
-
-try:
-    import deep_gemm
-    has_deep_gemm = True
-except ImportError:
-    has_deep_gemm = False
-
-if has_deep_ep:
+if has_deep_ep():
     from vllm.model_executor.layers.fused_moe.deepep_ht_prepare_finalize import (  # noqa: E501
         DeepEPHTPrepareAndFinalize)
     from vllm.model_executor.layers.fused_moe.deepep_ll_prepare_finalize import (  # noqa: E501
@@ -40,19 +32,21 @@ if has_deep_ep:
 
     from .deepep_utils import DeepEPHTArgs, DeepEPLLArgs, make_deepep_a2a
 
-if has_deep_gemm:
+if has_deep_gemm():
+    import deep_gemm
+
     from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
         BatchedDeepGemmExperts)
     from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
         DeepGemmExperts)
 
 requires_deep_ep = pytest.mark.skipif(
-    not has_deep_ep,
+    not has_deep_ep(),
     reason="Requires deep_ep kernels",
 )
 
 requires_deep_gemm = pytest.mark.skipif(
-    not has_deep_gemm,
+    not has_deep_gemm(),
     reason="Requires deep_gemm kernels",
 )
 
@@ -64,6 +58,25 @@ def next_power_of_2(x):
     if x == 0:
         return 1
     return 2**math.ceil(math.log2(x))
+
+
+def per_block_cast_to_fp8(
+        x: torch.Tensor,
+        block_size_n: int = 128) -> tuple[torch.Tensor, torch.Tensor]:
+    assert x.dim() == 2
+    m, n = x.shape
+    x_padded = torch.zeros(
+        (deep_gemm.ceil_div(m, 128) * 128,
+         deep_gemm.ceil_div(n, block_size_n) * block_size_n),
+        dtype=x.dtype,
+        device=x.device)
+    x_padded[:m, :n] = x
+    x_view = x_padded.view(-1, 128, x_padded.size(1) // 128, block_size_n)
+    x_amax = x_view.abs().float().amax(dim=(1, 3), keepdim=True).clamp(1e-4)
+    x_scaled = (x_view * (448.0 / x_amax)).to(torch.float8_e4m3fn)
+    x_scaled_sub = x_scaled.view_as(x_padded)[:m, :n].contiguous()
+    scales = (x_amax / 448.0).view(x_view.size(0), x_view.size(2))
+    return x_scaled_sub, scales
 
 
 def make_block_quant_fp8_weights(
@@ -106,8 +119,8 @@ def make_block_quant_fp8_weights(
     assert (w2.shape[-2] + block_n - 1) // block_n == w2_s.shape[-2]
 
     for i in range(e):
-        w1[i], w1_s[i] = deep_gemm.utils.math.per_block_cast_to_fp8(w1_bf16[i])
-        w2[i], w2_s[i] = deep_gemm.utils.math.per_block_cast_to_fp8(w2_bf16[i])
+        w1[i], w1_s[i] = per_block_cast_to_fp8(w1_bf16[i])
+        w2[i], w2_s[i] = per_block_cast_to_fp8(w2_bf16[i])
 
     return w1, w2, w1_s, w2_s
 

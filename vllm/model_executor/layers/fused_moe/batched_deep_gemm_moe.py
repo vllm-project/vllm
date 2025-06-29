@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-import importlib.util
 from typing import Optional
 
 import torch
@@ -10,8 +9,6 @@ from vllm.model_executor.layers.fused_moe.utils import _resize_cache
 from vllm.triton_utils import tl, triton
 
 logger = init_logger(__name__)
-
-has_deep_gemm = importlib.util.find_spec("deep_gemm") is not None
 
 
 @triton.jit
@@ -266,16 +263,19 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         # for the M expectation of each batch, correctly setting this value
         # may lead to better performance.
         expected_m = max_num_tokens
-        dg.fp8_m_grouped_gemm_nt_masked((a1q, a1q_scale), (w1, w1_scale),
-                                        out=workspace1,
-                                        masked_m=expert_num_tokens,
-                                        expected_m=expected_m)
+
+        dg.m_grouped_gemm_fp8_fp8_bf16_nt_masked((a1q, a1q_scale),
+                                                 (w1, w1_scale),
+                                                 out=workspace1,
+                                                 masked_m=expert_num_tokens,
+                                                 expected_m=expected_m)
 
         assert expert_num_tokens is not None
         a2q, a2q_scale = silu_mul_fp8_quant_deep_gemm(workspace1,
                                                       expert_num_tokens)
 
-        dg.fp8_m_grouped_gemm_nt_masked((a2q, a2q_scale), (w2, w2_scale),
-                                        out=output,
-                                        masked_m=expert_num_tokens,
-                                        expected_m=expected_m)
+        dg.m_grouped_gemm_fp8_fp8_bf16_nt_masked((a2q, a2q_scale),
+                                                 (w2, w2_scale),
+                                                 out=output,
+                                                 masked_m=expert_num_tokens,
+                                                 expected_m=expected_m)
