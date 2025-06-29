@@ -70,6 +70,12 @@ class _HfExamplesInfo:
     length that is too large to fit into memory in CI.
     """
 
+    revision: Optional[str] = None
+    """
+    The specific revision (commit hash, tag, or branch) to use for the model.
+    If not specified, the default revision will be used.
+    """
+
     def check_transformers_version(
         self,
         *,
@@ -164,6 +170,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "GemmaForCausalLM": _HfExamplesInfo("google/gemma-1.1-2b-it"),
     "Gemma2ForCausalLM": _HfExamplesInfo("google/gemma-2-9b"),
     "Gemma3ForCausalLM": _HfExamplesInfo("google/gemma-3-1b-it"),
+    "Gemma3nForConditionalGeneration": _HfExamplesInfo("google/gemma-3n-E2B-it",    # noqa: E501
+                                          min_transformers_version="4.53"),
     "GlmForCausalLM": _HfExamplesInfo("THUDM/glm-4-9b-chat-hf"),
     "Glm4ForCausalLM": _HfExamplesInfo("THUDM/GLM-4-9B-0414"),
     "GPT2LMHeadModel": _HfExamplesInfo("openai-community/gpt2",
@@ -193,7 +201,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                         extras={"tiny": "ai21labs/Jamba-tiny-dev"}),  # noqa: E501
     "LlamaForCausalLM": _HfExamplesInfo("meta-llama/Llama-3.2-1B-Instruct",
                                         extras={"guard": "meta-llama/Llama-Guard-3-1B",  # noqa: E501
-                                                "hermes": "NousResearch/Hermes-3-Llama-3.1-8B"}),  # noqa: E501
+                                                "hermes": "NousResearch/Hermes-3-Llama-3.1-8B", # noqa: E501
+                                                "fp8": "RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8"}),  # noqa: E501
     "LLaMAForCausalLM": _HfExamplesInfo("decapoda-research/llama-7b-hf",
                                         is_available_online=False),
     "MambaForCausalLM": _HfExamplesInfo("state-spaces/mamba-130m-hf"),
@@ -204,7 +213,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "MiniCPM3ForCausalLM": _HfExamplesInfo("openbmb/MiniCPM3-4B",
                                          trust_remote_code=True),
     "MiniMaxText01ForCausalLM": _HfExamplesInfo("MiniMaxAI/MiniMax-Text-01",
-                                                trust_remote_code=True),
+                                                trust_remote_code=True,
+                                                revision="a59aa9cbc53b9fb8742ca4e9e1531b9802b6fdc3"),  # noqa: E501
     "MiniMaxM1ForCausalLM": _HfExamplesInfo("MiniMaxAI/MiniMax-M1-40k",
                                             trust_remote_code=True),
     "MistralForCausalLM": _HfExamplesInfo("mistralai/Mistral-7B-Instruct-v0.1"),
