@@ -543,7 +543,7 @@ class DynamicNTKAlphaRotaryEmbedding(RotaryEmbedding):
         head_size: int,
         rotary_dim: int,
         max_position_embeddings: int,
-        base: int,
+        base: float,
         is_neox_style: bool,
         scaling_alpha: float,
         dtype: torch.dtype,
@@ -555,7 +555,8 @@ class DynamicNTKAlphaRotaryEmbedding(RotaryEmbedding):
     def _compute_cos_sin_cache(self) -> torch.Tensor:
         # For Hunyuan DynamicNTKAlphaRotaryEmbedding
         max_len = self.max_position_embeddings
-        base = self.base * self.scaling_alpha ** (self.rotary_dim / (self.rotary_dim-2))
+        base = self.base * self.scaling_alpha**(self.rotary_dim /
+                                                (self.rotary_dim - 2))
         inv_freq = self._compute_inv_freq(base)
         t = torch.arange(max_len, dtype=torch.float)
 
