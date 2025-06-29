@@ -34,7 +34,7 @@ def expert_num_tokens_round_up_and_sum(expert_num_tokens: torch.Tensor) -> int:
     return torch.sum(ent).item()
 
 
-def compute_aligned_M(self, M: int, num_topk: int, local_num_experts: int,
+def compute_aligned_M(M: int, num_topk: int, local_num_experts: int,
                       alignment: int,
                       expert_tokens_meta: Optional[mk.ExpertTokensMeta]):
     if ((expert_tokens_meta is not None)
@@ -342,7 +342,8 @@ def deepgemm_moe_permute(aq: torch.Tensor,
                          aq_out: Optional[torch.Tensor] = None):
 
     assert aq.ndim == 2
-    assert topk_ids.dtype == torch.int64, "Only int64 supported for now"
+    assert topk_ids.dtype.is_signed, (
+        "The kernel uses -1 to represent invalid topk_ids")
     H = aq.size(1)
     device = aq.device
 
@@ -372,9 +373,7 @@ def deepgemm_moe_permute(aq: torch.Tensor,
                                   is None))
     expert_ids_init = torch.zeros if maybe_has_empty_blocks else torch.empty
 
-    expert_ids = expert_ids_init.zeros((M_sum),
-                                       device=device,
-                                       dtype=torch.int32)
+    expert_ids = expert_ids_init((M_sum), device=device, dtype=torch.int32)
     inv_perm = torch.empty(topk_ids.shape, device=device, dtype=torch.int32)
 
     expert_num_tokens = None

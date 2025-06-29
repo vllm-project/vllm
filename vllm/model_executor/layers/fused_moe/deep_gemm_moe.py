@@ -121,6 +121,7 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
             aq=a1q,
             aq_scale=a1q_scale,
             topk_ids=topk_ids,
+            local_num_experts=local_num_experts,
             expert_map=expert_map,
             expert_tokens_meta=expert_tokens_meta,
             aq_out=_resize_cache(workspace2.view(dtype=torch.float8_e4m3fn),

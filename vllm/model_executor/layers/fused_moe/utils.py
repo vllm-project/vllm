@@ -59,7 +59,8 @@ def _resize_cache(x: torch.Tensor, v: tuple[int, ...]) -> torch.Tensor:
 def count_expert_num_tokens(
         topk_ids: torch.Tensor, num_local_experts: int,
         expert_map: Optional[torch.Tensor]) -> torch.Tensor:
-    assert topk_ids.dtype == torch.int64
+    assert topk_ids.dtype.is_signed, (
+        "The kernel uses -1 to represent invalid topk_ids")
     expert_num_tokens = torch.empty((num_local_experts),
                                     device=topk_ids.device,
                                     dtype=torch.int32)

@@ -66,5 +66,14 @@ class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
     ) -> None:
-        _moe_unpermute_and_reduce(output, fused_expert_output, None,
-                                  topk_weights, apply_router_weight_on_input)
+
+        H = output.size(1)
+        num_tokens = topk_ids.size(0)
+        fe_numel = fused_expert_output.numel()
+        is_fe_reduced: bool = fe_numel == (num_tokens * H)
+        do_apply_weights_and_reduce: bool = not is_fe_reduced
+
+        if do_apply_weights_and_reduce:
+            _moe_unpermute_and_reduce(output, fused_expert_output, None,
+                                      topk_weights,
+                                      apply_router_weight_on_input)
