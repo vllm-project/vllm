@@ -84,7 +84,7 @@ def main(args, dp_size, local_dp_rank, global_dp_rank, dp_master_ip,
         "The president of the United States is",
         "The capital of France is",
         "The future of AI is",
-    ] * 5
+    ] * 10
     # import random
     # import string
     # prompts = [''.join(random.choices(string.ascii_letters, k=128)) for _ in range(2048)]
@@ -112,7 +112,7 @@ def main(args, dp_size, local_dp_rank, global_dp_rank, dp_master_ip,
     # sampling params. here we set different max_tokens for different
     # ranks for demonstration.
     sampling_params = SamplingParams(
-        temperature=0.8, top_p=0.95, max_tokens=[16, 20][global_dp_rank % 2]
+        temperature=0.8, top_p=0.95, max_tokens=[20, 16][global_dp_rank % 2]
     )
 
     # Fixed params
