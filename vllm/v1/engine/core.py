@@ -122,6 +122,7 @@ class EngineCore:
         # Batch queue for scheduled batches. This enables us to asynchronously
         # schedule and execute batches, and is required by pipeline parallelism
         # to eliminate pipeline bubbles.
+        self.batch_id = 0
         self.batch_queue_size = self.model_executor.max_concurrent_batches
         self.batch_queue: Optional[queue.Queue[tuple[Future[ModelRunnerOutput],
                                                      SchedulerOutput]]] = None
@@ -129,6 +130,9 @@ class EngineCore:
             logger.info("Batch queue is enabled with size %d",
                         self.batch_queue_size)
             self.batch_queue = queue.Queue(self.batch_queue_size)
+
+        self.step_fn = (self.step if self.batch_queue is None else
+                        self.step_with_batch_queue)
 
     def _initialize_kv_caches(
             self, vllm_config: VllmConfig) -> tuple[int, int, KVCacheConfig]:
@@ -185,7 +189,6 @@ class EngineCore:
             assert request.mm_inputs is not None
             request.mm_inputs = self.mm_input_cache_server.get_and_update_p1(
                 request.mm_inputs, request.mm_hashes)
-
         req = Request.from_engine_core_request(request)
         if req.use_structured_output:
             # Start grammar compilation asynchronously
