@@ -200,10 +200,14 @@ async def build_async_engine_client_from_engine_args(
                 client_addresses=client_config,
                 client_index=client_index)
 
+            # mypy believes this may still be None
+            assert async_llm is not None, "Failed to initialize AsyncLLM"
+
             # Don't keep the dummy data in memory
             await async_llm.reset_mm_cache()
 
             yield async_llm
+
         finally:
             if async_llm:
                 async_llm.shutdown()

@@ -478,9 +478,9 @@ class EngineCoreProc(EngineCore):
 
     @staticmethod
     def run_engine_core(*args,
-                        traceparent: Optional[dict] = None,
                         dp_rank: int = 0,
                         local_dp_rank: int = 0,
+                        traceparent: Optional[dict] = None,
                         **kwargs):
         """Launch EngineCore busy loop in background process."""
         tracer = init_tracer(__name__)

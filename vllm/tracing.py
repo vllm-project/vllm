@@ -14,7 +14,7 @@ TRACE_HEADERS = ["traceparent", "tracestate"]
 
 logger = init_logger(__name__)
 
-_VLLM_OTEL_DOCS = "https://docs.vllm.ai/en/latest/examples/online_serving/opentelemetry.html"
+_VLLM_OTEL_DOCS = "https://docs.vllm.ai/en/stable/examples/online_serving/opentelemetry.html"
 
 _is_otel_imported = False
 _is_tracer_provider_initialized = False
@@ -176,7 +176,7 @@ def get_span_exporter():
     return OTLPSpanExporter(), protocol
 
 
-def get_traceparent() -> dict:
+def get_traceparent() -> dict[str, str]:
     """Get the current otel trace context.
 
     Used for propagating trace context between processes so that a single start
@@ -187,7 +187,7 @@ def get_traceparent() -> dict:
     """
     if not is_otel_available():
         return {}
-    carrier = {}
+    carrier: dict[str, str] = {}
     propagate.inject(carrier)
     return carrier
 

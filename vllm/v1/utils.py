@@ -232,11 +232,11 @@ class CoreEngineProcManager:
         start_index: int,
         local_start_index: int,
         vllm_config: VllmConfig,
-        traceparent: dict,
         on_head_node: bool,
         handshake_address: str,
         executor_class: type[Executor],
         log_stats: bool,
+        traceparent: Optional[dict[str, str]] = None,
     ):
         context = get_mp_context()
         common_kwargs = {
