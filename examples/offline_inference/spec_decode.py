@@ -16,7 +16,10 @@ def parse_args():
     parser = FlexibleArgumentParser()
     add_dataset_parser(parser)
     parser.add_argument(
-        "--method", type=str, default="eagle", choices=["ngram", "eagle", "eagle3"]
+        "--method",
+        type=str,
+        default="eagle",
+        choices=["ngram", "eagle", "eagle3", "mtp"],
     )
     parser.add_argument("--num-spec-tokens", type=int, default=2)
     parser.add_argument("--prompt-lookup-max", type=int, default=5)
