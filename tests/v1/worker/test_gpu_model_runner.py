@@ -24,7 +24,7 @@ from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 BLOCK_SIZE = 16
 NUM_BLOCKS = 10
-DEVICE = current_platform.device_name
+DEVICE = current_platform.device_type
 
 
 def initialize_kv_cache(runner: GPUModelRunner):
