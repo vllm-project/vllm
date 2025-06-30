@@ -984,7 +984,6 @@ class AsyncLLMEngine(EngineClient):
                     data_parallel_rank=data_parallel_rank,
             ):
                 yield LLMEngine.validate_output(output, RequestOutput)
-
         except asyncio.CancelledError:
             await self.abort(request_id)
             raise
