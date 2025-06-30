@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, ClassVar, Optional
+from typing import Any, ClassVar, Optional
 
 import torch
 
@@ -63,8 +63,7 @@ class AiterMLAMetadata(MLACommonMetadata[AiterMLADecodeMetadata]):
 
 
 class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
-    full_cudagraph_supported: ClassVar[bool] = True # decode only
-    force_separate_routine: ClassVar[Optional[bool]] = True
+    full_cudagraph_supported: ClassVar[bool] = True  # decode only
 
     def __init__(self, runner, kv_cache_spec: AttentionSpec,
                  block_table: BlockTable):
@@ -84,10 +83,11 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                                                   dtype=torch.int32,
                                                   device=self.runner.device)
 
-        self.qo_indptr = torch.arange(0, self.runner.max_num_reqs + 1,
-                                        step=1,
-                                        dtype=torch.int32,
-                                        device=self.runner.device)
+        self.qo_indptr = torch.arange(0,
+                                      self.runner.max_num_reqs + 1,
+                                      step=1,
+                                      dtype=torch.int32,
+                                      device=self.runner.device)
 
     def _build_decode(self, block_table_tensor: torch.Tensor,
                       seq_lens: torch.Tensor) -> AiterMLADecodeMetadata:
@@ -101,7 +101,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                 < block_table_bounds.unsqueeze(1))
         paged_kv_indices = block_table_tensor[mask]
         num_actual_pages = paged_kv_indices.size(0)
-    
+
         self.paged_kv_indices[:num_actual_pages].copy_(paged_kv_indices,
                                                        non_blocking=True)
         self.paged_kv_indices[num_actual_pages:].fill_(-1)
@@ -136,7 +136,6 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
 
 
 class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
-    
 
     def __init__(
             self,
