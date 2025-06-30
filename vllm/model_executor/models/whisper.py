@@ -41,6 +41,113 @@ from .utils import (AutoWeightsLoader, WeightsMapper, cast_overflow_tensors,
 
 logger = init_logger(__name__)
 
+# From https://platform.openai.com/docs/guides/speech-to-text/supported-languages
+
+ISO639_1_SUPPORTED_LANGS = {
+    "af": "Afrikaans",
+    "ar": "Arabic",
+    "hy": "Armenian",
+    "az": "Azerbaijani",
+    "be": "Belarusian",
+    "bs": "Bosnian",
+    "bg": "Bulgarian",
+    "ca": "Catalan",
+    "zh": "Chinese",
+    "hr": "Croatian",
+    "cs": "Czech",
+    "da": "Danish",
+    "nl": "Dutch",
+    "en": "English",
+    "et": "Estonian",
+    "fi": "Finnish",
+    "fr": "French",
+    "gl": "Galician",
+    "de": "German",
+    "el": "Greek",
+    "he": "Hebrew",
+    "hi": "Hindi",
+    "hu": "Hungarian",
+    "is": "Icelandic",
+    "id": "Indonesian",
+    "it": "Italian",
+    "ja": "Japanese",
+    "kn": "Kannada",
+    "kk": "Kazakh",
+    "ko": "Korean",
+    "lv": "Latvian",
+    "lt": "Lithuanian",
+    "mk": "Macedonian",
+    "ms": "Malay",
+    "mr": "Marathi",
+    "mi": "Maori",
+    "ne": "Nepali",
+    "no": "Norwegian",
+    "fa": "Persian",
+    "pl": "Polish",
+    "pt": "Portuguese",
+    "ro": "Romanian",
+    "ru": "Russian",
+    "sr": "Serbian",
+    "sk": "Slovak",
+    "sl": "Slovenian",
+    "es": "Spanish",
+    "sw": "Swahili",
+    "sv": "Swedish",
+    "tl": "Tagalog",
+    "ta": "Tamil",
+    "th": "Thai",
+    "tr": "Turkish",
+    "uk": "Ukrainian",
+    "ur": "Urdu",
+    "vi": "Vietnamese",
+    "cy": "Welsh"
+}
+ISO639_1_OTHER_LANGS = {
+    "lo": "Lao",
+    "jw": "Javanese",
+    "tk": "Turkmen",
+    "yi": "Yiddish",
+    "so": "Somali",
+    "bn": "Bengali",
+    "nn": "Norwegian Nynorsk",
+    "si": "Sinhala",
+    "yo": "Yoruba",
+    "sa": "Sanskrit",
+    "mi": "Māori",
+    "fo": "Faroese",  # codespell:ignore
+    "mt": "Maltese",
+    "tg": "Tajik",
+    "mg": "Malagasy",
+    "haw": "Hawaiian",
+    "km": "Khmer",
+    "br": "Breton",
+    "ps": "Pashto",
+    "ln": "Lingala",
+    "la": "Latin",
+    "ml": "Malayalam",
+    "sq": "Albanian",
+    "su": "Sundanese",
+    "eu": "Basque",
+    "ka": "Georgian",
+    "uz": "Uzbek",
+    "sn": "Shona",
+    "ht": "Haitian",
+    "as": "Assamese",
+    "mn": "Mongolian",
+    "te": "Telugu",
+    "pa": "Panjabi",
+    "tt": "Tatar",
+    "gu": "Gujarati",
+    "oc": "Occitan",
+    "ha": "Hausa",
+    "ba": "Bashkir",
+    "my": "Burmese",
+    "sd": "Sindhi",
+    "am": "Amharic",
+    "lb": "Luxembourgish",
+    "bo": "Tibetan"
+}
+
 
 class WhisperAudioInputs(TypedDict):
     input_features: NestedTensors
@@ -730,6 +837,28 @@ class WhisperForConditionalGeneration(nn.Module, SupportsTranscription,
         # add fake zeros bias for k_proj to state_dict
         weights = _create_fake_bias_for_k_proj(weights)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+
+    @classmethod
+    def validate_language(cls, language: str) -> bool:
+        if language in ISO639_1_SUPPORTED_LANGS:
+            return True
+        elif language in ISO639_1_OTHER_LANGS:
+            logger.warning(
+                "The selected language %s has limited accuracy with"
+                " reported WER>=0.5. Results may be less accurate "
+                "for this choice.", language)
+            return True
+        else:
+            raise ValueError(f"Unsupported language: {language}."
+                             "Language should be one of:" +
+                             f" {list(ISO639_1_SUPPORTED_LANGS.values())}" +
+                             f"or {list(ISO639_1_OTHER_LANGS.values())}")
+
+    @classmethod
+    def get_decoder_prompt(cls, language: str, task_type: str,
+                           prompt: str) -> str:
+        return (f"<|startoftranscript|><|{language}|><|{task_type}|>"
+                f"<|notimestamps|>{prompt}")
 
 
 def _create_fake_bias_for_k_proj(
