@@ -65,12 +65,10 @@ class P2pNcclEngine:
                  config: KVTransferConfig,
                  hostname: str = "",
                  port_offset: int = 0,
-                 num_layers: int = 0,
                  library_path: Optional[str] = None) -> None:
         self.config = config
         self.rank = port_offset
         self.local_rank = local_rank
-        self.num_layers = num_layers
         self.device = torch.device(f"cuda:{self.local_rank}")
         self.nccl = NCCLLibrary(library_path)
 
