@@ -9,9 +9,10 @@ import torch
 import vllm._custom_ops as ops
 from tests.kernels.utils import opcheck
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.platforms import current_platform
 
 DTYPES = [torch.bfloat16, torch.float]
-QUANT_DTYPES = [torch.int8, torch.float8_e4m3fn]
+QUANT_DTYPES = [torch.int8, current_platform.fp8_dtype()]
 VEC_HIDDEN_SIZES = range(1024, 1030)
 # Avoid combinatorial explosion with full Cartesian product
 NUM_TOKENS_HIDDEN_SIZES = [
@@ -90,12 +91,14 @@ def ops_dynamic_per_token_quant(weight: torch.Tensor,
                                 residual: Optional[torch.Tensor],
                                 scale_ub: Optional[torch.Tensor]) \
         -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+    residual_out = None
     if residual is not None:
         residual = residual.clone()
+        residual_out = torch.empty_like(residual)
     out, scales = ops.rms_norm_dynamic_per_token_quant(x, weight, EPS,
                                                        quant_dtype, scale_ub,
-                                                       residual)
-    return out, scales, residual
+                                                       residual_out, residual)
+    return out, scales, residual_out
 
 
 def ops_impl(weight: torch.Tensor,
@@ -144,6 +147,7 @@ def test_rms_norm(
     scale = 1 / (hidden_size)
     x = torch.randn(num_tokens, hidden_size, dtype=dtype) * scale
     residual = torch.randn_like(x) * scale if add_residual else None
+    residual_out = torch.empty_like(residual) if add_residual else None
     if scale_ub is not None:
         rms_x, _ = ref_rms_norm(layer, x, residual)
         scale_ub = torch.mean(rms_x).to(dtype=torch.float32, device='cuda')
@@ -171,4 +175,5 @@ def test_rms_norm(
                          dtype=torch.float32)
 
     opcheck(torch.ops._C.rms_norm_dynamic_per_token_quant,
-            (output, x, layer.weight, scales, 1e-5, scale_ub, residual))
+            (output, x, layer.weight, scales, 1e-5, scale_ub, residual_out,
+             residual))

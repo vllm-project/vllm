@@ -275,9 +275,11 @@ def rms_norm(out: torch.Tensor, input: torch.Tensor, weight: torch.Tensor,
     torch.ops._C.rms_norm(out, input_contiguous, weight, epsilon)
 
 
-def fused_add_rms_norm(input: torch.Tensor, residual: torch.Tensor,
+def fused_add_rms_norm(out: torch.Tensor, input: torch.Tensor,
+                       residual_out: torch.Tensor, residual: torch.Tensor,
                        weight: torch.Tensor, epsilon: float) -> None:
-    torch.ops._C.fused_add_rms_norm(input, residual, weight, epsilon)
+    torch.ops._C.fused_add_rms_norm(out, input, residual_out, residual, weight,
+                                    epsilon)
 
 
 def apply_repetition_penalties_torch(
@@ -358,6 +360,7 @@ def rms_norm_dynamic_per_token_quant(
     epsilon: float,
     quant_dtype: torch.dtype,
     scale_ub: Optional[torch.Tensor] = None,
+    residual_out: Optional[torch.Tensor] = None,
     residual: Optional[torch.Tensor] = None
 ) -> tuple[torch.Tensor, torch.Tensor]:
     output = torch.empty_like(input, dtype=quant_dtype)
@@ -367,7 +370,7 @@ def rms_norm_dynamic_per_token_quant(
 
     torch.ops._C.rms_norm_dynamic_per_token_quant(output, input, weight,
                                                   scales, epsilon, scale_ub,
-                                                  residual)
+                                                  residual_out, residual)
     return output, scales
 
 
