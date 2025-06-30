@@ -141,7 +141,6 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         quant_out = _resize_cache(workspace13.view(dtype=torch.float8_e4m3fn),
                                   (M_sum, N // 2))
         mm2_out = _resize_cache(workspace2, (M_sum, K))
-        # import pdb; pdb.set_trace()
 
         dg.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
             (a1q, a1q_scale), (w1, w1_scale), mm1_out, expert_ids)
