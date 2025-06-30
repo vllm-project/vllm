@@ -333,7 +333,8 @@ class NixlConnectorWorker:
         self.nixl_wrapper = NixlWrapper(str(uuid.uuid4()),
                                         None,
                                         num_workers=None,
-                                        num_shared_workers=16)
+                                        # num_shared_workers=16) # setting this > 0 causes the notifs to be recved
+                                        num_shared_workers=None) 
         # Map of engine_id -> {rank0: agent_name0, rank1: agent_name1..}.
         self._remote_agents: dict[str, dict[int, str]] = defaultdict(dict)
 
@@ -819,6 +820,7 @@ class NixlConnectorWorker:
         """
         notified_req_ids: set[str] = set()
         for notifs in self.nixl_wrapper.get_new_notifs().values():
+            print(f"{notifs=}")
             for notif in notifs:
                 req_id, tp_ratio = notif.decode("utf-8").rsplit(":", 1)
                 self.consumer_notification_counts_by_req[req_id] += 1
@@ -853,6 +855,7 @@ class NixlConnectorWorker:
                                        xfer_state)
 
             # Done.
+            print(f"{len(new_handles)=}")
             if len(new_handles) == 0:
                 start = time.perf_counter()
                 self.nixl_wrapper.send_notif(agent_name, notif_id)
