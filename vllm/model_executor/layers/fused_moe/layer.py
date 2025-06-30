@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import importlib
 from abc import abstractmethod
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -32,10 +31,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
-from vllm.utils import direct_register_custom_op
-
-has_pplx = importlib.util.find_spec("pplx_kernels") is not None
-has_deepep = importlib.util.find_spec("deep_ep") is not None
+from vllm.utils import direct_register_custom_op, has_deep_ep, has_pplx
 
 if current_platform.is_cuda_alike():
     from .fused_batched_moe import BatchedTritonExperts
@@ -43,9 +39,9 @@ if current_platform.is_cuda_alike():
     from .modular_kernel import (FusedMoEModularKernel,
                                  FusedMoEPermuteExpertsUnpermute,
                                  FusedMoEPrepareAndFinalize)
-    if has_pplx:
+    if has_pplx():
         from .pplx_prepare_finalize import PplxPrepareAndFinalize
-    if has_deepep:
+    if has_deep_ep():
         from .deepep_ht_prepare_finalize import DeepEPHTPrepareAndFinalize
         from .deepep_ll_prepare_finalize import (DEEPEP_QUANT_BLOCK_SIZE,
                                                  DeepEPLLPrepareAndFinalize)
@@ -1250,6 +1246,7 @@ class FusedMoE(torch.nn.Module):
             param.materialize(final_shape, dtype=loaded_weight.dtype)
 
         expert_data = param.data if full_load else param.data[expert_id]
+
         # Case input scale: input_scale loading is only supported for fp8
         if "input_scale" in weight_name:
             # this is needed for compressed-tensors only
@@ -1277,6 +1274,7 @@ class FusedMoE(torch.nn.Module):
                              tp_rank=self.tp_rank)
             return True if return_success else None
 
+        # TODO @dsikka: ModelOpt should follow the proper MoE loading pattern
         if "ModelOpt" in quant_method_name:
             if ('weight_scale_2' in weight_name
                     or 'input_scale' in weight_name):
@@ -1293,7 +1291,7 @@ class FusedMoE(torch.nn.Module):
                     tp_rank=self.tp_rank)
             return True if return_success else None
 
-        # Case weight scales, zero_points and offset
+        # Case weight scales, zero_points and offset, weight/input global scales
         if ("scale" in weight_name or "zero" in weight_name
                 or "offset" in weight_name):
             # load the weight scales and zp based on the quantization scheme
@@ -1743,7 +1741,8 @@ def moe_forward_fake(hidden_states: torch.Tensor, router_logits: torch.Tensor,
 direct_register_custom_op(
     op_name="moe_forward",
     op_func=moe_forward,
-    mutates_args=[],
+    mutates_args=["hidden_states"],
     fake_impl=moe_forward_fake,
     dispatch_key=current_platform.dispatch_key,
+    tags=(torch.Tag.needs_fixed_stride_order, ),
 )
