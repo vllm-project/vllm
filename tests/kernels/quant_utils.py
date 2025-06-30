@@ -241,7 +241,6 @@ def per_block_cast_to_fp8(
     return x_scaled_sub, scales
 
 
-# TODO: fix this
 def per_block_cast_to_int8(
     x: torch.Tensor,
     block_shape: list[int] = DEFAULT_BLOCK_SHAPE,
@@ -255,9 +254,9 @@ def per_block_cast_to_int8(
     x_padded[:m, :n] = x
     x_view = x_padded.view(-1, block_m, x_padded.size(1) // block_n, block_n)
     x_amax = x_view.abs().float().amax(dim=(1, 3), keepdim=True).clamp(1e-4)
-    x_scaled = (x_view * (448.0 / x_amax)).to(torch.int8)
+    x_scaled = (x_view * (256.0 / x_amax)).to(torch.int8)
     x_scaled_sub = x_scaled.view_as(x_padded)[:m, :n].contiguous()
-    scales = (x_amax / 448.0).view(x_view.size(0), x_view.size(2))
+    scales = (x_amax / 256.0).view(x_view.size(0), x_view.size(2))
     return x_scaled_sub, scales
 
 

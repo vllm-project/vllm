@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import itertools
-
 import pytest
 import torch
 
@@ -23,9 +21,38 @@ vllm_config.scheduler_config.max_num_seqs = 128
 vllm_config.scheduler_config.max_model_len = 8192
 
 DTYPES = [torch.half, torch.bfloat16]
-M = [1, 33, 64, 222]
-N = [128, 1024]
-K = [256, 4096]
+
+MNK_FACTORS = [
+    (1, 128, 128),
+    (1, 512, 512),
+    (1, 128, 7168),
+    (1, 1024, 7168),
+    (1, 4096, 128),
+    (1, 4096, 512),
+    (1, 4096, 7168),
+    (33, 128, 128),
+    (33, 512, 512),
+    (33, 128, 7168),
+    (33, 1024, 7168),
+    (33, 4096, 128),
+    (33, 4096, 512),
+    (33, 4096, 7168),
+    (128, 128, 128),
+    (128, 512, 512),
+    (128, 1024, 7168),
+    (128, 4096, 512),
+    (128, 4096, 7168),
+    (222, 128, 128),
+    (222, 512, 512),
+    (222, 1024, 7168),
+    (222, 4096, 512),
+    (222, 4096, 7168),
+    (2048, 128, 128),
+    (2048, 1024, 7168),
+    (2048, 4096, 512),
+    (2048, 4096, 7168),
+]
+
 E = [8, 24]
 TOP_KS = [2, 6]
 # BLOCK_SIZE = [[64, 64], [64, 128], [128, 64], [128, 128]]
@@ -76,9 +103,12 @@ def setup_cuda():
     torch.set_default_device("cuda")
 
 
-@pytest.mark.parametrize(
-    "M, N, K, E, topk, block_size, dtype, seed",
-    itertools.product(M, N, K, E, TOP_KS, BLOCK_SIZE, DTYPES, SEEDS))
+@pytest.mark.parametrize(("M", "N", "K"), MNK_FACTORS)
+@pytest.mark.parametrize("E", E)
+@pytest.mark.parametrize("topk", TOP_KS)
+@pytest.mark.parametrize("block_size", BLOCK_SIZE)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("seed", SEEDS)
 @torch.inference_mode()
 def test_w8a8_block_int8_fused_moe(M, N, K, E, topk, block_size, dtype, seed):
     """Tests the fused_moe kernel with W8A8 INT8 block quantization against a

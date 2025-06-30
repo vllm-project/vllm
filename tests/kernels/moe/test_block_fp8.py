@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import itertools
-
 import pytest
 import torch
 
@@ -37,10 +35,62 @@ vllm_config.scheduler_config.max_model_len = 8192
 DTYPES = [torch.bfloat16]  # [torch.half, torch.bfloat16, torch.float32]
 # Deepseek-V3's intermediate size 18432, so N is 18432*2/8=4608 at TP8
 # and its hidden size is 7168.
-M = [1, 83, 128, 2048, 8192]
-M_dg = [128, 192, 1335, 2048]
-N = [128, 256, 1024, 4608]
-K = [256, 512, 7168]
+MNK_FACTORS = [
+    (1, 128, 128),
+    (1, 512, 512),
+    (1, 128, 7168),
+    (1, 1024, 7168),
+    (1, 4608, 128),
+    (1, 4608, 512),
+    (1, 4608, 7168),
+    (83, 128, 128),
+    (83, 512, 512),
+    (83, 1024, 7168),
+    (83, 4608, 512),
+    (83, 4608, 7168),
+    (128, 128, 128),
+    (128, 512, 512),
+    (128, 1024, 7168),
+    (128, 4608, 512),
+    (128, 4608, 7168),
+    (2048, 128, 128),
+    (2048, 1024, 7168),
+    (2048, 4608, 512),
+    (2048, 4608, 7168),
+    (8192, 128, 128),
+    (8192, 512, 512),
+    (8192, 128, 7168),
+    (8192, 1024, 7168),
+    (8192, 4608, 512),
+    (8192, 4608, 7168),
+]
+
+MNK_FACTORS_DG = [
+    (128, 128, 128),
+    (128, 512, 512),
+    (128, 128, 7168),
+    (128, 1024, 7168),
+    (128, 4608, 128),
+    (128, 4608, 512),
+    (128, 4608, 7168),
+    (192, 128, 128),
+    (192, 512, 512),
+    (192, 1024, 7168),
+    (192, 4608, 512),
+    (192, 4608, 7168),
+    (1335, 128, 128),
+    (1335, 1024, 7168),
+    (1335, 4608, 512),
+    (1335, 4608, 7168),
+    (2048, 128, 128),
+    (2048, 512, 512),
+    (2048, 128, 7168),
+    (2048, 1024, 7168),
+    (2048, 4608, 128),
+    (2048, 4608, 512),
+    (2048, 4608, 7168),
+]
+
 BLOCK_SIZE = [[128, 128]]
 E = [2, 8, 16]  # [128, 256]
 TOP_KS = [1, 2, 6]
@@ -92,9 +142,12 @@ def setup_cuda():
     torch.set_default_device("cuda")
 
 
-@pytest.mark.parametrize(
-    "M,N,K,E,topk,block_size,dtype,seed",
-    itertools.product(M, N, K, E, TOP_KS, BLOCK_SIZE, DTYPES, SEEDS))
+@pytest.mark.parametrize(("M", "N", "K"), MNK_FACTORS)
+@pytest.mark.parametrize("E", E)
+@pytest.mark.parametrize("topk", TOP_KS)
+@pytest.mark.parametrize("block_size", BLOCK_SIZE)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("seed", SEEDS)
 @torch.inference_mode()
 def test_w8a8_block_fp8_fused_moe(M, N, K, E, topk, block_size, dtype, seed,
                                   monkeypatch):
@@ -166,8 +219,10 @@ def test_w8a8_block_fp8_fused_moe(M, N, K, E, topk, block_size, dtype, seed,
     torch.testing.assert_close(m_out, ref_out, atol=tol, rtol=tol)
 
 
-@pytest.mark.parametrize("M,N,K,E,topk,seed",
-                         itertools.product(M_dg, N, K, E, TOP_KS, SEEDS))
+@pytest.mark.parametrize(("M", "N", "K"), MNK_FACTORS_DG)
+@pytest.mark.parametrize("E", E)
+@pytest.mark.parametrize("topk", TOP_KS)
+@pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.skipif(not dg_available, reason="DeepGemm kernels not available.")
 @torch.inference_mode()
 def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed,

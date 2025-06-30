@@ -1038,7 +1038,6 @@ def inplace_fused_experts_fake(
     pass
 
 
-# TODO: get rid of these?  replace with modular op?
 direct_register_custom_op(
     op_name="inplace_fused_experts",
     op_func=inplace_fused_experts,

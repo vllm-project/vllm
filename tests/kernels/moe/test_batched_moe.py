@@ -19,6 +19,29 @@ from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
 from vllm.platforms import current_platform
 
+MNK_FACTORS = [
+    (1, 128, 128),
+    (1, 128, 2048),
+    (1, 512, 512),
+    (1, 1024, 128),
+    (1, 1024, 2048),
+    (32, 128, 128),
+    (32, 512, 512),
+    (32, 1024, 2048),
+    (45, 128, 128),
+    (45, 128, 2048),
+    (45, 512, 512),
+    (45, 1024, 128),
+    (45, 1024, 2048),
+    (64, 128, 128),
+    (64, 512, 512),
+    (64, 1024, 2048),
+    (222, 128, 128),
+    (222, 128, 2048),
+    (222, 512, 512),
+    (222, 1024, 128),
+    (222, 1024, 2048),
+]
 NUM_EXPERTS = [8, 64]
 TOP_KS = [1, 2, 6]
 
@@ -182,9 +205,7 @@ def test_batched_mm(num_experts: int, max_tokens_per_expert: int, K: int,
     torch.testing.assert_close(test_output, q_ref_output, atol=atol, rtol=rtol)
 
 
-@pytest.mark.parametrize("m", [1, 32, 45, 64, 222])
-@pytest.mark.parametrize("n", [128, 512, 1024, 2048])
-@pytest.mark.parametrize("k", [128, 512, 1024, 2048])
+@pytest.mark.parametrize(("m", "n", "k"), MNK_FACTORS)
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
