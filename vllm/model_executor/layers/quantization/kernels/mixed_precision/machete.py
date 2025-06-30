@@ -88,7 +88,7 @@ class MacheteLinearKernel(MPLinearKernel):
             permute_param_layout_(x, input_dim=0, output_dim=1)
             x.data = x.data.contiguous()
             return x
-        
+
         def transform_w_zp(x):
             assert isinstance(x, BasevLLMParameter)
             permute_param_layout_(x, input_dim=0, output_dim=1, packed_dim=1)
