@@ -159,10 +159,9 @@ class P2pNcclEngine:
         logger.info(
             "💯P2pNcclEngine init, rank:%d, local_rank:%d, http_address:%s, "
             "zmq_address:%s, proxy_address:%s, send_type:%s, buffer_size_"
-            "threshold:%.2f, nccl_num_channels:%s, num_layers:%d", self.rank,
-            self.local_rank, self.http_address, self.zmq_address,
-            self.proxy_address, self.send_type, self.buffer_size_threshold,
-            self.nccl_num_channels, self.num_layers)
+            "threshold:%.2f, nccl_num_channels:%s", self.rank, self.local_rank,
+            self.http_address, self.zmq_address, self.proxy_address,
+            self.send_type, self.buffer_size_threshold, self.nccl_num_channels)
 
     def _create_connect(self, remote_address: typing.Optional[str] = None):
         assert remote_address is not None
