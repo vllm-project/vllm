@@ -2710,7 +2710,9 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         num_candidates = len(buckets)
         captured_all = True
         warmed_random_sampler_bs: Set[int] = set()
+        buckets = [(2, 1, 128)]
         for idx, (batch_size, query_len, ctx) in enumerate(reversed(buckets)):
+            time_start_mode = time.perf_counter()
             # Graph memory usage is proportional to seq dimension in a batch
             phase = f"Graph/{'prompt' if is_prompt else 'decode'}"
             if is_prompt:
@@ -2737,6 +2739,10 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                                      torch.distributed.ReduceOp.MAX)
             total_mem += used_mem
             total_batch_seq += batch_seq
+            time_end_mode = time.perf_counter()
+            logger.info(
+                    f"Capture per {phase} time: {time_end_mode - time_start_mode} seconds"
+                )
 
         if is_prompt and self.model_is_mrope:
             #For multimodal total_batch_seq and total_mem, we store it in the
@@ -2906,15 +2912,20 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                                                torch.distributed.ReduceOp.MIN)
 
                 if not self.is_pooler:
-                    mem_post_prompt, prompt_batch_seq, prompt_captured_all = \
-                        self.warmup_graphs(
-                        self.bucketing_ctx.prompt_buckets,
-                        True, kv_caches)
-
+                    # Measure time for a single line
+                    start_time = time.time()
+                    # mem_post_prompt, prompt_batch_seq, prompt_captured_all = \
+                    #     self.warmup_graphs(
+                    #     self.bucketing_ctx.prompt_buckets,
+                    #     True, kv_caches)
+                    end_time = time.time()
+                    print(f"Time elapsed in warmup prefill: {end_time - start_time:.6f} seconds")
                     mem_post_decode, decode_batch_seq, decode_captured_all = \
                         self.warmup_graphs(
                         self.bucketing_ctx.decode_buckets,
                         False, kv_caches)
+                    end_time2 = time.time()
+                    print(f"Time elapsed in warmup decode: {end_time2 - end_time:.6f} seconds")
                 else:
                     msg = (f"Using {format_bytes(graph_free_mem)}"
                            f"/{format_bytes(free_mem)} "
@@ -2932,12 +2943,12 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                                 self.bucketing_ctx.prompt_buckets, True,
                                 kv_caches))
 
-                self.log_graph_warmup_summary(
-                    self.bucketing_ctx.prompt_buckets, True, mem_post_prompt)
-                if not self.is_pooler:
-                    self.log_graph_warmup_summary(
-                        self.bucketing_ctx.decode_buckets, False,
-                        mem_post_decode)
+                # self.log_graph_warmup_summary(
+                #     self.bucketing_ctx.prompt_buckets, True, mem_post_prompt)
+                # if not self.is_pooler:
+                #     self.log_graph_warmup_summary(
+                #         self.bucketing_ctx.decode_buckets, False,
+                #         mem_post_decode)
 
         end_time = time.perf_counter()
         end_mem = HabanaMemoryProfiler.current_device_memory_usage()
