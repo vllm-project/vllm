@@ -57,7 +57,7 @@ def _query_start_loc_to_chunk_indices_offsets(query_start_loc: torch.Tensor,
         _s, _e = s // chunk_size + p, e // chunk_size + p + (e % chunk_size
                                                              > 0)
 
-        # adjust inidces and offsets
+        # adjust indices and offsets
         chunk_indices[_s:_e] -= p
         chunk_offsets[_s] = s % chunk_size
 
