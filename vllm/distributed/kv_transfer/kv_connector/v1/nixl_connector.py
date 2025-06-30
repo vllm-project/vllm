@@ -27,7 +27,7 @@ from vllm.attention.selector import backend_name_to_enum, get_attn_backend
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorHandshakeMetadata, KVConnectorMetadata,
-    KVConnectorRole, KVTransferFinishedResult)
+    KVConnectorRole)
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size,
     get_tp_group)
@@ -399,19 +399,12 @@ class NixlConnector(KVConnectorBase_V1):
         if hasattr(self.connector_worker, 'xfer_metadata'):
             self.set_handshake_metadata(self.connector_worker.xfer_metadata)
 
-    def get_finished(self,
-                     finished_req_ids: set[str]) -> KVTransferFinishedResult:
+    def get_finished(
+        self, finished_req_ids: set[str]
+    ) -> tuple[Optional[set[str]], Optional[set[str]]]:
         """Get the finished recving and sending requests."""
         assert self.connector_worker is not None
         return self.connector_worker.get_finished()
-
-    def get_pending_handshake_req_ids(self) -> Optional[set[str]]:
-        """Get request IDs that are currently pending handshake completion."""
-        if self.connector_worker is not None:
-            result = self.connector_worker.get_finished()
-            return (result.pending_handshake
-                    if result.pending_handshake else None)
-        return None
 
     def start_load_kv(self, forward_context: "ForwardContext",
                       **kwargs) -> None:
@@ -988,7 +981,7 @@ class NixlConnectorWorker:
 
         return remote_agent_name
 
-    def get_finished(self) -> KVTransferFinishedResult:
+    def get_finished(self) -> tuple[Optional[set[str]], Optional[set[str]]]:
         """
         Get requests that are done sending, done recving, and pending handshake.
 
@@ -1003,61 +996,45 @@ class NixlConnectorWorker:
         done_sending = self._get_new_notifs()
         done_recving = self._pop_done_transfers(self._recving_transfers)
 
-        with self._handshake_lock:
-            pending_handshake = set()
-            for engine_id in self._handshake_futures:
-                pending_handshake.add(engine_id)
-
-        local_result = KVTransferFinishedResult(
-            finished_sending=done_sending,
-            finished_recving=done_recving,
-            pending_handshake=pending_handshake)
-
         if self.world_size == 1:
-            return local_result
+            return done_sending, done_recving
 
-        return self._coordinate_multi_rank_results(local_result)
+        return self._coordinate_multi_rank_results(done_sending, done_recving)
 
     def _coordinate_multi_rank_results(
-            self, local_result: KVTransferFinishedResult
-    ) -> KVTransferFinishedResult:
+        self, local_sending: set[str], local_recving: set[str]
+    ) -> tuple[Optional[set[str]], Optional[set[str]]]:
         """Coordinate results across multiple TP ranks."""
 
         if self.tp_rank == 0:
             # Rank 0 collects results from all other ranks.
-            for req_id in local_result.finished_sending:
+            for req_id in local_sending:
                 self._done_sending_count[req_id] += 1
-            for req_id in local_result.finished_recving:
+            for req_id in local_recving:
                 self._done_recving_count[req_id] += 1
 
-            all_pending_handshake = local_result.pending_handshake.copy()
             for i in range(1, self.world_size):
                 rank_data = self.tp_group.recv_object(src=i)
-                other_rank_result = KVTransferFinishedResult.from_tuple(
-                    rank_data)
+                other_sending, other_recving = rank_data
 
-                for req_id in other_rank_result.get_all_finished_req_ids():
+                sending_set = other_sending or set()
+                recving_set = other_recving or set()
+                for req_id in sending_set | recving_set:
                     if (req_id in self._done_recving_count
                             or req_id in self._recving_transfers):
                         self._done_recving_count[req_id] += 1
                     else:
                         self._done_sending_count[req_id] += 1
 
-                all_pending_handshake.update(
-                    other_rank_result.pending_handshake)
-
             all_done_recving = self._get_globally_finished_requests(
                 self._done_recving_count)
             all_done_sending = self._get_globally_finished_requests(
                 self._done_sending_count)
 
-            return KVTransferFinishedResult(
-                finished_sending=all_done_sending,
-                finished_recving=all_done_recving,
-                pending_handshake=all_pending_handshake)
+            return all_done_sending, all_done_recving
         else:
-            self.tp_group.send_object(local_result.to_tuple(), dst=0)
-            return local_result
+            self.tp_group.send_object((local_sending, local_recving), dst=0)
+            return local_sending, local_recving
 
     def _get_globally_finished_requests(
             self, counter_dict: dict[str, int]) -> set[str]:
