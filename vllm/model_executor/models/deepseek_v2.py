@@ -889,6 +889,7 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
                                             expert_id=expert_id,
                                             return_success=True)
                     if success:
+                        name = name_mapped
                         break
                 else:
                     if is_expert_weight:
