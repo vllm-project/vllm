@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import triton
 import triton.language as tl
-import torch.nn.functional as F
 from torch.distributions import Categorical
 
 from vllm.config import VllmConfig, set_current_vllm_config
@@ -100,7 +100,6 @@ class EagleProposer:
             )
         sample_hidden_states = hidden_states_logits[last_token_indices]
         logits = self.model.compute_logits(sample_hidden_states, None)
-        
 
         all_draft_probs = []
         all_draft_entropy = []
@@ -108,19 +107,16 @@ class EagleProposer:
         probs = F.softmax(logits, dim=-1, dtype=torch.float32)
         draft_token_ids = logits.argmax(dim=-1)
         # Get the probabilities of the draft tokens.
-        draft_probs = probs.gather(
-            dim=1,
-            index=draft_token_ids.unsqueeze(1)
-        )
-        dist    = Categorical(logits=logits)
-        entropy = dist.entropy().unsqueeze(-1)    # [batch_size, 1]
+        draft_probs = probs.gather(dim=1, index=draft_token_ids.unsqueeze(1))
+        dist = Categorical(logits=logits)
+        entropy = dist.entropy().unsqueeze(-1)  # [batch_size, 1]
         all_draft_probs.append(draft_probs)
         all_draft_entropy.append(entropy)
 
-
         # Early exit if there is only one draft token to be generated.
         if self.num_speculative_tokens == 1:
-            return draft_token_ids.view(-1, 1), all_draft_probs, all_draft_entropy
+            return draft_token_ids.view(-1,
+                                        1), all_draft_probs, all_draft_entropy
 
         # Generate the remaining draft tokens.
         draft_token_ids_list = [draft_token_ids]
@@ -182,12 +178,10 @@ class EagleProposer:
             draft_token_ids_list.append(draft_token_ids)
 
             probs = F.softmax(logits, dim=-1, dtype=torch.float32)
-            draft_probs = probs.gather(
-                dim=1,
-                index=draft_token_ids.unsqueeze(1)
-            )
-            dist    = Categorical(logits=logits)
-            entropy = dist.entropy().unsqueeze(-1)    # [batch_size, 1]
+            draft_probs = probs.gather(dim=1,
+                                       index=draft_token_ids.unsqueeze(1))
+            dist = Categorical(logits=logits)
+            entropy = dist.entropy().unsqueeze(-1)  # [batch_size, 1]
             all_draft_probs.append(draft_probs)
             all_draft_entropy.append(entropy)
 
