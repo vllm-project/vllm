@@ -483,6 +483,7 @@ Specified using `--task score`.
 | `Qwen3ForSequenceClassification` | Qwen3-based | `tomaarsen/Qwen3-Reranker-0.6B-seq-cls`, `Qwen/Qwen3-Reranker-0.6B` (see note), etc. | ✅︎ |
 | `RobertaForSequenceClassification` | RoBERTa-based | `cross-encoder/quora-roberta-base`, etc. | |
 | `XLMRobertaForSequenceClassification` | XLM-RoBERTa-based | `BAAI/bge-reranker-v2-m3`, etc. | |
+| `JinaVLForSequenceClassification`     | JinaVL-based       | `jinaai/jina-reranker-m0`,etc.                                                      |✅︎                      |
 
 !!! note
     Load the official original `BAAI/bge-reranker-v2-gemma` by using the following command.
