@@ -32,6 +32,12 @@ class _HfExamplesInfo:
     for speculative decoding.
     """
 
+    speculative_method: Optional[str] = None
+    """
+    The default speculative method to use for testing this architecture, which 
+    is only used for speculative decoding.
+    """
+
     min_transformers_version: Optional[str] = None
     """
     The minimum version of HF Transformers that is required to run this model.
@@ -60,6 +66,9 @@ class _HfExamplesInfo:
 
     v0_only: bool = False
     """The model is only available with the vLLM V0 engine."""
+
+    v1_only: bool = False
+    """The model is only available with the vLLM V1 engine."""
 
     hf_overrides: dict[str, Any] = field(default_factory=dict)
     """The ``hf_overrides`` required to load the model."""
@@ -434,10 +443,12 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
                                              trust_remote_code=True,
                                              speculative_model="yuhuili/EAGLE-LLaMA3-Instruct-8B",
                                              tokenizer="meta-llama/Meta-Llama-3-8B-Instruct"),  # noqa: E501
-    "EagleLlama4ForCausalLM": _HfExamplesInfo("ronaldbxu/EAGLE-Llama-4-Maverick-17B-128E-Instruct", # noqa: E501
+    "EagleLlama4ForCausalLM": _HfExamplesInfo("meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8", # noqa: E501
                                              trust_remote_code=True,
                                              speculative_model="ronaldbxu/EAGLE-Llama-4-Maverick-17B-128E-Instruct", # noqa: E501
-                                             tokenizer="meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8"), # noqa: E501
+                                             tokenizer="meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8", # noqa: E501
+                                             speculative_method="eagle",
+                                             v1_only=True),
     "Eagle3LlamaForCausalLM": _HfExamplesInfo("yuhuili/EAGLE3-LLaMA3.1-Instruct-8B",  # noqa: E501
                                             trust_remote_code=True,
                                             speculative_model="yuhuili/EAGLE3-LLaMA3.1-Instruct-8B",
