@@ -23,10 +23,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only HunYuan model compatible with HuggingFace weights."""
-import re
 from collections.abc import Iterable
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Optional, Union
 
+import regex as re
 import torch
 from torch import nn
 from transformers import PretrainedConfig
@@ -111,7 +111,7 @@ class HunYuanAttention(nn.Module):
         num_heads: int,
         num_kv_heads: int,
         rope_theta: float = 10000,
-        rope_scaling: Optional[Dict[str, Any]] = None,
+        rope_scaling: Optional[dict[str, Any]] = None,
         max_position_embeddings: int = 8192,
         quant_config: Optional[QuantizationConfig] = None,
         bias: bool = False,
@@ -196,7 +196,7 @@ class HunYuanAttention(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        kv_states: Optional[Tuple[torch.Tensor]] = None,
+        kv_states: Optional[tuple[torch.Tensor]] = None,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
@@ -213,7 +213,7 @@ class HunYuanAttention(nn.Module):
         attn_output = attn_output.view(q.shape[0], -1)
         output, _ = self.o_proj(attn_output)
         return output, (ori_k, v)
-    
+
 
 class HunYuanCrossAttention(nn.Module):
 
@@ -224,7 +224,7 @@ class HunYuanCrossAttention(nn.Module):
         num_heads: int,
         num_kv_heads: int,
         rope_theta: float = 10000,
-        rope_scaling: Optional[Dict[str, Any]] = None,
+        rope_scaling: Optional[dict[str, Any]] = None,
         max_position_embeddings: int = 8192,
         quant_config: Optional[QuantizationConfig] = None,
         bias: bool = False,
@@ -308,7 +308,7 @@ class HunYuanCrossAttention(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        kv_states: Optional[Tuple[torch.Tensor]] = None,
+        kv_states: Optional[tuple[torch.Tensor]] = None,
     ) -> torch.Tensor:
         assert kv_states is not None
         ori_k, v = kv_states  # use last layer kv,
@@ -349,7 +349,7 @@ class HunYuanDecoderLayer(nn.Module):
         rope_theta = getattr(config, "rope_theta", 10000)
         rope_scaling = getattr(config, "rope_scaling", None)
         if rope_scaling is not None and getattr(
-            config, "original_max_position_embeddings", None):
+                config, "original_max_position_embeddings", None):
             rope_scaling["original_max_position_embeddings"] = (
                 config.original_max_position_embeddings)
         max_position_embeddings = getattr(config, "max_position_embeddings",
@@ -357,8 +357,9 @@ class HunYuanDecoderLayer(nn.Module):
         attention_bias = getattr(config, "attention_bias", False) or getattr(
             config, "bias", False)
         cla_factor = _get_cla_factor(config)
-        attention_type = (AttentionType.ENCODER_DECODER if layer_id >= 0
-                          and layer_id % cla_factor != 0 else AttentionType.DECODER)
+        attention_type = (AttentionType.ENCODER_DECODER
+                          if layer_id >= 0 and layer_id % cla_factor != 0 else
+                          AttentionType.DECODER)
         if attention_type == AttentionType.DECODER:
             self.self_attn = HunYuanAttention(
                 config=config,
@@ -393,7 +394,7 @@ class HunYuanDecoderLayer(nn.Module):
             )
         else:
             raise RuntimeError(f"Unsupported attention type: {attention_type}")
-            
+
         self.mlp = HunYuanMLP(
             hidden_size=self.hidden_size,
             intermediate_size=self.intermediate_size,
@@ -412,8 +413,8 @@ class HunYuanDecoderLayer(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         residual: Optional[torch.Tensor],
-        kv_states: Optional[Tuple[torch.Tensor]] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        kv_states: Optional[tuple[torch.Tensor]] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
         if residual is None:
             residual = hidden_states
@@ -443,15 +444,11 @@ class HunYuanModel(nn.Module):
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-        lora_config = vllm_config.lora_config
-
         self.config = config
         self.quant_config = quant_config
         self.padding_idx = config.pad_token_id
-        lora_vocab = ((lora_config.lora_extra_vocab_size *
-                       (lora_config.max_loras or 1)) if lora_config else 0)
-        self.vocab_size = config.vocab_size + lora_vocab
-        self.org_vocab_size = config.vocab_size
+
+        self.vocab_size = config.vocab_size
         if get_pp_group().is_first_rank or (config.tie_word_embeddings
                                             and get_pp_group().is_last_rank):
             self.embed_tokens = VocabParallelEmbedding(
@@ -558,13 +555,7 @@ class HunYuanDenseV1ForCausalLM(nn.Module):
                 self.unpadded_vocab_size,
                 config.hidden_size,
                 org_num_embeddings=config.vocab_size,
-                padding_size=(
-                    DEFAULT_VOCAB_PADDING_SIZE
-                    # We need bigger padding if using lora for kernel
-                    # compatibility
-                    if not lora_config
-                    else lora_config.lora_vocab_padding_size
-                ),
+                padding_size=DEFAULT_VOCAB_PADDING_SIZE,
                 quant_config=quant_config,
             )
             if config.tie_word_embeddings:
@@ -642,7 +633,7 @@ class HunYuanDenseV1ForCausalLM(nn.Module):
         v = v.reshape(-1, hidden_size)
         return torch.concat((q, k, v))
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         cla_factor = _get_cla_factor(self.config)
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
@@ -676,7 +667,8 @@ class HunYuanDenseV1ForCausalLM(nn.Module):
                 name = name.replace("gate_proj_bias", "gate_proj.bias")
             if "up_proj_bias" in name:
                 name = name.replace("up_proj_bias", "up_proj.bias")
-            if "rotary_emb.cos_cached" in name or "rotary_emb.sin_cached" in name:
+            if ("rotary_emb.cos_cached" in name
+                    or "rotary_emb.sin_cached" in name):
                 # Models trained using ColossalAI may include these tensors in
                 # the checkpoint. Skip them.
                 continue
@@ -686,7 +678,7 @@ class HunYuanDenseV1ForCausalLM(nn.Module):
             if self.config.tie_word_embeddings and "lm_head.weight" in name:
                 continue
             if self.quant_config is not None and (
-                scale_name := self.quant_config.get_cache_scale(name)):
+                    scale_name := self.quant_config.get_cache_scale(name)):
                 # Loading kv cache scales for compressed-tensors quantization
                 param = params_dict[scale_name]
                 weight_loader = getattr(param, "weight_loader",
@@ -723,7 +715,14 @@ class HunYuanDenseV1ForCausalLM(nn.Module):
             if is_found:
                 continue
 
-            for param_name, weight_name, den, split_param, func in split_params_mapping:
+            for (
+                    param_name,
+                    weight_name,
+                    den,
+                    split_param,
+                    func,
+            ) in split_params_mapping:
+
                 if weight_name not in name:
                     continue
                 name = name.replace(weight_name, param_name)

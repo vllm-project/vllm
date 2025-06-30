@@ -23,10 +23,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only HunYuan model compatible with HuggingFace weights."""
-import re
 from collections.abc import Iterable
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Optional, Union
 
+import regex as re
 import torch
 from torch import nn
 from transformers import PretrainedConfig
@@ -37,18 +37,12 @@ from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (get_pp_group,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
-from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               MergedColumnParallelLinear,
-                                               QKVParallelLinear,
-                                               ReplicatedLinear,
-                                               RowParallelLinear)
+from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
-from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
@@ -57,8 +51,9 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
+from .hunyuan_v1_dense import (HunYuanAttention, HunYuanCrossAttention,
+                               HunYuanMLP)
 from .utils import PPMissingLayer, is_pp_missing_parameter, make_layers
-from .hunyuan_v1_dense import HunYuanAttention, HunYuanCrossAttention, HunYuanMLP
 
 
 def _get_cla_factor(config: PretrainedConfig) -> int:
@@ -105,7 +100,7 @@ class HunYuanSparseMoeBlock(nn.Module):
             hidden_size=config.hidden_size,
             intermediate_size=intermediate_size,
             reduce_results=False,
-            renormalize=True if top_k > 1 else False,
+            renormalize=top_k > 1,
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
         )
@@ -116,7 +111,8 @@ class HunYuanSparseMoeBlock(nn.Module):
                                      quant_config=None,
                                      prefix=f"{prefix}.gate")
         if config.use_mixed_mlp_moe > 0:
-            # Get layer_id num_shared_expert if config.num_shared_expert is a list
+            # Get layer_id num_shared_expert if config.num_shared_expert is
+            # a list.
             if isinstance(config.num_shared_expert, list):
                 assert layer_id >= 0
                 assert len(config.num_shared_expert) > layer_id
@@ -176,7 +172,7 @@ class HunYuanDecoderLayer(nn.Module):
         rope_theta = getattr(config, "rope_theta", 10000)
         rope_scaling = getattr(config, "rope_scaling", None)
         if rope_scaling is not None and getattr(
-            config, "original_max_position_embeddings", None):
+                config, "original_max_position_embeddings", None):
             rope_scaling["original_max_position_embeddings"] = (
                 config.original_max_position_embeddings)
         max_position_embeddings = getattr(config, "max_position_embeddings",
@@ -184,8 +180,9 @@ class HunYuanDecoderLayer(nn.Module):
         attention_bias = getattr(config, "attention_bias", False) or getattr(
             config, "bias", False)
         cla_factor = _get_cla_factor(config)
-        attention_type = (AttentionType.ENCODER_DECODER if layer_id >= 0
-                          and layer_id % cla_factor != 0 else AttentionType.DECODER)
+        attention_type = (AttentionType.ENCODER_DECODER
+                          if layer_id >= 0 and layer_id % cla_factor != 0 else
+                          AttentionType.DECODER)
         if attention_type == AttentionType.DECODER:
             self.self_attn = HunYuanAttention(
                 config=config,
@@ -237,8 +234,8 @@ class HunYuanDecoderLayer(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         residual: Optional[torch.Tensor],
-        kv_states: Optional[Tuple[torch.Tensor]] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        kv_states: Optional[tuple[torch.Tensor]] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
         if residual is None:
             residual = hidden_states
@@ -383,13 +380,7 @@ class HunYuanMoEV1ForCausalLM(nn.Module):
                 self.unpadded_vocab_size,
                 config.hidden_size,
                 org_num_embeddings=config.vocab_size,
-                padding_size=(
-                    DEFAULT_VOCAB_PADDING_SIZE
-                    # We need bigger padding if using lora for kernel
-                    # compatibility
-                    if not lora_config
-                    else lora_config.lora_vocab_padding_size
-                ),
+                padding_size=DEFAULT_VOCAB_PADDING_SIZE,
                 quant_config=quant_config,
             )
             if config.tie_word_embeddings:
@@ -467,7 +458,7 @@ class HunYuanMoEV1ForCausalLM(nn.Module):
         v = v.reshape(-1, hidden_size)
         return torch.concat((q, k, v))
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         cla_factor = _get_cla_factor(self.config)
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
@@ -510,7 +501,8 @@ class HunYuanMoEV1ForCausalLM(nn.Module):
                 name = name.replace("gate_proj_bias", "gate_proj.bias")
             if "up_proj_bias" in name:
                 name = name.replace("up_proj_bias", "up_proj.bias")
-            if "rotary_emb.cos_cached" in name or "rotary_emb.sin_cached" in name:
+            if ("rotary_emb.cos_cached" in name
+                    or "rotary_emb.sin_cached" in name):
                 # Models trained using ColossalAI may include these tensors in
                 # the checkpoint. Skip them.
                 continue
@@ -520,7 +512,7 @@ class HunYuanMoEV1ForCausalLM(nn.Module):
             if self.config.tie_word_embeddings and "lm_head.weight" in name:
                 continue
             if self.quant_config is not None and (
-                scale_name := self.quant_config.get_cache_scale(name)):
+                    scale_name := self.quant_config.get_cache_scale(name)):
                 # Loading kv cache scales for compressed-tensors quantization
                 param = params_dict[scale_name]
                 weight_loader = getattr(param, "weight_loader",
@@ -559,7 +551,13 @@ class HunYuanMoEV1ForCausalLM(nn.Module):
             if is_found:
                 continue
 
-            for param_name, weight_name, den, split_param, func in split_params_mapping:
+            for (
+                    param_name,
+                    weight_name,
+                    den,
+                    split_param,
+                    func,
+            ) in split_params_mapping:
                 if weight_name not in name:
                     continue
                 name = name.replace(weight_name, param_name)
