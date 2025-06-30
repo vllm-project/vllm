@@ -92,12 +92,21 @@ def should_start_nixl_side_channel_server(vllm_config: VllmConfig) -> bool:
     if vllm_config.kv_transfer_config is None:
         return False
         
-    return vllm_config.kv_transfer_config.kv_connector == "NixlConnector"
+    if vllm_config.kv_transfer_config.kv_connector != "NixlConnector":
+        return False
+    
+    handshake_method = envs.VLLM_NIXL_HANDSHAKE_METHOD.lower()
+    return handshake_method == "http"
 
 
 async def start_nixl_side_channel_server_if_needed(
         vllm_config: VllmConfig) -> Optional[NixlSideChannelServer]:
     if not should_start_nixl_side_channel_server(vllm_config):
+        if (vllm_config.kv_transfer_config is not None and 
+            vllm_config.kv_transfer_config.kv_connector == "NixlConnector"):
+            handshake_method = envs.VLLM_NIXL_HANDSHAKE_METHOD.lower()
+            logger.info("Skipping NIXL HTTP side channel server (handshake method: %s)", 
+                       handshake_method)
         return None
         
     side_channel_host = envs.VLLM_NIXL_SIDE_CHANNEL_HOST

@@ -1,22 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import base64
+import contextlib
 import json
 import math
 import queue
 import threading
 import time
 import uuid
+from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional
 from urllib.error import HTTPError, URLError
 from urllib.request import Request as URLRequest
 from urllib.request import urlopen
 
+import msgspec
 import torch
+import zmq
 
 from vllm import envs
 from vllm.attention.selector import backend_name_to_enum, get_attn_backend
@@ -31,7 +35,7 @@ from vllm.distributed.utils import divide
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
 from vllm.platforms import _Backend
-from vllm.utils import build_uri, round_down
+from vllm.utils import build_uri, make_zmq_path, make_zmq_socket, round_down
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.request import RequestStatus
 
@@ -74,6 +78,209 @@ class ReqMeta:
     remote_port: int
     remote_engine_id: str
     tp_size: int
+
+
+class HandshakeStrategy(ABC):
+    
+    def __init__(self, nixl_wrapper, tp_rank: int, tp_size: int, 
+                 side_channel_port: int, engine_id: str):
+        self.nixl_wrapper = nixl_wrapper
+        self.tp_rank = tp_rank
+        self.tp_size = tp_size
+        self.side_channel_port = side_channel_port
+        self.engine_id = engine_id
+    
+    @abstractmethod
+    def initiate_handshake(self, host: str, port: int, 
+                          remote_tp_size: int) -> Dict[int, str]:
+        pass
+    
+    @abstractmethod
+    def setup_listener(self, metadata: NixlAgentMetadata) -> None:
+        pass
+    
+    @abstractmethod
+    def cleanup(self) -> None:
+        pass
+
+
+class ZmqHandshakeStrategy(HandshakeStrategy):
+    
+    def __init__(self, nixl_wrapper, tp_rank: int, tp_size: int,
+                 side_channel_port: int, engine_id: str, 
+                 add_remote_agent_func):
+        super().__init__(nixl_wrapper, tp_rank, tp_size, side_channel_port, engine_id)
+        self.add_remote_agent_func = add_remote_agent_func
+        self._listener_thread: Optional[threading.Thread] = None
+        self._tp_size_mapping: Dict[str, int] = {engine_id: tp_size}
+    
+    def initiate_handshake(self, host: str, port: int, 
+                          remote_tp_size: int) -> Dict[int, str]:
+        start_time = time.perf_counter()
+        
+        def handshake(path: str, rank: int) -> tuple[NixlAgentMetadata, str]:
+            with self._zmq_ctx(zmq.REQ, path) as sock:
+                sock.send(GET_META_MSG)
+                metadata_bytes = sock.recv()
+                decoder = msgspec.msgpack.Decoder(NixlAgentMetadata)
+                metadata = decoder.decode(metadata_bytes)
+                got_metadata_time = time.perf_counter()
+                
+                # Register Remote agent
+                agent_name = self.add_remote_agent_func(metadata, rank, remote_tp_size)
+                setup_agent_time = time.perf_counter()
+                
+                logger.debug("NIXL handshake: get metadata took: %s",
+                           got_metadata_time - start_time)
+                logger.debug("NIXL handshake: add agent took: %s", 
+                           setup_agent_time - got_metadata_time)
+                return metadata, agent_name
+        
+        # Handshake with remote agent-rank0 first to get the tp_size of remote
+        path = make_zmq_path("tcp", host, port)
+        logger.debug("Querying master rank metadata on path: %s", path)
+        metadata, agent_name_0 = handshake(path, 0)
+        
+        agents = {0: agent_name_0}
+        
+        # Handshake only with the other TP remote the current local rank will
+        # pull from. With homogeneous TP it happens to be the same rank_i.
+        tp_ratio = self._tp_size_mapping[self.engine_id] // remote_tp_size
+        p_remote_rank = self.tp_rank // tp_ratio
+        if p_remote_rank > 0:
+            path = make_zmq_path("tcp", host, port + p_remote_rank)
+            logger.debug("Querying metadata on path: %s at remote rank %s",
+                        path, p_remote_rank)
+            _, agent_name = handshake(path, p_remote_rank)
+            agents[p_remote_rank] = agent_name
+        
+        return agents
+    
+    def setup_listener(self, metadata: NixlAgentMetadata) -> None:
+        ready_event = threading.Event()
+        self._listener_thread = threading.Thread(
+            target=self._nixl_handshake_listener,
+            args=(metadata, ready_event, self.side_channel_port, self.tp_rank),
+            daemon=True,
+            name="nixl_handshake_listener")
+        self._listener_thread.start()
+        ready_event.wait()
+    
+    def cleanup(self) -> None:
+        if self._listener_thread:
+            self._listener_thread.join(timeout=0)
+    
+    @staticmethod
+    def _nixl_handshake_listener(metadata: NixlAgentMetadata,
+                                ready_event: threading.Event, base_port: int,
+                                tp_rank: int):
+        encoder = msgspec.msgpack.Encoder()
+        encoded_data = encoder.encode(metadata)
+        size_in_bytes = len(encoded_data)
+        logger.debug("Size of encoded NixlAgentMetadata: %s bytes", size_in_bytes)
+        
+        # Listen for new requests for metadata
+        host = envs.VLLM_NIXL_SIDE_CHANNEL_HOST
+        path = make_zmq_path("tcp", host, base_port + tp_rank)
+        logger.debug("Starting listening on path: %s", path)
+        with ZmqHandshakeStrategy._zmq_ctx(zmq.ROUTER, path) as sock:
+            ready_event.set()
+            while True:
+                identity, _, msg = sock.recv_multipart()
+                if msg != GET_META_MSG:
+                    logger.warning("Connection listener got unexpected message %s", msg)
+                sock.send_multipart((identity, b"", encoded_data))
+    
+    @staticmethod
+    @contextlib.contextmanager
+    def _zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:
+        if socket_type not in (zmq.ROUTER, zmq.REQ):
+            raise ValueError(f"Unexpected socket type: {socket_type}")
+        
+        ctx: Optional[zmq.Context] = None
+        try:
+            ctx = zmq.Context()
+            yield make_zmq_socket(ctx=ctx, path=addr, socket_type=socket_type,
+                                bind=socket_type == zmq.ROUTER)
+        finally:
+            if ctx is not None:
+                ctx.destroy(linger=0)
+
+
+class HttpHandshakeStrategy(HandshakeStrategy):
+    
+    def __init__(self, nixl_wrapper, tp_rank: int, tp_size: int,
+                 side_channel_port: int, engine_id: str,
+                 add_remote_agent_func):
+        super().__init__(nixl_wrapper, tp_rank, tp_size, side_channel_port, engine_id)
+        self.add_remote_agent_func = add_remote_agent_func
+        self._tp_size_mapping: Dict[str, int] = {engine_id: tp_size}
+    
+    def initiate_handshake(self, host: str, port: int, 
+                          remote_tp_size: int) -> Dict[int, str]:
+        start_time = time.perf_counter()
+        logger.debug("Starting NIXL handshake with %s:%s", host, port)
+        
+        url = build_uri("http", host, port, path="get_kv_connector_metadata")
+        
+        try:
+            req = URLRequest(url)
+            with urlopen(req, timeout=envs.VLLM_NIXL_HANDSHAKE_TIMEOUT) as response:
+                response_data = response.read().decode('utf-8')
+                res = json.loads(response_data)
+        except (URLError, HTTPError) as e:
+            logger.error("Failed to fetch metadata from %s: %s", url, e)
+            raise
+        
+        if res is None:
+            logger.warning("Remote server returned None metadata, skipping handshake")
+            raise RuntimeError("Remote server returned None metadata")
+        
+        # Get dp_rank 0 data (standard for disaggregated prefill-decode)
+        dp_data = res.get("0", {})
+        if not dp_data:
+            raise RuntimeError("No metadata found for dp_rank 0")
+        
+        remote_tp_size = len(dp_data.keys())
+        
+        # Handshake only with the remote TP rank that current local rank will
+        # pull from. With homogeneous TP it happens to be the same rank_i.
+        tp_ratio = self._tp_size_mapping[self.engine_id] // remote_tp_size
+        p_remote_rank = self.tp_rank // tp_ratio
+        
+        # Get data for the specific rank we need to connect to
+        rank_data = dp_data.get(str(p_remote_rank), {})
+        if not rank_data:
+            raise RuntimeError(f"No metadata found for remote rank {p_remote_rank}")
+        
+        metadata_bytes = rank_data.get("agent_metadata", None)
+        if metadata_bytes is None:
+            raise RuntimeError(f"No agent metadata found for remote rank {p_remote_rank}")
+        
+        rank_data_copy = rank_data.copy()
+        rank_data_copy.pop("agent_metadata", None)
+        metadata = NixlAgentMetadata(
+            agent_metadata=base64.b64decode(metadata_bytes), **rank_data_copy)
+        
+        pre_register = time.perf_counter()
+        # Register Remote agent
+        remote_agent_name = self.add_remote_agent_func(metadata, p_remote_rank, remote_tp_size)
+        agent_time = time.perf_counter()
+        
+        logger.debug("Finished registering remote agent for engine %s", metadata.engine_id)
+        logger.debug("NIXL handshake: get metadata took: %s", pre_register - start_time)
+        logger.debug("NIXL handshake: add agent took: %s", agent_time - pre_register)
+        
+        logger.debug("NIXL handshake method completed for %s:%s", host, port)
+        
+        # Return remote rank -> agent name mapping
+        return {p_remote_rank: remote_agent_name}
+    
+    def setup_listener(self, metadata: NixlAgentMetadata) -> None:
+        pass
+    
+    def cleanup(self) -> None:
+        pass
 
 
 class NixlConnectorMetadata(KVConnectorMetadata):
@@ -461,78 +668,32 @@ class NixlConnectorWorker:
         # finish reading before safely freeing the blocks.
         self.consumer_notification_counts_by_req = defaultdict[ReqId, int](int)
 
+        # Initialize handshake strategy
+        handshake_method = envs.VLLM_NIXL_HANDSHAKE_METHOD.lower()
+        if handshake_method == "zmq":
+            self._handshake_strategy = ZmqHandshakeStrategy(
+                self.nixl_wrapper, self.tp_rank, self.world_size,
+                self.side_channel_port, self.engine_id, self.add_remote_agent)
+        elif handshake_method == "http":
+            self._handshake_strategy = HttpHandshakeStrategy(
+                self.nixl_wrapper, self.tp_rank, self.world_size,
+                self.side_channel_port, self.engine_id, self.add_remote_agent)
+        else:
+            raise ValueError(f"Unknown handshake method: {handshake_method}. "
+                           "Supported methods: 'zmq', 'http'")
+        
+        logger.info("Using %s handshake strategy", handshake_method)
+
     def __del__(self):
-        """Cleanup background threads on destruction."""
         self._handshake_initiation_executor.shutdown(wait=False)
+        if hasattr(self, '_handshake_strategy'):
+            self._handshake_strategy.cleanup()
         if self._nixl_handshake_listener_t:
             self._nixl_handshake_listener_t.join(timeout=0)
 
     def _nixl_handshake(self, host: str, port: int,
                         remote_tp_size: int) -> dict[int, str]:
-        """Do a NIXL handshake with a remote instance."""
-
-        start_time = time.perf_counter()
-        logger.debug("Starting NIXL handshake with %s:%s", host, port)
-
-        url = build_uri("http", host, port, path="get_kv_connector_metadata")
-
-        try:
-            req = URLRequest(url)
-            with urlopen(req,
-                         timeout=envs.VLLM_NIXL_HANDSHAKE_TIMEOUT) as response:
-                response_data = response.read().decode('utf-8')
-                res = json.loads(response_data)
-        except (URLError, HTTPError) as e:
-            logger.error("Failed to fetch metadata from %s: %s", url, e)
-            raise
-
-        if res is None:
-            logger.warning(
-                "Remote server returned None metadata, skipping handshake")
-            raise RuntimeError("Remote server returned None metadata")
-
-        # Get dp_rank 0 data (standard for disaggregated prefill-decode)
-        dp_data = res.get("0", {})
-        if not dp_data:
-            raise RuntimeError("No metadata found for dp_rank 0")
-
-        remote_tp_size = len(dp_data.keys())
-        
-        # Handshake only with the remote TP rank that current local rank will
-        # pull from. With homogeneous TP it happens to be the same rank_i.
-        tp_ratio = self._tp_size[self.engine_id] // remote_tp_size
-        p_remote_rank = self.tp_rank // tp_ratio
-        
-        # Get data for the specific rank we need to connect to
-        rank_data = dp_data.get(str(p_remote_rank), {})
-        if not rank_data:
-            raise RuntimeError(f"No metadata found for remote rank {p_remote_rank}")
-
-        metadata_bytes = rank_data.get("agent_metadata", None)
-        if metadata_bytes is None:
-            raise RuntimeError(f"No agent metadata found for remote rank {p_remote_rank}")
-
-        rank_data_copy = rank_data.copy()
-        rank_data_copy.pop("agent_metadata", None)
-        metadata = NixlAgentMetadata(
-            agent_metadata=base64.b64decode(metadata_bytes), **rank_data_copy)
-
-        pre_register = time.perf_counter()
-        # Register Remote agent.
-        remote_agent_name = self.add_remote_agent(metadata, p_remote_rank, remote_tp_size)
-        agent_time = time.perf_counter()
-
-        logger.debug("Finished registering remote agent for engine %s",
-                     metadata.engine_id)
-        logger.debug("NIXL handshake: get metadata took: %s",
-                     pre_register - start_time)
-        logger.debug("NIXL handshake: add agent took: %s",
-                     agent_time - pre_register)
-
-        logger.debug("NIXL handshake method completed for %s:%s", host, port)
-        
-        # Return remote rank -> agent name mapping
-        return {p_remote_rank: remote_agent_name}
+        return self._handshake_strategy.initiate_handshake(host, port, remote_tp_size)
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in nixl."""
@@ -662,6 +823,9 @@ class NixlConnectorWorker:
             num_blocks=self.num_blocks,
             block_len=self.block_len,
             attn_backend_name=self.backend_name)
+
+        # Setup handshake strategy listener
+        self._handshake_strategy.setup_listener(self.xfer_metadata)
 
     def add_remote_agent(self,
                          nixl_agent_meta: NixlAgentMetadata,

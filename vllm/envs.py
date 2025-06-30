@@ -127,6 +127,7 @@ if TYPE_CHECKING:
     VLLM_NIXL_SIDE_CHANNEL_HOST: str = "localhost"
     VLLM_NIXL_SIDE_CHANNEL_PORT: int = 5557
     VLLM_NIXL_HANDSHAKE_TIMEOUT: float = 2.0
+    VLLM_NIXL_HANDSHAKE_METHOD: str = "zmq"
     VLLM_ALL2ALL_BACKEND: str = "naive"
     VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE: int = 163840
     VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS: int = 1
@@ -904,6 +905,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Default is 2 seconds
     "VLLM_NIXL_HANDSHAKE_TIMEOUT":
     lambda: float(os.getenv("VLLM_NIXL_HANDSHAKE_TIMEOUT", "2.0")),
+
+    # NIXL handshake method ("zmq" or "http")
+    "VLLM_NIXL_HANDSHAKE_METHOD":
+    lambda: os.getenv("VLLM_NIXL_HANDSHAKE_METHOD", "zmq"),
 
     # all2all backend for vllm's expert parallel communication
     # Available options:
