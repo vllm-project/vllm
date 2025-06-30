@@ -268,6 +268,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "Zamba2ForCausalLM": _HfExamplesInfo("Zyphra/Zamba2-7B-instruct"),
     "MiMoForCausalLM": _HfExamplesInfo("XiaomiMiMo/MiMo-7B-RL",
                                         trust_remote_code=True),
+    "Dots1ForCausalLM": _HfExamplesInfo("rednote-hilab/dots.llm1.inst",
+                                        min_transformers_version="4.53"),
     # [Encoder-decoder]
     "BartModel": _HfExamplesInfo("facebook/bart-base"),
     "BartForConditionalGeneration": _HfExamplesInfo("facebook/bart-large-cnn"),
