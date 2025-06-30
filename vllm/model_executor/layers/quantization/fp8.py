@@ -1023,9 +1023,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
                 topk_ids_across_dp = get_forward_context(
                 ).dp_metadata.topk_ids_across_dp
-                topk_ids = layer.multicast_fn(topk_ids,
+                topk_ids = layer.multicast_fn(topk_ids.to(torch.int32),
                                               cu_tokens_across_dp_cpu,
-                                              topk_ids_across_dp)
+                                              topk_ids_across_dp).long()
 
                 topk_weights_across_dp = get_forward_context(
                 ).dp_metadata.topk_weights_across_dp
