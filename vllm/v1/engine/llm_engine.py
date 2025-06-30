@@ -356,7 +356,7 @@ class LLMEngine:
 
     def __del__(self):
         if self.log_stats and self._log_thread:
-                self._log_active = False
-                self._log_thread.join(timeout=10)
+            self._log_active = False
+            self._log_thread.join(timeout=10)
         if dp_group := getattr(self, "dp_group", None):
             stateless_destroy_torch_distributed_process_group(dp_group)
