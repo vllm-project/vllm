@@ -268,8 +268,7 @@ void get_cutlass_pplx_moe_mm_data(torch::Tensor& expert_offsets,
                                   const int64_t padded_m, const int64_t n,
                                   const int64_t k);
 
-void transpose_cutlass_moe_a_scales(torch::Tensor& a_scales_t,
-                                    torch::Tensor& a_scales,
+torch::Tensor transpose_cutlass_moe_a_scales(torch::Tensor& a_scales,
                                     torch::Tensor& expert_offsets,
                                     torch::Tensor& problem_sizes);
 

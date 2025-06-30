@@ -167,31 +167,31 @@ __global__ void transpose_a_scales(float* __restrict__ a_scales_t,
                                    const int32_t* expert_offsets,
                                    const int32_t* problem_sizes,
                                    int64_t k_scaled) {
-  int expert_idx = blockIdx.x;
-  int start_k_scaled = threadIdx.x;
-  int step_k_scaled = blockDim.x;
-  int expert_offset = expert_offsets[expert_idx];
-  int num_tokens = problem_sizes[expert_idx * 3];
-  int expert_offset_scaled = expert_offset * k_scaled;
+  int64_t expert_idx = blockIdx.x;
+  int64_t start_k_scaled = threadIdx.x;
+  int64_t step_k_scaled = blockDim.x;
+  int64_t expert_offset = expert_offsets[expert_idx];
+  int64_t num_tokens = problem_sizes[expert_idx * 3];
+  int64_t expert_offset_scaled = expert_offset * k_scaled;
 
-  for (int t = 0; t < num_tokens; ++t) {
-    for (int k = start_k_scaled; k < k_scaled; k += step_k_scaled) {
+  for (int64_t t = 0; t < num_tokens; ++t) {
+    for (int64_t k = start_k_scaled; k < k_scaled; k += step_k_scaled) {
       a_scales_t[expert_offset_scaled + k * num_tokens + t] =
           a_scales[expert_offset_scaled + t * k_scaled + k];
     }
   }
 }
 
-void transpose_cutlass_moe_a_scales_caller(torch::Tensor& a_scales_t,
-                                           torch::Tensor& a_scales,
+torch::Tensor transpose_cutlass_moe_a_scales_caller(torch::Tensor& a_scales,
                                            torch::Tensor& expert_offsets,
                                            torch::Tensor& problem_sizes) {
   const int64_t num_experts = expert_offsets.size(0);
   const int64_t num_tokens = a_scales.size(0);
   const int64_t k_scaled = a_scales.size(1);
 
-  TORCH_CHECK(a_scales_t.dim() == 1);
-  TORCH_CHECK(a_scales_t.size(0) == k_scaled * num_tokens);
+  auto options =
+      torch::TensorOptions().dtype(a_scales.dtype()).device(a_scales.device());
+  torch::Tensor a_scales_t = torch::empty(num_tokens * k_scaled, options);
 
   auto stream = at::cuda::getCurrentCUDAStream(expert_offsets.device().index());
   auto num_threads = min(k_scaled, 128ul);
@@ -201,4 +201,5 @@ void transpose_cutlass_moe_a_scales_caller(torch::Tensor& a_scales_t,
       static_cast<const float*>(a_scales.data_ptr()),
       static_cast<const int32_t*>(expert_offsets.data_ptr()),
       static_cast<const int32_t*>(problem_sizes.data_ptr()), k_scaled);
+  return a_scales_t;
 }

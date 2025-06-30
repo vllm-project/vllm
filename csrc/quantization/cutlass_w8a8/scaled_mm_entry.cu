@@ -74,8 +74,7 @@ void get_cutlass_pplx_moe_mm_data_caller(torch::Tensor& expert_offsets,
                                          const int64_t padded_m,
                                          const int64_t n, const int64_t k);
 
-void transpose_cutlass_moe_a_scales_caller(torch::Tensor& a_scales_t,
-                                           torch::Tensor& a_scales,
+torch::Tensor transpose_cutlass_moe_a_scales_caller(torch::Tensor& a_scales,
                                            torch::Tensor& expert_offsets,
                                            torch::Tensor& problem_sizes);
 
@@ -312,17 +311,15 @@ void get_cutlass_pplx_moe_mm_data(torch::Tensor& expert_offsets,
       version_num, ". Required capability: 90");
 }
 
-void transpose_cutlass_moe_a_scales(torch::Tensor& a_scales_t,
-                                    torch::Tensor& a_scales,
+  torch::Tensor transpose_cutlass_moe_a_scales(torch::Tensor& a_scales,
                                     torch::Tensor& expert_offsets,
                                     torch::Tensor& problem_sizes) {
   // This function currently gets compiled only if we have a valid cutlass moe
   // mm to run it for.
   int32_t version_num = get_sm_version_num();
 #if defined ENABLE_CUTLASS_MOE_SM90 && ENABLE_CUTLASS_MOE_SM90
-  transpose_cutlass_moe_a_scales_caller(a_scales_t, a_scales, expert_offsets,
+  return transpose_cutlass_moe_a_scales_caller(a_scales, expert_offsets,
                                         problem_sizes);
-  return;
 #endif
   TORCH_CHECK_NOT_IMPLEMENTED(
       false,

@@ -122,10 +122,7 @@ def run_blocked_cutlass_moe_fp8(
     c3 = _resize_cache(workspace13, (M * topk, K))
 
     if per_act_block:
-        a1q_scale_t = torch.empty((a1q_scale.shape[0] * a1q_scale.shape[1]),
-                                  device=device,
-                                  dtype=a1q_scale.dtype)
-        ops.transpose_cutlass_moe_a_scales(a1q_scale_t, a1q_scale,
+        a1q_scale_t = ops.transpose_cutlass_moe_a_scales(a1q_scale,
                                            expert_offsets, problem_sizes1)
     else:
         a1q_scale = a1q_scale.repeat(a1q.shape[1] // 128, a1q.shape[0])
@@ -140,10 +137,7 @@ def run_blocked_cutlass_moe_fp8(
 
     if per_act_block:
         a2q, a2q_scale = per_token_group_quant_fp8(c2, 128)
-        a2q_scale_t = torch.empty((a2q_scale.shape[0] * a2q_scale.shape[1]),
-                                  device=device,
-                                  dtype=a2q_scale.dtype)
-        ops.transpose_cutlass_moe_a_scales(a2q_scale_t, a2q_scale,
+        a2q_scale_t = ops.transpose_cutlass_moe_a_scales(a2q_scale,
                                            expert_offsets, problem_sizes2)
     else:
         a2q, a2q_scale = ops.scaled_fp8_quant(c2,
@@ -240,7 +234,7 @@ def cutlass_moe_blocked_fp8(
     a2_scale: Optional[torch.Tensor] = None,
     apply_router_weight_on_input: bool = False,
     global_num_experts: int = -1,
-    per_act_block: bool = False,
+    per_act_block: bool = True,
 ) -> torch.Tensor:
     """
     This function computes a a8w8-blockwise quantized Mixture of Experts (MoE)

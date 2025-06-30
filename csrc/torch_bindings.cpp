@@ -484,9 +484,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 
   // Transpose input scales for blocked cutlass moe mm.
   ops.def(
-      "transpose_cutlass_moe_a_scales(Tensor! a_scales_t, Tensor a_scales, "
-      "                               Tensor expert_offsets, "
-      "                               Tensor problem_sizes) -> ()",
+      "transpose_cutlass_moe_a_scales(Tensor a_scales, Tensor expert_offsets, "
+      "                               Tensor problem_sizes) -> Tensor",
       {stride_tag});
   ops.impl("transpose_cutlass_moe_a_scales", torch::kCUDA,
            &transpose_cutlass_moe_a_scales);
