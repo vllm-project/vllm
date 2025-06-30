@@ -89,15 +89,15 @@ MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS = 5120
 
 STR_NOT_IMPL_ENC_DEC_SWA = \
     "Sliding window attention for encoder/decoder models " + \
-                    "is not currently supported."
+    "is not currently supported."
 
 STR_NOT_IMPL_ENC_DEC_PREFIX_CACHE = \
     "Prefix caching for encoder/decoder models " + \
-                    "is not currently supported."
+    "is not currently supported."
 
 STR_NOT_IMPL_ENC_DEC_CHUNKED_PREFILL = \
     "Chunked prefill for encoder/decoder models " + \
-                    "is not currently supported."
+    "is not currently supported."
 
 STR_NOT_IMPL_ENC_DEC_LOGIT_SOFTCAP = (
     "Models with logits_soft_cap "
@@ -752,7 +752,7 @@ def _generate_random_fp8(
     # to generate random data for fp8 data.
     # For example, s.11111.00 in fp8e5m2 format represents Inf.
     #     | E4M3        | E5M2
-    #-----|-------------|-------------------
+    # -----|-------------|-------------------
     # Inf | N/A         | s.11111.00
     # NaN | s.1111.111  | s.11111.{01,10,11}
     from vllm import _custom_ops as ops
@@ -840,7 +840,6 @@ def create_kv_caches_with_random(
     seed: Optional[int] = None,
     device: Optional[str] = "cuda",
 ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
-
     if cache_dtype == "fp8" and head_size % 16:
         raise ValueError(
             f"Does not support key cache of type fp8 with head_size {head_size}"
@@ -1205,7 +1204,6 @@ def deprecate_args(
     is_deprecated: Union[bool, Callable[[], bool]] = True,
     additional_message: Optional[str] = None,
 ) -> Callable[[F], F]:
-
     if not callable(is_deprecated):
         is_deprecated = partial(identity, is_deprecated)
 
@@ -1355,7 +1353,7 @@ def weak_bind(bound_method: Callable[..., Any], ) -> Callable[..., None]:
     return weak_bound
 
 
-#From: https://stackoverflow.com/a/4104188/2749989
+# From: https://stackoverflow.com/a/4104188/2749989
 def run_once(f: Callable[P, None]) -> Callable[P, None]:
 
     def wrapper(*args: P.args, **kwargs: P.kwargs) -> None:
@@ -1474,7 +1472,7 @@ class FlexibleArgumentParser(ArgumentParser):
 
         # Convert underscores to dashes and vice versa in argument names
         processed_args = list[str]()
-        for arg in args:
+        for i, arg in enumerate(args):
             if arg.startswith('--'):
                 if '=' in arg:
                     key, value = arg.split('=', 1)
@@ -1486,7 +1484,14 @@ class FlexibleArgumentParser(ArgumentParser):
             elif arg.startswith('-O') and arg != '-O' and arg[2] != '.':
                 # allow -O flag to be used without space, e.g. -O3 or -Odecode
                 # -O.<...> handled later
-                processed_args.append(f'-O.level={arg[2:]}')
+                # also handle -O=<level> here
+                level = arg[3:] if arg[2] == '=' else arg[2:]
+                processed_args.append(f'-O.level={level}')
+            elif arg == '-O' and i + 1 < len(args) and args[i + 1] in {
+                    "0", "1", "2", "3"
+            }:
+                # Convert -O <n> to -O.level <n>
+                processed_args.append('-O.level')
             else:
                 processed_args.append(arg)
 
@@ -1527,6 +1532,7 @@ class FlexibleArgumentParser(ArgumentParser):
         for i, processed_arg in enumerate(processed_args):
             if i in delete:  # skip if value from previous arg
                 continue
+
             if processed_arg.startswith("-") and "." in processed_arg:
                 if "=" in processed_arg:
                     processed_arg, value_str = processed_arg.split("=", 1)
@@ -2426,7 +2432,7 @@ def memory_profiling(
     The increase of `torch.cuda.memory_stats()["allocated_bytes.all.peak"]` during profiling gives (b.).
 
     The increase of `non_torch_memory` from creating the current vLLM instance until after profiling to get (c.).
-    """ # noqa
+    """  # noqa
     gc.collect()
     torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats()
