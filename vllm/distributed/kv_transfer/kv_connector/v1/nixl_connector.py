@@ -845,7 +845,7 @@ class NixlConnectorWorker:
         now = time.monotonic()
         while self._reqs_to_send:
             req_id, expires = next(iter(self._reqs_to_send.items()))
-            # Sorted dict, oldest request are put first so we can exit early.
+            # Sorted dict, oldest requests are put first so we can exit early.
             if now < expires:
                 break
             del self._reqs_to_send[req_id]
