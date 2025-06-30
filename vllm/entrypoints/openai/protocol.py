@@ -1194,7 +1194,16 @@ class ScoreRequest(OpenAIBaseModel):
             "default: 0). Any priority other than 0 will raise an error "
             "if the served model does not use priority scheduling."),
     )
-
+    score_template: Optional[dict[str, str]] = Field(
+        default=None,
+        description=("A dictionary containing query_template and "
+                     "document_template to format the scorer input."))
+    score_template_kwargs: Optional[dict[str, Any]] = Field(
+        default=None,
+        description=(
+            "Additional keyword args to pass to the template renderer. "
+            "Will be accessible by the score template."),
+    )
     # --8<-- [end:score-extra-params]
 
     def to_pooling_params(self):
@@ -1220,7 +1229,16 @@ class RerankRequest(OpenAIBaseModel):
             "default: 0). Any priority other than 0 will raise an error "
             "if the served model does not use priority scheduling."),
     )
-
+    rerank_template: Optional[dict[str, str]] = Field(
+        default=None,
+        description=("A dictionary containing query_template and "
+                     "document_template to format the reranker input.")
+    )
+    rerank_template_kwargs: Optional[dict[str, Any]] = Field(
+        default=None,
+        description=("A dictionary of key-value pairs to be formatted into "
+                     "the rerank model's template.")
+    )
     # --8<-- [end:rerank-extra-params]
 
     def to_pooling_params(self):
