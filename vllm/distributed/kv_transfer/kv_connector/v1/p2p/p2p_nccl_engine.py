@@ -459,10 +459,10 @@ class P2pNcclEngine:
                             request_id, None)
                         self.recv_request_id_to_tensor_ids.pop(
                             request_id, None)
-                    self.finished_recving.discard(request_id)
                     if isinstance(tensor, tuple):
                         addr, _, _ = tensor
                         self.pool.free(addr)
+            self.finished_recving.discard(request_id)
             logger.debug("🔵get_finished, request_id:%s", request_id)
 
         # TODO: 1)Avoid polling. 2)Validate chunked prefill and preemption.
