@@ -6,8 +6,8 @@ from typing import TYPE_CHECKING, Any, NamedTuple, Optional, Union
 
 import torch
 from packaging.version import Version
-from packaging.version import __version__ as TRANSFORMERS_VERSION
 from transformers import BatchFeature, PretrainedConfig, ProcessorMixin
+from transformers import __version__ as TRANSFORMERS_VERSION
 from typing_extensions import TypeVar
 
 from vllm.jsontree import JSONTree, json_map_leaves
