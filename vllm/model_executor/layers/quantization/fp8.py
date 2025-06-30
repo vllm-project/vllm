@@ -188,7 +188,8 @@ class Fp8LinearMethod(LinearMethodBase):
                                            and envs.VLLM_ROCM_USE_AITER_LINEAR
                                            and current_platform.is_fp8_fnuz())
 
-        self.block_quant = self.quant_config.weight_block_size is not None
+        self.weight_block_size = self.quant_config.weight_block_size
+        self.block_quant = self.weight_block_size is not None
         self.fp8_linear = Fp8LinearOp(
             # Default to using per_token quantization if cutlass is supported
             use_per_token_if_dynamic=cutlass_fp8_supported())
@@ -215,11 +216,11 @@ class Fp8LinearMethod(LinearMethodBase):
 
         if self.block_quant:
             tp_size = get_tensor_model_parallel_world_size()
-            assert self.quant_config.weight_block_size is not None
-            layer.weight_block_size = self.quant_config.weight_block_size
+            assert self.weight_block_size is not None
+            layer.weight_block_size = self.weight_block_size
             block_n, block_k = (
-                self.quant_config.weight_block_size[0],
-                self.quant_config.weight_block_size[1],
+                self.weight_block_size[0],
+                self.weight_block_size[1],
             )
             # Required by row parallel
             if (tp_size > 1
@@ -399,12 +400,12 @@ class Fp8LinearMethod(LinearMethodBase):
                 bias=bias)
 
         if self.block_quant:
-            assert self.quant_config.weight_block_size is not None
+            assert layer.weight_block_size is not None
 
             return torch.ops.vllm.apply_w8a8_block_fp8_linear(
                 input=x,
                 weight=layer.weight,
-                block_size=self.quant_config.weight_block_size,
+                block_size=layer.weight_block_size,
                 weight_scale=layer.weight_scale_inv,
                 input_scale=layer.input_scale,
                 bias=bias,
@@ -436,7 +437,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
     def __init__(self, quant_config: Fp8Config):
         from vllm.model_executor.layers.fused_moe import fused_experts
         self.quant_config = quant_config
-        self.block_quant = self.quant_config.weight_block_size is not None
+        self.weight_block_size = self.quant_config.weight_block_size
+        self.block_quant = self.weight_block_size is not None
 
         # For GPUs that lack FP8 hardware support, we can leverage the Marlin
         # kernel for fast weight-only FP8 quantization
@@ -466,7 +468,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         self.fused_experts = functools.partial(  # type: ignore
             fused_experts,
             use_fp8_w8a8=True,
-            block_shape=self.quant_config.weight_block_size,
+            block_shape=self.weight_block_size,
             allow_deep_gemm=self.allow_deep_gemm)
 
     def create_weights(self, layer: Module, num_experts: int, hidden_size: int,
@@ -482,12 +484,12 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         if self.quant_config.is_checkpoint_fp8_serialized:
             params_dtype = torch.float8_e4m3fn
         if self.block_quant:
-            assert self.quant_config.weight_block_size is not None
-            layer.weight_block_size = self.quant_config.weight_block_size
+            assert self.weight_block_size is not None
+            layer.weight_block_size = self.weight_block_size
             tp_size = get_tensor_model_parallel_world_size()
             block_n, block_k = (
-                self.quant_config.weight_block_size[0],
-                self.quant_config.weight_block_size[1],
+                self.weight_block_size[0],
+                self.weight_block_size[1],
             )
             # NOTE: To ensure proper alignment of the block-wise quantization
             # scales, the output_size of the weights for both the gate and up
@@ -793,13 +795,13 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 use_int8_w8a16=False,
                 use_int4_w4a16=False,
                 per_channel_quant=False,
-                block_shape=self.quant_config.weight_block_size,
+                block_shape=self.weight_block_size,
                 allow_deep_gemm=self.allow_deep_gemm,
             )
         else:
             experts = TritonOrDeepGemmExperts(
                 use_fp8_w8a8=True,
-                block_shape=self.quant_config.weight_block_size,
+                block_shape=self.weight_block_size,
                 allow_deep_gemm=self.allow_deep_gemm,
             )
 
@@ -871,7 +873,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                           if self.block_quant else layer.w2_weight_scale),
                 a1_scale=layer.w13_input_scale,
                 a2_scale=layer.w2_input_scale,
-                block_shape=self.quant_config.weight_block_size)
+                block_shape=self.weight_block_size)
         elif self.use_marlin:
             assert activation == "silu", (
                 f"{activation} not supported for Marlin MoE.")
