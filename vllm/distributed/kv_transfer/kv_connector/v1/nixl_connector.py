@@ -340,7 +340,7 @@ class NixlConnectorWorker:
         self.nixl_wrapper = NixlWrapper(str(uuid.uuid4()),
                                         None,
                                         num_workers=num_workers,
-                                        num_shared_workers=None) 
+                                        num_shared_workers=None)
         # Map of engine_id -> {rank0: agent_name0, rank1: agent_name1..}.
         self._remote_agents: dict[str, dict[int, str]] = defaultdict(dict)
 
@@ -999,9 +999,12 @@ class NixlConnectorWorker:
 
         # Begin async xfer.
         start = time.perf_counter()
-        for handle in handles:
-            self.nixl_wrapper.transfer(handle)
-        # self.nixl_wrapper.transfer_batched(handles)
+        # IT WORKS WITH THIS:
+        # for handle in handles:
+        #     self.nixl_wrapper.transfer(handle)
+
+        # IT FAILS WITH THIS:
+        self.nixl_wrapper.transfer_batched(handles)
         end = time.perf_counter()
         logger.info("======== LAUNCH TIME: %s ========", end - start)
 
