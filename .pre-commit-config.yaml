@@ -162,10 +162,11 @@ repos:
     additional_dependencies: [pathspec, regex]
   - id: validate-config
     name: Validate configuration has default values and that each field has a docstring
-    entry: python tools/validate_config.py vllm/config.py tests/test_config.py
+    entry: python tools/validate_config.py
     language: python
     types: [python]
-    pass_filenames: false
+    pass_filenames: true
+    files: vllm/config.py|tests/test_config.py
   # Keep `suggestion` last
   - id: suggestion
     name: Suggestion
