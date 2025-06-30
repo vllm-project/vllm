@@ -481,8 +481,8 @@ class P2pNcclEngine:
             if num_layers == len(
                     self.recv_request_id_to_tensor_ids[request_id]):
                 self.finished_recving.add(request_id)
-        for request_id in finished_sending:
-            self.send_request_id_to_tensor_ids.pop(request_id, None)
+        for request_id in self.finished_recving:
+            self.recv_request_id_to_tensor_ids.pop(request_id, None)
 
         # TODO: Add failed requests (e.g., transmission errors)
         return self.finished_sending or None, self.finished_recving or None
