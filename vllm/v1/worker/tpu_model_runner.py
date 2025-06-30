@@ -711,7 +711,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                 self.device)
         block_tables = block_tables.to(self.device)
 
-        # calcute the slot mapping
+        # Calculate the slot mapping
         slot_mapping_metadata = self._get_slot_mapping_metadata(
             num_reqs, num_scheduled_tokens_per_req)
         num_kv_update_slices = slot_mapping_metadata.shape[0]
