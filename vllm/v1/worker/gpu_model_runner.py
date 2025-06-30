@@ -33,6 +33,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.model_loader import TensorizerLoader, get_model_loader
+from vllm.model_executor.models.interfaces import has_step_pooler
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.multimodal.utils import group_mm_inputs_by_modality
@@ -261,6 +262,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 dtype=torch.int64,
                 device="cpu",
                 pin_memory=self.pin_memory)
+            self.mrope_positions_np = self.mrope_positions_cpu.numpy()
 
         # Only relevant for models using ALiBi (e.g, MPT)
         self.use_alibi = check_use_alibi(model_config)
@@ -888,15 +890,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 dst_start = mrope_pos_ptr
                 dst_end = mrope_pos_ptr + completion_part_len
 
-                self.mrope_positions_cpu[:, dst_start:dst_end] = \
-                    MRotaryEmbedding.get_next_input_positions_tensor(
-                        req.mrope_position_delta,
-                        context_len=num_computed_tokens +
-                        prompt_part_len,
-                        seq_len=num_computed_tokens +
-                        prompt_part_len +
-                        completion_part_len,
-                    )
+                MRotaryEmbedding.get_next_input_positions_tensor(
+                    out=self.mrope_positions_np,
+                    out_offset=dst_start,
+                    mrope_position_delta=req.mrope_position_delta,
+                    context_len=num_computed_tokens + prompt_part_len,
+                    num_new_tokens=completion_part_len,
+                )
 
                 mrope_pos_ptr += completion_part_len
 
@@ -1708,6 +1708,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 )
                 model_loader.load_weights(self.model,
                                           model_config=self.model_config)
+            if has_step_pooler(self.model):
+                self.input_batch.logits_processing_needs_token_ids = True
             if self.lora_config:
                 self.model = self.load_lora_model(self.model,
                                                   self.model_config,
