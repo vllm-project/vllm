@@ -108,3 +108,29 @@ body[data-md-color-scheme="slate"] .md-nav__item--section > label.md-nav__link .
 .md-content__button-wrapper a:hover {
   color: var(--md-accent-fg-color);
 }
+
+/* Slack and Forum css */
+.slack-button, 
+.forum-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: 0.4rem;
+  height: 24px;
+}
+
+.slack-button img {
+  height: 18px;
+  filter: none !important;
+}
+
+.slack-button:hover,
+.forum-button:hover {
+  opacity: 0.7;
+}
+
+.forum-button svg {
+  height: 28px;
+  opacity: 0.9;
+  transform: translateY(2px);
+}
