@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 import threading
 import time
+
 from collections.abc import Mapping
 from copy import copy
 from typing import Any, Callable, Optional, Union
@@ -122,6 +124,7 @@ class LLMEngine:
         # Don't keep the dummy data in memory
         self.reset_mm_cache()
 
+        # If log_stats is enabled, start a background thread to periodically log metrics.
         self._log_active = False
         self._log_thread = None
         if self.log_stats:
@@ -300,6 +303,23 @@ class LLMEngine:
     def is_sleeping(self) -> bool:
         return self.engine_core.is_sleeping()
 
+    @staticmethod
+    def _record_stats(
+        stat_loggers: list[StatLoggerBase],
+        scheduler_stats: Optional[SchedulerStats],
+        iteration_stats: Optional[IterationStats],
+    ):
+        for stat_logger in stat_loggers:
+            stat_logger.record(scheduler_stats=scheduler_stats,
+                               iteration_stats=iteration_stats)
+    
+    def _log_loop(self):
+        while self._log_active:
+            for loggers in self.stat_loggers:
+                for stat_logger in loggers:
+                    stat_logger.log()
+            time.sleep(_LOCAL_LOGGING_INTERVAL_SEC)
+
     def get_metrics(self) -> list[Metric]:
         assert self.log_stats, "Stat logging disabled"
         return get_metrics_snapshot()
@@ -340,22 +360,3 @@ class LLMEngine:
                 self._log_thread.join(timeout=10)
         if dp_group := getattr(self, "dp_group", None):
             stateless_destroy_torch_distributed_process_group(dp_group)
-
-    @staticmethod
-    def _record_stats(
-        stat_loggers: list[StatLoggerBase],
-        scheduler_stats: Optional[SchedulerStats],
-        iteration_stats: Optional[IterationStats],
-    ):
-        """static so that it can be used from the output_handler task
-        without a circular ref to AsyncLLM."""
-        for stat_logger in stat_loggers:
-            stat_logger.record(scheduler_stats=scheduler_stats,
-                               iteration_stats=iteration_stats)
-    
-    def _log_loop(self):
-        while self._log_active:
-            for loggers in self.stat_loggers:
-                for stat_logger in loggers:
-                    stat_logger.log()
-            time.sleep(_LOCAL_LOGGING_INTERVAL_SEC)
