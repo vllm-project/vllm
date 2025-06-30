@@ -233,6 +233,8 @@ class EngineCore:
             return {}, False
         scheduler_output = self.scheduler.schedule()
         model_output = self.execute_model(scheduler_output)
+        if isinstance(model_output, Future):
+            model_output = model_output.result()
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output)  # type: ignore
 
