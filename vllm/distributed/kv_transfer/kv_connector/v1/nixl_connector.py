@@ -60,14 +60,14 @@ except ImportError:
     NixlWrapper = None
 
 
-class NixlAgentMetadata(KVConnectorHandshakeMetadata, kw_only=True):
-    connector_type: str = "nixl"
+class NixlAgentMetadata(KVConnectorHandshakeMetadata):
     engine_id: str
     agent_metadata: bytes
     kv_caches_base_addr: list[int]
     num_blocks: int
     block_len: int
     attn_backend_name: str
+    connector_type: str = "nixl"
 
 
 @dataclass
@@ -696,7 +696,7 @@ class NixlConnectorWorker:
         # Initialize handshake strategy
         handshake_method = envs.VLLM_NIXL_HANDSHAKE_METHOD.lower()
         if handshake_method == "zmq":
-            self._handshake_strategy = ZmqHandshakeStrategy(
+            self._handshake_strategy: HandshakeStrategy = ZmqHandshakeStrategy(
                 self.nixl_wrapper, self.tp_rank, self.world_size,
                 self.side_channel_port, self.engine_id, self.add_remote_agent)
         elif handshake_method == "http":
