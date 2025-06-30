@@ -8,8 +8,8 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.utils.machete_utils import (
-    MACHETE_SUPPORTED_GROUP_SIZES, check_machete_supports_shape,
-    query_machete_supported_quant_types)
+    check_machete_supports_shape, query_machete_supported_quant_types,
+    query_machete_supported_group_sizes)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     pack_quantized_values_into_int32, unpack_quantized_values_into_int32)
 from vllm.model_executor.parameter import (BasevLLMParameter,
@@ -27,7 +27,7 @@ class MacheteLinearKernel(MPLinearKernel):
     @classmethod
     def can_implement(cls,
                       c: MPLinearLayerConfig) -> tuple[bool, Optional[str]]:
-
+        return False, "temp disable machete"
         if c.has_g_idx and\
             c.partition_weight_shape[0] != c.full_weight_shape[0]:
             return False, "Act reordering currently not supported by Machete, "\
@@ -40,10 +40,10 @@ class MacheteLinearKernel(MPLinearKernel):
                            "Machete, supported types are: "\
                            f"{query_machete_supported_quant_types(c.zero_points)}"
 
-        if c.group_size not in MACHETE_SUPPORTED_GROUP_SIZES:
+        if c.group_size not in query_machete_supported_group_sizes(c.act_type):
             return False, f"Group size ({c.group_size}) not supported by "\
                             "Machete, supported group sizes are: "\
-                            f"{MACHETE_SUPPORTED_GROUP_SIZES}"
+                            f"{query_machete_supported_group_sizes(c.act_type)}"
 
         return check_machete_supports_shape(c.partition_weight_shape[0],
                                             c.partition_weight_shape[1])

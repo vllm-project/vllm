@@ -7,7 +7,6 @@ import torch
 
 from vllm.scalar_type import ScalarType, scalar_types
 
-MACHETE_SUPPORTED_GROUP_SIZES = [-1, 128]
 MACHETE_PREPACKED_BLOCK_SHAPE = [64, 128]
 
 
@@ -20,6 +19,13 @@ def query_machete_supported_quant_types(zero_points: bool) -> list[ScalarType]:
 
 def query_machete_supported_act_types(zero_points: bool) -> list[ScalarType]:
     return [torch.float16, torch.bfloat16]
+
+
+def query_machete_supported_group_sizes(act_type: torch.dtype) -> list[int]:
+    if act_type in [torch.float16, torch.bfloat16]:
+        return [-1, 64, 128]
+    else:
+        return [-1, 128]
 
 
 def check_machete_supports_shape(in_features: int, out_featrues: int) \
