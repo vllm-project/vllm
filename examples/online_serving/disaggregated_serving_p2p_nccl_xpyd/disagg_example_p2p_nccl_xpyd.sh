@@ -1,23 +1,43 @@
 #!/bin/bash
 
+# =============================================================================
+# vLLM Disaggregated Serving Script - P2P NCCL XpYd Architecture
+# =============================================================================
+# This script demonstrates disaggregated prefill and decode serving using
+# P2P NCCL communication. The architecture supports various XpYd configurations:
+#
+# - 1P3D: 1 Prefill server + 3 Decode servers (current default)
+# - 3P1D: 3 Prefill servers + 1 Decode server
+# - etc.
+#
+# Configuration can be customized via environment variables:
+#   MODEL: Model to serve
+#   PREFILL_GPUS: Comma-separated GPU IDs for prefill servers
+#   DECODE_GPUS: Comma-separated GPU IDs for decode servers
+#   PREFILL_PORTS: Comma-separated ports for prefill servers
+#   DECODE_PORTS: Comma-separated ports for decode servers
+#   PROXY_PORT: Proxy server port used to setup XpYd connection.
+#   TIMEOUT_SECONDS: Server startup timeout
+# =============================================================================
+
 # Configuration - can be overridden via environment variables
 MODEL=${MODEL:-meta-llama/Llama-3.1-8B-Instruct}
 TIMEOUT_SECONDS=${TIMEOUT_SECONDS:-1200}
 PROXY_PORT=${PROXY_PORT:-30001}
 
-# In this example we run 1P3D. You can modify the following variables for 
-# XpYd support.
-# Currently we only support same TP and PP between prefill and decode instances.
-PREFILL_PORT=${PREFILL_PORT:-20005}
-DECODE_PORTS=${DECODE_PORTS:-20009,20003,20008}
-PREFILL_GPU=${PREFILL_GPU:-0}
+# Default 1P3D configuration (1 Prefill + 3 Decode)
+PREFILL_GPUS=${PREFILL_GPUS:-0}
 DECODE_GPUS=${DECODE_GPUS:-1,2,3}
+PREFILL_PORTS=${PREFILL_PORTS:-20003}
+DECODE_PORTS=${DECODE_PORTS:-20005,20007,20009} 
 
 echo "Warning: P2P NCCL disaggregated prefill XpYd support for vLLM v1 is experimental and subject to change."
-echo "Configuration:"
+echo ""
+echo "Architecture Configuration:"
 echo "  Model: $MODEL"
-echo "  Prefill GPU: $PREFILL_GPU, Port: $PREFILL_PORT"
+echo "  Prefill GPUs: $PREFILL_GPUS, Ports: $PREFILL_PORTS"
 echo "  Decode GPUs: $DECODE_GPUS, Ports: $DECODE_PORTS"
+echo "  Proxy Port: $PROXY_PORT"
 echo "  Timeout: ${TIMEOUT_SECONDS}s"
 echo ""
 
@@ -63,11 +83,7 @@ check_num_gpus() {
 ensure_python_library_installed() {
     echo "Checking if $1 is installed..."
     if ! python3 -c "import $1" > /dev/null 2>&1; then
-        if [ "$1" == "nixl" ]; then
-            echo "$1 is not installed. Please refer to https://github.com/ai-dynamo/nixl for installation."
-        else
-            echo "$1 is not installed. Please install it via pip install $1."
-        fi
+        echo "$1 is not installed. Please install it via pip install $1."
         exit 1
     else
         echo "$1 is installed."
@@ -118,43 +134,66 @@ main() {
     trap cleanup USR1
     trap cleanup TERM
 
-    echo "Launching prefiller, decoder and proxy..."
-    echo "Please check prefill1.log, decode1.log, decode2.log, decode3.log and proxy.log for logs."
+    echo "Launching disaggregated serving components..."
+    echo "Please check the log files for detailed output:"
+    echo "  - prefill*.log: Prefill server logs"
+    echo "  - decode*.log: Decode server logs"
+    echo "  - proxy.log: Proxy server log"
 
-    # launch proxy
+    # =============================================================================
+    # Launch Proxy Server
+    # =============================================================================
+    echo ""
+    echo "Starting proxy server on port $PROXY_PORT..."
     python3 disagg_proxy_p2p_nccl_xpyd.py &
     PIDS+=($!)
 
     # Parse GPU and port arrays
+    IFS=',' read -ra PREFILL_GPU_ARRAY <<< "$PREFILL_GPUS"
     IFS=',' read -ra DECODE_GPU_ARRAY <<< "$DECODE_GPUS"
+    IFS=',' read -ra PREFILL_PORT_ARRAY <<< "$PREFILL_PORTS"
     IFS=',' read -ra DECODE_PORT_ARRAY <<< "$DECODE_PORTS"
 
-    # 1P (1 Producer) - Prefill server
-    echo "Starting prefill server on GPU $PREFILL_GPU, port $PREFILL_PORT..."
-    CUDA_VISIBLE_DEVICES=$PREFILL_GPU VLLM_USE_V1=1 vllm serve $MODEL \
-    --enforce-eager \
-    --host 0.0.0.0 \
-    --port $PREFILL_PORT \
-    --tensor-parallel-size 1 \
-    --seed 1024 \
-    --dtype float16 \
-    --max-model-len 10000 \
-    --max-num-batched-tokens 10000 \
-    --max-num-seqs 256 \
-    --trust-remote-code \
-    --gpu-memory-utilization 0.9 \
-    --disable-log-request \
-    --kv-transfer-config \
-    "{\"kv_connector\":\"P2pNcclConnector\",\"kv_role\":\"kv_producer\",\"kv_buffer_size\":\"1e1\",\"kv_port\":\"21001\",\"kv_connector_extra_config\":{\"proxy_ip\":\"0.0.0.0\",\"proxy_port\":\"$PROXY_PORT\",\"http_port\":\"$PREFILL_PORT\",\"send_type\":\"PUT_ASYNC\",\"nccl_num_channels\":\"16\"}}" > prefill1.log 2>&1 &
-    PIDS+=($!)
+    # =============================================================================
+    # Launch Prefill Servers (X Producers)
+    # =============================================================================
+    echo ""
+    echo "Starting ${#PREFILL_GPU_ARRAY[@]} prefill server(s)..."
+    for i in "${!PREFILL_GPU_ARRAY[@]}"; do
+        local gpu_id=${PREFILL_GPU_ARRAY[$i]}
+        local port=${PREFILL_PORT_ARRAY[$i]}
+        local kv_port=$((21001 + i))
+        
+        echo "  Prefill server $((i+1)): GPU $gpu_id, Port $port, KV Port $kv_port"
+        CUDA_VISIBLE_DEVICES=$gpu_id VLLM_USE_V1=1 vllm serve $MODEL \
+        --enforce-eager \
+        --host 0.0.0.0 \
+        --port $port \
+        --tensor-parallel-size 1 \
+        --seed 1024 \
+        --dtype float16 \
+        --max-model-len 10000 \
+        --max-num-batched-tokens 10000 \
+        --max-num-seqs 256 \
+        --trust-remote-code \
+        --gpu-memory-utilization 0.9 \
+        --disable-log-request \
+        --kv-transfer-config \
+        "{\"kv_connector\":\"P2pNcclConnector\",\"kv_role\":\"kv_producer\",\"kv_buffer_size\":\"1e1\",\"kv_port\":\"$kv_port\",\"kv_connector_extra_config\":{\"proxy_ip\":\"0.0.0.0\",\"proxy_port\":\"$PROXY_PORT\",\"http_port\":\"$port\",\"send_type\":\"PUT_ASYNC\",\"nccl_num_channels\":\"16\"}}" > prefill$((i+1)).log 2>&1 &
+        PIDS+=($!)
+    done
 
-    # 3D (3 Decoders) - Decode servers
+    # =============================================================================
+    # Launch Decode Servers (Y Decoders)
+    # =============================================================================
+    echo ""
+    echo "Starting ${#DECODE_GPU_ARRAY[@]} decode server(s)..."
     for i in "${!DECODE_GPU_ARRAY[@]}"; do
         local gpu_id=${DECODE_GPU_ARRAY[$i]}
         local port=${DECODE_PORT_ARRAY[$i]}
         local kv_port=$((22001 + i))
         
-        echo "Starting decode server $((i+1)) on GPU $gpu_id, port $port..."
+        echo "  Decode server $((i+1)): GPU $gpu_id, Port $port, KV Port $kv_port"
         VLLM_USE_V1=1 CUDA_VISIBLE_DEVICES=$gpu_id vllm serve $MODEL \
         --enforce-eager \
         --host 0.0.0.0 \
@@ -173,9 +212,12 @@ main() {
         PIDS+=($!)
     done
 
-    # Wait for all servers to start with error handling
+    # =============================================================================
+    # Wait for All Servers to Start
+    # =============================================================================
+    echo ""
     echo "Waiting for all servers to start..."
-    for port in $PREFILL_PORT "${DECODE_PORT_ARRAY[@]}"; do
+    for port in "${PREFILL_PORT_ARRAY[@]}" "${DECODE_PORT_ARRAY[@]}"; do
         if ! wait_for_server $port; then
             echo "Failed to start server on port $port"
             cleanup
@@ -183,9 +225,12 @@ main() {
         fi
     done
 
+    echo ""
     echo "All servers are up. Starting benchmark..."
 
-    # begin benchmark
+    # =============================================================================
+    # Run Benchmark
+    # =============================================================================
     cd ../../../benchmarks/
     python3 benchmark_serving.py --port 10001 --seed $(date +%s) \
         --model $MODEL \
