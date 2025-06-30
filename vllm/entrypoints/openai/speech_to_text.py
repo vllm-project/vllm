@@ -120,7 +120,7 @@ class OpenAISpeechToText(OpenAIServing):
                 get_decoder_prompt(  # type: ignore[attr-defined]
                     lang, self.task_type, 
                     request.prompt,
-                    previous_text)
+                    previous_text[0])
             }
             yield (cast(PromptType, prompt), duration)
             
