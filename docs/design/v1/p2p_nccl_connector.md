@@ -60,10 +60,7 @@ If the `--max-num-seqs` parameter for P instances is set to a large value, due t
 To address the above issues, I have designed and developed a local Tensor memory pool for storing KVcache, inspired by the buddy system used in Linux memory modules. Since the memory is sufficiently large, typically in the TB range on servers, there is no need to consider prefix caching or using block-based designs to reuse memory, thereby saving space. When the memory buffer is insufficient, KVcache can be directly stored in the Tensor memory pool, and D instances can subsequently retrieve KVcache from it. The read and write speed is that of PCIe, with PCIe 4.0 having a speed of approximately 21 GB/s, which is usually faster than the Prefill speed. Otherwise, solutions like Mooncake and lmcache would not be necessary. The Tensor memory pool acts as a flood diversion area, typically unused except during sudden traffic surges. In the worst-case scenario, my solution performs no worse than the normal situation with a Cache store.
 
 # Install vLLM
-
-??? Commands
-
-    ```shell
+    
     # Enter the home directory or your working directory.
     cd /home
 
@@ -79,7 +76,6 @@ To address the above issues, I have designed and developed a local Tensor memory
 
     # installation
     pip install -e . -v
-    ```
 
 # Run xPyD
 
@@ -99,16 +95,11 @@ To address the above issues, I have designed and developed a local Tensor memory
 
 ### Proxy (e.g. 10.0.1.1)
 
-```shell
-cd {your vllm directory}/examples/online_serving/disagg_xpyd/
-python3 disagg_prefill_proxy_xpyd.py &
-```
+    cd {your vllm directory}/examples/online_serving/disagg_xpyd/
+    python3 disagg_prefill_proxy_xpyd.py &
 
 ### Prefill1 (e.g. 10.0.1.2 or 10.0.1.1)
 
-??? Command
-
-    ```shell
     VLLM_USE_V1=1 CUDA_VISIBLE_DEVICES=0 vllm serve {your model directory} \
         --host 0.0.0.0 \
         --port 20005 \
@@ -124,13 +115,9 @@ python3 disagg_prefill_proxy_xpyd.py &
         --disable-log-request \
         --kv-transfer-config \
         '{"kv_connector":"P2pNcclConnector","kv_role":"kv_producer","kv_buffer_size":"1e1","kv_port":"21001","kv_connector_extra_config":{"proxy_ip":"10.0.1.1","proxy_port":"30001","http_port":"20005","send_type":"PUT_ASYNC","nccl_num_channels":"16"}}' > /var/vllm.log 2>&1 &
-    ```
 
 ### Decode1 (e.g. 10.0.1.3 or 10.0.1.1)
 
-??? Command
-
-    ```shell
     VLLM_USE_V1=1 CUDA_VISIBLE_DEVICES=1 vllm serve {your model directory} \
         --host 0.0.0.0 \
         --port 20009 \
@@ -146,13 +133,9 @@ python3 disagg_prefill_proxy_xpyd.py &
         --disable-log-request \
         --kv-transfer-config \
         '{"kv_connector":"P2pNcclConnector","kv_role":"kv_consumer","kv_buffer_size":"8e9","kv_port":"22001","kv_connector_extra_config":{"proxy_ip":"10.0.1.1","proxy_port":"30001","http_port":"20009","send_type":"PUT_ASYNC","nccl_num_channels":"16"}}' > /var/vllm.log 2>&1 &
-    ```
 
 ### Decode2 (e.g. 10.0.1.4 or 10.0.1.1)
 
-??? Command
-
-    ```shell
     VLLM_USE_V1=1 CUDA_VISIBLE_DEVICES=2 vllm serve {your model directory} \
         --host 0.0.0.0 \
         --port 20003 \
@@ -168,13 +151,9 @@ python3 disagg_prefill_proxy_xpyd.py &
         --disable-log-request \
         --kv-transfer-config \
         '{"kv_connector":"P2pNcclConnector","kv_role":"kv_consumer","kv_buffer_size":"8e9","kv_port":"23001","kv_connector_extra_config":{"proxy_ip":"10.0.1.1","proxy_port":"30001","http_port":"20003","send_type":"PUT_ASYNC","nccl_num_channels":"16"}}' > /var/vllm.log 2>&1 &
-    ```
 
 ### Decode3 (e.g. 10.0.1.5 or 10.0.1.1)
 
-??? Command
-
-    ```shell
     VLLM_USE_V1=1 CUDA_VISIBLE_DEVICES=3 vllm serve {your model directory} \
         --host 0.0.0.0 \
         --port 20008 \
@@ -190,22 +169,16 @@ python3 disagg_prefill_proxy_xpyd.py &
         --disable-log-request \
         --kv-transfer-config \
         '{"kv_connector":"P2pNcclConnector","kv_role":"kv_consumer","kv_buffer_size":"8e9","kv_port":"24001","kv_connector_extra_config":{"proxy_ip":"10.0.1.1","proxy_port":"30001","http_port":"20008","send_type":"PUT_ASYNC","nccl_num_channels":"16"}}' > /var/vllm.log 2>&1 &
-    ```
 
 ## Run 3P1D
 
 ### Proxy (e.g. 10.0.1.1)
 
-```shell
-cd {your vllm directory}/examples/online_serving/disagg_xpyd/
-python3 disagg_prefill_proxy_xpyd.py &
-```
+    cd {your vllm directory}/examples/online_serving/disagg_xpyd/
+    python3 disagg_prefill_proxy_xpyd.py &
 
 ### Prefill1 (e.g. 10.0.1.2 or 10.0.1.1)
 
-??? Command
-
-    ```shell
     VLLM_USE_V1=1 CUDA_VISIBLE_DEVICES=0 vllm serve {your model directory} \
         --host 0.0.0.0 \
         --port 20005 \
@@ -221,13 +194,9 @@ python3 disagg_prefill_proxy_xpyd.py &
         --disable-log-request \
         --kv-transfer-config \
         '{"kv_connector":"P2pNcclConnector","kv_role":"kv_producer","kv_buffer_size":"1e1","kv_port":"21001","kv_connector_extra_config":{"proxy_ip":"10.0.1.1","proxy_port":"30001","http_port":"20005","send_type":"PUT_ASYNC","nccl_num_channels":"16"}}' > /var/vllm.log 2>&1 &
-    ```
 
 ### Prefill2 (e.g. 10.0.1.3 or 10.0.1.1)
 
-??? Command
-
-    ```shell
     VLLM_USE_V1=1 CUDA_VISIBLE_DEVICES=1 vllm serve {your model directory} \
         --host 0.0.0.0 \
         --port 20009 \
@@ -243,13 +212,9 @@ python3 disagg_prefill_proxy_xpyd.py &
         --disable-log-request \
         --kv-transfer-config \
         '{"kv_connector":"P2pNcclConnector","kv_role":"kv_producer","kv_buffer_size":"1e1","kv_port":"22001","kv_connector_extra_config":{"proxy_ip":"10.0.1.1","proxy_port":"30001","http_port":"20009","send_type":"PUT_ASYNC","nccl_num_channels":"16"}}' > /var/vllm.log 2>&1 &
-    ```
 
 ### Prefill3 (e.g. 10.0.1.4 or 10.0.1.1)
 
-??? Command
-
-    ```shell
     VLLM_USE_V1=1 CUDA_VISIBLE_DEVICES=2 vllm serve {your model directory} \
         --host 0.0.0.0 \
         --port 20003 \
@@ -265,13 +230,9 @@ python3 disagg_prefill_proxy_xpyd.py &
         --disable-log-request \
         --kv-transfer-config \
         '{"kv_connector":"P2pNcclConnector","kv_role":"kv_producer","kv_buffer_size":"1e1","kv_port":"23001","kv_connector_extra_config":{"proxy_ip":"10.0.1.1","proxy_port":"30001","http_port":"20003","send_type":"PUT_ASYNC","nccl_num_channels":"16"}}' > /var/vllm.log 2>&1 &
-    ```
 
 ### Decode1 (e.g. 10.0.1.5 or 10.0.1.1)
 
-??? Command
-
-    ```shell
     VLLM_USE_V1=1 CUDA_VISIBLE_DEVICES=3 vllm serve {your model directory} \
         --host 0.0.0.0 \
         --port 20008 \
@@ -287,26 +248,20 @@ python3 disagg_prefill_proxy_xpyd.py &
         --disable-log-request \
         --kv-transfer-config \
         '{"kv_connector":"P2pNcclConnector","kv_role":"kv_consumer","kv_buffer_size":"8e9","kv_port":"24001","kv_connector_extra_config":{"proxy_ip":"10.0.1.1","proxy_port":"30001","http_port":"20008","send_type":"PUT_ASYNC","nccl_num_channels":"16"}}' > /var/vllm.log 2>&1 &
-    ```
 
 # Single request
 
-```shell
-curl -X POST -s http://10.0.1.1:10001/v1/completions \
--H "Content-Type: application/json" \
--d '{
-    "model": "base_model",
-    "prompt": "San Francisco is a",
-    "max_tokens": 10,
-    "temperature": 0
-}'
-```
+    curl -X POST -s http://10.0.1.1:10001/v1/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+        "model": "base_model",
+        "prompt": "San Francisco is a",
+        "max_tokens": 10,
+        "temperature": 0
+    }'
 
 # Benchmark
 
-??? Command
-
-    ```shell
     python3 benchmark_serving.py \
         --backend vllm \
         --model base_model \
@@ -324,13 +279,10 @@ curl -X POST -s http://10.0.1.1:10001/v1/completions \
         --trust-remote-code \
         --request-rate 3 \
         --num-prompts 1000
-    ```
 
 # Shut down
 
-```shell
-pgrep python | xargs kill -9 && pkill -f python
-```
+    pgrep python | xargs kill -9 && pkill -f python
 
 # Test data
 
