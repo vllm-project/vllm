@@ -14,6 +14,7 @@ def get_attr_docs(cls_node: ast.ClassDef) -> dict[str, str]:
     """
     Get any docstrings placed after attribute assignments in a class body.
 
+    Adapted from https://davidism.com/attribute-docstrings/
     https://davidism.com/mit-license/
     """
 
