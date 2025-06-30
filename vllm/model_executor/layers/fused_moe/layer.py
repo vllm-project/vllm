@@ -440,6 +440,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         self.moe = moe
 
         self.rocm_aiter_moe_enabled = is_rocm_aiter_moe_enabled()
+        self.rocm_aiter_use_asm = (self.rocm_aiter_moe_enabled
+                                   and envs.VLLM_ROCM_USE_AITER_ASMMOE)
         if self.rocm_aiter_moe_enabled:
             from .rocm_aiter_fused_moe import rocm_aiter_fused_experts
             self.rocm_aiter_fused_experts = rocm_aiter_fused_experts
@@ -615,7 +617,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             indices_type=self.topk_indices_dtype)
 
         if self.rocm_aiter_moe_enabled:
-            assert expert_map is None
+            # assert expert_map is None
             return self.rocm_aiter_fused_experts(
                 hidden_states=x,
                 w1=layer.w13_weight,
@@ -623,7 +625,9 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
                 activation=activation,
-                apply_router_weight_on_input=apply_router_weight_on_input)
+                apply_router_weight_on_input=apply_router_weight_on_input,
+                expert_map=expert_map,
+                use_asm=self.rocm_aiter_use_asm)
         else:
             return self.fused_experts(
                 hidden_states=x,

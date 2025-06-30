@@ -37,7 +37,7 @@ class ActivationMethod(IntEnum):
 @cache
 def is_rocm_aiter_moe_enabled() -> bool:
     return current_platform.is_rocm() \
-        and envs.VLLM_ROCM_USE_AITER_MOE \
+        and (envs.VLLM_ROCM_USE_AITER_MOE or envs.VLLM_ROCM_USE_AITER_ASMMOE) \
         and envs.VLLM_ROCM_USE_AITER
 
 
@@ -236,7 +236,6 @@ def rocm_aiter_asm_moe_impl(
     from aiter.fused_moe_bf16_asm import asm_moe
 
     activation = ActivationType(activation_method)
-
     return asm_moe(
         hidden_states,
         w1,
@@ -249,7 +248,7 @@ def rocm_aiter_asm_moe_impl(
         fc2_smooth_scale=fc2_smooth_scale,
         a16=a16,
         per_tensor_quant_scale=per_tensor_quant_scale,
-        block_shape=block_shape,
+        block_shape=tuple(block_shape),
         activation=activation,
         expert_mask=expert_mask,
     )
@@ -383,6 +382,7 @@ def rocm_aiter_fused_experts(
     a2_scale: Optional[torch.Tensor] = None,
     block_shape: Optional[list[int]] = None,
     expert_map: Optional[torch.Tensor] = None,
+    use_asm: bool = False,
 ) -> torch.Tensor:
 
     activation_method = (ActivationMethod.SILU
@@ -422,6 +422,22 @@ def rocm_aiter_fused_experts(
             expert_mask=expert_mask,
             activation_method=activation_method)
 
+    elif use_asm:
+        return torch.ops.vllm.rocm_aiter_asm_moe(
+            hidden_states,
+            w1,
+            w2,
+            topk_weights,
+            topk_ids,
+            fc1_scale=w1_scale,
+            fc2_scale=w2_scale,
+            fc1_smooth_scale=a1_scale,
+            fc2_smooth_scale=a2_scale,
+            a16=False,
+            block_shape=block_shape,
+            activation_method=activation_method,
+            expert_mask=expert_mask,
+        )
     else:
         quant_method = QuantMethod.NO.value
 
@@ -433,21 +449,6 @@ def rocm_aiter_fused_experts(
             assert w1_scale is not None
             assert w2_scale is not None
             quant_method = QuantMethod.BLOCK_128x128.value
-        elif per_channel_quant and use_fp8_w8a8 and expert_map is not None:
-            return torch.ops.vllm.rocm_aiter_asm_moe(
-                hidden_states,
-                w1,
-                w2,
-                topk_weights,
-                topk_ids,
-                fc1_scale=w1_scale,
-                fc2_scale=w2_scale,
-                fc1_smooth_scale=a1_scale,
-                fc2_smooth_scale=a2_scale,
-                a16=False,
-                activation_method=activation_method,
-                expert_mask=expert_mask,
-            )
         elif per_channel_quant and use_fp8_w8a8:
             quant_method = QuantMethod.PER_TOKEN.value
         elif use_fp8_w8a8:

@@ -289,8 +289,12 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             layer.w13_weight_scale = torch.nn.Parameter(max_w13_scales,
                                                         requires_grad=False)
 
+        self.rocm_aiter_use_asm = (self.rocm_aiter_moe_enabled
+                                   and envs.VLLM_ROCM_USE_AITER_ASMMOE)
+
         # Property to determine if AITER is used
         if self.rocm_aiter_moe_enabled:
+
             from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (  # noqa E501
                 rocm_aiter_fused_experts, shuffle_weights)
 
@@ -361,7 +365,8 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 w2_scale=layer.w2_weight_scale,
                 a1_scale=layer.w13_input_scale,
                 a2_scale=layer.w2_input_scale,
-                expert_map=expert_map)
+                expert_map=expert_map,
+                use_asm=self.rocm_aiter_use_asm)
         if self.use_marlin:
             assert activation == "silu", (
                 f"{activation} not supported for Marlin MoE.")

@@ -89,6 +89,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
     VLLM_ROCM_USE_AITER_MOE: bool = True
+    VLLM_ROCM_USE_AITER_ASMMOE: bool = False
     VLLM_ROCM_USE_AITER_MLA: bool = True
     VLLM_ROCM_USE_AITER_MHA: bool = True
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
@@ -548,7 +549,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_XLA_USE_SPMD":
     lambda: bool(int(os.getenv("VLLM_XLA_USE_SPMD", "0"))),
     "VLLM_FUSED_MOE_CHUNK_SIZE":
-    lambda: int(os.getenv("VLLM_FUSED_MOE_CHUNK_SIZE", "65536")),
+    lambda: int(os.getenv("VLLM_FUSED_MOE_CHUNK_SIZE", "32768")),
 
     # If set, vllm will skip the deprecation warnings.
     "VLLM_NO_DEPRECATION_WARNING":
@@ -660,6 +661,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # By default is enabled.
     "VLLM_ROCM_USE_AITER_MOE":
     lambda: (os.getenv("VLLM_ROCM_USE_AITER_MOE", "True").lower() in
+             ("true", "1")),
+
+    # Whether to use aiter asm moe ops.
+    # By default is enabled.
+    "VLLM_ROCM_USE_AITER_ASMMOE":
+    lambda: (os.getenv("VLLM_ROCM_USE_AITER_ASMMOE", "False").lower() in
              ("true", "1")),
 
     # Whether to use aiter mla ops.
