@@ -1,173 +1,144 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+"""
+DeBERTa v2 model implementation for vLLM.
+
+Based on the HuggingFace transformers implementation and Microsoft's official DeBERTa repository.
+Supports disentangled attention with proper relative position encoding.
+"""
+
 import math
 from collections.abc import Iterable
-from typing import Optional, Union
+from typing import Optional, Tuple, Union, List
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from transformers import DebertaV2Config
-from transformers.modeling_outputs import BaseModelOutput
 
-from vllm.compilation.decorators import support_torch_compile
+from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, VllmConfig
-from vllm.forward_context import get_forward_context
+from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               RowParallelLinear)
-from vllm.model_executor.layers.pooler import ClassifierPooler
+                                               QKVParallelLinear,
+                                               RowParallelLinear,
+                                               LinearBase)
+from vllm.model_executor.layers.pooler import Pooler, PoolingType, ClassifierPooler
+from vllm.model_executor.pooling_metadata import PoolingMetadata
+from vllm.sequence import PoolerOutput
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    VocabParallelEmbedding)
+    DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.pooling_metadata import PoolingMetadata
-from vllm.sequence import IntermediateTensors, PoolerOutput
-from vllm.transformers_utils.config import (
-    get_cross_encoder_activation_function)
-
-from .interfaces import SupportsCrossEncoding, SupportsQuant, SupportsV0Only
-from .utils import maybe_prefix
+from vllm.model_executor.utils import set_weight_attrs
+from vllm.sequence import IntermediateTensors
 
 
-def build_relative_position(
-    query_size: int,
-    key_size: int,
-    bucket_size: int,
-    max_position: int,
-    device: torch.device,
-) -> torch.Tensor:
-    """
-    Build relative position matrix for disentangled attention.
-
-    Computes relative position indices for query-key pairs, where each position
-    represents the relative distance between query position i and key position
-    j.
-
-    Args:
-        query_size (int): Length of the query sequence
-        key_size (int): Length of the key sequence
-        bucket_size (int): Number of position buckets for encoding
-        max_position (int): Maximum allowed absolute position
-        device (torch.device): Device for tensor allocation
-
-    Returns:
-        torch.LongTensor: Relative position matrix with shape 
-            [1, query_size, key_size]
-    """
-
+def build_relative_position(query_size: int, key_size: int, bucket_size: int = -1, max_position: int = -1, device=None):
+    """Build relative position according to the query and key sizes."""
     q_ids = torch.arange(0, query_size, dtype=torch.long, device=device)
     k_ids = torch.arange(0, key_size, dtype=torch.long, device=device)
     rel_pos_ids = q_ids[:, None] - k_ids[None, :]
-    rel_pos_ids = rel_pos_ids[:query_size, :]
-    rel_pos_ids = rel_pos_ids.unsqueeze(0)
+    
+    if bucket_size > 0 and max_position > 0:
+        rel_pos_ids = make_log_bucket_position(rel_pos_ids, bucket_size, max_position)
+    
     return rel_pos_ids
 
 
-def make_log_bucket_position(relative_pos: torch.Tensor, bucket_size: int,
-                             max_position: int) -> torch.Tensor:
-    """
-    Map relative positions to position buckets using logarithmic scaling.
-
-    For positions within the middle range, use linear mapping.
-    For positions beyond the middle range, use logarithmic compression
-    to efficiently represent distant positions.
-    """
-    sign = torch.sign(relative_pos)
+def make_log_bucket_position(relative_pos, bucket_size, max_position):
+    """Make relative position into log buckets like T5."""
     mid = bucket_size // 2
-    abs_pos = torch.where(
-        (relative_pos < mid) & (relative_pos > -mid),
-        mid - 1,
-        torch.abs(relative_pos),
-    )
-
-    # Convert scalars to tensors for proper computation
-    mid_tensor = torch.tensor(mid, dtype=abs_pos.dtype, device=abs_pos.device)
-    max_pos_tensor = torch.tensor(max_position - 1,
-                                  dtype=abs_pos.dtype,
-                                  device=abs_pos.device)
-
-    # Add epsilon to prevent log(0) and division by 0
-    eps = 1e-8
-    abs_pos = torch.clamp(abs_pos, min=eps)
-    mid_tensor = torch.clamp(mid_tensor, min=eps)
-    max_pos_tensor = torch.clamp(max_pos_tensor, min=eps)
-
-    # Compute log position with numerical stability
-    log_ratio = torch.log(abs_pos / mid_tensor) / torch.log(
-        max_pos_tensor / mid_tensor)
-    log_pos = torch.ceil(log_ratio * (mid - 1)) + mid
-
-    # Ensure log_pos is finite
-    log_pos = torch.where(
-        torch.isfinite(log_pos),
-        log_pos,
-        torch.tensor(mid, dtype=log_pos.dtype, device=log_pos.device),
-    )
-
-    bucket_pos = torch.where(abs_pos <= mid, relative_pos,
-                             log_pos * sign).long()
-
-    # Clamp to valid bucket range
-    bucket_pos = torch.clamp(bucket_pos, 0, bucket_size - 1)
-
+    abs_pos = torch.abs(relative_pos)
+    
+    # Small positions use linear buckets (0 to mid-1)
+    is_small = abs_pos < mid
+    
+    # Large positions use log buckets (mid to bucket_size-1)
+    # Use T5-style logarithmic bucketing for positions beyond mid
+    # Avoid log(0) by using max(abs_pos, 1.0) and ensure mid > 0
+    safe_abs_pos = torch.clamp(abs_pos.float(), min=1.0)
+    safe_mid = max(mid, 1)
+    safe_max_pos = max(max_position, safe_mid + 1)
+    
+    log_pos = mid + (torch.log(safe_abs_pos / safe_mid) / math.log(safe_max_pos / safe_mid) * (mid - 1)).long()
+    log_pos = torch.clamp(log_pos, mid, bucket_size - 1)
+    
+    # Use linear for small, log for large
+    bucket_pos = torch.where(is_small, abs_pos.long(), log_pos)
+    
+    # Handle negative positions by mirroring around bucket_size
+    # Negative positions get indices [bucket_size, 2*bucket_size-1]
+    bucket_pos = torch.where(relative_pos < 0, bucket_size + bucket_pos, bucket_pos)
+    
     return bucket_pos
 
 
 class DebertaV2Embeddings(nn.Module):
+    """DeBERTa v2 embeddings with position-biased input."""
 
     def __init__(self, config: DebertaV2Config):
         super().__init__()
-        self.size = config.hidden_size
-        self.word_embeddings = VocabParallelEmbedding(config.vocab_size,
-                                                      config.hidden_size)
-
-        # DeBERTa v2 doesn't use token_type_embeddings by default
-        if config.type_vocab_size > 0:
-            self.token_type_embeddings = VocabParallelEmbedding(
-                config.type_vocab_size, config.hidden_size)
+        pad_token_id = getattr(config, "pad_token_id", 0)
+        self.embedding_size = getattr(config, "embedding_size", config.hidden_size)
+        
+        self.word_embeddings = VocabParallelEmbedding(
+            config.vocab_size,
+            self.embedding_size,
+        )
+        
+        self.position_biased_input = getattr(config, "position_biased_input", True)
+        if not self.position_biased_input:
+            self.position_embeddings = None
         else:
-            self.token_type_embeddings = None
+            self.position_embeddings = VocabParallelEmbedding(
+                config.max_position_embeddings,
+                self.embedding_size,
+            )
 
-        self.LayerNorm = nn.LayerNorm(config.hidden_size,
-                                      eps=config.layer_norm_eps)
+        if getattr(config, "type_vocab_size", 0) > 0:
+            self.token_type_embeddings = VocabParallelEmbedding(
+                config.type_vocab_size,
+                self.embedding_size,
+            )
+
+        if self.embedding_size != config.hidden_size:
+            self.embed_proj = RowParallelLinear(
+                self.embedding_size,
+                config.hidden_size,
+                bias=False,
+            )
+        else:
+            self.embed_proj = None
+
+        self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
-        # DeBERTa v2 uses relative position encoding, check
-        # position_biased_input from config
-        self.position_biased_input = getattr(config, "position_biased_input",
-                                             False)
+    def forward(self, input_ids: torch.Tensor, token_type_ids: Optional[torch.Tensor] = None) -> torch.Tensor:
+        seq_length = input_ids.size(-1)
+        
+        # Word embeddings
+        words_embeddings = self.word_embeddings(input_ids)
+        
+        # Position embeddings
+        embeddings = words_embeddings
         if self.position_biased_input:
-            self.position_embeddings = VocabParallelEmbedding(
-                config.max_position_embeddings, config.hidden_size)
-
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        seq_lens: torch.Tensor,
-        position_ids: torch.Tensor,
-        token_type_ids: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        input_shape = input_ids.size()
-
-        # Input embeddings
-        inputs_embeds = self.word_embeddings(input_ids)
-
-        embeddings = inputs_embeds
-
-        # Add position embeddings only if position_biased_input is True
-        if self.position_biased_input and hasattr(self, "position_embeddings"):
+            position_ids = torch.arange(seq_length, dtype=torch.long, device=input_ids.device)
+            position_ids = position_ids.unsqueeze(0).expand_as(input_ids)
             position_embeddings = self.position_embeddings(position_ids)
-            embeddings = embeddings + position_embeddings
+            embeddings += position_embeddings
 
-        # Add token type embeddings if available
-        if self.token_type_embeddings is not None:
-            if token_type_ids is None:
-                token_type_ids = torch.zeros(input_shape,
-                                             dtype=torch.long,
-                                             device=inputs_embeds.device)
+        # Token type embeddings
+        if token_type_ids is not None:
             token_type_embeddings = self.token_type_embeddings(token_type_ids)
-            embeddings = embeddings + token_type_embeddings
+            embeddings += token_type_embeddings
+
+        # Project to hidden size if needed
+        if self.embed_proj is not None:
+            embeddings = self.embed_proj(embeddings)[0]
 
         embeddings = self.LayerNorm(embeddings)
         embeddings = self.dropout(embeddings)
@@ -175,411 +146,321 @@ class DebertaV2Embeddings(nn.Module):
 
 
 class DebertaV2DisentangledSelfAttention(nn.Module):
-    """
-    DeBERTa v2 disentangled self-attention mechanism.
+    """DeBERTa v2 disentangled self-attention with proper relative position encoding."""
 
-    Implements three-component attention computation:
-    1. Content-to-content attention (standard self-attention)
-    2. Content-to-position attention (query content attending to relative 
-       positions)
-    3. Position-to-content attention (relative positions attending to key 
-       content)
-
-    The attention score is computed as the sum of all three components,
-    scaled by 1/√(3d) where d is the head dimension.
-    """
-
-    def __init__(
-        self,
-        config: DebertaV2Config,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
-        layer_idx: int = 0,
-    ):
+    def __init__(self, config: DebertaV2Config, layer_idx: int = 0):
         super().__init__()
-        self.config = config
-        self.layer_idx = layer_idx
-
         if config.hidden_size % config.num_attention_heads != 0:
             raise ValueError(
-                f"hidden_size ({config.hidden_size}) must be divisible by "
-                f"num_attention_heads ({config.num_attention_heads})")
+                f"The hidden size ({config.hidden_size}) is not a multiple of the number of attention "
+                f"heads ({config.num_attention_heads})"
+            )
 
         self.num_attention_heads = config.num_attention_heads
-        self.attention_head_size = (config.hidden_size //
-                                    config.num_attention_heads)
+        self.attention_head_size = int(config.hidden_size / config.num_attention_heads)
         self.all_head_size = self.num_attention_heads * self.attention_head_size
 
-        # Content projection matrices
-        self.query_proj = ColumnParallelLinear(
+        # Content projections
+        self.query_proj = RowParallelLinear(
             config.hidden_size,
             self.all_head_size,
             bias=True,
-            quant_config=quant_config,
-            prefix=f"{prefix}.query_proj",
         )
-        self.key_proj = ColumnParallelLinear(
+        self.key_proj = RowParallelLinear(
             config.hidden_size,
             self.all_head_size,
             bias=True,
-            quant_config=quant_config,
-            prefix=f"{prefix}.key_proj",
         )
-        self.value_proj = ColumnParallelLinear(
+        self.value_proj = RowParallelLinear(
             config.hidden_size,
             self.all_head_size,
             bias=True,
-            quant_config=quant_config,
-            prefix=f"{prefix}.value_proj",
         )
-
-        # Position projection matrices (shared with content if specified in
-        # config)
-        if getattr(config, "share_att_key", False):
-            self.pos_key_proj = self.key_proj
-            self.pos_query_proj = self.query_proj
-        else:
-            self.pos_key_proj = ColumnParallelLinear(
-                config.hidden_size,
-                self.all_head_size,
-                bias=True,
-                quant_config=quant_config,
-                prefix=f"{prefix}.pos_key_proj",
-            )
-            self.pos_query_proj = ColumnParallelLinear(
-                config.hidden_size,
-                self.all_head_size,
-                bias=True,
-                quant_config=quant_config,
-                prefix=f"{prefix}.pos_query_proj",
-            )
 
         self.dropout = nn.Dropout(config.attention_probs_dropout_prob)
+        
+        # Position attention configuration
+        self.pos_att_type = config.pos_att_type if config.pos_att_type is not None else ["c2p", "p2c"]
+        self.relative_attention = getattr(config, "relative_attention", False)
+        self.talking_head = getattr(config, "talking_head", False)
+        
+        # Ensure pos_att_type is a list for consistent behavior
+        if isinstance(self.pos_att_type, str):
+            self.pos_att_type = [self.pos_att_type]
+        
+        if self.relative_attention:
+            self.position_buckets = getattr(config, "position_buckets", -1)
+            self.max_relative_positions = getattr(config, "max_relative_positions", -1)
+            if self.max_relative_positions < 1:
+                self.max_relative_positions = config.max_position_embeddings
+            self.pos_ebd_size = self.max_relative_positions
+            if self.position_buckets > 0:
+                self.pos_ebd_size = self.position_buckets
 
-        # Relative position parameters
-        self.max_relative_positions = getattr(config, "max_relative_positions",
-                                              512)
-        self.position_biased_input = getattr(config, "position_biased_input",
-                                             True)
-
-        # Scaling factor for three-component attention: 1/√(3d)
-        self.scale_factor = 1.0 / math.sqrt(3.0 * self.attention_head_size)
+            self.pos_dropout = nn.Dropout(config.hidden_dropout_prob)
 
     def transpose_for_scores(self, x: torch.Tensor) -> torch.Tensor:
-        """Transpose tensor for multi-head attention computation."""
-        new_x_shape = x.size()[:-1] + (
-            self.num_attention_heads,
-            self.attention_head_size,
-        )
-        x = x.view(new_x_shape)
-        return x.permute(0, 2, 1, 3)  # [batch, heads, seq_len, head_size]
-
-    def build_relative_position(self, query_size: int, key_size: int,
-                                device: torch.device) -> torch.Tensor:
-        """
-        Build relative position matrix with position bucketing.
-
-        Maps relative distances to bucket indices using the bucketing strategy:
-        - For small distances: direct mapping
-        - For large distances: logarithmic compression
-        """
-        k = self.max_relative_positions
-
-        # Create position indices
-        q_ids = torch.arange(query_size, dtype=torch.long, device=device)
-        k_ids = torch.arange(key_size, dtype=torch.long, device=device)
-
-        # Compute relative distances: i - j
-        rel_pos = q_ids[:, None] - k_ids[None, :]
-
-        # Apply bucketing with clamping
-        rel_pos = torch.clamp(rel_pos, -k, k)
-        rel_pos = rel_pos + k  # Shift to make it 0-indexed: [0, 2k]
-
-        return rel_pos
-
-    def disentangled_attention_bias(
-        self,
-        query_layer: torch.Tensor,
-        key_layer: torch.Tensor,
-        relative_pos: torch.Tensor,
-        rel_embeddings: torch.Tensor,
-    ) -> torch.Tensor:
-        """
-        Compute disentangled attention scores with three components:
-
-        1. Content-to-content: Standard self-attention between content 
-           representations
-        2. Content-to-position: Query content attending to relative position 
-           embeddings
-        3. Position-to-content: Relative position embeddings attending to key 
-           content
-
-        Returns the sum of all three attention components.
-        """
-        batch_size, num_heads, seq_len, head_size = query_layer.shape
-
-        # Project relative position embeddings
-        # rel_embeddings: [2*max_rel_pos+1, hidden_size]
-        rel_k, _ = self.pos_key_proj(
-            rel_embeddings)  # [2*max_rel_pos+1, all_head_size]
-        rel_q, _ = self.pos_query_proj(
-            rel_embeddings)  # [2*max_rel_pos+1, all_head_size]
-
-        # Reshape for multi-head attention
-        rel_k = rel_k.view(-1, self.num_attention_heads,
-                           self.attention_head_size
-                           )  # [2*max_rel_pos+1, num_heads, head_size]
-        rel_q = rel_q.view(-1, self.num_attention_heads,
-                           self.attention_head_size
-                           )  # [2*max_rel_pos+1, num_heads, head_size]
-
-        # 1. Content-to-content attention: standard self-attention
-        content_to_content = torch.matmul(query_layer,
-                                          key_layer.transpose(-2, -1))
-
-        # 2. Content-to-position attention: query content to relative positions
-        content_to_position = torch.zeros_like(content_to_content,
-                                               device=query_layer.device)
-
-        # For each query position i, compute attention to all relative positions
-        for i in range(seq_len):
-            # Q_i^c: [batch_size, num_heads, head_size]
-            q_i = query_layer[:, :, i, :]  # [batch_size, num_heads, head_size]
-
-            # Compute attention to all relative positions
-            # rel_k: [2*max_rel_pos+1, num_heads, head_size]
-            # Result: [batch_size, num_heads, 2*max_rel_pos+1]
-            c2p_scores = torch.einsum("bnh,rnh->bnr", q_i, rel_k)
-
-            # Extract the correct relative position for each j
-            for j in range(seq_len):
-                rel_idx = relative_pos[i, j].item()
-                content_to_position[:, :, i, j] = c2p_scores[:, :, rel_idx]
-
-        # 3. Position-to-content attention: relative positions to key content
-        position_to_content = torch.zeros_like(content_to_content,
-                                               device=query_layer.device)
-
-        # For each key position j, compute attention from relative positions
-        for j in range(seq_len):
-            # K_j^c: [batch_size, num_heads, head_size]
-            k_j = key_layer[:, :, j, :]  # [batch_size, num_heads, head_size]
-
-            # Compute attention from all relative positions
-            # rel_q: [2*max_rel_pos+1, num_heads, head_size]
-            # Result: [batch_size, num_heads, 2*max_rel_pos+1]
-            p2c_scores = torch.einsum("bnh,rnh->bnr", k_j, rel_q)
-
-            # Extract the correct relative position for each i (note: j,i not
-            # i,j)
-            for i in range(seq_len):
-                rel_idx = relative_pos[
-                    j, i].item()  # Reverse direction for position-to-content
-                position_to_content[:, :, i, j] = p2c_scores[:, :, rel_idx]
-
-        # Sum all three components
-        attention_scores = (content_to_content + content_to_position +
-                            position_to_content)
-
-        return attention_scores
+        new_x_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)
+        x = x.reshape(new_x_shape)
+        return x.permute(0, 2, 1, 3)
 
     def forward(
         self,
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
-        output_attentions: bool = False,
         rel_embeddings: Optional[torch.Tensor] = None,
         rel_pos: Optional[torch.Tensor] = None,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
-        """
-        Forward pass implementing DeBERTa v2 disentangled attention.
-        """
-        batch_size, seq_len, hidden_size = hidden_states.shape
-
-        # Project to query, key, value
-        query_layer, _ = self.query_proj(hidden_states)
-        key_layer, _ = self.key_proj(hidden_states)
-        value_layer, _ = self.value_proj(hidden_states)
-
-        query_layer = self.transpose_for_scores(query_layer)
-        key_layer = self.transpose_for_scores(key_layer)
-        value_layer = self.transpose_for_scores(value_layer)
-
-        # Build relative position matrix if not provided
-        if rel_pos is None:
-            rel_pos = self.build_relative_position(seq_len, seq_len,
-                                                   hidden_states.device)
-
-        # Compute disentangled attention scores
-        if rel_embeddings is not None:
-            attention_scores = self.disentangled_attention_bias(
-                query_layer, key_layer, rel_pos, rel_embeddings)
+    ) -> torch.Tensor:
+        # Handle 2D vs 3D tensor shapes for vLLM compatibility
+        if hidden_states.dim() == 2:
+            seq_len, hidden_size = hidden_states.shape
+            batch_size = 1
+            hidden_states = hidden_states.unsqueeze(0)
+            squeeze_output = True
         else:
-            # DeBERTa v2 REQUIRES disentangled attention - this should never
-            # happen
-            raise ValueError(
-                "DeBERTa v2 requires relative embeddings for disentangled "
-                "attention. This indicates a configuration or implementation "
-                "error.")
+            batch_size, seq_len, hidden_size = hidden_states.shape
+            squeeze_output = False
 
-        # Apply scaling factor for three-component attention
-        attention_scores = attention_scores * self.scale_factor
+        # Content projections
+        query_layer = self.transpose_for_scores(self.query_proj(hidden_states)[0])
+        key_layer = self.transpose_for_scores(self.key_proj(hidden_states)[0])
+        value_layer = self.transpose_for_scores(self.value_proj(hidden_states)[0])
+
+        # Content-to-content attention (standard self-attention)
+        attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
+
+        # Add relative position bias if available
+        if self.relative_attention and rel_embeddings is not None and rel_pos is not None:
+            rel_att = self.disentangled_attention_bias(
+                query_layer, key_layer, rel_pos, rel_embeddings, batch_size, seq_len
+            )
+            attention_scores = attention_scores + rel_att
+
+        # DeBERTa v2 scaling: 1/√(3d) when using all three attention components, otherwise 1/√d
+        num_attention_components = 1  # content-to-content
+        if self.relative_attention and rel_embeddings is not None and rel_pos is not None:
+            if "c2p" in self.pos_att_type:
+                num_attention_components += 1  # content-to-position
+            if "p2c" in self.pos_att_type:
+                num_attention_components += 1  # position-to-content
+        
+        scale_factor = math.sqrt(num_attention_components * self.attention_head_size)
+        attention_scores = attention_scores / scale_factor
 
         # Apply attention mask
         if attention_mask is not None:
+            if attention_mask.dim() == 2:
+                # Convert 2D mask to 4D
+                attention_mask = attention_mask.unsqueeze(1).unsqueeze(2)
+            
             attention_scores = attention_scores + attention_mask
 
-        # Softmax to get attention probabilities
-        attention_probs = nn.functional.softmax(attention_scores, dim=-1)
+        # Clamp attention scores to prevent numerical instability
+        attention_scores = torch.clamp(attention_scores, min=-50.0, max=50.0)
+        
+        # Normalize attention probabilities
+        attention_probs = torch.softmax(attention_scores, dim=-1)
         attention_probs = self.dropout(attention_probs)
 
         # Apply attention to values
         context_layer = torch.matmul(attention_probs, value_layer)
-
-        # Reshape back to original format
+        
+        # Reshape output
         context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
-        new_context_layer_shape = context_layer.size()[:-2] + (
-            self.all_head_size, )
-        context_layer = context_layer.view(new_context_layer_shape)
+        new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)
+        context_layer = context_layer.reshape(new_context_layer_shape)
 
-        outputs = ((context_layer, attention_probs) if output_attentions else
-                   (context_layer, ))
-        return outputs
+        if squeeze_output:
+            context_layer = context_layer.squeeze(0)
+        return context_layer
 
+    def disentangled_attention_bias(
+        self, 
+        query_layer: torch.Tensor, 
+        key_layer: torch.Tensor,
+        relative_pos: torch.Tensor, 
+        rel_embeddings: torch.Tensor,
+        batch_size: int,
+        seq_len: int
+    ) -> torch.Tensor:
+        """Compute disentangled attention bias for content-to-position and position-to-content attention."""
+        if relative_pos is None or rel_embeddings is None:
+            return 0
 
-class DebertaV2SelfOutput(nn.Module):
+        # Ensure relative_pos indices are within bounds
+        max_idx = rel_embeddings.shape[0] - 1
+        relative_pos = torch.clamp(relative_pos.long(), 0, max_idx)
 
-    def __init__(
-        self,
-        config: DebertaV2Config,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
-    ):
-        super().__init__()
-        self.dense = RowParallelLinear(
-            config.hidden_size,
-            config.hidden_size,
-            quant_config=quant_config,
-            prefix=f"{prefix}.dense",
-        )
-        self.LayerNorm = nn.LayerNorm(config.hidden_size,
-                                      eps=config.layer_norm_eps)
-        self.dropout = nn.Dropout(config.hidden_dropout_prob)
+        att_span = torch.zeros_like(query_layer @ key_layer.transpose(-1, -2))
+        
+        # Handle the case where batch_size might not match the actual tensor batch dimension
+        actual_batch_size = query_layer.shape[0]
+        if actual_batch_size != batch_size:
+            # This might happen in vLLM when batching is handled differently
+            batch_size = actual_batch_size
+        
+        # For batch processing, we need to ensure each sequence gets its own position bias
+        # The issue is that when batch_size > 1, all sequences share the same relative_pos matrix
+        # which causes cross-contamination. We need to isolate the computation per sequence.
+        if batch_size > 1:
+            # Process each sequence in the batch separately to avoid cross-contamination
+            att_spans = []
+            for b in range(batch_size):
+                # Extract single sequence tensors
+                query_b = query_layer[b:b+1]  # [1, heads, seq, head_dim]
+                key_b = key_layer[b:b+1]      # [1, heads, seq, head_dim]
+                
+                # Compute attention bias for this sequence only
+                att_span_b = torch.zeros_like(query_b @ key_b.transpose(-1, -2))
+                
+                # Compute c2p and p2c for this sequence
+                if "c2p" in self.pos_att_type:
+                    pos_key_embeddings = rel_embeddings[relative_pos]
+                    pos_key_flat = pos_key_embeddings.reshape(-1, pos_key_embeddings.size(-1))
+                    pos_key_proj = self.key_proj(pos_key_flat)[0]
+                    pos_key = pos_key_proj.reshape(seq_len, seq_len, self.all_head_size)
+                    pos_key = pos_key.reshape(seq_len, seq_len, self.num_attention_heads, self.attention_head_size)
+                    pos_key = pos_key.permute(2, 0, 1, 3)
+                    c2p_att = torch.einsum('bhiq,hijq->bhij', query_b, pos_key)
+                    att_span_b += c2p_att
+                
+                if "p2c" in self.pos_att_type:
+                    relative_pos_t = relative_pos.transpose(0, 1)
+                    pos_query_embeddings = rel_embeddings[relative_pos_t]
+                    pos_query_flat = pos_query_embeddings.reshape(-1, pos_query_embeddings.size(-1))
+                    pos_query_proj = self.query_proj(pos_query_flat)[0]
+                    pos_query = pos_query_proj.reshape(seq_len, seq_len, self.all_head_size)
+                    pos_query = pos_query.reshape(seq_len, seq_len, self.num_attention_heads, self.attention_head_size)
+                    pos_query = pos_query.permute(2, 0, 1, 3)
+                    p2c_att = torch.einsum('hijq,bhjq->bhij', pos_query, key_b)
+                    att_span_b += p2c_att
+                
+                att_spans.append(att_span_b)
+            
+            # Concatenate results from all sequences
+            att_span = torch.cat(att_spans, dim=0)
+            return att_span
 
-    def forward(self, hidden_states: torch.Tensor,
-                input_tensor: torch.Tensor) -> torch.Tensor:
-        hidden_states, _ = self.dense(hidden_states)
-        hidden_states = self.dropout(hidden_states)
-        hidden_states = self.LayerNorm(hidden_states + input_tensor)
-        return hidden_states
+        # DeBERTa v2 uses shared query/key projections for efficiency
+        # The same projections are used for both content and position attention
+        
+        # Content-to-position attention (c2p)
+        if "c2p" in self.pos_att_type:
+            # Content-to-position: query content attends to relative position keys
+            pos_key_embeddings = rel_embeddings[relative_pos]  # [seq_len, seq_len, hidden_size]
+            
+            # Project position embeddings through key projection
+            pos_key_flat = pos_key_embeddings.reshape(-1, pos_key_embeddings.size(-1))
+            pos_key_proj = self.key_proj(pos_key_flat)[0]  # [seq_len*seq_len, hidden_size]
+            pos_key = pos_key_proj.reshape(seq_len, seq_len, self.all_head_size)
+            
+            # Reshape for multi-head attention: [seq_len, seq_len, num_heads, head_dim]
+            pos_key = pos_key.reshape(seq_len, seq_len, self.num_attention_heads, self.attention_head_size)
+            pos_key = pos_key.permute(2, 0, 1, 3)  # [heads, seq, seq, head_dim]
+            
+            # Compute c2p attention: query content @ position key
+            c2p_att = torch.einsum('bhiq,hijq->bhij', query_layer, pos_key)
+            att_span += c2p_att
+
+        # Position-to-content attention (p2c)  
+        if "p2c" in self.pos_att_type:
+            # Position-to-content: relative position queries attend to content keys
+            # We need relative positions from key to query (transpose of relative_pos)
+            relative_pos_t = relative_pos.transpose(0, 1)  # [seq_len, seq_len]
+            
+            # Extract relative position embeddings for p2c
+            pos_query_embeddings = rel_embeddings[relative_pos_t]  # [seq_len, seq_len, hidden_size]
+            
+            # Project position embeddings through query projection
+            pos_query_flat = pos_query_embeddings.reshape(-1, pos_query_embeddings.size(-1))
+            pos_query_proj = self.query_proj(pos_query_flat)[0]  # [seq_len*seq_len, hidden_size]
+            pos_query = pos_query_proj.reshape(seq_len, seq_len, self.all_head_size)
+            
+            # Reshape for multi-head attention: [seq_len, seq_len, num_heads, head_dim]
+            pos_query = pos_query.reshape(seq_len, seq_len, self.num_attention_heads, self.attention_head_size)
+            pos_query = pos_query.permute(2, 0, 1, 3)  # [heads, seq, seq, head_dim]
+            
+            # Compute p2c attention: position query @ content key
+            p2c_att = torch.einsum('hijq,bhjq->bhij', pos_query, key_layer)
+            att_span += p2c_att
+
+        return att_span
 
 
 class DebertaV2Attention(nn.Module):
-    """DeBERTa v2 attention module."""
+    """DeBERTa v2 attention layer."""
 
-    def __init__(
-        self,
-        config: DebertaV2Config,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
-    ):
+    def __init__(self, config: DebertaV2Config, layer_idx: int = 0):
         super().__init__()
-
-        self.self = DebertaV2DisentangledSelfAttention(
-            config=config,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.self",
-            layer_idx=0,  # Will be set properly in the layer
+        self.self = DebertaV2DisentangledSelfAttention(config, layer_idx)
+        self.output = RowParallelLinear(
+            config.hidden_size,
+            config.hidden_size,
+            bias=True,
         )
-        self.output = DebertaV2SelfOutput(
-            config=config,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.output",
-        )
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
+        # Add LayerNorm to match HuggingFace DeBERTa v2 structure
+        self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
 
     def forward(
         self,
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
-        output_attentions: bool = False,
         rel_embeddings: Optional[torch.Tensor] = None,
         rel_pos: Optional[torch.Tensor] = None,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+    ) -> torch.Tensor:
         self_outputs = self.self(
             hidden_states,
             attention_mask,
-            output_attentions,
             rel_embeddings,
             rel_pos,
         )
-
-        if output_attentions:
-            self_output, attention_probs = self_outputs
-        else:
-            self_output = self_outputs[0]
-            attention_probs = None
-
-        output = self.output(self_output, hidden_states)
-
-        if output_attentions:
-            return output, attention_probs
-        else:
-            return output, None
+        
+        attention_output = self.output(self_outputs)[0]
+        attention_output = self.dropout(attention_output)
+        
+        # Apply LayerNorm after residual connection (post-norm architecture)
+        attention_output = self.LayerNorm(attention_output + hidden_states)
+        
+        return attention_output
 
 
 class DebertaV2Intermediate(nn.Module):
+    """DeBERTa v2 intermediate (feed-forward) layer."""
 
-    def __init__(
-        self,
-        config: DebertaV2Config,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
-    ):
+    def __init__(self, config: DebertaV2Config):
         super().__init__()
         self.dense = ColumnParallelLinear(
             config.hidden_size,
             config.intermediate_size,
-            quant_config=quant_config,
-            prefix=f"{prefix}.dense",
+            bias=True,
         )
-        self.intermediate_act_fn = get_act_fn(config.hidden_act)
+        if isinstance(config.hidden_act, str):
+            self.intermediate_act_fn = get_act_fn(config.hidden_act)
+        else:
+            self.intermediate_act_fn = config.hidden_act
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        hidden_states, _ = self.dense(hidden_states)
+        hidden_states = self.dense(hidden_states)[0]  # ColumnParallelLinear returns tuple
         hidden_states = self.intermediate_act_fn(hidden_states)
         return hidden_states
 
 
 class DebertaV2Output(nn.Module):
+    """DeBERTa v2 output layer."""
 
-    def __init__(
-        self,
-        config: DebertaV2Config,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
-    ):
+    def __init__(self, config: DebertaV2Config):
         super().__init__()
         self.dense = RowParallelLinear(
             config.intermediate_size,
             config.hidden_size,
-            quant_config=quant_config,
-            prefix=f"{prefix}.dense",
+            bias=True,
         )
-        self.LayerNorm = nn.LayerNorm(config.hidden_size,
-                                      eps=config.layer_norm_eps)
+        self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
-    def forward(self, hidden_states: torch.Tensor,
-                input_tensor: torch.Tensor) -> torch.Tensor:
-        hidden_states, _ = self.dense(hidden_states)
+    def forward(self, hidden_states: torch.Tensor, input_tensor: torch.Tensor) -> torch.Tensor:
+        hidden_states = self.dense(hidden_states)[0]
         hidden_states = self.dropout(hidden_states)
         hidden_states = self.LayerNorm(hidden_states + input_tensor)
         return hidden_states
@@ -588,242 +469,268 @@ class DebertaV2Output(nn.Module):
 class DebertaV2Layer(nn.Module):
     """DeBERTa v2 transformer layer."""
 
+    def __init__(self, config: DebertaV2Config, layer_idx: int = 0):
+        super().__init__()
+        self.attention = DebertaV2Attention(config, layer_idx)
+        self.intermediate = DebertaV2Intermediate(config)
+        self.output = DebertaV2Output(config)
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        rel_embeddings: Optional[torch.Tensor] = None,
+        rel_pos: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        # Self-attention (residual connection handled inside attention module)
+        attention_output = self.attention(
+            hidden_states,
+            attention_mask,
+            rel_embeddings,
+            rel_pos,
+        )
+        
+        # Feed-forward network (residual connection handled inside output module)
+        intermediate_output = self.intermediate(attention_output)
+        layer_output = self.output(intermediate_output, attention_output)
+        
+        return layer_output
+
+
+class DebertaV2Encoder(nn.Module):
+    """DeBERTa v2 transformer encoder."""
+
+    def __init__(self, config: DebertaV2Config, cache_config: Optional[CacheConfig] = None):
+        super().__init__()
+        self.config = config
+        self.layer = nn.ModuleList([
+            DebertaV2Layer(config, layer_idx=i)
+            for i in range(config.num_hidden_layers)
+        ])
+        
+        # Relative position embeddings
+        self.relative_attention = getattr(config, "relative_attention", False)
+        if self.relative_attention:
+            self.max_relative_positions = getattr(config, "max_relative_positions", -1)
+            if self.max_relative_positions < 1:
+                self.max_relative_positions = config.max_position_embeddings
+            
+            self.position_buckets = getattr(config, "position_buckets", -1)
+            self.pos_ebd_size = self.max_relative_positions
+            if self.position_buckets > 0:
+                self.pos_ebd_size = self.position_buckets
+
+            # DeBERTa v2 uses 2 * pos_ebd_size for bidirectional relative positions
+            rel_embeddings_size = self.pos_ebd_size * 2
+            self.rel_embeddings = VocabParallelEmbedding(
+                rel_embeddings_size,
+                config.hidden_size,
+            )
+
+    def get_rel_embedding(self):
+        """Get relative position embeddings."""
+        if self.relative_attention:
+            rel_embeddings = self.rel_embeddings.weight
+            return rel_embeddings
+        return None
+
+    def get_attention_mask(self, attention_mask: torch.Tensor) -> torch.Tensor:
+        """Convert attention mask to the format expected by attention layers."""
+        if attention_mask.dim() <= 2:
+            extended_attention_mask = attention_mask.unsqueeze(1).unsqueeze(2)
+            extended_attention_mask = extended_attention_mask.to(dtype=torch.float32)
+            extended_attention_mask = (1.0 - extended_attention_mask) * -10000.0
+        else:
+            extended_attention_mask = attention_mask
+        return extended_attention_mask
+
+    def get_rel_pos(self, hidden_states: torch.Tensor, query_states: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """Get relative position matrix."""
+        if self.relative_attention and hidden_states.size():
+            if hidden_states.dim() == 2:
+                # vLLM 2D format: [seq_len, hidden_size]
+                seq_len = hidden_states.size(0)
+            else:
+                # Standard 3D format: [batch_size, seq_len, hidden_size]
+                seq_len = hidden_states.size(-2)
+            
+            q = query_states.size(-2) if query_states is not None else seq_len
+            
+            rel_pos = build_relative_position(
+                q,
+                seq_len,
+                bucket_size=self.position_buckets,
+                max_position=self.max_relative_positions,
+                device=hidden_states.device,
+            )
+            return rel_pos
+        return None
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        # Get relative position information
+        rel_embeddings = self.get_rel_embedding()
+        rel_pos = self.get_rel_pos(hidden_states)
+        
+        # Convert attention mask
+        if attention_mask is not None:
+            attention_mask = self.get_attention_mask(attention_mask)
+
+        # Pass through transformer layers
+        for layer_module in self.layer:
+            hidden_states = layer_module(
+                hidden_states,
+                attention_mask,
+                rel_embeddings,
+                rel_pos,
+            )
+
+        return hidden_states
+
+
+class DebertaV2ConvLayer(nn.Module):
+    """DeBERTa v2 convolution layer for nGiE (nGram Induced Input Encoding)."""
+
+    def __init__(self, config: DebertaV2Config):
+        super().__init__()
+        kernel_size = getattr(config, "conv_kernel_size", 3)
+        groups = getattr(config, "conv_groups", 1)
+        self.conv_act = getattr(config, "conv_act", "tanh")
+        
+        self.conv = nn.Conv1d(
+            config.hidden_size,
+            config.hidden_size,
+            kernel_size,
+            padding=(kernel_size - 1) // 2,
+            groups=groups,
+        )
+        self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
+        self.act = get_act_fn(self.conv_act)
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        # Apply convolution
+        hidden_states = hidden_states.transpose(1, 2)  # (batch, hidden, seq)
+        hidden_states = self.conv(hidden_states)
+        hidden_states = hidden_states.transpose(1, 2)  # (batch, seq, hidden)
+        
+        # Apply activation, layer norm, and dropout
+        hidden_states = self.act(hidden_states)
+        hidden_states = self.LayerNorm(hidden_states)
+        hidden_states = self.dropout(hidden_states)
+        
+        return hidden_states
+
+
+class DebertaV2Model(nn.Module):
+    """DeBERTa v2 model."""
+
     def __init__(
         self,
         config: DebertaV2Config,
         cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
+        quant_config=None,
     ):
         super().__init__()
-        self.attention = DebertaV2Attention(
-            config=config,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.attention",
-        )
-        self.intermediate = DebertaV2Intermediate(
-            config=config,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.intermediate",
-        )
-        self.output = DebertaV2Output(
-            config=config,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.output",
-        )
+        self.config = config
+        
+        self.embeddings = DebertaV2Embeddings(config)
+        
+        # Optional convolution layer for nGiE
+        self.conv = None
+        if getattr(config, "conv_kernel_size", 0) > 0:
+            self.conv = DebertaV2ConvLayer(config)
+            
+        self.encoder = DebertaV2Encoder(config, cache_config)
 
     def forward(
         self,
-        hidden_states: torch.Tensor,
+        input_ids: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
-        output_attentions: bool = False,
-        rel_embeddings: Optional[torch.Tensor] = None,
-        rel_pos: Optional[torch.Tensor] = None,
-    ):
-        attn_output, attention_probs = self.attention(
-            hidden_states,
-            attention_mask,
-            output_attentions,
-            rel_embeddings,
-            rel_pos,
+        token_type_ids: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        embedding_output = self.embeddings(input_ids, token_type_ids)
+        
+        # Apply nGiE convolution if available
+        if self.conv is not None:
+            embedding_output = self.conv(embedding_output)
+            
+        encoder_outputs = self.encoder(embedding_output, attention_mask)
+        return encoder_outputs
+
+
+class DebertaV2ContextPooler(nn.Module):
+    """DeBERTa v2 context pooler for sequence classification."""
+
+    def __init__(self, config: DebertaV2Config):
+        super().__init__()
+        self.dense = ColumnParallelLinear(
+            config.hidden_size,
+            config.hidden_size,
+            bias=True,
         )
-        intermediate_output = self.intermediate(attn_output)
-        output = self.output(intermediate_output, attn_output)
+        self.dropout = nn.Dropout(config.pooler_dropout)
+        self.act_fn = get_act_fn(config.pooler_hidden_act)
 
-        if output_attentions:
-            return output, attention_probs
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        # Handle 2D tensor case for vLLM pooling models
+        if hidden_states.dim() == 2:
+            # For 2D input [seq_len, hidden_size], take first token
+            context_token = hidden_states[0]  # Shape: [hidden_size]
+            is_batch = False
         else:
-            return output, None
+            # For 3D input [batch, seq_len, hidden_size], take first token
+            context_token = hidden_states[:, 0]  # Shape: [batch, hidden_size]
+            is_batch = True
+        
+        context_token = self.dropout(context_token)
+        pooled_output = self.dense(context_token)[0]  # ColumnParallelLinear returns tuple
+        pooled_output = self.act_fn(pooled_output)
+        
+        return pooled_output
 
 
-@support_torch_compile
-class DebertaV2Encoder(nn.Module):
+class DebertaV2ForSequenceClassification(nn.Module):
+    """DeBERTa v2 model for sequence classification."""
 
-    def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+    ):
         super().__init__()
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-
-        # Transformer layers
-        self.layer = nn.ModuleList([
-            DebertaV2Layer(
-                config=config,
-                cache_config=cache_config,
-                quant_config=quant_config,
-                prefix=f"{prefix}.layer.{layer_idx}",
-            ) for layer_idx in range(config.num_hidden_layers)
-        ])
-
-        # Relative position embeddings
-        self.relative_attention = getattr(config, "relative_attention", True)
-        if self.relative_attention:
-            self.max_relative_positions = getattr(config,
-                                                  "max_relative_positions", -1)
-            if self.max_relative_positions < 1:
-                self.max_relative_positions = config.max_position_embeddings
-            self.position_buckets = getattr(config, "position_buckets", 256)
-
-            # Relative embeddings for position encoding
-            self.rel_embeddings = VocabParallelEmbedding(
-                self.position_buckets, config.hidden_size)
-
-        # Encoder-level LayerNorm (applied after all layers)
-        self.LayerNorm = nn.LayerNorm(config.hidden_size,
-                                      eps=config.layer_norm_eps)
-
-        # Convolutional layer for enhanced position encoding (DeBERTa v2
-        # specific)
-        conv_kernel_size = getattr(config, "conv_kernel_size", 3)
-        self.conv = DebertaV2ConvLayer(config.hidden_size, conv_kernel_size,
-                                       config.hidden_dropout_prob)
-
-    def get_relative_positions(self,
-                               hidden_states: torch.Tensor) -> torch.Tensor:
-        """Generate relative position matrix for the sequence."""
-        if len(hidden_states.shape) == 2:
-            # vLLM format: (seq_len, hidden_size)
-            seq_len = hidden_states.size(0)
-        else:
-            # Standard format: (batch_size, seq_len, hidden_size)
-            seq_len = hidden_states.size(1)
-
-        return build_relative_position(
-            seq_len,
-            seq_len,
-            self.position_buckets,
-            self.max_relative_positions,
-            hidden_states.device,
+        
+        self.config = config
+        self.num_labels = config.num_labels
+        
+        self.deberta = DebertaV2Model(config, cache_config, quant_config)
+        
+        # Pooler and classifier
+        self.context_pooler = DebertaV2ContextPooler(config)
+        # Use regular Linear layer for classifier to work with ClassifierPooler
+        self.classifier = nn.Linear(
+            config.hidden_size,
+            config.num_labels,
+            bias=True,
         )
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        output_attentions: bool = False,
-        output_hidden_states: bool = False,
-        return_dict: bool = True,
-    ) -> Union[tuple, BaseModelOutput]:
-        all_hidden_states = () if output_hidden_states else None
-        all_attentions = () if output_attentions else None
-
-        # Build relative position matrix and embeddings
-        seq_len = hidden_states.size(1)
-        relative_pos = build_relative_position(
-            seq_len,
-            seq_len,
-            self.position_buckets,
-            self.max_relative_positions,
-            hidden_states.device,
+        # Initialize pooler for vLLM
+        self._pooler = ClassifierPooler(
+            vllm_config.model_config,
+            self.classifier,
+            self.context_pooler,
         )
-        rel_embeddings = self.rel_embeddings.weight
+        
 
-        # Apply convolutional layer for enhanced position encoding
-        # This captures n-gram patterns in the input sequence
-        hidden_states = self.conv(hidden_states)
-
-        # Pass through transformer layers
-        for layer in self.layer:
-            if output_hidden_states:
-                all_hidden_states = all_hidden_states + (hidden_states, )
-
-            layer_output, attention_probs = layer(
-                hidden_states,
-                attention_mask,
-                output_attentions,
-                rel_embeddings,
-                relative_pos,
-            )
-
-            hidden_states = layer_output
-
-            if output_attentions:
-                all_attentions = all_attentions + (attention_probs, )
-
-        if output_hidden_states:
-            all_hidden_states = all_hidden_states + (hidden_states, )
-
-        # Apply final LayerNorm
-        hidden_states = self.LayerNorm(hidden_states)
-
-        if not return_dict:
-            return tuple(
-                v for v in [hidden_states, all_hidden_states, all_attentions]
-                if v is not None)
-
-        return BaseModelOutput(
-            last_hidden_state=hidden_states,
-            hidden_states=all_hidden_states,
-            attentions=all_attentions,
-        )
-
-
-class DebertaV2ConvLayer(nn.Module):
-    """
-    Convolutional layer for enhanced position encoding in DeBERTa v2.
-    This layer applies grouped convolution to capture local dependencies.
-    """
-
-    def __init__(self, hidden_size: int, kernel_size: int,
-                 dropout_prob: float):
-        super().__init__()
-        self.kernel_size = kernel_size
-        self.conv = nn.Conv1d(
-            hidden_size,
-            hidden_size,
-            kernel_size=kernel_size,
-            padding=(kernel_size - 1) // 2,
-            groups=hidden_size,
-        )
-        self.LayerNorm = nn.LayerNorm(hidden_size)
-        self.dropout = nn.Dropout(dropout_prob)
-        self.activation = nn.GELU()
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        # Handle different tensor formats
-        if len(hidden_states.shape) == 2:
-            # vLLM format: (seq_len, hidden_size)
-            # Add batch dimension for conv operation
-            conv_input = hidden_states.unsqueeze(0).transpose(
-                1, 2)  # (1, hidden_size, seq_len)
-            conv_output = self.conv(conv_input)
-            conv_output = conv_output.transpose(1, 2).squeeze(
-                0)  # (seq_len, hidden_size)
-        else:
-            # Standard format: (batch_size, seq_len, hidden_size)
-            conv_input = hidden_states.transpose(
-                1, 2)  # (batch_size, hidden_size, seq_len)
-            conv_output = self.conv(conv_input)
-            conv_output = conv_output.transpose(
-                1, 2)  # (batch_size, seq_len, hidden_size)
-
-        # Apply activation and normalization
-        conv_output = self.activation(conv_output)
-        conv_output = self.dropout(conv_output)
-
-        # Residual connection and layer norm
-        output = self.LayerNorm(conv_output + hidden_states)
-        return output
-
-
-class DebertaV2Model(nn.Module, SupportsQuant):
-
-    def __init__(
-        self,
-        *,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-        embedding_class: type = DebertaV2Embeddings,
-        add_pooling_layer: bool = False,
-    ):
-        super().__init__()
-        config = vllm_config.model_config.hf_config
-        self.embeddings = embedding_class(config)
-        self.encoder = DebertaV2Encoder(vllm_config=vllm_config,
-                                        prefix=f"{prefix}.encoder")
+        
+        # Don't initialize weights - they will be loaded from checkpoint
 
     def forward(
         self,
@@ -836,222 +743,87 @@ class DebertaV2Model(nn.Module, SupportsQuant):
         if inputs_embeds is not None:
             hidden_states = inputs_embeds
         else:
-            attn_metadata = get_forward_context().attn_metadata
-            assert hasattr(attn_metadata, "seq_lens_tensor")
-            hidden_states = self.embeddings(
-                input_ids=input_ids,
-                seq_lens=attn_metadata.seq_lens_tensor,
-                position_ids=positions,
-                token_type_ids=token_type_ids,
-            )
-        return self.encoder(hidden_states)
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-        params_dict = dict(self.named_parameters())
-        for name, loaded_weight in weights:
-            # Handle DeBERTa v2 specific weights
-            if "relative_attention_bias" in name:
-                # These are handled by the disentangled attention mechanism
-                continue
-            if "disentangled_attention_bias" in name:
-                # These are computed dynamically in disentangled attention
-                continue
-
-            if "rel_embeddings" in name:
-                param_name = name.replace("encoder.rel_embeddings",
-                                          "encoder.rel_embeddings.weight")
-                if param_name in params_dict:
-                    param = params_dict[param_name]
-                    weight_loader = getattr(param, "weight_loader",
-                                            default_weight_loader)
-                    weight_loader(param, loaded_weight)
-                continue
-
-            if "encoder.LayerNorm" in name:
-                param_name = name
-                if param_name in params_dict:
-                    param = params_dict[param_name]
-                    weight_loader = getattr(param, "weight_loader",
-                                            default_weight_loader)
-                    weight_loader(param, loaded_weight)
-                continue
-
-            if "encoder.conv" in name:
-                if "encoder.conv.weight" in name:
-                    param_name = "encoder.conv.conv.weight"
-                elif "encoder.conv.bias" in name:
-                    param_name = "encoder.conv.conv.bias"
-                else:
-                    param_name = name
-
-                if param_name in params_dict:
-                    param = params_dict[param_name]
-                    weight_loader = getattr(param, "weight_loader",
-                                            default_weight_loader)
-                    weight_loader(param, loaded_weight)
-                continue
-
-            # Handle position projection weights for disentangled attention
-            if "pos_query_proj" in name or "pos_key_proj" in name:
-                if name in params_dict:
-                    param = params_dict[name]
-                    weight_loader = getattr(param, "weight_loader",
-                                            default_weight_loader)
-                    weight_loader(param, loaded_weight)
-                continue
-
-            # Skip loading extra bias for packed layers
-            if name.endswith(".bias") and name not in params_dict:
-                continue
-
-            if name in params_dict:
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
-                weight_loader(param, loaded_weight)
-
-
-class DebertaV2CrossEncoderActivation(nn.Module):
-    """Custom activation function for DeBERTa v2 cross-encoder models.
-
-    For multi-class models like MNLI, this extracts the appropriate score
-    for similarity ranking. For MNLI, we use the ENTAILMENT score (index 2).
-    """
-
-    def __init__(self, config: DebertaV2Config):
-        super().__init__()
-        self.num_labels = config.num_labels
-
-        # For MNLI models, use ENTAILMENT score (index 2)
-        if (self.num_labels == 3 and hasattr(config, "id2label")
-                and config.id2label.get(2) == "ENTAILMENT"):
-            self.entailment_index = 2
-        else:
-            self.entailment_index = None
-
-    def forward(self, logits: torch.Tensor) -> torch.Tensor:
-        if self.num_labels == 1:
-            # Single label case - return as is
-            return logits
-        elif self.entailment_index is not None:
-            # MNLI case - extract ENTAILMENT score
-            return logits[..., self.entailment_index:self.entailment_index + 1]
-        else:
-            # Other multi-class cases - use softmax and take max probability
-            probs = torch.softmax(logits, dim=-1)
-            max_prob, _ = torch.max(probs, dim=-1, keepdim=True)
-            return max_prob
-
-
-class DebertaV2ContextPooler(nn.Module):
-    """Context pooler for DeBERTa v2 that matches the original 
-    implementation."""
-
-    def __init__(self, config: DebertaV2Config):
-        super().__init__()
-        pooler_hidden_size = getattr(config, "pooler_hidden_size",
-                                     config.hidden_size)
-        pooler_dropout = getattr(config, "pooler_dropout", 0.0)
-
-        self.dense = nn.Linear(config.hidden_size, pooler_hidden_size)
-        self.dropout = nn.Dropout(pooler_dropout)
-        self.activation = nn.Tanh()
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        # Handle vLLM's tensor format: (seq_len, hidden_size) for a single
-        # sequence. The ClassifierPooler already extracts the sequence, so we
-        # just need the first token
-        if len(hidden_states.shape) == 2:
-            # vLLM format: (seq_len, hidden_size) - take the first token (CLS)
-            pooled_output = hidden_states[0]
-        else:
-            # Standard format: (batch_size, seq_len, hidden_size) - take first
-            # token of each sequence
-            pooled_output = hidden_states[:, 0]
-
-        pooled_output = self.dense(pooled_output)
-        pooled_output = self.activation(pooled_output)
-        pooled_output = self.dropout(pooled_output)
-        return pooled_output
-
-
-class DebertaV2ForSequenceClassification(nn.Module, SupportsV0Only,
-                                         SupportsCrossEncoding, SupportsQuant):
-    """
-    DeBERTa v2 model for sequence classification tasks.
-
-    Supports both single-label and multi-label classification with proper
-    pooling and activation functions for cross-encoder applications.
-    """
-
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__()
-        config = vllm_config.model_config.hf_config
-
-        self.default_activation_function = (
-            get_cross_encoder_activation_function(config))
-        self.num_labels = config.num_labels
-
-        # Build the main DeBERTa model
-        self.deberta = DebertaV2Model(vllm_config=vllm_config,
-                                      prefix=maybe_prefix(prefix, "deberta"))
-
-        # Classification head
-        self.classifier = nn.Linear(config.hidden_size, config.num_labels)
-
-        # Pooler for classification
-        self._pooler = ClassifierPooler(
-            vllm_config.model_config,
-            self.classifier,
-            None,  # No built-in pooler in DeBERTa v2
-        )
-
-    def forward(
-        self,
-        input_ids: Optional[torch.Tensor],
-        positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-        token_type_ids: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        """Forward pass for sequence classification."""
-        hidden_states = self.deberta(
-            input_ids=input_ids,
-            positions=positions,
-            inputs_embeds=inputs_embeds,
-            intermediate_tensors=intermediate_tensors,
-            token_type_ids=token_type_ids,
-        )
-
-        # Apply classification head
-        logits = self.classifier(hidden_states[:, 0])  # Use [CLS] token
-        return logits
+            hidden_states = self.deberta(input_ids, token_type_ids=token_type_ids)
+        
+        return hidden_states
 
     def pooler(
         self,
         hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> Optional[PoolerOutput]:
         return self._pooler(hidden_states, pooling_metadata)
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-        """Load weights from checkpoint."""
-        self_weights = []
-
-        def weight_filter():
-            for name, weight in weights:
-                if name.startswith("deberta."):
-                    yield (name[len("deberta."):], weight)
-                else:
-                    self_weights.append((name, weight))
-
-        self.deberta.load_weights(weight_filter())
-
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         params_dict = dict(self.named_parameters())
-
-        for name, loaded_weight in self_weights:
-            if name.startswith("classifier"):
+        loaded_params = set()
+        
+        weight_list = list(weights)
+        
+        for name, loaded_weight in weight_list:
+            # DON'T skip the "deberta." prefix - our model parameters include it!
+            # The checkpoint already has the correct "deberta." prefix
+            # if name.startswith("deberta."):
+            #     name = name[len("deberta."):]
+            
+            # Handle HuggingFace -> vLLM parameter name mapping
+            original_name = name
+            # Map HuggingFace parameter names to vLLM parameter names
+            if '.attention.output.dense.' in name:
+                # HF: deberta.encoder.layer.X.attention.output.dense.{weight,bias}
+                # vLLM: deberta.encoder.layer.X.attention.output.{weight,bias}
+                name = name.replace('.attention.output.dense.', '.attention.output.')
+            elif '.attention.output.LayerNorm.' in name:
+                # HF: deberta.encoder.layer.X.attention.output.LayerNorm.{weight,bias}
+                # vLLM: deberta.encoder.layer.X.attention.LayerNorm.{weight,bias}
+                name = name.replace('.attention.output.LayerNorm.', '.attention.LayerNorm.')
+            elif '.output.LayerNorm.' in name and '.attention.' not in name:
+                # HF: deberta.encoder.layer.X.output.LayerNorm.{weight,bias}
+                # vLLM: deberta.encoder.layer.X.output.LayerNorm.{weight,bias} (same)
+                pass  # No change needed
+            elif 'pooler.dense.' in name:
+                name = name.replace('pooler.dense.', 'context_pooler.dense.')
+            
+            # Skip known unused parameters from HuggingFace models
+            skip_params = [
+                'cls.predictions.bias', 'cls.predictions.transform.dense.weight', 
+                'cls.predictions.transform.dense.bias', 'cls.predictions.transform.LayerNorm.weight', 
+                'cls.predictions.transform.LayerNorm.bias', 'cls.predictions.decoder.weight', 
+                'cls.predictions.decoder.bias'
+            ]
+            
+            if original_name in skip_params:
+                continue
+                
+            if name in params_dict:
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
+                loaded_params.add(name)
+            else:
+                pass  # Parameter not found - this is expected for some HuggingFace parameters
+        
+        # Check for missing critical parameters
+        critical_params = [
+            'encoder.rel_embeddings.weight',
+            'context_pooler.dense.weight',
+            'classifier.weight',
+            'classifier.bias'
+        ]
+        
+        # Verify critical parameters are loaded
+        missing_critical = [param for param in critical_params 
+                           if param in params_dict and param not in loaded_params]
+        if missing_critical:
+            raise RuntimeError(f"Critical parameters not loaded: {missing_critical}")
+
+    def _init_weights(self):
+        """Initialize weights that might not be loaded correctly."""
+        # DISABLED: This was overwriting correctly loaded weights!
+        # The weight loading should handle all initialization
+        pass
+
+
+def _get_model_type() -> str:
+    return "deberta_v2"
