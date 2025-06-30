@@ -2,13 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
-from typing import Any, Optional
+from typing import Optional
 
 import uvicorn
 from fastapi import FastAPI
 
 from vllm import envs
 from vllm.config import VllmConfig
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorHandshakeMetadata)
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -32,8 +34,9 @@ class NixlSideChannelServer:
         @self.app.get("/get_kv_connector_metadata/{dp_rank}/{tp_rank}")
         async def get_kv_connector_metadata(dp_rank: Optional[int] = None,
                                             tp_rank: Optional[int] = None):
-            kv_meta: Optional[dict[str, dict[str, dict[str, Any]]]] = (
-                self.vllm_config.cache_config.transfer_handshake_metadata)
+            kv_meta: Optional[dict[int, dict[
+                int, KVConnectorHandshakeMetadata]]] = (
+                    self.vllm_config.cache_config.transfer_handshake_metadata)
 
             if kv_meta is None:
                 return None
@@ -71,7 +74,8 @@ class NixlSideChannelServer:
         self.server = uvicorn.Server(config)
 
         # start the server in a background task
-        asyncio.create_task(self.server.serve())
+        if self.server is not None:
+            asyncio.create_task(self.server.serve())
         logger.info("NIXL side channel server started successfully")
 
     async def stop_async(self):
