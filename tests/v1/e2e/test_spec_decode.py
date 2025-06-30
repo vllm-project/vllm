@@ -123,27 +123,39 @@ def test_ngram_correctness(
         cleanup_dist_env_and_memory()
 
 
-@pytest.mark.parametrize(
-    "model_setup,mm_enabled", [
-        (("eagle", "meta-llama/Llama-3.1-8B-Instruct",
-          "yuhuili/EAGLE-LLaMA3.1-Instruct-8B", 1), False),
-        (("eagle3", "meta-llama/Llama-3.1-8B-Instruct",
-          "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B", 1), False),
-        pytest.param(
-            (("eagle", "meta-llama/Llama-4-Scout-17B-16E-Instruct",
-              "morgendave/EAGLE-Llama-4-Scout-17B-16E-Instruct", 4), False),
-            marks=pytest.mark.skip(reason="Skipping due to CI OOM issues")),
-        pytest.param(
-            (("eagle", "meta-llama/Llama-4-Scout-17B-16E-Instruct",
-              "morgendave/EAGLE-Llama-4-Scout-17B-16E-Instruct", 4), True),
-            marks=pytest.mark.skip(reason="Skipping due to CI OOM issues")),
-    ],
-    ids=["llama3_eagle", "llama3_eagle3", "llama4_eagle", "llama4_eagle_mm"])
+@pytest.mark.parametrize("model_setup,mm_enabled,prefill_shift", [
+    (("eagle", "meta-llama/Llama-3.1-8B-Instruct",
+      "yuhuili/EAGLE-LLaMA3.1-Instruct-8B", 1), False, True),
+    (("eagle3", "meta-llama/Llama-3.1-8B-Instruct",
+      "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B", 1), False, True),
+    pytest.param(
+        (("eagle", "meta-llama/Llama-4-Scout-17B-16E-Instruct",
+          "morgendave/EAGLE-Llama-4-Scout-17B-16E-Instruct", 4), False, True),
+        marks=pytest.mark.skip(reason="Skipping due to CI OOM issues")),
+    pytest.param(
+        (("eagle", "meta-llama/Llama-4-Scout-17B-16E-Instruct",
+          "morgendave/EAGLE-Llama-4-Scout-17B-16E-Instruct", 4), True, True),
+        marks=pytest.mark.skip(reason="Skipping due to CI OOM issues")),
+    pytest.param(
+        (("eagle", "meta-llama/Llama-4-Scout-17B-16E-Instruct",
+          "morgendave/EAGLE-Llama-4-Scout-17B-16E-Instruct", 4), False, False),
+        marks=pytest.mark.skip(reason="Skipping due to CI OOM issues")),
+    pytest.param(
+        (("eagle", "meta-llama/Llama-4-Scout-17B-16E-Instruct",
+          "morgendave/EAGLE-Llama-4-Scout-17B-16E-Instruct", 4), True, False),
+        marks=pytest.mark.skip(reason="Skipping due to CI OOM issues")),
+],
+                         ids=[
+                             "llama3_eagle", "llama3_eagle3", "llama4_eagle",
+                             "llama4_eagle_mm", "llama4_eagle_no_shift",
+                             "llama4_eagle_mm_no_shift"
+                         ])
 def test_eagle_correctness(
     monkeypatch: pytest.MonkeyPatch,
     sampling_config: SamplingParams,
     model_setup: tuple[str, str, str, int],
     mm_enabled: bool,
+    prefill_shift: bool,
 ):
     # Generate test prompts inside the function instead of using fixture
     test_prompts = get_test_prompts(mm_enabled)
@@ -156,8 +168,9 @@ def test_eagle_correctness(
         m.setenv("VLLM_USE_V1", "1")
         method, model_name, spec_model_name, tp_size = model_setup
 
+        max_model_len = 2048 if not mm_enabled else 4096
         ref_llm = LLM(model=model_name,
-                      max_model_len=2048,
+                      max_model_len=max_model_len,
                       tensor_parallel_size=tp_size)
         ref_outputs = ref_llm.chat(test_prompts, sampling_config)
         del ref_llm
@@ -172,9 +185,10 @@ def test_eagle_correctness(
                 "method": method,
                 "model": spec_model_name,
                 "num_speculative_tokens": 3,
-                "max_model_len": 2048,
+                "max_model_len": max_model_len,
+                "prefill_token_shift": prefill_shift,
             },
-            max_model_len=2048,
+            max_model_len=max_model_len,
         )
         spec_outputs = spec_llm.chat(test_prompts, sampling_config)
         matches = 0
