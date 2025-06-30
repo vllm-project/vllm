@@ -6,6 +6,7 @@ import pytest
 from vllm.attention.layer import Attention
 from vllm.config import (CacheConfig, ModelConfig, SchedulerConfig, VllmConfig,
                          set_current_vllm_config)
+from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.utils import GiB_bytes
 from vllm.v1.core.kv_cache_utils import (estimate_max_model_len,
@@ -71,6 +72,7 @@ def _schedule_new_request(*req_ids: str) -> SchedulerOutput:
                 mm_hashes=[],
                 mm_positions=[],
                 sampling_params=SamplingParams(),
+                pooling_params=PoolingParams(),
                 block_ids=([0], ),  # block_ids should be tuple[list[int]]
                 num_computed_tokens=0,
                 lora_request=None,
@@ -585,3 +587,17 @@ def test_init_kv_cache_with_kv_sharing_valid():
     assert len(kv_cache_config.kv_cache_groups[0].layer_names) == 2
     assert kv_cache_config.kv_cache_groups[0].layer_names[0] == layer_0
     assert kv_cache_config.kv_cache_groups[0].layer_names[1] == layer_1
+
+
+def test_most_model_len(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("VLLM_TPU_MOST_MODEL_LEN", "2048")
+    vllm_config = get_vllm_config()
+    vllm_config.model_config.max_model_len = 32000
+    vllm_config.scheduler_config.max_num_seqs = 1200
+    model_runner = get_model_runner(vllm_config)
+
+    # verify model runner will adjust num_reqs to avoid SMEM OOM.
+    assert model_runner.num_reqs_most_model_len == 1200
+    # num_page_per_req = 32k // 128
+    # num_reqs = 1024 ** 2 // 2 // num_page_per_req // 4 = 524
+    assert model_runner.num_reqs_max_model_len == 524
