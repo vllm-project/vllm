@@ -147,6 +147,8 @@ class AttnFusionPass(VllmInductorPass):
         self.patterns = PatternMatcherPass(pass_name="attn_fusion_pass")
 
         for key, layer in self.static_fwd_ctx.items():
+            if not isinstance(layer, Attention):
+                continue
             pattern = AttentionStaticQuantPattern(key, layer.num_heads,
                                                   layer.head_size,
                                                   config.model_config.dtype,
