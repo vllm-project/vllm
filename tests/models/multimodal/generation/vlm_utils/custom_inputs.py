@@ -138,7 +138,7 @@ def video_with_metadata_glm4_1v():
     video_prompt = "<|begin_of_video|><|video|><|end_of_video|>"
     formatted_prompt = f"<|user|>\n{video_prompt}{question}<|assistant|>\n"
 
-    scales = [0.25, 0.5, 0.75]
+    scales = [0.1, 0.2, 0.25]
     video_input = [[(rescale_video_size(video_array, scale), metadata)]
                    for scale in scales]
     prompts = [formatted_prompt] * len(video_input)
