@@ -86,9 +86,12 @@ def test_models(
     num_logprobs: int,
 ) -> None:
 
-    model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
-    model_info.check_available_online(on_fail="skip")
-    model_info.check_transformers_version(on_fail="skip")
+    try:
+        model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
+        model_info.check_available_online(on_fail="skip")
+        model_info.check_transformers_version(on_fail="skip")
+    except ValueError:
+        pass
 
     with hf_runner(model) as hf_model:
         if model not in HF_UNSUPPORTED_MODELS:
