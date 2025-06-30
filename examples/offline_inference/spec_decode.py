@@ -131,12 +131,14 @@ def main():
     print(f"num_drafts: {num_drafts}")
     print(f"num_draft_tokens: {num_draft_tokens}")
     print(f"num_accepted_tokens: {num_accepted_tokens}")
-    print(f"mean acceptance length: {1 + (num_accepted_tokens / num_drafts):.2f}")
+    acceptance_length = 1 + (num_accepted_tokens / num_drafts) if num_drafts > 0 else 1
+    print(f"mean acceptance length: {acceptance_length:.2f}")
     print("-" * 50)
 
     # print acceptance at each token position
     for i in range(len(acceptance_counts)):
-        print(f"acceptance at token {i}:{acceptance_counts[i] / num_drafts:.2f}")
+        acceptance_rate = acceptance_counts[i] / num_drafts if num_drafts > 0 else 0
+        print(f"acceptance at token {i}: {acceptance_rate:.2f}")
 
 
 if __name__ == "__main__":
