@@ -12,7 +12,8 @@ from typing import Any, Optional, Union
 import torch
 import uvloop
 from benchmark_dataset import (AIMODataset, BurstGPTDataset,
-                               ConversationDataset, InstructCoderDataset,
+                               CNNDailyMailDataset, ConversationDataset,
+                               InstructCoderDataset, MTBenchDataset,
                                RandomDataset, SampleRequest, ShareGPTDataset,
                                SonnetDataset, VisionArenaDataset)
 from benchmark_utils import convert_to_pytorch_benchmark_format, write_to_json
@@ -339,6 +340,14 @@ def get_requests(args, tokenizer):
             dataset_cls = AIMODataset
             common_kwargs['dataset_subset'] = None
             common_kwargs['dataset_split'] = "train"
+        elif args.dataset_path in MTBenchDataset.SUPPORTED_DATASET_PATHS:
+            dataset_cls = MTBenchDataset
+            common_kwargs['dataset_subset'] = None
+            common_kwargs['dataset_split'] = "train"
+        elif args.dataset_path in CNNDailyMailDataset.SUPPORTED_DATASET_PATHS:
+            dataset_cls = CNNDailyMailDataset
+            common_kwargs['dataset_subset'] = '3.0.0'
+            common_kwargs['dataset_split'] = "train"
     else:
         raise ValueError(f"Unknown dataset name: {args.dataset_name}")
     # Remove None values
@@ -477,8 +486,11 @@ def validate_args(args):
                 VisionArenaDataset.SUPPORTED_DATASET_PATHS.keys()
                 | ConversationDataset.SUPPORTED_DATASET_PATHS):
             assert args.backend == "vllm-chat", f"{args.dataset_path} needs to use vllm-chat as the backend."  #noqa: E501
-        elif args.dataset_path in (InstructCoderDataset.SUPPORTED_DATASET_PATHS
-                                   | AIMODataset.SUPPORTED_DATASET_PATHS):
+        elif args.dataset_path in (
+                InstructCoderDataset.SUPPORTED_DATASET_PATHS
+                | AIMODataset.SUPPORTED_DATASET_PATHS
+                | MTBenchDataset.SUPPORTED_DATASET_PATHS
+                | CNNDailyMailDataset.SUPPORTED_DATASET_PATHS):
             assert args.backend == "vllm", f"{args.dataset_path} needs to use vllm as the backend."  #noqa: E501
         else:
             raise ValueError(
