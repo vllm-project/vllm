@@ -10,8 +10,7 @@ from vllm.config import KVTransferConfig, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.factory import (
     KVConnectorFactory)
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-    KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole,
-    KVTransferFinishedResult)
+    KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -103,49 +102,36 @@ class MultiConnector(KVConnectorBase_V1):
         for c in self._connectors:
             c.wait_for_save()
 
-    def get_finished(self,
-                     finished_req_ids: set[str]) -> KVTransferFinishedResult:
+    def get_finished(
+        self, finished_req_ids: set[str]
+    ) -> tuple[Optional[set[str]], Optional[set[str]]]:
         finished_sending: set[str] = set()
         finished_recving: set[str] = set()
-        pending_handshake: set[str] = set()
 
         for c in self._connectors:
-            result = c.get_finished(finished_req_ids)
-            if result.is_empty():
-                continue
+            sending, recving = c.get_finished(finished_req_ids)
 
             # Aggregate finished recving request ids.
-            finished_recving.update(result.finished_recving)
-
-            # Aggregate pending handshake request ids.
-            pending_handshake.update(result.pending_handshake)
+            if recving:
+                finished_recving.update(recving)
 
             # Aggregate finished sending request ids - only include
             # once we've drained the "extra" count (for cases where
             # more than one connector is async-saving the same request).
-            for req_id in result.finished_sending:
-                extra_pending = self._extra_async_saves.get(req_id)
-                if extra_pending is None:
-                    finished_sending.add(req_id)
-                    continue
-                assert extra_pending > 0
-                if extra_pending == 1:
-                    del self._extra_async_saves[req_id]
-                else:
-                    self._extra_async_saves[req_id] = extra_pending - 1
+            if sending:
+                for req_id in sending:
+                    extra_pending = self._extra_async_saves.get(req_id)
+                    if extra_pending is None:
+                        finished_sending.add(req_id)
+                        continue
+                    assert extra_pending > 0
+                    if extra_pending == 1:
+                        del self._extra_async_saves[req_id]
+                    else:
+                        self._extra_async_saves[req_id] = extra_pending - 1
 
-        return KVTransferFinishedResult(finished_sending=finished_sending,
-                                        finished_recving=finished_recving,
-                                        pending_handshake=pending_handshake)
-
-    def get_pending_handshake_req_ids(self) -> Optional[set[str]]:
-        """Get request IDs that are currently pending handshake completion."""
-        pending_handshake: set[str] = set()
-        for c in self._connectors:
-            connector_pending = c.get_pending_handshake_req_ids()
-            if connector_pending:
-                pending_handshake.update(connector_pending)
-        return pending_handshake or None
+        return (finished_sending if finished_sending else None,
+                finished_recving if finished_recving else None)
 
     # ==============================
     # Scheduler-side methods
