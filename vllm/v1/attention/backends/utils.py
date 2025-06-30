@@ -17,6 +17,7 @@ import vllm.envs as envs
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     get_kv_connector_cache_layout)
 from vllm.logger import init_logger
+from vllm.v1.worker.block_table import BlockTable
 
 logger = init_logger(__name__)
 
@@ -29,6 +30,8 @@ class CommonAttentionMetadata:
     """
 
     query_start_loc: torch.Tensor
+
+    # query_start_loc_cpu: torch.Tensor
     """(batch_size + 1,), the start location of each request in query Tensor"""
     seq_lens: torch.Tensor
     """(batch_size,), the length of each request including both computed tokens
@@ -40,6 +43,47 @@ class CommonAttentionMetadata:
     """Total number of tokens in batch"""
     max_query_len: int
     """Longest query in batch"""
+
+    # block_table: BlockTable
+
+    # def compute_request_slice(self, token_slice: slice) -> slice:
+    #     """
+    #     return 
+    #     - num_decodes: number of decode requests
+    #     - num_prefills: number of prefill requests
+    #     - num_decode_tokens: number of decode tokens
+    #     - num_prefill_tokens: number of prefill tokens
+    #     """
+    #     if self.max_query_len == 1:
+    #         # Pure decode
+    #         return token_slice
+    #     else:
+    #         # Find the first query_start_loc that's greater than the token_slice.start
+    #         first_reqest = (self.query_start_loc_cpu >= token_slice.start).int().argmax(dim=-1).item()
+    #         last_request = (self.query_start_loc_cpu < token_slice.stop).int().argmax(dim=-1).item()
+    #         return slice(first_reqest, last_request)
+
+    # # Slice the current CommonAttentionMetatdata into two
+    # def _slice(self, token_slice: slice) -> CommonAttentionMetadata:
+    #     request_slice = self.compute_request_slice(token_slice)
+    #     query_start_loc = slice_query_start_locs(
+    #         self.query_start_loc, request_slice)
+        
+    #     seq_lens = self.seq_lens[request_slice]
+    #     num_requests = request_slice.stop - request_slice.start
+    #     num_actual_tokens = token_slice.stop - token_slice.start
+    #     #TODO(Sage) update this for prefill
+    #     max_query_len = 1
+
+    #     block_table = self.block_table
+    #     block_table_tensor = block_table.get_device_tensor()[req_slice]
+    #     block_table.slot_mapping[token_slice].copy_(
+    #         block_table.slot_mapping_cpu[token_slice],
+    #         non_blocking=True)
+    #     block_table.slot_mapping[token_slice.stop:].fill_(-1)
+    #     slot_mapping = block_table.slot_mapping[token_slice]
+
+    #     pass
 
 
 M = TypeVar("M")
