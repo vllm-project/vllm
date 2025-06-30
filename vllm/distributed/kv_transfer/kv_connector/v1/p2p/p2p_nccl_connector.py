@@ -355,8 +355,8 @@ class P2pNcclConnector(KVConnectorBase_V1):
                 if num_tokens < len(new_req.prompt_token_ids):
                     # 'CachedRequestData' has no attribute 'prompt_token_ids'
                     logger.info(
-                        "🚧%s is chunked prefill, num_token:%d, num_prompt:%d",
-                        new_req.req_id, num_token,
+                        "🚧%s is chunked prefill, num_tokens:%d, num_prompt:%d",
+                        new_req.req_id, num_tokens,
                         len(new_req.prompt_token_ids))
                     self.chunked_prefill[new_req.req_id] = (
                         new_req.block_ids[0], new_req.prompt_token_ids)
@@ -388,8 +388,8 @@ class P2pNcclConnector(KVConnectorBase_V1):
                 prompt_token_ids = self.chunked_prefill[cached_req.req_id][1]
                 # the request's prompt is chunked prefill again
                 if num_tokens < len(prompt_token_ids):
-                    logger.info("🚧%s is chunked prefill again, num_token:%d, "
-                                "num_prompt:%d", cached_req.req_id, num_token,
+                    logger.info("🚧%s is chunked prefill again, num_tokens:%d, "
+                                "num_prompt:%d", cached_req.req_id, num_tokens,
                                 len(prompt_token_ids))
                     self.chunked_prefill[cached_req.req_id] = (
                         block_ids, prompt_token_ids)
