@@ -182,9 +182,9 @@ __global__ void transpose_a_scales(float* __restrict__ a_scales_t,
   }
 }
 
-torch::Tensor transpose_cutlass_moe_a_scales_caller(torch::Tensor& a_scales,
-                                           torch::Tensor& expert_offsets,
-                                           torch::Tensor& problem_sizes) {
+torch::Tensor transpose_cutlass_moe_a_scales_caller(
+    torch::Tensor& a_scales, torch::Tensor& expert_offsets,
+    torch::Tensor& problem_sizes) {
   const int64_t num_experts = expert_offsets.size(0);
   const int64_t num_tokens = a_scales.size(0);
   const int64_t k_scaled = a_scales.size(1);

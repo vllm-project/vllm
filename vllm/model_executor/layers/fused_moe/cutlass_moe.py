@@ -122,8 +122,8 @@ def run_blocked_cutlass_moe_fp8(
     c3 = _resize_cache(workspace13, (M * topk, K))
 
     if per_act_block:
-        a1q_scale_t = ops.transpose_cutlass_moe_a_scales(a1q_scale,
-                                           expert_offsets, problem_sizes1)
+        a1q_scale_t = ops.transpose_cutlass_moe_a_scales(
+            a1q_scale, expert_offsets, problem_sizes1)
     else:
         a1q_scale = a1q_scale.repeat(a1q.shape[1] // 128, a1q.shape[0])
 
@@ -137,8 +137,8 @@ def run_blocked_cutlass_moe_fp8(
 
     if per_act_block:
         a2q, a2q_scale = per_token_group_quant_fp8(c2, 128)
-        a2q_scale_t = ops.transpose_cutlass_moe_a_scales(a2q_scale,
-                                           expert_offsets, problem_sizes2)
+        a2q_scale_t = ops.transpose_cutlass_moe_a_scales(
+            a2q_scale, expert_offsets, problem_sizes2)
     else:
         a2q, a2q_scale = ops.scaled_fp8_quant(c2,
                                               use_per_token_if_dynamic=False)
