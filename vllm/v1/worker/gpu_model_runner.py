@@ -475,7 +475,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         for i, req_id in enumerate(req_data.req_ids):
             req_state = self.requests[req_id]
             num_computed_tokens = req_data.num_computed_tokens[i]
-            new_token_ids = req_data.new_token_ids[i]
             new_block_ids = req_data.new_block_ids[i]
             resumed_from_preemption = req_data.resumed_from_preemption[i]
 
@@ -483,6 +482,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             req_state.num_computed_tokens = num_computed_tokens
 
             if not self.async_scheduling:
+                new_token_ids = req_data.new_token_ids[i]
                 # Add the sampled token(s) from the previous step (if any).
                 # This doesn't include "unverified" tokens like spec tokens.
                 num_new_tokens = (num_computed_tokens + len(new_token_ids) -
