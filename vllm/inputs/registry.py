@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple, Optional, Union
 
 import torch
+from packaging.version import Version
+from packaging.version import __version__ as TRANSFORMERS_VERSION
 from transformers import BatchFeature, PretrainedConfig, ProcessorMixin
 from typing_extensions import TypeVar
 
@@ -128,9 +130,16 @@ class InputProcessingContext(InputContext):
         /,
         **kwargs: object,
     ) -> _P:
+        # Transformers 4.53.0 has issue with passing tokenizer to
+        # initialize processor. We disable it for this version.
+        # See: https://github.com/vllm-project/vllm/issues/20224
+        if Version(TRANSFORMERS_VERSION) == Version("4.53.0"):
+            tokenizer = None
+        else:
+            tokenizer = self.tokenizer
         return super().get_hf_processor(
             typ,
-            tokenizer=self.tokenizer,
+            tokenizer=tokenizer,
             **kwargs,
         )
 
