@@ -13,14 +13,15 @@ namespace vllm::cutlass_moe::blockwise_scaling {
 template <typename InType, typename OutType,
           template <typename, typename, typename> typename Epilogue>
 
+// TODO: figure out the best configs
 struct sm90_fp8_config_default {
   static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
   using KernelSchedule = cutlass::gemm::
-      KernelPtrArrayTmaWarpSpecializedPingpongFP8BlockScaledAccum;
+      KernelPtrArrayTmaWarpSpecializedCooperativeFP8BlockScaledAccum;
   using EpilogueSchedule =
-      cutlass::epilogue::PtrArrayTmaWarpSpecializedPingpong;
-  using TileShape = cute::Shape<cute::_64, cute::_128, cute::_256>;
-  using ClusterShape = cute::Shape<cute::_1, cute::_1, cute::_1>;
+      cutlass::epilogue::PtrArrayTmaWarpSpecializedCooperative;
+  using TileShape = cute::Shape<cute::_128, cute::_128, cute::_128>;
+  using ClusterShape = cute::Shape<cute::_1, cute::_2, cute::_1>;
 
   using Cutlass3xGemm =
       cutlass_3x_blockwise_group_gemm<InType, OutType, Epilogue, TileShape,
