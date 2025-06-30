@@ -93,10 +93,13 @@ def test_can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch):
             tokenizer_mode=model_info.tokenizer_mode,
             revision=model_info.revision,
             speculative_config={
-                "method": model_info.speculative_method 
-                        if model_info.speculative_method else None,
-                "model": model_info.speculative_model,
-                "num_speculative_tokens": 1,
+                "method":
+                model_info.speculative_method
+                if model_info.speculative_method else None,
+                "model":
+                model_info.speculative_model,
+                "num_speculative_tokens":
+                1,
             } if model_info.speculative_model else None,
             trust_remote_code=model_info.trust_remote_code,
             max_model_len=model_info.max_model_len,
