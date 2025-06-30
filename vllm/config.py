@@ -194,7 +194,8 @@ def config(cls: ConfigT) -> ConfigT:
     requires custom construction from CLI (i.e. `CompilationConfig`), it can
     have a `from_cli` method, which will be called instead.
 
-    Config validation is performed in pre-commit to avoid runtime overhead.
+    Config validation is performed by the tools/validate_config.py
+    script, which is invoked during the pre-commit checks.
     """
     return cls
 

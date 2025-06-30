@@ -73,6 +73,10 @@ class ConfigValidator(ast.NodeVisitor):
 
         if set(decorators) == {'config', 'dataclass'}:
             validate_class(node)
+        elif set(decorators) == {'config'}:
+            fail(
+                f"Class {node.name} with config decorator must be a dataclass.",
+                node)
 
         self.generic_visit(node)
 
