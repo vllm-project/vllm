@@ -11,8 +11,10 @@ from tests.kernels.utils import opcheck
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.platforms import current_platform
 
+FP8_DTYPE = current_platform.fp8_dtype()
+
 DTYPES = [torch.bfloat16, torch.float]
-QUANT_DTYPES = [torch.int8, current_platform.fp8_dtype()]
+QUANT_DTYPES = [torch.int8, FP8_DTYPE]
 VEC_HIDDEN_SIZES = range(1024, 1030)
 # Avoid combinatorial explosion with full Cartesian product
 NUM_TOKENS_HIDDEN_SIZES = [
@@ -58,13 +60,13 @@ def ref_dynamic_per_token_quant(rms_norm_layer: RMSNorm,
                                 scale_ub: Optional[torch.Tensor]) \
         -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
     if scale_ub is not None:
-        assert quant_dtype == torch.float8_e4m3fn
+        assert quant_dtype == FP8_DTYPE
 
     # Norm
     torch_out, residual = ref_rms_norm(rms_norm_layer, x, residual)
 
     # Quant
-    if quant_dtype == torch.float8_e4m3fn:
+    if quant_dtype == FP8_DTYPE:
         torch_out, scales = ops.scaled_fp8_quant(torch_out,
                                                  scale_ub=scale_ub,
                                                  use_per_token_if_dynamic=True)
@@ -91,13 +93,8 @@ def ops_dynamic_per_token_quant(weight: torch.Tensor,
                                 residual: Optional[torch.Tensor],
                                 scale_ub: Optional[torch.Tensor]) \
         -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
-    residual_out = None
-    if residual is not None:
-        residual = residual.clone()
-        residual_out = torch.empty_like(residual)
-    out, scales = ops.rms_norm_dynamic_per_token_quant(x, weight, EPS,
-                                                       quant_dtype, scale_ub,
-                                                       residual_out, residual)
+    out, scales, residual_out = ops.rms_norm_dynamic_per_token_quant(
+        x, weight, EPS, quant_dtype, scale_ub, residual)
     return out, scales, residual_out
 
 

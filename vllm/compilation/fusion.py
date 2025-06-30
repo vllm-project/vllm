@@ -289,7 +289,7 @@ class FusedAddRMSNormStaticQuantPattern(RMSNormQuantPattern):
                                       input=at[1],
                                       scale=scale)
 
-            # result, residual
+            # result, residual_out
             return at1[1], at[2]
 
         def replacement(result: torch.Tensor, result_rms: torch.Tensor,
@@ -305,7 +305,7 @@ class FusedAddRMSNormStaticQuantPattern(RMSNormQuantPattern):
                                      scale=scale,
                                      epsilon=self.epsilon)
 
-            # result, residual
+            # result, residual_out
             return at[1], at[2]
 
         inputs = [
@@ -348,6 +348,7 @@ class FusedAddRMSNormStaticQuantPattern(RMSNormQuantPattern):
             with self.inserting_after_match():
                 # Missing epsilon, scalars cannot be inputs to the pattern
                 kwargs = self.match.kwargs.copy()
+                del kwargs["result_rms"]  # not used in the fused op
 
                 # 0 is always None
                 fused_return_mapping = {1: (quant_node, 1), 2: (rms_node, 2)}
@@ -451,6 +452,7 @@ class RMSNormDynamicQuantPattern(RMSNormQuantPattern):
                     fused_return_mapping,
                     epsilon=rms_node.kwargs["epsilon"],
                     scale_ub=None,  # not used but required
+                    residual_out=None,  # not used but required
                     residual=None,  # not used but required
                     **kwargs)
 
@@ -489,7 +491,7 @@ class FusedAddRMSNormDynamicQuantPattern(RMSNormQuantPattern):
                                       scale=scale,
                                       scale_ub=None)
 
-            # result, residual, scale
+            # result, residual_out, scale
             return at1[1], at[2], at1[2]
 
         def replacement(result: torch.Tensor, result_rms: torch.Tensor,
@@ -506,7 +508,7 @@ class FusedAddRMSNormDynamicQuantPattern(RMSNormQuantPattern):
                                      residual_out=residual_out,
                                      residual=residual)
 
-            # result, residual, scale
+            # result, residual_out, scale
             return at[1], at[3], at[2]
 
         inputs = [
@@ -550,11 +552,12 @@ class FusedAddRMSNormDynamicQuantPattern(RMSNormQuantPattern):
             with self.inserting_after_match():
                 # Missing epsilon, scalars cannot be inputs to the pattern
                 kwargs = self.match.kwargs.copy()
+                del kwargs["result_rms"]  # not used in the fused op
 
                 fused_return_mapping = {
                     1: (quant_node, 1),  # result
                     2: (quant_node, 2),  # scale
-                    3: (rms_node, 2),  # residual
+                    3: (rms_node, 2),  # residual_out
                 }
                 self.insert_fused_node(
                     fused_return_mapping,
