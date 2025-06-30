@@ -117,8 +117,8 @@ There are two design points to highlight:
 
 1. We allocate all KVCacheBlock when initializing the KV cache manager to be a block pool. This avoids Python object creation overheads and can easily track all blocks all the time.  
 2. We introduce doubly linked list pointers directly in the KVCacheBlock, so that we could construct a free queue directly. This gives us two benefits:  
-   1. We could have O(1) complexity moving elements in the middle to the tail.  
-   2. We could avoid introducing another Python queue (e.g., `deque`) which has a wrapper to the elements.
+    1. We could have O(1) complexity moving elements in the middle to the tail.  
+    2. We could avoid introducing another Python queue (e.g., `deque`) which has a wrapper to the elements.
 
 As a result, we will have the following components when the KV cache manager is initialized:
 
@@ -135,19 +135,19 @@ As a result, we will have the following components when the KV cache manager is 
 
 **New request:** Workflow for the scheduler to schedule a new request with KV cache block allocation:
 
-1. The scheduler calls `kv_cache_manager.get_computed_blocks()` to get a sequence of blocks that have already been computed. This is done by hashing the prompt tokens in the request and looking up Cache Blocks.  
+1. The scheduler calls `kv_cache_manager.get_computed_blocks()` to get a sequence of blocks that have already been computed. This is done by hashing the prompt tokens in the request and looking up cache blocks.  
 2. The scheduler calls `kv_cache_manager.allocate_slots()`. It does the following steps:  
-   1. Compute the number of new required blocks, and return if there are no sufficient blocks to allocate.  
-   2. “Touch” the computed blocks. It increases the reference count of the computed block by one, and removes the block from the free queue if the block wasn’t used by other requests. This is to avoid these computed blocks being evicted. See the example in the next section for illustration.  
-   3. Allocate new blocks by popping the heads of the free queue. If the head block is a cached block, this also “evicts” the block so that no other requests can reuse it anymore from now on.  
-   4. If an allocated block is already full of tokens, we immediately add it to the Cache Block, so that the block can be reused by other requests in the same batch.
+    1. Compute the number of new required blocks, and return if there are no sufficient blocks to allocate.  
+    2. “Touch” the computed blocks. It increases the reference count of the computed block by one, and removes the block from the free queue if the block wasn’t used by other requests. This is to avoid these computed blocks being evicted. See the example in the next section for illustration.  
+    3. Allocate new blocks by popping the heads of the free queue. If the head block is a cached block, this also “evicts” the block so that no other requests can reuse it anymore from now on.  
+    4. If an allocated block is already full of tokens, we immediately add it to the cache block, so that the block can be reused by other requests in the same batch.
 
 **Running request:** Workflow for the scheduler to schedule a running request with KV cache block allocation:
 
 1. The scheduler calls `kv_cache_manager.allocate_slots()`. It does the following steps:  
-   1. Compute the number of new required blocks, and return if there are no sufficient blocks to allocate.  
-   2. Allocate new blocks by popping the heads of the free queue. If the head block is a cached block, this also “evicts” the block so that no other requests can reuse it anymore from now on.  
-   3. Append token IDs to the slots in existing blocks as well as the new blocks. If a block is full, we add it to the Cache Block to cache it.
+    1. Compute the number of new required blocks, and return if there are no sufficient blocks to allocate.  
+    2. Allocate new blocks by popping the heads of the free queue. If the head block is a cached block, this also “evicts” the block so that no other requests can reuse it anymore from now on.  
+    3. Append token IDs to the slots in existing blocks as well as the new blocks. If a block is full, we add it to the cache block to cache it.
 
 **Duplicated blocks**  
 Assuming block size is 4 and you send a request (Request 1\) with prompt ABCDEF and decoding length 3:
@@ -199,7 +199,7 @@ When a request is finished, we free all its blocks if no other requests are usin
 When the head block (least recently used block) of the free queue is cached, we have to evict the block to prevent it from being used by other requests. Specifically, eviction involves the following steps:
 
 1. Pop the block from the head of the free queue. This is the LRU block to be evicted.  
-2. Remove the block ID from the Cache Block.  
+2. Remove the block ID from the cache block.  
 3. Remove the block hash.
 
 ## Example
