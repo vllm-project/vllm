@@ -423,6 +423,9 @@ class P2pNcclEngine:
 
         self._have_sent_tensor_id(tensor_id)
 
+        logger.debug("🔵[PUT]Send Tensor, %s👉%s, data:%s", self.zmq_address,
+                     remote_address, data)
+
         return True
 
     def get_finished(
