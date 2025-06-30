@@ -139,7 +139,7 @@ class LLM:
             For example, for Phi-3-Vision: `{"num_crops": 4}`.
         override_pooler_config: Initialize non-default pooling config or
             override default pooling config for the pooling model.
-            e.g. `{"pooling_type": "mean", "normalize": false}`.
+            e.g. `PoolerConfig(pooling_type="mean", normalize=False)`.
         compilation_config: Either an integer or a dictionary. If it is an
             integer, it is used as the level of compilation optimization. If it
             is a dictionary, it can specify the full compilation configuration.
