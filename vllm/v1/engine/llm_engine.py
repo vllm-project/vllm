@@ -3,7 +3,6 @@
 
 import threading
 import time
-
 from collections.abc import Mapping
 from copy import copy
 from typing import Any, Callable, Optional, Union
@@ -31,10 +30,10 @@ from vllm.v1.engine.output_processor import OutputProcessor
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.abstract import Executor
-from vllm.v1.metrics.loggers import (PrometheusStatLogger, StatLoggerBase,
-                                     StatLoggerFactory, setup_default_loggers)
+from vllm.v1.metrics.loggers import (StatLoggerBase, StatLoggerFactory,
+                                     setup_default_loggers)
 from vllm.v1.metrics.reader import Metric, get_metrics_snapshot
-from vllm.v1.metrics.stats import SchedulerStats, IterationStats
+from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 
 logger = init_logger(__name__)
 _LOCAL_LOGGING_INTERVAL_SEC = 5
@@ -124,15 +123,13 @@ class LLMEngine:
         # Don't keep the dummy data in memory
         self.reset_mm_cache()
 
-        # If log_stats is enabled, start a background thread to periodically log metrics.
+        # Start background thread for periodic logging if log_stats enabled
         self._log_active = False
-        self._log_thread = None
+        self._log_thread: Optional[threading.Thread] = None
         if self.log_stats:
             self._log_active = True
-            self._log_thread: Optional[threading.Thread] = threading.Thread(
-                target=self._log_loop,
-                daemon=True
-            )
+            self._log_thread = threading.Thread(target=self._log_loop,
+                                                daemon=True)
             self._log_thread.start()
 
     @classmethod
@@ -267,10 +264,10 @@ class LLMEngine:
         if self.stat_loggers is not None:
             assert outputs.scheduler_stats is not None
             self._record_stats(
-                            self.stat_loggers[outputs.engine_index],
-                            scheduler_stats=outputs.scheduler_stats,
-                            iteration_stats=iteration_stats,
-                        )
+                self.stat_loggers[outputs.engine_index],
+                scheduler_stats=outputs.scheduler_stats,
+                iteration_stats=iteration_stats,
+            )
 
         return processed_outputs.request_outputs
 
@@ -312,7 +309,7 @@ class LLMEngine:
         for stat_logger in stat_loggers:
             stat_logger.record(scheduler_stats=scheduler_stats,
                                iteration_stats=iteration_stats)
-    
+
     def _log_loop(self):
         while self._log_active:
             for loggers in self.stat_loggers:
