@@ -717,6 +717,8 @@ class NixlConnectorWorker:
 
         # Create dst descs and xfer side handles. TP workers have same #blocks.
         if engine_id in self.dst_num_blocks:
+            print(f"{self.dst_num_blocks[engine_id]=}")
+            print(f"{nixl_agent_meta.num_blocks=}")
             assert self.dst_num_blocks[engine_id] == nixl_agent_meta.num_blocks
         else:
             self.dst_num_blocks[engine_id] = nixl_agent_meta.num_blocks
