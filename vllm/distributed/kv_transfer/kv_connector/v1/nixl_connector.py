@@ -827,8 +827,6 @@ class NixlConnectorWorker:
         """
         notified_req_ids: set[str] = set()
         for notifs in self.nixl_wrapper.get_new_notifs().values():
-            # WE GET NOTHING FROM HERE IF NUM_WORKERS > 0.
-            print(f"{notifs=}")
             for notif in notifs:
                 req_id, tp_ratio = notif.decode("utf-8").rsplit(":", 1)
                 self.consumer_notification_counts_by_req[req_id] += 1
