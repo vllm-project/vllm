@@ -89,7 +89,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
 
         num_layers = len(vllm_config.compilation_config.static_forward_context)
 
-        logger.ifno("🚧compilation_config:%s", vllm_config.compilation_config)
+        logger.info("🚧compilation_config:%s", vllm_config.compilation_config)
         self.p2p_nccl_engine = P2pNcclEngine(
             local_rank=self._local_rank,
             config=self.config,
