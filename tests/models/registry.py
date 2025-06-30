@@ -448,7 +448,7 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
                                              speculative_model="ronaldbxu/EAGLE-Llama-4-Maverick-17B-128E-Instruct", # noqa: E501
                                              tokenizer="meta-llama/Llama-4-Scout-17B-16E-Instruct", # noqa: E501
                                              speculative_method="eagle",
-                                             max_model_len=10240,
+                                             max_model_len=256,
                                              v1_only=True),
     "Eagle3LlamaForCausalLM": _HfExamplesInfo("yuhuili/EAGLE3-LLaMA3.1-Instruct-8B",  # noqa: E501
                                             trust_remote_code=True,
