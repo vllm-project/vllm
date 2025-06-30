@@ -132,4 +132,5 @@ body[data-md-color-scheme="slate"] .md-nav__item--section > label.md-nav__link .
 .forum-button svg {
   height: 28px;
   opacity: 0.9;
+  transform: translateY(2px);
 }
