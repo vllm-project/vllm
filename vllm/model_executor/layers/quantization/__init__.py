@@ -35,6 +35,7 @@ QuantizationMethods = Literal[
     "moe_wna16",
     "torchao",
     "auto-round",
+    "inc",
 ]
 QUANTIZATION_METHODS: list[str] = list(get_args(QuantizationMethods))
 
@@ -103,6 +104,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .gptq_marlin import GPTQMarlinConfig
     from .gptq_marlin_24 import GPTQMarlin24Config
     from .hqq_marlin import HQQMarlinConfig
+    from .inc import INCConfig
     from .ipex_quant import IPEXConfig
     from .marlin import MarlinConfig
     from .modelopt import ModelOptFp8Config, ModelOptNvFp4Config
@@ -142,6 +144,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "moe_wna16": MoeWNA16Config,
         "torchao": TorchAOConfig,
         "auto-round": AutoRoundConfig,
+        "inc": INCConfig,
     }
     # Update the `method_to_config` with customized quantization methods.
     method_to_config.update(_CUSTOMIZED_METHOD_TO_QUANT_CONFIG)

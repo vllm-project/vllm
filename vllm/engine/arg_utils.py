@@ -170,6 +170,10 @@ def get_type_hints(type_hint: TypeHint) -> set[TypeHint]:
     return type_hints
 
 
+def is_online_quantization(quantization: Any) -> bool:
+    return quantization in ["inc"]
+
+
 @functools.lru_cache(maxsize=30)
 def _compute_kwargs(cls: ConfigType) -> dict[str, Any]:
     cls_docs = get_attr_docs(cls)
@@ -988,6 +992,8 @@ class EngineArgs:
         return LoadConfig(
             load_format=self.load_format,
             download_dir=self.download_dir,
+            device="cpu"
+            if is_online_quantization(self.quantization) else None,
             model_loader_extra_config=self.model_loader_extra_config,
             ignore_patterns=self.ignore_patterns,
             use_tqdm_on_load=self.use_tqdm_on_load,
@@ -1347,7 +1353,8 @@ class EngineArgs:
                 and not envs.is_set("VLLM_ATTENTION_BACKEND")
             ) or envs.VLLM_ATTENTION_BACKEND == "FLASH_ATTN_VLLM_V1"
             supported = False
-            if current_platform.is_rocm():
+            if (current_platform.is_rocm() or current_platform.device_name
+                    == "hpu"):  # handle hpu also for OOT platform
                 supported = True
             elif fp8_attention and will_use_fa:
                 from vllm.attention.utils.fa_utils import (

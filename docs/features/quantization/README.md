@@ -13,6 +13,7 @@ Contents:
 - [BitBLAS](bitblas.md)
 - [GGUF](gguf.md)
 - [GPTQModel](gptqmodel.md)
+- [Inc](inc.md)
 - [INT4 W4A16](int4.md)
 - [INT8 W8A8](int8.md)
 - [FP8 W8A8](fp8.md)
