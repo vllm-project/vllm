@@ -333,6 +333,7 @@ class NixlConnectorWorker:
         import os
         num_workers = 16
         # setting num workers on the prefiller causes the notifs to not be recved???
+        # this is a hack to make sure we set num workers on the prefiller to 1.
         if os.getenv("VLLM_NIXL_SIDE_CHANNEL_PORT", "") == "5557":
             num_workers = None
         print(f"NUM_WORKERS: {num_workers=}")
