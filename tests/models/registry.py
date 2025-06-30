@@ -270,8 +270,11 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                         trust_remote_code=True),
     "Dots1ForCausalLM": _HfExamplesInfo("rednote-hilab/dots.llm1.inst",
                                         min_transformers_version="4.53"),
+<<<<<<< HEAD
     "HunYuanMoEV1ForCausalLM": _HfExamplesInfo("tencent/Hunyuan-A13B-Instruct"),
     "HunYuanDenseV1ForCausalLM": _HfExamplesInfo("tencent/Hunyuan-7B-Instruct"),
+=======
+>>>>>>> upstream/main
     # [Encoder-decoder]
     "BartModel": _HfExamplesInfo("facebook/bart-base"),
     "BartForConditionalGeneration": _HfExamplesInfo("facebook/bart-large-cnn"),
