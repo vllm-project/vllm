@@ -27,29 +27,29 @@ vllm serve mistralai/Mistral-7B-Instruct-v0.1
 
 - Use the `OpenAIGenerator` and `OpenAIChatGenerator` components in Haystack to query the vLLM server.
 
-??? Code
+## Code
 
-    ```python
-    from haystack.components.generators.chat import OpenAIChatGenerator
-    from haystack.dataclasses import ChatMessage
-    from haystack.utils import Secret
+```python
+from haystack.components.generators.chat import OpenAIChatGenerator
+from haystack.dataclasses import ChatMessage
+from haystack.utils import Secret
 
-    generator = OpenAIChatGenerator(
-        # for compatibility with the OpenAI API, a placeholder api_key is needed
-        api_key=Secret.from_token("VLLM-PLACEHOLDER-API-KEY"),
-        model="mistralai/Mistral-7B-Instruct-v0.1",
-        api_base_url="http://{your-vLLM-host-ip}:{your-vLLM-host-port}/v1",
-        generation_kwargs = {"max_tokens": 512}
-    )
+generator = OpenAIChatGenerator(
+    # for compatibility with the OpenAI API, a placeholder api_key is needed
+    api_key=Secret.from_token("VLLM-PLACEHOLDER-API-KEY"),
+    model="mistralai/Mistral-7B-Instruct-v0.1",
+    api_base_url="http://{your-vLLM-host-ip}:{your-vLLM-host-port}/v1",
+    generation_kwargs = {"max_tokens": 512}
+)
 
-    response = generator.run(
-      messages=[ChatMessage.from_user("Hi. Can you help me plan my next trip to Italy?")]
-    )
+response = generator.run(
+  messages=[ChatMessage.from_user("Hi. Can you help me plan my next trip to Italy?")]
+)
 
-    print("-"*30)
-    print(response)
-    print("-"*30)
-    ```
+print("-"*30)
+print(response)
+print("-"*30)
+```
 
 ```console
 ------------------------------
