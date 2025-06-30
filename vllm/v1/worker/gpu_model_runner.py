@@ -1193,8 +1193,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         for i, token_ids in enumerate(valid_sampled_token_ids):
             req_id = self.input_batch.req_ids[i]
             if req_id not in self.acceptance_stats:
-                self.acceptance_stats[req_id] = []
-            self.acceptance_stats[req_id].append(len(token_ids))
+                self.acceptance_stats[req_id] = {
+                    'acc_len': [],
+                    'acc_prob': [],
+                    'acc_entropy': [],
+                }
+            self.acceptance_stats[req_id]['acc_len'].append(len(token_ids))
         # Force 1 generated token per request.
         for i, token_ids in enumerate(valid_sampled_token_ids):
             valid_sampled_token_ids[i] = token_ids[:1]
@@ -1274,7 +1278,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
             if self.use_aux_hidden_state_outputs:
                 target_hidden_states = torch.cat(target_hidden_states, dim=-1)
-            draft_token_ids = self.drafter.propose(
+            draft_token_ids, draft_probs, draft_entropy = self.drafter.propose(
                 target_token_ids=target_token_ids,
                 target_positions=target_positions,
                 target_hidden_states=target_hidden_states,
@@ -1285,6 +1289,23 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 sampling_metadata=sampling_metadata,
             )
             spec_token_ids = draft_token_ids.tolist()
+
+        for req_id in self.input_batch.req_ids:
+            if req_id not in self.acceptance_stats:
+                self.acceptance_stats[req_id] = {
+                    'acc_len': [],
+                    'acc_prob': [],
+                    'acc_entropy': [],
+                }
+            req_index = self.input_batch.req_id_to_index[req_id]
+            step_probs, step_entropy = [], []
+            for prob, entropy in zip(
+                    draft_probs, draft_entropy):
+                step_probs.append(prob[req_index].item())
+                step_entropy.append(entropy[req_index].item())
+            
+            self.acceptance_stats[req_id]['acc_prob'].append(step_probs)
+            self.acceptance_stats[req_id]['acc_entropy'].append(step_entropy)
 
         # Clear KVConnector state after all KVs are generated.
         if has_kv_transfer_group():
