@@ -6,7 +6,6 @@ from functools import cached_property, partial
 from typing import Any, Literal, Optional, TypedDict, Union
 
 import numpy as np
-import PIL
 import torch
 import torch.nn as nn
 from einops import rearrange
@@ -17,9 +16,6 @@ from transformers.activations import ACT2FN, GELUActivation
 from transformers.feature_extraction_utils import BatchFeature
 from transformers.modeling_outputs import (BaseModelOutput,
                                            BaseModelOutputWithPooling)
-from transformers.processing_utils import (ProcessingKwargs, ProcessorMixin,
-                                           Unpack, VideosKwargs)
-from transformers.tokenization_utils_base import PreTokenizedInput, TextInput
 from transformers.utils import torch_int
 
 from vllm.config import VllmConfig
@@ -60,47 +56,31 @@ from .utils import (AutoWeightsLoader, WeightsMapper,
                     maybe_prefix, merge_multimodal_embeddings)
 from .vision import get_vit_attn_backend
 
-ImageInput = Union[
-    "PIL.Image.Image",
-    np.ndarray,
-    "torch.Tensor",
-    list["PIL.Image.Image"],
-    list[np.ndarray],
-    list["torch.Tensor"],
-]
-
-VideoInput = Union[
-    list["PIL.Image.Image"],
-    "np.ndarray",
-    "torch.Tensor",
-    list["np.ndarray"],
-    list["torch.Tensor"],
-    list[list["PIL.Image.Image"]],
-    list[list["np.ndarrray"]],
-    list[list["torch.Tensor"]],
-]
-
 _MAX_FRAMES_PER_VIDEO = 16
+_MAX_IMAGE_SIZE = 9999999
 
 
 def smart_resize(
     height: int,
     width: int,
     factor: int = 28,
-    min_pixels: int = 56 * 56,
-    max_pixels: int = 14 * 14 * 4096,
+    min_pixels: int = 28 * 28 * 130,
+    max_pixels: int = 28 * 28 * 1280,
 ):
-
     if height < factor:
-        print("smart_resize: "
-              "height={height} < factor={factor}"
-              ", reset height=factor")
+        print(
+            "smart_resize: height=%s < factor=%s, reset height=factor",
+            height,
+            factor,
+        )
         width = round((width * factor) / height)
         height = factor
 
     if width < factor:
         print(
-            f"smart_resize: width={width} < factor={factor}, reset width=factor"
+            "smart_resize: width=%s < factor=%s, reset width=factor",
+            width,
+            factor,
         )
         height = round((height * factor) / width)
         width = factor
@@ -119,9 +99,6 @@ def smart_resize(
         h_bar = math.ceil(height * beta / factor) * factor
         w_bar = math.ceil(width * beta / factor) * factor
     return h_bar, w_bar
-
-
-# === Vision Inputs === #
 
 
 class KeyeImagePixelInputs(TypedDict):
@@ -200,206 +177,6 @@ class KeyeVideoEmbeddingInputs(TypedDict):
 KeyeVideoInputs = Union[KeyeVideoPixelInputs, KeyeVideoEmbeddingInputs]
 
 
-class KeyeVideosProcessorKwargs(VideosKwargs, total=False):
-    fps: Union[list[float], float]
-
-
-class KeyeProcessorKwargs(ProcessingKwargs, total=False):
-    videos_kwargs: KeyeVideosProcessorKwargs
-    _defaults = {
-        "text_kwargs": {
-            "padding": False,
-        },
-        "videos_kwargs": {
-            "fps": 2.0
-        },
-    }
-
-
-class KeyeProcessor(ProcessorMixin):
-
-    attributes = ["image_processor", "tokenizer"]
-    valid_kwargs = [
-        "chat_template",
-        "image_std",
-        "min_pixels",
-        "image_mean",
-        "merge_size",
-        "image_processor_type",
-        "temporal_patch_size",
-        "patch_size",
-        "max_pixels",
-    ]
-
-    image_processor_class = "AutoImageProcessor"
-    tokenizer_class = (
-        "Qwen2Tokenizer",
-        "Qwen2TokenizerFast",
-    )
-
-    def __init__(
-        self,
-        image_processor=None,
-        tokenizer=None,
-        chat_template=None,
-        **kwargs,
-    ):
-        self.image_token = ("<|image_pad|>"
-                            if not hasattr(tokenizer, "image_token") else
-                            tokenizer.image_token)
-        self.video_token = ("<|video_pad|>"
-                            if not hasattr(tokenizer, "video_token") else
-                            tokenizer.video_token)
-        super().__init__(
-            image_processor,
-            tokenizer,
-            chat_template=chat_template,
-        )
-
-    def __call__(
-        self,
-        images: ImageInput = None,
-        text: Union[
-            TextInput,
-            PreTokenizedInput,
-            list[TextInput],
-            list[PreTokenizedInput],
-        ] = None,
-        videos: VideoInput = None,
-        **kwargs: Unpack[KeyeProcessorKwargs],
-    ) -> BatchFeature:
-
-        output_kwargs = self._merge_kwargs(
-            KeyeProcessorKwargs,
-            tokenizer_init_kwargs=self.tokenizer.init_kwargs,
-            **kwargs,
-        )
-
-        if images is not None:
-            image_inputs = self.image_processor(images=images,
-                                                return_tensors="pt")
-            image_inputs["pixel_values"] = image_inputs["pixel_values"]
-            image_grid_thw = image_inputs["image_grid_thw"]
-
-        else:
-            image_inputs = {}
-            image_grid_thw = None
-
-        if videos is not None:
-            # TODO: add video processing
-            videos_inputs = self.image_processor(
-                images=None,
-                videos=videos,
-                **output_kwargs["images_kwargs"],
-            )
-            video_grid_thw = videos_inputs["video_grid_thw"]
-
-            fps = output_kwargs["videos_kwargs"].pop("fps", 2.0)
-            if isinstance(fps, (int, float)):
-                second_per_grid_ts = [
-                    self.image_processor.temporal_patch_size / fps
-                ] * len(video_grid_thw)
-            elif hasattr(fps, "__len__") and len(fps) == len(video_grid_thw):
-                second_per_grid_ts = [
-                    self.image_processor.temporal_patch_size / tmp
-                    for tmp in fps
-                ]
-            else:
-                raise ValueError(
-                    "The length of fps "
-                    "({len(fps) if hasattr(fps, '__len__') else fps}) "
-                    "must be equal to the length of video_grid_thw "
-                    "({len(video_grid_thw)}) "
-                    "or fps should be a single number.")
-            videos_inputs.update({"second_per_grid_ts": second_per_grid_ts})
-
-        else:
-            videos_inputs = {}
-            video_grid_thw = None
-
-        if not isinstance(text, list):
-            text = [text]
-
-        if image_grid_thw is not None:
-            index = 0
-            for i in range(len(text)):
-                while self.image_token in text[i]:
-                    text[i] = text[i].replace(
-                        self.image_token,
-                        "<|placeholder|>" * (image_grid_thw[index].prod() //
-                                             self.image_processor.merge_size //
-                                             self.image_processor.merge_size),
-                        1,
-                    )
-                    index += 1
-                text[i] = text[i].replace("<|placeholder|>", self.image_token)
-
-        if video_grid_thw is not None:
-            index = 0
-            for i in range(len(text)):
-                while self.video_token in text[i]:
-                    text[i] = text[i].replace(
-                        self.video_token,
-                        "<|placeholder|>" * (video_grid_thw[index].prod() //
-                                             self.image_processor.merge_size //
-                                             self.image_processor.merge_size),
-                        1,
-                    )
-                    index += 1
-                text[i] = text[i].replace("<|placeholder|>", self.video_token)
-
-        text_inputs = self.tokenizer(text, **output_kwargs["text_kwargs"])
-
-        return BatchFeature(data={
-            **text_inputs,
-            **image_inputs,
-            **videos_inputs,
-        })
-
-    def batch_decode(self, *args, **kwargs):
-        """This method forwards all its arguments to
-        Qwen2TokenizerFast's
-        [`~PreTrainedTokenizer.batch_decode`].
-
-        Please refer to the docstring of this method for
-        more information.
-        """
-        return self.tokenizer.batch_decode(*args, **kwargs)
-
-    def decode(self, *args, **kwargs):
-        """This method forwards all its arguments to
-        Qwen2TokenizerFast's
-        [`~PreTrainedTokenizer.decode`].
-
-        Please refer to the docstring of this method for
-        more information.
-        """
-        return self.tokenizer.decode(*args, **kwargs)
-
-    def post_process_image_text_to_text(
-        self,
-        generated_outputs,
-        skip_special_tokens=True,
-        clean_up_tokenization_spaces=False,
-        **kwargs,
-    ):
-
-        return self.tokenizer.batch_decode(
-            generated_outputs,
-            skip_special_tokens=skip_special_tokens,
-            clean_up_tokenization_spaces=clean_up_tokenization_spaces,
-            **kwargs,
-        )
-
-    @property
-    def model_input_names(self):
-        tokenizer_input_names = self.tokenizer.model_input_names
-        image_processor_input_names = self.image_processor.model_input_names
-        names_from_processor = list(
-            dict.fromkeys(tokenizer_input_names + image_processor_input_names))
-        return names_from_processor + ["second_per_grid_ts"]
-
-
 class SiglipVisionEmbeddings(nn.Module):
 
     def __init__(self, config: PretrainedConfig):
@@ -467,21 +244,11 @@ class SiglipVisionEmbeddings(nn.Module):
         patch_pos_embed = patch_pos_embed.permute(0, 2, 3, 1).view(1, -1, dim)
         return patch_pos_embed
 
-    @staticmethod
-    def flatten_list(image_grid_thw):
-        tmp_image_grid_thw = list()
-        for image_grid in image_grid_thw:
-            if isinstance(image_grid, list):
-                tmp_image_grid_thw.extend(image_grid)
-            else:
-                tmp_image_grid_thw.append(image_grid)
-        return tmp_image_grid_thw
-
     def fetch_position_embedding_lfu_cache(self,
                                            embeddings,
                                            h,
                                            w,
-                                           max_cache=20):
+                                           max_cache: int = 20):
         grid = (h, w)
         if grid in self.cache_position_embedding:
             self.cache_position_count[grid] += 1
@@ -514,7 +281,10 @@ class SiglipVisionEmbeddings(nn.Module):
         if pixel_values.dim() == 4:
             pixel_values = pixel_values.unsqueeze(0)
         if pixel_values.dim() == 5:
-            assert position_ids is not None
+            if position_ids is None:
+                raise ValueError(
+                    "position_ids cannot be None when pixel_values.dim() is 5."
+                )
             (
                 batch_size,
                 squence_len,
@@ -546,7 +316,8 @@ class SiglipVisionEmbeddings(nn.Module):
                     position_ids)
             return embeddings
         else:
-            raise NotImplementedError(str(pixel_values.shape))
+            raise ValueError("Unsupported pixel_values dimension:"
+                             f" {pixel_values.dim()}. Expected 4 or 5.")
 
 
 def apply_rotary_pos_emb_flashatt(
@@ -640,7 +411,9 @@ class SiglipAttention(nn.Module):
                 self.head_dim,
             ).squeeze(0)
         else:
-            assert cu_seqlens is not None, "Rope support flash attn only."
+            if cu_seqlens is None:
+                raise ValueError(
+                    "cu_seqlens cannot be None when rope_emb is not None.")
             cos, sin = rope_emb
             q = q.view(*q.shape[:-1], self.num_heads, self.head_dim)
             k = k.view(
@@ -948,7 +721,9 @@ class SiglipVisionTransformer(nn.Module):
         last_hidden_state = self.post_layernorm(last_hidden_state)
 
         sample_hidden_state = list()
-        assert cu_seqlens is not None
+        if cu_seqlens is None:
+            raise ValueError("cu_seqlens cannot be None for "
+                             "SiglipVisionTransformer output processing.")
         for i in range(cu_seqlens.shape[0] - 1):
             start = cu_seqlens[i]
             end = cu_seqlens[i + 1]
@@ -1178,7 +953,6 @@ class Projector(nn.Module):
                                                  image_grid_thw):
                 image_feature = self.pre_norm(image_feature)
                 t, h, w = image_grid
-                from einops import rearrange
 
                 image_feature = rearrange(
                     image_feature,
@@ -1278,9 +1052,8 @@ class KeyeProcessingInfo(BaseProcessingInfo):
         max_pixels: Optional[int] = None,
         size: Optional[dict[str, int]] = None,
         **kwargs: object,
-    ) -> KeyeProcessor:
+    ):
         return self.ctx.get_hf_processor(
-            KeyeProcessor,
             image_processor=self.get_image_processor(
                 min_pixels=min_pixels,
                 max_pixels=max_pixels,
@@ -1427,8 +1200,8 @@ class KeyeProcessingInfo(BaseProcessingInfo):
 
     def get_image_size_with_most_features(self, ) -> ImageSize:
         max_image_size, _ = self._get_vision_info(
-            image_width=9999999,
-            image_height=9999999,
+            image_width=_MAX_IMAGE_SIZE,
+            image_height=_MAX_IMAGE_SIZE,
             image_processor=None,
         )
         return max_image_size
@@ -1611,7 +1384,6 @@ class KeyeForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsLoRA,
         ],
     }
 
-    # To ensure correct weight loading and mapping.
     hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={
         "lm_head.": "language_model.lm_head.",
         "model.": "language_model.model.",
@@ -1776,7 +1548,8 @@ class KeyeForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsLoRA,
             cu_seqlens.append(cu_seqlens[-1] + numel)
 
         if image_input["type"] == "image_embeds":
-            raise AssertionError()
+            raise ValueError(
+                "Image embeddings are not supported for this processing path.")
         else:
             pixel_values = image_input["pixel_values"].type(self.visual.dtype)
             siglip_position_ids = torch.concat(siglip_position_ids,
@@ -1822,7 +1595,8 @@ class KeyeForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsLoRA,
             cu_seqlens.append(cu_seqlens[-1] + numel)
 
         if video_input["type"] == "video_embeds":
-            raise AssertionError()
+            raise ValueError(
+                "Video embeddings are not supported for this processing path.")
         else:
             pixel_values_videos = video_input["pixel_values_videos"].type(
                 self.visual.dtype)
@@ -1909,32 +1683,21 @@ class KeyeForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsLoRA,
         inputs_embeds = self.get_input_embeddings(input_ids)
         if image_input is not None:
             image_embeds = self._process_image_input(image_input)
-            image_embeds = torch.cat(image_embeds, dim=0)
-
-            mask = input_ids == self.config.image_token_id
-            mask_unsqueezed = mask.unsqueeze(-1)
-            mask_expanded = mask_unsqueezed.expand_as(inputs_embeds)
-            image_mask = mask_expanded.to(inputs_embeds.device)
-
-            image_embeds = image_embeds.to(inputs_embeds.device,
-                                           inputs_embeds.dtype)
-            inputs_embeds = inputs_embeds.masked_scatter(
-                image_mask, image_embeds)
+            inputs_embeds = merge_multimodal_embeddings(
+                input_ids,
+                inputs_embeds,
+                image_embeds,
+                placeholder_token_id=self.config.image_token_id,
+            )
 
         if video_input is not None:
             video_embeds = self._process_video_input(video_input)
-            video_embeds = torch.cat(video_embeds, dim=0)
-
-            mask = input_ids == self.config.video_token_id
-            mask_unsqueezed = mask.unsqueeze(-1)
-            mask_expanded = mask_unsqueezed.expand_as(inputs_embeds)
-            video_mask = mask_expanded.to(inputs_embeds.device)
-
-            video_embeds = video_embeds.to(inputs_embeds.device,
-                                           inputs_embeds.dtype)
-            inputs_embeds = inputs_embeds.masked_scatter(
-                video_mask, video_embeds)
-
+            inputs_embeds = merge_multimodal_embeddings(
+                input_ids,
+                inputs_embeds,
+                video_embeds,
+                placeholder_token_id=self.config.video_token_id,
+            )
         return inputs_embeds
 
     def forward(
