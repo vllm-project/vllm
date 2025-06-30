@@ -54,7 +54,7 @@ class AiterMLADecodeMetadata(MLACommonDecodeMetadata):
     # The number of entries in the last page of each request in
     # the paged kv cache, shape: [batch_size]
     paged_kv_last_page_len: Optional[torch.Tensor] = None
-    # # The query indptr, shape : [num_decode + 1]
+    # The query indptr, shape : [num_decode + 1]
     qo_indptr: Optional[torch.Tensor] = None
 
 
