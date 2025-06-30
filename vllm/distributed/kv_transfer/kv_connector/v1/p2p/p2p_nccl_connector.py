@@ -354,6 +354,9 @@ class P2pNcclConnector(KVConnectorBase_V1):
                 # the request's prompt is chunked prefill
                 if num_tokens < len(new_req.prompt_token_ids):
                     # 'CachedRequestData' has no attribute 'prompt_token_ids'
+                    logger.info(
+                        "🚧%s is chunked prefill, num_token:%d, num_prompt:%d",
+                        request_id, num_token, len(new_req.prompt_token_ids))
                     self.chunked_prefill[new_req.req_id] = (
                         new_req.block_ids[0], new_req.prompt_token_ids)
                     continue
@@ -384,6 +387,9 @@ class P2pNcclConnector(KVConnectorBase_V1):
                 prompt_token_ids = self.chunked_prefill[cached_req.req_id][1]
                 # the request's prompt is chunked prefill again
                 if num_tokens < len(prompt_token_ids):
+                    logger.info("🚧%s is chunked prefill again, num_token:%d, "
+                                "num_prompt:%d", request_id, num_token,
+                                len(prompt_token_ids))
                     self.chunked_prefill[cached_req.req_id] = (
                         block_ids, prompt_token_ids)
                     continue
@@ -404,6 +410,8 @@ class P2pNcclConnector(KVConnectorBase_V1):
                 total_tokens = cached_req.num_computed_tokens + 1
                 token_ids = request.all_token_ids[:total_tokens]
 
+                logger.info("🚧%s is resumed from preemption, total_tokens:%d",
+                            cached_req.req_id, total_tokens)
                 # NOTE(rob): For resumed req, new_block_ids is all
                 # of the block_ids for the request.
                 block_ids = cached_req.new_block_ids[0]
