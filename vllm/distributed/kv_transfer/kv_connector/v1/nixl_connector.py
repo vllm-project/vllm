@@ -81,6 +81,12 @@ class ReqMeta:
 
 
 class HandshakeStrategy(ABC):
+    """
+    Abstract base class for handshake strategies.
+
+    This class is used to abstract the handshake process for different
+    communication protocols.
+    """
 
     def __init__(self, nixl_wrapper, tp_rank: int, tp_size: int,
                  side_channel_port: int, engine_id: str):
@@ -105,6 +111,12 @@ class HandshakeStrategy(ABC):
 
 
 class ZmqHandshakeStrategy(HandshakeStrategy):
+    """
+    Handshake strategy that uses a ZMQ socket at port defined by
+    VLLM_NIXL_SIDE_CHANNEL_PORT + tp_rank for communication.
+
+    This is the default handshake strategy for NIXL, and is P2P.
+    """
 
     def __init__(self, nixl_wrapper, tp_rank: int, tp_size: int,
                  side_channel_port: int, engine_id: str,
@@ -214,6 +226,11 @@ class ZmqHandshakeStrategy(HandshakeStrategy):
 
 
 class HttpHandshakeStrategy(HandshakeStrategy):
+    """
+    Handshake strategy that uses HTTP requests to fetch metadata from a
+    remote server. This is done through the front-end, and is
+    North-South, not P2P.
+    """
 
     def __init__(self, nixl_wrapper, tp_rank: int, tp_size: int,
                  side_channel_port: int, engine_id: str,
