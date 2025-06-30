@@ -596,16 +596,22 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
             if self.model_config.is_encoder_decoder:
                 # Save encoder-decoder data for use in subsequent decode steps
                 # (may need to be updated for future models)
-                tt_out, cross_attention_masks, \
-                full_text_row_masked_out_mask = outputs
+                tt_out, prefill_cross_attention_masks, \
+                prefill_full_text_row_masked_out_mask, \
+                decode_cross_attention_masks, \
+                 decode_full_text_row_masked_out_mask = outputs
                 if self.cached_enc_dec_data is None:
                     self.cached_enc_dec_data = {}
                 for i, seq_id in enumerate(model_input.seq_groups):
                     enc_dec_data = {
-                        "cross_attention_masks":
-                        cross_attention_masks[i],
-                        "full_text_row_masked_out_mask":
-                        full_text_row_masked_out_mask[i]
+                        "prefill_cross_attention_masks":
+                        prefill_cross_attention_masks[i],
+                        "prefill_full_text_row_masked_out_mask":
+                        prefill_full_text_row_masked_out_mask[i],
+                        "decode_cross_attention_masks":
+                        decode_cross_attention_masks[i],
+                        "decode_full_text_row_masked_out_mask":
+                        decode_full_text_row_masked_out_mask[i]
                     }
                     self.cached_enc_dec_data[seq_id] = enc_dec_data
             else:
@@ -615,19 +621,35 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                 assert self.cached_enc_dec_data is not None
 
                 # Use encoder-decoder data from prefill step
-                cross_attention_masks = [
-                    self.cached_enc_dec_data[seq_id]["cross_attention_masks"]
+                prefill_cross_attention_masks = [
+                    self.cached_enc_dec_data[seq_id]
+                    ["prefill_cross_attention_masks"]
                     for seq_id in model_input.seq_groups
                 ]
-                full_text_row_masked_out_mask = [
+                prefill_full_text_row_masked_out_mask = [
                     self.cached_enc_dec_data[seq_id]
-                    ["full_text_row_masked_out_mask"]
+                    ["prefill_full_text_row_masked_out_mask"]
+                    for seq_id in model_input.seq_groups
+                ]
+                decode_cross_attention_masks = [
+                    self.cached_enc_dec_data[seq_id]
+                    ["decode_cross_attention_masks"]
+                    for seq_id in model_input.seq_groups
+                ]
+                decode_full_text_row_masked_out_mask = [
+                    self.cached_enc_dec_data[seq_id]
+                    ["decode_full_text_row_masked_out_mask"]
                     for seq_id in model_input.seq_groups
                 ]
                 enc_dec_kwargs = {
-                    "cross_attention_masks": cross_attention_masks,
-                    "full_text_row_masked_out_mask":
-                    full_text_row_masked_out_mask
+                    "prefill_cross_attention_masks":
+                    prefill_cross_attention_masks,
+                    "prefill_full_text_row_masked_out_mask":
+                    prefill_full_text_row_masked_out_mask,
+                    "decode_cross_attention_masks":
+                    decode_cross_attention_masks,
+                    "decode_full_text_row_masked_out_mask":
+                    decode_full_text_row_masked_out_mask
                 }
             else:
                 enc_dec_kwargs = {}
