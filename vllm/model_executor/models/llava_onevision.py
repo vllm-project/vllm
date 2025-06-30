@@ -286,6 +286,7 @@ class LlavaOnevisionMultiModalProcessor(
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         mm_data = dict(mm_data)
         videos = mm_data.pop("videos", [])
@@ -296,6 +297,7 @@ class LlavaOnevisionMultiModalProcessor(
                 prompt=prompt,
                 mm_data=mm_data,
                 mm_kwargs=mm_kwargs,
+                tok_kwargs=tok_kwargs,
             )
 
         # LLaVA-OneVision processor doesn't support multiple videos
@@ -310,6 +312,7 @@ class LlavaOnevisionMultiModalProcessor(
             prompt=prompt,
             mm_data={},
             mm_kwargs=mm_kwargs,
+            tok_kwargs=tok_kwargs,
         )
 
         images = mm_data.pop("images", [])
@@ -319,6 +322,7 @@ class LlavaOnevisionMultiModalProcessor(
                 prompt=image_token * len(images),
                 mm_data={"images": images},
                 mm_kwargs=mm_kwargs,
+                tok_kwargs=tok_kwargs,
             )
             image_outputs = {
                 k: v
@@ -334,6 +338,7 @@ class LlavaOnevisionMultiModalProcessor(
                 prompt=video_token,
                 mm_data={"videos": video},
                 mm_kwargs=mm_kwargs,
+                tok_kwargs=tok_kwargs,
             )
 
             pixel_values_videos.append(item_outputs["pixel_values_videos"][0])
@@ -352,11 +357,13 @@ class LlavaOnevisionMultiModalProcessor(
         prompt_text: str,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
+        tokenization_kwargs: Mapping[str, object],
     ) -> bool:
         base_result = super()._hf_processor_applies_updates(
             prompt_text=prompt_text,
             mm_items=mm_items,
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+            tokenization_kwargs=tokenization_kwargs,
         )
 
         return base_result and mm_items.get_count("video", strict=False) == 0

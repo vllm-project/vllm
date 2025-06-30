@@ -481,6 +481,13 @@ class LLM:
             # Use default sampling params.
             sampling_params = self.get_default_sampling_params()
 
+        tokenization_kwargs: dict[str, Any] = {}
+        truncate_prompt_tokens = None
+        if isinstance(sampling_params, SamplingParams):
+            truncate_prompt_tokens = sampling_params.truncate_prompt_tokens
+        _validate_truncation_size(self.llm_engine.model_config.max_model_len,
+                                  truncate_prompt_tokens, tokenization_kwargs)
+
         self._validate_and_add_requests(
             prompts=parsed_prompts,
             params=sampling_params,
@@ -488,6 +495,7 @@ class LLM:
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
             guided_options=guided_options_request,
+            tokenization_kwargs=tokenization_kwargs,
             priority=priority,
         )
 

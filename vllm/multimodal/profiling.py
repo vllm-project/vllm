@@ -30,6 +30,7 @@ class ProcessorInputs:
     prompt: Union[str, list[int]]
     mm_data: MultiModalDataDict
     hf_processor_mm_kwargs: Mapping[str, object] = field(default_factory=dict)
+    tokenization_kwargs: Mapping[str, object] = field(default_factory=dict)
 
 
 class DummyEncoderData(NamedTuple):
@@ -90,8 +91,11 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
         """
         dummy_text = self.get_dummy_text(mm_counts)
         dummy_mm_data = self.get_dummy_mm_data(seq_len, mm_counts)
+        tokenization_kwargs = {"truncation": False}
 
-        return ProcessorInputs(prompt=dummy_text, mm_data=dummy_mm_data)
+        return ProcessorInputs(prompt=dummy_text,
+                               mm_data=dummy_mm_data,
+                               tokenization_kwargs=tokenization_kwargs)
 
     def _get_dummy_audios(
         self,
@@ -170,6 +174,7 @@ class MultiModalProfiler(Generic[_I]):
             prompt=processor_inputs.prompt,
             mm_data=processor_inputs.mm_data,
             hf_processor_mm_kwargs=processor_inputs.hf_processor_mm_kwargs,
+            tokenization_kwargs=processor_inputs.tokenization_kwargs,
         )
 
     def _get_mm_num_tokens(

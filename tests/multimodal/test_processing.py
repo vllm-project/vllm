@@ -1086,6 +1086,7 @@ def test_hf_processor_kwargs(model_id, call_kwargs, expected_kwargs):
         prompt="",
         mm_data={},
         mm_kwargs=call_kwargs,
+        tok_kwargs={},
     )
 
     assert out_kwargs == expected_kwargs
