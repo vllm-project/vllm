@@ -92,6 +92,20 @@ class CachedRequestData:
     new_block_ids: list[tuple[list[int], ...]]
     num_computed_tokens: list[int]
 
+    @property
+    def num_reqs(self) -> int:
+        return len(self.req_ids)
+
+    @classmethod
+    def make_empty(cls) -> CachedRequestData:
+        return cls(
+            req_ids=[],
+            resumed_from_preemption=[],
+            new_token_ids=[],
+            new_block_ids=[],
+            num_computed_tokens=[],
+        )
+
 
 @dataclass
 class SchedulerOutput:
