@@ -333,8 +333,8 @@ class NixlConnectorWorker:
         self.nixl_wrapper = NixlWrapper(str(uuid.uuid4()),
                                         None,
                                         num_workers=None,
-                                        # num_shared_workers=16) # setting this > 0 causes the notifs to be recved
-                                        num_shared_workers=None) 
+                                        num_shared_workers=16) # setting this > 0 causes the notifs to be recved
+                                        # num_shared_workers=None) 
         # Map of engine_id -> {rank0: agent_name0, rank1: agent_name1..}.
         self._remote_agents: dict[str, dict[int, str]] = defaultdict(dict)
 
@@ -864,7 +864,7 @@ class NixlConnectorWorker:
                 end = time.perf_counter()
                 print(f"========= SEND NOTIF TIME: {end - start} =========")
             else:
-                transfers[req_id] = (new_handles, notif_id, agent_name)
+                transfers[req_id] = (new_handles, agent_name, notif_id)
 
         return done_req_ids
 
@@ -977,7 +977,7 @@ class NixlConnectorWorker:
         assert len(local_block_descs_ids) == len(remote_block_descs_ids)
 
         # Prepare transfer with Nixl.
-        CHUNK_SIZE = 1000
+        CHUNK_SIZE = 100
         handles = []
         for i in range(0, len(local_block_descs_ids), CHUNK_SIZE):
             handles.append(
