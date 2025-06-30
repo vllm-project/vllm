@@ -1,5 +1,5 @@
 ---
-title: Registering a Model to vLLM
+title: Registering a Model
 ---
 [](){ #new-model-registration }
 

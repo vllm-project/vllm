@@ -151,6 +151,14 @@ the terms of the DCO.
 
 Using `-s` with `git commit` will automatically add this header.
 
+!!! tip
+    You can enable automatic sign-off via your IDE:
+  
+    - **PyCharm**: Click on the `Show Commit Options` icon to the right of the `Commit and Push...` button in the `Commit` window.
+      It will bring up a `git` window where you can modify the `Author` and enable `Sign-off commit`.
+    - **VSCode**: Open the [Settings editor](https://code.visualstudio.com/docs/configure/settings)
+      and enable the `Git: Always Sign Off` (`git.alwaysSignOff`) field.
+
 ### PR Title and Classification
 
 Only specific types of PRs will be reviewed. The PR title is prefixed

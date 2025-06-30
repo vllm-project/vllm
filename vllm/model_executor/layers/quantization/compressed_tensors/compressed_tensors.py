@@ -33,6 +33,8 @@ from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     find_matched_target, is_activation_quantization_format,
     should_ignore_layer)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
+from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (  # noqa: E501
+    cutlass_fp4_supported)
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
@@ -375,7 +377,7 @@ class CompressedTensorsConfig(QuantizationConfig):
 
         if is_activation_quantization_format(self.quant_format):
             if self._is_fp4a4_nvfp4(weight_quant, input_quant):
-                if CompressedTensorsW4A4Fp4.cutlass_fp4_supported(
+                if cutlass_fp4_supported(
                 ) or envs.VLLM_USE_NVFP4_CT_EMULATIONS:
                     return CompressedTensorsW4A4Fp4()
                 else:

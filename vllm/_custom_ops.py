@@ -5,7 +5,6 @@ import contextlib
 from typing import TYPE_CHECKING, Optional, Union
 
 import torch
-import torch.library
 
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -1275,8 +1274,7 @@ def scaled_fp8_quant(
             scale = torch.zeros(1, device=input.device, dtype=torch.float32)
             torch.ops._C.dynamic_scaled_fp8_quant(output, input, scale)
     else:
-        # num_token_padding not implemented for this case
-        assert (scale.numel() == 1 and num_token_padding is None)
+        assert scale.numel() == 1
         torch.ops._C.static_scaled_fp8_quant(output, input, scale)
 
     return output, scale
@@ -1747,6 +1745,38 @@ def open_mem_handle(mem_handle: torch.Tensor):
 
 def free_shared_buffer(ptr: int) -> None:
     torch.ops._C_custom_ar.free_shared_buffer(ptr)
+
+
+# quick all reduce
+def init_custom_qr(rank: int,
+                   world_size: int,
+                   qr_max_size: Optional[int] = None) -> int:
+    return torch.ops._C_custom_ar.init_custom_qr(rank, world_size, qr_max_size)
+
+
+def qr_destroy(fa: int) -> None:
+    torch.ops._C_custom_ar.qr_destroy(fa)
+
+
+def qr_all_reduce(fa: int,
+                  inp: torch.Tensor,
+                  out: torch.Tensor,
+                  quant_level: int,
+                  cast_bf2half: bool = False) -> None:
+    torch.ops._C_custom_ar.qr_all_reduce(fa, inp, out, quant_level,
+                                         cast_bf2half)
+
+
+def qr_get_handle(fa: int) -> torch.Tensor:
+    return torch.ops._C_custom_ar.qr_get_handle(fa)
+
+
+def qr_open_handles(fa: int, handles: list[torch.Tensor]) -> None:
+    return torch.ops._C_custom_ar.qr_open_handles(fa, handles)
+
+
+def qr_max_size() -> int:
+    return torch.ops._C_custom_ar.qr_max_size()
 
 
 def get_flash_mla_metadata(
