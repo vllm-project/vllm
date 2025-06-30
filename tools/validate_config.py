@@ -126,24 +126,32 @@ def validate_class(class_node: ast.ClassDef):
                             ".", stmt)
 
 
-def validate_config(file_path: str):
-    print(f"validating {file_path} config dataclasses ", end="")
-    with open(file_path, encoding="utf-8") as f:
-        source = f.read()
-
-    tree = ast.parse(source, filename=file_path)
+def validate_ast(tree: ast.stmt):
     ConfigValidator().visit(tree)
-    print("✅")
+
+
+def validate_file(file_path: str):
+    try:
+        print(f"validating {file_path} config dataclasses ", end="")
+        with open(file_path, encoding="utf-8") as f:
+            source = f.read()
+
+        tree = ast.parse(source, filename=file_path)
+        validate_ast(tree)
+    except ValueError as e:
+        print(e)
+        SystemExit(2)
+    else:
+        print("✅")
 
 
 def fail(message: str, node: ast.stmt):
-    print(f"❌ line({node.lineno}): {message}")
-    sys.exit(2)
+    raise ValueError(f"❌ line({node.lineno}): {message}")
 
 
 def main():
     for filename in sys.argv[1:]:
-        validate_config(filename)
+        validate_file(filename)
 
 
 if __name__ == "__main__":
