@@ -17,7 +17,7 @@ from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
-from vllm.outputs import RequestOutput
+from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
@@ -228,8 +228,7 @@ class AsyncLLM(EngineClient):
         if self.errored:
             raise EngineDeadError()
 
-        assert isinstance(params, SamplingParams), \
-            "Pooling is not supported in V1"
+        is_pooling = isinstance(params, PoolingParams)
 
         # Create a new output collector for the request.
         queue = RequestOutputCollector(output_kind=params.output_kind)
@@ -240,7 +239,7 @@ class AsyncLLM(EngineClient):
             tokenization_kwargs, trace_headers, prompt_adapter_request,
             priority, data_parallel_rank)
 
-        if params.n == 1:
+        if is_pooling or params.n == 1:
             await self._add_request(request, prompt_str, None, 0, queue)
             return queue
 
@@ -443,7 +442,7 @@ class AsyncLLM(EngineClient):
             stat_logger.record(scheduler_stats=scheduler_stats,
                                iteration_stats=iteration_stats)
 
-    def encode(
+    async def encode(
         self,
         prompt: PromptType,
         pooling_params: PoolingParams,
@@ -451,8 +450,75 @@ class AsyncLLM(EngineClient):
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         priority: int = 0,
-    ):
-        raise ValueError("Not Supported on V1 yet.")
+    ) -> AsyncGenerator[PoolingRequestOutput, None]:
+        """
+        Main function called by the API server to kick off a request
+            * 1) Making an AsyncStream corresponding to the Request.
+            * 2) Processing the Input.
+            * 3) Adding the Request to the EngineCore (separate process).
+
+        A separate output_handler loop runs in a background AsyncIO task,
+        pulling outputs from EngineCore and putting them into the
+        per-request AsyncStream.
+
+        The caller of generate() iterates the returned AsyncGenerator,
+        returning the RequestOutput back to the caller.
+        """
+
+        try:
+            # We start the output_handler on the first call to generate() so
+            # we can call __init__ before the event loop, which enables us
+            # to handle startup failure gracefully in the OpenAI server.
+            self._run_output_handler()
+
+            q = await self.add_request(
+                request_id,
+                prompt,
+                pooling_params,
+                lora_request=lora_request,
+                trace_headers=trace_headers,
+                priority=priority,
+            )
+
+            # The output_handler task pushes items into the queue.
+            # This task pulls from the queue and yields to caller.
+            finished = False
+            while not finished:
+                # Note: drain queue without await if possible (avoids
+                # task switching under load which helps performance).
+                out = q.get_nowait() or await q.get()
+                assert isinstance(out, PoolingRequestOutput)
+                # Note: both OutputProcessor and EngineCore handle their
+                # own request cleanup based on finished.
+                finished = out.finished
+                yield out
+
+        # If the request is disconnected by the client, generate()
+        # is cancelled. So, we abort the request if we end up here.
+        except asyncio.CancelledError:
+            await self.abort(request_id)
+            if self.log_requests:
+                logger.info("Request %s aborted.", request_id)
+            raise
+
+        # Engine is dead. Do not abort since we shut down.
+        except EngineDeadError:
+            if self.log_requests:
+                logger.info("Request %s failed (engine dead).", request_id)
+            raise
+
+        # Request validation error.
+        except ValueError:
+            if self.log_requests:
+                logger.info("Request %s failed (bad request).", request_id)
+            raise
+
+        # Unexpected error in the generate() task (possibly recoverable).
+        except Exception as e:
+            await self.abort(request_id)
+            if self.log_requests:
+                logger.info("Request %s failed.", request_id)
+            raise EngineGenerateError() from e
 
     async def get_vllm_config(self) -> VllmConfig:
         return self.vllm_config
@@ -486,6 +552,8 @@ class AsyncLLM(EngineClient):
 
     async def check_health(self) -> None:
         logger.debug("Called check_health.")
+        if self.errored:
+            raise self.dead_error
 
     async def start_profile(self) -> None:
         await self.engine_core.profile_async(True)

@@ -36,6 +36,7 @@ _TEXT_GENERATION_MODELS = {
     "AquilaForCausalLM": ("llama", "LlamaForCausalLM"),  # AquilaChat2
     "ArcticForCausalLM": ("arctic", "ArcticForCausalLM"),
     "MiniMaxText01ForCausalLM": ("minimax_text_01", "MiniMaxText01ForCausalLM"),
+    "MiniMaxM1ForCausalLM": ("minimax_text_01", "MiniMaxText01ForCausalLM"),
     # baichuan-7b, upper case 'C' in the class name
     "BaiChuanForCausalLM": ("baichuan", "BaiChuanForCausalLM"),
     # baichuan-13b, lower case 'c' in the class name
@@ -51,12 +52,15 @@ _TEXT_GENERATION_MODELS = {
     "DeepseekForCausalLM": ("deepseek", "DeepseekForCausalLM"),
     "DeepseekV2ForCausalLM": ("deepseek_v2", "DeepseekV2ForCausalLM"),
     "DeepseekV3ForCausalLM": ("deepseek_v2", "DeepseekV3ForCausalLM"),
+    "Dots1ForCausalLM": ("dots1", "Dots1ForCausalLM"),
     "ExaoneForCausalLM": ("exaone", "ExaoneForCausalLM"),
     "FalconForCausalLM": ("falcon", "FalconForCausalLM"),
     "Fairseq2LlamaForCausalLM": ("fairseq2_llama", "Fairseq2LlamaForCausalLM"),
     "GemmaForCausalLM": ("gemma", "GemmaForCausalLM"),
     "Gemma2ForCausalLM": ("gemma2", "Gemma2ForCausalLM"),
     "Gemma3ForCausalLM": ("gemma3", "Gemma3ForCausalLM"),
+    #TODO(ywang96): Support multimodal gemma3n
+    "Gemma3nForConditionalGeneration": ("gemma3n", "Gemma3nForConditionalGeneration"),    # noqa: E501
     "GlmForCausalLM": ("glm", "GlmForCausalLM"),
     "Glm4ForCausalLM": ("glm4", "Glm4ForCausalLM"),
     "GPT2LMHeadModel": ("gpt2", "GPT2LMHeadModel"),
@@ -129,6 +133,7 @@ _EMBEDDING_MODELS = {
     "DeciLMForCausalLM": ("nemotron_nas", "DeciLMForCausalLM"),
     "Gemma2Model": ("gemma2", "Gemma2ForCausalLM"),
     "GlmForCausalLM": ("glm", "GlmForCausalLM"),
+    "GPT2ForSequenceClassification": ("gpt2", "GPT2ForSequenceClassification"),
     "GritLM": ("gritlm", "GritLM"),
     "GteModel": ("bert_with_rope", "SnowflakeGteNewModel"),
     "GteNewModel": ("bert_with_rope", "GteNewModel"),
@@ -215,6 +220,7 @@ _MULTIMODAL_MODELS = {
     "UltravoxModel": ("ultravox", "UltravoxModel"),
     "Phi4MMForCausalLM": ("phi4mm", "Phi4MMForCausalLM"),
     "TarsierForConditionalGeneration": ("tarsier", "TarsierForConditionalGeneration"),  # noqa: E501
+    "Tarsier2ForConditionalGeneration": ("qwen2_vl", "Tarsier2ForConditionalGeneration"),  # noqa: E501
     # [Encoder-decoder]
     "Florence2ForConditionalGeneration": ("florence2", "Florence2ForConditionalGeneration"),  # noqa: E501
     "MllamaForConditionalGeneration": ("mllama", "MllamaForConditionalGeneration"),  # noqa: E501

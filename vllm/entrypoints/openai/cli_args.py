@@ -216,7 +216,7 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         "--enable-request-id-headers",
         action="store_true",
         help="If specified, API server will add X-Request-Id header to "
-        "responses. Caution: this hurts performance at high QPS.")
+        "responses.")
     parser.add_argument(
         "--enable-auto-tool-choice",
         action="store_true",
@@ -272,6 +272,11 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         action='store_true',
         default=False,
         help="If set to True, enable prompt_tokens_details in usage.")
+    parser.add_argument(
+        "--enable-force-include-usage",
+        action='store_true',
+        default=False,
+        help="If set to True, including usage on every request.")
     parser.add_argument(
         "--enable-server-load-tracking",
         action='store_true',

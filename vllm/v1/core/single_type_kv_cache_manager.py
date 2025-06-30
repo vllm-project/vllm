@@ -8,7 +8,7 @@ from vllm.utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheSpec,
-                                        SlidingWindowSpec)
+                                        MambaSpec, SlidingWindowSpec)
 from vllm.v1.request import Request
 
 
@@ -52,6 +52,7 @@ class SingleTypeKVCacheManager(ABC):
 
         self.caching_hash_fn = caching_hash_fn
         self.kv_cache_group_id = kv_cache_group_id
+        self._null_block = block_pool.null_block
 
     def get_num_blocks_to_allocate(
             self, request_id: str, num_tokens: int,
@@ -390,9 +391,49 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         return 0
 
 
+class MambaManager(SingleTypeKVCacheManager):
+
+    @classmethod
+    def find_longest_cache_hit(
+        cls,
+        block_hashes: list[BlockHash],
+        max_length: int,
+        kv_cache_group_ids: list[int],
+        block_pool: BlockPool,
+        kv_cache_spec: KVCacheSpec,
+        use_eagle: bool,
+    ) -> tuple[list[KVCacheBlock], ...]:
+        assert isinstance(
+            kv_cache_spec,
+            MambaSpec), ("MambaManager can only be used for mamba groups")
+        # Prefix caching is not supported for mamba now. Always return empty
+        # list.
+        computed_blocks: tuple[list[KVCacheBlock], ...] = tuple(
+            [] for _ in range(len(kv_cache_group_ids)))
+        return computed_blocks
+
+    def remove_skipped_blocks(self, request_id: str,
+                              num_computed_tokens: int) -> None:
+        # Each request will always have 1 block at this moment, so no need to
+        # remove blocks.
+        pass
+
+    def get_num_common_prefix_blocks(self, request_id: str,
+                                     num_running_requests: int) -> int:
+        return 0
+
+    def allocate_new_blocks(self, request_id: str,
+                            num_tokens: int) -> list[KVCacheBlock]:
+        new_blocks = super().allocate_new_blocks(request_id, num_tokens)
+        assert len(self.req_to_blocks[request_id]) == 1, (
+            "MambaManager should only allocate 1 block for each request.")
+        return new_blocks
+
+
 spec_manager_map: dict[type[KVCacheSpec], type[SingleTypeKVCacheManager]] = {
     FullAttentionSpec: FullAttentionManager,
     SlidingWindowSpec: SlidingWindowManager,
+    MambaSpec: MambaManager,
 }
 
 

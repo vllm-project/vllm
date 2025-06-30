@@ -1,4 +1,4 @@
-# --8<-- [start:installation]
+# Google TPU
 
 Tensor Processing Units (TPUs) are Google's custom-developed application-specific
 integrated circuits (ASICs) used to accelerate machine learning workloads. TPUs
@@ -33,8 +33,7 @@ information, see [Storage options for Cloud TPU data](https://cloud.devsite.corp
 !!! warning
     There are no pre-built wheels for this device, so you must either use the pre-built Docker image or build vLLM from source.
 
-# --8<-- [end:installation]
-# --8<-- [start:requirements]
+## Requirements
 
 - Google Cloud TPU VM
 - TPU versions: v6e, v5e, v5p, v4
@@ -63,14 +62,13 @@ For more information about using TPUs with GKE, see:
 - <https://cloud.google.com/kubernetes-engine/docs/concepts/tpus>
 - <https://cloud.google.com/kubernetes-engine/docs/concepts/plan-tpus>
 
-# --8<-- [end:requirements]
-# --8<-- [start:configure-a-new-environment]
+## Configure a new environment
 
 ### Provision a Cloud TPU with the queued resource API
 
 Create a TPU v5e with 4 TPU chips:
 
-```console
+```bash
 gcloud alpha compute tpus queued-resources create QUEUED_RESOURCE_ID \
   --node-id TPU_NAME \
   --project PROJECT_ID \
@@ -90,26 +88,23 @@ gcloud alpha compute tpus queued-resources create QUEUED_RESOURCE_ID \
 | RUNTIME_VERSION    | The TPU VM runtime version to use. For example, use `v2-alpha-tpuv6e` for a VM loaded with one or more v6e TPU(s). For more information see [TPU VM images].                                             |
 | SERVICE_ACCOUNT    | The email address for your service account. You can find it in the IAM Cloud Console under *Service Accounts*. For example: `tpu-service-account@<your_project_ID>.iam.gserviceaccount.com`              |
 
-Connect to your TPU using SSH:
+Connect to your TPU VM using SSH:
 
 ```bash
-gcloud compute tpus tpu-vm ssh TPU_NAME --zone ZONE
+gcloud compute tpus tpu-vm ssh TPU_NAME --project PROJECT_ID --zone ZONE
 ```
 
 [TPU versions]: https://cloud.google.com/tpu/docs/runtimes
 [TPU VM images]: https://cloud.google.com/tpu/docs/runtimes
 [TPU regions and zones]: https://cloud.google.com/tpu/docs/regions-zones
 
-# --8<-- [end:configure-a-new-environment]
-# --8<-- [start:set-up-using-python]
+## Set up using Python
 
-# --8<-- [end:set-up-using-python]
-# --8<-- [start:pre-built-wheels]
+### Pre-built wheels
 
 Currently, there are no pre-built TPU wheels.
 
-# --8<-- [end:pre-built-wheels]
-# --8<-- [start:build-wheel-from-source]
+### Build wheel from source
 
 Install Miniconda:
 
@@ -142,7 +137,7 @@ Install build dependencies:
 
 ```bash
 pip install -r requirements/tpu.txt
-sudo apt-get install libopenblas-base libopenmpi-dev libomp-dev
+sudo apt-get install --no-install-recommends --yes libopenblas-base libopenmpi-dev libomp-dev
 ```
 
 Run the setup script:
@@ -151,26 +146,23 @@ Run the setup script:
 VLLM_TARGET_DEVICE="tpu" python -m pip install -e .
 ```
 
-# --8<-- [end:build-wheel-from-source]
-# --8<-- [start:set-up-using-docker]
+## Set up using Docker
 
-# --8<-- [end:set-up-using-docker]
-# --8<-- [start:pre-built-images]
+### Pre-built images
 
 See [deployment-docker-pre-built-image][deployment-docker-pre-built-image] for instructions on using the official Docker image, making sure to substitute the image name `vllm/vllm-openai` with `vllm/vllm-tpu`.
 
-# --8<-- [end:pre-built-images]
-# --8<-- [start:build-image-from-source]
+### Build image from source
 
 You can use <gh-file:docker/Dockerfile.tpu> to build a Docker image with TPU support.
 
-```console
+```bash
 docker build -f docker/Dockerfile.tpu -t vllm-tpu .
 ```
 
 Run the Docker image with the following command:
 
-```console
+```bash
 # Make sure to add `--privileged --net host --shm-size=16G`.
 docker run --privileged --net host --shm-size=16G -it vllm-tpu
 ```
@@ -193,12 +185,6 @@ docker run --privileged --net host --shm-size=16G -it vllm-tpu
 
     Install OpenBLAS with the following command:
 
-    ```console
-    sudo apt-get install libopenblas-base libopenmpi-dev libomp-dev
+    ```bash
+    sudo apt-get install --no-install-recommends --yes libopenblas-base libopenmpi-dev libomp-dev
     ```
-
-# --8<-- [end:build-image-from-source]
-# --8<-- [start:extra-information]
-
-There is no extra information for this device.
-# --8<-- [end:extra-information]

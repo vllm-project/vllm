@@ -53,7 +53,9 @@ def test_oot_registration_embedding(
     with monkeypatch.context() as m:
         m.setenv("VLLM_PLUGINS", "register_dummy_model")
         prompts = ["Hello, my name is", "The text does not matter"]
-        llm = LLM(model=dummy_gemma2_embedding_path, load_format="dummy")
+        llm = LLM(model=dummy_gemma2_embedding_path,
+                  load_format="dummy",
+                  max_model_len=2048)
         outputs = llm.embed(prompts)
 
         for output in outputs:

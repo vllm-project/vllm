@@ -15,6 +15,7 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.inputs import PromptType
 from vllm.platforms import current_platform
 from vllm.sampling_params import RequestOutputKind
+from vllm.utils import set_default_torch_num_threads
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.metrics.loggers import LoggingStatLogger
 
@@ -107,7 +108,8 @@ async def test_load(
     with monkeypatch.context() as m, ExitStack() as after:
         m.setenv("VLLM_USE_V1", "1")
 
-        engine = AsyncLLM.from_engine_args(engine_args)
+        with set_default_torch_num_threads(1):
+            engine = AsyncLLM.from_engine_args(engine_args)
         after.callback(engine.shutdown)
 
         NUM_REQUESTS = 100
@@ -154,7 +156,8 @@ async def test_abort(
     with monkeypatch.context() as m, ExitStack() as after:
         m.setenv("VLLM_USE_V1", "1")
 
-        engine = AsyncLLM.from_engine_args(engine_args)
+        with set_default_torch_num_threads(1):
+            engine = AsyncLLM.from_engine_args(engine_args)
         after.callback(engine.shutdown)
 
         NUM_REQUESTS = 100
@@ -226,7 +229,8 @@ async def test_finished_flag(
     with monkeypatch.context() as m, ExitStack() as after:
         m.setenv("VLLM_USE_V1", "1")
 
-        engine = AsyncLLM.from_engine_args(engine_args)
+        with set_default_torch_num_threads(1):
+            engine = AsyncLLM.from_engine_args(engine_args)
         after.callback(engine.shutdown)
 
         sampling_params = SamplingParams(
@@ -260,7 +264,8 @@ async def test_mid_stream_cancellation(monkeypatch: pytest.MonkeyPatch,
     with monkeypatch.context() as m, ExitStack() as after:
         m.setenv("VLLM_USE_V1", "1")
 
-        engine = AsyncLLM.from_engine_args(engine_args)
+        with set_default_torch_num_threads(1):
+            engine = AsyncLLM.from_engine_args(engine_args)
         after.callback(engine.shutdown)
 
         NUM_REQUESTS = 100
@@ -322,10 +327,11 @@ async def test_customize_loggers(monkeypatch):
     with monkeypatch.context() as m, ExitStack() as after:
         m.setenv("VLLM_USE_V1", "1")
 
-        engine = AsyncLLM.from_engine_args(
-            TEXT_ENGINE_ARGS,
-            stat_loggers=[MockLoggingStatLogger],
-        )
+        with set_default_torch_num_threads(1):
+            engine = AsyncLLM.from_engine_args(
+                TEXT_ENGINE_ARGS,
+                stat_loggers=[MockLoggingStatLogger],
+            )
         after.callback(engine.shutdown)
 
         await engine.do_log_stats()
@@ -340,7 +346,8 @@ async def test_dp_rank_argument(monkeypatch: pytest.MonkeyPatch):
     with monkeypatch.context() as m, ExitStack() as after:
         m.setenv("VLLM_USE_V1", "1")
 
-        engine = AsyncLLM.from_engine_args(TEXT_ENGINE_ARGS)
+        with set_default_torch_num_threads(1):
+            engine = AsyncLLM.from_engine_args(TEXT_ENGINE_ARGS)
         after.callback(engine.shutdown)
 
         sampling_params = SamplingParams(max_tokens=100,
@@ -362,3 +369,33 @@ async def test_dp_rank_argument(monkeypatch: pytest.MonkeyPatch):
                                            sampling_params=sampling_params,
                                            data_parallel_rank=1):
                 pass
+
+
+@pytest.mark.asyncio
+async def test_check_health(monkeypatch: pytest.MonkeyPatch):
+    """Test that check_health returns normally for healthy engine
+    and raises EngineDeadError when the engine is dead.
+    """
+    from unittest.mock import patch
+
+    from vllm.v1.engine.exceptions import EngineDeadError
+
+    with monkeypatch.context() as m, ExitStack() as after:
+        m.setenv("VLLM_USE_V1", "1")
+
+        with set_default_torch_num_threads(1):
+            engine = AsyncLLM.from_engine_args(TEXT_ENGINE_ARGS)
+        after.callback(engine.shutdown)
+
+        # Test 1: Healthy engine should not raise any exception
+        await engine.check_health()
+
+        # Test 2: Mock the errored property to simulate a dead engine
+        with patch.object(type(engine),
+                          'errored',
+                          new_callable=lambda: property(lambda self: True)
+                          ), pytest.raises(EngineDeadError):
+            await engine.check_health()
+
+        # Test 3: Verify healthy engine still works after mock
+        await engine.check_health()
