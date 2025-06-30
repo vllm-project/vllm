@@ -14,7 +14,9 @@ from vllm.attention.ops.chunked_prefill_paged_decode import (
     chunked_prefill_paged_decode)
 from vllm.attention.ops.paged_attn import PagedAttention
 from vllm.attention.ops.triton_unified_attention import unified_attention
+from vllm.compilation.fusion import GroupShape
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fp8_quantization import QuantFP8
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.attention.backends.utils import (
@@ -258,6 +260,10 @@ class TritonAttentionImpl(AttentionImpl):
         else:
             self.sliding_window = (sliding_window - 1, 0)
         self.kv_cache_dtype = kv_cache_dtype
+        self.is_fp8 = self.kv_cache_dtype.startswith("fp8")
+        if self.is_fp8:
+            self.quant_fp8 = QuantFP8(GroupShape.PER_TENSOR)
+
         if logits_soft_cap is None:
             # In flash-attn, setting logits_soft_cap as 0 means no soft cap.
             logits_soft_cap = 0
@@ -363,7 +369,7 @@ class TritonAttentionImpl(AttentionImpl):
                     layer._v_scale,
                 )
 
-        if self.kv_cache_dtype.startswith("fp8"):
+        if self.is_fp8:
             key_cache = key_cache.view(self.fp8_dtype)
             value_cache = value_cache.view(self.fp8_dtype)
             num_tokens, num_heads, head_size = query.shape
@@ -372,10 +378,8 @@ class TritonAttentionImpl(AttentionImpl):
             if not current_platform.is_rocm():
                 # Skip Q quantization on ROCm, since dequantizing back to
                 # f32 in the attention kernel is not supported.
-                query, _ = ops.scaled_fp8_quant(
-                    query.reshape(
-                        (num_tokens, num_heads * head_size)).contiguous(),
-                    layer._q_scale)
+                query = query.reshape((num_tokens, -1)).contiguous()
+                query, _ = ops.scaled_fp8_quant(query, layer._q_scale)
                 query = query.reshape((num_tokens, num_heads, head_size))
 
         use_local_attn = \

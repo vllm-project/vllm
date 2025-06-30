@@ -232,9 +232,7 @@ class CompressedTensors24(CompressedTensorsScheme):
         :return: The output tensor of the layer
         """
         if self.quantized:
-            scale = None
-            if hasattr(layer, "input_scale"):
-                scale = layer.input_scale
+            scale = getattr(layer, 'input_scale', None)
 
             if self.weights_dtype == torch.int8:
                 ops_output = ops.scaled_int8_quant(x, scale=scale)
@@ -242,11 +240,7 @@ class CompressedTensors24(CompressedTensorsScheme):
                 input_scale = ops_output[1]
             else:
                 assert self.weights_dtype == torch.float8_e4m3fn
-                if scale is not None:
-                    q_input, input_scale = ops.scaled_fp8_quant(x, scale=scale)
-                else:
-                    q_input, input_scale = ops.scaled_fp8_quant(
-                        x, use_per_token_if_dynamic=True)
+                q_input, input_scale = self.quant_fp8(x, scale=scale)
 
         else:
             # Not quantized, nothing to do with the input_scales, use as is
