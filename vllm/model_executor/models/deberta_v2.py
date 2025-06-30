@@ -204,6 +204,95 @@ class DebertaV2DisentangledSelfAttention(nn.Module):
         x = x.reshape(new_x_shape)
         return x.permute(0, 2, 1, 3)
 
+
+    def _get_sequence_lengths(self):
+        """Get sequence lengths from vLLM forward context."""
+        try:
+            from vllm.forward_context import get_forward_context
+            forward_context = get_forward_context()
+            
+            if forward_context and hasattr(forward_context, 'attn_metadata'):
+                attn_metadata = forward_context.attn_metadata
+                if hasattr(attn_metadata, 'seq_lens') and attn_metadata.seq_lens is not None:
+                    return attn_metadata.seq_lens
+        except (ImportError, AttributeError):
+            pass
+        return None
+
+    def _compute_isolated_attention_bias(
+        self, 
+        query_layer: torch.Tensor, 
+        key_layer: torch.Tensor,
+        relative_pos: torch.Tensor, 
+        rel_embeddings: torch.Tensor,
+        seq_lens: list,
+        total_seq_len: int
+    ) -> torch.Tensor:
+        """Compute attention bias with sequence isolation to prevent cross-contamination."""
+        # Ensure relative_pos indices are within bounds
+        max_idx = rel_embeddings.shape[0] - 1
+        relative_pos = torch.clamp(relative_pos.long(), 0, max_idx)
+        
+        att_span = torch.zeros_like(query_layer @ key_layer.transpose(-1, -2))
+        
+        # Process each sequence separately
+        start_pos = 0
+        for seq_len in seq_lens:
+            end_pos = start_pos + seq_len
+            
+            # Extract sub-tensors for this sequence
+            query_seq = query_layer[:, :, start_pos:end_pos, :]  # [batch, heads, seq_len, head_dim]
+            key_seq = key_layer[:, :, start_pos:end_pos, :]
+            rel_pos_seq = relative_pos[start_pos:end_pos, start_pos:end_pos]
+            
+            # Compute attention bias for this sequence only
+            att_span_seq = torch.zeros_like(query_seq @ key_seq.transpose(-1, -2))
+            
+            # Content-to-position attention (c2p)
+            if "c2p" in self.pos_att_type:
+                pos_key_embeddings = rel_embeddings[rel_pos_seq]  # [seq_len, seq_len, hidden_size]
+                
+                # Project position embeddings through key projection
+                pos_key_flat = pos_key_embeddings.reshape(-1, pos_key_embeddings.size(-1))
+                pos_key_proj = self.key_proj(pos_key_flat)[0]  # [seq_len*seq_len, hidden_size]
+                pos_key = pos_key_proj.reshape(seq_len, seq_len, self.all_head_size)
+                
+                # Reshape for multi-head attention: [seq_len, seq_len, num_heads, head_dim]
+                pos_key = pos_key.reshape(seq_len, seq_len, self.num_attention_heads, self.attention_head_size)
+                pos_key = pos_key.permute(2, 0, 1, 3)  # [heads, seq, seq, head_dim]
+                
+                # Compute c2p attention: query content @ position key
+                c2p_att = torch.einsum('bhiq,hijq->bhij', query_seq, pos_key)
+                att_span_seq += c2p_att
+
+            # Position-to-content attention (p2c)  
+            if "p2c" in self.pos_att_type:
+                # We need relative positions from key to query (transpose of rel_pos_seq)
+                rel_pos_seq_t = rel_pos_seq.transpose(0, 1)  # [seq_len, seq_len]
+                
+                # Extract relative position embeddings for p2c
+                pos_query_embeddings = rel_embeddings[rel_pos_seq_t]  # [seq_len, seq_len, hidden_size]
+                
+                # Project position embeddings through query projection
+                pos_query_flat = pos_query_embeddings.reshape(-1, pos_query_embeddings.size(-1))
+                pos_query_proj = self.query_proj(pos_query_flat)[0]  # [seq_len*seq_len, hidden_size]
+                pos_query = pos_query_proj.reshape(seq_len, seq_len, self.all_head_size)
+                
+                # Reshape for multi-head attention: [seq_len, seq_len, num_heads, head_dim]
+                pos_query = pos_query.reshape(seq_len, seq_len, self.num_attention_heads, self.attention_head_size)
+                pos_query = pos_query.permute(2, 0, 1, 3)  # [heads, seq, seq, head_dim]
+                
+                # Compute p2c attention: position query @ content key
+                p2c_att = torch.einsum('hijq,bhjq->bhij', pos_query, key_seq)
+                att_span_seq += p2c_att
+            
+            # Place the computed bias in the correct position in the full attention matrix
+            att_span[:, :, start_pos:end_pos, start_pos:end_pos] = att_span_seq
+            
+            start_pos = end_pos
+        
+        return att_span
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -235,6 +324,8 @@ class DebertaV2DisentangledSelfAttention(nn.Module):
                 query_layer, key_layer, rel_pos, rel_embeddings, batch_size, seq_len
             )
             attention_scores = attention_scores + rel_att
+
+
 
         # DeBERTa v2 scaling: 1/√(3d) when using all three attention components, otherwise 1/√d
         num_attention_components = 1  # content-to-content
@@ -287,6 +378,15 @@ class DebertaV2DisentangledSelfAttention(nn.Module):
         if relative_pos is None or rel_embeddings is None:
             return 0
 
+        # Check for vLLM sequence isolation
+        seq_lens = self._get_sequence_lengths()
+        if seq_lens and len(seq_lens) > 1:
+            # Multiple sequences - compute bias per sequence to prevent cross-contamination
+            return self._compute_isolated_attention_bias(
+                query_layer, key_layer, relative_pos, rel_embeddings, seq_lens, seq_len
+            )
+
+        # Single sequence - use original logic
         # Ensure relative_pos indices are within bounds
         max_idx = rel_embeddings.shape[0] - 1
         relative_pos = torch.clamp(relative_pos.long(), 0, max_idx)
