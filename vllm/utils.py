@@ -1729,6 +1729,7 @@ def supports_kw(
         last_param = params[next(reversed(params))]  # type: ignore
         return (last_param.kind == inspect.Parameter.VAR_KEYWORD
                 and last_param.name != kw_name)
+
     return False
 
 
@@ -1771,6 +1772,7 @@ def resolve_mm_processor_kwargs(
     # Merge the final processor kwargs, prioritizing inference
     # time values over the initialization time values.
     mm_processor_kwargs = {**init_mm_kwargs, **runtime_mm_kwargs}
+
     return mm_processor_kwargs
 
 
@@ -2929,3 +2931,31 @@ def is_torch_equal_or_newer(target: str) -> bool:
 def _is_torch_equal_or_newer(torch_version: str, target: str) -> bool:
     torch_version = version.parse(torch_version)
     return torch_version >= version.parse(target)
+
+
+@cache
+def _has_module(module_name: str) -> bool:
+    """Return True if *module_name* can be found in the current environment.
+
+    The result is cached so that subsequent queries for the same module incur
+    no additional overhead.
+    """
+    return importlib.util.find_spec(module_name) is not None
+
+
+def has_pplx() -> bool:
+    """Whether the optional `pplx_kernels` package is available."""
+
+    return _has_module("pplx_kernels")
+
+
+def has_deep_ep() -> bool:
+    """Whether the optional `deep_ep` package is available."""
+
+    return _has_module("deep_ep")
+
+
+def has_deep_gemm() -> bool:
+    """Whether the optional `deep_gemm` package is available."""
+
+    return _has_module("deep_gemm")
