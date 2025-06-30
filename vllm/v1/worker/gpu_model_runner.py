@@ -839,6 +839,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                 max_query_len=max(tokens[req_slice]),
                                 common_prefix_len=common_prefix_len,
                                 common_attn_metadata=common_attn_metadata,
+                                ubatch_id=ubid
                             ))
                     for layer_name in kv_cache_group_spec.layer_names:
                         assert type(attn_metadata) is list
@@ -1583,7 +1584,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         def _make_ubatch_contexts(ubatch_slices, 
                                   attn_metadata, 
                                   compute_stream,
-                                  is_dummy_run, 
                                   num_tokens_across_dp,
                                   skip_cuda_graphs) -> list[UBatchContext]:
             ubatch_ctxs = make_ubatch_contexts(len(ubatch_slices),
@@ -1623,7 +1623,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 ubatch_slices=ubatch_slices, 
                 attn_metadata=attn_metadata, 
                 compute_stream=compute_stream,
-                is_dummy_run=is_dummy_run,
                 num_tokens_across_dp=num_tokens_across_dp,
                 skip_cuda_graphs=skip_cuda_graphs
             )
@@ -2369,7 +2368,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # _dummy_run doesn't go through _prepare_inputs so 
         # we synchronize with other DP ranks here
         # logger.info(f"NUM TOKENS {num_tokens} SHOULD UBATCH {should_ubatch}")
-        should_ubatch = self.should_ubatch(allow_microbatching)
+        should_ubatch = self.should_ubatch(should_ubatch)
         # Padding for DP
         # logger.info("PADDING DUMMY")
         num_tokens_across_dp = None
@@ -2451,6 +2450,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                     max_query_len=max_query_len,
                                     common_prefix_len=0,
                                     common_attn_metadata=common_attn_metadata,
+                                    ubatch_id=ubid
                                 ))
                         for layer_name in kv_cache_group_spec.layer_names:
                             assert type(attn_metadata) is list

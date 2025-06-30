@@ -475,6 +475,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         max_query_len: int,
         common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
+        ubatch_id: int = 0
     ) -> M:
         num_reqs = req_slice.stop - req_slice.start
         num_tokens = token_slice.stop - token_slice.start
@@ -586,6 +587,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             decode_metadata = self._build_decode(
                 block_table_tensor=block_table_tensor[:num_decodes, ...],
                 seq_lens=seq_lens[:num_decodes],
+                ubatch_id=ubatch_id
             )
 
         return self.metadata_cls(
