@@ -119,13 +119,22 @@ class LognormalDistribution(Distribution):
 
 class GenConvArgs(NamedTuple):
     num_conversations: int
-    text_files: "list[str]"
+    text_files: list[str]
     input_num_turns: Distribution
     input_common_prefix_num_tokens: Distribution
     input_prefix_num_tokens: Distribution
     input_num_tokens: Distribution
     output_num_tokens: Distribution
     print_stats: bool
+
+
+def verify_field_exists(
+    conf: dict, field_name: str, section: str, subsection: str
+) -> None:
+    if field_name not in conf:
+        raise ValueError(
+            f"Missing field '{field_name}' in {section=} and {subsection=}"
+        )
 
 
 def get_random_distribution(
@@ -139,47 +148,49 @@ def get_random_distribution(
         return ConstantDistribution(0)
 
     # subsection can be "num_turns", "num_tokens" or "prefix_num_tokens"
-    assert subsection in conf, f"Missing subsection {subsection} in section {section}"
+    if subsection not in conf:
+        raise ValueError(f"Missing subsection {subsection} in section {section}")
 
     conf = conf[subsection]
 
     distribution = conf.get("distribution")
-    assert distribution is not None, (
-        f"Missing field 'distribution' in {section=} and {subsection=}"
-    )
+    if distribution is None:
+        raise ValueError(
+            f"Missing field 'distribution' in {section=} and {subsection=}"
+        )
 
     if distribution == "constant":
-        assert "value" in conf, f"Missing field 'value' in {section=} and {subsection=}"
+        verify_field_exists(conf, "value", section, subsection)
         return ConstantDistribution(conf["value"])
 
     elif distribution == "zipf":
-        assert "alpha" in conf, f"Missing field 'alpha' in {section=} and {subsection=}"
+        verify_field_exists(conf, "alpha", section, subsection)
         max_val = conf.get("max", None)
         return ZipfDistribution(conf["alpha"], max_val=max_val)
 
     elif distribution == "poisson":
-        assert "alpha" in conf, f"Missing field 'alpha' in {section=} and {subsection=}"
+        verify_field_exists(conf, "alpha", section, subsection)
         max_val = conf.get("max", None)
         return PoissonDistribution(conf["alpha"], max_val=max_val)
 
     elif distribution == "lognormal":
-        assert "mean" in conf, f"Missing field 'mean' in {section=} and {subsection=}"
-        assert "sigma" in conf, f"Missing field 'sigma' in {section=} and {subsection=}"
+        verify_field_exists(conf, "mean", section, subsection)
+        verify_field_exists(conf, "sigma", section, subsection)
         max_val = conf.get("max", None)
         return LognormalDistribution(conf["mean"], conf["sigma"], max_val=max_val)
 
     elif distribution == "uniform":
-        assert "min" in conf, f"Missing field 'min' in {section=} and {subsection=}"
-        assert "max" in conf, f"Missing field 'max' in {section=} and {subsection=}"
+        verify_field_exists(conf, "min", section, subsection)
+        verify_field_exists(conf, "max", section, subsection)
 
-        min_val = conf["min"]
-        max_val = conf["max"]
+        min_value = conf["min"]
+        max_value = conf["max"]
 
-        assert min_val > 0
-        assert min_val <= max_val
+        assert min_value > 0
+        assert min_value <= max_value
 
-        is_integer = isinstance(min_val, int) and isinstance(max_val, int)
-        return UniformDistribution(min_val, max_val, is_integer)
+        is_integer = isinstance(min_value, int) and isinstance(max_value, int)
+        return UniformDistribution(min_value, max_value, is_integer)
     else:
         raise ValueError(f"Unknown distribution: {distribution}")
 
@@ -296,7 +307,7 @@ def generate_conversations(
 ) -> ConversationsMap:
     # Text for all user prompts
     # (text from the input text files will be appended to this line)
-    base_prompt_text = "Please rewrite the following text in a humorous style: "
+    base_prompt_text = "Please rewrite the following text and add more content: "
     base_prompt_token_count = len(
         tokenizer.encode(base_prompt_text, add_special_tokens=False)
     )

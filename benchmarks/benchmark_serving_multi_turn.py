@@ -37,9 +37,12 @@ NUM_TOKENS_FROM_DATASET = 0
 TERM_SIGNAL = None
 
 
-class ConversationSampling(Enum):
+class ConversationSampling(str, Enum):
     ROUND_ROBIN = "round_robin"
     RANDOM = "random"
+
+    def __str__(self):
+        return self.value
 
 
 class ClientArgs(NamedTuple):
@@ -52,7 +55,7 @@ class ClientArgs(NamedTuple):
     print_content: bool
     verify_output: bool
     conversation_sampling: ConversationSampling
-    lambda_param: float
+    request_rate: float
 
 
 class RequestArgs(NamedTuple):
@@ -214,7 +217,7 @@ def nanosec_to_sec(value: float) -> float:
 
 async def send_request(
     session: aiohttp.ClientSession,
-    messages: "list[dict[str, str]]",
+    messages: list[dict[str, str]],
     chat_url: str,
     model: str,
     stream: bool = True,
@@ -343,7 +346,7 @@ def get_token_count(tokenizer: AutoTokenizer, text: str) -> int:
 
 
 def get_messages_token_count(
-    tokenizer: AutoTokenizer, messages: "list[dict[str, str]]"
+    tokenizer: AutoTokenizer, messages: list[dict[str, str]]
 ) -> int:
     token_count = 0
     for m in messages:
@@ -514,11 +517,11 @@ async def send_turn(
     return rs
 
 
-async def poisson_sleep(lambda_param: float, verbose: bool = False) -> None:
+async def poisson_sleep(request_rate: float, verbose: bool = False) -> None:
     # Generate a random time interval from the Poisson distribution
-    assert lambda_param > 0
+    assert request_rate > 0
 
-    interval = np.random.exponential(1.0 / lambda_param)
+    interval = np.random.exponential(1.0 / request_rate)
     if verbose:
         logger.info(f"Sleeping for {interval:.3f} seconds...")
     await asyncio.sleep(interval)
@@ -720,8 +723,8 @@ async def client_main(
                     conv_id_queue.appendleft(conv_id)
 
             # Sleep between requests (if lambda is positive)
-            if args.lambda_param > 0:
-                await poisson_sleep(args.lambda_param, args.verbose)
+            if args.request_rate > 0:
+                await poisson_sleep(args.request_rate, args.verbose)
 
     # Send indication that the client is done
     conv_queue.put((TERM_SIGNAL, TERM_SIGNAL))
@@ -758,7 +761,7 @@ def worker_function(
 
 def get_client_config(
     args: argparse.Namespace, input_conv: ConversationsMap
-) -> "tuple[ClientArgs, RequestArgs]":
+) -> tuple[ClientArgs, RequestArgs]:
     if args.num_clients < 1:
         raise ValueError("Number of clients must be a positive number")
 
@@ -808,7 +811,7 @@ def get_client_config(
         print_content=args.print_content,
         verify_output=args.verify_output,
         conversation_sampling=args.conversation_sampling,
-        lambda_param=args.lambda_param,
+        request_rate=args.request_rate,
     )
 
     if args.limit_min_tokens > 0 or args.limit_max_tokens > 0:
@@ -840,7 +843,7 @@ async def main_mp(
     bench_args: BenchmarkArgs,
     tokenizer: AutoTokenizer,
     input_conv: ConversationsMap,
-) -> "tuple[ConversationsMap, list[RequestStats]]":
+) -> tuple[ConversationsMap, list[RequestStats]]:
     # An event that will trigger graceful termination of all the clients
     stop_event = mp.Event()
 
@@ -1024,8 +1027,8 @@ def get_filename_with_timestamp(label: str, extension: str) -> str:
 
 
 def process_statistics(
-    client_metrics: "list[RequestStats]",
-    warmup_percentages: "list[float]",
+    client_metrics: list[RequestStats],
+    warmup_percentages: list[float],
     test_params: dict,
     verbose: bool,
     gen_conv_args: Optional[GenConvArgs] = None,
@@ -1322,19 +1325,22 @@ async def main() -> None:
     )
 
     parser.add_argument(
-        "--lambda",
+        "--request-rate",
         type=float,
-        default=0.0,
-        dest="lambda_param",
-        help="Lambda parameter (Poisson distribution) for the "
-        "request rate of each client (use 0 for no delay between requests)",
+        default=0,
+        help="Expected request rate (Poisson process) per client in requests/sec."
+        "Set to 0 for no delay between requests.",
     )
     parser.add_argument(
         "--conversation-sampling",
-        type=lambda s: ConversationSampling[s.upper()],
+        type=ConversationSampling,
         choices=list(ConversationSampling),
         default=ConversationSampling.ROUND_ROBIN,
-        help="Conversation sampling from the input file (for each request)",
+        help=(
+            "Strategy for selecting which conversation to use for the next request. "
+            "Options: 'round_robin' (cycle through conversations), "
+            "'random' (pick randomly)."
+        ),
     )
     parser.add_argument(
         "--verify-output",
