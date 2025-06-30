@@ -432,10 +432,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
         "min_p": 0.0,
     }
 
-    def to_beam_search_params(self,
-                              max_tokens: int,
-                              default_sampling_params: Optional[dict] = None
-                              ) -> BeamSearchParams:
+    def to_beam_search_params(
+            self, max_tokens: int,
+            default_sampling_params: dict) -> BeamSearchParams:
         # TODO(#9845): remove max_tokens when field is removed from OpenAI API
 
         n = self.n if self.n is not None else 1
@@ -456,7 +455,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         self,
         max_tokens: int,
         logits_processor_pattern: Optional[str],
-        default_sampling_params: Optional[dict] = None,
+        default_sampling_params: dict,
     ) -> SamplingParams:
         # TODO(#9845): remove max_tokens when field is removed from OpenAI API
 
