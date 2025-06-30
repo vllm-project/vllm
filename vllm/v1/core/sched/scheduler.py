@@ -750,7 +750,7 @@ class Scheduler(SchedulerInterface):
         for request in self.running:
             req_id = request.request_id
             num_tokens_scheduled = num_scheduled_tokens.get(req_id, 0)
-            
+
             if num_tokens_scheduled == 0:
                 # The request was not scheduled in this step.
                 new_running.append(request)

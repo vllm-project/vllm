@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
-import threading
 from typing import Any, Optional
 
 import uvicorn
@@ -10,7 +9,6 @@ from fastapi import FastAPI
 
 from vllm import envs
 from vllm.config import VllmConfig
-from vllm.entrypoints.launcher import serve_http
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -26,9 +24,9 @@ class NixlSideChannelServer:
         self.server = None
         self.server_thread = None
         self._setup_routes()
-        
+
     def _setup_routes(self):
-        
+
         @self.app.get("/get_kv_connector_metadata")
         @self.app.get("/get_kv_connector_metadata/{dp_rank}")
         @self.app.get("/get_kv_connector_metadata/{dp_rank}/{tp_rank}")
@@ -58,10 +56,10 @@ class NixlSideChannelServer:
         if self.server is not None:
             logger.warning("Side channel server is already running")
             return
-            
-        logger.info("Starting NIXL side channel server on %s:%s", 
-                   self.host, self.port)
-        
+
+        logger.info("Starting NIXL side channel server on %s:%s", self.host,
+                    self.port)
+
         # use uvicorn directly to avoid dependency on engine_client
         config = uvicorn.Config(
             app=self.app,
@@ -71,7 +69,7 @@ class NixlSideChannelServer:
             access_log=True,
         )
         self.server = uvicorn.Server(config)
-        
+
         # start the server in a background task
         asyncio.create_task(self.server.serve())
         logger.info("NIXL side channel server started successfully")
@@ -83,7 +81,8 @@ class NixlSideChannelServer:
                 self.server.should_exit = True
                 await asyncio.sleep(1)  # give it time to shutdown
             except Exception as e:
-                logger.warning("Error during side channel server shutdown: %s", e)
+                logger.warning("Error during side channel server shutdown: %s",
+                               e)
             self.server = None
             logger.info("NIXL side channel server stopped")
 
@@ -91,10 +90,10 @@ class NixlSideChannelServer:
 def should_start_nixl_side_channel_server(vllm_config: VllmConfig) -> bool:
     if vllm_config.kv_transfer_config is None:
         return False
-        
+
     if vllm_config.kv_transfer_config.kv_connector != "NixlConnector":
         return False
-    
+
     handshake_method = envs.VLLM_NIXL_HANDSHAKE_METHOD.lower()
     return handshake_method == "http"
 
@@ -102,20 +101,22 @@ def should_start_nixl_side_channel_server(vllm_config: VllmConfig) -> bool:
 async def start_nixl_side_channel_server_if_needed(
         vllm_config: VllmConfig) -> Optional[NixlSideChannelServer]:
     if not should_start_nixl_side_channel_server(vllm_config):
-        if (vllm_config.kv_transfer_config is not None and 
-            vllm_config.kv_transfer_config.kv_connector == "NixlConnector"):
+        if (vllm_config.kv_transfer_config is not None
+                and vllm_config.kv_transfer_config.kv_connector
+                == "NixlConnector"):
             handshake_method = envs.VLLM_NIXL_HANDSHAKE_METHOD.lower()
-            logger.info("Skipping NIXL HTTP side channel server (handshake method: %s)", 
-                       handshake_method)
+            logger.info(
+                "Skipping NIXL HTTP side channel server (handshake method: %s)",
+                handshake_method)
         return None
-        
+
     side_channel_host = envs.VLLM_NIXL_SIDE_CHANNEL_HOST
     side_channel_port = envs.VLLM_NIXL_SIDE_CHANNEL_PORT
-    
+
     logger.info("Starting NIXL side channel metadata server on %s:%d",
-               side_channel_host, side_channel_port)
-    
-    server = NixlSideChannelServer(
-        vllm_config, side_channel_host, side_channel_port)
+                side_channel_host, side_channel_port)
+
+    server = NixlSideChannelServer(vllm_config, side_channel_host,
+                                   side_channel_port)
     await server.start_async()
     return server

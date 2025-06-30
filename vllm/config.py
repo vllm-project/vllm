@@ -1542,7 +1542,7 @@ class CacheConfig:
 
     transfer_handshake_metadata: Optional[dict[int, dict[
         int, KVConnectorHandshakeMetadata]]] = field(default=None, init=False)
-    """Metadata for the KV connector handshake. Structure: dp_rank -> tp_rank -> metadata"""
+    """Metadata for KV connector handshake. Structure: dp_rank -> tp_rank"""
 
     def compute_hash(self) -> str:
         """
@@ -4633,8 +4633,8 @@ class VllmConfig:
             if self.kv_events_config is not None:
                 # Hybrid KV cache manager is not compatible with KV events.
                 self.scheduler_config.disable_hybrid_kv_cache_manager = True
-        
-        if (self.kv_transfer_config is not None 
+
+        if (self.kv_transfer_config is not None
                 and self.kv_transfer_config.is_kv_transfer_instance):
             from collections import defaultdict
             self.cache_config.transfer_handshake_metadata = defaultdict(dict)

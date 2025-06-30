@@ -542,7 +542,8 @@ def wait_for_engine_startup(
                     "Received transfer handshake metadata from engine %s: %s",
                     eng_index, txfer_metadata)
                 if cache_config.transfer_handshake_metadata is None:
-                    cache_config.transfer_handshake_metadata = defaultdict(dict)
+                    cache_config.transfer_handshake_metadata = defaultdict(
+                        dict)
                 for dp_rank, tp_dict in txfer_metadata.items():
                     for tp_rank, metadata in tp_dict.items():
                         cache_config.transfer_handshake_metadata[dp_rank][

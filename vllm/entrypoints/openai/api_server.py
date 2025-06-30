@@ -47,6 +47,8 @@ from vllm.entrypoints.chat_utils import (load_chat_template,
                                          resolve_mistral_chat_template)
 from vllm.entrypoints.launcher import serve_http
 from vllm.entrypoints.logger import RequestLogger
+from vllm.entrypoints.nixl_side_channel_server import (
+    start_nixl_side_channel_server_if_needed)
 from vllm.entrypoints.openai.cli_args import (log_non_default_args,
                                               make_arg_parser,
                                               validate_parsed_serve_args)
@@ -93,8 +95,6 @@ from vllm.entrypoints.openai.serving_tokenization import (
 from vllm.entrypoints.openai.serving_transcription import (
     OpenAIServingTranscription, OpenAIServingTranslation)
 from vllm.entrypoints.openai.tool_parsers import ToolParserManager
-from vllm.entrypoints.nixl_side_channel_server import (
-    start_nixl_side_channel_server_if_needed)
 from vllm.entrypoints.utils import (cli_env_setup, load_aware_call,
                                     with_cancellation)
 from vllm.logger import init_logger
@@ -918,7 +918,6 @@ if envs.VLLM_SERVER_DEV_MODE:
         server_info = {"vllm_config": str(raw_request.app.state.vllm_config)}
         return JSONResponse(content=server_info)
 
-
     @router.post("/reset_prefix_cache")
     async def reset_prefix_cache(raw_request: Request):
         """
@@ -1452,7 +1451,8 @@ async def run_server_worker(listen_address,
 
         nixl_side_channel_server = None
         try:
-            nixl_side_channel_server = await start_nixl_side_channel_server_if_needed(vllm_config)
+            nixl_side_channel_server = await \
+                start_nixl_side_channel_server_if_needed(vllm_config)
         except Exception as e:
             logger.warning("Failed to start NIXL side channel server: %s", e)
 
@@ -1484,7 +1484,8 @@ async def run_server_worker(listen_address,
             try:
                 await nixl_side_channel_server.stop_async()
             except Exception as e:
-                logger.warning("Error stopping NIXL side channel server: %s", e)
+                logger.warning("Error stopping NIXL side channel server: %s",
+                               e)
         sock.close()
 
 
