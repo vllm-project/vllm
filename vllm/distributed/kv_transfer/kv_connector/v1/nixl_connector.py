@@ -330,11 +330,16 @@ class NixlConnectorWorker:
         self.block_size = vllm_config.cache_config.block_size
 
         # Agent.
+        import os
+        num_workers = 16
+        # setting num workers on the prefiller causes the notifs to not be recved???
+        if os.getenv("VLLM_NIXL_SIDE_CHANNEL_PORT", "") == "5557":
+            num_workers = None
+        print(f"NUM_WORKERS: {num_workers=}")
         self.nixl_wrapper = NixlWrapper(str(uuid.uuid4()),
                                         None,
-                                        num_workers=None,
-                                        num_shared_workers=16) # setting this > 0 causes the notifs to be recved
-                                        # num_shared_workers=None) 
+                                        num_workers=num_workers,
+                                        num_shared_workers=None) 
         # Map of engine_id -> {rank0: agent_name0, rank1: agent_name1..}.
         self._remote_agents: dict[str, dict[int, str]] = defaultdict(dict)
 
@@ -820,6 +825,7 @@ class NixlConnectorWorker:
         """
         notified_req_ids: set[str] = set()
         for notifs in self.nixl_wrapper.get_new_notifs().values():
+            # WE GET NOTHING FROM HERE IF NUM_WORKERS > 0.
             print(f"{notifs=}")
             for notif in notifs:
                 req_id, tp_ratio = notif.decode("utf-8").rsplit(":", 1)

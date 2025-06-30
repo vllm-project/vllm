@@ -12,7 +12,7 @@ port PORT:
 
 
 prefill:
-    VLLM_NIXL_SIDE_CHANNEL_PORT=$(just port 5557) \
+    VLLM_NIXL_SIDE_CHANNEL_PORT=5557 \
     CUDA_VISIBLE_DEVICES=0 \
     vllm serve {{MODEL}} \
       --port $(just port 8100) \
