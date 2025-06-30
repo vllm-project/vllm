@@ -556,19 +556,24 @@ class FlashAttentionImpl(AttentionImpl):
                 current_key_cache = current_key_cache.transpose(0, 1)
                 current_value_cache = current_value_cache.transpose(0, 1)
 
-                print(attn_metadata.occupied_slot_mapping)
-                print(attn_metadata.seq_lens)
-
-                print(current_key_cache.shape, current_value_cache.shape)
+                current_kv_len = current_key_cache.size(0)
 
                 compressed_key_cache, compressed_value_cache = kvcompressor.update_kv(
                     current_key_cache,
                     query,
                     current_value_cache,
                 )
-                
-                # Compress the kv cache.
-                num_dropped_tokens_i = i  # TODO: update value
+
+                # overwrite key_cache and value_cache
+                compressed_kv_len = compressed_key_cache.size(0)
+                key_cache.view(-1, key_cache.size(-2), key_cache.size(-1))[
+                    attn_metadata.occupied_slot_mapping[seq_starts_ends_indices[i]:seq_starts_ends_indices[i + 1]][:compressed_kv_len], ...
+                ] = compressed_key_cache.transpose(0, 1)
+                value_cache.view(-1, value_cache.size(-2), value_cache.size(-1))[
+                    attn_metadata.occupied_slot_mapping[seq_starts_ends_indices[i]:seq_starts_ends_indices[i + 1]][:compressed_kv_len], ...
+                ] = compressed_value_cache.transpose(0, 1)
+
+                num_dropped_tokens_i = current_kv_len - compressed_kv_len
                 if num_dropped_tokens_i != attn_metadata.num_dropped_tokens_list[i]:
                     assert attn_metadata.num_dropped_tokens_list[i] == 0
                     attn_metadata.num_dropped_tokens_list[i] = num_dropped_tokens_i
