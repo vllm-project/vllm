@@ -68,7 +68,7 @@ To address the above issues, I have designed and developed a local Tensor memory
     cd /home
 
     # Download the installation package, and I will update the commit-id in time. You can directly copy the command.
-    wget https://vllm-wheels.s3.us-west-2.amazonaws.com/9112b443a042d8d815880b8780633882ad32b183/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl
+    wget https://vllm-wheels.s3.us-west-2.amazonaws.com/0d06b533a0fcca7a62603c868df68235659d6935/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl
 
     # Download the code repository.
     git clone -b xpyd-v1 https://github.com/Abatom/vllm.git
