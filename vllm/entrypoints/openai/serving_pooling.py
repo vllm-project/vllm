@@ -44,9 +44,9 @@ def _get_data(
         pt_float32 = output.data.to(dtype=torch.float32)
         pooling_bytes = np.array(pt_float32, dtype="float32").tobytes()
         return base64.b64encode(pooling_bytes).decode("utf-8")
-    elif encoding_format == "tensors":
+    elif encoding_format == "tensor":
         tensor_encoding_io = ImageEmbeddingMediaIO()
-        tensor_encoding_io.encode_base64(output.data)
+        return tensor_encoding_io.encode_base64(output.data)
 
     assert_never(encoding_format)
 

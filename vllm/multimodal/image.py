@@ -95,3 +95,12 @@ class ImageEmbeddingMediaIO(MediaIO[torch.Tensor]):
 
     def encode_base64(self, media: torch.Tensor) -> str:
         return base64.b64encode(media.numpy()).decode('utf-8')
+
+    # currently not used but it makes it easy
+    # for users to reconstruct the result tensor without knowledge of the array shape
+    def encode_tensor(self, media: torch.Tensor) -> str:
+        buffer_tiff = BytesIO()
+        torch.save(media.data, buffer_tiff)
+        buffer_tiff.seek(0)
+        binary_data = buffer_tiff.read()
+        return base64.b64encode(binary_data).decode('utf-8')

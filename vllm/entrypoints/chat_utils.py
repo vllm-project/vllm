@@ -140,6 +140,7 @@ ChatCompletionContentPartParam: TypeAlias = Union[
     ChatCompletionContentPartVideoParam, ChatCompletionContentPartRefusalParam,
     CustomChatCompletionContentSimpleImageParam,
     ChatCompletionContentPartImageEmbedsParam,
+    ChatCompletionContentPartTensorsParam,
     CustomChatCompletionContentSimpleAudioParam,
     CustomChatCompletionContentSimpleVideoParam, str]
 
@@ -583,6 +584,8 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
                 return self._cached_token_str(self._tokenizer,
                                               hf_config.video_token_index)
             raise TypeError(f"Unknown {modality} model type: {model_type}")
+        elif modality == "tensors":
+            return None
         else:
             raise TypeError(f"Unknown modality: {modality}")
 
@@ -641,6 +644,13 @@ class MultiModalItemTracker(BaseMultiModalItemTracker[object]):
                 raise ValueError(\
                     "Only one message can have {'type': 'image_embeds'}")
             mm_inputs["image"] = image_embeds_lst[0]
+
+        if "tensors" in items_by_modality:
+            tensors_lst = items_by_modality["tensors"]
+            if len(tensors_lst) > 1:
+                raise ValueError(\
+                    "Only one message can have {'type': 'tensors'}")
+            mm_inputs["tensors"] = tensors_lst[0]
         if "image" in items_by_modality:
             mm_inputs["image"] = items_by_modality["image"] # A list of images
         if "audio" in items_by_modality:
@@ -674,6 +684,12 @@ class AsyncMultiModalItemTracker(BaseMultiModalItemTracker[Awaitable[object]]):
                 raise ValueError(
                     "Only one message can have {'type': 'image_embeds'}")
             mm_inputs["image"] = image_embeds_lst[0]
+        if "tensors" in items_by_modality:
+            tensors_lst = items_by_modality["tensors"]
+            if len(tensors_lst) > 1:
+                raise ValueError(\
+                    "Only one message can have {'type': 'tensors'}")
+            mm_inputs["tensors"] = tensors_lst[0]
         if "image" in items_by_modality:
             mm_inputs["image"] = items_by_modality["image"] # A list of images
         if "audio" in items_by_modality:
