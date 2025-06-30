@@ -49,7 +49,7 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
     pad_slot_id: tl.constexpr,
     # Meta-parameters
     HAS_BIAS: tl.constexpr,
-    KERNEL_WIDTH: tl.constexpr,  # maybe using this we don't need 'width'
+    KERNEL_WIDTH: tl.constexpr,
     SILU_ACTIVATION: tl.constexpr,
     HAS_INITIAL_STATES: tl.constexpr,
     HAS_CACHE: tl.constexpr,
