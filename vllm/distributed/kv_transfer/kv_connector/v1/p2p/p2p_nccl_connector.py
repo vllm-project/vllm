@@ -371,45 +371,48 @@ class P2pNcclConnector(KVConnectorBase_V1):
                                  block_size=self._block_size)
                 self._requests_need_load.pop(new_req.req_id)
 
-        for cached_req in scheduler_output.scheduled_cached_reqs:
+        cached_reqs = scheduler_output.scheduled_cached_reqs
+        for i, req_id in enumerate(cached_reqs.req_ids):
+            num_computed_tokens = cached_reqs.num_computed_tokens[i]
+            new_block_ids = cached_reqs.new_block_ids[i]
+            resumed_from_preemption = cached_reqs.resumed_from_preemption[i]
+
             if self.is_producer:
                 num_scheduled_tokens = (
-                    scheduler_output.num_scheduled_tokens)[cached_req.req_id]
-                num_tokens = (num_scheduled_tokens +
-                              cached_req.num_computed_tokens)
-                assert cached_req.req_id in self.chunked_prefill
-                block_ids = cached_req.new_block_ids[0]
-                if not cached_req.resumed_from_preemption:
-                    block_ids = (self.chunked_prefill[cached_req.req_id][0] +
-                                 block_ids)
-                prompt_token_ids = self.chunked_prefill[cached_req.req_id][1]
+                    scheduler_output.num_scheduled_tokens)[req_id]
+                num_tokens = (num_scheduled_tokens + num_computed_tokens)
+                assert req_id in self.chunked_prefill
+                block_ids = new_block_ids[0]
+                if not resumed_from_preemption:
+                    block_ids = (self.chunked_prefill[req_id][0] + block_ids)
+                prompt_token_ids = self.chunked_prefill[req_id][1]
                 # the request's prompt is chunked prefill again
                 if num_tokens < len(prompt_token_ids):
-                    self.chunked_prefill[cached_req.req_id] = (
-                        block_ids, prompt_token_ids)
+                    self.chunked_prefill[req_id] = (block_ids,
+                                                    prompt_token_ids)
                     continue
                 # the request's prompt is all prefilled finally
-                meta.add_request(request_id=cached_req.req_id,
+                meta.add_request(request_id=req_id,
                                  token_ids=prompt_token_ids,
                                  block_ids=block_ids,
                                  block_size=self._block_size)
-                self.chunked_prefill.pop(cached_req.req_id, None)
+                self.chunked_prefill.pop(req_id, None)
                 continue
 
             # NOTE(rob): here we rely on the resumed requests being
             # the first N requests in the list scheduled_cache_reqs.
-            if not cached_req.resumed_from_preemption:
+            if not resumed_from_preemption:
                 break
-            if cached_req.req_id in self._requests_need_load:
-                request, _ = self._requests_need_load.pop(cached_req.req_id)
-                total_tokens = cached_req.num_computed_tokens + 1
+            if req_id in self._requests_need_load:
+                request, _ = self._requests_need_load.pop(req_id)
+                total_tokens = num_computed_tokens + 1
                 token_ids = request.all_token_ids[:total_tokens]
 
                 # NOTE(rob): For resumed req, new_block_ids is all
                 # of the block_ids for the request.
-                block_ids = cached_req.new_block_ids[0]
+                block_ids = new_block_ids[0]
 
-                meta.add_request(request_id=cached_req.req_id,
+                meta.add_request(request_id=req_id,
                                  token_ids=token_ids,
                                  block_ids=block_ids,
                                  block_size=self._block_size)

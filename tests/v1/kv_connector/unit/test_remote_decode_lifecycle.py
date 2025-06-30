@@ -66,7 +66,7 @@ def test_basic_lifecycle():
     assert len(scheduler_output.finished_req_ids) == 1
     assert request_id in scheduler_output.finished_req_ids
     assert len(scheduler_output.scheduled_new_reqs) == 0
-    assert len(scheduler_output.scheduled_cached_reqs) == 0
+    assert scheduler_output.scheduled_cached_reqs.num_reqs == 0
     assert len(scheduler.finished_req_ids) == 0
 
     # (2b): execute_model()
@@ -81,7 +81,7 @@ def test_basic_lifecycle():
     assert len(scheduler.running) == 0
     assert len(scheduler_output.finished_req_ids) == 0
     assert len(scheduler_output.scheduled_new_reqs) == 0
-    assert len(scheduler_output.scheduled_cached_reqs) == 0
+    assert scheduler_output.scheduled_cached_reqs.num_reqs == 0
     assert len(scheduler.finished_req_ids) == 0
 
     # (3b): execute_model()
