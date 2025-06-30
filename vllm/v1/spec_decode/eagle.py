@@ -142,6 +142,7 @@ class EagleProposer:
         cu_num_tokens: torch.Tensor,
         decode_mask: torch.Tensor,
         full_prefill_mask: torch.Tensor,
+        partial_prefill_mask: torch.Tensor,
         prefill_first_hiddens: torch.Tensor,
         block_table: torch.Tensor,
         batch_size: int,
@@ -169,6 +170,34 @@ class EagleProposer:
             tuple: (target_positions, target_hidden_states, target_slot_mapping,
                     cu_num_tokens, current_pos, partial_prefill_mask)
 
+        Algorithm design:
+        - Suppose target tokens are [1,2,3,...N], next token is N+1
+        - Position is [0,1,2,...N-1]
+        - And hidden is [h1,h2,h3,...hN]
+        - Suppose partial prefill is [Nm, Nm+1, ...Nm+M-1]
+        -- For normal shifting:
+           --- draft prefill is [2,3,...N+1], position is same as target
+           --- Stacking hidden is [h1,h2,h3,...hN]
+           --- Decode tokens are [N+2, N+3, ...], hidden is [hN+1,hN+2,...]
+           --- Decode positions are [N,N+1,...]
+           --- draft partial prefill is [Nm+1, Nm+2, ...Nm+M]
+        -- For non-shifting:
+           --- draft full prefill is [1,2,3,...N+1], position is [0,1,2,...N]
+           --- Stacking hidden is [hN,h1,h2,h3,...hN]
+           --- Decode tokens are [N+2, N+3, ...], hidden is [hN+1,hN+2,...]
+           --- Decode positions are [N+1,N+2,...]
+           --- draft partial prefill is [Nm, Nm+1, ...Nm+M-1]
+           --- draft hidden is [hNm-1,hNm,...hNm+M] 
+               (hNm-1 is the last round hidden)
+        -- For kv sharing(non-shifting required):
+           This means all target prefill tokens are not needed to be processed
+           in drafting prefill step as we don't need the kv from draft.
+           --- draft full prefill is [N+1], position is [N]
+           --- Stacking hidden is [hN]
+           --- Decode is the same as non-shifting decode
+           --- draft partial prefill is totally skipped
+        All other metadata like slot mapping, etc. should be based on
+        the positions and tokens to generate/manipulate again
         """
         # Count total number of full prefill requests to determine the
         # size needed for adjusted tensors
@@ -221,21 +250,6 @@ class EagleProposer:
 
         # Create updated cumulative token counts
         updated_cu_num_tokens = torch.zeros_like(cu_num_tokens)
-
-        # Track which requests are partial prefill (no decode tokens)
-        partial_prefill_mask = torch.zeros_like(full_prefill_mask)
-
-        # Create masks for each category
-        has_decode_mask = torch.zeros(batch_size,
-                                      dtype=torch.bool,
-                                      device=decode_mask.device)
-        for i in range(batch_size):
-            start_idx = cu_num_tokens[i].item()
-            end_idx = cu_num_tokens[i + 1].item()
-            has_decode_mask[i] = decode_mask[start_idx:end_idx].any().item()
-
-        # Category 1: Partial prefill (no decode tokens)
-        partial_prefill_mask = ~has_decode_mask
 
         # Process batched operations using masks
         current_pos = 0
@@ -401,6 +415,7 @@ class EagleProposer:
         mm_embeds: Optional[list[torch.Tensor]] = None,
         decode_mask: torch.Tensor = None,
         full_prefill_mask: torch.Tensor = None,
+        partial_prefill_mask: torch.Tensor = None,
     ) -> torch.Tensor:
         num_tokens = target_token_ids.shape[0]
         batch_size = next_token_ids.shape[0]
@@ -422,6 +437,17 @@ class EagleProposer:
             prefill_shift_tokens = False
 
         if not prefill_shift_tokens and has_prefill:
+            if (partial_prefill_mask.all()
+                    and self.draft_prefill_kv_sharing_from_base):
+                # All requests are partial prefill and
+                # KV cache sharing is enabled
+                # Skip the rest of the function
+                # and return dummy draft tokens
+                return torch.zeros(
+                    (batch_size, self.num_speculative_tokens),
+                    dtype=target_token_ids.dtype,
+                    device=target_token_ids.device,
+                )
             # Adjust the tensors for full prefill requests
             (
                 target_positions,
@@ -438,22 +464,12 @@ class EagleProposer:
                 cu_num_tokens,
                 decode_mask,
                 full_prefill_mask,
+                partial_prefill_mask,
                 prefill_first_hiddens,
                 block_table,
                 batch_size,
                 num_tokens,
             )
-            if (partial_prefill_mask.all()
-                    and self.draft_prefill_kv_sharing_from_base):
-                # All requests are partial prefill and
-                # KV cache sharing is enabled
-                # Skip the rest of the function
-                # and return dummy draft tokens
-                return torch.zeros(
-                    (batch_size, self.num_speculative_tokens),
-                    dtype=target_token_ids.dtype,
-                    device=target_token_ids.device,
-                )
             batch_size = cu_num_tokens.shape[0] - 1
         else:
             # Original behavior: shift all tokens by one
@@ -485,6 +501,9 @@ class EagleProposer:
         if not prefill_shift_tokens and has_prefill:
             # Replace the last token with the next token under non-shifting,
             # but only for non-partial prefill requests
+            # For partial prefill in non-shifting, we just match the target
+            # prefill tokens as it would match the positions and hidden states
+            # so no need to add this next token from next round
             mask = ~partial_prefill_mask
             # if we enable copy kv then all of the partial prefills
             # are completely skipped so they won't be in last_token_indices

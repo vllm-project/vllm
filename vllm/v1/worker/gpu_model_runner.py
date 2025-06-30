@@ -1897,6 +1897,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             prefill_first_hiddens = []
             full_prefill_mask = []
             query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
+            partial_prefill_mask = []
             for i, token_ids in enumerate(sampled_token_ids):
                 req_id = self.input_batch.req_ids[i]
                 req_state = self.requests[req_id]
@@ -1921,6 +1922,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 if token_ids:
                     # Common case.
                     next_token_id = token_ids[-1]
+                    partial_prefill_mask.append(False)
                 else:
                     # Partial prefill (rare case).
                     # Get the next token id from the request state.
@@ -1933,6 +1935,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     # as the first prefill hidden for the next round
                     req_state.prefill_hidden_states = target_hidden_states[
                         last_hidden_index]
+                    partial_prefill_mask.append(True)
                 next_token_ids.append(next_token_id)
             next_token_ids = torch.tensor(next_token_ids,
                                           dtype=torch.int32,
@@ -1941,6 +1944,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             full_prefill_mask = torch.tensor(full_prefill_mask,
                                              dtype=torch.bool,
                                              device=self.device)
+            partial_prefill_mask = torch.tensor(partial_prefill_mask,
+                                                dtype=torch.bool,
+                                                device=self.device)
             draft_token_ids = self.drafter.propose(
                 target_token_ids=target_token_ids,
                 target_positions=target_positions,
@@ -1952,6 +1958,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 prefill_first_hiddens=prefill_first_hiddens,
                 decode_mask=decode_mask,
                 full_prefill_mask=full_prefill_mask,
+                partial_prefill_mask=partial_prefill_mask,
             )
             spec_token_ids = draft_token_ids.tolist()
         return spec_token_ids
