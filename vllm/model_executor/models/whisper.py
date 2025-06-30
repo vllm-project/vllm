@@ -856,9 +856,9 @@ class WhisperForConditionalGeneration(nn.Module, SupportsTranscription,
 
     @classmethod
     def get_decoder_prompt(cls, language: str, task_type: str,
-                           prompt: str) -> str:
+                           prompt: str, previous_text : str) -> str:
         return (f"<|startoftranscript|><|{language}|><|{task_type}|>"
-                f"<|notimestamps|>{prompt}")
+                f"<|notimestamps|>{prompt}{previous_text}")
 
 
 def _create_fake_bias_for_k_proj(

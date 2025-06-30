@@ -24,7 +24,6 @@ from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.utils import get_model_architecture
-from vllm.outputs import RequestOutput
 
 from vllm.transformers_utils.processor import cached_get_processor
 from vllm.utils import PlaceholderModule
@@ -108,7 +107,6 @@ class OpenAISpeechToText(OpenAIServing):
         chunks = [y
                   ] if duration < self.max_audio_clip_s else self._split_audio(
                       y, int(sr))
-        prompts = []
         for chunk in chunks:
             prompt = {
                 "encoder_prompt": {
@@ -120,7 +118,9 @@ class OpenAISpeechToText(OpenAIServing):
                 "decoder_prompt":
                 self.model_cls.
                 get_decoder_prompt(  # type: ignore[attr-defined]
-                    lang, self.task_type, request.prompt)
+                    lang, self.task_type, 
+                    request.prompt,
+                    previous_text)
             }
             yield (cast(PromptType, prompt), duration)
             
