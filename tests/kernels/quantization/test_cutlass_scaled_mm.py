@@ -715,11 +715,10 @@ def test_cutlass_fp8_blockwise_group_gemm(num_experts: int,
             block_size_k, dim=0).repeat_interleave(block_size_n, dim=1)
 
         if per_act_block:
-            scale_a = torch.randn((m_a_scales, 1),
+            scale_a = torch.randn((m_a_scales, k_b_scales),
                                   device=device,
                                   dtype=torch.float32)
             ground_scale_a = scale_a.clone()
-            scale_a = scale_a.repeat_interleave(k_b_scales, dim=1)
             a_scales_tensors.append(scale_a)
         else:
             ground_scale_a = one_scale_a.clone()
@@ -788,4 +787,8 @@ def test_cutlass_fp8_blockwise_group_gemm(num_experts: int,
     for g in range(num_experts):
         baseline = baseline_tensors[g]
         c = out_tensors_stacked[expert_offsets[g]:expert_offsets[g + 1]]
+        # uncomment for debugging
+        # print("c:", c)
+        # print("baseline:", baseline)
+        # print("*")
         torch.testing.assert_close(c, baseline, rtol=1e-2, atol=5e-4)
