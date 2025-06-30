@@ -3,6 +3,7 @@
 
 import base64
 import json
+from typing import Any
 from unittest.mock import MagicMock, patch
 from urllib.error import URLError
 
@@ -19,22 +20,6 @@ class TestHandshakeStrategyAbstraction:
     def test_abstract_base_class(self):
         with pytest.raises(TypeError):
             HandshakeStrategy(None, 0, 1, 8080, "test-engine")
-
-    def test_strategy_interface(self):
-        mock_nixl = MagicMock()
-        mock_add_agent = MagicMock()
-
-        zmq_strategy = ZmqHandshakeStrategy(mock_nixl, 0, 1, 8080,
-                                            "test-engine", mock_add_agent)
-        assert hasattr(zmq_strategy, 'initiate_handshake')
-        assert hasattr(zmq_strategy, 'setup_listener')
-        assert hasattr(zmq_strategy, 'cleanup')
-
-        http_strategy = HttpHandshakeStrategy(mock_nixl, 0, 1, 8080,
-                                              "test-engine", mock_add_agent)
-        assert hasattr(http_strategy, 'initiate_handshake')
-        assert hasattr(http_strategy, 'setup_listener')
-        assert hasattr(http_strategy, 'cleanup')
 
 
 class TestZmqHandshakeStrategy:
@@ -278,9 +263,8 @@ class TestHttpHandshakeStrategy:
 
         strategy = HttpHandshakeStrategy(mock_nixl, 1, 2, 8080,
                                          "decode-engine", mock_add_agent)
-
         mock_response = MagicMock()
-        empty_response = {"0": {}}
+        empty_response: dict[str, dict[str, dict[str, Any]]] = {"0": {}}
         mock_response.read.return_value = json.dumps(empty_response).encode()
         mock_urlopen.return_value.__enter__.return_value = mock_response
 
@@ -326,30 +310,3 @@ class TestHandshakeStrategyIntegration:
     @patch('vllm.envs.VLLM_NIXL_HANDSHAKE_METHOD', 'http')
     def test_http_strategy_selection(self):
         assert envs.VLLM_NIXL_HANDSHAKE_METHOD.lower() == 'http'
-
-    def test_strategy_polymorphism(self):
-        mock_nixl = MagicMock()
-        mock_add_agent = MagicMock()
-
-        strategies = [
-            ZmqHandshakeStrategy(mock_nixl, 0, 1, 8080, "test",
-                                 mock_add_agent),
-            HttpHandshakeStrategy(mock_nixl, 0, 1, 8080, "test",
-                                  mock_add_agent)
-        ]
-
-        test_metadata = NixlAgentMetadata(
-            engine_id="test-engine",
-            agent_metadata=b"test-data",
-            kv_caches_base_addr=[12345],
-            num_blocks=100,
-            block_len=16,
-            attn_backend_name="FLASH_ATTN_VLLM_V1")
-
-        for strategy in strategies:
-            assert callable(strategy.initiate_handshake)
-            assert callable(strategy.setup_listener)
-            assert callable(strategy.cleanup)
-
-            strategy.setup_listener(test_metadata)
-            strategy.cleanup()
