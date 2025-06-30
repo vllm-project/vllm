@@ -861,7 +861,6 @@ class NixlConnectorWorker:
                                        xfer_state)
 
             # Done.
-            print(f"{len(new_handles)=}")
             if len(new_handles) == 0:
                 start = time.perf_counter()
                 self.nixl_wrapper.send_notif(agent_name, notif_id)
@@ -1008,9 +1007,9 @@ class NixlConnectorWorker:
 
         # Begin async xfer.
         start = time.perf_counter()
-        # for handle in handles:
-        #     self.nixl_wrapper.transfer(handle)
-        self.nixl_wrapper.transfer_batched(handles)
+        for handle in handles:
+            self.nixl_wrapper.transfer(handle)
+        # self.nixl_wrapper.transfer_batched(handles)
         end = time.perf_counter()
         logger.info("======== LAUNCH TIME: %s ========", end - start)
 
