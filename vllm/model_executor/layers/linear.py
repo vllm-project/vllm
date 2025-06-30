@@ -1485,6 +1485,8 @@ class QKVCrossParallelLinear(LinearBase):
     @property
     def q_proj_decoder(self) -> ColumnParallelLinear:
         layer = self.proj["q_proj_decoder"]
+        if torch.compiler.is_compiling():
+            return layer
         for name, param in self.named_parameters():
             target_param = getattr(layer, name, None)
             if target_param is not None:
@@ -1496,6 +1498,8 @@ class QKVCrossParallelLinear(LinearBase):
     @property
     def kv_proj_encoder(self) -> QKVParallelLinear:
         layer = self.proj["kv_proj_encoder"]
+        if torch.compiler.is_compiling():
+            return layer
         for name, param in self.named_parameters():
             target_param = getattr(layer, name, None)
             if target_param is not None:
