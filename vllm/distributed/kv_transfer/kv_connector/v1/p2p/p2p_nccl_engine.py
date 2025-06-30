@@ -462,7 +462,6 @@ class P2pNcclEngine:
                     if isinstance(tensor, tuple):
                         addr, _, _ = tensor
                         self.pool.free(addr)
-            self.finished_recving.discard(request_id)
             logger.debug("🔵get_finished, request_id:%s", request_id)
 
         # TODO: 1)Avoid polling. 2)Validate chunked prefill and preemption.
@@ -477,6 +476,7 @@ class P2pNcclEngine:
             for request_id in self.finished_sending:
                 self.send_request_id_to_tensor_ids.pop(request_id, None)
         # Retrieve requests that have already received the KV cache.
+        self.finished_recving.clear()
         for request_id in self.recv_request_id_to_tensor_ids:
             if num_layers == len(
                     self.recv_request_id_to_tensor_ids[request_id]):
