@@ -101,6 +101,9 @@ class ReqMeta:
     tp_size: int
     do_remote_prefill: bool = False
     do_remote_decode: bool = False
+    # NOTE: needed when use_host_buffer is true.
+    do_save_to_host: bool = False
+    do_load_to_device: bool = False
 
 
 class NixlConnectorMetadata(KVConnectorMetadata):
@@ -113,9 +116,10 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         request_id: ReqId,
         local_block_ids: list[int],
         kv_transfer_params: dict[str, Any],
-        customize_kv_transfer_params: Optional[dict[str, Any]] = None,
+        do_save_to_host: bool = False,
+        do_load_to_device: bool = False,
     ):
-        _req_meta = ReqMeta(
+        self.requests[request_id] = ReqMeta(
             local_block_ids=local_block_ids,
             remote_block_ids=kv_transfer_params["remote_block_ids"],
             remote_engine_id=kv_transfer_params["remote_engine_id"],
@@ -125,13 +129,9 @@ class NixlConnectorMetadata(KVConnectorMetadata):
             tp_size=kv_transfer_params.get("tp_size", 1),
             do_remote_prefill=kv_transfer_params["do_remote_prefill"],
             do_remote_decode=kv_transfer_params["do_remote_decode"],
+            do_save_to_host=do_save_to_host,
+            do_load_to_device=do_load_to_device,
         )
-        if customize_kv_transfer_params:
-            for param, value in customize_kv_transfer_params.items():
-                if hasattr(_req_meta, param):
-                    setattr(_req_meta, param, value)
-
-        self.requests[request_id] = _req_meta
 
 
 class NixlConnector(KVConnectorBase_V1):
@@ -292,7 +292,7 @@ class NixlConnectorScheduler:
 
         if not params:
             return
-        if params.get("do_remote_decode"):
+        if self.use_host_buffer and params.get("do_remote_decode"):
             # NOTE: when kv_buffer_device (e.) is not supported by Nixl,
             # prefilled blocks need to be saved to host memory before transfer.
 
@@ -337,28 +337,22 @@ class NixlConnectorScheduler:
         meta = NixlConnectorMetadata()
 
         # Loop through scheduled reqs and convert to ReqMeta.
-        _customize_params = {
-            "do_remote_prefill": True,
-        } if self.use_host_buffer else {}
         for req_id, (req, block_ids) in self._reqs_need_recv.items():
             assert req.kv_transfer_params is not None
             meta.add_new_req(
                 request_id=req_id,
                 local_block_ids=block_ids,
                 kv_transfer_params=req.kv_transfer_params,
-                customize_kv_transfer_params=_customize_params,
+                do_load_to_device=self.use_host_buffer,
             )
 
-        _customize_params = {
-            "do_remote_decode": True,
-        } if self.use_host_buffer else {}
         for req_id, (req, block_ids) in self._reqs_need_save.items():
             assert req.kv_transfer_params is not None
             meta.add_new_req(
                 request_id=req_id,
                 local_block_ids=block_ids,
                 kv_transfer_params=req.kv_transfer_params,
-                customize_kv_transfer_params=_customize_params,
+                do_save_to_host=self.use_host_buffer,
             )
 
         # Clear the list once workers start the transfers
@@ -979,7 +973,7 @@ class NixlConnectorWorker:
             meta = self._recving_metadata.get(req_id)
         if meta and req_id not in self._recving_transfers:
             # local decode only
-            if not meta.do_remote_prefill:
+            if not meta.do_load_to_device:
                 return
             local_block_ids = meta.local_block_ids
             self.copy_blocks(self.host_xfer_buffers, self.device_kv_caches,
@@ -999,7 +993,7 @@ class NixlConnectorWorker:
 
         for req_id, meta in metadata.requests.items():
             # local prefill requests only
-            if not meta.do_remote_decode:
+            if not meta.do_save_to_host:
                 continue
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug(
@@ -1133,7 +1127,9 @@ class NixlConnectorWorker:
         We check for these trnxs to complete in each step().
         """
         for req_id, meta in metadata.requests.items():
-            if not meta.do_remote_prefill:
+            # NOTE: when host xfer buffer is used, only load kv
+            # for requests with do_load_to_device = True.
+            if self.use_host_buffer and not meta.do_load_to_device:
                 continue
             remote_engine_id = meta.remote_engine_id
             logger.debug(
