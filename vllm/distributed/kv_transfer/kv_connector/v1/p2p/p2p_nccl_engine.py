@@ -65,10 +65,12 @@ class P2pNcclEngine:
                  config: KVTransferConfig,
                  hostname: str = "",
                  port_offset: int = 0,
+                 num_layers: int = 0,
                  library_path: Optional[str] = None) -> None:
         self.config = config
         self.rank = port_offset
         self.local_rank = local_rank
+        self.num_layers = num_layers
         self.device = torch.device(f"cuda:{self.local_rank}")
         self.nccl = NCCLLibrary(library_path)
 
@@ -153,12 +155,16 @@ class P2pNcclEngine:
                                                  daemon=True)
             self._ping_thread.start()
 
+        self.finished_recving: set[str] = set()
+        self.finished_sending: set[str] = set()
+
         logger.info(
             "💯P2pNcclEngine init, rank:%d, local_rank:%d, http_address:%s, "
             "zmq_address:%s, proxy_address:%s, send_type:%s, buffer_size_"
-            "threshold:%.2f, nccl_num_channels:%s", self.rank, self.local_rank,
-            self.http_address, self.zmq_address, self.proxy_address,
-            self.send_type, self.buffer_size_threshold, self.nccl_num_channels)
+            "threshold:%.2f, nccl_num_channels:%s, num_layers:%d", self.rank,
+            self.local_rank, self.http_address, self.zmq_address,
+            self.proxy_address, self.send_type, self.buffer_size_threshold,
+            self.nccl_num_channels, self.num_layers)
 
     def _create_connect(self, remote_address: typing.Optional[str] = None):
         assert remote_address is not None
@@ -453,6 +459,7 @@ class P2pNcclEngine:
                             request_id, None)
                         self.recv_request_id_to_tensor_ids.pop(
                             request_id, None)
+                    self.finished_recving.discard(request_id)
                     if isinstance(tensor, tuple):
                         addr, _, _ = tensor
                         self.pool.free(addr)
@@ -461,23 +468,24 @@ class P2pNcclEngine:
         # TODO: 1)Avoid polling. 2)Validate chunked prefill and preemption.
         num_layers = len(forward_context.no_compile_layers)
         # Retrieve requests that have already sent the KV cache.
-        finished_sending: set[str] = set()
+        self.finished_sending.clear()
         if self.send_type != "GET":
             for request_id in self.send_request_id_to_tensor_ids:
                 if (num_layers == len(
                         self.send_request_id_to_tensor_ids[request_id])):
-                    finished_sending.add(request_id)
-            for request_id in finished_sending:
+                    self.finished_sending.add(request_id)
+            for request_id in self.finished_sending:
                 self.send_request_id_to_tensor_ids.pop(request_id, None)
         # Retrieve requests that have already received the KV cache.
-        finished_recving: set[str] = set()
         for request_id in self.recv_request_id_to_tensor_ids:
             if num_layers == len(
                     self.recv_request_id_to_tensor_ids[request_id]):
-                finished_recving.add(request_id)
+                self.finished_recving.add(request_id)
+        for request_id in finished_sending:
+            self.send_request_id_to_tensor_ids.pop(request_id, None)
 
         # TODO: Add failed requests (e.g., transmission errors)
-        return finished_sending or None, finished_recving or None
+        return self.finished_sending or None, self.finished_recving or None
 
     def _ping(self):
         sock = self.context.socket(zmq.DEALER)

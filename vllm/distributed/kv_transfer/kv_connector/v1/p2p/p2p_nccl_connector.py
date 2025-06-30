@@ -87,11 +87,13 @@ class P2pNcclConnector(KVConnectorBase_V1):
         self._local_rank = get_world_group().local_rank \
             if role == KVConnectorRole.WORKER else 0
 
+        num_layers = len(vllm_config.compilation_config.static_forward_context)
         self.p2p_nccl_engine = P2pNcclEngine(
             local_rank=self._local_rank,
             config=self.config,
             hostname="",
             port_offset=self._rank,
+            num_layers=num_layers,
         ) if role == KVConnectorRole.WORKER else None
 
     # ==============================
