@@ -1729,6 +1729,7 @@ def supports_kw(
         last_param = params[next(reversed(params))]  # type: ignore
         return (last_param.kind == inspect.Parameter.VAR_KEYWORD
                 and last_param.name != kw_name)
+
     return False
 
 
@@ -1771,6 +1772,7 @@ def resolve_mm_processor_kwargs(
     # Merge the final processor kwargs, prioritizing inference
     # time values over the initialization time values.
     mm_processor_kwargs = {**init_mm_kwargs, **runtime_mm_kwargs}
+
     return mm_processor_kwargs
 
 
