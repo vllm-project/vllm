@@ -382,6 +382,7 @@ class Qwen2VisionAttention(nn.Module):
             _Backend.TORCH_SDPA,
             _Backend.XFORMERS,
             _Backend.ROCM_AITER_FA,
+            _Backend.IPEX,
         }:
             raise RuntimeError(
                 f"Qwen2-VL does not support {self.attn_backend} backend now."
@@ -457,6 +458,35 @@ class Qwen2VisionAttention(nn.Module):
                 causal=False,
             )
 
+            context_layer = rearrange(
+                output, "(b s) h d -> s b (h d)", b=batch_size
+            ).contiguous()
+        elif self.attn_backend == _Backend.IPEX:
+            from vllm._ipex_ops import ipex_ops
+
+            q, k, v = (rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
+
+            output = torch.empty(q.shape, dtype=q.dtype, device=q.device)
+            ipex_ops.varlen_attention(
+                q,
+                k,
+                v,
+                output,
+                cu_seqlens,
+                cu_seqlens,
+                None,
+                max_seqlen,
+                max_seqlen,
+                pdropout=0.0,
+                softmax_scale=1.0 / (q.shape[-1] ** 0.5),
+                zero_tensors=False,
+                is_causal=True,
+                return_softmax=False,
+                gen_=None,
+                window_size_left=-1,
+                window_size_right=-1,
+                logits_soft_cap=-1,
+            )
             context_layer = rearrange(
                 output, "(b s) h d -> s b (h d)", b=batch_size
             ).contiguous()
@@ -796,6 +826,8 @@ class Qwen2VisionTransformer(nn.Module):
             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
         elif self.attn_backend == _Backend.XFORMERS:
             seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
+        elif self.attn_backend == _Backend.IPEX:
+            max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
         return max_seqlen, seqlens
 
     def forward(
