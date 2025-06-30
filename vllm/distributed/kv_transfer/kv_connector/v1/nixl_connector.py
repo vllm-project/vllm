@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
-import copy
 import math
 import queue
 import threading
@@ -81,7 +80,7 @@ class NixlConnectorMetadata(KVConnectorMetadata):
 
     def __init__(self):
         self.reqs_to_recv: dict[ReqId, ReqMeta] = {}
-        self.reqs_to_send: set[str] = set()
+        self.reqs_to_send: dict[ReqId, float] = {}
 
     def add_new_req(
         self,
@@ -200,7 +199,8 @@ class NixlConnectorScheduler:
         # New requests are added by update_state_after_alloc in
         # the scheduler. Used to make metadata passed to Worker.
         self._reqs_need_recv: dict[ReqId, tuple[Request, list[int]]] = {}
-        self._reqs_need_send: set[str] = set()
+        # Reqs to send and their expiration time
+        self._reqs_need_send: dict[ReqId, float] = {}
 
     def get_num_new_matched_tokens(
             self, request: "Request",
@@ -268,9 +268,6 @@ class NixlConnectorScheduler:
                 assert num_external_tokens == 0
             # Only trigger 1 KV transfer per request.
             params["do_remote_prefill"] = False
-        elif params is not None and params.get("do_remote_decode"):
-            # Prefill request on remote. It will be read from D upon completion
-            self._reqs_need_send.add(request.request_id)
 
     def build_connector_meta(
         self,
@@ -287,10 +284,11 @@ class NixlConnectorScheduler:
                 kv_transfer_params=req.kv_transfer_params,
             )
 
-        meta.reqs_to_send = copy.copy(self._reqs_need_send)
         # Clear the list once workers start the transfers
         self._reqs_need_recv.clear()
-        self._reqs_need_send.clear()
+
+        meta.reqs_to_send = self._reqs_need_send
+        self._reqs_need_send = {}
 
         return meta
 
@@ -332,6 +330,13 @@ class NixlConnectorScheduler:
 
         # If prompt < block_size, no xfer so free blocks immediately.
         delay_free_blocks = len(computed_block_ids) > 0
+
+        if delay_free_blocks and params.get("do_remote_decode"):
+            now = time.monotonic()
+            # Prefill request on remote. It will be read from D upon completion
+            self._reqs_need_send[
+                request.
+                request_id] = now + envs.VLLM_NIXL_ABORT_REQUEST_TIMEOUT
 
         return delay_free_blocks, dict(
             do_remote_prefill=True,
@@ -402,7 +407,7 @@ class NixlConnectorWorker:
         # In progress transfers.
         # [req_id -> list[handle]]
         self._recving_transfers = defaultdict[ReqId, list[Transfer]](list)
-        # Keep track of the time for requests that are waiting to be sent.
+        # Track the expiration time of requests that are waiting to be sent.
         self._reqs_to_send: dict[ReqId, float] = {}
 
         # Complete transfer tracker. Used by the rank 0 to track finished
@@ -838,21 +843,13 @@ class NixlConnectorWorker:
 
         # Handle timeout to avoid stranding blocks on remote.
         now = time.monotonic()
-        timed_out_requests: list[str] = []
-        for req_id, finish_time in self._reqs_to_send.items():
-            if finish_time < 0:
-                # Request just finished, start timeout.
-                self._reqs_to_send[req_id] = now
-            elif now - finish_time >= envs.VLLM_NIXL_ABORT_REQUEST_TIMEOUT:
-                # Timeout exceed, clear the request blocks.
-                timed_out_requests.append(req_id)
-
-        for req_id in timed_out_requests:
-            # Skip communication with other ranks, but
-            if self.tp_rank == 0:
-                self._done_sending_count[req_id] += self.world_size
-                done_sending.add(req_id)
+        while self._reqs_to_send:
+            req_id, expires = next(iter(self._reqs_to_send.items()))
+            # Sorted dict, oldest request are put first so we can exit early.
+            if now < expires:
+                break
             del self._reqs_to_send[req_id]
+            done_sending.add(req_id)
 
         if self.world_size == 1:
             return done_sending, done_recving
@@ -972,10 +969,8 @@ class NixlConnectorWorker:
         while not self._ready_requests.empty():
             self._read_blocks_for_req(*self._ready_requests.get_nowait())
 
-        # Track the request that are waiting to be read and abort on timeout.
-        # Set to -1 so that timeout does not depend on model latency.
-        for req_id in metadata.reqs_to_send:
-            self._reqs_to_send[req_id] = -1
+        # Add to requests that are waiting to be read and track expiration.
+        self._reqs_to_send.update(metadata.reqs_to_send)
 
     def _read_blocks_for_req(self, req_id: str, meta: ReqMeta):
         logger.debug(
