@@ -323,6 +323,7 @@ _CROSS_ENCODER_EXAMPLE_MODELS = {
     "RobertaForSequenceClassification": _HfExamplesInfo("cross-encoder/quora-roberta-base", v0_only=True),  # noqa: E501
     "XLMRobertaForSequenceClassification": _HfExamplesInfo("BAAI/bge-reranker-v2-m3", v0_only=True),  # noqa: E501
     "ModernBertForSequenceClassification": _HfExamplesInfo("Alibaba-NLP/gte-reranker-modernbert-base", v0_only=True),  # noqa: E501
+    "JinaVLForSequenceClassification": _HfExamplesInfo("jinaai/jina-reranker-m0"),   # noqa: E501
 }
 
 _MULTIMODAL_EXAMPLE_MODELS = {
