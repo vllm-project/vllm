@@ -3,6 +3,7 @@
 
 import pytest
 
+from tests.models.registry import HF_EXAMPLE_MODELS
 from tests.utils import multi_gpu_test
 from vllm.engine.arg_utils import EngineArgs
 from vllm.sampling_params import SamplingParams
@@ -84,6 +85,11 @@ def test_models(
     max_tokens: int,
     num_logprobs: int,
 ) -> None:
+
+    model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
+    model_info.check_available_online(on_fail="skip")
+    model_info.check_transformers_version(on_fail="skip")
+
     with hf_runner(model) as hf_model:
         if model not in HF_UNSUPPORTED_MODELS:
             hf_outputs = hf_model.generate_greedy_logprobs_limit(
