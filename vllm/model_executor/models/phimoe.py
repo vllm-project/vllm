@@ -325,7 +325,6 @@ class PhiMoEAttention(nn.Module):
         if head_dim is None:
             head_dim = hidden_size // num_heads
         self.head_dim = head_dim
-        # hidden_size // self.total_num_heads
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
