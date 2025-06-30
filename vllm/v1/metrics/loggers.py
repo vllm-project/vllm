@@ -13,7 +13,7 @@ from vllm.config import SupportsMetricsInfo, VllmConfig
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_utils import PrefixCachingMetrics
 from vllm.v1.engine import FinishReason
-from vllm.v1.metrics.prometheus import unregister_vllm_metrics
+from vllm.v1.metrics.prometheus import get_instance_id, unregister_vllm_metrics
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 from vllm.v1.spec_decode.metrics import SpecDecodingLogging, SpecDecodingProm
 
@@ -156,10 +156,11 @@ class PrometheusStatLogger(StatLoggerBase):
         self.show_hidden_metrics = \
             vllm_config.observability_config.show_hidden_metrics
 
-        labelnames = ["model_name", "engine"]
+        labelnames = ["model_name", "engine", "instance_id"]
         labelvalues = [
             vllm_config.model_config.served_model_name,
-            str(engine_index)
+            str(engine_index),
+            get_instance_id()
         ]
 
         max_model_len = vllm_config.model_config.max_model_len
@@ -402,6 +403,7 @@ class PrometheusStatLogger(StatLoggerBase):
 
         metrics_info = config_obj.metrics_info()
         metrics_info["engine"] = self.engine_index
+        metrics_info["instance_id"] = get_instance_id()
 
         name, documentation = None, None
         if type == "cache_config":
