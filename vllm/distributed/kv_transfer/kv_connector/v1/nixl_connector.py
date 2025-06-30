@@ -985,7 +985,7 @@ class NixlConnectorWorker:
         assert len(local_block_descs_ids) == len(remote_block_descs_ids)
 
         # Prepare transfer with Nixl.
-        CHUNK_SIZE = 100
+        CHUNK_SIZE = 1000
         handles = []
         futures = []
         with ThreadPoolExecutor() as executor:
