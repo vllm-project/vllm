@@ -428,9 +428,7 @@ class OpenAIServing:
 
         if self._is_model_supported(request.model):
             return None
-        if request.model in [
-                lora.lora_name for lora in self.models.lora_requests
-        ]:
+        if request.model in self.models.lora_requests:
             return None
         if envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING and request.model and (
                 load_result := await self.models.resolve_lora(request.model)):
@@ -456,9 +454,8 @@ class OpenAIServing:
             None, PromptAdapterRequest]]:
         if self._is_model_supported(request.model):
             return None, None
-        for lora in self.models.lora_requests:
-            if request.model == lora.lora_name:
-                return lora, None
+        if request.model in self.models.lora_requests:
+            return self.models.lora_requests[request.model], None
         for prompt_adapter in self.models.prompt_adapter_requests:
             if request.model == prompt_adapter.prompt_adapter_name:
                 return None, prompt_adapter
@@ -818,6 +815,8 @@ class OpenAIServing:
             )
 
         mm_data = await mm_data_future
+        
+        logger.info(f"[Kourosh] 3")
 
         # tool parsing is done only if a tool_parser has been set and if
         # tool_choice is not "none" (if tool_choice is "none" but a tool_parser
@@ -848,6 +847,7 @@ class OpenAIServing:
             prompt_inputs = TextTokensPrompt(
                 prompt=tokenizer.decode(request_prompt),
                 prompt_token_ids=request_prompt)
+        logger.info(f"[Kourosh] 4, {prompt_inputs=}")
 
         engine_prompt = EngineTokensPrompt(
             prompt_token_ids=prompt_inputs["prompt_token_ids"])
@@ -858,6 +858,8 @@ class OpenAIServing:
 
         if hasattr(request, "cache_salt") and request.cache_salt is not None:
             engine_prompt["cache_salt"] = request.cache_salt
+
+        logger.info(f"[Kourosh] 5, {conversation=}, {request_prompt=}, {engine_prompt=}")
 
         return conversation, [request_prompt], [engine_prompt]
 
