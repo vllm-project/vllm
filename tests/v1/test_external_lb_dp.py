@@ -9,6 +9,7 @@ from contextlib import AsyncExitStack
 import openai  # use the official client for correctness check
 import pytest
 import pytest_asyncio
+from platforms import Platform
 
 from tests.utils import RemoteOpenAIServer
 
@@ -61,14 +62,19 @@ class ExternalLBServerManager:
             ])
 
             # Use a thread to start each server to allow parallel initialization
-            def start_server(r, sargs):
+            def start_server(r: int, sargs: list[str]):
                 try:
                     # Start the server
                     server = RemoteOpenAIServer(
                         self.model_name,
                         sargs,
                         auto_port=False,
-                        env_dict={"CUDA_VISIBLE_DEVICES": str(r)})
+                        env_dict={
+                            "CUDA_VISIBLE_DEVICES":
+                            ",".join(
+                                str(Platform.device_id_to_physical_device_id(
+                                    i)) for i in range(DP_SIZE * TP_SIZE))
+                        })
                     server.__enter__()
                     print(f"Server rank {r} started successfully with "
                           f"{self.api_server_count} API servers")
@@ -131,7 +137,7 @@ async def clients(servers: list[tuple[RemoteOpenAIServer, list[str]]]):
     # Create a client for each server
     async with AsyncExitStack() as stack:
         yield [
-            await stack.enter_context(server.get_async_client())
+            await stack.enter_async_context(server.get_async_client())
             for server, _ in servers
         ]
 
