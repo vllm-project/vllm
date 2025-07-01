@@ -370,7 +370,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # distinct requests - clearing the cached states for the first request
         # and handling the second as a new request.
         for req_id in scheduler_output.finished_req_ids:
-            assert self.input_batch.remove_request(req_id) is not None
+            self.input_batch.remove_request(req_id)
 
         # Free the cached encoder outputs.
         for req_id, input_id in scheduler_output.free_encoder_input_ids:
