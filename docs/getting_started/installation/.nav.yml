@@ -2,4 +2,6 @@ nav:
   - README.md
   - gpu.md
   - cpu.md
-  - ai_accelerator.md
+  - google_tpu.md
+  - intel_gaudi.md
+  - aws_neuron.md

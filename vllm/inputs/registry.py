@@ -5,7 +5,9 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple, Optional, Union
 
 import torch
+from packaging.version import Version
 from transformers import BatchFeature, PretrainedConfig, ProcessorMixin
+from transformers import __version__ as TRANSFORMERS_VERSION
 from typing_extensions import TypeVar
 
 from vllm.jsontree import JSONTree, json_map_leaves
@@ -128,9 +130,13 @@ class InputProcessingContext(InputContext):
         /,
         **kwargs: object,
     ) -> _P:
+        # Transformers 4.53.0 has issue with passing tokenizer to
+        # initialize processor. We disable it for this version.
+        # See: https://github.com/vllm-project/vllm/issues/20224
+        if Version(TRANSFORMERS_VERSION) != Version("4.53.0"):
+            kwargs["tokenizer"] = self.tokenizer
         return super().get_hf_processor(
             typ,
-            tokenizer=self.tokenizer,
             **kwargs,
         )
 
@@ -168,9 +174,11 @@ class InputProcessingContext(InputContext):
         try:
             output = hf_processor(**data, **merged_kwargs, return_tensors="pt")
             # this emulates output.to(dtype=self.model_config.dtype)
-            cast_output = json_map_leaves(maybe_cast_dtype, output)
             if isinstance(output, BatchFeature):
+                cast_output = json_map_leaves(maybe_cast_dtype, output.data)
                 return BatchFeature(cast_output)
+
+            cast_output = json_map_leaves(maybe_cast_dtype, output)
 
             logger.warning_once(
                 f"{type(hf_processor).__name__} did not return `BatchFeature`. "

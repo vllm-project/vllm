@@ -67,9 +67,6 @@ from torch.library import Library
 from typing_extensions import Never, ParamSpec, TypeIs, assert_never
 
 import vllm.envs as envs
-# NOTE: import triton_utils to make TritonPlaceholderModule work
-#       if triton is unavailable
-import vllm.triton_utils  # noqa: F401
 from vllm.logger import enable_trace_function_call, init_logger
 
 if TYPE_CHECKING:
@@ -92,15 +89,15 @@ MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS = 5120
 
 STR_NOT_IMPL_ENC_DEC_SWA = \
     "Sliding window attention for encoder/decoder models " + \
-                    "is not currently supported."
+    "is not currently supported."
 
 STR_NOT_IMPL_ENC_DEC_PREFIX_CACHE = \
     "Prefix caching for encoder/decoder models " + \
-                    "is not currently supported."
+    "is not currently supported."
 
 STR_NOT_IMPL_ENC_DEC_CHUNKED_PREFILL = \
     "Chunked prefill for encoder/decoder models " + \
-                    "is not currently supported."
+    "is not currently supported."
 
 STR_NOT_IMPL_ENC_DEC_LOGIT_SOFTCAP = (
     "Models with logits_soft_cap "
@@ -189,6 +186,16 @@ TORCH_DTYPE_TO_NUMPY_DTYPE = {
     torch.int32: np.int32,
     torch.int64: np.int64,
 }
+
+
+@contextlib.contextmanager
+def set_default_torch_num_threads(num_threads: int):
+    """Sets the default number of threads for PyTorch to the given value."""
+    old_num_threads = torch.get_num_threads()
+    torch.set_num_threads(num_threads)
+    yield
+    torch.set_num_threads(old_num_threads)
+
 
 P = ParamSpec('P')
 T = TypeVar("T")
@@ -745,7 +752,7 @@ def _generate_random_fp8(
     # to generate random data for fp8 data.
     # For example, s.11111.00 in fp8e5m2 format represents Inf.
     #     | E4M3        | E5M2
-    #-----|-------------|-------------------
+    # -----|-------------|-------------------
     # Inf | N/A         | s.11111.00
     # NaN | s.1111.111  | s.11111.{01,10,11}
     from vllm import _custom_ops as ops
@@ -833,7 +840,6 @@ def create_kv_caches_with_random(
     seed: Optional[int] = None,
     device: Optional[str] = "cuda",
 ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
-
     if cache_dtype == "fp8" and head_size % 16:
         raise ValueError(
             f"Does not support key cache of type fp8 with head_size {head_size}"
@@ -1198,7 +1204,6 @@ def deprecate_args(
     is_deprecated: Union[bool, Callable[[], bool]] = True,
     additional_message: Optional[str] = None,
 ) -> Callable[[F], F]:
-
     if not callable(is_deprecated):
         is_deprecated = partial(identity, is_deprecated)
 
@@ -1348,7 +1353,7 @@ def weak_bind(bound_method: Callable[..., Any], ) -> Callable[..., None]:
     return weak_bound
 
 
-#From: https://stackoverflow.com/a/4104188/2749989
+# From: https://stackoverflow.com/a/4104188/2749989
 def run_once(f: Callable[P, None]) -> Callable[P, None]:
 
     def wrapper(*args: P.args, **kwargs: P.kwargs) -> None:
@@ -1467,7 +1472,7 @@ class FlexibleArgumentParser(ArgumentParser):
 
         # Convert underscores to dashes and vice versa in argument names
         processed_args = list[str]()
-        for arg in args:
+        for i, arg in enumerate(args):
             if arg.startswith('--'):
                 if '=' in arg:
                     key, value = arg.split('=', 1)
@@ -1476,10 +1481,17 @@ class FlexibleArgumentParser(ArgumentParser):
                 else:
                     key = pattern.sub(repl, arg, count=1)
                     processed_args.append(key)
-            elif arg.startswith('-O') and arg != '-O' and len(arg) == 2:
-                # allow -O flag to be used without space, e.g. -O3
-                processed_args.append('-O')
-                processed_args.append(arg[2:])
+            elif arg.startswith('-O') and arg != '-O' and arg[2] != '.':
+                # allow -O flag to be used without space, e.g. -O3 or -Odecode
+                # -O.<...> handled later
+                # also handle -O=<level> here
+                level = arg[3:] if arg[2] == '=' else arg[2:]
+                processed_args.append(f'-O.level={level}')
+            elif arg == '-O' and i + 1 < len(args) and args[i + 1] in {
+                    "0", "1", "2", "3"
+            }:
+                # Convert -O <n> to -O.level <n>
+                processed_args.append('-O.level')
             else:
                 processed_args.append(arg)
 
@@ -1497,26 +1509,43 @@ class FlexibleArgumentParser(ArgumentParser):
         def recursive_dict_update(
             original: dict[str, Any],
             update: dict[str, Any],
-        ):
-            """Recursively updates a dictionary with another dictionary."""
+        ) -> set[str]:
+            """Recursively updates a dictionary with another dictionary.
+            Returns a set of duplicate keys that were overwritten.
+            """
+            duplicates = set[str]()
             for k, v in update.items():
                 if isinstance(v, dict) and isinstance(original.get(k), dict):
-                    recursive_dict_update(original[k], v)
+                    nested_duplicates = recursive_dict_update(original[k], v)
+                    duplicates |= {f"{k}.{d}" for d in nested_duplicates}
+                elif isinstance(v, list) and isinstance(original.get(k), list):
+                    original[k] += v
                 else:
+                    if k in original:
+                        duplicates.add(k)
                     original[k] = v
+            return duplicates
 
         delete = set[int]()
         dict_args = defaultdict[str, dict[str, Any]](dict)
+        duplicates = set[str]()
         for i, processed_arg in enumerate(processed_args):
-            if processed_arg.startswith("--") and "." in processed_arg:
+            if i in delete:  # skip if value from previous arg
+                continue
+
+            if processed_arg.startswith("-") and "." in processed_arg:
                 if "=" in processed_arg:
                     processed_arg, value_str = processed_arg.split("=", 1)
                     if "." not in processed_arg:
-                        # False positive, . was only in the value
+                        # False positive, '.' was only in the value
                         continue
                 else:
                     value_str = processed_args[i + 1]
                     delete.add(i + 1)
+
+                if processed_arg.endswith("+"):
+                    processed_arg = processed_arg[:-1]
+                    value_str = json.dumps(list(value_str.split(",")))
 
                 key, *keys = processed_arg.split(".")
                 try:
@@ -1526,12 +1555,17 @@ class FlexibleArgumentParser(ArgumentParser):
 
                 # Merge all values with the same key into a single dict
                 arg_dict = create_nested_dict(keys, value)
-                recursive_dict_update(dict_args[key], arg_dict)
+                arg_duplicates = recursive_dict_update(dict_args[key],
+                                                       arg_dict)
+                duplicates |= {f'{key}.{d}' for d in arg_duplicates}
                 delete.add(i)
         # Filter out the dict args we set to None
         processed_args = [
             a for i, a in enumerate(processed_args) if i not in delete
         ]
+        if duplicates:
+            logger.warning("Found duplicate keys %s", ", ".join(duplicates))
+
         # Add the dict args back as if they were originally passed as JSON
         for dict_arg, dict_value in dict_args.items():
             processed_args.append(dict_arg)
@@ -1722,6 +1756,7 @@ def supports_kw(
         last_param = params[next(reversed(params))]  # type: ignore
         return (last_param.kind == inspect.Parameter.VAR_KEYWORD
                 and last_param.name != kw_name)
+
     return False
 
 
@@ -1764,6 +1799,7 @@ def resolve_mm_processor_kwargs(
     # Merge the final processor kwargs, prioritizing inference
     # time values over the initialization time values.
     mm_processor_kwargs = {**init_mm_kwargs, **runtime_mm_kwargs}
+
     return mm_processor_kwargs
 
 
@@ -2396,7 +2432,7 @@ def memory_profiling(
     The increase of `torch.cuda.memory_stats()["allocated_bytes.all.peak"]` during profiling gives (b.).
 
     The increase of `non_torch_memory` from creating the current vLLM instance until after profiling to get (c.).
-    """ # noqa
+    """  # noqa
     gc.collect()
     torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats()
@@ -2912,230 +2948,41 @@ def is_torch_equal_or_newer(target: str) -> bool:
         Whether the condition meets.
     """
     try:
-        torch_version = version.parse(str(torch.__version__))
-        return torch_version >= version.parse(target)
+        return _is_torch_equal_or_newer(str(torch.__version__), target)
     except Exception:
         # Fallback to PKG-INFO to load the package info, needed by the doc gen.
         return Version(importlib.metadata.version('torch')) >= Version(target)
 
 
-# class ArgParserUtils:
-    
-#     @staticmethod
-#     def parse_type(return_type: Callable[[str], T]) -> Callable[[str], T]:
-
-#         def _parse_type(val: str) -> T:
-#             try:
-#                 if return_type is json.loads and not re.match("^{.*}$", val):
-#                     return cast(T, nullable_kvs(val))
-#                 return return_type(val)
-#             except ValueError as e:
-#                 raise argparse.ArgumentTypeError(
-#                     f"Value {val} cannot be converted to {return_type}.") from e
-
-#         return _parse_type
+# Helper function used in testing.
+def _is_torch_equal_or_newer(torch_version: str, target: str) -> bool:
+    torch_version = version.parse(torch_version)
+    return torch_version >= version.parse(target)
 
 
-#     @staticmethod
-#     def optional_type(
-#             return_type: Callable[[str], T]) -> Callable[[str], Optional[T]]:
+@cache
+def _has_module(module_name: str) -> bool:
+    """Return True if *module_name* can be found in the current environment.
 
-#         def _optional_type(val: str) -> Optional[T]:
-#             if val == "" or val == "None":
-#                 return None
-#             return parse_type(return_type)(val)
-
-#         return _optional_type
+    The result is cached so that subsequent queries for the same module incur
+    no additional overhead.
+    """
+    return importlib.util.find_spec(module_name) is not None
 
 
-#     @staticmethod
-#     def union_dict_and_str(val: str) -> Optional[Union[str, dict[str, str]]]:
-#         if not re.match("^{.*}$", val):
-#             return str(val)
-#         return optional_type(json.loads)(val)
+def has_pplx() -> bool:
+    """Whether the optional `pplx_kernels` package is available."""
+
+    return _has_module("pplx_kernels")
 
 
-#     @deprecated(
-#         "Passing a JSON argument as a string containing comma separated key=value "
-#         "pairs is deprecated. This will be removed in v0.10.0. Please use a JSON "
-#         "string instead.")
-#     def nullable_kvs(val: str) -> dict[str, int]:
-#         """Parses a string containing comma separate key [str] to value [int]
-#         pairs into a dictionary.
+def has_deep_ep() -> bool:
+    """Whether the optional `deep_ep` package is available."""
 
-#         Args:
-#             val: String value to be parsed.
-
-#         Returns:
-#             Dictionary with parsed values.
-#         """
-#         out_dict: dict[str, int] = {}
-#         for item in val.split(","):
-#             kv_parts = [part.lower().strip() for part in item.split("=")]
-#             if len(kv_parts) != 2:
-#                 raise argparse.ArgumentTypeError(
-#                     "Each item should be in the form KEY=VALUE")
-#             key, value = kv_parts
-
-#             try:
-#                 parsed_value = int(value)
-#             except ValueError as exc:
-#                 msg = f"Failed to parse value of item {key}={value}"
-#                 raise argparse.ArgumentTypeError(msg) from exc
-
-#             if key in out_dict and out_dict[key] != parsed_value:
-#                 raise argparse.ArgumentTypeError(
-#                     f"Conflicting values specified for key: {key}")
-#             out_dict[key] = parsed_value
-
-#         return out_dict
+    return _has_module("deep_ep")
 
 
-#     def is_type(type_hint: TypeHint, type: TypeHintT) -> TypeIs[TypeHintT]:
-#         """Check if the type hint is a specific type."""
-#         return type_hint is type or get_origin(type_hint) is type
+def has_deep_gemm() -> bool:
+    """Whether the optional `deep_gemm` package is available."""
 
-
-#     def contains_type(type_hints: set[TypeHint], type: TypeHintT) -> bool:
-#         """Check if the type hints contain a specific type."""
-#         return any(is_type(type_hint, type) for type_hint in type_hints)
-
-
-#     def get_type(type_hints: set[TypeHint], type: TypeHintT) -> TypeHintT:
-#         """Get the specific type from the type hints."""
-#         return next((th for th in type_hints if is_type(th, type)), None)
-
-
-#     def literal_to_kwargs(type_hints: set[TypeHint]) -> dict[str, Any]:
-#         """Convert Literal type hints to argparse kwargs."""
-#         type_hint = get_type(type_hints, Literal)
-#         choices = get_args(type_hint)
-#         choice_type = type(choices[0])
-#         if not all(isinstance(choice, choice_type) for choice in choices):
-#             raise ValueError(
-#                 "All choices must be of the same type. "
-#                 f"Got {choices} with types {[type(c) for c in choices]}")
-#         return {"type": choice_type, "choices": sorted(choices)}
-
-
-#     def is_not_builtin(type_hint: TypeHint) -> bool:
-#         """Check if the class is not a built-in type."""
-#         return type_hint.__module__ != "builtins"
-
-
-#     def get_type_hints(type_hint: TypeHint) -> set[TypeHint]:
-#         """Extract type hints from Annotated or Union type hints."""
-#         type_hints: set[TypeHint] = set()
-#         origin = get_origin(type_hint)
-#         args = get_args(type_hint)
-
-#         if origin is Annotated:
-#             type_hints.update(get_type_hints(args[0]))
-#         elif origin is Union:
-#             for arg in args:
-#                 type_hints.update(get_type_hints(arg))
-#         else:
-#             type_hints.add(type_hint)
-
-#         return type_hints
-
-
-#     def get_kwargs(cls: ConfigType) -> dict[str, Any]:
-#         cls_docs = get_attr_docs(cls)
-#         kwargs = {}
-#         for field in fields(cls):
-#             # Get the set of possible types for the field
-#             type_hints: set[TypeHint] = get_type_hints(field.type)
-
-#             # If the field is a dataclass, we can use the model_validate_json
-#             generator = (th for th in type_hints if is_dataclass(th))
-#             dataclass_cls = next(generator, None)
-
-#             # Get the default value of the field
-#             if field.default is not MISSING:
-#                 default = field.default
-#             elif field.default_factory is not MISSING:
-#                 default = field.default_factory()
-
-#             # Get the help text for the field
-#             name = field.name
-#             help = cls_docs[name].strip()
-#             # Escape % for argparse
-#             help = help.replace("%", "%%")
-
-#             # Initialise the kwargs dictionary for the field
-#             kwargs[name] = {"default": default, "help": help}
-
-#             # Set other kwargs based on the type hints
-#             json_tip = """\n\nShould either be a valid JSON string or JSON keys
-#             passed individually. For example, the following sets of arguments are
-#             equivalent:\n\n
-#             - `--json-arg '{"key1": "value1", "key2": {"key3": "value2"}}'`\n
-#             - `--json-arg.key1 value1 --json-arg.key2.key3 value2`\n\n"""
-#             if dataclass_cls is not None:
-
-#                 def parse_dataclass(val: str, cls=dataclass_cls) -> Any:
-#                     try:
-#                         if hasattr(cls, "from_cli"):
-#                             return cls.from_cli(val)
-#                         return TypeAdapter(cls).validate_json(val)
-#                     except ValidationError as e:
-#                         raise argparse.ArgumentTypeError(repr(e)) from e
-
-#                 kwargs[name]["type"] = parse_dataclass
-#                 kwargs[name]["help"] += json_tip
-#             elif contains_type(type_hints, bool):
-#                 # Creates --no-<name> and --<name> flags
-#                 kwargs[name]["action"] = argparse.BooleanOptionalAction
-#             elif contains_type(type_hints, Literal):
-#                 kwargs[name].update(literal_to_kwargs(type_hints))
-#             elif contains_type(type_hints, tuple):
-#                 type_hint = get_type(type_hints, tuple)
-#                 types = get_args(type_hint)
-#                 tuple_type = types[0]
-#                 assert all(t is tuple_type for t in types if t is not Ellipsis), (
-#                     "All non-Ellipsis tuple elements must be of the same "
-#                     f"type. Got {types}.")
-#                 kwargs[name]["type"] = tuple_type
-#                 kwargs[name]["nargs"] = "+" if Ellipsis in types else len(types)
-#             elif contains_type(type_hints, list):
-#                 type_hint = get_type(type_hints, list)
-#                 types = get_args(type_hint)
-#                 assert len(types) == 1, (
-#                     "List type must have exactly one type. Got "
-#                     f"{type_hint} with types {types}")
-#                 kwargs[name]["type"] = types[0]
-#                 kwargs[name]["nargs"] = "+"
-#             elif contains_type(type_hints, int):
-#                 kwargs[name]["type"] = int
-#                 # Special case for large integers
-#                 if name in {"max_model_len", "max_num_batched_tokens"}:
-#                     kwargs[name]["type"] = human_readable_int
-#             elif contains_type(type_hints, float):
-#                 kwargs[name]["type"] = float
-#             elif (contains_type(type_hints, dict)
-#                 and (contains_type(type_hints, str)
-#                     or any(is_not_builtin(th) for th in type_hints))):
-#                 kwargs[name]["type"] = union_dict_and_str
-#             elif contains_type(type_hints, dict):
-#                 kwargs[name]["type"] = parse_type(json.loads)
-#                 kwargs[name]["help"] += json_tip
-#             elif (contains_type(type_hints, str)
-#                 or any(is_not_builtin(th) for th in type_hints)):
-#                 kwargs[name]["type"] = str
-#             else:
-#                 raise ValueError(
-#                     f"Unsupported type {type_hints} for argument {name}.")
-
-#             # If the type hint was a sequence of literals, use the helper function
-#             # to update the type and choices
-#             if get_origin(kwargs[name].get("type")) is Literal:
-#                 kwargs[name].update(literal_to_kwargs({kwargs[name]["type"]}))
-
-#             # If None is in type_hints, make the argument optional.
-#             # But not if it's a bool, argparse will handle this better.
-#             if type(None) in type_hints and not contains_type(type_hints, bool):
-#                 kwargs[name]["type"] = optional_type(kwargs[name]["type"])
-#                 if kwargs[name].get("choices"):
-#                     kwargs[name]["choices"].append("None")
-#         return kwargs
+    return _has_module("deep_gemm")

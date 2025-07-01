@@ -22,10 +22,10 @@ Currently, there are no pre-built XPU wheels.
 # --8<-- [end:pre-built-wheels]
 # --8<-- [start:build-wheel-from-source]
 
-- First, install required driver and Intel OneAPI 2025.0 or later.
+- First, install required [driver](https://dgpu-docs.intel.com/driver/installation.html#installing-gpu-drivers) and [Intel OneAPI](https://www.intel.com/content/www/us/en/developer/tools/oneapi/base-toolkit.html) 2025.0 or later.
 - Second, install Python packages for vLLM XPU backend building:
 
-```console
+```bash
 git clone https://github.com/vllm-project/vllm.git
 cd vllm
 pip install --upgrade pip
@@ -34,7 +34,7 @@ pip install -v -r requirements/xpu.txt
 
 - Then, build and install vLLM XPU backend:
 
-```console
+```bash
 VLLM_TARGET_DEVICE=xpu python setup.py install
 ```
 
@@ -53,9 +53,9 @@ Currently, there are no pre-built XPU images.
 # --8<-- [end:pre-built-images]
 # --8<-- [start:build-image-from-source]
 
-```console
-$ docker build -f docker/Dockerfile.xpu -t vllm-xpu-env --shm-size=4g .
-$ docker run -it \
+```bash
+docker build -f docker/Dockerfile.xpu -t vllm-xpu-env --shm-size=4g .
+docker run -it \
              --rm \
              --network=host \
              --device /dev/dri \
@@ -63,11 +63,12 @@ $ docker run -it \
              vllm-xpu-env
 ```
 
-## Supported features
+# --8<-- [end:build-image-from-source]
+# --8<-- [start:supported-features]
 
 XPU platform supports **tensor parallel** inference/serving and also supports **pipeline parallel** as a beta feature for online serving. We require Ray as the distributed runtime backend. For example, a reference execution like following:
 
-```console
+```bash
 python -m vllm.entrypoints.openai.api_server \
      --model=facebook/opt-13b \
      --dtype=bfloat16 \
@@ -78,4 +79,6 @@ python -m vllm.entrypoints.openai.api_server \
 ```
 
 By default, a ray instance will be launched automatically if no existing one is detected in the system, with `num-gpus` equals to `parallel_config.world_size`. We recommend properly starting a ray cluster before execution, referring to the <gh-file:examples/online_serving/run_cluster.sh> helper script.
+
+# --8<-- [end:supported-features]
 # --8<-- [end:extra-information]

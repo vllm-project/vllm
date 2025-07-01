@@ -153,6 +153,8 @@ class FrontendArgs:
     """If set to True, enable prompt_tokens_details in usage."""
     enable_server_load_tracking: bool = False
     """If set to True, enable tracking server_load_metrics in the app state."""
+    enable_force_include_usage: bool = False
+    """If set to True, including usage on every request."""
     
     def __post_init__(self):
         # Set default values for list fields that should not be None
@@ -243,6 +245,7 @@ class FrontendArgs:
         frontend_group.add_argument("--disable-fastapi-docs", **frontend_kwargs["disable_fastapi_docs"])
         frontend_group.add_argument("--enable-prompt-tokens-details", **frontend_kwargs["enable_prompt_tokens_details"])
         frontend_group.add_argument("--enable-server-load-tracking", **frontend_kwargs["enable_server_load_tracking"])
+        frontend_group.add_argument("--enable-force-include-usage", **frontend_kwargs["enable_force_include_usage"])
 
         return parser
 

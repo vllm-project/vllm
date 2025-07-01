@@ -89,10 +89,6 @@ class CpuPlatform(Platform):
         import vllm.envs as envs
         from vllm.utils import GiB_bytes
         model_config = vllm_config.model_config
-        # Reminder: Please update docs/features/compatibility_matrix.md
-        # If the feature combo become valid
-        if not model_config.enforce_eager:
-            model_config.enforce_eager = True
 
         model_config.disable_cascade_attn = True
 
@@ -171,9 +167,21 @@ class CpuPlatform(Platform):
         compilation_config = vllm_config.compilation_config
         if (envs.VLLM_USE_V1 and vllm_config.compilation_config.level
                 == CompilationLevel.PIECEWISE):
+
+            # Note: vLLM V1 is using PIECEWISE level compilation, which will
+            # take time to compile kernels just-in-time with the inductor
+            # backend. For CPU CI tests, most of them are executed fast and
+            # compilations consume too much time, even with torch compile
+            # cache. So use VLLM_CPU_CI_ENV to indicate the CI environment,
+            # and just execute model with dynamo + eager mode to save time.
+            # VLLM_CPU_CI_ENV is only used as an internal variable.
+            if os.environ.get("VLLM_CPU_CI_ENV", "0") != "0":
+                backend = "eager"
+            else:
+                backend = "inductor"
+
             compilation_config.level = CompilationLevel.DYNAMO_ONCE
-            compilation_config.backend = "eager"
-            compilation_config.custom_ops += ["none"]
+            compilation_config.backend = backend
             compilation_config.inductor_compile_config.update({
                 "dce":
                 True,
@@ -207,9 +215,6 @@ class CpuPlatform(Platform):
 
         # Disable torch async compiling which won't work with daemonic processes
         os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = "1"
-
-        # Share the cpusets list among ranks by spawning process instead
-        os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
         # Intel OpenMP setting
         ld_prealod_str = os.getenv("LD_PRELOAD", "")
@@ -264,3 +269,11 @@ class CpuPlatform(Platform):
         model configuration.
         """
         return True
+
+    @classmethod
+    def default_v1(cls, model_config) -> bool:
+        """Returns whether the current platform can use v1 by default for the
+        supplied model configuration.
+        """
+        return cls.supports_v1(
+            model_config) and cls.get_cpu_architecture() == CpuArchEnum.X86

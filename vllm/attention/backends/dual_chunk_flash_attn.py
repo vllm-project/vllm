@@ -307,7 +307,6 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
                                if sliding_window is not None else (-1, -1))
         self.kv_cache_dtype = kv_cache_dtype
 
-        assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
         if sliding_window is not None:
             # NOTE(woosuk): flash-attn's sliding window does not work with
