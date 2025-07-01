@@ -90,7 +90,10 @@ class BatchedMMTensors:
 
 
 @pytest.mark.parametrize("num_experts", [8, 16, 32])
-@pytest.mark.parametrize(("max_tokens_per_expert", "N", "K"), MNK_FACTORS)
+@pytest.mark.parametrize("max_tokens_per_expert",
+                         [32, 64, 128, 192, 224, 256, 512])
+@pytest.mark.parametrize("K", [128, 256, 1024])
+@pytest.mark.parametrize("N", [128, 256, 512, 1024])
 @pytest.mark.parametrize(
     "dtype",
     [torch.float8_e4m3fn, torch.float32, torch.float16, torch.bfloat16])
