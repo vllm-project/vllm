@@ -586,8 +586,9 @@ class InputBatch:
         del self._req_ids[self.num_reqs:]
         del self.req_output_token_ids[self.num_reqs:]
 
-    def update_reset(self):
+    def refresh_metadata(self):
         """Apply batch updates, reset input batch at end of step
+        
         * Apply batch add/remove/permute to logits procs' states
         * If batch state is modified, update sampling metadata
         """
