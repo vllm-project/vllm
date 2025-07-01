@@ -357,7 +357,7 @@ def test_swap_states_in_input_batch(device: str, batch_size: int,
         assigned_req_index = ref_input_batch.add_request(req)
         assert assigned_req_index == req_index
 
-    input_batch.update_reset()
-    ref_input_batch.update_reset()
+    input_batch.refresh_metadata()
+    ref_input_batch.refresh_metadata()
 
     _compare_objs(input_batch, ref_input_batch)

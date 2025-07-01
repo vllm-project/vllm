@@ -335,8 +335,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # group to reorder the batch and asserting that all other groups do not
         # reorder the batch.
         for i in range(1, len(self.kv_cache_config.kv_cache_groups)):
-            assert not self.attn_metadata_builders[i].reorder_batch(
+            batch_reordered = self.attn_metadata_builders[i].reorder_batch(
                 self.input_batch, scheduler_output)
+            assert not batch_reordered
 
     # Note: used for model runner override.
     def _init_device_properties(self) -> None:
@@ -393,7 +394,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # have low request overlap (e.g., alternating between two distinct
         # sets of requests), this optimization becomes very inefficient.
         for req_id in unscheduled_req_ids:
-            assert self.input_batch.remove_request(req_id) is not None
+            self.input_batch.remove_request(req_id)
 
         req_ids_to_add: list[str] = []
         # Add new requests to the cached states.
@@ -532,8 +533,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.input_batch.condense()
         # Allow attention backend to reorder the batch, potentially
         self._may_reorder_batch(scheduler_output)
-        # Apply batch updates then reset input batch
-        self.input_batch.update_reset()
+        # Refresh batch metadata with any pending updates.
+        self.input_batch.refresh_metadata()
 
     def _get_cumsum_and_arange(
         self,
