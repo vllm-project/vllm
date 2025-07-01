@@ -1435,9 +1435,10 @@ class ModelConfig:
 
     def get_and_verify_max_len(self, max_model_len: int):
         # For pooling models, the tokenizer's `model_max_length` is often a
-        # reliable source for the maximum sequence length. However, for generative
-        # models, this can be incorrect and unduly limit the context window (e.g.,
-        # DeepSeek). Therefore, we only consider tokenizer_config for pooling models.
+        # reliable source for the maximum sequence length. However, for
+        # generative models, this can be incorrect and unduly limit the
+        # context window (e.g., DeepSeek-R1). Therefore, we only consider
+        # tokenizer_config for pooling models.
         tokenizer_config = None
         if self.runner_type == "pooling":
             tokenizer_config = try_get_tokenizer_config(
