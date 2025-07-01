@@ -50,6 +50,27 @@ void shm_send_tensor_list(int64_t handle,
 
 std::vector<torch::Tensor> shm_recv_tensor_list(int64_t handle, int64_t src);
 
+at::Tensor weight_packed_linear(at::Tensor& mat1, at::Tensor& mat2,
+                                const std::optional<at::Tensor>& bias,
+                                bool is_vnni);
+
+at::Tensor convert_weight_packed(at::Tensor& weight);
+
+at::Tensor fused_experts_cpu(
+    at::Tensor& hidden_states, at::Tensor& w1, at::Tensor& w2,
+    at::Tensor& topk_weights, at::Tensor& topk_ids, bool inplace,
+    bool use_int8_w8a8, bool use_fp8_w8a16,
+    const std::optional<at::Tensor>& w1_scale,
+    const std::optional<at::Tensor>& w2_scale,
+    const std::optional<std::vector<int64_t>> block_size,
+    const std::optional<at::Tensor>& a1_scale,
+    const std::optional<at::Tensor>& a2_scale, bool is_vnni);
+
+at::Tensor int8_scaled_mm_with_quant(at::Tensor& mat1, at::Tensor& mat2,
+                                     at::Tensor& scales2,
+                                     const std::optional<at::Tensor>& bias,
+                                     at::ScalarType out_dtype, bool is_vnni);
+
 TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // vLLM custom ops
 
@@ -131,16 +152,19 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 
   // Quantization
 #ifdef __AVX512F__
+  at::Tag stride_tag = at::Tag::needs_fixed_stride_order;
   // Compute int8 quantized tensor for given scaling factor.
   ops.def(
       "static_scaled_int8_quant(Tensor! out, Tensor input, Tensor scale,"
-      "Tensor? azp) -> ()");
+      "Tensor? azp) -> ()",
+      {stride_tag});
   ops.impl("static_scaled_int8_quant", torch::kCPU, &static_scaled_int8_quant);
 
   // Compute int8 quantized tensor and scaling factor
   ops.def(
       "dynamic_scaled_int8_quant(Tensor! out, Tensor input, Tensor! scale, "
-      "Tensor!? azp) -> ()");
+      "Tensor!? azp) -> ()",
+      {stride_tag});
   ops.impl("dynamic_scaled_int8_quant", torch::kCPU,
            &dynamic_scaled_int8_quant);
   // W8A8 GEMM, supporting symmetric per-tensor or per-row/column
@@ -148,7 +172,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def(
       "cutlass_scaled_mm(Tensor! out, Tensor a,"
       "                  Tensor b, Tensor a_scales,"
-      "                  Tensor b_scales, Tensor? bias) -> ()");
+      "                  Tensor b_scales, Tensor? bias) -> ()",
+      {stride_tag});
   ops.impl("cutlass_scaled_mm", torch::kCPU, &int8_scaled_mm);
   // w8a8 GEMM, supporting asymmetric per-tensor or per-row/column
   // quantization.
@@ -156,7 +181,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "cutlass_scaled_mm_azp(Tensor! out, Tensor a,"
       "                  Tensor b, Tensor a_scales,"
       "                  Tensor b_scales, Tensor azp_adj,"
-      "                  Tensor? azp, Tensor? bias) -> ()");
+      "                  Tensor? azp, Tensor? bias) -> ()",
+      {stride_tag});
   ops.impl("cutlass_scaled_mm_azp", torch::kCPU, &int8_scaled_mm_azp);
 #elif defined(__powerpc64__)
   // Compute int8 quantized tensor for given scaling factor.
@@ -208,6 +234,28 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("shm_send_tensor_list", torch::kCPU, &shm_send_tensor_list);
   ops.def("shm_recv_tensor_list(int handle, int src) -> Tensor[](a)",
           &shm_recv_tensor_list);
+#endif
+
+  // sgl-kernels
+#if defined(__AVX512BF16__) && defined(__AVX512F__) && defined(__AVX512VNNI__)
+  ops.def(
+      "weight_packed_linear(Tensor(a0!) mat1, Tensor(a1!) mat2, Tensor(a2!)? "
+      "bias, bool is_vnni) -> Tensor");
+  ops.impl("weight_packed_linear", torch::kCPU, &weight_packed_linear);
+  ops.def("convert_weight_packed(Tensor! weight) -> Tensor");
+  ops.impl("convert_weight_packed", torch::kCPU, &convert_weight_packed);
+  ops.def(
+      "fused_experts_cpu(Tensor! hidden_states, Tensor w1, Tensor w2, Tensor "
+      "topk_weights, Tensor topk_ids, bool inplace, bool use_int8_w8a8, bool "
+      "use_fp8_w8a16, Tensor? w1_scale, Tensor? w2_scale, SymInt[]? "
+      "block_size, Tensor? a1_scale, Tensor? a2_scale, bool is_vnni) -> "
+      "Tensor");
+  ops.impl("fused_experts_cpu", torch::kCPU, &fused_experts_cpu);
+  ops.def(
+      "int8_scaled_mm_with_quant(Tensor mat1, Tensor mat2, Tensor scales2, "
+      "Tensor? bias, ScalarType out_dtype, bool is_vnni) -> Tensor");
+  ops.impl("int8_scaled_mm_with_quant", torch::kCPU,
+           &int8_scaled_mm_with_quant);
 #endif
 }
 

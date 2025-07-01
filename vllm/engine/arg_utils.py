@@ -3,7 +3,9 @@
 
 # yapf: disable
 import argparse
+import copy
 import dataclasses
+import functools
 import json
 import sys
 import threading
@@ -168,7 +170,8 @@ def get_type_hints(type_hint: TypeHint) -> set[TypeHint]:
     return type_hints
 
 
-def get_kwargs(cls: ConfigType) -> dict[str, Any]:
+@functools.lru_cache(maxsize=30)
+def _compute_kwargs(cls: ConfigType) -> dict[str, Any]:
     cls_docs = get_attr_docs(cls)
     kwargs = {}
     for field in fields(cls):
@@ -199,7 +202,10 @@ def get_kwargs(cls: ConfigType) -> dict[str, Any]:
         passed individually. For example, the following sets of arguments are
         equivalent:\n\n
         - `--json-arg '{"key1": "value1", "key2": {"key3": "value2"}}'`\n
-        - `--json-arg.key1 value1 --json-arg.key2.key3 value2`\n\n"""
+        - `--json-arg.key1 value1 --json-arg.key2.key3 value2`\n
+        Additionally, list elements can be passed individually using '+':
+        - `--json-arg '{"key4": ["value3", "value4", "value5"]}'`\n
+        - `--json-arg.key4+ value3 --json-arg.key4+='value4,value5'`\n\n"""
         if dataclass_cls is not None:
 
             def parse_dataclass(val: str, cls=dataclass_cls) -> Any:
@@ -269,6 +275,16 @@ def get_kwargs(cls: ConfigType) -> dict[str, Any]:
     return kwargs
 
 
+def get_kwargs(cls: ConfigType) -> dict[str, Any]:
+    """Return argparse kwargs for the given Config dataclass.
+
+    The heavy computation is cached via functools.lru_cache, and a deep copy
+    is returned so callers can mutate the dictionary without affecting the
+    cached version.
+    """
+    return copy.deepcopy(_compute_kwargs(cls))
+
+
 @dataclass
 class EngineArgs:
     """Arguments for vLLM engine."""
@@ -307,6 +323,11 @@ class EngineArgs:
     data_parallel_rpc_port: Optional[int] = None
     data_parallel_backend: str = ParallelConfig.data_parallel_backend
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
+    enable_eplb: bool = ParallelConfig.enable_eplb
+    num_redundant_experts: int = ParallelConfig.num_redundant_experts
+    eplb_window_size: int = ParallelConfig.eplb_window_size
+    eplb_step_interval: int = ParallelConfig.eplb_step_interval
+    eplb_log_balancedness: bool = ParallelConfig.eplb_log_balancedness
     max_parallel_loading_workers: Optional[
         int] = ParallelConfig.max_parallel_loading_workers
     block_size: Optional[BlockSize] = CacheConfig.block_size
@@ -658,6 +679,16 @@ class EngineArgs:
         parallel_group.add_argument(
             "--enable-expert-parallel",
             **parallel_kwargs["enable_expert_parallel"])
+        parallel_group.add_argument("--enable-eplb",
+                                    **parallel_kwargs["enable_eplb"])
+        parallel_group.add_argument("--num-redundant-experts",
+                                    **parallel_kwargs["num_redundant_experts"])
+        parallel_group.add_argument("--eplb-window-size",
+                                    **parallel_kwargs["eplb_window_size"])
+        parallel_group.add_argument("--eplb-step-interval",
+                                    **parallel_kwargs["eplb_step_interval"])
+        parallel_group.add_argument("--eplb-log-balancedness",
+                                    **parallel_kwargs["eplb_log_balancedness"])
         parallel_group.add_argument(
             "--max-parallel-loading-workers",
             **parallel_kwargs["max_parallel_loading_workers"])
@@ -1134,6 +1165,11 @@ class EngineArgs:
             data_parallel_rpc_port=data_parallel_rpc_port,
             data_parallel_backend=data_parallel_backend,
             enable_expert_parallel=self.enable_expert_parallel,
+            enable_eplb=self.enable_eplb,
+            num_redundant_experts=self.num_redundant_experts,
+            eplb_window_size=self.eplb_window_size,
+            eplb_step_interval=self.eplb_step_interval,
+            eplb_log_balancedness=self.eplb_log_balancedness,
             max_parallel_loading_workers=self.max_parallel_loading_workers,
             disable_custom_all_reduce=self.disable_custom_all_reduce,
             ray_workers_use_nsight=self.ray_workers_use_nsight,
@@ -1286,11 +1322,6 @@ class EngineArgs:
                 != EngineArgs.disable_async_output_proc):
             _raise_or_fallback(feature_name="--disable-async-output-proc",
                                recommend_to_remove=True)
-            return False
-
-        if self.scheduling_policy != SchedulerConfig.policy:
-            _raise_or_fallback(feature_name="--scheduling-policy",
-                               recommend_to_remove=False)
             return False
 
         if self.num_scheduler_steps != SchedulerConfig.num_scheduler_steps:
