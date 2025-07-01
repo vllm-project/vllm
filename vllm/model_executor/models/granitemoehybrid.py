@@ -584,11 +584,11 @@ class GraniteMoeHybridForCausalLM(nn.Module, HasInnerState, SupportsLoRA,
         mamba_cache_params = None
         if not envs.VLLM_USE_V1:
             if self.mamba_cache is None:
-                num_mamba_layers = \
+                num_mamba_layers = (
                     self.model_config.get_num_layers_by_block_type(
                         self.vllm_config.parallel_config,
                         LayerBlockType.mamba
-                )
+                ))
                 self.mamba_cache = MambaCacheManager(
                     self.vllm_config, self.model_config.dtype,
                     num_mamba_layers, *self._get_mamba_cache_shape())
