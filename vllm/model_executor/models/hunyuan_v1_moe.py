@@ -24,25 +24,31 @@
 # limitations under the License.
 """Inference-only HunYuan model compatible with HuggingFace weights."""
 from collections.abc import Iterable
-from typing import Optional, Union
+from typing import Any, Optional, Union
 
 import regex as re
 import torch
 from torch import nn
 from transformers import PretrainedConfig
 
-from vllm.attention import AttentionType
+from vllm.attention import Attention, AttentionType
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (get_pp_group,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
+from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               MergedColumnParallelLinear,
+                                               QKVParallelLinear,
+                                               ReplicatedLinear,
+                                               RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
+from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
@@ -51,8 +57,6 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
-from .hunyuan_v1_dense import (HunYuanAttention, HunYuanCrossAttention,
-                               HunYuanMLP)
 from .utils import PPMissingLayer, is_pp_missing_parameter, make_layers
 
 
@@ -60,6 +64,273 @@ def _get_cla_factor(config: PretrainedConfig) -> int:
     if not getattr(config, "use_cla", False):
         return 1
     return getattr(config, "cla_share_factor", 1)
+
+
+class HunYuanMLP(nn.Module):
+
+    def __init__(
+        self,
+        hidden_size: int,
+        intermediate_size: int,
+        hidden_act: str,
+        quant_config: Optional[QuantizationConfig] = None,
+        bias: bool = False,
+        prefix: str = "",
+        reduce_results: bool = True,
+    ) -> None:
+        super().__init__()
+        self.gate_up_proj = MergedColumnParallelLinear(
+            input_size=hidden_size,
+            output_sizes=[intermediate_size] * 2,
+            bias=bias,
+            quant_config=quant_config,
+            prefix=f"{prefix}.gate_up_proj",
+        )
+        self.down_proj = RowParallelLinear(
+            input_size=intermediate_size,
+            output_size=hidden_size,
+            bias=bias,
+            quant_config=quant_config,
+            prefix=f"{prefix}.down_proj",
+            reduce_results=reduce_results,
+        )
+        if hidden_act != "silu":
+            raise ValueError(f"Unsupported activation: {hidden_act}. "
+                             "Only silu is supported for now.")
+        self.act_fn = SiluAndMul()
+
+    def forward(self, x):
+        gate_up, _ = self.gate_up_proj(x)
+        x = self.act_fn(gate_up)
+        x, _ = self.down_proj(x)
+        return x
+
+
+class HunYuanAttention(nn.Module):
+
+    def __init__(
+        self,
+        config: PretrainedConfig,
+        hidden_size: int,
+        num_heads: int,
+        num_kv_heads: int,
+        rope_theta: float = 10000,
+        rope_scaling: Optional[dict[str, Any]] = None,
+        max_position_embeddings: int = 8192,
+        quant_config: Optional[QuantizationConfig] = None,
+        bias: bool = False,
+        cache_config: Optional[CacheConfig] = None,
+        prefix: str = "",
+        layer_id: int = -1,
+    ) -> None:
+        super().__init__()
+        self.hidden_size = hidden_size
+        tp_size = get_tensor_model_parallel_world_size()
+        self.total_num_heads = num_heads
+        assert self.total_num_heads % tp_size == 0
+        self.num_heads = self.total_num_heads // tp_size
+        self.total_num_kv_heads = num_kv_heads
+        if self.total_num_kv_heads >= tp_size:
+            # Number of KV heads is greater than TP size, so we partition
+            # the KV heads across multiple tensor parallel GPUs.
+            assert self.total_num_kv_heads % tp_size == 0
+        else:
+            # Number of KV heads is less than TP size, so we replicate
+            # the KV heads across multiple tensor parallel GPUs.
+            assert tp_size % self.total_num_kv_heads == 0
+        self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
+        # MistralConfig has an optional head_dim introduced by Mistral-Nemo
+        if hasattr(config, "head_dim"):
+            self.head_dim = config.head_dim
+        elif hasattr(config, "attention_head_dim"):
+            self.head_dim = config.attention_head_dim
+        else:
+            self.head_dim = self.hidden_size // self.total_num_heads
+        self.q_size = self.num_heads * self.head_dim
+        self.kv_size = self.num_kv_heads * self.head_dim
+        self.scaling = self.head_dim**-0.5
+        self.rope_theta = rope_theta
+        self.max_position_embeddings = max_position_embeddings
+        self.use_qk_norm = getattr(config, "use_qk_norm", False)
+        self.layer_id = layer_id
+
+        self.qkv_proj = QKVParallelLinear(
+            hidden_size=hidden_size,
+            head_size=self.head_dim,
+            total_num_heads=self.total_num_heads,
+            total_num_kv_heads=self.total_num_kv_heads,
+            bias=bias,
+            quant_config=quant_config,
+            prefix=f"{prefix}.qkv_proj",
+        )
+
+        self.o_proj = RowParallelLinear(
+            input_size=self.total_num_heads * self.head_dim,
+            output_size=hidden_size,
+            bias=bias,
+            quant_config=quant_config,
+            prefix=f"{prefix}.o_proj",
+        )
+
+        self.rotary_emb = get_rope(
+            self.head_dim,
+            rotary_dim=self.head_dim,
+            max_position=max_position_embeddings,
+            base=rope_theta,
+            rope_scaling=rope_scaling,
+            is_neox_style=True,
+        )
+        self.attn = Attention(
+            self.num_heads,
+            self.head_dim,
+            self.scaling,
+            num_kv_heads=self.num_kv_heads,
+            cache_config=cache_config,
+            quant_config=quant_config,
+            prefix=f"{prefix}.attn",
+        )
+
+        if self.use_qk_norm:
+            self.query_layernorm = RMSNorm(self.head_dim,
+                                           eps=config.rms_norm_eps)
+            self.key_layernorm = RMSNorm(self.head_dim,
+                                         eps=config.rms_norm_eps)
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        kv_states: Optional[tuple[torch.Tensor]] = None,
+    ) -> torch.Tensor:
+        qkv, _ = self.qkv_proj(hidden_states)
+        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        q, k = self.rotary_emb(positions, q, k)
+        ori_k = k
+        if self.use_qk_norm:
+            q = self.query_layernorm(
+                q.view(-1, self.num_heads, self.head_dim).contiguous())
+            k = self.key_layernorm(
+                k.view(-1, self.num_kv_heads, self.head_dim).contiguous())
+
+        attn_output = self.attn(q, k, v)
+        # For o_proj
+        attn_output = attn_output.view(q.shape[0], -1)
+        output, _ = self.o_proj(attn_output)
+        return output, (ori_k, v)
+
+
+class HunYuanCrossAttention(nn.Module):
+
+    def __init__(
+        self,
+        config: PretrainedConfig,
+        hidden_size: int,
+        num_heads: int,
+        num_kv_heads: int,
+        rope_theta: float = 10000,
+        rope_scaling: Optional[dict[str, Any]] = None,
+        max_position_embeddings: int = 8192,
+        quant_config: Optional[QuantizationConfig] = None,
+        bias: bool = False,
+        cache_config: Optional[CacheConfig] = None,
+        prefix: str = "",
+        layer_id: int = -1,
+    ) -> None:
+        super().__init__()
+        self.hidden_size = hidden_size
+        tp_size = get_tensor_model_parallel_world_size()
+        self.total_num_heads = num_heads
+        assert self.total_num_heads % tp_size == 0
+        self.num_heads = self.total_num_heads // tp_size
+        self.total_num_kv_heads = num_kv_heads
+        if self.total_num_kv_heads >= tp_size:
+            # Number of KV heads is greater than TP size, so we partition
+            # the KV heads across multiple tensor parallel GPUs.
+            assert self.total_num_kv_heads % tp_size == 0
+        else:
+            # Number of KV heads is less than TP size, so we replicate
+            # the KV heads across multiple tensor parallel GPUs.
+            assert tp_size % self.total_num_kv_heads == 0
+        self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
+        # MistralConfig has an optional head_dim introduced by Mistral-Nemo
+        if hasattr(config, "head_dim"):
+            self.head_dim = config.head_dim
+        elif hasattr(config, "attention_head_dim"):
+            self.head_dim = config.attention_head_dim
+        else:
+            self.head_dim = self.hidden_size // self.total_num_heads
+        self.q_size = self.num_heads * self.head_dim
+        self.kv_size = self.num_kv_heads * self.head_dim
+        self.scaling = self.head_dim**-0.5
+        self.rope_theta = rope_theta
+        self.max_position_embeddings = max_position_embeddings
+        self.use_qk_norm = getattr(config, "use_qk_norm", False)
+        self.layer_id = layer_id
+
+        self.q_proj = ColumnParallelLinear(
+            hidden_size,
+            hidden_size,
+            bias=bias,
+            quant_config=quant_config,
+            prefix=f"{prefix}.q_proj",
+        )
+
+        self.o_proj = RowParallelLinear(
+            input_size=self.total_num_heads * self.head_dim,
+            output_size=hidden_size,
+            bias=bias,
+            quant_config=quant_config,
+            prefix=f"{prefix}.o_proj",
+        )
+
+        self.rotary_emb = get_rope(
+            self.head_dim,
+            rotary_dim=self.head_dim,
+            max_position=max_position_embeddings,
+            base=rope_theta,
+            rope_scaling=rope_scaling,
+            is_neox_style=True,
+        )
+        self.attn = Attention(
+            self.num_heads,
+            self.head_dim,
+            self.scaling,
+            num_kv_heads=self.num_kv_heads,
+            cache_config=cache_config,
+            quant_config=quant_config,
+            prefix=f"{prefix}.attn",
+            attn_type=AttentionType.ENCODER_DECODER,
+        )
+
+        if self.use_qk_norm:
+            self.query_layernorm = RMSNorm(self.head_dim,
+                                           eps=config.rms_norm_eps)
+            self.key_layernorm = RMSNorm(self.head_dim,
+                                         eps=config.rms_norm_eps)
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        kv_states: Optional[tuple[torch.Tensor]] = None,
+    ) -> torch.Tensor:
+        assert kv_states is not None
+        ori_k, v = kv_states  # use last layer kv,
+        k = ori_k
+        q, _ = self.q_proj(hidden_states)
+        k_tmp = torch.empty_like(k)  # Todo: reduant rotary embedding
+        q, _ = self.rotary_emb(positions, q, k_tmp)
+        if self.use_qk_norm:
+            q = self.query_layernorm(
+                q.view(-1, self.num_heads, self.head_dim).contiguous())
+            k = self.key_layernorm(
+                k.view(-1, self.num_kv_heads, self.head_dim).contiguous())
+
+        attn_output = self.attn(q, k, v)
+        # For o_proj
+        attn_output = attn_output.view(q.shape[0], -1)
+        output, _ = self.o_proj(attn_output)
+        return output, (ori_k, v)
 
 
 class HunYuanSparseMoeBlock(nn.Module):
