@@ -776,7 +776,8 @@ class Scheduler(SchedulerInterface):
 
             # NOTE(woosuk): This has to be executed after updating
             # `request.num_computed_tokens`.
-            self._free_encoder_inputs(request)
+            if request.has_encoder_inputs:
+                self._free_encoder_inputs(request)
 
             stopped = False
             new_logprobs = None
@@ -895,7 +896,13 @@ class Scheduler(SchedulerInterface):
     def _free_encoder_inputs(self, request: Request) -> None:
         cached_encoder_input_ids = (
             self.encoder_cache_manager.get_cached_input_ids(request))
-        for input_id in cached_encoder_input_ids:
+        # OPTIMIZATION: Avoid list(set) if the set is empty.
+        if not cached_encoder_input_ids:
+            return
+
+        # Here, we use list(set) to avoid modifying the set while iterating
+        # over it.
+        for input_id in list(cached_encoder_input_ids):
             mm_positions = request.mm_positions[input_id]
             start_pos = mm_positions.offset
             num_tokens = mm_positions.length
