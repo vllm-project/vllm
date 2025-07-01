@@ -147,10 +147,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             # quantization. Fallback to per_token_dynamic quant.
             per_token_quant = True
         else:
-            per_token_quant = ((quant_config.block_shape is None) or
-                               (a1_scale is not None and a1_scale.numel() != 1)
-                               or (a2_scale is not None
-                                   and a2_scale.numel() != 1))
+            per_token_quant = False
 
         if per_token_quant:
             a1q, a1q_scale = moe_kernel_quantize_input(
@@ -160,6 +157,8 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 per_act_token_quant=True,
                 block_shape=quant_config.block_shape,
             )
+            if a1q_scale is not None and a1q_scale.numel() == 1:
+                a1q_scale = a1q_scale.view(1, 1)
             (expert_x, expert_x_scale, expert_num_tokens, expert_topk_ids,
              expert_topk_weights) = self._do_dispatch(
                  tokens=a1q,

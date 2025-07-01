@@ -119,6 +119,10 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             block_shape=quant_config.block_shape)
 
         if a1q_scale is not None:
+            if a1q_scale.numel() == 1:
+                orig_a_scale_block_shape = 1
+            else:
+                orig_a_scale_block_shape = a1q_scale.shape[-1]
             a1q_scale = a1q_scale.repeat(repeat_rows, repeat_cols)
 
         # rem_experts need to be 0 for pplx to work properly.
@@ -143,8 +147,9 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         expert_x_scale: Optional[torch.Tensor] = None
         if a1q.dtype.itemsize == 1:
             float32_size = torch.float32.itemsize
-            block_size = (quant_config.block_shape[1] if quant_config.
-                          block_shape is not None else 1) * float32_size
+            block_size = (quant_config.block_shape[1]
+                          if quant_config.block_shape is not None else
+                          float32_size)
             expert_x_scale = torch.empty(
                 (
                     num_local_experts,
@@ -169,7 +174,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             bound_m=bound_m,
         )
         if expert_x_scale is not None:
-            expert_x_scale = expert_x_scale[:, :, 0:1]
+            expert_x_scale = expert_x_scale[:, :, :orig_a_scale_block_shape]
 
         return expert_x, expert_x_scale, expert_num_tokens, None, None
 
