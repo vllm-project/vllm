@@ -13,7 +13,6 @@ import msgpack
 import torch
 import zmq
 
-from vllm.config import KVTransferConfig
 from vllm.distributed.device_communicators.pynccl_wrapper import (
     NCCLLibrary, buffer_type, cudaStream_t, ncclComm_t, ncclDataTypeEnum)
 from vllm.distributed.kv_transfer.kv_connector.v1.p2p.tensor_memory_pool import (  # noqa: E501
@@ -129,7 +128,7 @@ class P2pNcclEngine:
             self.send_queue: deque[list[Any]] = deque()
             self.send_request_id_to_tensor_ids: dict[str, set[str]] = {}
             self.send_thread = threading.Thread(target=self.send_async,
-                                                 daemon=True)
+                                                daemon=True)
             self.send_thread.start()
 
         # tensor_id: torch.Tensor/(addr, dtype, shape)
@@ -150,8 +149,7 @@ class P2pNcclEngine:
 
         self.ping_thread = None
         if port_offset == 0 and self.proxy_address != "":
-            self.ping_thread = threading.Thread(target=self.ping,
-                                                 daemon=True)
+            self.ping_thread = threading.Thread(target=self.ping, daemon=True)
             self.ping_thread.start()
 
         self.num_layers = 0
@@ -285,8 +283,8 @@ class P2pNcclEngine:
                            remote_address, tensor_id, data["ret"])
             return None
 
-        return self.recv(comm, tensor_id, data["shape"], data["dtype"],
-                          rank ^ 1, self.recv_stream)
+        return self.recv(comm, data["shape"], data["dtype"], rank ^ 1,
+                         self.recv_stream)
 
     def listen_for_requests(self):
         while True:
@@ -313,9 +311,8 @@ class P2pNcclEngine:
                 try:
                     self.router_socket.send_multipart([remote_address, b"0"])
                     comm, rank = self.comms[remote]
-                    tensor = self.recv(comm, tensor_id, data["shape"],
-                                        data["dtype"], rank ^ 1,
-                                        self.recv_stream)
+                    tensor = self.recv(comm, data["shape"], data["dtype"],
+                                       rank ^ 1, self.recv_stream)
                     tensor_size = tensor.element_size() * tensor.numel()
                     if (self.buffer_size + tensor_size
                             > self.buffer_size_threshold):
@@ -365,8 +362,8 @@ class P2pNcclEngine:
 
                 if data["ret"] == 0:
                     comm, rank = self.comms[remote]
-                    self.send(comm, tensor_id, tensor.to(self.device),
-                               rank ^ 1, self.send_stream)
+                    self.send(comm, tensor.to(self.device), rank ^ 1,
+                              self.send_stream)
             else:
                 logger.warning(
                     "🚧Unexpected, Received message from %s, data:%s",
@@ -374,7 +371,8 @@ class P2pNcclEngine:
 
     def get_num_layers(self):
         if self.num_layers == 0:
-            self.num_layers = len(self.compilation_config.static_forward_context)
+            self.num_layers = len(
+                self.compilation_config.static_forward_context)
             logger.debug("get_num_layers, num_layers:%d", self.num_layers)
         return self.num_layers
 
@@ -435,8 +433,7 @@ class P2pNcclEngine:
                 response.decode())
             return False
 
-        self.send(comm, tensor_id, tensor.to(self.device), rank ^ 1,
-                   self.send_stream)
+        self.send(comm, tensor.to(self.device), rank ^ 1, self.send_stream)
 
         self.have_sent_tensor_id(tensor_id)
 
@@ -499,11 +496,10 @@ class P2pNcclEngine:
             time.sleep(3)
 
     def send(self,
-              comm,
-              tensor_id: str,
-              tensor: torch.Tensor,
-              dst: int,
-              stream=None):
+             comm,
+             tensor: torch.Tensor,
+             dst: int,
+             stream=None):
         assert tensor.device == self.device, (
             f"this nccl communicator is created to work on {self.device}, "
             f"but the input tensor is on {tensor.device}")
@@ -516,12 +512,11 @@ class P2pNcclEngine:
         event.synchronize()
 
     def recv(self,
-              comm,
-              tensor_id: str,
-              shape: str,
-              dtype: str,
-              src: int,
-              stream=None):
+             comm,
+             shape: str,
+             dtype: str,
+             src: int,
+             stream=None):
         stream = stream if stream is not None else current_stream()
         event = torch.cuda.Event()
         with torch.cuda.stream(stream):
