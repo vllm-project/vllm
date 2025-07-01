@@ -234,8 +234,10 @@ def marlin_create_bench_fn(bt: BenchmarkTensors) -> Callable:
 
         fn = lambda: ops.gptq_marlin_gemm(
             a=bt.a,
+            c=None,
             b_q_weight=w_q,
             b_scales=w_s,
+            global_scale=None,
             b_zeros=w_zp,
             g_idx=g_idx,
             perm=sort_indices,
