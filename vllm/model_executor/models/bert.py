@@ -121,7 +121,6 @@ class BertPooler(nn.Module):
         return pooled_output
 
 
-@support_torch_compile
 class BertEncoder(nn.Module):
 
     def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
@@ -339,6 +338,7 @@ class BertOutput(nn.Module):
         return hidden_states
 
 
+@support_torch_compile
 class BertModel(nn.Module, SupportsQuant):
     packed_modules_mapping = {"qkv_proj": ["query", "key", "value"]}
 
@@ -665,7 +665,7 @@ class BertForSequenceClassification(nn.Module, SupportsCrossEncoding,
     def forward(
         self,
         input_ids: Optional[torch.Tensor],
-        positions: Optional[torch.Tensor],
+        positions: torch.Tensor,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
         token_type_ids: Optional[torch.Tensor] = None,
