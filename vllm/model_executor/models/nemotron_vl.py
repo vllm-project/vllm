@@ -1145,7 +1145,7 @@ class Llama_Nemotron_Nano_VL_Model(nn.Module, SupportsMultiModal, SupportsPP,
 
     def extract_feature(self, pixel_values: torch.Tensor) -> torch.Tensor:
         #kh vit_embeds = self.vision_model(pixel_values=pixel_values)
-        vit_embeds = self.vision_model(x = pixel_values)
+        vit_embeds = self.vision_model(x=pixel_values)
         vit_embeds = vit_embeds[:, 1:, :]
 
         h = w = int(vit_embeds.shape[1]**0.5)

@@ -27,10 +27,12 @@ from .cradios.extra_models import *
 # Register extra models
 from .cradios.extra_timm_models import *
 from .cradios.feature_normalizer import (FeatureNormalizer,
-                                 IntermediateFeatureNormalizer)
+                                         IntermediateFeatureNormalizer)
 #from .radio_model import create_model_from_args
 #from .radio_model import RADIOModel as RADIOModelBase, Resolution
-from .cradios.input_conditioner import InputConditioner, get_default_conditioner
+from .cradios.input_conditioner import (InputConditioner,
+                                        get_default_conditioner)
+
 
 class Resolution(NamedTuple):
     height: int

@@ -631,8 +631,7 @@ class GRAAttentionBlock(nn.Module):
                     2)
                 attn_mask = attn_mask.masked_fill(attn_mask != 0,
                                                   (-100.0)).masked_fill(
-                                                      attn_mask == 0,
-                                                      0.0)
+                                                      attn_mask == 0, 0.0)
 
         # window attention
         x = x + self.drop_path1(self.gamma1 * self.attn(
