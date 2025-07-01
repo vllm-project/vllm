@@ -18,11 +18,11 @@ class HfHubResolver(FilesystemResolver):
         # these are the dirs we will allows downloads for
         # for potential LoRA requests.
         repo_files = HfApi().list_repo_files(repo_id=repo_name)
-        self.adapter_dirs = [
-            name.split("/")[0]
+        self.adapter_dirs = {
+            os.path.dirname(name)
             for name in repo_files
             if name.endswith("adapter_config.json")
-        ]
+        }
 
     async def resolve_lora(
         self, base_model_name: str, lora_name: str
