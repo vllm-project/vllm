@@ -361,7 +361,7 @@ class FusedMoEConfig:
             quant_dtype: Optional[torch.dtype] = None
 
             input_quant = get_quant_config_input_quant(quant_config)
-            weight_quant = get_quant_config_input_quant(quant_config)
+            weight_quant = get_quant_config_weight_quant(quant_config)
 
             if input_quant is not None:
                 per_act_token_quant = (input_quant.strategy

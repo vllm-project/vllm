@@ -34,7 +34,7 @@ def pplx_hidden_dim_scale_bytes(
         if per_act_token_quant:
             # per-token
             assert block_shape is None
-            hidden_scale_bytes = max_num_tokens * elem_size
+            hidden_scale_bytes = elem_size
         elif block_shape is not None:
             # per-group
             block_size = block_shape[1]
@@ -47,8 +47,10 @@ def pplx_hidden_dim_scale_bytes(
         hidden_dim_bytes = hidden_dim * in_dtype.itemsize
         hidden_scale_bytes = 0
 
-    return round_up(hidden_dim_bytes, align), round_up(hidden_scale_bytes,
-                                                       align)
+    return (
+        round_up(hidden_dim_bytes, align),
+        round_up(hidden_scale_bytes, align),
+    )
 
 
 # The max_num_tokens, world_size and dp_size must be the same
@@ -111,7 +113,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             a1 = a1 * topk_weights.to(a1.dtype)
 
         repeat_cols = 4
-        repeat_rows = 1 if quant_config.per_act_token_quant else a1.shape[0]
+        repeat_rows = 1 if quant_config.per_act_token_quant else a1.size(0)
         a1q, a1q_scale = moe_kernel_quantize_input(
             a1, (None if quant_config.per_act_token_quant else a1_scale),
             quant_dtype=quant_config.quant_dtype,
@@ -146,16 +148,12 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         expert_x_scale: Optional[torch.Tensor] = None
         if a1q.dtype.itemsize == 1:
-            float32_size = torch.float32.itemsize
             block_size = (quant_config.block_shape[1]
-                          if quant_config.block_shape is not None else
-                          float32_size)
+                          if quant_config.block_shape is not None else 1)
             expert_x_scale = torch.empty(
-                (
-                    num_local_experts,
-                    expert_x.size(1),
-                    (expert_x.size(2) + block_size - 1) // block_size,
-                ),
+                (num_local_experts, expert_x.size(1),
+                 round_up(
+                     (expert_x.size(2) + block_size - 1) // block_size, 4)),
                 dtype=torch.float32,
                 device=device,
             )

@@ -800,7 +800,7 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         qintermediate_cache2, a2q_scale = moe_kernel_quantize_input(
             A=intermediate_cache2,
             A_scale=a2_scale,
-            quant_dtype=torch.float8_e4m3fn if self.use_fp8_w8a8 else None,
+            quant_dtype=self.quant_dtype,
             per_act_token_quant=self.per_act_token_quant,
             block_shape=self.block_shape)
 
