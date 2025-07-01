@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Iterable, MutableSequence
 from typing import (TYPE_CHECKING, ClassVar, Literal, Optional, Protocol,
                     Union, overload, runtime_checkable)
 
@@ -427,6 +428,73 @@ def is_hybrid(
 
 
 @runtime_checkable
+class MixtureOfExperts(Protocol):
+    """
+    Check if the model is a mixture of experts (MoE) model.
+    """
+
+    expert_weights: MutableSequence[Iterable[Tensor]]
+    """
+    Expert weights saved in this rank.
+
+    The first dimension is the layer, and the second dimension is different
+    parameters in the layer, e.g. up/down projection weights.
+    """
+
+    num_moe_layers: int
+    """Number of MoE layers in this model."""
+
+    num_expert_groups: int
+    """Number of expert groups in this model."""
+
+    num_logical_experts: int
+    """Number of logical experts in this model."""
+
+    num_physical_experts: int
+    """Number of physical experts in this model."""
+
+    num_local_physical_experts: int
+    """Number of local physical experts in this model."""
+
+    num_routed_experts: int
+    """Number of routed experts in this model."""
+
+    num_shared_experts: int
+    """Number of shared experts in this model."""
+
+    num_redundant_experts: int
+    """Number of redundant experts in this model."""
+
+    def set_eplb_state(
+        self,
+        expert_load_view: Tensor,
+        logical_to_physical_map: Tensor,
+        logical_replica_count: Tensor,
+    ) -> None:
+        """
+        Register the EPLB state in the MoE model.
+        
+        Since these are views of the actual EPLB state, any changes made by
+        the EPLB algorithm are automatically reflected in the model's behavior
+        without requiring additional method calls to set new states.
+
+        You should also collect model's `expert_weights` here instead of in
+        the weight loader, since after initial weight loading, further
+        processing like quantization may be applied to the weights.
+
+        Args:
+            expert_load_view: A view of the expert load metrics tensor.
+            logical_to_physical_map: Mapping from logical to physical experts.
+            logical_replica_count: Count of replicas for each logical expert.
+        """
+        ...
+
+
+def is_mixture_of_experts(model: object) -> TypeIs[MixtureOfExperts]:
+    return isinstance(model, MixtureOfExperts)
+
+
+@runtime_checkable
 class HasNoOps(Protocol):
     has_noops: ClassVar[Literal[True]] = True
 
@@ -530,6 +598,17 @@ class SupportsTranscription(Protocol):
     """The interface required for all models that support transcription."""
 
     supports_transcription: ClassVar[Literal[True]] = True
+
+    @classmethod
+    def get_decoder_prompt(cls, language: str, task_type: str,
+                           prompt: str) -> str:
+        """Get the decoder prompt for the ASR model."""
+        ...
+
+    @classmethod
+    def validate_language(cls, language: str) -> bool:
+        """Check if the model supports a specific ISO639_1 language."""
+        ...
 
 
 @overload

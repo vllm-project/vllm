@@ -569,6 +569,10 @@ class ModelConfig:
         else:
             self.truncation_side = "right"
 
+        model_info, arch = self.registry.inspect_model_cls(self.architectures)
+        self._model_info = model_info
+        self._architecture = arch
+
         self.pooler_config = self._init_pooler_config()
 
         self.dtype = _get_and_verify_dtype(
@@ -660,7 +664,17 @@ class ModelConfig:
 
     @property
     def architectures(self) -> list[str]:
+        # architectures in the model config.
         return getattr(self.hf_config, "architectures", [])
+
+    @property
+    def architecture(self) -> str:
+        # The architecture vllm actually used.
+        return self._architecture
+
+    @property
+    def model_info(self) -> dict[str, Any]:
+        return self._model_info
 
     def maybe_pull_model_tokenizer_for_s3(self, model: str,
                                           tokenizer: str) -> None:
@@ -1470,7 +1484,7 @@ class CacheConfig:
     sizes up to 32 are supported. On HPU devices, block size defaults to 128.
 
     This config has no static default. If left unspecified by the user, it will
-    be set in `Platform.check_and_update_configs()` based on the current
+    be set in `Platform.check_and_update_config()` based on the current
     platform."""
     gpu_memory_utilization: float = 0.9
     """The fraction of GPU memory to be used for the model executor, which can
@@ -1775,6 +1789,25 @@ class ParallelConfig:
     """Backend to use for data parallel, either "mp" or "ray"."""
     enable_expert_parallel: bool = False
     """Use expert parallelism instead of tensor parallelism for MoE layers."""
+    enable_eplb: bool = False
+    """Enable expert parallelism load balancing for MoE layers."""
+    num_redundant_experts: int = 0
+    """Number of redundant experts to use for expert parallelism."""
+    eplb_window_size: int = 1000
+    """Window size for expert load recording."""
+    eplb_step_interval: int = 3000
+    """
+    Interval for rearranging experts in expert parallelism.
+    
+    Note that if this is greater than the EPLB window size, only the metrics
+    of the last `eplb_window_size` steps will be used for rearranging experts.
+    """
+    eplb_log_balancedness: bool = False
+    """
+    Log the balancedness each step of expert parallelism.
+    This is turned off by default since it will cause communication overhead.
+    """
+
     max_parallel_loading_workers: Optional[int] = None
     """Maximum number of parallel loading workers when loading model
     sequentially in multiple batches. To avoid RAM OOM when using tensor
@@ -1845,18 +1878,41 @@ class ParallelConfig:
         return answer
 
     def stateless_init_dp_group(self) -> "ProcessGroup":
+        # NOTE: In high-concurrency scenarios multiple processes
+        # can pick the same (currently free) port through a race
+        # condition when calling `get_open_port()`. When the first
+        # process binds the port the others will subsequently fail
+        # with `torch.distributed.DistNetworkError: EADDRINUSE`.
+        # To make the initialization more robust we retry a few times
+        # with a fresh port whenever this specific error is observed.
+        from torch.distributed import DistNetworkError
+
         from vllm.distributed.utils import (
             stateless_init_torch_distributed_process_group)
 
-        # use gloo since the engine process might not have cuda device
-        dp_group = stateless_init_torch_distributed_process_group(
-            self.data_parallel_master_ip,
-            self.get_next_dp_init_port(),
-            self.data_parallel_rank,
-            self.data_parallel_size,
-            backend="gloo")
+        max_retries = 5
+        last_exc: Optional[Exception] = None
+        for _ in range(max_retries):
+            try:
+                # use gloo since the engine process might not have cuda device
+                return stateless_init_torch_distributed_process_group(
+                    self.data_parallel_master_ip,
+                    self.get_next_dp_init_port(),
+                    self.data_parallel_rank,
+                    self.data_parallel_size,
+                    backend="gloo")
+            except DistNetworkError as e:
+                # We only want to retry when the root cause is EADDRINUSE.
+                if "EADDRINUSE" in str(e):
+                    logger.warning(
+                        "Address already in use. Retrying with a new port.")
+                    last_exc = e
+                    continue  # try again with a new port
+                raise e
 
-        return dp_group
+        # If we get here all retries have failed.
+        assert last_exc is not None
+        raise last_exc
 
     @staticmethod
     def has_unfinished_dp(dp_group: "ProcessGroup",
@@ -1913,6 +1969,20 @@ class ParallelConfig:
             os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
             logger.info("Disabling V1 multiprocessing for external launcher.")
 
+        if self.enable_eplb:
+            if not current_platform.is_cuda():
+                raise ValueError(
+                    "Expert parallelism load balancing is only supported on "
+                    "CUDA devices now.")
+            if self.num_redundant_experts < 0:
+                raise ValueError(
+                    "num_redundant_experts must be non-negative, but got "
+                    f"{self.num_redundant_experts}.")
+        else:
+            if self.num_redundant_experts != 0:
+                raise ValueError(
+                    "num_redundant_experts should be used with EPLB."
+                    f"{self.num_redundant_experts}.")
         if self.distributed_executor_backend is None and self.world_size > 1:
             # We use multiprocessing by default if world_size fits on the
             # current node and we aren't in a ray placement group.
@@ -3924,7 +3994,8 @@ class CompilationConfig:
     - 'none,+op1,+op2' to enable only op1 and op2
 
     By default, all custom ops are enabled when running without Inductor and
-    disabled when running with Inductor (compile_level >= Inductor)."""
+    disabled when running with Inductor: level>=PIECEWISE and use_inductor=True.
+    Inductor generates (fused) Triton kernels for disabled custom ops."""
     splitting_ops: list[str] = field(default_factory=list)
     """A list of ops to split the full graph into subgraphs, used in piecewise
     compilation."""
@@ -3933,10 +4004,13 @@ class CompilationConfig:
     use_inductor: bool = True
     """Whether to use inductor compilation:
 
-    - False: inductor compilation is not used. graph runs in eager.
-    - True: inductor compilation is used. one graph for symbolic shape
-        is compiled. In addition, compile for compile_sizes,
-        using configurations in inductor_compile_config."""
+    - False: inductor compilation is not used. graph runs in eager
+        (custom_ops enabled by default).
+    - True: inductor compilation is used (custom_ops disabled by default).
+        One graph for symbolic shape and one graph per size in compile_sizes
+        are compiled using configurations in inductor_compile_config.
+        
+    This setting is ignored if level<PIECEWISE."""
     compile_sizes: Optional[list[Union[int, str]]] = None
     """Sizes to compile for inductor. In addition
     to integers, it also supports "cudagraph_capture_sizes" to
@@ -4066,9 +4140,9 @@ class CompilationConfig:
 
     @classmethod
     def from_cli(cls, cli_value: str) -> "CompilationConfig":
-        """Parse the CLI value for the compilation config."""
-        if cli_value in ["0", "1", "2", "3"]:
-            return cls(level=int(cli_value))
+        """Parse the CLI value for the compilation config.
+        -O1, -O2, -O3, etc. is handled in FlexibleArgumentParser.
+        """
         return TypeAdapter(CompilationConfig).validate_json(cli_value)
 
     def __post_init__(self) -> None:
@@ -4229,17 +4303,16 @@ class VllmConfig:
     """Quantization configuration."""
     compilation_config: CompilationConfig = field(
         default_factory=CompilationConfig)
-    """`torch.compile` configuration for the model.
+    """`torch.compile` and cudagraph capture configuration for the model.
 
-    When it is a number (0, 1, 2, 3), it will be interpreted as the
-    optimization level.
+    As a shorthand, `-O<n>` can be used to directly specify the compilation
+    level `n`: `-O3` is equivalent to `-O.level=3` (same as `-O='{"level":3}'`).
+    Currently, -O <n> and -O=<n> are supported as well but this will likely be 
+    removed in favor of clearer -O<n> syntax in the future.
 
     NOTE: level 0 is the default level without any optimization. level 1 and 2
     are for internal testing only. level 3 is the recommended level for
-    production.
-
-    Following the convention of traditional compilers, using `-O` without space
-    is also supported. `-O3` is equivalent to `-O 3`.
+    production, also default in V1.
 
     You can specify the full compilation config like so:
     `{"level": 3, "cudagraph_capture_sizes": [1, 2, 4, 8]}`
@@ -4417,6 +4490,9 @@ class VllmConfig:
     def __post_init__(self):
         """Verify configs are valid & consistent with each other.
         """
+
+        self.try_verify_and_update_config()
+
         if self.model_config is not None:
             self.model_config.verify_async_output_proc(self.parallel_config,
                                                        self.speculative_config,
@@ -4463,19 +4539,6 @@ class VllmConfig:
             self.compilation_config.cudagraph_num_of_warmups = 1
             self.compilation_config.level = CompilationLevel.PIECEWISE
             self.compilation_config.set_splitting_ops_for_v1()
-
-            # The behavior of custom ops with inductor depends on the config:
-            # - If use_inductor=True and custom_ops is empty:
-            #   Inductor generates Triton kernels for all registered custom ops
-            #   (default behavior)
-            # - If use_inductor=True and custom_ops is non-empty:
-            #   Custom CUDA kernels are used for specified ops while inductor
-            #   generates Triton kernels for remaining ops, including misc torch
-            #   ops in the model.
-            if (not self.compilation_config.custom_ops
-                    and self.compilation_config.use_inductor):
-                # Let inductor generate Triton kernels for the custom ops.
-                self.compilation_config.custom_ops = ["none"]
 
         self._set_cudagraph_sizes()
 
@@ -4661,11 +4724,21 @@ class VllmConfig:
             batch_size_capture_list)
 
     def recalculate_max_model_len(self, max_model_len: int):
+        # Can only be called in try_verify_and_update_config
         model_config = self.model_config
         max_model_len = model_config.get_and_verify_max_len(max_model_len)
         self.model_config.max_model_len = max_model_len
         self.scheduler_config.max_model_len = max_model_len
-        self.compute_hash()
+
+    def try_verify_and_update_config(self):
+        architecture = getattr(self.model_config, "architecture", None)
+        if architecture is None:
+            return
+
+        from vllm.model_executor.models.config import MODELS_CONFIG_MAP
+        cls = MODELS_CONFIG_MAP.get(architecture, None)
+        if cls is not None:
+            cls.verify_and_update_config(self)
 
     def __str__(self):
         return (
