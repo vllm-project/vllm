@@ -1147,11 +1147,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Force use of the torch.compile implementation from xgrammar to work
         # around issues with the Triton kernel in concurrent structured output
         # scenarios. See PR #19565 and issues #19493, #18376 for details.
+        start_time = time.time()
         xgr_torch_compile.apply_token_bitmask_inplace_torch_compile(
             logits,
             grammar_bitmask.to(self.device, non_blocking=True),
             indices=out_indices,
         )
+        end_time = time.time()
+        logger.info("TORCH COMPILE Execution with xgr_torch_compile: %f seconds", end_time-start_time)
 
     def sync_and_slice_intermediate_tensors(
             self, num_tokens: int, intermediate_tensors: IntermediateTensors,
