@@ -532,7 +532,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.input_batch.condense()
         # Allow attention backend to reorder the batch, potentially
         self._may_reorder_batch(scheduler_output)
-        # Apply batch updates then reset input batch
+        # Refresh batch metadata with any pending updates.
         self.input_batch.update_reset()
 
     def _get_cumsum_and_arange(
