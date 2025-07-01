@@ -50,16 +50,21 @@ class Sampler(nn.Module):
         logits = self.apply_penalties(logits, sampling_metadata)
         # Sample the next token.
         sampled = self.sample(logits, sampling_metadata)
-        # Convert sampled token ids to int64 (long) type to ensure compatibility
-        # with subsequent operations that may use these values as indices.
-        # This conversion is necessary because FlashInfer sampling operations
-        # return int32 (while PyTorch argmax and topk return int64).
-        sampled = sampled.long()
 
         # Gather the logprobs of the topk and sampled token (if requested).
         # Get logprobs and rank tensors (if requested)
-        logprobs_tensors = None if num_logprobs is None else \
-            self.gather_logprobs(raw_logprobs, num_logprobs, token_ids=sampled)
+        if num_logprobs is not None:
+            # Convert sampled token ids to int64 (long) type to ensure
+            # compatibility with subsequent operations that may use these values
+            # as indices. This conversion is necessary because FlashInfer
+            # sampling operations return int32 (while PyTorch argmax and topk
+            # return int64).
+            sampled = sampled.long()
+            logprobs_tensors = self.gather_logprobs(raw_logprobs,
+                                                    num_logprobs,
+                                                    token_ids=sampled)
+        else:
+            logprobs_tensors = None
 
         # Use int32 to reduce the tensor size.
         sampled = sampled.to(torch.int32)
