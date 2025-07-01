@@ -77,6 +77,7 @@ if TYPE_CHECKING:
     VLLM_HTTP_TIMEOUT_KEEP_ALIVE: int = 5  # seconds
     VLLM_PLUGINS: Optional[list[str]] = None
     VLLM_LORA_RESOLVER_CACHE_DIR: Optional[str] = None
+    VLLM_LORA_RESOLVER_HF_REPO: Optional[str] = None
     VLLM_TORCH_PROFILER_DIR: Optional[str] = None
     VLLM_USE_TRITON_AWQ: bool = False
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
@@ -602,6 +603,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # VLLM_ALLOW_RUNTIME_LORA_UPDATING is enabled.
     "VLLM_LORA_RESOLVER_CACHE_DIR":
     lambda: os.getenv("VLLM_LORA_RESOLVER_CACHE_DIR", None),
+
+    # A remote HF repo containing one or more LoRA adapters, which
+    # may be downloaded and leveraged as needed. Only works if plugins
+    # are enabled and VLLM_ALLOW_RUNTIME_LORA_UPDATING is enabled.
+    "VLLM_LORA_RESOLVER_HF_REPO":
+    lambda: os.getenv("VLLM_LORA_RESOLVER_HF_REPO", None),
 
     # Enables torch profiler if set. Path to the directory where torch profiler
     # traces are saved. Note that it must be an absolute path.
