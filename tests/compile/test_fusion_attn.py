@@ -20,8 +20,8 @@ from vllm.config import (CompilationConfig, CompilationLevel, ModelConfig,
 from vllm.platforms import current_platform
 
 
-def check(test_pass_manager: TestPassManager, quant_key: QuantKey,
-          compile_config: CompilationConfig):
+def fusion_op_check(test_pass_manager: TestPassManager, quant_key: QuantKey,
+                    compile_config: CompilationConfig):
 
     # check support
     attn_fusion_supported = [
@@ -118,7 +118,7 @@ def test_attention_fusion_v0(example_prompts, monkeypatch, model: str,
     backend = TestBackend(NoOpEliminationPass(vllm_config),
                           attn_pass,
                           check_fn=functools.partial(
-                              check,
+                              fusion_op_check,
                               quant_key=quant_key,
                               compile_config=compile_config))
     llm2 = LLM(model,
@@ -224,7 +224,7 @@ def test_attention_fusion_v1(example_prompts, monkeypatch, model: str,
         backend = TestBackend(  # noqa: F841
             LazyInitPass(AttnFusionPass, vllm_config),
             check_fn=functools.partial(
-                check,
+                fusion_op_check,
                 quant_key=quant_key,
                 compile_config=get_current_vllm_config().compilation_config))
         llm2 = LLM(model,

@@ -199,7 +199,7 @@ def kernel_paged_attention_2d(
     # epilogue
     acc = acc / L[:, None]
     if USE_FP8:
-        acc = acc / tl.load(out_scale)
+        acc = acc * tl.load(out_scale)
         acc = tl.clamp(acc, FP8_MIN, FP8_MAX)
 
     output_offset = (cur_batch_in_all_start_index * output_stride_0 +
@@ -351,7 +351,7 @@ def chunked_prefill_paged_decode(
             scale=sm_scale,
             k_scale=k_scale,
             v_scale=v_scale,
-            out_scale=output_scale,
+            out_scale=1.0 / output_scale if output_scale is not None else 1.0,
             num_query_heads=num_query_heads,
             num_queries_per_kv=num_queries_per_kv,
             num_queries_per_kv_padded=num_queries_per_kv_padded,

@@ -31,9 +31,6 @@ class LazyInitPass(InductorPass):
 
 
 class TestPassManager(InductorPass):
-    """
-    TODO clean this up more
-    """
 
     def __init__(
         self,
