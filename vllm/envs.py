@@ -46,6 +46,7 @@ if TYPE_CHECKING:
     VLLM_CPU_OMP_THREADS_BIND: str = ""
     VLLM_CPU_NUM_OF_RESERVED_CPU: int = 0
     VLLM_CPU_MOE_PREPACK: bool = True
+    VLLM_CPU_SGL_KERNEL: bool = False
     VLLM_XLA_CACHE_PATH: str = os.path.join(VLLM_CACHE_ROOT, "xla_cache")
     VLLM_XLA_CHECK_RECOMPILATION: bool = False
     VLLM_FUSED_MOE_CHUNK_SIZE: int = 64 * 1024
@@ -135,6 +136,9 @@ if TYPE_CHECKING:
     VLLM_KV_CACHE_LAYOUT: Optional[str] = None
     VLLM_COMPUTE_NANS_IN_LOGITS: bool = False
     VLLM_USE_NVFP4_CT_EMULATIONS: bool = False
+    VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: str = "NONE"
+    VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16: bool = True
+    VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB: Optional[int] = None
     VLLM_COLLECT_EXPERT_USAGE_HISTOGRAM: bool = False
 
 
@@ -445,6 +449,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_CPU_MOE_PREPACK":
     lambda: bool(int(os.getenv("VLLM_CPU_MOE_PREPACK", "1"))),
 
+    # (CPU backend only) whether to use SGL kernels, optimized for small batch.
+    "VLLM_CPU_SGL_KERNEL":
+    lambda: bool(int(os.getenv("VLLM_CPU_SGL_KERNEL", "0"))),
+
     # If the env var is set, then all workers will execute as separate
     # processes from the engine, and we use the same mechanism to trigger
     # execution on all workers.
@@ -690,6 +698,31 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_CUSTOM_PAGED_ATTN":
     lambda: (os.getenv("VLLM_ROCM_CUSTOM_PAGED_ATTN", "True").lower() in
              ("true", "1")),
+
+    # Custom quick allreduce kernel for MI3* cards
+    # Choice of quantization level: FP, INT8, INT6, INT4 or NONE
+    # Recommended for large models to get allreduce
+    "VLLM_ROCM_QUICK_REDUCE_QUANTIZATION":
+    lambda: os.getenv("VLLM_ROCM_QUICK_REDUCE_QUANTIZATION", "NONE").upper(),
+
+    # Custom quick allreduce kernel for MI3* cards
+    # Due to the lack of the bfloat16 asm instruction, bfloat16
+    # kernels are slower than fp16,
+    # If environment variable is set to 1, the input is converted to fp16
+    "VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16":
+    lambda:
+    (os.getenv("VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16", "True").lower() in
+     ("true", "1")),
+
+    # Custom quick allreduce kernel for MI3* cards.
+    # Controls the maximum allowed number of data bytes(MB) for custom quick
+    # allreduce communication.
+    # Default: 2048 MB.
+    # Data exceeding this size will use either custom allreduce or RCCL
+    # communication.
+    "VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB":
+    lambda: maybe_convert_int(
+        os.environ.get("VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB", None)),
 
     # If set, when running in Quark emulation mode, do not dequantize the
     # weights at load time. Instead, dequantize weights on-the-fly during
