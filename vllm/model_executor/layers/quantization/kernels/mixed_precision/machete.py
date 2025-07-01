@@ -8,8 +8,8 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.utils.machete_utils import (
-    check_machete_supports_shape, query_machete_supported_quant_types,
-    query_machete_supported_group_sizes)
+    check_machete_supports_shape, query_machete_supported_group_sizes,
+    query_machete_supported_quant_types)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     pack_quantized_values_into_int32, unpack_quantized_values_into_int32)
 from vllm.model_executor.parameter import (BasevLLMParameter,
