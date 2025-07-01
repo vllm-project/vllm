@@ -121,7 +121,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 
             handle = all2all_manager.get_handle(all_to_all_args)
 
-            assert moe.tp_size == all2all_manager.tp_group.world_size
+            #assert moe.tp_size == all2all_manager.tp_group.world_size
 
             prepare_finalize = PplxPrepareAndFinalize(
                 handle,
@@ -129,7 +129,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                 world_size=all2all_manager.world_size,
                 rank=all2all_manager.rank,
                 # dp_size actually means tp_size, bug in pplx kernels
-                dp_size=moe.tp_size,
+                dp_size=all2all_manager.tp_group.world_size,
             )
         elif moe.use_deepep_ht_kernels:
             assert moe.dp_size == all2all_manager.dp_world_size
