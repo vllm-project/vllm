@@ -182,9 +182,21 @@ class FrontendArgs:
         frontend_group.add_argument("--uvicorn-log-level", **frontend_kwargs["uvicorn_log_level"])
         frontend_group.add_argument("--disable-uvicorn-access-log", **frontend_kwargs["disable_uvicorn_access_log"])
         frontend_group.add_argument("--allow-credentials", **frontend_kwargs["allow_credentials"])
-        frontend_group.add_argument("--allowed-origins", **frontend_kwargs["allowed_origins"])
-        frontend_group.add_argument("--allowed-methods", **frontend_kwargs["allowed_methods"])
-        frontend_group.add_argument("--allowed-headers", **frontend_kwargs["allowed_headers"])
+        
+        # Special case: These need json.loads type and ["*"] default
+        frontend_group.add_argument("--allowed-origins",
+                                    type=json.loads,
+                                    default=["*"],
+                                    help=frontend_kwargs["allowed_origins"]["help"])
+        frontend_group.add_argument("--allowed-methods",
+                                    type=json.loads,
+                                    default=["*"],
+                                    help=frontend_kwargs["allowed_methods"]["help"])
+        frontend_group.add_argument("--allowed-headers",
+                                    type=json.loads,
+                                    default=["*"],
+                                    help=frontend_kwargs["allowed_headers"]["help"])
+        
         frontend_group.add_argument("--api-key", **frontend_kwargs["api_key"])
         
         # Special case: LoRA modules need custom parser action

@@ -1143,6 +1143,7 @@ def build_app(args: Namespace) -> FastAPI:
 
     mount_metrics(app)
 
+    print(f"[Kourosh] {args=}")
     app.add_middleware(
         CORSMiddleware,
         allow_origins=args.allowed_origins,
