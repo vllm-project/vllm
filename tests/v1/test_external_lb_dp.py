@@ -9,9 +9,9 @@ from contextlib import AsyncExitStack
 import openai  # use the official client for correctness check
 import pytest
 import pytest_asyncio
-from platforms import Platform
 
 from tests.utils import RemoteOpenAIServer
+from vllm.platforms import Platform
 
 MODEL_NAME = "ibm-research/PowerMoE-3b"
 
