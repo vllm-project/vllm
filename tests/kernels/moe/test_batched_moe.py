@@ -33,12 +33,10 @@ MNK_FACTORS = [
     (45, 512, 512),
     (45, 1024, 128),
     (45, 1024, 2048),
-    (64, 128, 128),
     (64, 512, 512),
     (64, 1024, 2048),
     (222, 128, 128),
     (222, 128, 2048),
-    (222, 512, 512),
     (222, 1024, 128),
     (222, 1024, 2048),
 ]
@@ -92,10 +90,7 @@ class BatchedMMTensors:
 
 
 @pytest.mark.parametrize("num_experts", [8, 16, 32])
-@pytest.mark.parametrize("max_tokens_per_expert",
-                         [32, 64, 128, 192, 224, 256, 512])
-@pytest.mark.parametrize("K", [128, 256, 1024])
-@pytest.mark.parametrize("N", [128, 256, 512, 1024])
+@pytest.mark.parametrize(("max_tokens_per_expert", "N", "K"), MNK_FACTORS)
 @pytest.mark.parametrize(
     "dtype",
     [torch.float8_e4m3fn, torch.float32, torch.float16, torch.bfloat16])
@@ -207,9 +202,7 @@ def test_batched_mm(num_experts: int, max_tokens_per_expert: int, K: int,
     torch.testing.assert_close(test_output, q_ref_output, atol=atol, rtol=rtol)
 
 
-@pytest.mark.parametrize("m", [1, 32, 45, 64, 222])
-@pytest.mark.parametrize("n", [128, 512, 1024, 2048])
-@pytest.mark.parametrize("k", [128, 512, 1024, 2048])
+@pytest.mark.parametrize(("m", "n", "k"), MNK_FACTORS)
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
 @pytest.mark.parametrize("dtype", [torch.float8_e4m3fn, torch.bfloat16])

@@ -182,5 +182,4 @@ def make_deepep_a2a(pg: ProcessGroup,
                                   block_shape)
 
     assert deepep_ll_args is not None
-    return make_deepep_ll_a2a(pg, pgi, dp_size, deepep_ll_args, q_dtype,
-                              block_shape)
+    return make_deepep_ll_a2a(pg, pgi, deepep_ll_args, q_dtype, block_shape)
