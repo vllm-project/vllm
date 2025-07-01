@@ -204,12 +204,13 @@ class DeepseekVL2MultiModalProcessor(
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         if mm_data:
             processed_outputs = self.info.ctx.call_hf_processor(
                 self.info.get_hf_processor(**mm_kwargs),
                 dict(prompt=prompt, **mm_data),
-                mm_kwargs,
+                dict(**mm_kwargs, **tok_kwargs),
             )
             pixel_values = processed_outputs["pixel_values"]
             # split pixel values into patches corresponding to each image
@@ -278,6 +279,7 @@ class DeepseekVL2MultiModalProcessor(
         prompt: Union[str, list[int]],
         mm_data_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
+        tokenization_kwargs: Mapping[str, object],
         *,
         return_mm_hashes: bool,
     ) -> tuple[list[int], MultiModalKwargs, Optional[MultiModalHashes], bool]:
@@ -290,6 +292,7 @@ class DeepseekVL2MultiModalProcessor(
                 prompt=prompt,
                 mm_data_items=mm_data_items,
                 hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+                tokenization_kwargs=tokenization_kwargs,
                 return_mm_hashes=return_mm_hashes,
             )
 
@@ -297,6 +300,7 @@ class DeepseekVL2MultiModalProcessor(
             prompt=prompt,
             mm_data_items=mm_data_items,
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+            tokenization_kwargs=tokenization_kwargs,
             return_mm_hashes=return_mm_hashes,
         )
 
