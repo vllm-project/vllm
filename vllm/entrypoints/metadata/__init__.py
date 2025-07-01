@@ -7,7 +7,6 @@ from .classify import ClassifyMetadata
 from .draft import DraftMetadata
 from .embed import EmbedMetadata
 from .generate import GenerateMetadata
-from .score import ScoreMetadata
 from .transcription import TranscriptionMetadata
 
 if TYPE_CHECKING:
@@ -15,7 +14,6 @@ if TYPE_CHECKING:
 
 TASK2METADATA_CLASS = {
     "embed": EmbedMetadata,
-    "score": ScoreMetadata,
     "classify": ClassifyMetadata,
     "generate": GenerateMetadata,
     "transcription": TranscriptionMetadata,

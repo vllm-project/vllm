@@ -6,40 +6,37 @@ import pytest
 import requests
 
 from vllm.entrypoints.metadata.base import PoolerConfigMetadata
-from vllm.entrypoints.metadata.embed import EmbedBrief, EmbedMetadata
+from vllm.entrypoints.metadata.classify import ClassifyBrief, ClassifyMetadata
 
 os.environ["VLLM_LOGGING_LEVEL"] = "WARNING"
 
-MODEL_NAME = "intfloat/e5-small"
+MODEL_NAME = "jason9693/Qwen2.5-1.5B-apeach"
 
-expected_brief = EmbedBrief(
-    task="embed",
+expected_brief = ClassifyBrief(
+    task="classify",
     served_model_name=MODEL_NAME,
-    architectures=["BertModel"],
-    embedding_dim=384,
-    max_model_len=512,
-    is_matryoshka=False,
-    matryoshka_dimensions=None,
-    truncation_side="right",
-)
+    architectures=["Qwen2ForSequenceClassification"],
+    max_model_len=131072,
+    num_labels=2)
 
-expected_pooler_config = PoolerConfigMetadata(pooling_type='MEAN',
-                                              normalize=True,
+expected_pooler_config = PoolerConfigMetadata(pooling_type=None,
+                                              normalize=None,
                                               softmax=None,
                                               step_tag_id=None,
                                               returned_token_ids=None)
 
 
-def test_embed_offline_metadata(vllm_runner):
-    with vllm_runner(MODEL_NAME, task="embed",
+def test_classify_offline_metadata(vllm_runner):
+    with vllm_runner(MODEL_NAME, task="classify",
                      max_model_len=None) as vllm_model:
-        metadata: EmbedMetadata = vllm_model.model.metadata
+        metadata: ClassifyMetadata = vllm_model.model.metadata
 
-        assert isinstance(metadata, EmbedMetadata)
+        assert isinstance(metadata, ClassifyMetadata)
 
         assert metadata.brief == expected_brief
 
-        assert metadata.hf_config["architectures"][0] == "BertModel"
+        assert metadata.hf_config["architectures"][
+            0] == "Qwen2ForSequenceClassification"
         assert metadata.pooler_config == expected_pooler_config
 
 
@@ -47,15 +44,15 @@ def test_embed_offline_metadata(vllm_runner):
 def server():
     from tests.utils import RemoteOpenAIServer
     args = [
-        "--task", "embed", "--enforce-eager", "--disable-uvicorn-access-log",
-        "--disable-brief-metadata-only"
+        "--task", "classify", "--enforce-eager",
+        "--disable-uvicorn-access-log", "--disable-brief-metadata-only"
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
 
 
-def test_embed_online_metadata(server):
+def test_classify_online_metadata(server):
     url = server.url_for("metadata/brief")
     response = requests.get(url)
     assert response.json() == expected_brief.model_dump()

@@ -46,11 +46,8 @@ def test_brief_metadata_only(server):
 
     url = server.url_for("metadata/brief")
     response = requests.get(url)
+    assert response.status_code == HTTPStatus.OK
     assert response.json() == expected_brief.model_dump()
-
-    url = server.url_for("metadata/detail")
-    response = requests.get(url)
-    assert response.status_code == HTTPStatus.NOT_FOUND
 
     url = server.url_for("metadata/hf_config")
     response = requests.get(url)

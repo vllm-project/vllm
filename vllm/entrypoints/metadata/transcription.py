@@ -3,19 +3,13 @@
 
 from dataclasses import dataclass
 
-from vllm.entrypoints.metadata.base import (BriefMetadata, DetailMetadata,
-                                            Metadata)
+from vllm.entrypoints.metadata.base import BriefMetadata, Metadata
 
 
 class TranscriptionBrief(BriefMetadata):
     pass
 
 
-class TranscriptionDetail(DetailMetadata):
-    pass
-
-
 @dataclass
 class TranscriptionMetadata(Metadata):
     brief: TranscriptionBrief
-    detail: TranscriptionDetail

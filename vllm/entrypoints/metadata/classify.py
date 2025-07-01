@@ -4,23 +4,31 @@
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from vllm.entrypoints.metadata.base import (BriefMetadata, DetailMetadata,
+from pydantic import Field
+
+from vllm.entrypoints.metadata.base import (BriefMetadata, HfConfigMetadata,
                                             Metadata, PoolerConfigMetadata)
 
 if TYPE_CHECKING:
-    pass
+    from vllm.config import VllmConfig
 
 
 class ClassifyBrief(BriefMetadata):
-    pass
+    num_labels: int = Field(..., title="Num labels")
 
-
-class ClassifyDetail(DetailMetadata):
-    pass
+    @classmethod
+    def from_vllm_config(cls, vllm_config: "VllmConfig") -> "ClassifyBrief":
+        return cls(
+            task=vllm_config.model_config.task,
+            served_model_name=vllm_config.model_config.served_model_name,
+            architectures=vllm_config.model_config.architectures,
+            max_model_len=vllm_config.model_config.max_model_len,
+            num_labels=vllm_config.model_config.hf_config.num_labels,
+        )
 
 
 @dataclass
 class ClassifyMetadata(Metadata):
     brief: ClassifyBrief
-    detail: ClassifyDetail
+    hf_config: HfConfigMetadata
     pooler_config: PoolerConfigMetadata

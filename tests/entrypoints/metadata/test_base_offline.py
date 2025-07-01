@@ -3,7 +3,7 @@
 import os
 
 import pytest
-import requests
+from pydantic import ValidationError
 
 from vllm.entrypoints.metadata.generate import GenerateBrief, GenerateMetadata
 
@@ -22,7 +22,7 @@ expected_brief = GenerateBrief(task=task,
                                enable_prefix_caching=enable_prefix_caching)
 
 
-def test_generate_offline_metadata(vllm_runner):
+def test_offline(vllm_runner):
     with vllm_runner(
             MODEL_NAME,
             max_model_len=max_model_len,
@@ -32,33 +32,6 @@ def test_generate_offline_metadata(vllm_runner):
 
         assert isinstance(metadata, GenerateMetadata)
 
-        assert metadata.brief == expected_brief
-        assert metadata.hf_config["architectures"] == architectures
-
-
-@pytest.fixture(scope="module")
-def server():
-    from tests.utils import RemoteOpenAIServer
-    args = [
-        "--task", "generate", "--max-model-len", f"{max_model_len}",
-        "--enforce-eager", "--disable-uvicorn-access-log",
-        "--disable-brief-metadata-only"
-    ]
-
-    if enable_prefix_caching:
-        args.append("--enable-prefix-caching")
-    else:
-        args.append("--no-enable-prefix-caching")
-
-    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
-        yield remote_server
-
-
-def test_generate_online_metadata(server):
-    url = server.url_for("metadata/brief")
-    response = requests.get(url)
-    assert response.json() == expected_brief.model_dump()
-
-    url = server.url_for("metadata/hf_config")
-    response = requests.get(url)
-    assert response.json()
+        with pytest.raises(ValidationError):
+            # should not be able to modify the metadata
+            metadata.brief.task = "foo"
