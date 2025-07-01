@@ -122,7 +122,6 @@ _TEXT_GENERATION_MODELS = {
     # [Encoder-decoder]
     "BartModel": ("bart", "BartForConditionalGeneration"),
     "BartForConditionalGeneration": ("bart", "BartForConditionalGeneration"),
-    "KeyeForConditionalGeneration": ("keye", "KeyeForConditionalGeneration"),
 }
 
 _EMBEDDING_MODELS = {
@@ -225,6 +224,7 @@ _MULTIMODAL_MODELS = {
     "Llama4ForConditionalGeneration": ("mllama4", "Llama4ForConditionalGeneration"),  # noqa: E501
     "SkyworkR1VChatModel": ("skyworkr1v", "SkyworkR1VChatModel"),
     "WhisperForConditionalGeneration": ("whisper", "WhisperForConditionalGeneration"),  # noqa: E501
+    "KeyeForConditionalGeneration": ("keye", "KeyeForConditionalGeneration"),
 }
 
 _SPECULATIVE_DECODING_MODELS = {

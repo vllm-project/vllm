@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from functools import cached_property, partial
+from functools import partial
 from typing import Any, Literal, Optional, TypedDict, Union
 
 import numpy as np
@@ -12,7 +12,7 @@ from einops import rearrange
 from flash_attn import flash_attn_varlen_func
 from flash_attn.layers.rotary import apply_rotary_emb
 from transformers import PretrainedConfig
-from transformers.activations import ACT2FN, GELUActivation
+from transformers.activations import GELUActivation
 from transformers.feature_extraction_utils import BatchFeature
 from transformers.modeling_outputs import (BaseModelOutput,
                                            BaseModelOutputWithPooling)
@@ -20,6 +20,7 @@ from transformers.utils import torch_int
 
 from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
@@ -28,7 +29,6 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.gptq import GPTQConfig
 from vllm.model_executor.layers.quantization.gptq_marlin import (
     GPTQMarlinConfig)
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.models.module_mapping import MultiModelKeys
@@ -51,10 +51,13 @@ from vllm.transformers_utils.processor import (
 
 from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
                          SupportsMultiModal, SupportsPP)
+from .siglip import SiglipMLP
 from .utils import (AutoWeightsLoader, WeightsMapper,
                     init_vllm_registered_model, is_pp_missing_parameter,
                     maybe_prefix, merge_multimodal_embeddings)
 from .vision import get_vit_attn_backend
+
+logger = init_logger(__name__)
 
 _MAX_FRAMES_PER_VIDEO = 16
 _MAX_IMAGE_SIZE = 9999999
@@ -68,7 +71,7 @@ def smart_resize(
     max_pixels: int = 28 * 28 * 1280,
 ):
     if height < factor:
-        print(
+        logger.warning(
             "smart_resize: height=%s < factor=%s, reset height=factor",
             height,
             factor,
@@ -77,7 +80,7 @@ def smart_resize(
         height = factor
 
     if width < factor:
-        print(
+        logger.warning(
             "smart_resize: width=%s < factor=%s, reset width=factor",
             width,
             factor,
@@ -177,7 +180,7 @@ class KeyeVideoEmbeddingInputs(TypedDict):
 KeyeVideoInputs = Union[KeyeVideoPixelInputs, KeyeVideoEmbeddingInputs]
 
 
-class SiglipVisionEmbeddings(nn.Module):
+class KeyeVisionEmbeddings(nn.Module):
 
     def __init__(self, config: PretrainedConfig):
         super().__init__()
@@ -449,37 +452,6 @@ class SiglipAttention(nn.Module):
         return output
 
 
-class SiglipMLP(nn.Module):
-
-    def __init__(
-        self,
-        config: PretrainedConfig,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
-    ):
-        super().__init__()
-        self.config = config
-        self.activation_fn = ACT2FN[config.hidden_act]
-        self.fc1 = ColumnParallelLinear(
-            config.hidden_size,
-            config.intermediate_size,
-            quant_config=quant_config,
-            prefix=f"{prefix}.fc1",
-        )
-        self.fc2 = RowParallelLinear(
-            config.intermediate_size,
-            config.hidden_size,
-            quant_config=quant_config,
-            prefix=f"{prefix}.fc2",
-        )
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        hidden_states, _ = self.fc1(hidden_states)
-        hidden_states = self.activation_fn(hidden_states)
-        hidden_states, _ = self.fc2(hidden_states)
-        return hidden_states
-
-
 class SigLIPRotaryEmbedding(nn.Module):
 
     def __init__(self, dim: int, theta: float = 10000.0) -> None:
@@ -664,7 +636,7 @@ class SiglipVisionTransformer(nn.Module):
         self.config = config
         embed_dim = config.hidden_size
 
-        self.embeddings = SiglipVisionEmbeddings(config)
+        self.embeddings = KeyeVisionEmbeddings(config)
         self.encoder = SiglipEncoder(
             config,
             quant_config=quant_config,
@@ -731,49 +703,6 @@ class SiglipVisionTransformer(nn.Module):
             sample_hidden_state.append(tensor)
 
         return sample_hidden_state
-
-
-class SiglipMultiheadAttentionPoolingHead(nn.Module):
-    """Multihead Attention Pooling."""
-
-    def __init__(
-        self,
-        config: PretrainedConfig,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
-    ):
-        super().__init__()
-
-        self.probe = nn.Parameter(torch.randn(1, 1, config.hidden_size))
-        self.attention = torch.nn.MultiheadAttention(
-            config.hidden_size,
-            config.num_attention_heads,
-            batch_first=True,
-        )
-        self.layernorm = nn.LayerNorm(config.hidden_size,
-                                      eps=config.layer_norm_eps)
-        self.mlp = SiglipMLP(
-            config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.mlp",
-        )
-
-    def forward(self, hidden_state, key_padding_mask=None):
-        batch_size = hidden_state.shape[0]
-        probe = self.probe.repeat(batch_size, 1, 1)
-
-        hidden_state = self.attention(
-            probe,
-            hidden_state,
-            hidden_state,
-            key_padding_mask=key_padding_mask,
-        )[0]
-
-        residual = hidden_state
-        hidden_state = self.layernorm(hidden_state)
-        hidden_state = residual + self.mlp(hidden_state)
-
-        return hidden_state[:, 0]
 
 
 class SiglipVisionModel(nn.Module):
@@ -1419,13 +1348,6 @@ class KeyeForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsLoRA,
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
 
-    @cached_property
-    def sampler(self):
-        if hasattr(self.language_model, "sampler"):
-            return self.language_model.sampler
-
-        return get_sampler()
-
     def _maybe_ignore_quant_config(self, quant_config: QuantizationConfig):
         if isinstance(quant_config, (GPTQConfig, GPTQMarlinConfig)):
             return None
@@ -1764,13 +1686,6 @@ class KeyeForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsLoRA,
     ) -> Optional[torch.Tensor]:
         return self.language_model.compute_logits(hidden_states,
                                                   sampling_metadata)
-
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        return self.language_model.sample(logits, sampling_metadata)
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
