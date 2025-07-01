@@ -30,6 +30,7 @@ class ProcessorInputs:
     prompt: Union[str, list[int]]
     mm_data: MultiModalDataDict
     hf_processor_mm_kwargs: Mapping[str, object] = field(default_factory=dict)
+    tokenization_kwargs: Mapping[str, object] = field(default_factory=dict)
 
 
 class DummyEncoderData(NamedTuple):
@@ -90,8 +91,11 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
         """
         dummy_text = self.get_dummy_text(mm_counts)
         dummy_mm_data = self.get_dummy_mm_data(seq_len, mm_counts)
+        tokenization_kwargs = {"truncation": False}
 
-        return ProcessorInputs(prompt=dummy_text, mm_data=dummy_mm_data)
+        return ProcessorInputs(prompt=dummy_text,
+                               mm_data=dummy_mm_data,
+                               tokenization_kwargs=tokenization_kwargs)
 
     def _get_dummy_audios(
         self,
@@ -170,6 +174,7 @@ class MultiModalProfiler(Generic[_I]):
             prompt=processor_inputs.prompt,
             mm_data=processor_inputs.mm_data,
             hf_processor_mm_kwargs=processor_inputs.hf_processor_mm_kwargs,
+            tokenization_kwargs=processor_inputs.tokenization_kwargs,
         )
 
     def _get_mm_num_tokens(
@@ -253,6 +258,26 @@ class MultiModalProfiler(Generic[_I]):
         seq_len: int,
         mm_counts: Optional[Mapping[str, int]] = None,
     ) -> Mapping[str, int]:
-        mm_inputs = self._get_dummy_mm_inputs(seq_len, mm_counts)
+        max_tokens_per_item = self.processing_info.get_max_tokens_per_item(
+            seq_len=seq_len, mm_counts=mm_counts)
+        if max_tokens_per_item is not None:
+            if mm_counts is None:
+                total_mm_tokens = sum(max_tokens_per_item.values())
+            else:
+                total_mm_tokens = sum(max_tokens_per_item[k] * mm_counts[k]
+                                      for k in max_tokens_per_item.keys()
+                                      & mm_counts.keys())
+            if total_mm_tokens > seq_len:
+                logger.warning_once(
+                    "The sequence length (%d) is smaller than the pre-defined"
+                    " wosrt-case total number of multimodal tokens (%d). "
+                    "This may cause certain multi-modal inputs to fail during "
+                    "inference. To avoid this, you should increase "
+                    "`max_model_len` or reduce `mm_counts`.",
+                    seq_len,
+                    total_mm_tokens,
+                )
+            return max_tokens_per_item
 
+        mm_inputs = self._get_dummy_mm_inputs(seq_len, mm_counts)
         return self._get_mm_num_tokens(mm_inputs)

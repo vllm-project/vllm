@@ -37,38 +37,61 @@ from vllm.utils import FlexibleArgumentParser, get_open_port
 
 
 def parse_args():
-    parser = FlexibleArgumentParser()
-    EngineArgs.add_cli_args(parser)
-    parser.set_defaults(model="ibm-research/PowerMoE-3b")
-    parser.add_argument("--dp-size",
-                        type=int,
-                        default=2,
-                        help="Data parallel size")
-    parser.add_argument("--tp-size",
-                        type=int,
-                        default=2,
-                        help="Tensor parallel size")
-    parser.add_argument("--node-size",
-                        type=int,
-                        default=1,
-                        help="Total number of nodes")
-    parser.add_argument("--node-rank",
-                        type=int,
-                        default=0,
-                        help="Rank of the current node")
-    parser.add_argument("--master-addr",
-                        type=str,
-                        default="",
-                        help="Master node IP address")
-    parser.add_argument("--master-port",
-                        type=int,
-                        default=0,
-                        help="Master node port")
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Data Parallel Inference")
+    parser.add_argument(
+        "--model",
+        type=str,
+        default="ibm-research/PowerMoE-3b",
+        help="Model name or path",
+    )
+    parser.add_argument("--dp-size", type=int, default=2, help="Data parallel size")
+    parser.add_argument("--tp-size", type=int, default=2, help="Tensor parallel size")
+    parser.add_argument(
+        "--node-size", type=int, default=1, help="Total number of nodes"
+    )
+    parser.add_argument(
+        "--node-rank", type=int, default=0, help="Rank of the current node"
+    )
+    parser.add_argument(
+        "--master-addr", type=str, default="", help="Master node IP address"
+    )
+    parser.add_argument("--master-port", type=int, default=0, help="Master node port")
+    parser.add_argument(
+        "--enforce-eager", action="store_true", help="Enforce eager mode execution."
+    )
+    parser.add_argument(
+        "--trust-remote-code", action="store_true", help="Trust remote code."
+    )
+    parser.add_argument(
+        "--max-num-seqs",
+        type=int,
+        default=64,
+        help=("Maximum number of sequences to be processed in a single iteration."),
+    )
+    parser.add_argument(
+        "--gpu-memory-utilization",
+        type=float,
+        default=0.8,
+        help=("Fraction of GPU memory vLLM is allowed to allocate (0.0, 1.0]."),
+    )
     return parser.parse_args()
 
 
-def main(args, dp_size, local_dp_rank, global_dp_rank, dp_master_ip,
-         dp_master_port, GPUs_per_dp_rank):
+def main(
+    model,
+    dp_size,
+    local_dp_rank,
+    global_dp_rank,
+    dp_master_ip,
+    dp_master_port,
+    GPUs_per_dp_rank,
+    enforce_eager,
+    trust_remote_code,
+    max_num_seqs,
+    gpu_memory_utilization,
+):
     os.environ["VLLM_DP_RANK"] = str(global_dp_rank)
     os.environ["VLLM_DP_RANK_LOCAL"] = str(local_dp_rank)
     os.environ["VLLM_DP_SIZE"] = str(dp_size)
@@ -123,7 +146,9 @@ def main(args, dp_size, local_dp_rank, global_dp_rank, dp_master_ip,
     llm = LLM(
         tensor_parallel_size=GPUs_per_dp_rank,
         enable_expert_parallel=True,
-        **args,
+        trust_remote_code=trust_remote_code,
+        max_num_seqs=max_num_seqs,
+        gpu_memory_utilization=gpu_memory_utilization,
     )
     outputs = llm.generate(prompts, sampling_params)
     # Print the outputs.
@@ -167,17 +192,24 @@ if __name__ == "__main__":
 
     procs = []
     for local_dp_rank, global_dp_rank in enumerate(
-            range(node_rank * dp_per_node, (node_rank + 1) * dp_per_node)):
-        proc = Process(target=main,
-                       args=(
-                           args,
-                           dp_size,
-                           local_dp_rank,
-                           global_dp_rank,
-                           dp_master_ip,
-                           dp_master_port,
-                           tp_size,
-                       ))
+        range(node_rank * dp_per_node, (node_rank + 1) * dp_per_node)
+    ):
+        proc = Process(
+            target=main,
+            args=(
+                args.model,
+                dp_size,
+                local_dp_rank,
+                global_dp_rank,
+                dp_master_ip,
+                dp_master_port,
+                tp_size,
+                args.enforce_eager,
+                args.trust_remote_code,
+                args.max_num_seqs,
+                args.gpu_memory_utilization,
+            ),
+        )
         proc.start()
         procs.append(proc)
     exit_code = 0
