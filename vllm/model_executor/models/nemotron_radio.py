@@ -18,20 +18,19 @@ from transformers import PretrainedConfig
 
 from vllm.model_executor.layers.quantization import QuantizationConfig
 
-from . import eradio_model
+from .cradios import eradio_model
 # Import all required modules.
-from .adaptor_base import AdaptorBase, AdaptorInput, RadioOutput
-from .adaptor_generic import AdaptorBase, GenericAdaptor
-from .enable_cpe_support import enable_cpe
-from .extra_models import *
+from .cradios.adaptor_base import AdaptorBase, AdaptorInput, RadioOutput
+from .cradios.adaptor_generic import AdaptorBase, GenericAdaptor
+from .cradios.enable_cpe_support import enable_cpe
+from .cradios.extra_models import *
 # Register extra models
-from .extra_timm_models import *
-from .feature_normalizer import (FeatureNormalizer,
+from .cradios.extra_timm_models import *
+from .cradios.feature_normalizer import (FeatureNormalizer,
                                  IntermediateFeatureNormalizer)
 #from .radio_model import create_model_from_args
 #from .radio_model import RADIOModel as RADIOModelBase, Resolution
-from .input_conditioner import InputConditioner, get_default_conditioner
-
+from .cradios.input_conditioner import InputConditioner, get_default_conditioner
 
 class Resolution(NamedTuple):
     height: int

@@ -26,7 +26,7 @@ from vllm.model_executor.layers.quantization.awq import AWQConfig
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 # from vllm.model_executor.models.intern_vit import (InternVisionModel,
 #                                                    InternVisionPatchModel)
-from vllm.model_executor.models.radiomodel import RADIOModel
+from vllm.model_executor.models.nemotron_radio import RADIOModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.image import convert_image_mode
@@ -48,7 +48,9 @@ from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
 
 IMG_START = '<img>'
 IMG_END = '</img>'
-IMG_CONTEXT = '<IMG_CONTEXT>'
+# khuang use a different token
+#IMG_CONTEXT = '<IMG_CONTEXT>'
+IMG_CONTEXT = '<image>'
 
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
@@ -767,14 +769,14 @@ class BaseInternVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
             mm_data=mm_data,
             mm_kwargs=mm_kwargs,
         )
+        # Call the HF processor to process the image inputs
+        hf_processor = self.info.get_hf_processor(**mm_kwargs)
+        image_token_id = hf_processor.image_token_id
 
-        # hf_processor = self.info.get_hf_processor(**mm_kwargs)
-        # image_token_id = hf_processor.image_token_id
-
-        # # Since there may be extra tokens in the feature placeholders,
-        # # we need to pass the image token ID to the model to select the
-        # # tokens to merge from the vision encoder outputs
-        # processed_outputs["image_token_id"] = torch.tensor(image_token_id)
+        # Since there may be extra tokens in the feature placeholders,
+        # we need to pass the image token ID to the model to select the
+        # tokens to merge from the vision encoder outputs
+        processed_outputs["image_token_id"] = torch.tensor(image_token_id)
 
         return processed_outputs
 
@@ -1142,7 +1144,8 @@ class Llama_Nemotron_Nano_VL_Model(nn.Module, SupportsMultiModal, SupportsPP,
         return x
 
     def extract_feature(self, pixel_values: torch.Tensor) -> torch.Tensor:
-        vit_embeds = self.vision_model(pixel_values=pixel_values)
+        #kh vit_embeds = self.vision_model(pixel_values=pixel_values)
+        vit_embeds = self.vision_model(x = pixel_values)
         vit_embeds = vit_embeds[:, 1:, :]
 
         h = w = int(vit_embeds.shape[1]**0.5)
@@ -1156,7 +1159,8 @@ class Llama_Nemotron_Nano_VL_Model(nn.Module, SupportsMultiModal, SupportsPP,
 
     def _validate_pixel_values(self, data: torch.Tensor) -> torch.Tensor:
 
-        h = w = self.config.vision_config.image_size
+        #kh h = w = self.config.vision_config.image_size
+        h = w = self.config.force_image_size
         expected_dims = (3, h, w)
 
         def _validate_shape(d: torch.Tensor):
@@ -1420,7 +1424,10 @@ class Llama_Nemotron_Nano_VL_Model(nn.Module, SupportsMultiModal, SupportsPP,
             "loc_encoder", "loc_decoder", "sam", "temporal_token",
             "track_token"
         ]
-        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
+        ## khuang ignore these two, which are registered_buffer instead of submodules
+        ## see https://huggingface.co/nvidia/C-RADIOv2-H/blob/main/input_conditioner.py#L28
+        skip_substrs = ["norm_mean", "norm_std"]
+        loader = AutoWeightsLoader(self, skip_substrs=skip_substrs)
         return loader.load_weights(weights)
 
     def get_mm_mapping(self) -> MultiModelKeys:
