@@ -210,8 +210,8 @@ class LogitsProcessor(ABC):
         raise NotImplementedError
 
 
-LogitprocCtor = Callable[[], LogitsProcessor]
-logitsprocs_ctors: Sequence[LogitprocCtor] = []
+LogitprocCtor = Callable[[], None]
+logitsprocs_ctors: list[LogitprocCtor] = []
 
 
 @dataclass
@@ -222,8 +222,7 @@ class LogitsProcessorManager:
     non_argmax_invariant: list[LogitsProcessor] = field(
         default_factory=list)  # non-argmax-invariant logitsprocs
 
-    def add_logitsprocs_by_ctor(self,
-                                ctor_list: Sequence[LogitprocCtor]) -> None:
+    def add_logitsprocs_by_ctor(self, ctor_list: list[LogitprocCtor]) -> None:
         for ctor in ctor_list:
             logitproc: LogitsProcessor = ctor()
             (self.argmax_invariant if logitproc.is_argmax_invariant() else
