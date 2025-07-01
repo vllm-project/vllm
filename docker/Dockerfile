@@ -411,6 +411,7 @@ RUN --mount=type=cache,target=/root/.cache/uv bash - <<'BASH'
           rm -rf flashinfer
       fi \
   fi
+BASH
 COPY examples examples
 COPY benchmarks benchmarks
 COPY ./vllm/collect_env.py .
