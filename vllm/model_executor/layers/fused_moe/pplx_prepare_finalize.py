@@ -53,25 +53,22 @@ def pplx_hidden_dim_scale_bytes(
     )
 
 
-# The max_num_tokens, world_size and dp_size must be the same
-# as the ones used to create the AllToAll.
 class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
     def __init__(
         self,
         a2a: pplx.AllToAll,
         max_num_tokens: int,
-        world_size: int,
-        rank: int,
-        dp_size: int,
+        num_local_experts: int,
+        num_dispatchers: int,
     ):
         super().__init__()
         assert max_num_tokens > 0
+        assert num_local_experts > 0
         self.a2a = a2a
         self.max_num_tokens = max_num_tokens
-        self.world_size = world_size
-        self.rank = rank
-        self.dp_size = dp_size
+        self.num_local_experts = num_local_experts
+        self.num_dispatchers = num_dispatchers
 
     @property
     def activation_format(self) -> mk.FusedMoEActivationFormat:
@@ -140,21 +137,15 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         assert a1q_scale is None or a1q_scale.ndim == 2, \
             f"{0 if a1q_scale is None else (a1q_scale.ndim, a1q_scale.shape)}"
 
-        # rem_experts need to be 0 for pplx to work properly.
-        rem_experts = num_experts % self.world_size
-        assert rem_experts == 0
-        num_local_experts = ((num_experts // self.world_size) +
-                             (1 if self.rank < rem_experts else 0))
-
         expert_num_tokens = torch.empty(
-            num_local_experts,
+            self.num_local_experts,
             dtype=torch.int32,
             device=device,
         )
 
-        num_dp = self.world_size // self.dp_size
         expert_x = torch.empty(
-            (num_local_experts, self.max_num_tokens * num_dp, hidden_dim),
+            (self.num_local_experts,
+             self.max_num_tokens * self.num_dispatchers, hidden_dim),
             dtype=a1q.dtype,
             device=device,
         )
@@ -175,7 +166,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 final_dim = num_blocks
 
             expert_x_scale_shape = (
-                num_local_experts,
+                self.num_local_experts,
                 expert_x.size(1),
                 round_up(final_dim, 4)  # round up for alignment
             )

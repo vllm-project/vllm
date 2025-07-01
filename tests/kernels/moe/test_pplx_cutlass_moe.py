@@ -14,6 +14,7 @@ from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEModularKernel)
 from vllm.platforms import current_platform
+from vllm.utils import cdiv
 
 from .parallel_utils import ProcessGroupInfo, parallel_launch
 
@@ -112,15 +113,17 @@ def pplx_cutlass_moe(
     w2_scale = w2_scale.to(device)
     a1_scale = a1_scale.to(device)
 
+    assert num_experts % world_size == 0
+    num_local_experts = cdiv(num_experts, world_size)
+
     prepare_finalize = PplxPrepareAndFinalize(
         ata,
-        max_num_tokens,
-        pgi.world_size,
-        rank,
-        dp_size,
+        max_num_tokens=max_num_tokens,
+        num_local_experts=num_local_experts,
+        num_dispatchers=pgi.world_size // dp_size,
     )
 
-    experts = CutlassExpertsFp8((num_experts + world_size - 1) // world_size,
+    experts = CutlassExpertsFp8(num_local_experts,
                                 out_dtype,
                                 per_act_token,
                                 per_out_ch,

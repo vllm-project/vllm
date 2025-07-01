@@ -471,15 +471,13 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     def __init__(
         self,
         max_num_tokens: int,
-        world_size: int,
-        dp_size: int,
+        num_local_experts: int,
         rank: int,
     ):
         super().__init__()
-        self.world_size = world_size
-        self.dp_size = dp_size
-        self.rank = rank
         self.max_num_tokens = max_num_tokens
+        self.num_local_experts = num_local_experts
+        self.rank = rank
 
     @property
     def activation_format(self) -> mk.FusedMoEActivationFormat:
@@ -522,9 +520,7 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                                         dtype=torch.int,
                                         device=a1.device)
 
-        assert num_experts % self.world_size == 0
-
-        num_local_experts = num_experts // self.world_size
+        num_local_experts = self.num_local_experts
 
         if quant_config.quant_dtype is None:
             b_type = a1.dtype
@@ -626,8 +622,7 @@ class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def __init__(
         self,
         max_num_tokens: int,
-        world_size: int,
-        dp_size: int,
+        num_dispatchers: int,
         use_fp8_w8a8: bool = False,
         use_int8_w8a8: bool = False,
         use_int8_w8a16: bool = False,
@@ -648,8 +643,7 @@ class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         assert not use_int8_w8a16, "NYI"
         assert not use_int4_w4a16, "NYI"
         self.max_num_tokens = max_num_tokens
-        self.world_size = world_size
-        self.dp_size = dp_size
+        self.num_dispatchers = num_dispatchers
 
     @property
     def activation_formats(
@@ -676,7 +670,7 @@ class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         local_num_experts: int,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
         assert a.dim() == 2
-        num_dp = self.world_size
+        num_dp = self.num_dispatchers  # global // local?
         num_experts = local_num_experts
         workspace13 = (num_experts, self.max_num_tokens * num_dp, K)
         workspace2 = (self.max_num_tokens * num_dp, N)
@@ -834,8 +828,7 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def __init__(
         self,
         max_num_tokens: int,
-        world_size: int,
-        dp_size: int,
+        num_dispatchers: int,
         use_fp8_w8a8: bool = False,
         use_int8_w8a8: bool = False,
         use_int8_w8a16: bool = False,
@@ -855,17 +848,14 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         assert not use_int8_w8a8, "NYI"
         assert not use_int8_w8a16, "NYI"
         assert not use_int4_w4a16, "NYI"
+        assert max_num_tokens > 0
+        assert num_dispatchers > 0
         self.use_fp8_w8a8 = use_fp8_w8a8
         self.use_int8_w8a8 = use_int8_w8a8
         self.use_int4_w4a16 = use_int4_w4a16
         self.use_int8_w8a16 = use_int8_w8a16
         self.max_num_tokens = max_num_tokens
-        self.world_size = world_size
-        self.dp_size = dp_size
-        assert world_size > 0
-        assert dp_size > 0
-        assert dp_size <= world_size
-        assert max_num_tokens > 0
+        self.num_dispatchers = num_dispatchers
 
     @property
     def activation_formats(
@@ -892,7 +882,7 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         local_num_experts: int,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
         assert a.dim() == 2
-        num_dp = self.world_size
+        num_dp = self.num_dispatchers
         num_experts = local_num_experts
         max_num_tokens = self.max_num_tokens
         workspace13 = (num_experts, max_num_tokens * num_dp, max(K, N))

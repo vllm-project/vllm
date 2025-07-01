@@ -42,15 +42,11 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     def __init__(self,
                  buffer: deep_ep.Buffer,
                  max_tokens_per_rank: int,
-                 world_size: int,
-                 dp_size: int,
                  use_fp8_dispatch: bool = False):
         super().__init__()
 
         self.buffer = buffer
         self.max_tokens_per_rank = max_tokens_per_rank
-        self.world_size = world_size
-        self.dp_size = dp_size
         self.use_fp8_dispatch = use_fp8_dispatch
         # The dispatch function returns a handle that the combine function
         # requires. We store the handle here so it is available to the

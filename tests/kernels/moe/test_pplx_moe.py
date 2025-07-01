@@ -189,6 +189,63 @@ def test_fused_moe_batched_experts(
                                rtol=0)
 
 
+def create_pplx_prepare_finalize(
+    num_tokens: int,
+    hidden_dim: int,
+    topk: int,
+    num_experts: int,
+    rank: int,
+    dp_size: int,
+    world_size: int,
+    in_dtype: torch.dtype,
+    quant_dtype: Optional[torch.dtype],
+    block_shape: Optional[list[int]],
+    per_act_token_quant: bool,
+    group_name: Optional[str],
+):
+    from vllm.model_executor.layers.fused_moe.pplx_prepare_finalize import (
+        PplxPrepareAndFinalize, pplx_hidden_dim_scale_bytes)
+
+    max_num_tokens = max(rank_chunk(num_tokens, 0, world_size), 1)
+    num_local_experts = rank_chunk(num_experts, 0, world_size)
+
+    hidden_dim_bytes, scale_bytes = pplx_hidden_dim_scale_bytes(
+        max_num_tokens,
+        hidden_dim,
+        in_dtype,
+        quant_dtype,
+        per_act_token_quant=per_act_token_quant,
+        block_shape=block_shape,
+    )
+
+    args = dict(
+        max_num_tokens=max_num_tokens,
+        num_experts=num_experts,
+        experts_per_token=topk,
+        rank=rank,
+        world_size=world_size,
+        dp_size=dp_size,
+        hidden_dim=hidden_dim,
+        hidden_dim_bytes=hidden_dim_bytes,
+        hidden_dim_scale_bytes=scale_bytes,
+    )
+
+    if group_name is None:
+        ata = AllToAll.internode(**args)
+    else:
+        args["group_name"] = group_name
+        ata = AllToAll.intranode(**args)
+
+    prepare_finalize = PplxPrepareAndFinalize(
+        ata,
+        max_num_tokens=max_num_tokens,
+        num_local_experts=num_local_experts,
+        num_dispatchers=world_size // dp_size,
+    )
+
+    return prepare_finalize, ata
+
+
 def rank_chunk(num: int, r: int, w: int) -> int:
     rem = num % w
     return (num // w) + (1 if r < rem else 0)
@@ -240,9 +297,6 @@ def pplx_prepare_finalize(
     per_act_token_quant: bool,
     group_name: Optional[str],
 ) -> torch.Tensor:
-    from vllm.model_executor.layers.fused_moe.pplx_prepare_finalize import (
-        PplxPrepareAndFinalize, pplx_hidden_dim_scale_bytes)
-
     assert torch.cuda.current_device() == pgi.local_rank
 
     topk = topk_ids.shape[1]
@@ -250,43 +304,23 @@ def pplx_prepare_finalize(
     device = pgi.device
     rank = pgi.rank
     world_size = pgi.world_size
-    max_num_tokens = max(rank_chunk(num_tokens, 0, world_size), 1)
-
-    hidden_dim_bytes, scale_bytes = pplx_hidden_dim_scale_bytes(
-        max_num_tokens,
-        hidden_dim,
-        a.dtype,
-        quant_dtype,
-        per_act_token_quant=per_act_token_quant,
-        block_shape=block_shape,
-    )
-
-    args = dict(
-        max_num_tokens=max_num_tokens,
-        num_experts=num_experts,
-        experts_per_token=topk,
-        rank=rank,
-        world_size=world_size,
-        dp_size=dp_size,
-        hidden_dim=hidden_dim,
-        hidden_dim_bytes=hidden_dim_bytes,
-        hidden_dim_scale_bytes=scale_bytes,
-    )
-
-    if group_name is None:
-        ata = AllToAll.internode(**args)
-    else:
-        args["group_name"] = group_name
-        ata = AllToAll.intranode(**args)
+    print(f"PGI {pgi} {world_size} {dp_size}")
 
     topk_ids = topk_ids.to(dtype=torch.uint32)
 
-    prepare_finalize = PplxPrepareAndFinalize(
-        ata,
-        max_num_tokens,
-        world_size,
+    prepare_finalize, ata = create_pplx_prepare_finalize(
+        num_tokens,
+        hidden_dim,
+        topk,
+        num_experts,
         rank,
         dp_size,
+        world_size,
+        a.dtype,
+        quant_dtype,
+        block_shape,
+        per_act_token_quant,
+        group_name,
     )
 
     assert a.shape[0] == topk_ids.shape[0]
@@ -468,50 +502,28 @@ def pplx_moe(
     use_compile: bool = False,
     use_cudagraphs: bool = True,
 ) -> torch.Tensor:
-    from vllm.model_executor.layers.fused_moe.pplx_prepare_finalize import (
-        PplxPrepareAndFinalize, pplx_hidden_dim_scale_bytes)
 
-    hidden_dim = a.shape[1]
+    num_tokens, hidden_dim = a.shape
     num_experts = w1.shape[0]
     topk = topk_ids.shape[1]
     max_num_tokens = round_up(rank_chunk(a.shape[0], 0, world_size), 16)
 
-    hidden_dim_bytes, scale_bytes = pplx_hidden_dim_scale_bytes(
-        max_num_tokens,
+    prepare_finalize, ata = create_pplx_prepare_finalize(
+        num_tokens,
         hidden_dim,
+        topk,
+        num_experts,
+        rank,
+        dp_size,
+        world_size,
         a.dtype,
         quant_dtype,
-        per_act_token_quant=per_act_token_quant,
-        block_shape=block_shape,
+        block_shape,
+        per_act_token_quant,
+        group_name,
     )
-
-    args = dict(
-        max_num_tokens=max_num_tokens,
-        num_experts=num_experts,
-        experts_per_token=topk,
-        rank=rank,
-        world_size=world_size,
-        dp_size=dp_size,
-        hidden_dim=hidden_dim,
-        hidden_dim_bytes=hidden_dim_bytes,
-        hidden_dim_scale_bytes=scale_bytes,
-    )
-
-    if group_name is None:
-        ata = AllToAll.internode(**args)
-    else:
-        args["group_name"] = group_name
-        ata = AllToAll.intranode(**args)
 
     topk_ids = topk_ids.to(dtype=torch.uint32)
-
-    prepare_finalize = PplxPrepareAndFinalize(
-        ata,
-        max_num_tokens=max_num_tokens,
-        world_size=world_size,
-        rank=rank,
-        dp_size=dp_size,
-    )
 
     experts = BatchedTritonExperts(
         max_num_tokens=max_num_tokens,
@@ -858,7 +870,8 @@ def _pplx_test_loop(pgi: ProcessGroupInfo, dp_size: int, use_internode: bool,
               f"rank={pgi.rank}.")
 
 
-@pytest.mark.parametrize("world_dp_size", [[2, 1]])
+@pytest.mark.parametrize("world_dp_size", [[2, 1], [2, 2], [4, 1]])
+#@pytest.mark.parametrize("world_dp_size", [[2, 1]])
 @pytest.mark.parametrize("use_internode", [False])
 @requires_pplx
 def test_pplx_prepare_finalize(
@@ -867,11 +880,12 @@ def test_pplx_prepare_finalize(
 ):
     current_platform.seed_everything(7)
     world_size, dp_size = world_dp_size
-    parallel_launch(world_size, _pplx_test_loop, dp_size, use_internode, False,
-                    _pplx_prepare_finalize)
+    parallel_launch(world_size * dp_size, _pplx_test_loop, dp_size,
+                    use_internode, False, _pplx_prepare_finalize)
 
 
-@pytest.mark.parametrize("world_dp_size", [[2, 1]])
+@pytest.mark.parametrize("world_dp_size", [[2, 1], [2, 2], [4, 1]])
+#@pytest.mark.parametrize("world_dp_size", [[2, 1]])
 @pytest.mark.parametrize("use_internode", [False])
 @requires_pplx
 def test_pplx_moe(

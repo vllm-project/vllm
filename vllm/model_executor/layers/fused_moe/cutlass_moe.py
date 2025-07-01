@@ -212,6 +212,7 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
     def __init__(
         self,
         max_experts_per_worker: int,
+        num_dispatchers: int,
         out_dtype: Optional[torch.dtype],
         per_act_token_quant: bool,
         per_out_ch_quant: bool,
@@ -227,6 +228,7 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
             ))
         assert max_experts_per_worker > 0
         self.max_experts_per_worker = max_experts_per_worker
+        self.num_dispatchers = num_dispatchers
         self.out_dtype = out_dtype
         self.use_batched_format = use_batched_format
 
@@ -263,8 +265,11 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
         output: tuple[int, ...] = ()
         if self.use_batched_format:
             padded_M = aq.size(1)
-            workspace1 = (self.max_experts_per_worker, padded_M, max(N, K))
-            workspace2 = (self.max_experts_per_worker, padded_M, (N // 2))
+            num_dp = self.num_dispatchers
+            workspace1 = (self.max_experts_per_worker, padded_M * num_dp,
+                          max(N, K))
+            workspace2 = (self.max_experts_per_worker, padded_M * num_dp,
+                          (N // 2))
             output = (self.max_experts_per_worker, padded_M, K)
         else:
             workspace1 = (M * topk, max(2 * N, K))

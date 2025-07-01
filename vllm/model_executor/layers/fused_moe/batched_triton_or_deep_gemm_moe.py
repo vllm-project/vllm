@@ -15,8 +15,7 @@ class BatchedTritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def __init__(self,
                  max_num_tokens: int,
-                 world_size: int,
-                 dp_size: int,
+                 num_dispatchers: int,
                  use_fp8_w8a8: bool = False,
                  use_int8_w8a8: bool = False,
                  use_int8_w8a16: bool = False,
@@ -37,15 +36,11 @@ class BatchedTritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
                 block_shape=block_shape,
                 per_act_token_quant=per_act_token_quant,
             ))
-        self.max_num_tokens = max_num_tokens
-        self.world_size = world_size
-        self.dp_size = dp_size
         self.allow_deep_gemm = allow_deep_gemm
 
         self.batched_triton_experts = BatchedTritonExperts(
-            max_num_tokens=self.max_num_tokens,
-            world_size=self.world_size,
-            dp_size=self.dp_size,
+            max_num_tokens=max_num_tokens,
+            num_dispatchers=num_dispatchers,
             use_fp8_w8a8=use_fp8_w8a8,
             use_int8_w8a8=use_int8_w8a8,
             use_int8_w8a16=use_int8_w8a16,
@@ -59,9 +54,8 @@ class BatchedTritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
                                 == BatchedDeepGemmExperts.DEEPGEMM_BLOCK_SHAPE)
 
         self.batched_deep_gemm_experts = BatchedDeepGemmExperts(
-            max_num_tokens=self.max_num_tokens,
-            world_size=self.world_size,
-            dp_size=self.dp_size,
+            max_num_tokens=max_num_tokens,
+            num_dispatchers=num_dispatchers,
             block_shape=self.block_shape,  # type: ignore[arg-type]
         ) if self.allow_deep_gemm else None
 
