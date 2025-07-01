@@ -382,14 +382,20 @@ class FusedMoEConfig:
                 per_out_ch_quant = (
                     weight_quant.strategy == QuantizationStrategy.CHANNEL)
 
-            assert quant_dtype is not None
+            if quant_dtype is not None:
+                _quant_config = FusedMoEQuantConfig(
+                    quant_dtype=quant_dtype,
+                    per_act_token_quant=per_act_token_quant,
+                    per_out_ch_quant=per_out_ch_quant,
+                    block_shape=block_shape,
+                )
+            else:
+                logger.warning_once("MoE DP setup unable to determine "
+                                    "quantization scheme or unsupported "
+                                    "quantization type. This model will "
+                                    "not run with DP enabled.")
 
-            _quant_config = FusedMoEQuantConfig(
-                quant_dtype=quant_dtype,
-                per_act_token_quant=per_act_token_quant,
-                per_out_ch_quant=per_out_ch_quant,
-                block_shape=block_shape,
-            )
+            _quant_config = FusedMoEQuantConfig()
         else:
             _quant_config = quant_config
 

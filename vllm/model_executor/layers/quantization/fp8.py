@@ -800,8 +800,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 self.quant_config.weight_block_size, False)
             return BatchedTritonOrDeepGemmExperts(
                 max_num_tokens=max_num_tokens_per_rank,
-                world_size=moe.world_size,
-                dp_size=moe.dp_size,
+                world_size=prepare_finalize.world_size,
+                dp_size=prepare_finalize.dp_size,
                 use_fp8_w8a8=True,
                 block_shape=self.quant_config.weight_block_size,
                 per_act_token_quant=False,
