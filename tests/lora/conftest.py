@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import tempfile
 from collections import OrderedDict
@@ -161,11 +162,6 @@ def mixtral_lora_files():
     # Note: this module has incorrect adapter_config.json to test
     # https://github.com/vllm-project/vllm/pull/5909/files.
     return snapshot_download(repo_id="SangBinCho/mixtral-lora")
-
-
-@pytest.fixture(scope="session")
-def gemma_lora_files():
-    return snapshot_download(repo_id="wskwon/gemma-7b-test-lora")
 
 
 @pytest.fixture(scope="session")

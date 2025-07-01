@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
 from collections.abc import Iterable, Mapping
@@ -66,7 +67,7 @@ class WeightsMapper:
 
 class AutoWeightsLoader:
     """
-    Helper class to load weights into a {class}`torch.nn.Module`. It is able
+    Helper class to load weights into a [`torch.nn.Module`][]. It is able
     to automatically detect child modules and parameters while iterating over
     the weights only once.
 

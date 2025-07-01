@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 Simple KV Cache Connector for Distributed Machine Learning Inference
 
@@ -106,7 +107,7 @@ class SimpleConnector(KVConnectorBase):
         else:
 
             # the current vLLM instance is KV consumer, so it needs to connect
-            # its recv pipe to the send pipe of KV producder
+            # its recv pipe to the send pipe of KV producer
             if self.config.kv_connector == "PyNcclConnector":
                 self.consumer_data_pipe = PyNcclPipe(
                     local_rank=local_rank,

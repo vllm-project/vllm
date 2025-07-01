@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only MiniMaxText01 model."""
 import copy
 import math
-import re
 from collections.abc import Iterable
 from typing import Optional, Union
 
+import regex as re
 import torch
 import torch.distributed
 import torch.nn.functional as F
@@ -141,7 +142,7 @@ class MiniMaxText01RotaryEmbedding(CustomOp):
         head_size: int,
         rotary_dim: int,
         max_position: int,
-        base: int,
+        base: float,
         is_neox_style: bool,
         cache_dtype: torch.dtype,
     ) -> None:
@@ -155,10 +156,7 @@ class MiniMaxText01RotaryEmbedding(CustomOp):
         cache = self._compute_cos_sin_cache().to(cache_dtype)
         self.register_buffer("cos_sin_cache", cache, persistent=False)
 
-    def _compute_inv_freq(
-        self,
-        base: Union[int, float],
-    ) -> torch.Tensor:
+    def _compute_inv_freq(self, base: float) -> torch.Tensor:
         """Compute the inverse frequency."""
         inv_freq = 1.0 / (base**(torch.arange(
             0, self.rotary_dim, 2, dtype=torch.float) / self.rotary_dim))
@@ -858,7 +856,7 @@ class MiniMaxText01Model(nn.Module):
         self._dtype = _dummy.dtype
         del _dummy
 
-        self.minimax_cache = MinimaxCacheManager(dtype=self._dtype,
+        self.minimax_cache = MinimaxCacheManager(dtype=torch.float32,
                                                  cache_shape=self.cache_shape)
 
         rope_theta = getattr(config, "rope_theta", 10000)
@@ -1023,7 +1021,7 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
 
         else:
             self.lm_head = PPMissingLayer()
-
+        self.lm_head.float()
         flash_layer_count = sum(1 for attn_type in self.config.attn_type_list
                                 if attn_type == 1)
         self.kv_cache = [torch.tensor([]) for _ in range(flash_layer_count)]
@@ -1056,7 +1054,7 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        logits = self.logits_processor(self.lm_head, hidden_states,
+        logits = self.logits_processor(self.lm_head, hidden_states.float(),
                                        sampling_metadata)
 
         return logits

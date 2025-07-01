@@ -76,16 +76,14 @@ void cutlass_group_gemm_caller(
     torch::Tensor const& b_tensors, torch::Tensor const& a_scales,
     torch::Tensor const& b_scales, torch::Tensor const& expert_offsets,
     torch::Tensor const& problem_sizes, torch::Tensor const& a_strides,
-    torch::Tensor const& b_strides, torch::Tensor const& c_strides) {
+    torch::Tensor const& b_strides, torch::Tensor const& c_strides,
+    bool per_act_token, bool per_out_ch) {
   using ElementAB = typename Gemm::ElementAB;
   using ElementD = typename Gemm::ElementD;
 
   int num_experts = static_cast<int>(expert_offsets.size(0));
   int k_size = a_tensors.size(1);
   int n_size = out_tensors.size(1);
-
-  bool per_act_token = a_scales.numel() != 1;
-  bool per_out_ch = b_scales.numel() != num_experts;
 
   auto stream = at::cuda::getCurrentCUDAStream(a_tensors.device().index());
 

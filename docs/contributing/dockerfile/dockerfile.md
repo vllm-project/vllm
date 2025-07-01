@@ -26,7 +26,12 @@ The edges of the build graph represent:
   > Commands to regenerate the build graph (make sure to run it **from the \`root\` directory of the vLLM repository** where the dockerfile is present):
   >
   > ```bash
-  > dockerfilegraph -o png --legend --dpi 200 --max-label-length 50 --filename docker/Dockerfile
+  > dockerfilegraph \
+  >   -o png \
+  >   --legend \
+  >   --dpi 200 \
+  >   --max-label-length 50 \
+  >   --filename docker/Dockerfile
   > ```
   >
   > or in case you want to run it directly with the docker image:

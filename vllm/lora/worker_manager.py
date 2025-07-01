@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from contextlib import contextmanager
 from typing import Any, Literal, Optional, Union
@@ -229,6 +230,11 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
             self.add_adapter(lora)
 
     def add_adapter(self, lora_request: LoRARequest) -> bool:
+        # Note that this method is not thread-safe. It may be invoked multiple
+        # times for the same adapter when using multiple API servers.
+        # This is ok because it's currently only called from
+        # the single-threaded core engine loop.
+
         if lora_request.lora_int_id not in self.list_adapters():
             # Load the new adapter first to ensure it is actually valid, before
             # evicting any existing adapters.

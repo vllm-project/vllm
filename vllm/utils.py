@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from __future__ import annotations
 
@@ -19,7 +20,6 @@ import json
 import multiprocessing
 import os
 import pickle
-import re
 import signal
 import socket
 import subprocess
@@ -34,11 +34,12 @@ import uuid
 import warnings
 import weakref
 from argparse import (Action, ArgumentDefaultsHelpFormatter, ArgumentParser,
-                      ArgumentTypeError, _ArgumentGroup)
+                      ArgumentTypeError, RawDescriptionHelpFormatter,
+                      _ArgumentGroup)
 from asyncio import FIRST_COMPLETED, AbstractEventLoop, Task
 from collections import UserDict, defaultdict
-from collections.abc import (AsyncGenerator, Awaitable, Generator, Hashable,
-                             Iterable, Iterator, KeysView, Mapping)
+from collections.abc import (AsyncGenerator, Awaitable, Collection, Generator,
+                             Hashable, Iterable, Iterator, KeysView, Mapping)
 from concurrent.futures.process import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from functools import cache, lru_cache, partial, wraps
@@ -54,6 +55,7 @@ import cloudpickle
 import numpy as np
 import numpy.typing as npt
 import psutil
+import regex as re
 import torch
 import torch.types
 import yaml
@@ -65,9 +67,6 @@ from torch.library import Library
 from typing_extensions import Never, ParamSpec, TypeIs, assert_never
 
 import vllm.envs as envs
-# NOTE: import triton_utils to make TritonPlaceholderModule work
-#       if triton is unavailable
-import vllm.triton_utils  # noqa: F401
 from vllm.logger import enable_trace_function_call, init_logger
 
 if TYPE_CHECKING:
@@ -85,20 +84,20 @@ MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS = 5120
 
 # Exception strings for non-implemented encoder/decoder scenarios
 
-# Reminder: Please update docs/source/features/compatibility_matrix.md
+# Reminder: Please update docs/features/compatibility_matrix.md
 # If the feature combo become valid
 
 STR_NOT_IMPL_ENC_DEC_SWA = \
     "Sliding window attention for encoder/decoder models " + \
-                    "is not currently supported."
+    "is not currently supported."
 
 STR_NOT_IMPL_ENC_DEC_PREFIX_CACHE = \
     "Prefix caching for encoder/decoder models " + \
-                    "is not currently supported."
+    "is not currently supported."
 
 STR_NOT_IMPL_ENC_DEC_CHUNKED_PREFILL = \
     "Chunked prefill for encoder/decoder models " + \
-                    "is not currently supported."
+    "is not currently supported."
 
 STR_NOT_IMPL_ENC_DEC_LOGIT_SOFTCAP = (
     "Models with logits_soft_cap "
@@ -106,7 +105,7 @@ STR_NOT_IMPL_ENC_DEC_LOGIT_SOFTCAP = (
     "currently not supported for encoder/decoder "
     "models.")
 
-STR_NOT_IMPL_ENC_DEC_LORA = ("LoRA is currently not currently "
+STR_NOT_IMPL_ENC_DEC_LORA = ("LoRA is not currently "
                              "supported with encoder/decoder "
                              "models.")
 
@@ -187,6 +186,16 @@ TORCH_DTYPE_TO_NUMPY_DTYPE = {
     torch.int32: np.int32,
     torch.int64: np.int64,
 }
+
+
+@contextlib.contextmanager
+def set_default_torch_num_threads(num_threads: int):
+    """Sets the default number of threads for PyTorch to the given value."""
+    old_num_threads = torch.get_num_threads()
+    torch.set_num_threads(num_threads)
+    yield
+    torch.set_num_threads(old_num_threads)
+
 
 P = ParamSpec('P')
 T = TypeVar("T")
@@ -743,7 +752,7 @@ def _generate_random_fp8(
     # to generate random data for fp8 data.
     # For example, s.11111.00 in fp8e5m2 format represents Inf.
     #     | E4M3        | E5M2
-    #-----|-------------|-------------------
+    # -----|-------------|-------------------
     # Inf | N/A         | s.11111.00
     # NaN | s.1111.111  | s.11111.{01,10,11}
     from vllm import _custom_ops as ops
@@ -758,16 +767,15 @@ def get_kv_cache_torch_dtype(
         model_dtype: Optional[Union[str, torch.dtype]] = None) -> torch.dtype:
     if isinstance(cache_dtype, str):
         if cache_dtype == "auto":
-            if isinstance(model_dtype, str):
+            if isinstance(model_dtype,
+                          str) and model_dtype in STR_DTYPE_TO_TORCH_DTYPE:
                 torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[model_dtype]
             elif isinstance(model_dtype, torch.dtype):
                 torch_dtype = model_dtype
             else:
                 raise ValueError(f"Invalid model dtype: {model_dtype}")
-        elif cache_dtype in ["half", "bfloat16", "float"]:
+        elif cache_dtype in STR_DTYPE_TO_TORCH_DTYPE:
             torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_dtype]
-        elif cache_dtype == "fp8":
-            torch_dtype = torch.uint8
         else:
             raise ValueError(f"Invalid kv cache dtype: {cache_dtype}")
     elif isinstance(cache_dtype, torch.dtype):
@@ -832,7 +840,6 @@ def create_kv_caches_with_random(
     seed: Optional[int] = None,
     device: Optional[str] = "cuda",
 ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
-
     if cache_dtype == "fp8" and head_size % 16:
         raise ValueError(
             f"Does not support key cache of type fp8 with head_size {head_size}"
@@ -898,6 +905,7 @@ class DeviceMemoryProfiler:
     def current_memory_usage(self) -> float:
         # Return the memory usage in bytes.
         from vllm.platforms import current_platform
+        gc.collect()
         return current_platform.get_current_memory_usage(self.device)
 
     def __enter__(self):
@@ -979,6 +987,53 @@ def get_dtype_size(dtype: torch.dtype) -> int:
     return torch.tensor([], dtype=dtype).element_size()
 
 
+# bool = 0, int = 1, float = 2, complex = 3
+def _get_precision_level(dtype: torch.dtype) -> int:
+    # NOTE: Complex dtypes return `is_floating_point=False`
+    return ((dtype != torch.bool) + dtype.is_floating_point +
+            dtype.is_complex * 2)
+
+
+def is_lossless_cast(src_dtype: torch.dtype, tgt_dtype: torch.dtype):
+    """
+    Test whether it is lossless to cast a tensor from
+    `src_dtype` to `tgt_dtype`.
+    """
+    if src_dtype == tgt_dtype:
+        return True
+
+    src_level = _get_precision_level(src_dtype)
+    tgt_level = _get_precision_level(tgt_dtype)
+
+    if src_level < tgt_level:
+        return True
+    if src_level > tgt_level:
+        return False
+
+    # Compare integral types
+    if not src_dtype.is_floating_point and not src_dtype.is_complex:
+        src_info = torch.iinfo(src_dtype)
+        tgt_info = torch.iinfo(tgt_dtype)
+        return src_info.min >= tgt_info.min and src_info.max <= tgt_info.max
+
+    # Compare floating-point types
+    src_info = torch.finfo(src_dtype)
+    tgt_info = torch.finfo(tgt_dtype)
+    return (src_info.min >= tgt_info.min and src_info.max <= tgt_info.max
+            and src_info.resolution >= tgt_info.resolution)
+
+
+def common_broadcastable_dtype(dtypes: Collection[torch.dtype]):
+    """
+    Get the common `dtype` where all of the other `dtypes` can be
+    cast to it without losing any information.
+    """
+    return max(
+        dtypes,
+        key=lambda dtype: sum(is_lossless_cast(dt, dtype) for dt in dtypes),
+    )
+
+
 # `collections` helpers
 def is_list_of(
     value: object,
@@ -1004,7 +1059,7 @@ def flatten_2d_lists(lists: Iterable[Iterable[T]]) -> list[T]:
 
 def full_groupby(values: Iterable[_V], *, key: Callable[[_V], _K]):
     """
-    Unlike {class}`itertools.groupby`, groups are not broken by
+    Unlike [`itertools.groupby`][], groups are not broken by
     non-contiguous data.
     """
     groups = defaultdict[_K, list[_V]](list)
@@ -1149,7 +1204,6 @@ def deprecate_args(
     is_deprecated: Union[bool, Callable[[], bool]] = True,
     additional_message: Optional[str] = None,
 ) -> Callable[[F], F]:
-
     if not callable(is_deprecated):
         is_deprecated = partial(identity, is_deprecated)
 
@@ -1299,7 +1353,7 @@ def weak_bind(bound_method: Callable[..., Any], ) -> Callable[..., None]:
     return weak_bound
 
 
-#From: https://stackoverflow.com/a/4104188/2749989
+# From: https://stackoverflow.com/a/4104188/2749989
 def run_once(f: Callable[P, None]) -> Callable[P, None]:
 
     def wrapper(*args: P.args, **kwargs: P.kwargs) -> None:
@@ -1323,7 +1377,8 @@ class StoreBoolean(Action):
                              "Expected 'true' or 'false'.")
 
 
-class SortedHelpFormatter(ArgumentDefaultsHelpFormatter):
+class SortedHelpFormatter(ArgumentDefaultsHelpFormatter,
+                          RawDescriptionHelpFormatter):
     """SortedHelpFormatter that sorts arguments by their option strings."""
 
     def _split_lines(self, text, width):
@@ -1408,25 +1463,39 @@ class FlexibleArgumentParser(ArgumentParser):
         if '--config' in args:
             args = self._pull_args_from_config(args)
 
+        def repl(match: re.Match) -> str:
+            """Replaces underscores with dashes in the matched string."""
+            return match.group(0).replace("_", "-")
+
+        # Everything between the first -- and the first .
+        pattern = re.compile(r"(?<=--)[^\.]*")
+
         # Convert underscores to dashes and vice versa in argument names
-        processed_args = []
-        for arg in args:
+        processed_args = list[str]()
+        for i, arg in enumerate(args):
             if arg.startswith('--'):
                 if '=' in arg:
                     key, value = arg.split('=', 1)
-                    key = '--' + key[len('--'):].replace('_', '-')
+                    key = pattern.sub(repl, key, count=1)
                     processed_args.append(f'{key}={value}')
                 else:
-                    processed_args.append('--' +
-                                          arg[len('--'):].replace('_', '-'))
-            elif arg.startswith('-O') and arg != '-O' and len(arg) == 2:
-                # allow -O flag to be used without space, e.g. -O3
-                processed_args.append('-O')
-                processed_args.append(arg[2:])
+                    key = pattern.sub(repl, arg, count=1)
+                    processed_args.append(key)
+            elif arg.startswith('-O') and arg != '-O' and arg[2] != '.':
+                # allow -O flag to be used without space, e.g. -O3 or -Odecode
+                # -O.<...> handled later
+                # also handle -O=<level> here
+                level = arg[3:] if arg[2] == '=' else arg[2:]
+                processed_args.append(f'-O.level={level}')
+            elif arg == '-O' and i + 1 < len(args) and args[i + 1] in {
+                    "0", "1", "2", "3"
+            }:
+                # Convert -O <n> to -O.level <n>
+                processed_args.append('-O.level')
             else:
                 processed_args.append(arg)
 
-        def create_nested_dict(keys: list[str], value: str):
+        def create_nested_dict(keys: list[str], value: str) -> dict[str, Any]:
             """Creates a nested dictionary from a list of keys and a value.
 
             For example, `keys = ["a", "b", "c"]` and `value = 1` will create:
@@ -1437,35 +1506,66 @@ class FlexibleArgumentParser(ArgumentParser):
                 nested_dict = {key: nested_dict}
             return nested_dict
 
-        def recursive_dict_update(original: dict, update: dict):
-            """Recursively updates a dictionary with another dictionary."""
+        def recursive_dict_update(
+            original: dict[str, Any],
+            update: dict[str, Any],
+        ) -> set[str]:
+            """Recursively updates a dictionary with another dictionary.
+            Returns a set of duplicate keys that were overwritten.
+            """
+            duplicates = set[str]()
             for k, v in update.items():
                 if isinstance(v, dict) and isinstance(original.get(k), dict):
-                    recursive_dict_update(original[k], v)
+                    nested_duplicates = recursive_dict_update(original[k], v)
+                    duplicates |= {f"{k}.{d}" for d in nested_duplicates}
+                elif isinstance(v, list) and isinstance(original.get(k), list):
+                    original[k] += v
                 else:
+                    if k in original:
+                        duplicates.add(k)
                     original[k] = v
+            return duplicates
 
-        delete = set()
-        dict_args: dict[str, dict] = defaultdict(dict)
+        delete = set[int]()
+        dict_args = defaultdict[str, dict[str, Any]](dict)
+        duplicates = set[str]()
         for i, processed_arg in enumerate(processed_args):
-            if processed_arg.startswith("--") and "." in processed_arg:
+            if i in delete:  # skip if value from previous arg
+                continue
+
+            if processed_arg.startswith("-") and "." in processed_arg:
                 if "=" in processed_arg:
-                    processed_arg, value = processed_arg.split("=", 1)
+                    processed_arg, value_str = processed_arg.split("=", 1)
                     if "." not in processed_arg:
-                        # False positive, . was only in the value
+                        # False positive, '.' was only in the value
                         continue
                 else:
-                    value = processed_args[i + 1]
+                    value_str = processed_args[i + 1]
                     delete.add(i + 1)
+
+                if processed_arg.endswith("+"):
+                    processed_arg = processed_arg[:-1]
+                    value_str = json.dumps(list(value_str.split(",")))
+
                 key, *keys = processed_arg.split(".")
+                try:
+                    value = json.loads(value_str)
+                except json.decoder.JSONDecodeError:
+                    value = value_str
+
                 # Merge all values with the same key into a single dict
                 arg_dict = create_nested_dict(keys, value)
-                recursive_dict_update(dict_args[key], arg_dict)
+                arg_duplicates = recursive_dict_update(dict_args[key],
+                                                       arg_dict)
+                duplicates |= {f'{key}.{d}' for d in arg_duplicates}
                 delete.add(i)
         # Filter out the dict args we set to None
         processed_args = [
             a for i, a in enumerate(processed_args) if i not in delete
         ]
+        if duplicates:
+            logger.warning("Found duplicate keys %s", ", ".join(duplicates))
+
         # Add the dict args back as if they were originally passed as JSON
         for dict_arg, dict_value in dict_args.items():
             processed_args.append(dict_arg)
@@ -1656,6 +1756,7 @@ def supports_kw(
         last_param = params[next(reversed(params))]  # type: ignore
         return (last_param.kind == inspect.Parameter.VAR_KEYWORD
                 and last_param.name != kw_name)
+
     return False
 
 
@@ -1698,6 +1799,7 @@ def resolve_mm_processor_kwargs(
     # Merge the final processor kwargs, prioritizing inference
     # time values over the initialization time values.
     mm_processor_kwargs = {**init_mm_kwargs, **runtime_mm_kwargs}
+
     return mm_processor_kwargs
 
 
@@ -1877,14 +1979,6 @@ def get_cuda_view_from_cpu_tensor(cpu_tensor: torch.Tensor) -> torch.Tensor:
     return torch.ops._C.get_cuda_view_from_cpu_tensor(cpu_tensor)
 
 
-def is_in_doc_build() -> bool:
-    try:
-        from sphinx.ext.autodoc.mock import _MockModule
-        return isinstance(zmq, _MockModule)
-    except ModuleNotFoundError:
-        return False
-
-
 def import_from_path(module_name: str, file_path: Union[str, os.PathLike]):
     """
     Import a Python file according to its file path.
@@ -1924,7 +2018,8 @@ class _PlaceholderBase:
     Disallows downstream usage of placeholder modules.
 
     We need to explicitly override each dunder method because
-    {meth}`__getattr__` is not called when they are accessed.
+    [`__getattr__`][vllm.utils._PlaceholderBase.__getattr__]
+    is not called when they are accessed.
 
     Info:
         [Special method lookup](https://docs.python.org/3/reference/datamodel.html#special-lookup)
@@ -2219,6 +2314,8 @@ def kill_process_tree(pid: int):
 class MemorySnapshot:
     """Memory snapshot."""
     torch_peak: int = 0
+    free_memory: int = 0
+    total_memory: int = 0
     cuda_memory: int = 0
     torch_memory: int = 0
     non_torch_memory: int = 0
@@ -2238,8 +2335,8 @@ class MemorySnapshot:
         self.torch_peak = torch.cuda.memory_stats().get(
             "allocated_bytes.all.peak", 0)
 
-        self.cuda_memory = torch.cuda.mem_get_info(
-        )[1] - torch.cuda.mem_get_info()[0]
+        self.free_memory, self.total_memory = torch.cuda.mem_get_info()
+        self.cuda_memory = self.total_memory - self.free_memory
 
         # torch.cuda.memory_reserved() is how many bytes
         # PyTorch gets from cuda (by calling cudaMalloc, etc.)
@@ -2252,6 +2349,8 @@ class MemorySnapshot:
     def __sub__(self, other: MemorySnapshot) -> MemorySnapshot:
         return MemorySnapshot(
             torch_peak=self.torch_peak - other.torch_peak,
+            free_memory=self.free_memory - other.free_memory,
+            total_memory=self.total_memory - other.total_memory,
             cuda_memory=self.cuda_memory - other.cuda_memory,
             torch_memory=self.torch_memory - other.torch_memory,
             non_torch_memory=self.non_torch_memory - other.non_torch_memory,
@@ -2272,6 +2371,16 @@ class MemoryProfilingResult:
     before_profile: MemorySnapshot = field(default_factory=MemorySnapshot)
     after_profile: MemorySnapshot = field(default_factory=MemorySnapshot)
     profile_time: float = 0.0
+
+    def __repr__(self) -> str:
+        return (f"Memory profiling takes {self.profile_time:.2f} seconds. "
+                f"Total non KV cache memory: "
+                f"{(self.non_kv_cache_memory / GiB_bytes):.2f}GiB; "
+                f"torch peak memory increase: "
+                f"{(self.torch_peak_increase / GiB_bytes):.2f}GiB; "
+                f"non-torch forward increase memory: "
+                f"{(self.non_torch_increase / GiB_bytes):.2f}GiB; "
+                f"weights memory: {(self.weights_memory / GiB_bytes):.2f}GiB.")
 
 
 @contextlib.contextmanager
@@ -2323,7 +2432,7 @@ def memory_profiling(
     The increase of `torch.cuda.memory_stats()["allocated_bytes.all.peak"]` during profiling gives (b.).
 
     The increase of `non_torch_memory` from creating the current vLLM instance until after profiling to get (c.).
-    """ # noqa
+    """  # noqa
     gc.collect()
     torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats()
@@ -2412,7 +2521,7 @@ def make_zmq_path(scheme: str, host: str, port: Optional[int] = None) -> str:
     Returns:
         A properly formatted ZMQ path string.
     """
-    if not port:
+    if port is None:
         return f"{scheme}://{host}"
     if is_valid_ipv6_address(host):
         return f"{scheme}://[{host}]:{port}"
@@ -2426,6 +2535,7 @@ def make_zmq_socket(
     socket_type: Any,
     bind: Optional[bool] = None,
     identity: Optional[bytes] = None,
+    linger: Optional[int] = None,
 ) -> Union[zmq.Socket, zmq.asyncio.Socket]:  # type: ignore[name-defined]
     """Make a ZMQ socket with the proper bind/connect semantics."""
 
@@ -2445,7 +2555,7 @@ def make_zmq_socket(
         buf_size = -1  # Use system default buffer size
 
     if bind is None:
-        bind = socket_type != zmq.PUSH
+        bind = socket_type not in (zmq.PUSH, zmq.SUB, zmq.XSUB)
 
     if socket_type in (zmq.PULL, zmq.DEALER, zmq.ROUTER):
         socket.setsockopt(zmq.RCVHWM, 0)
@@ -2457,6 +2567,9 @@ def make_zmq_socket(
 
     if identity is not None:
         socket.setsockopt(zmq.IDENTITY, identity)
+
+    if linger is not None:
+        socket.setsockopt(zmq.LINGER, linger)
 
     # Determine if the path is a TCP socket with an IPv6 address.
     # Enable IPv6 on the zmq socket if so.
@@ -2529,7 +2642,7 @@ def _maybe_force_spawn():
         logger.warning(
             "We must use the `spawn` multiprocessing start method. "
             "Overriding VLLM_WORKER_MULTIPROC_METHOD to 'spawn'. "
-            "See https://docs.vllm.ai/en/latest/getting_started/"
+            "See https://docs.vllm.ai/en/latest/usage/"
             "troubleshooting.html#python-multiprocessing "
             "for more information. Reason: %s", reason)
         os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
@@ -2794,14 +2907,17 @@ def cprofile(save_file: Optional[str] = None, enabled: bool = True):
 
 # Only relevant for models using ALiBi (e.g, MPT)
 def check_use_alibi(model_config: ModelConfig) -> bool:
-    return (getattr(model_config.hf_text_config, "alibi", False)  # Falcon
+    cfg = model_config.hf_text_config
+    return (getattr(cfg, "alibi", False)  # Falcon
             or ("BloomForCausalLM" in getattr(model_config.hf_config,
                                               "architectures", []))  # Bloom
-            or getattr(model_config.hf_text_config, "position_encoding_type",
-                       "") == "alibi"  # codellm_1b_alibi
-            or
-            (hasattr(model_config.hf_text_config, "attn_config")  # MPT
-             and model_config.hf_text_config.attn_config.get("alibi", False)))
+            or getattr(cfg, "position_encoding_type", "") ==
+            "alibi"  # codellm_1b_alibi
+            or (hasattr(cfg, "attn_config")  # MPT
+                and ((isinstance(cfg.attn_config, dict)
+                      and cfg.attn_config.get("alibi", False)) or
+                     (not isinstance(cfg.attn_config, dict)
+                      and getattr(cfg.attn_config, "alibi", False)))))
 
 
 def sha256(input) -> int:
@@ -2832,8 +2948,41 @@ def is_torch_equal_or_newer(target: str) -> bool:
         Whether the condition meets.
     """
     try:
-        torch_version = version.parse(str(torch.__version__))
-        return torch_version >= version.parse(target)
+        return _is_torch_equal_or_newer(str(torch.__version__), target)
     except Exception:
         # Fallback to PKG-INFO to load the package info, needed by the doc gen.
         return Version(importlib.metadata.version('torch')) >= Version(target)
+
+
+# Helper function used in testing.
+def _is_torch_equal_or_newer(torch_version: str, target: str) -> bool:
+    torch_version = version.parse(torch_version)
+    return torch_version >= version.parse(target)
+
+
+@cache
+def _has_module(module_name: str) -> bool:
+    """Return True if *module_name* can be found in the current environment.
+
+    The result is cached so that subsequent queries for the same module incur
+    no additional overhead.
+    """
+    return importlib.util.find_spec(module_name) is not None
+
+
+def has_pplx() -> bool:
+    """Whether the optional `pplx_kernels` package is available."""
+
+    return _has_module("pplx_kernels")
+
+
+def has_deep_ep() -> bool:
+    """Whether the optional `deep_ep` package is available."""
+
+    return _has_module("deep_ep")
+
+
+def has_deep_gemm() -> bool:
+    """Whether the optional `deep_gemm` package is available."""
+
+    return _has_module("deep_gemm")

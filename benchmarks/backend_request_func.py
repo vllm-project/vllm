@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import io
 import json
@@ -324,7 +325,7 @@ async def async_request_openai_completions(
 
                                 most_recent_timestamp = timestamp
                                 generated_text += text or ""
-                            elif usage := data.get("usage"):
+                            if usage := data.get("usage"):
                                 output.output_tokens = usage.get("completion_tokens")
                     if first_chunk_received:
                         output.success = True
@@ -403,8 +404,14 @@ async def async_request_openai_chat_completions(
                         chunk_bytes = chunk_bytes.strip()
                         if not chunk_bytes:
                             continue
+                        chunk_bytes = chunk_bytes.decode("utf-8")
+                        # NOTE: SSE comments (often used as pings) start with a colon.
+                        # These are not JSON data payload and should be skipped.
+                        if chunk_bytes.startswith(":"):
+                            continue
 
-                        chunk = chunk_bytes.decode("utf-8").removeprefix("data: ")
+                        chunk = chunk_bytes.removeprefix("data: ")
+
                         if chunk != "[DONE]":
                             timestamp = time.perf_counter()
                             data = json.loads(chunk)
@@ -611,6 +618,7 @@ ASYNC_REQUEST_FUNCS = {
     "tensorrt-llm": async_request_trt_llm,
     "scalellm": async_request_openai_completions,
     "sglang": async_request_openai_completions,
+    "llama.cpp": async_request_openai_completions,
 }
 
 OPENAI_COMPATIBLE_BACKENDS = [

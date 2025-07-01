@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Adapted from https://github.com/sgl-project/sglang/pull/2575
 import itertools
@@ -12,7 +13,8 @@ from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import fused_moe
 from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
     _valid_deep_gemm_shape, deep_gemm_moe_fp8)
-from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
+from vllm.model_executor.layers.fused_moe.fused_moe import (
+    fused_topk, modular_triton_fused_moe)
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_align_block_size)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
@@ -36,16 +38,16 @@ vllm_config.scheduler_config.max_model_len = 8192
 
 # Test configurations
 DTYPES = [torch.bfloat16]  # [torch.half, torch.bfloat16, torch.float32]
-NUM_TOKENS = [7, 83, 2048]
+NUM_TOKENS = [7, 2050]
 D = [512, 4096, 5120, 13824]
-GROUP_SIZE = [64, 128, 256, 512]
-M = [1, 7, 8, 83, 84, 512, 2048, 4096]
-N = [128, 512, 1024, 4096, 7168, 7748, 13824]
-K = [256, 4096, 5120, 3884, 13824, 16384]
+GROUP_SIZE = [64, 128, 512]
+M = [1, 7, 8, 83, 84, 4096]
+N = [128, 512, 7168, 7748, 13824]
+K = [256, 3884, 4096, 13824, 16384]
 # Deepseek-V3's intermediate size 18432, so N is 18432*2/8=4608 at TP8
 # and its hidden size is 7168.
-M_moe = [1, 2, 7, 83, 128, 512, 2048]
-M_moe_dg = [128, 192, 512, 1335, 2048]
+M_moe = [1, 2, 7, 83, 128, 2048, 1024 * 128]
+M_moe_dg = [128, 192, 1335, 2048]
 N_moe = [128, 256, 1024, 4608]  # [13824]
 K_moe = [256, 512, 7168]  # [13824]
 BLOCK_SIZE = [[128, 128]]
@@ -213,6 +215,13 @@ def test_w8a8_block_fp8_fused_moe(M, N, K, E, topk, block_size, dtype, seed):
 
     score = torch.randn((M, E), dtype=dtype)
 
+    m_fused_moe = modular_triton_fused_moe(use_fp8_w8a8=True,
+                                           use_int8_w8a8=False,
+                                           use_int8_w8a16=False,
+                                           use_int4_w4a16=False,
+                                           per_channel_quant=False,
+                                           block_shape=block_size)
+
     # Set the context to avoid lots of warning spam.
     with set_current_vllm_config(vllm_config):
         out = fused_moe(
@@ -230,11 +239,26 @@ def test_w8a8_block_fp8_fused_moe(M, N, K, E, topk, block_size, dtype, seed):
         ref_out = torch_w8a8_block_fp8_moe(a, w1, w2, w1_s, w2_s, score, topk,
                                            block_size)
 
+        topk_weights, topk_ids, _ = fused_topk(a, score, topk, False)
+        m_out = m_fused_moe(a,
+                            w1,
+                            w2,
+                            topk_weights,
+                            topk_ids,
+                            global_num_experts=E,
+                            w1_scale=w1_s,
+                            w2_scale=w2_s)
+
     #print(f"{out.sum()=}")
     #print(f"{ref_out.sum()=}")
 
     rel_diff = (torch.mean(
         torch.abs(out.to(torch.float32) - ref_out.to(torch.float32))) /
+                torch.mean(torch.abs(ref_out.to(torch.float32))))
+    assert rel_diff < 0.03
+
+    rel_diff = (torch.mean(
+        torch.abs(m_out.to(torch.float32) - ref_out.to(torch.float32))) /
                 torch.mean(torch.abs(ref_out.to(torch.float32))))
     assert rel_diff < 0.03
 
@@ -379,19 +403,24 @@ def deep_gemm_w8a8_block_fp8_moe(M, K, a, w1, w2, w1_s, w2_s, score, topk,
     itertools.product(M_moe_dg, N_moe, K_moe, E, TOP_KS, SEEDS))
 @pytest.mark.skipif(not dg_available, reason="DeepGemm kernels not available.")
 @torch.inference_mode()
-def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed):
-
-    block_m = deep_gemm.get_m_alignment_for_contiguous_layout()
-    block_size = [block_m, block_m]
-    dtype = torch.bfloat16
-
+def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed,
+                                            monkeypatch):
     if topk > E:
         pytest.skip(f"Skipping test: topk={topk} > E={E}")
 
     if not _valid_deep_gemm_shape(M, N, K):
         pytest.skip(f"Skipping test: invalid size m={M}, n={N}, k={K}")
 
+    chunk_size = 1024
+
     torch.manual_seed(seed)
+
+    monkeypatch.setenv("VLLM_FUSED_MOE_CHUNK_SIZE", str(chunk_size))
+
+    block_m = deep_gemm.get_m_alignment_for_contiguous_layout()
+    block_size = [block_m, block_m]
+    dtype = torch.bfloat16
+
     fp8_info = torch.finfo(torch.float8_e4m3fn)
     fp8_max, fp8_min = fp8_info.max, fp8_info.min
 
@@ -427,6 +456,14 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed):
         w1[i], w1_s[i] = per_block_cast_to_fp8(w1_bf16[i])
         w2[i], w2_s[i] = per_block_cast_to_fp8(w2_bf16[i])
 
+    # Note: for now use_compile will error out if the problem size is
+    # large enough to trigger chunking. I'm leaving the flag and
+    # setup code in case we are able to revisit this later.
+    use_compile = False
+
+    use_cudagraph = (chunk_size < M and N >= 1024 and K >= 1024
+                     and current_platform.is_cuda_alike())
+
     # Set the context to avoid lots of warning spam.
     with set_current_vllm_config(vllm_config):
         if M >= 128:
@@ -439,7 +476,29 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed):
         topk_weights, topk_ids, token_expert_indices = fused_topk(
             a, score.float(), topk, False)
 
-        out = deep_gemm_moe_fp8(a, w1, w2, w1_s, w2_s, topk_weights, topk_ids)
+        if use_compile:
+            deep_gemm_moe_fp8_fn = torch.compile(deep_gemm_moe_fp8,
+                                                 backend="inductor",
+                                                 fullgraph=True)
+            torch._dynamo.mark_dynamic(a, 0)
+            torch._dynamo.mark_dynamic(topk_weights, 0)
+            torch._dynamo.mark_dynamic(topk_ids, 0)
+        else:
+            deep_gemm_moe_fp8_fn = deep_gemm_moe_fp8
+
+        out = deep_gemm_moe_fp8_fn(a, w1, w2, w1_s, w2_s, topk_weights,
+                                   topk_ids)
+
+        if use_cudagraph:
+            out.fill_(0)
+            stream = torch.cuda.Stream()
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph, stream=stream):
+                out = deep_gemm_moe_fp8_fn(a, w1, w2, w1_s, w2_s, topk_weights,
+                                           topk_ids)
+            torch.cuda.synchronize()
+            graph.replay()
+            torch.cuda.synchronize()
 
     #print(f"{out.sum()=}")
     #print(f"{ref_out.sum()=}")

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from typing import Optional
 
@@ -6,9 +7,12 @@ import torch
 from torch.distributed import ProcessGroup
 
 import vllm.envs as envs
+from vllm.logger import init_logger
+from vllm.platforms import current_platform
 
-from .all2all import All2AllBase
 from .base_device_communicator import DeviceCommunicatorBase
+
+logger = init_logger(__name__)
 
 
 class CudaCommunicator(DeviceCommunicatorBase):
@@ -31,8 +35,6 @@ class CudaCommunicator(DeviceCommunicatorBase):
         use_pynccl = "ep" not in unique_name
 
         self.use_pynccl = use_pynccl
-        self.use_all2all = "ep" in unique_name
-        self.all2all_impl: Optional[All2AllBase] = None
         self.use_custom_allreduce = use_custom_allreduce
 
         # lazy import to avoid documentation build error
@@ -40,6 +42,8 @@ class CudaCommunicator(DeviceCommunicatorBase):
             CustomAllreduce)
         from vllm.distributed.device_communicators.pynccl import (
             PyNcclCommunicator)
+        from vllm.distributed.device_communicators.quick_all_reduce import (
+            QuickAllReduce)
 
         self.pynccl_comm: Optional[PyNcclCommunicator] = None
         if use_pynccl and self.world_size > 1:
@@ -49,6 +53,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
             )
 
         self.ca_comm: Optional[CustomAllreduce] = None
+        self.qr_comm: Optional[QuickAllReduce] = None
         if use_custom_allreduce and self.world_size > 1:
             # Initialize a custom fast all-reduce implementation.
             self.ca_comm = CustomAllreduce(
@@ -56,9 +61,44 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 device=self.device,
             )
 
+            if current_platform.is_rocm():
+                # Initialize a custom quick all-reduce implementation for AMD.
+                # Quick reduce is designed as a complement to custom allreduce.
+                # Based on quickreduce (https://github.com/mk1-project/quickreduce).
+                # If it's a rocm, 'use_custom_allreduce==True' means it must
+                # currently be an MI300 series.
+                self.qr_comm = QuickAllReduce(group=self.cpu_group,
+                                              device=self.device)
+        if self.use_all2all:
+            all2all_backend = envs.VLLM_ALL2ALL_BACKEND
+            if all2all_backend == "naive":
+                from .all2all import NaiveAll2AllManager
+                self.all2all_manager = NaiveAll2AllManager(self.cpu_group)
+                logger.info("Using naive all2all manager.")
+            elif all2all_backend == "pplx":
+                from .all2all import PPLXAll2AllManager
+                self.all2all_manager = PPLXAll2AllManager(self.cpu_group)
+                logger.info("Using PPLX all2all manager.")
+            elif all2all_backend == "deepep_high_throughput":
+                from .all2all import DeepEPHTAll2AllManager
+                self.all2all_manager = DeepEPHTAll2AllManager(self.cpu_group)
+                logger.info("Using DeepEP High-Throughput all2all manager.")
+            elif all2all_backend == "deepep_low_latency":
+                from .all2all import DeepEPLLAll2AllManager
+                self.all2all_manager = DeepEPLLAll2AllManager(self.cpu_group)
+                logger.info("Using DeepEP Low-Latency all2all manager.")
+            else:
+                raise ValueError(f"Unknown all2all backend: {all2all_backend}")
+
     def all_reduce(self, input_):
-        # always try custom allreduce first,
-        # and then pynccl.
+        # always try quick reduce first, then custom allreduce,
+        # and then pynccl. (quick reduce just for ROCM MI3*)
+        qr_comm = self.qr_comm
+        if qr_comm is not None and not qr_comm.disabled and \
+            qr_comm.should_quick_allreduce(input_):
+            out = qr_comm.quick_all_reduce(input_)
+            assert out is not None
+            return out
         ca_comm = self.ca_comm
         if ca_comm is not None and not ca_comm.disabled and \
             ca_comm.should_custom_ar(input_):
@@ -136,31 +176,19 @@ class CudaCommunicator(DeviceCommunicatorBase):
             self.pynccl_comm = None
         if self.ca_comm is not None:
             self.ca_comm = None
-        if self.all2all_impl is not None:
-            self.all2all_impl.destroy()
-            self.all2all_impl = None
-
-    def prepare_communication_buffer_for_model(self,
-                                               model: torch.nn.Module) -> None:
-        """
-        Prepare the communication buffer for the model.
-        """
-        if not self.use_all2all:
-            return
-        all2all_backend = envs.VLLM_ALL2ALL_BACKEND
-        if all2all_backend == "naive":
-            from .all2all import NaiveAll2All
-            self.all2all_impl = NaiveAll2All(self.cpu_group, model)
+        if self.all2all_manager is not None:
+            self.all2all_manager.destroy()
+            self.all2all_manager = None
 
     def dispatch(
             self, hidden_states: torch.Tensor,
             router_logits: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        assert self.all2all_impl is not None
-        hidden_states, router_logits = self.all2all_impl.dispatch(
+        assert self.all2all_manager is not None
+        hidden_states, router_logits = self.all2all_manager.dispatch(
             hidden_states, router_logits)
         return hidden_states, router_logits
 
     def combine(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        assert self.all2all_impl is not None
-        hidden_states = self.all2all_impl.combine(hidden_states)
+        assert self.all2all_manager is not None
+        hidden_states = self.all2all_manager.combine(hidden_states)
         return hidden_states

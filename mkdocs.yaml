@@ -1,6 +1,7 @@
 site_name: vLLM
 site_url: https://docs.vllm.ai
 repo_url: https://github.com/vllm-project/vllm
+edit_uri: edit/main/docs/
 exclude_docs: |
   *.inc.md
   *.template.md
@@ -29,10 +30,12 @@ theme:
         icon: material/brightness-2
         name: Switch to system preference
   features:
+    - content.action.edit
     - content.code.copy
     - content.tabs.link
     - navigation.tracking
     - navigation.tabs
+    - navigation.tabs.sticky
     - navigation.sections
     - navigation.prune
     - navigation.top
@@ -60,12 +63,17 @@ plugins:
   - api-autonav:
       modules: ["vllm"]
       api_root_uri: "api"
+      exclude:
+        - "re:vllm\\._.*"  # Internal modules
+        - "vllm.third_party"
+        - "vllm.vllm_flash_attn"
   - mkdocstrings:
       handlers:
         python:
           options:
             show_symbol_type_heading: true
             show_symbol_type_toc: true
+            filters: []
             summary:
               modules: true
             show_if_no_docstring: true
@@ -112,6 +120,16 @@ markdown_extensions:
   - mdx_math:
       enable_dollar_delimiter: true
 
+extra_css:
+  - mkdocs/stylesheets/extra.css
+
 extra_javascript:
   - mkdocs/javascript/run_llm_widget.js
   - https://cdn.mathjax.org/mathjax/latest/MathJax.js?config=TeX-AMS_HTML
+  - mkdocs/javascript/edit_and_feedback.js
+  - mkdocs/javascript/slack_and_forum.js
+
+# Makes the url format end in .html rather than act as a dir
+# So index.md generates as index.html and is available under URL /index.html
+# https://www.mkdocs.org/user-guide/configuration/#use_directory_urls
+use_directory_urls: false

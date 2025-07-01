@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """PyTorch Zamba2 model implementation for vLLM.
 
 This module implements the Zamba2 architecture from 

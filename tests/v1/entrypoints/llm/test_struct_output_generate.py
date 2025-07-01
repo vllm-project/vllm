@@ -1,15 +1,16 @@
 # ruff: noqa: E501
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from __future__ import annotations
 
 import json
-import re
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 import jsonschema
 import pytest
+import regex as re
 from pydantic import BaseModel
 
 from tests.reasoning.utils import run_reasoning_extraction

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -65,17 +66,14 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
 
     def __init__(self, runner, kv_cache_spec: AttentionSpec,
                  block_table: BlockTable):
-        super().__init__(runner, kv_cache_spec, block_table)
-        max_model_len = self.runner.model_config.max_model_len
-        assert max_model_len == 32768,\
-            "AITER MLA requires max_model_len=32768"
-        assert self.runner.block_size == 1, "AITER MLA" \
+        super().__init__(runner, kv_cache_spec, block_table, AiterMLAMetadata)
+        assert self.kv_cache_spec.block_size == 1, "AITER MLA" \
             "only supports block size 1."
 
     def _get_paged_kv_tensors(
             self, block_table: torch.Tensor,
             seq_lens: torch.Tensor) -> tuple[torch.Tensor, ...]:
-        page_size = self.runner.block_size
+        page_size = self.kv_cache_spec.block_size
         block_table_bounds = (seq_lens + page_size - 1) // page_size
         device = self.runner.device
 
@@ -141,12 +139,13 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             blocksparse_params: Optional[dict[str, Any]],
             logits_soft_cap: Optional[float],
             attn_type: str,
+            kv_sharing_target_layer_name: Optional[str],
             # MLA Specific Arguments
             **mla_args) -> None:
         super().__init__(num_heads, head_size, scale, num_kv_heads,
                          alibi_slopes, sliding_window, kv_cache_dtype,
                          blocksparse_params, logits_soft_cap, attn_type,
-                         **mla_args)
+                         kv_sharing_target_layer_name, **mla_args)
         assert (num_heads == 16 or num_heads == 128), (
             f"Aiter MLA only supports 16 or 128 number of heads.\n"
             f"Provided {num_heads} number of heads.\n"
@@ -202,16 +201,9 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
 
         kv_buffer = kv_c_and_k_pe_cache.unsqueeze(2)
 
-        if self.num_heads == 16:
-            # AITER MLA decode kernel only supports
-            # max_seqlen_q=1 when using 16 heads.
-            max_seqlen_qo = 1
-        else:
-            # AITER MLA decode Kernel handles arbitrary
-            # max_seqlen_q values when using 128 heads.
-            assert attn_metadata.prefill is not None
-            max_seqlen_qo = attn_metadata.prefill.max_query_len
-
+        # max_seqlen_qo must be 1 except for MTP
+        # TODO: Find the best value for MTP
+        max_seqlen_qo = 1
         aiter_mla_decode_fwd(q, kv_buffer, o, self.scale,
                              attn_metadata.decode.qo_indptr, max_seqlen_qo,
                              attn_metadata.decode.paged_kv_indptr,

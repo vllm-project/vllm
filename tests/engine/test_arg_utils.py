@@ -1,17 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
 from argparse import ArgumentError, ArgumentTypeError
 from contextlib import nullcontext
 from dataclasses import dataclass, field
-from typing import Literal, Optional
+from typing import Annotated, Literal, Optional
 
 import pytest
 
 from vllm.config import CompilationConfig, config
 from vllm.engine.arg_utils import (EngineArgs, contains_type, get_kwargs,
-                                   get_type, is_not_builtin, is_type,
-                                   literal_to_kwargs, nullable_kvs,
+                                   get_type, get_type_hints, is_not_builtin,
+                                   is_type, literal_to_kwargs, nullable_kvs,
                                    optional_type, parse_type)
 from vllm.utils import FlexibleArgumentParser
 
@@ -159,6 +160,18 @@ def test_is_not_builtin(type_hint, expected):
     assert is_not_builtin(type_hint) == expected
 
 
+@pytest.mark.parametrize(
+    ("type_hint", "expected"), [
+        (Annotated[int, "annotation"], {int}),
+        (Optional[int], {int, type(None)}),
+        (Annotated[Optional[int], "annotation"], {int, type(None)}),
+        (Optional[Annotated[int, "annotation"]], {int, type(None)}),
+    ],
+    ids=["Annotated", "Optional", "Annotated_Optional", "Optional_Annotated"])
+def test_get_type_hints(type_hint, expected):
+    assert get_type_hints(type_hint) == expected
+
+
 def test_get_kwargs():
     kwargs = get_kwargs(DummyConfig)
     print(kwargs)
@@ -226,32 +239,40 @@ def test_compilation_config():
     assert args.compilation_config == CompilationConfig()
 
     # set to O3
-    args = parser.parse_args(["-O3"])
-    assert args.compilation_config.level == 3
+    args = parser.parse_args(["-O0"])
+    assert args.compilation_config.level == 0
 
     # set to O 3 (space)
-    args = parser.parse_args(["-O", "3"])
-    assert args.compilation_config.level == 3
+    args = parser.parse_args(["-O", "1"])
+    assert args.compilation_config.level == 1
 
     # set to O 3 (equals)
-    args = parser.parse_args(["-O=3"])
+    args = parser.parse_args(["-O=2"])
+    assert args.compilation_config.level == 2
+
+    # set to O.level 3
+    args = parser.parse_args(["-O.level", "3"])
     assert args.compilation_config.level == 3
 
     # set to string form of a dict
     args = parser.parse_args([
-        "--compilation-config",
-        '{"level": 3, "cudagraph_capture_sizes": [1, 2, 4, 8]}',
+        "-O",
+        '{"level": 3, "cudagraph_capture_sizes": [1, 2, 4, 8], '
+        '"use_inductor": false}',
     ])
     assert (args.compilation_config.level == 3 and
-            args.compilation_config.cudagraph_capture_sizes == [1, 2, 4, 8])
+            args.compilation_config.cudagraph_capture_sizes == [1, 2, 4, 8]
+            and not args.compilation_config.use_inductor)
 
     # set to string form of a dict
     args = parser.parse_args([
         "--compilation-config="
-        '{"level": 3, "cudagraph_capture_sizes": [1, 2, 4, 8]}',
+        '{"level": 3, "cudagraph_capture_sizes": [1, 2, 4, 8], '
+        '"use_inductor": true}',
     ])
     assert (args.compilation_config.level == 3 and
-            args.compilation_config.cudagraph_capture_sizes == [1, 2, 4, 8])
+            args.compilation_config.cudagraph_capture_sizes == [1, 2, 4, 8]
+            and args.compilation_config.use_inductor)
 
 
 def test_prefix_cache_default():

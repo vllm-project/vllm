@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import functools
-import importlib.util
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Union
 
 import torch
 import torch.nn.functional as F
@@ -10,7 +10,6 @@ from torch.nn import Module
 from torch.nn.parameter import Parameter
 
 import vllm.envs as envs
-import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
@@ -38,12 +37,11 @@ from vllm.model_executor.parameter import (BlockQuantScaleParameter,
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
+from vllm.utils import has_deep_gemm
 
 ACTIVATION_SCHEMES = ["static", "dynamic"]
 
 logger = init_logger(__name__)
-
-has_deep_gemm = importlib.util.find_spec("deep_gemm") is not None
 
 
 def _is_col_major(x: torch.Tensor) -> bool:
@@ -63,10 +61,9 @@ class Fp8Config(QuantizationConfig):
         weight_block_size: Optional[list[int]] = None,
     ) -> None:
         super().__init__()
+
         self.is_checkpoint_fp8_serialized = is_checkpoint_fp8_serialized
-        if is_checkpoint_fp8_serialized:
-            logger.warning("Detected fp8 checkpoint. Please note that the "
-                           "format is experimental and subject to change.")
+
         if activation_scheme not in ACTIVATION_SCHEMES:
             raise ValueError(
                 f"Unsupported activation scheme {activation_scheme}")
@@ -403,6 +400,7 @@ class Fp8LinearMethod(LinearMethodBase):
 
         if self.block_quant:
             assert self.quant_config.weight_block_size is not None
+
             return torch.ops.vllm.apply_w8a8_block_fp8_linear(
                 input=x,
                 weight=layer.weight,
@@ -451,8 +449,11 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         # Check for DeepGemm support.
         self.allow_deep_gemm = False
         if envs.VLLM_USE_DEEP_GEMM:
-            if not has_deep_gemm:
+            if not has_deep_gemm():
                 logger.warning_once("Failed to import DeepGemm kernels.")
+            elif not self.block_quant:
+                logger.warning_once("Model is not block quantized. Not using "
+                                    " DeepGemm kernels")
             elif (current_platform.is_cuda()
                   and current_platform.has_device_capability(90)):
                 logger.info_once("Using DeepGemm kernels for Fp8MoEMethod.")
@@ -461,8 +462,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 logger.warning_once(
                     "DeepGemm not supported on the current platform.")
 
-        self.fused_experts = functools.partial(
+        self.topk_indices_dtype = None
+        self.fused_experts = functools.partial(  # type: ignore
             fused_experts,
+            use_fp8_w8a8=True,
             block_shape=self.quant_config.weight_block_size,
             allow_deep_gemm=self.allow_deep_gemm)
 
@@ -597,7 +600,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
     def process_weights_after_loading(self, layer: Module) -> None:
         # Lazy import to avoid importing triton too early.
         from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
-            expand_weights, is_rocm_aiter_moe_enabled, shuffle_weights)
+            is_rocm_aiter_moe_enabled, shuffle_weights)
 
         self.rocm_aiter_moe_enabled = is_rocm_aiter_moe_enabled()
 
@@ -629,9 +632,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             if self.rocm_aiter_moe_enabled:
                 # reshaping weights is required for aiter moe kernel.
                 shuffled_w13, shuffled_w2 = shuffle_weights(
-                    layer.w13_weight.data,
-                    layer.w2_weight.data,
-                    layout=(16, 16))
+                    layer.w13_weight.data, layer.w2_weight.data)
 
                 layer.w13_weight = torch.nn.Parameter(shuffled_w13,
                                                       requires_grad=False)
@@ -677,20 +678,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                                                  requires_grad=False)
             if self.rocm_aiter_moe_enabled:
                 # reshaping weights is required for aiter moe kernel.
-                w13_scales, w2_scales = expand_weights(
-                    layer.w13_weight_scale.data,
-                    layer.w2_weight_scale.data,
-                    expansion_dims=[
-                        layer.w13_weight.shape[1], layer.w2_weight.shape[1]
-                    ])
-                layer.w13_weight_scale = torch.nn.Parameter(
-                    w13_scales.contiguous(), requires_grad=False)
-                layer.w2_weight_scale = torch.nn.Parameter(
-                    w2_scales.contiguous(), requires_grad=False)
-
-                shuffled_w13, shuffled_w2 = shuffle_weights(layer.w13_weight,
-                                                            layer.w2_weight,
-                                                            layout=(16, 16))
+                shuffled_w13, shuffled_w2 = shuffle_weights(
+                    layer.w13_weight, layer.w2_weight)
 
                 layer.w13_weight = torch.nn.Parameter(shuffled_w13,
                                                       requires_grad=False)
@@ -762,20 +751,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     start += shard_size
 
             if self.rocm_aiter_moe_enabled:
-                # reshaping weights is required for aiter moe kernel.
-                expansion_dims = [
-                    layer.w13_weight.shape[1], layer.w2_weight.shape[1]
-                ]
-                max_w13_scales, w2_scales = expand_weights(
-                    max_w13_scales,
-                    layer.w2_weight_scale.data,
-                    expansion_dims=expansion_dims)
-                layer.w2_weight_scale = torch.nn.Parameter(
-                    w2_scales.contiguous(), requires_grad=False)
-
-                shuffled_w13, shuffled_w2 = shuffle_weights(layer.w13_weight,
-                                                            layer.w2_weight,
-                                                            layout=(32, 32))
+                shuffled_w13, shuffled_w2 = shuffle_weights(
+                    layer.w13_weight, layer.w2_weight)
 
                 layer.w13_weight = torch.nn.Parameter(shuffled_w13,
                                                       requires_grad=False)
@@ -791,30 +768,43 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             del layer.w13_input_scale
             del layer.w2_input_scale
 
-    def set_prepare_finalize(
-        self,
-        dp_size: int,
-        world_size: int,
-        prepare_finalize: mk.FusedMoEPrepareAndFinalize,
-    ) -> bool:
+    def select_gemm_impl(self, prepare_finalize, moe):
+
+        from vllm.model_executor.layers.fused_moe.batched_triton_or_deep_gemm_moe import (  # noqa: E501
+            BatchedTritonOrDeepGemmExperts)
         from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
             TritonOrDeepGemmExperts)
 
-        if self.use_marlin or self.rocm_aiter_moe_enabled:
-            return False
+        assert not self.use_marlin and not self.rocm_aiter_moe_enabled, (
+            "Marlin and ROCm AITER are not supported with all2all yet.")
 
-        experts = TritonOrDeepGemmExperts(
-            use_fp8_w8a8=True,
-            block_shape=self.quant_config.weight_block_size,
-            allow_deep_gemm=self.allow_deep_gemm,
-        )
+        experts: Optional[Union[BatchedTritonOrDeepGemmExperts,
+                                TritonOrDeepGemmExperts]] = None
+        max_num_tokens_per_rank = prepare_finalize.max_num_tokens_per_rank()
+        use_batched_experts = max_num_tokens_per_rank is not None
 
-        self.fused_experts = mk.FusedMoEModularKernel(
-            prepare_finalize,
-            experts,
-        )
+        if use_batched_experts:
+            experts = BatchedTritonOrDeepGemmExperts(
+                max_num_tokens=max_num_tokens_per_rank,
+                world_size=prepare_finalize.world_size,
+                dp_size=prepare_finalize.dp_size,
+                use_fp8_w8a8=True,
+                use_int8_w8a8=False,
+                use_int8_w8a16=False,
+                use_int4_w4a16=False,
+                per_channel_quant=False,
+                block_shape=self.quant_config.weight_block_size,
+                allow_deep_gemm=self.allow_deep_gemm,
+            )
+        else:
+            experts = TritonOrDeepGemmExperts(
+                use_fp8_w8a8=True,
+                block_shape=self.quant_config.weight_block_size,
+                allow_deep_gemm=self.allow_deep_gemm,
+            )
 
-        return True
+        assert experts is not None
+        return experts
 
     def apply(
         self,
@@ -833,7 +823,17 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
+        enable_eplb: bool = False,
+        expert_load_view: Optional[torch.Tensor] = None,
+        logical_to_physical_map: Optional[torch.Tensor] = None,
+        logical_replica_count: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        if enable_eplb:
+            assert expert_load_view is not None
+            assert logical_to_physical_map is not None
+            assert logical_replica_count is not None
+            assert isinstance(layer, FusedMoE)
+
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
             router_logits=router_logits,
@@ -845,6 +845,12 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias,
+            indices_type=self.topk_indices_dtype,
+            enable_eplb=enable_eplb,
+            expert_map=expert_map,
+            expert_load_view=expert_load_view,
+            logical_to_physical_map=logical_to_physical_map,
+            logical_replica_count=logical_replica_count,
         )
 
         if self.rocm_aiter_moe_enabled:
@@ -892,7 +898,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 topk_ids=topk_ids,
                 inplace=True,
                 activation=activation,
-                use_fp8_w8a8=True,
                 global_num_experts=global_num_experts,
                 apply_router_weight_on_input=apply_router_weight_on_input,
                 expert_map=expert_map,

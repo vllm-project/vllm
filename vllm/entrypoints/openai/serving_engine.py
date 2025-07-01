@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import base64
 import io
 import json
@@ -57,7 +58,8 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               TokenizeCompletionRequest,
                                               TokenizeResponse,
                                               TranscriptionRequest,
-                                              TranscriptionResponse)
+                                              TranscriptionResponse,
+                                              TranslationRequest)
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.openai.tool_parsers import ToolParser
 # yapf: enable
@@ -88,9 +90,8 @@ CompletionLikeRequest = Union[CompletionRequest, DetokenizeRequest,
 
 ChatLikeRequest = Union[ChatCompletionRequest, EmbeddingChatRequest,
                         TokenizeChatRequest]
-
-AnyRequest = Union[CompletionLikeRequest, ChatLikeRequest,
-                   TranscriptionRequest]
+SpeechToTextRequest = Union[TranscriptionRequest, TranslationRequest]
+AnyRequest = Union[CompletionLikeRequest, ChatLikeRequest, SpeechToTextRequest]
 
 AnyResponse = Union[
     CompletionResponse,
@@ -131,21 +132,19 @@ RequestT = TypeVar("RequestT", bound=AnyRequest)
 
 class RequestProcessingMixin(BaseModel):
     """
-    Mixin for request processing, 
+    Mixin for request processing,
     handling prompt preparation and engine input.
     """
-    request_prompts: Optional[Sequence[RequestPrompt]] = \
-                            Field(default_factory=list)
+    request_prompts: Optional[Sequence[RequestPrompt]] = []
     engine_prompts: Optional[Union[list[EngineTokensPrompt],
-                                   list[EngineEmbedsPrompt]]] = Field(
-                                       default_factory=list)
+                                   list[EngineEmbedsPrompt]]] = []
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
 class ResponseGenerationMixin(BaseModel):
     """
-    Mixin for response generation, 
+    Mixin for response generation,
     managing result generators and final batch results.
     """
     result_generator: Optional[AsyncGenerator[tuple[int, Union[
@@ -209,6 +208,7 @@ class OpenAIServing:
         *,
         request_logger: Optional[RequestLogger],
         return_tokens_as_token_ids: bool = False,
+        enable_force_include_usage: bool = False,
     ):
         super().__init__()
 
@@ -220,6 +220,7 @@ class OpenAIServing:
 
         self.request_logger = request_logger
         self.return_tokens_as_token_ids = return_tokens_as_token_ids
+        self.enable_force_include_usage = enable_force_include_usage
 
         self._tokenizer_executor = ThreadPoolExecutor(max_workers=1)
 
@@ -528,12 +529,14 @@ class OpenAIServing:
         if isinstance(request,
                       (EmbeddingChatRequest, EmbeddingCompletionRequest,
                        ScoreRequest, RerankRequest, ClassificationRequest)):
-            operation = {
-                ScoreRequest: "score",
-                ClassificationRequest: "classification"
-            }.get(type(request), "embedding generation")
 
             if token_num > self.max_model_len:
+                operations: dict[type[AnyRequest], str] = {
+                    ScoreRequest: "score",
+                    ClassificationRequest: "classification"
+                }
+                operation = operations.get(type(request),
+                                           "embedding generation")
                 raise ValueError(
                     f"This model's maximum context length is "
                     f"{self.max_model_len} tokens. However, you requested "
@@ -582,7 +585,8 @@ class OpenAIServing:
         add_special_tokens: bool = True,
     ) -> TextTokensPrompt:
         """
-        A simpler implementation of {meth}`_tokenize_prompt_input_or_inputs`
+        A simpler implementation of
+        [`_tokenize_prompt_input_or_inputs`][vllm.entrypoints.openai.serving_engine.OpenAIServing._tokenize_prompt_input_or_inputs]
         that assumes single input.
         """
         return next(
@@ -603,7 +607,8 @@ class OpenAIServing:
         add_special_tokens: bool = True,
     ) -> Iterator[TextTokensPrompt]:
         """
-        A simpler implementation of {meth}`_tokenize_prompt_input_or_inputs`
+        A simpler implementation of
+        [`_tokenize_prompt_input_or_inputs`][vllm.entrypoints.openai.serving_engine.OpenAIServing._tokenize_prompt_input_or_inputs]
         that assumes multiple inputs.
         """
         for text in prompt_inputs:

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from typing import Final, Optional, Union
 
@@ -110,7 +111,12 @@ class OpenAIServingTokenization(OpenAIServing):
                           dict) and "prompt_token_ids" in engine_prompt:
                 input_ids.extend(engine_prompt["prompt_token_ids"])
 
+        token_strs = None
+        if request.return_token_strs:
+            token_strs = tokenizer.convert_ids_to_tokens(input_ids)
+
         return TokenizeResponse(tokens=input_ids,
+                                token_strs=token_strs,
                                 count=len(input_ids),
                                 max_model_len=self.max_model_len)
 

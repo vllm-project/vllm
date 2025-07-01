@@ -13,6 +13,10 @@
 #include <cub/block/block_load.cuh>
 #include <cub/block/block_store.cuh>
 
+#ifdef USE_ROCM
+    namespace cub = hipcub;
+#endif
+
 #include "static_switch.h"
 
 
@@ -181,9 +185,7 @@ void causal_conv1d_fwd(const at::Tensor &x, const at::Tensor &weight,
         params.conv_states_ptr = nullptr;
     }
 
-    // Otherwise the kernel will be launched from cuda:0 device
-    // Cast to char to avoid compiler warning about narrowing
-    at::cuda::CUDAGuard device_guard{(char)x.get_device()};
+    const at::cuda::OptionalCUDAGuard device_guard(device_of(x));
     auto stream = at::cuda::getCurrentCUDAStream().stream();
     DISPATCH_WTYPE_ITYPE_FLOAT_AND_HALF_AND_BF16(x.scalar_type(), "causal_conv1d_fwd", [&] {
             causal_conv1d_fwd_cuda<input_t, weight_t>(params, stream);
@@ -274,9 +276,7 @@ void causal_conv1d_update(const at::Tensor &x,
         params.conv_state_indices_ptr = nullptr;
     }
 
-    // Otherwise the kernel will be launched from cuda:0 device
-    // Cast to char to avoid compiler warning about narrowing
-    at::cuda::CUDAGuard device_guard{(char)x.get_device()};
+    const at::cuda::OptionalCUDAGuard device_guard(device_of(x));
     auto stream = at::cuda::getCurrentCUDAStream().stream();
     DISPATCH_WTYPE_ITYPE_FLOAT_AND_HALF_AND_BF16(x.scalar_type(), "causal_conv1d_update", [&] {
             causal_conv1d_update_cuda<input_t, weight_t>(params, stream);
@@ -501,15 +501,9 @@ void causal_conv1d_fwd_launch(ConvParamsBase &params, cudaStream_t stream) {
         auto kernel = &causal_conv1d_fwd_kernel<Ktraits>;
 
         if (kSmemSize >= 48 * 1024) {
-            #ifndef USE_ROCM
-            C10_CUDA_CHECK(cudaFuncSetAttribute(
-                kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemSize));
-            #else
-            // There is a slight signature discrepancy in HIP and CUDA "FuncSetAttribute" function.
             C10_CUDA_CHECK(cudaFuncSetAttribute(
                 (void *) kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemSize));
             std::cerr << "Warning (causal_conv1d fwd launch): attempting to set maxDynamicSharedMemorySize on an AMD GPU which is currently a non-op (in ROCm versions <= 6.1). This might lead to undefined behavior. \n" << std::endl;
-            #endif
         }
         kernel<<<grid, Ktraits::kNThreads, kSmemSize, stream>>>(params);
 
