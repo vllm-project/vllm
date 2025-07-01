@@ -310,10 +310,11 @@ class P2pNcclEngine:
                 elif data["cmd"] == "PUT":
                     tensor_id = data["tensor_id"]
                     try:
-                        tensor = torch.empty(data["shape"],
-                                             dtype=getattr(
-                                                 torch, data["dtype"]),
-                                             device=self.device)
+                        with torch.cuda.stream(self.recv_stream):
+                            tensor = torch.empty(data["shape"],
+                                                 dtype=getattr(
+                                                     torch, data["dtype"]),
+                                                 device=self.device)
                         self.router_socket.send_multipart(
                             [remote_address, b"0"])
                         comm, rank = self.comms[remote_address.decode()]
