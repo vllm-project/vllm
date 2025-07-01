@@ -181,6 +181,7 @@ class ModelOptNvFp4Config(QuantizationConfig):
         exclude_modules: list[str],
         group_size: int = 16,
     ) -> None:
+        super().__init__()
         self.is_checkpoint_nvfp4_serialized = is_checkpoint_nvfp4_serialized
         if is_checkpoint_nvfp4_serialized:
             logger.warning(

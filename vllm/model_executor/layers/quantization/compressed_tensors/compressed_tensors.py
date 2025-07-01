@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from contextlib import suppress
-from typing import Any, Literal, Optional, cast
+from typing import TYPE_CHECKING, Any, Literal, Optional, cast
 
 import torch
 from compressed_tensors.config import (CompressionFormat,
@@ -36,6 +36,9 @@ from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (  # noqa: E501
     cutlass_fp4_supported)
 from vllm.platforms import current_platform
+
+if TYPE_CHECKING:
+    from vllm.model_executor.models.utils import WeightsMapper
 
 logger = init_logger(__name__)
 
@@ -79,6 +82,18 @@ class CompressedTensorsConfig(QuantizationConfig):
 
     def get_name(self) -> QuantizationMethods:
         return "compressed-tensors"
+
+    def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
+        self.target_scheme_map = hf_to_vllm_mapper.apply_dict(
+            self.target_scheme_map)
+        self.ignore = hf_to_vllm_mapper.apply_list(self.ignore)
+        self.sparsity_scheme_map = hf_to_vllm_mapper.apply_dict(
+            self.sparsity_scheme_map)
+        self.sparsity_ignore_list = hf_to_vllm_mapper.apply_list(
+            self.sparsity_ignore_list)
+        if self.kv_cache_scheme is not None:
+            self.kv_cache_scheme = hf_to_vllm_mapper.apply_dict(
+                self.kv_cache_scheme)
 
     def get_quant_method(
         self,
