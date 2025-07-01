@@ -189,10 +189,14 @@ class Attention(nn.Module):
         except Exception as e:
             if torch.cuda.is_available():
                 # This helps to see how much memory is allocated when using CUDA
-                logger.error(f"Failed to initialize attention q/k/v range constants: {e}")
-                logger.debug(f"CUDA device: {torch.cuda.current_device()}")
-                logger.debug(f"Allocated: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
-                logger.debug(f"Reserved: {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
+                logger.error(
+                    "Failed to initialize attention q/k/v range "
+                    "constants: %s", e)
+                logger.debug("CUDA device: %s", torch.cuda.current_device())
+                allocated_gb = torch.cuda.memory_allocated() / 1024**3
+                logger.debug("Allocated: %.2f GB", allocated_gb)
+                reserved_gb = torch.cuda.memory_reserved() / 1024**3
+                logger.debug("Reserved: %.2f GB", reserved_gb)
             raise RuntimeError(
                 "Failed to initialize q/k/v range constants. "
                 "This may be caused by insufficient memory to allocate kv cache."
