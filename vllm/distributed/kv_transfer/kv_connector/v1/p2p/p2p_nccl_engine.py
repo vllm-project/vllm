@@ -128,9 +128,9 @@ class P2pNcclEngine:
             # tensor_id: torch.Tensor
             self.send_queue: deque[list[Any]] = deque()
             self.send_request_id_to_tensor_ids: dict[str, set[str]] = {}
-            self._send_thread = threading.Thread(target=self._send_async,
+            self.send_thread = threading.Thread(target=self.send_async,
                                                  daemon=True)
-            self._send_thread.start()
+            self.send_thread.start()
 
         # tensor_id: torch.Tensor/(addr, dtype, shape)
         self.recv_store: dict[str, Any] = {}
@@ -145,12 +145,12 @@ class P2pNcclEngine:
             "nccl_num_channels", "8")
 
         self._listener_thread = threading.Thread(
-            target=self._listen_for_requests, daemon=True)
+            target=self.listen_for_requests, daemon=True)
         self._listener_thread.start()
 
         self._ping_thread = None
         if port_offset == 0 and self.proxy_address != "":
-            self._ping_thread = threading.Thread(target=self._ping,
+            self._ping_thread = threading.Thread(target=self.ping,
                                                  daemon=True)
             self._ping_thread.start()
 
@@ -165,7 +165,7 @@ class P2pNcclEngine:
             self.http_address, self.zmq_address, self.proxy_address,
             self.send_type, self.buffer_size_threshold, self.nccl_num_channels)
 
-    def _create_connect(self, remote_address: typing.Optional[str] = None):
+    def create_connect(self, remote_address: typing.Optional[str] = None):
         assert remote_address is not None
         if remote_address not in self.socks:
             sock = self.context.socket(zmq.DEALER)
@@ -270,7 +270,7 @@ class P2pNcclEngine:
             return None
 
         if remote_address not in self.socks:
-            self._create_connect(remote_address)
+            self.create_connect(remote_address)
 
         sock = self.socks[remote_address]
         comm, rank = self.comms[remote_address]
@@ -285,10 +285,10 @@ class P2pNcclEngine:
                            remote_address, tensor_id, data["ret"])
             return None
 
-        return self._recv(comm, tensor_id, data["shape"], data["dtype"],
+        return self.recv(comm, tensor_id, data["shape"], data["dtype"],
                           rank ^ 1, self.recv_stream)
 
-    def _listen_for_requests(self):
+    def listen_for_requests(self):
         while True:
             socks = dict(self.poller.poll())
             if self.router_socket not in socks:
@@ -313,7 +313,7 @@ class P2pNcclEngine:
                 try:
                     self.router_socket.send_multipart([remote_address, b"0"])
                     comm, rank = self.comms[remote]
-                    tensor = self._recv(comm, tensor_id, data["shape"],
+                    tensor = self.recv(comm, tensor_id, data["shape"],
                                         data["dtype"], rank ^ 1,
                                         self.recv_stream)
                     tensor_size = tensor.element_size() * tensor.numel()
@@ -337,7 +337,7 @@ class P2pNcclEngine:
 
                 with self.recv_store_cv:
                     self.recv_store[tensor_id] = tensor
-                    self._have_received_tensor_id(tensor_id)
+                    self.have_received_tensor_id(tensor_id)
                     self.recv_store_cv.notify()
 
                 logger.debug(
@@ -356,7 +356,7 @@ class P2pNcclEngine:
                         }
                         # LRU
                         self.send_store[tensor_id] = tensor
-                        self._have_sent_tensor_id(tensor_id)
+                        self.have_sent_tensor_id(tensor_id)
                     else:
                         data = {"ret": 1}
 
@@ -365,7 +365,7 @@ class P2pNcclEngine:
 
                 if data["ret"] == 0:
                     comm, rank = self.comms[remote]
-                    self._send(comm, tensor_id, tensor.to(self.device),
+                    self.send(comm, tensor_id, tensor.to(self.device),
                                rank ^ 1, self.send_stream)
             else:
                 logger.warning(
@@ -378,7 +378,7 @@ class P2pNcclEngine:
             logger.debug("get_num_layers, num_layers:%d", self.num_layers)
         return self.num_layers
 
-    def _have_sent_tensor_id(self, tensor_id: str):
+    def have_sent_tensor_id(self, tensor_id: str):
         request_id = tensor_id.split('#')[0]
         if request_id not in self.send_request_id_to_tensor_ids:
             self.send_request_id_to_tensor_ids[request_id] = set()
@@ -387,7 +387,7 @@ class P2pNcclEngine:
                 self.send_request_id_to_tensor_ids[request_id]):
             self.finished_sending.add(request_id)
 
-    def _have_received_tensor_id(self, tensor_id: str):
+    def have_received_tensor_id(self, tensor_id: str):
         request_id = tensor_id.split('#')[0]
         if request_id not in self.recv_request_id_to_tensor_ids:
             self.recv_request_id_to_tensor_ids[request_id] = set()
@@ -396,15 +396,15 @@ class P2pNcclEngine:
                 self.recv_request_id_to_tensor_ids[request_id]):
             self.finished_recving.add(request_id)
 
-    def _send_async(self):
+    def send_async(self):
         while True:
             with self.send_queue_cv:
                 while not self.send_queue:
                     self.send_queue_cv.wait()
                 tensor_id, remote_address, tensor = self.send_queue.popleft()
-            self._send_sync(tensor_id, tensor, remote_address)
+            self.send_sync(tensor_id, tensor, remote_address)
 
-    def _send_sync(
+    def send_sync(
         self,
         tensor_id: str,
         tensor: torch.Tensor,
@@ -413,7 +413,7 @@ class P2pNcclEngine:
         if remote_address is None:
             return False
         if remote_address not in self.socks:
-            self._create_connect(remote_address)
+            self.create_connect(remote_address)
 
         sock = self.socks[remote_address]
         comm, rank = self.comms[remote_address]
@@ -435,10 +435,10 @@ class P2pNcclEngine:
                 response.decode())
             return False
 
-        self._send(comm, tensor_id, tensor.to(self.device), rank ^ 1,
+        self.send(comm, tensor_id, tensor.to(self.device), rank ^ 1,
                    self.send_stream)
 
-        self._have_sent_tensor_id(tensor_id)
+        self.have_sent_tensor_id(tensor_id)
 
         logger.debug("🔵[PUT]Send Tensor, %s👉%s, data:%s", self.zmq_address,
                      remote_address, data)
@@ -484,7 +484,7 @@ class P2pNcclEngine:
         # TODO: Add failed requests (e.g., transmission errors)
         return finished_sending or None, finished_recving or None
 
-    def _ping(self):
+    def ping(self):
         sock = self.context.socket(zmq.DEALER)
         sock.setsockopt_string(zmq.IDENTITY, self.zmq_address)
         logger.debug("ping start, zmq_address:%s", self.zmq_address)
@@ -498,7 +498,7 @@ class P2pNcclEngine:
             sock.send(msgpack.dumps(data))
             time.sleep(3)
 
-    def _send(self,
+    def send(self,
               comm,
               tensor_id: str,
               tensor: torch.Tensor,
@@ -515,7 +515,7 @@ class P2pNcclEngine:
         event.record(stream)
         event.synchronize()
 
-    def _recv(self,
+    def recv(self,
               comm,
               tensor_id: str,
               shape: str,
