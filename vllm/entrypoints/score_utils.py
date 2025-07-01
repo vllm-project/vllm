@@ -10,6 +10,14 @@ from vllm.outputs import PoolingRequestOutput
 from vllm.transformers_utils.tokenizer import (AnyTokenizer,
                                                PreTrainedTokenizer,
                                                PreTrainedTokenizerFast)
+from typing_extensions import Required, TypeAlias, TypedDict
+from vllm.entrypoints.chat_utils import ChatCompletionContentPartImageParam, ChatCompletionContentPartImageEmbedsParam
+
+ScoreContentPartParam: TypeAlias = Union[ChatCompletionContentPartImageParam, ChatCompletionContentPartImageEmbedsParam]
+class ScoreMultiModalParam(TypedDict, total=False):
+
+    content: Required[list[ScoreContentPartParam]]
+    """The contents of the message."""
 
 
 def _cosine_similarity(
@@ -42,17 +50,24 @@ def _cosine_similarity(
 
 
 def _validate_score_input_lens(
-    data_1: Union[SingletonPrompt, Sequence[SingletonPrompt]],
-    data_2: Union[SingletonPrompt, Sequence[SingletonPrompt]],
+    data_1: Union[Sequence[SingletonPrompt], ScoreMultiModalParam],
+    data_2: Union[Sequence[SingletonPrompt], ScoreMultiModalParam],
 ):
-    if len(data_1) > 1 and len(data_1) != len(data_2):
+    len_1 = len(data_1)
+    len_2 = len(data_2)
+    if isinstance(data_1, dict):
+        len_1 = len(data_1["content"])
+    if isinstance(data_2, dict):
+        len_2 = len(data_2["content"])
+
+    if len_1 > 1 and len_1 != len_2:
         raise ValueError("Input lengths must be either 1:1, 1:N or N:N")
-    if len(data_1) == 0:
+    if len_1 == 0:
         raise ValueError("At least one text element must be given")
-    if len(data_2) == 0:
+    if len_2 == 0:
         raise ValueError("At least one text_pair element must be given")
 
-
+# TODO: it will be better to implement this as parse_chat_messages
 def formatting_prompts(
     model_arch: str,
     tokenizer: AnyTokenizer,
@@ -110,3 +125,11 @@ def formatting_prompts(
         raise ValueError(f"Unsupported model architecture: {model_arch}")
 
     return engine_prompt
+
+# TODO: implement this as parse_chat_messages_futures
+def parse_score_content_futures(
+    content: list[str, ScoreContentPartParam],
+    model_config: ModelConfig,
+    tokenizer: AnyTokenizer,
+) -> tuple[list[SingletonPrompt], Awaitable[Optional[MultiModalDataDict]]]:
+    pass

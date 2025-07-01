@@ -29,6 +29,9 @@ from vllm.transformers_utils.tokenizer import (AnyTokenizer, MistralTokenizer,
                                                PreTrainedTokenizer,
                                                PreTrainedTokenizerFast)
 from vllm.utils import make_async, merge_async_iterators
+from vllm.entrypoints.score_utils import ScoreMultiModalParam, ScoreContentPartParam, formatting_prompts
+from vllm.entrypoints.chat_utils import _parse_chat_message_content_mm_part
+from vllm.multimodal.utils import MediaConnector
 
 logger = init_logger(__name__)
 
@@ -142,8 +145,8 @@ class ServingScores(OpenAIServing):
     async def _cross_encoding_score(
         self,
         tokenizer: Union[AnyTokenizer],
-        texts_1: list[str],
-        texts_2: list[str],
+        data_1: Union[list[str], list[ScoreContentPartParam]],
+        data_2: Union[list[str], list[ScoreContentPartParam]],
         request: Union[RerankRequest, ScoreRequest],
         request_id=str,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
@@ -156,36 +159,53 @@ class ServingScores(OpenAIServing):
         request_prompts: list[str] = []
         engine_prompts: list[TokensPrompt] = []
 
-        if len(texts_1) == 1:
-            texts_1 = texts_1 * len(texts_2)
+        if len(data_1) == 1:
+            data_1 = data_1 * len(data_2)
 
-        input_pairs = [(t1, t2) for t1, t2 in zip(texts_1, texts_2)]
 
         if isinstance(tokenizer, MistralTokenizer):
             raise ValueError(
                 "MistralTokenizer not supported for cross-encoding")
+        
+        if self.model_config.is_multimodal_model:
 
-        tokenize_async = make_async(tokenizer.__call__,
-                                    executor=self._tokenizer_executor)
+            model_architectures = self.model_config.architectures
 
-        tokenization_kwargs = tokenization_kwargs or {}
-        tokenized_prompts = await asyncio.gather(
-            *(tokenize_async(text=t1, text_pair=t2, **tokenization_kwargs)
-              for t1, t2 in input_pairs))
+            def check_content(content: Union[str, ScoreContentPartParam]):
+                _type = "text"
+                if isinstance(content, dict):
+                    _type, prompt = _parse_chat_message_content_mm_part(content)
+                return content, _type
 
-        for prompt_inputs, (t1, t2) in zip(tokenized_prompts, input_pairs):
-            sep_token = tokenizer.sep_token if tokenizer.sep_token else ''
-            request_prompt = f"{t1}{sep_token}{t2}"
+            input_pairs = [((check_content(d1)), (check_content(d2))) for d1, d2 in zip(data_1, data_2)] 
 
-            input_ids = prompt_inputs["input_ids"]
-            text_token_prompt = \
-                self._validate_input(request, input_ids, request_prompt)
-            engine_prompt = TokensPrompt(
-                prompt_token_ids=text_token_prompt["prompt_token_ids"],
-                token_type_ids=prompt_inputs.get("token_type_ids"))
 
-            request_prompts.append(request_prompt)
-            engine_prompts.append(engine_prompt)
+
+        else:
+            
+            input_pairs = [(t1, t2) for t1, t2 in zip(data_1, data_2)]
+
+            tokenize_async = make_async(tokenizer.__call__,
+                                        executor=self._tokenizer_executor)
+
+            tokenization_kwargs = tokenization_kwargs or {}
+            tokenized_prompts = await asyncio.gather(
+                *(tokenize_async(text=t1, text_pair=t2, **tokenization_kwargs)
+                for t1, t2 in input_pairs))
+
+            for prompt_inputs, (t1, t2) in zip(tokenized_prompts, input_pairs):
+                sep_token = tokenizer.sep_token if tokenizer.sep_token else ''
+                request_prompt = f"{t1}{sep_token}{t2}"
+
+                input_ids = prompt_inputs["input_ids"]
+                text_token_prompt = \
+                    self._validate_input(request, input_ids, request_prompt)
+                engine_prompt = TokensPrompt(
+                    prompt_token_ids=text_token_prompt["prompt_token_ids"],
+                    token_type_ids=prompt_inputs.get("token_type_ids"))
+
+                request_prompts.append(request_prompt)
+                engine_prompts.append(engine_prompt)
 
         # Schedule the request and get the result generator.
         generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
@@ -225,8 +245,8 @@ class ServingScores(OpenAIServing):
 
     async def _run_scoring(
         self,
-        texts_1: Union[str, list[str]],
-        texts_2: Union[str, list[str]],
+        data_1: Union[list[str], str, ScoreMultiModalParam],
+        data_2: Union[list[str], str, ScoreMultiModalParam],
         request: Union[ScoreRequest, RerankRequest],
         request_id: str,
         raw_request: Optional[Request] = None,
@@ -251,18 +271,18 @@ class ServingScores(OpenAIServing):
         trace_headers = (None if raw_request is None else await
                          self._get_trace_headers(raw_request.headers))
 
-        if isinstance(texts_1, str):
-            texts_1 = [texts_1]
-        if isinstance(texts_2, str):
-            texts_2 = [texts_2]
+        if isinstance(data_1, str):
+            data_1 = [data_1]
+        if isinstance(data_2, str):
+            data_2 = [data_2]
 
-        _validate_score_input_lens(texts_1, texts_2)
+        _validate_score_input_lens(data_1, data_2)
 
         if self.model_config.is_cross_encoder:
             return await self._cross_encoding_score(
                 tokenizer=tokenizer,
-                texts_1=texts_1,
-                texts_2=texts_2,
+                data_1=data_1,
+                data_2=data_2,
                 request=request,
                 request_id=request_id,
                 tokenization_kwargs=tokenization_kwargs,
@@ -271,10 +291,12 @@ class ServingScores(OpenAIServing):
                 trace_headers=trace_headers)
 
         else:
+            if isinstance(data_1, dict) or isinstance(data_2, dict):
+                raise ValueError("MultiModalParam is not supported for ")
             return await self._embedding_score(
                 tokenizer=tokenizer,
-                texts_1=texts_1,
-                texts_2=texts_2,
+                data_1=data_1,
+                data_2=data_2,
                 request=request,
                 request_id=request_id,
                 tokenization_kwargs=tokenization_kwargs,
@@ -301,8 +323,8 @@ class ServingScores(OpenAIServing):
 
         try:
             final_res_batch = await self._run_scoring(
-                request.text_1,
-                request.text_2,
+                request.data_1,
+                request.data_2,
                 request,
                 request_id,
                 raw_request,
