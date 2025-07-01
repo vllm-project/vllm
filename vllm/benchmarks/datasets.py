@@ -1477,7 +1477,6 @@ class MLPerfDataset(HuggingFaceDataset):
         tokenizer: PreTrainedTokenizerBase,
         num_requests: int,
         output_len: Optional[int] = None,
-        enable_multimodal_chat: bool = False,  # Unused, kept for signature compatibility
         **kwargs,
     ) -> list[SampleRequest]:
         # Force dynamic output length based on reference completion.
