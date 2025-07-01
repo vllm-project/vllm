@@ -238,16 +238,13 @@ def show_filtered_argument_or_group_from_help(parser, subcommand_name):
 
 def get_max_tokens(max_model_len: int, request: Union[ChatCompletionRequest,
                                                       CompletionRequest],
-                   input_length: int, default_sampling_params) -> int:
+                   input_length: int, default_sampling_params: dict) -> int:
 
-    if isinstance(request, ChatCompletionRequest):
-        max_tokens = request.max_completion_tokens or request.max_tokens
-    else:
-        max_tokens = request.max_tokens
+    max_tokens = getattr(request, "max_completion_tokens", request.max_tokens)
     default_max_tokens = max_model_len - input_length
     max_output_tokens = current_platform.get_max_output_tokens(input_length)
 
     return min(val
                for val in (default_max_tokens, max_tokens, max_output_tokens,
-                           default_sampling_params.get("max_tokens", None))
+                           default_sampling_params.get("max_tokens"))
                if val is not None)
