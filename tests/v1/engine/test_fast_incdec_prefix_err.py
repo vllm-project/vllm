@@ -33,6 +33,7 @@ def test_fast_inc_detok_invalid_utf8_err_case():
         None,
         params,
         None,
+        None,
         0.0,
         None,
         cache_salt=None,
