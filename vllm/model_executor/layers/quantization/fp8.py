@@ -442,6 +442,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
     """
 
     def __init__(self, quant_config: Fp8Config):
+
         from vllm.model_executor.layers.fused_moe import fused_experts
         self.quant_config = quant_config
         self.block_quant = self.quant_config.weight_block_size is not None
@@ -879,7 +880,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                           if self.block_quant else layer.w2_weight_scale),
                 a1_scale=layer.w13_input_scale,
                 a2_scale=layer.w2_input_scale,
-                block_shape=self.quant_config.weight_block_size)
+                block_shape=self.quant_config.weight_block_size,
+                expert_map=expert_map)
         elif self.use_marlin:
             assert activation == "silu", (
                 f"{activation} not supported for Marlin MoE.")
