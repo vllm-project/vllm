@@ -811,15 +811,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.query_start_loc_cpu[num_reqs].item())
 
         query_start_loc = self.query_start_loc[:num_reqs + 1]
-        seq_lens = self.seq_lens[:num_reqs]
-
-        common_attn_metadata = CommonAttentionMetadata(
-            query_start_loc=query_start_loc,
-            seq_lens=seq_lens,
-            num_reqs=num_reqs,
-            num_actual_tokens=total_num_scheduled_tokens,
-            max_query_len=max_num_scheduled_tokens,
-        )
 
         attn_metadata: PerLayerAttnMetadata = {}
         if ubatch_slices is not None:
@@ -829,6 +820,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # in the same group share the same metadata.
         for kv_cache_group_id, kv_cache_group_spec in enumerate(
                 self.kv_cache_config.kv_cache_groups):
+
+            common_attn_metadata = CommonAttentionMetadata(
+                query_start_loc=self.query_start_loc[:num_reqs + 1],
+                query_start_loc_cpu=self.query_start_loc_cpu[:num_reqs + 1],
+                seq_lens=self.seq_lens[:num_reqs],
+                seq_lens_cpu=self.seq_lens_cpu[:num_reqs],
+                num_reqs=num_reqs,
+                num_actual_tokens=total_num_scheduled_tokens,
+                max_query_len=max_num_scheduled_tokens,
+                block_table_tensor=self.input_batch.block_table[kv_cache_group_id].get_device_tensor()[:num_reqs],
+                slot_mapping=self.input_batch.block_table[kv_cache_group_id].slot_mapping[:num_reqs],
+                slot_mapping_cpu=self.input_batch.block_table[kv_cache_group_id].slot_mapping_cpu[:num_reqs],
+            )
 
             # Prepare for cascade attention if enabled & beneficial.
             common_prefix_len = 0
@@ -856,12 +860,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     else:
                         attn_metadata_i = (
                             self.attn_metadata_builders[kv_cache_group_id].
-                            build_slice(
-                                req_slice=req_slice,
-                                token_slice=token_slice,
-                                max_query_len=max(tokens[req_slice]),
+                            build(
                                 common_prefix_len=common_prefix_len,
-                                common_attn_metadata=common_attn_metadata,
+                                common_attn_metadata=common_attn_metadata._slice(token_slice, cg_buffer_idx=ubid),
                                 ubatch_id=ubid
                             ))
                     for layer_name in kv_cache_group_spec.layer_names:
@@ -2578,27 +2579,30 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if ubatch_slices is not None:
                 attn_metadata = [dict() for _ in range(len(ubatch_slices))]
 
-            query_start_loc = self.query_start_loc[:num_reqs + 1]
             # Make sure max_model_len is used at the graph capture time.
             self.seq_lens_np[:num_reqs] = self.max_model_len
             self.seq_lens_np[num_reqs:] = 0
             self.seq_lens[:num_reqs].copy_(self.seq_lens_cpu[:num_reqs],
                                            non_blocking=True)
-            seq_lens = self.seq_lens[:num_reqs]
 
             max_query_len = num_tokens
             if ubatch_slices is not None:
                 max_query_len = 1
-            common_attn_metadata = CommonAttentionMetadata(
-                query_start_loc=query_start_loc,
-                seq_lens=seq_lens,
-                num_reqs=num_reqs,
-                num_actual_tokens=num_tokens,
-                max_query_len=max_query_len,
-            )
-
-            for kv_cache_group_id, kv_cache_group_spec in enumerate(
+            for kv_cache_group_id, kv_cache_group_spec in enumerate(    
                     self.kv_cache_config.kv_cache_groups):
+                common_attn_metadata = CommonAttentionMetadata(
+                    query_start_loc=self.query_start_loc[:num_reqs + 1],
+                    query_start_loc_cpu=self.query_start_loc_cpu[:num_reqs + 1],
+                    seq_lens=self.seq_lens[:num_reqs],
+                    seq_lens_cpu=self.seq_lens_cpu[:num_reqs],
+                    num_reqs=num_reqs,
+                    num_actual_tokens=num_tokens,
+                    max_query_len=max_query_len,
+                    block_table_tensor=self.input_batch.block_table[kv_cache_group_id].get_device_tensor()[:num_reqs],
+                    slot_mapping=self.input_batch.block_table[kv_cache_group_id].slot_mapping[:num_reqs],
+                    slot_mapping_cpu=self.input_batch.block_table[kv_cache_group_id].slot_mapping_cpu[:num_reqs],
+                )
+                
                 if ubatch_slices is not None:
                     for ubid, (req_slice, token_slice) in enumerate(ubatch_slices):
                         # Run a dummy batch if its a empty ubatch
@@ -2607,12 +2611,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         else:
                             attn_metadata_i = (
                                 self.attn_metadata_builders[kv_cache_group_id].
-                                build_slice(
-                                    req_slice=req_slice,
-                                    token_slice=token_slice,
-                                    max_query_len=max_query_len,
+                                build(
                                     common_prefix_len=0,
-                                    common_attn_metadata=common_attn_metadata,
+                                    common_attn_metadata=common_attn_metadata._slice(token_slice, cg_buffer_idx=ubid),
                                     ubatch_id=ubid
                                 ))
                         for layer_name in kv_cache_group_spec.layer_names:

@@ -208,8 +208,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from vllm.platforms import current_platform
 from vllm.utils import cdiv, round_down
 from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
-                                              CommonAttentionMetadata,
-                                              slice_query_start_locs)
+                                              CommonAttentionMetadata)
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.block_table import BlockTable
 
@@ -438,11 +437,13 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         return modified_batch
 
     def _build_decode(self, block_table_tensor: torch.Tensor,
-                      seq_lens: torch.Tensor):
+                      seq_lens: torch.Tensor,
+                      ubatch_id: Optional[int] = None):
         return MLACommonDecodeMetadata(
             block_table=block_table_tensor,
             seq_lens=seq_lens,
         )
+
 
     def _split_decodes_and_prefills(self, max_query_len: int, num_reqs: int,
                                     num_tokens: int,
@@ -468,40 +469,48 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             return (num_decodes, num_prefills, num_decode_tokens,
                     num_prefill_tokens)
 
-    def build_slice(
-        self,
-        req_slice: slice,
-        token_slice: slice,
-        max_query_len: int,
-        common_prefix_len: int,
-        common_attn_metadata: CommonAttentionMetadata,
-        ubatch_id: int = 0
-    ) -> M:
-        num_reqs = req_slice.stop - req_slice.start
-        num_tokens = token_slice.stop - token_slice.start
+    def build_for_cudagraph_capture(
+            self, common_attn_metadata: CommonAttentionMetadata) -> M:
+        """
+        This method builds the metadata for full cudagraph capture.
+        Currently, only decode is supported for full cudagraphs with MLA.
+        """
+        m = common_attn_metadata
+        assert m.num_reqs == m.num_actual_tokens, \
+            "MLA only supports decode-only full CUDAGraph capture. " \
+            "Make sure all cudagraph capture sizes <= max_num_seq."
+
+        m.max_query_len = 1  # decode-only
+
+        return self.build(0, m)
+
+    def build(self, common_prefix_len: int,
+              common_attn_metadata: CommonAttentionMetadata,
+              ubatch_id: Optional[int] = None) -> M:
+        num_reqs = common_attn_metadata.num_reqs
+        num_tokens = common_attn_metadata.num_actual_tokens
+        max_query_len = common_attn_metadata.max_query_len
+
 
         # Note(simon): be careful about the CPU <> GPU memory movement in this
         # function. We should avoid GPU -> CPU sync as much as possible because
         # it blocks on all previous kernels.
         device = self.runner.device
-        block_table = self.block_table
-        block_table_tensor = block_table.get_device_tensor()[req_slice]
-        block_table.slot_mapping[token_slice].copy_(
-            block_table.slot_mapping_cpu[token_slice],
-            non_blocking=True)
-        block_table.slot_mapping[token_slice.stop:].fill_(-1)
-        slot_mapping = block_table.slot_mapping[token_slice]
+        block_table_tensor = common_attn_metadata.block_table_tensor
+        slot_mapping = common_attn_metadata.slot_mapping
 
-        query_start_loc = slice_query_start_locs(
-            common_attn_metadata.query_start_loc, req_slice)
-        seq_lens = common_attn_metadata.seq_lens[req_slice]
-
-        num_computed_tokens = self.runner.input_batch.\
-            num_computed_tokens_cpu_tensor[req_slice]
-
+        query_start_loc = common_attn_metadata.query_start_loc
+        query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
+        seq_lens = common_attn_metadata.seq_lens
+        
+        query_seq_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
+        print(f"query_start_loc_cpu.shape: {query_start_loc_cpu.shape}")
+        print(f"query_seq_lens_cpu.shape: {query_seq_lens_cpu.shape}")
+        num_computed_tokens_cpu = common_attn_metadata.seq_lens_cpu - query_seq_lens_cpu
+        
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = \
-            self._split_decodes_and_prefills(
-                max_query_len, num_reqs, num_tokens, query_start_loc)
+        self._split_decodes_and_prefills(
+            max_query_len, num_reqs, num_tokens, query_start_loc)
 
         assert num_decodes + num_prefills == num_reqs
         assert num_decode_tokens + num_prefill_tokens == num_tokens
@@ -510,7 +519,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         if num_prefills > 0:
             reqs_start = num_decodes  # prefill_start
 
-            context_lens_cpu = num_computed_tokens[reqs_start:num_reqs]
+            context_lens_cpu = num_computed_tokens_cpu[reqs_start:num_reqs]
             max_context_len_cpu = context_lens_cpu.max().item()
             num_prefills_with_context_cpu = (context_lens_cpu > 0).sum().item()
             prefill_query_start_loc = query_start_loc[
@@ -603,20 +612,6 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             decode=decode_metadata,
         )
 
-    def build(self, common_prefix_len: int,
-              common_attn_metadata: CommonAttentionMetadata) -> M:
-        num_reqs = common_attn_metadata.num_reqs
-        num_actual_tokens = common_attn_metadata.num_actual_tokens
-        max_query_len = common_attn_metadata.max_query_len
-
-        # assert self._num_decodes + self._num_prefills == num_reqs
-        return self.build_slice(
-            req_slice=slice(0, num_reqs),
-            token_slice=slice(0, num_actual_tokens),
-            max_query_len=max_query_len,
-            common_prefix_len=common_prefix_len,
-            common_attn_metadata=common_attn_metadata,
-        )
 
     def build_for_cudagraph_capture(
             self, common_attn_metadata: CommonAttentionMetadata) -> M:
@@ -637,9 +632,6 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         # self._num_prefills = 0
         # self._num_prefill_tokens = 0
         return self.build(0, m)
-
-    def use_cascade_attention(self, *args, **kwargs) -> bool:
-        return False
 
     def can_run_in_cudagraph(
             self, common_attn_metadata: CommonAttentionMetadata) -> bool:
