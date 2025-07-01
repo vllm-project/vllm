@@ -3,10 +3,9 @@
 DeepEP test utilities
 """
 import dataclasses
-import importlib
 import os
 import traceback
-from typing import Callable, Optional
+from typing import Callable, Optional, any
 
 import torch
 from torch.distributed import ProcessGroup
@@ -14,10 +13,12 @@ from torch.multiprocessing import (
     spawn)  # pyright: ignore[reportPrivateImportUsage]
 from typing_extensions import Concatenate, ParamSpec
 
-from vllm.utils import get_open_port
+from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.distributed import (init_distributed_environment,
+                              initialize_model_parallel)
+from vllm.utils import get_open_port, has_deep_ep
 
-has_deep_ep = importlib.util.find_spec("deep_ep") is not None
-if has_deep_ep:
+if has_deep_ep():
     from vllm.model_executor.layers.fused_moe.deepep_ht_prepare_finalize import (  # noqa: E501
         DeepEPHTPrepareAndFinalize)
     from vllm.model_executor.layers.fused_moe.deepep_ll_prepare_finalize import (  # noqa: E501
@@ -38,6 +39,33 @@ class ProcessGroupInfo:
     device: torch.device
 
 
+def _set_vllm_config(vllm_config: VllmConfig, world_size: int, rank: int,
+                     local_rank: int):
+
+    import tempfile
+    temp_file = tempfile.mkstemp()[1]
+
+    set_current_vllm_config(vllm_config)
+    with set_current_vllm_config(vllm_config):
+        init_distributed_environment(
+            world_size=world_size,
+            rank=rank,
+            distributed_init_method=f"file://{temp_file}",
+            local_rank=local_rank,
+            backend="nccl",
+        )
+
+        initialize_model_parallel(
+            tensor_model_parallel_size=vllm_config.parallel_config.
+            tensor_parallel_size,
+            pipeline_model_parallel_size=vllm_config.parallel_config.
+            pipeline_parallel_size,
+        )
+        cpu_group = torch.distributed.new_group(list(range(world_size)),
+                                                backend="gloo")
+    return cpu_group
+
+
 def _worker_parallel_launch(
     local_rank: int,
     world_size: int,
@@ -45,6 +73,8 @@ def _worker_parallel_launch(
     node_rank: int,
     init_method: str,
     worker: Callable[Concatenate[ProcessGroupInfo, P], None],
+    vllm_config: Optional[VllmConfig],
+    env_dict: Optional[dict],
     *args: P.args,
     **kwargs: P.kwargs,
 ) -> None:
@@ -60,6 +90,14 @@ def _worker_parallel_launch(
     )
     barrier = torch.tensor([rank], device=device)
     torch.distributed.all_reduce(barrier)
+
+    if env_dict is not None:
+        os.environ.update(env_dict)
+
+    cpu_group = None
+    if vllm_config is not None:
+        cpu_group = _set_vllm_config(vllm_config, world_size, rank, local_rank)
+        args = (vllm_config, cpu_group) + args
 
     try:
         worker(
@@ -97,6 +135,33 @@ def parallel_launch(
             0,
             f"tcp://{os.getenv('LOCALHOST', 'localhost')}:{get_open_port()}",
             worker,
+            None,  # vllm_config
+            None,  # env_dict
+        ) + args,
+        nprocs=world_size,
+        join=True,
+    )
+
+
+def parallel_launch_with_config(
+    world_size: int,
+    worker: Callable[Concatenate[ProcessGroupInfo, P], None],
+    vllm_config: VllmConfig,
+    env_dict: dict[any, any],
+    *args: P.args,
+    **kwargs: P.kwargs,
+) -> None:
+    assert not kwargs
+    spawn(
+        _worker_parallel_launch,
+        args=(
+            world_size,
+            world_size,
+            0,
+            "tcp://localhost:29500",
+            worker,
+            vllm_config,
+            env_dict,
         ) + args,
         nprocs=world_size,
         join=True,
