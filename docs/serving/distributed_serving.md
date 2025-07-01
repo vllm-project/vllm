@@ -100,7 +100,50 @@ vllm serve /path/to/the/model/in/the/container \
      --tensor-parallel-size 16
 ```
 
-To make tensor parallel performant, you should make sure the communication between nodes is efficient, e.g. using high-speed network cards like Infiniband. To correctly set up the cluster to use Infiniband, append additional arguments like `--privileged -e NCCL_IB_HCA=mlx5` to the `run_cluster.sh` script. Please contact your system administrator for more information on how to set up the flags. One way to confirm if the Infiniband is working is to run vLLM with `NCCL_DEBUG=TRACE` environment variable set, e.g. `NCCL_DEBUG=TRACE vllm serve ...` and check the logs for the NCCL version and the network used. If you find `[send] via NET/Socket` in the logs, it means NCCL uses raw TCP Socket, which is not efficient for cross-node tensor parallel. If you find `[send] via NET/IB/GDRDMA` in the logs, it means NCCL uses Infiniband with GPU-Direct RDMA, which is efficient.
+To make tensor parallel performant, you should make sure the communication between nodes is efficient, e.g. using high-speed network cards like InfiniBand. To correctly set up the cluster to use InfiniBand, append additional arguments like `--privileged -e NCCL_IB_HCA=mlx5` to the `run_cluster.sh` script. Please contact your system administrator for more information on how to set up the flags. One way to confirm if the InfiniBand is working is to run vLLM with `NCCL_DEBUG=TRACE` environment variable set, e.g. `NCCL_DEBUG=TRACE vllm serve ...` and check the logs for the NCCL version and the network used. If you find `[send] via NET/Socket` in the logs, it means NCCL uses raw TCP Socket, which is not efficient for cross-node tensor parallel. If you find `[send] via NET/IB/GDRDMA` in the logs, it means NCCL uses InfiniBand with GPUDirect RDMA, which is efficient.
+
+### GPUDirect RDMA
+
+To enable GPUDirect RDMA with vLLM, specific configuration tweaks are needed. This setup ensures:
+
+- `IPC_LOCK` Security Context: Add the `IPC_LOCK` capability to the container’s security context to lock memory pages and prevent swapping to disk.
+- Shared Memory with `/dev/shm`: Mount `/dev/shm` in the pod spec to provide shared memory for IPC.
+
+When using Docker, you can set up the container as follows:
+
+```bash
+docker run --gpus all \
+    --ipc=host \
+    --shm-size=16G \
+    -v /dev/shm:/dev/shm \
+    vllm/vllm-openai
+```
+
+When using Kubernetes, you can set up the pod spec as follows:
+
+```yaml
+...
+spec:
+  containers:
+    - name: vllm
+      image: vllm/vllm-openai
+      securityContext:
+        capabilities:
+          add: ["IPC_LOCK"]
+      volumeMounts:
+        - mountPath: /dev/shm
+          name: dshm
+      resources:
+        limits:
+          nvidia.com/gpu: 8
+        requests:
+          nvidia.com/gpu: 8
+  volumes:
+    - name: dshm
+      emptyDir:
+        medium: Memory
+...
+```
 
 !!! warning
     After you start the Ray cluster, you'd better also check the GPU-GPU communication between nodes. It can be non-trivial to set up. Please refer to the [sanity check script][troubleshooting-incorrect-hardware-driver] for more information. If you need to set some environment variables for the communication configuration, you can append them to the `run_cluster.sh` script, e.g. `-e NCCL_SOCKET_IFNAME=eth0`. Note that setting environment variables in the shell (e.g. `NCCL_SOCKET_IFNAME=eth0 vllm serve ...`) only works for the processes in the same node, not for the processes in the other nodes. Setting environment variables when you create the cluster is the recommended way. See <gh-issue:6803> for more information.

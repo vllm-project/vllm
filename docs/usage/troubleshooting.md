@@ -273,6 +273,27 @@ But you are sure that the model is in the [list of supported models][supported-m
 
 If you see an error like `RuntimeError: Failed to infer device type`, it means that vLLM failed to infer the device type of the runtime environment. You can check [the code](gh-file:vllm/platforms/__init__.py) to see how vLLM infers the device type and why it is not working as expected. After [this PR](gh-pr:14195), you can also set the environment variable `VLLM_LOGGING_LEVEL=DEBUG` to see more detailed logs to help debug the issue.
 
+## NCCL error: unhandled system error during `ncclCommInitRank`
+
+If your serving workload uses GPUDirect RDMA for distributed serving across multiple nodes and encounters an error during `ncclCommInitRank`, with no clear error message even with `NCCL_DEBUG=INFO` set, it might look like this:
+
+```text
+Error executing method 'init_device'. This might cause deadlock in distributed execution.
+Traceback (most recent call last):
+...
+   File "/usr/local/lib/python3.12/dist-packages/vllm/distributed/device_communicators/pynccl.py", line 99, in __init__
+     self.comm: ncclComm_t = self.nccl.ncclCommInitRank(
+                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   File "/usr/local/lib/python3.12/dist-packages/vllm/distributed/device_communicators/pynccl_wrapper.py", line 277, in ncclCommInitRank
+     self.NCCL_CHECK(self._funcs["ncclCommInitRank"](ctypes.byref(comm),
+   File "/usr/local/lib/python3.12/dist-packages/vllm/distributed/device_communicators/pynccl_wrapper.py", line 256, in NCCL_CHECK
+     raise RuntimeError(f"NCCL error: {error_str}")
+ RuntimeError: NCCL error: unhandled system error (run with NCCL_DEBUG=INFO for details)
+...
+```
+
+This indicates vLLM failed to initialize the NCCL communicator, possibly due to a missing `IPC_LOCK` linux capability  or an unmounted `/dev/shm`. Refer to [Distributed Inference and Serving](../serving/distributed_serving.md#running-vllm-on-multiple-nodes) for guidance on properly configuring the environment for distributed serving.
+
 ## Known Issues
 
 - In `v0.5.2`, `v0.5.3`, and `v0.5.3.post1`, there is a bug caused by [zmq](https://github.com/zeromq/pyzmq/issues/2000) , which can occasionally cause vLLM to hang depending on the machine configuration. The solution is to upgrade to the latest version of `vllm` to include the [fix](gh-pr:6759).
