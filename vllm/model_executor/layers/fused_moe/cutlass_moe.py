@@ -41,9 +41,6 @@ def run_blocked_cutlass_moe_fp8(
     size 128x128. When per_act_block is True, the input is quantized with
     per-token 128-blocked scales (equivalent to block size 1x128). When
     it's False, the input is quantized with per-tensor scales.
-
-    Parameters:
-    - output (torch.Tensor): The output tensor.
     """
 
     a1q = hidden_states
