@@ -26,7 +26,7 @@ from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
 from vllm.distributed.parallel_state import (
-    get_pp_group, get_tp_group, graph_capture,
+    get_pp_group, get_tp_group, graph_capture, is_global_first_rank,
     prepare_communication_buffer_for_model)
 from vllm.forward_context import (DPMetadata, get_forward_context,
                                   set_forward_context)
@@ -2285,9 +2285,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # can reuse the memory pool allocated for the large shapes.
         with graph_capture(device=self.device):
             full_cg = self.full_cuda_graph
-            for num_tokens in tqdm(reversed(self.cudagraph_batch_sizes),
-                                   desc="Capturing CUDA graphs",
-                                   total=len(self.cudagraph_batch_sizes)):
+            # Only rank 0 should print progress bar during capture
+            compilation_cases = reversed(self.cudagraph_batch_sizes)
+            if is_global_first_rank():
+                compilation_cases = tqdm(list(compilation_cases),
+                                         desc="Capturing CUDA graph shapes")
+            for num_tokens in compilation_cases:
                 # We skip EPLB here since we don't want to record dummy metrics
                 for _ in range(
                         self.compilation_config.cudagraph_num_of_warmups):
