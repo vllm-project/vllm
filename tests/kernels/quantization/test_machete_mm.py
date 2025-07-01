@@ -139,7 +139,7 @@ def maybe_convert_zeropoints(zps: Optional[torch.Tensor], s: torch.Tensor):
 
 def group_size_valid(shape: tuple[int, int, int],
                      group_size: Optional[int]) -> bool:
-    return group_size is None or group_size == -1 or group_size % shape[2] == 0
+    return group_size is None or group_size == -1 or shape[2] % group_size == 0
 
 
 def machete_quantize_and_pack(atype: torch.dtype,
