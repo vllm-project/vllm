@@ -7,7 +7,6 @@ import time
 import uuid
 from collections import defaultdict
 from collections.abc import Iterator
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -335,7 +334,7 @@ class NixlConnectorWorker:
 
         # Agent.
         import os
-        num_workers = 32
+        num_workers = 64
         # setting num_workers on the prefiller causes no notifs to be recved???
         # this is a hack to make sure we set num workers on the prefiller to 1.
         if os.getenv("VLLM_IS_PREFILL", "0") == "1":

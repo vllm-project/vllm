@@ -12,8 +12,9 @@ port PORT:
 
 
 prefill:
+    VLLM_IS_PREFILL=1 \
     VLLM_NIXL_SIDE_CHANNEL_PORT=5557 \
-    CUDA_VISIBLE_DEVICES=0 \
+    CUDA_VISIBLE_DEVICES=7 \
     vllm serve {{MODEL}} \
       --port $(just port 8100) \
       --tensor-parallel-size 1 \
@@ -23,8 +24,9 @@ prefill:
       --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
 
 decode:
+    VLLM_IS_PREFILL=0 \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$(just port 5559) \
-    CUDA_VISIBLE_DEVICES=1 \
+    CUDA_VISIBLE_DEVICES=6 \
     vllm serve {{MODEL}} \
       --port $(just port 8300) \
       --tensor-parallel-size 1 \
