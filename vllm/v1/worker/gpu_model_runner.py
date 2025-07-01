@@ -470,6 +470,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             req_ids_to_add.append(req_id)
 
         # Update the states of the running/resumed requests.
+        is_last_rank = get_pp_group().is_last_rank
         req_data = scheduler_output.scheduled_cached_reqs
         for i, req_id in enumerate(req_data.req_ids):
             req_state = self.requests[req_id]
@@ -480,7 +481,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Update the cached states.
             req_state.num_computed_tokens = num_computed_tokens
 
-            if not get_pp_group().is_last_rank:
+            if not is_last_rank:
                 # When using PP, the scheduler sends the sampled tokens back,
                 # because there's no direct communication between the first-
                 # stage worker and the last-stage worker.
@@ -519,6 +520,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.input_batch.num_computed_tokens_cpu[req_index] = (
                 num_computed_tokens)
             self.input_batch.block_table.append_row(new_block_ids, req_index)
+
+            if is_last_rank:
+                # For the last rank, we don't need to update the token_ids_cpu
+                # because the sampled tokens are already cached.
+                continue
+
             # Add new_token_ids to token_ids_cpu.
             start_token_index = num_computed_tokens
             end_token_index = num_computed_tokens + len(new_token_ids)
