@@ -5,6 +5,7 @@ import deep_ep
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm import _custom_ops as ops
 from vllm.model_executor.layers.fused_moe.utils import (
     moe_kernel_quantize_input)
 
@@ -193,20 +194,23 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                                   apply_router_weight_on_input: bool,
                                   output_dtype: torch.dtype):
 
+        hidden_dim = fused_expert_output.size(-1)
         if fused_expert_output.ndim == 2:
-            hidden_dim = fused_expert_output.size(-1)
             fused_expert_output = fused_expert_output.view(
                 num_tokens, -1, hidden_dim)
 
         if not apply_router_weight_on_input:
             # The DeepEP combine kernels don't do the topk weight
             # multiplication. We multiply the weights locally.
-            fused_expert_output = fused_expert_output.to(torch.float32)
-            fused_expert_output = fused_expert_output * topk_weights.view(
-                fused_expert_output.size(0), -1, 1)
-            fused_expert_output = fused_expert_output.to(output_dtype)
+            m_x_topk = fused_expert_output.size(0)
+            fused_expert_output.mul_(topk_weights.view(m_x_topk, -1, 1))
 
-        return fused_expert_output.sum(dim=1).to(output_dtype)
+        out = torch.empty((num_tokens, hidden_dim),
+                          device=fused_expert_output.device,
+                          dtype=output_dtype)
+        ops.moe_sum(fused_expert_output, out)
+
+        return out
 
     def finalize(self, output: torch.Tensor, fused_expert_output: torch.Tensor,
                  topk_weights: torch.Tensor, topk_ids: torch.Tensor,

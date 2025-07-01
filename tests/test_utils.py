@@ -5,6 +5,7 @@
 import asyncio
 import hashlib
 import json
+import logging
 import pickle
 import socket
 from collections.abc import AsyncIterator
@@ -142,6 +143,7 @@ def parser():
     parser.add_argument('--batch-size', type=int)
     parser.add_argument('--enable-feature', action='store_true')
     parser.add_argument('--hf-overrides', type=json.loads)
+    parser.add_argument('-O', '--compilation-config', type=json.loads)
     return parser
 
 
@@ -265,6 +267,11 @@ def test_dict_args(parser):
         "val2",
         "--hf-overrides.key2.key4",
         "val3",
+        # Test compile config and compilation level
+        "-O.use_inductor=true",
+        "-O.backend",
+        "custom",
+        "-O1",
         # Test = sign
         "--hf-overrides.key5=val4",
         # Test underscore to dash conversion
@@ -272,6 +279,22 @@ def test_dict_args(parser):
         "val5",
         "--hf_overrides.key-7.key_8",
         "val6",
+        # Test data type detection
+        "--hf_overrides.key9",
+        "100",
+        "--hf_overrides.key10",
+        "100.0",
+        "--hf_overrides.key11",
+        "true",
+        "--hf_overrides.key12.key13",
+        "null",
+        # Test '-' and '.' in value
+        "--hf_overrides.key14.key15",
+        "-minus.and.dot",
+        # Test array values
+        "-O.custom_ops+",
+        "-quant_fp8",
+        "-O.custom_ops+=+silu_mul,-rms_norm",
     ]
     parsed_args = parser.parse_args(args)
     assert parsed_args.model_name == "something.something"
@@ -286,7 +309,46 @@ def test_dict_args(parser):
         "key-7": {
             "key_8": "val6",
         },
+        "key9": 100,
+        "key10": 100.0,
+        "key11": True,
+        "key12": {
+            "key13": None,
+        },
+        "key14": {
+            "key15": "-minus.and.dot",
+        }
     }
+    assert parsed_args.compilation_config == {
+        "level": 1,
+        "use_inductor": True,
+        "backend": "custom",
+        "custom_ops": ["-quant_fp8", "+silu_mul", "-rms_norm"],
+    }
+
+
+def test_duplicate_dict_args(caplog_vllm, parser):
+    args = [
+        "--model-name=something.something",
+        "--hf-overrides.key1",
+        "val1",
+        "--hf-overrides.key1",
+        "val2",
+        "-O1",
+        "-O.level",
+        "2",
+        "-O3",
+    ]
+
+    parsed_args = parser.parse_args(args)
+    # Should be the last value
+    assert parsed_args.hf_overrides == {"key1": "val2"}
+    assert parsed_args.compilation_config == {"level": 3}
+
+    assert len(caplog_vllm.records) == 1
+    assert "duplicate" in caplog_vllm.text
+    assert "--hf-overrides.key1" in caplog_vllm.text
+    assert "-O.level" in caplog_vllm.text
 
 
 # yapf: enable

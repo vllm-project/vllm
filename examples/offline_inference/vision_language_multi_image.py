@@ -289,6 +289,106 @@ def load_internvl(question: str, image_urls: list[str]) -> ModelRequestData:
     )
 
 
+def load_llava(question: str, image_urls: list[str]) -> ModelRequestData:
+    # NOTE: CAUTION! Original Llava models wasn't really trained on multi-image inputs,
+    # it will generate poor response for multi-image inputs!
+    model_name = "llava-hf/llava-1.5-7b-hf"
+    engine_args = EngineArgs(
+        model=model_name,
+        max_num_seqs=16,
+        limit_mm_per_prompt={"image": len(image_urls)},
+    )
+
+    placeholders = [{"type": "image", "image": url} for url in image_urls]
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                *placeholders,
+                {"type": "text", "text": question},
+            ],
+        }
+    ]
+
+    processor = AutoProcessor.from_pretrained(model_name)
+
+    prompt = processor.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+        image_data=[fetch_image(url) for url in image_urls],
+    )
+
+
+def load_llava_next(question: str, image_urls: list[str]) -> ModelRequestData:
+    model_name = "llava-hf/llava-v1.6-mistral-7b-hf"
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=8192,
+        max_num_seqs=16,
+        limit_mm_per_prompt={"image": len(image_urls)},
+    )
+
+    placeholders = [{"type": "image", "image": url} for url in image_urls]
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                *placeholders,
+                {"type": "text", "text": question},
+            ],
+        }
+    ]
+
+    processor = AutoProcessor.from_pretrained(model_name)
+
+    prompt = processor.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+        image_data=[fetch_image(url) for url in image_urls],
+    )
+
+
+def load_llava_onevision(question: str, image_urls: list[str]) -> ModelRequestData:
+    model_name = "llava-hf/llava-onevision-qwen2-7b-ov-hf"
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=16384,
+        max_num_seqs=16,
+        limit_mm_per_prompt={"image": len(image_urls)},
+    )
+
+    placeholders = [{"type": "image", "image": url} for url in image_urls]
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                *placeholders,
+                {"type": "text", "text": question},
+            ],
+        }
+    ]
+
+    processor = AutoProcessor.from_pretrained(model_name)
+
+    prompt = processor.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+        image_data=[fetch_image(url) for url in image_urls],
+    )
+
+
 def load_llama4(question: str, image_urls: list[str]) -> ModelRequestData:
     model_name = "meta-llama/Llama-4-Scout-17B-16E-Instruct"
 
@@ -728,6 +828,32 @@ def load_tarsier(question: str, image_urls: list[str]) -> ModelRequestData:
     )
 
 
+def load_tarsier2(question: str, image_urls: list[str]) -> ModelRequestData:
+    model_name = "omni-research/Tarsier2-Recap-7b"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        trust_remote_code=True,
+        max_model_len=32768,
+        limit_mm_per_prompt={"image": len(image_urls)},
+        hf_overrides={"architectures": ["Tarsier2ForConditionalGeneration"]},
+    )
+
+    prompt = (
+        "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
+        f"<|im_start|>user\n<|vision_start|>{'<|image_pad|>' * len(image_urls)}"
+        f"<|vision_end|>{question}<|im_end|>\n"
+        "<|im_start|>assistant\n"
+    )
+    image_data = [fetch_image(url) for url in image_urls]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+        image_data=image_data,
+    )
+
+
 model_example_map = {
     "aria": load_aria,
     "aya_vision": load_aya_vision,
@@ -737,6 +863,9 @@ model_example_map = {
     "idefics3": load_idefics3,
     "internvl_chat": load_internvl,
     "kimi_vl": load_kimi_vl,
+    "llava": load_llava,
+    "llava-next": load_llava_next,
+    "llava-onevision": load_llava_onevision,
     "llama4": load_llama4,
     "mistral3": load_mistral3,
     "mllama": load_mllama,
@@ -750,6 +879,7 @@ model_example_map = {
     "qwen2_5_vl": load_qwen2_5_vl,
     "smolvlm": load_smolvlm,
     "tarsier": load_tarsier,
+    "tarsier2": load_tarsier2,
 }
 
 

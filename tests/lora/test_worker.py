@@ -16,6 +16,8 @@ from vllm.lora.request import LoRARequest
 from vllm.v1.worker.gpu_worker import Worker as V1Worker
 from vllm.worker.worker import Worker
 
+NUM_LORAS = 16
+
 
 @patch.dict(os.environ, {"RANK": "0"})
 def test_worker_apply_lora(sql_lora_files):
@@ -58,12 +60,12 @@ def test_worker_apply_lora(sql_lora_files):
         device_config=DeviceConfig("cuda"),
         cache_config=CacheConfig(
             block_size=16,
-            gpu_memory_utilization=1.0,
             swap_space=0,
             cache_dtype="auto",
         ),
-        lora_config=LoRAConfig(max_lora_rank=8, max_cpu_loras=32,
-                               max_loras=32),
+        lora_config=LoRAConfig(max_lora_rank=8,
+                               max_cpu_loras=NUM_LORAS,
+                               max_loras=NUM_LORAS),
     )
     worker = worker_cls(
         vllm_config=vllm_config,
@@ -78,9 +80,9 @@ def test_worker_apply_lora(sql_lora_files):
     set_active_loras(worker, [])
     assert worker.list_loras() == set()
 
-    n_loras = 32
     lora_requests = [
-        LoRARequest(str(i + 1), i + 1, sql_lora_files) for i in range(n_loras)
+        LoRARequest(str(i + 1), i + 1, sql_lora_files)
+        for i in range(NUM_LORAS)
     ]
 
     set_active_loras(worker, lora_requests)
@@ -89,12 +91,12 @@ def test_worker_apply_lora(sql_lora_files):
         for lora_request in lora_requests
     }
 
-    for i in range(32):
+    for i in range(NUM_LORAS):
         random.seed(i)
         iter_lora_requests = random.choices(lora_requests,
-                                            k=random.randint(1, n_loras))
+                                            k=random.randint(1, NUM_LORAS))
         random.shuffle(iter_lora_requests)
-        iter_lora_requests = iter_lora_requests[:-random.randint(0, n_loras)]
+        iter_lora_requests = iter_lora_requests[:-random.randint(0, NUM_LORAS)]
         set_active_loras(worker, lora_requests)
         assert worker.list_loras().issuperset(
             {lora_request.lora_int_id

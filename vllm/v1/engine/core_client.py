@@ -68,17 +68,30 @@ class EngineCoreClient(ABC):
                 "is not currently supported.")
 
         if multiprocess_mode and asyncio_mode:
-            if vllm_config.parallel_config.data_parallel_size > 1:
-                if vllm_config.parallel_config.data_parallel_backend == "ray":
-                    return RayDPClient(vllm_config, executor_class, log_stats)
-                return DPAsyncMPClient(vllm_config, executor_class, log_stats)
-
-            return AsyncMPClient(vllm_config, executor_class, log_stats)
+            return EngineCoreClient.make_async_mp_client(
+                vllm_config, executor_class, log_stats)
 
         if multiprocess_mode and not asyncio_mode:
             return SyncMPClient(vllm_config, executor_class, log_stats)
 
         return InprocClient(vllm_config, executor_class, log_stats)
+
+    @staticmethod
+    def make_async_mp_client(
+        vllm_config: VllmConfig,
+        executor_class: type[Executor],
+        log_stats: bool,
+        client_addresses: Optional[dict[str, str]] = None,
+        client_index: int = 0,
+    ) -> "MPClient":
+        if vllm_config.parallel_config.data_parallel_size > 1:
+            if vllm_config.parallel_config.data_parallel_backend == "ray":
+                return RayDPClient(vllm_config, executor_class, log_stats,
+                                   client_addresses, client_index)
+            return DPAsyncMPClient(vllm_config, executor_class, log_stats,
+                                   client_addresses, client_index)
+        return AsyncMPClient(vllm_config, executor_class, log_stats,
+                             client_addresses, client_index)
 
     @abstractmethod
     def shutdown(self):
@@ -140,6 +153,11 @@ class EngineCoreClient(ABC):
                        timeout: Optional[float] = None,
                        args: tuple = (),
                        kwargs: Optional[dict[str, Any]] = None) -> list[_R]:
+        raise NotImplementedError
+
+    def dp_engines_running(self) -> bool:
+        """Returns True id data parallel engines are collectively in a
+        running state."""
         raise NotImplementedError
 
     async def get_output_async(self) -> EngineCoreOutputs:
@@ -269,6 +287,9 @@ class InprocClient(EngineCoreClient):
                        kwargs: Optional[dict[str, Any]] = None) -> list[_R]:
         return self.engine_core.collective_rpc(method, timeout, args, kwargs)
 
+    def dp_engines_running(self) -> bool:
+        return False
+
 
 @dataclass
 class BackgroundResources:
@@ -370,6 +391,9 @@ class MPClient(EngineCoreClient):
             local_start_index = parallel_config.data_parallel_rank_local
             dp_size = parallel_config.data_parallel_size
             dp_rank = parallel_config.data_parallel_rank
+
+            # State used for data parallel.
+            self.engines_running = False
 
             # SPMD mode is where there is an LLM instance per DP rank and
             # one core engine per LLM, see
@@ -526,6 +550,9 @@ class MPClient(EngineCoreClient):
         while self.pending_messages and self.pending_messages[-1][0].done:
             self.pending_messages.pop()
 
+    def dp_engines_running(self) -> bool:
+        return self.engines_running
+
 
 def _process_utility_output(output: UtilityOutput,
                             utility_results: dict[int, AnyFuture]):
@@ -549,6 +576,7 @@ class SyncMPClient(MPClient):
             log_stats=log_stats,
         )
 
+        self.is_dp = self.vllm_config.parallel_config.data_parallel_size > 1
         self.outputs_queue = queue.Queue[Union[EngineCoreOutputs, Exception]]()
 
         # Ensure that the outputs socket processing thread does not have
@@ -610,6 +638,8 @@ class SyncMPClient(MPClient):
         outputs = self.outputs_queue.get()
         if isinstance(outputs, Exception):
             raise self._format_exception(outputs) from None
+        if outputs.wave_complete is not None:
+            self.engines_running = False
         return outputs
 
     def _send_input(self, request_type: EngineCoreRequestType, request: Any):
@@ -637,6 +667,8 @@ class SyncMPClient(MPClient):
         return future.result()
 
     def add_request(self, request: EngineCoreRequest) -> None:
+        if self.is_dp:
+            self.engines_running = True
         self._send_input(EngineCoreRequestType.ADD, request)
 
     def abort_requests(self, request_ids: list[str]) -> None:
@@ -781,7 +813,6 @@ class AsyncMPClient(MPClient):
                     request_type: EngineCoreRequestType,
                     request: Any,
                     engine: Optional[CoreEngine] = None) -> Awaitable[Any]:
-        self.ensure_alive()
         if engine is None:
             engine = self.core_engine
 
@@ -899,7 +930,6 @@ class DPAsyncMPClient(AsyncMPClient):
                  client_addresses: Optional[dict[str, str]] = None,
                  client_index: int = 0):
         self.current_wave = 0
-        self.engines_running = False
         # To route aborts to the correct engine.
         self.reqs_in_flight: dict[str, CoreEngine] = {}
 
@@ -987,9 +1017,6 @@ class DPAsyncMPClient(AsyncMPClient):
                                     ) -> CoreEngine:
         if dp_rank is not None:
             # engines are already in rank order
-            if dp_rank < 0 or dp_rank >= len(self.core_engines):
-                raise ValueError(f"Requested DP rank {dp_rank} is out of "
-                                 f"range [0, {len(self.core_engines)})")
             return self.core_engines[dp_rank]
 
         if not self.lb_engines:
@@ -1049,7 +1076,7 @@ class DPAsyncMPClient(AsyncMPClient):
                 self.reqs_in_flight.pop(req_id, None)
 
     async def abort_requests_async(self, request_ids: list[str]) -> None:
-        if not request_ids:
+        if not request_ids or self.resources.engine_dead:
             return
 
         if len(request_ids) == 1:
@@ -1067,9 +1094,8 @@ class DPAsyncMPClient(AsyncMPClient):
 
     async def _abort_requests(self, request_ids: list[str],
                               engine: CoreEngine) -> None:
-        if not self.resources.engine_dead:
-            await self._send_input(EngineCoreRequestType.ABORT, request_ids,
-                                   engine)
+        await self._send_input(EngineCoreRequestType.ABORT, request_ids,
+                               engine)
 
 
 class RayDPClient(DPAsyncMPClient):

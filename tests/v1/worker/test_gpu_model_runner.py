@@ -4,6 +4,7 @@
 import random
 
 import pytest
+import torch
 
 from vllm.attention import Attention
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
@@ -40,12 +41,13 @@ def initialize_kv_cache(runner: GPUModelRunner):
     tensor_size = attn_spec.page_size_bytes * NUM_BLOCKS
     kv_cache_config = KVCacheConfig(
         num_blocks=NUM_BLOCKS,
-        tensors={
-            "layer.0": KVCacheTensor(size=tensor_size),
-        },
+        kv_cache_tensors=[
+            KVCacheTensor(size=tensor_size, shared_by=["layer.0"]),
+        ],
         kv_cache_groups=[
             KVCacheGroupSpec(layer_names=["layer.0"], kv_cache_spec=attn_spec)
-        ])
+        ],
+    )
     runner.kv_cache_config = kv_cache_config
     runner.input_batch = InputBatch(
         max_num_reqs=runner.max_num_reqs,
@@ -121,7 +123,8 @@ def _schedule_new_request(*req_ids: str) -> SchedulerOutput:
                 mm_hashes=[],
                 mm_positions=[],
                 sampling_params=SamplingParams(),
-                block_ids=[[0]],
+                pooling_params=None,
+                block_ids=([0], ),
                 num_computed_tokens=0,
                 lora_request=None,
             ))
@@ -130,7 +133,7 @@ def _schedule_new_request(*req_ids: str) -> SchedulerOutput:
 
     return SchedulerOutput(
         scheduled_new_reqs=new_reqs,
-        scheduled_cached_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
         num_scheduled_tokens=num_scheduled_tokens,
         total_num_scheduled_tokens=total_num_scheduled_tokens,
         scheduled_spec_decode_tokens={},
@@ -169,7 +172,7 @@ def _is_req_state_block_table_match(model_runner, req_id: str) -> bool:
             req_state.block_ids[0]).all()
 
 
-def test_update_states_new_request(model_runner):
+def test_update_states_new_request(model_runner, dist_init):
     req_id = "req_0"
 
     # new req
@@ -183,7 +186,7 @@ def test_update_states_new_request(model_runner):
     assert _is_req_state_block_table_match(model_runner, req_id)
 
 
-def test_update_states_request_finished(model_runner):
+def test_update_states_request_finished(model_runner, dist_init):
     req_id = "req_0"
 
     # new req
@@ -196,7 +199,7 @@ def test_update_states_request_finished(model_runner):
     # finish req
     scheduler_output = SchedulerOutput(
         scheduled_new_reqs=[],
-        scheduled_cached_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
         num_scheduled_tokens={},
         total_num_scheduled_tokens=0,
         scheduled_spec_decode_tokens={},
@@ -215,7 +218,7 @@ def test_update_states_request_finished(model_runner):
     assert not _is_req_scheduled(model_runner, req_id)
 
 
-def test_update_states_request_resumed(model_runner):
+def test_update_states_request_resumed(model_runner, dist_init):
     req_id = "req_0"
 
     # new req
@@ -228,7 +231,7 @@ def test_update_states_request_resumed(model_runner):
     # unschedule req
     scheduler_output = SchedulerOutput(
         scheduled_new_reqs=[],
-        scheduled_cached_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
         num_scheduled_tokens={},
         total_num_scheduled_tokens=0,
         scheduled_spec_decode_tokens={},
@@ -246,16 +249,16 @@ def test_update_states_request_resumed(model_runner):
 
     # resume req
     cached_req_data = CachedRequestData(
-        req_id=req_id,
-        resumed_from_preemption=False,
-        new_token_ids=[],
-        new_block_ids=[[]],
-        num_computed_tokens=0,
+        req_ids=[req_id],
+        resumed_from_preemption=[False],
+        new_token_ids=[[]],
+        new_block_ids=([[0]], ),
+        num_computed_tokens=[0],
     )
 
     scheduler_output = SchedulerOutput(
         scheduled_new_reqs=[],
-        scheduled_cached_reqs=[cached_req_data],
+        scheduled_cached_reqs=cached_req_data,
         num_scheduled_tokens={req_id: 1},
         total_num_scheduled_tokens=1,
         scheduled_spec_decode_tokens={},
@@ -275,7 +278,55 @@ def test_update_states_request_resumed(model_runner):
     assert _is_req_state_block_table_match(model_runner, req_id)
 
 
-def test_update_states_no_changes(model_runner):
+def test_get_nans_in_logits(model_runner, dist_init):
+    req_ids = ("req_0", "req_1")
+
+    scheduler_output = _schedule_new_request(*req_ids)
+    model_runner._update_states(scheduler_output)
+
+    logits = torch.tensor([
+        [1.0, 2.0, 3.0],
+        [3.0, 2.0, 1.0],
+    ], device=DEVICE)
+    result = model_runner._get_nans_in_logits(logits)
+    assert result == {"req_0": 0, "req_1": 0}
+
+    logits = torch.tensor([
+        [1.0, float('nan'), 3.0],
+        [4.0, float('nan'), float('nan')],
+    ],
+                          device=DEVICE)
+    result = model_runner._get_nans_in_logits(logits)
+    assert result == {"req_0": 1, "req_1": 2}
+
+    logits = torch.tensor([
+        [1.0, 2.0, 3.0],
+        [4.0, float('nan'), float('nan')],
+    ],
+                          device=DEVICE)
+    result = model_runner._get_nans_in_logits(logits)
+    assert result == {"req_0": 0, "req_1": 2}
+
+    result = model_runner._get_nans_in_logits(logits=None)
+    assert result == {"req_0": 0, "req_1": 0}
+
+    logits = torch.tensor([
+        [1.0, float('nan'), 3.0],
+    ], device=DEVICE)
+    result = model_runner._get_nans_in_logits(logits)
+    assert result == {'req_0': 1, 'req_1': 0}
+
+    logits = torch.tensor([
+        [float('nan'), float('nan'), 2.0],
+        [1.0, 2.0, 3.0],
+        [float('nan'), 2.0, 3.0],
+    ],
+                          device=DEVICE)
+    result = model_runner._get_nans_in_logits(logits)
+    assert result == {'req_0': 2, 'req_1': 0}
+
+
+def test_update_states_no_changes(model_runner, dist_init):
     req_id = "req_0"
 
     # new req
@@ -288,7 +339,7 @@ def test_update_states_no_changes(model_runner):
     # schedule req
     scheduler_output = SchedulerOutput(
         scheduled_new_reqs=[],
-        scheduled_cached_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
         num_scheduled_tokens={req_id: 1},
         total_num_scheduled_tokens=1,
         scheduled_spec_decode_tokens={},
@@ -308,7 +359,7 @@ def test_update_states_no_changes(model_runner):
     assert _is_req_state_block_table_match(model_runner, req_id)
 
 
-def test_update_states_request_unscheduled(model_runner):
+def test_update_states_request_unscheduled(model_runner, dist_init):
     req_ids = ("req_0", "req_1")
 
     # new reqs
@@ -325,7 +376,7 @@ def test_update_states_request_unscheduled(model_runner):
     # unschedule req_1
     scheduler_output = SchedulerOutput(
         scheduled_new_reqs=[],
-        scheduled_cached_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
         num_scheduled_tokens={req_ids[0]: 1},
         total_num_scheduled_tokens=1,
         scheduled_spec_decode_tokens={},
@@ -518,9 +569,9 @@ def test_init_kv_cache_without_kv_sharing():
     kv_cache_config = get_kv_cache_config(vllm_config, kv_cache_spec,
                                           available_memory)
     assert kv_cache_config.num_blocks == num_expected_blocks
-    assert len(kv_cache_config.tensors) == 2
-    assert kv_cache_config.tensors[layer_0].size == available_memory // 2
-    assert kv_cache_config.tensors[layer_1].size == available_memory // 2
+    assert len(kv_cache_config.kv_cache_tensors) == 2
+    assert kv_cache_config.kv_cache_tensors[0].size == available_memory // 2
+    assert kv_cache_config.kv_cache_tensors[1].size == available_memory // 2
 
     max_context_len =\
         estimate_max_model_len(vllm_config, kv_cache_spec, 5 * GiB_bytes)
@@ -530,9 +581,9 @@ def test_init_kv_cache_without_kv_sharing():
     # important: override tensor size to prevent large mem alloc during test
     # this will only allocate 2 block worth of memory (2 * 32kb)
     kv_cache_config.num_blocks = 1
-    for layer in kv_cache_config.tensors:
-        kv_cache_config.tensors[layer].size =\
-            kv_cache_spec[layer].page_size_bytes
+    for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
+        kv_cache_tensor.size = (
+            kv_cache_spec[kv_cache_tensor.shared_by[0]].page_size_bytes)
 
     runner.initialize_kv_cache(kv_cache_config)
 
@@ -589,10 +640,10 @@ def test_init_kv_cache_with_kv_sharing_valid():
     kv_cache_config = get_kv_cache_config(vllm_config, kv_cache_spec,
                                           available_memory)
     assert kv_cache_config.num_blocks == num_expected_blocks
-    assert len(kv_cache_config.tensors) == 1
+    assert len(kv_cache_config.kv_cache_tensors) == 1
     # Each layer now has twice the available memory for KV cache
     # compared to no KV sharing
-    assert kv_cache_config.tensors[layer_0].size == available_memory
+    assert kv_cache_config.kv_cache_tensors[0].size == available_memory
 
     max_context_len =\
         estimate_max_model_len(vllm_config, kv_cache_spec, 5 * GiB_bytes)
@@ -602,7 +653,7 @@ def test_init_kv_cache_with_kv_sharing_valid():
     # important: override tensor size to prevent large mem alloc during test
     # this will only allocate 1 block worth of memory (32kb)
     kv_cache_config.num_blocks = 1
-    kv_cache_config.tensors[layer_0].size =\
+    kv_cache_config.kv_cache_tensors[0].size =\
         kv_cache_spec[layer_0].page_size_bytes
 
     runner.initialize_kv_cache(kv_cache_config)

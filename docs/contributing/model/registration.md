@@ -1,5 +1,5 @@
 ---
-title: Registering a Model to vLLM
+title: Registering a Model
 ---
 [](){ #new-model-registration }
 
@@ -18,7 +18,7 @@ After you have implemented your model (see [tutorial][new-model-basic]), put it 
 Then, add your model class to `_VLLM_MODELS` in <gh-file:vllm/model_executor/models/registry.py> so that it is automatically registered upon importing vLLM.
 Finally, update our [list of supported models][supported-models] to promote your model!
 
-!!! warning
+!!! important
     The list of models in each section should be maintained in alphabetical order.
 
 ## Out-of-tree models
@@ -49,6 +49,6 @@ def register():
     )
 ```
 
-!!! warning
+!!! important
     If your model is a multimodal model, ensure the model class implements the [SupportsMultiModal][vllm.model_executor.models.interfaces.SupportsMultiModal] interface.
     Read more about that [here][supports-multimodal].

@@ -4,7 +4,6 @@ Test deepep dispatch-combine logic
 """
 
 import dataclasses
-import importlib
 from typing import Optional, Union
 
 import pytest
@@ -22,21 +21,20 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8)
 from vllm.platforms import current_platform
+from vllm.utils import has_deep_ep
 
-from .deepep_utils import ProcessGroupInfo, parallel_launch
+from .utils import ProcessGroupInfo, parallel_launch
 
-has_deep_ep = importlib.util.find_spec("deep_ep") is not None
-
-if has_deep_ep:
+if has_deep_ep():
     from vllm.model_executor.layers.fused_moe.deepep_ht_prepare_finalize import (  # noqa: E501
         DeepEPHTPrepareAndFinalize)
     from vllm.model_executor.layers.fused_moe.deepep_ll_prepare_finalize import (  # noqa: E501
         DeepEPLLPrepareAndFinalize)
 
-    from .deepep_utils import DeepEPHTArgs, DeepEPLLArgs, make_deepep_a2a
+    from .utils import DeepEPHTArgs, DeepEPLLArgs, make_deepep_a2a
 
 requires_deep_ep = pytest.mark.skipif(
-    not has_deep_ep,
+    not has_deep_ep(),
     reason="Requires deep_ep kernels",
 )
 

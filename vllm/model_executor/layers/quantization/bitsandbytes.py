@@ -71,9 +71,7 @@ class BitsAndBytesConfig(QuantizationConfig):
 
     @staticmethod
     def get_config_filenames() -> list[str]:
-        return [
-            "adapter_config.json",
-        ]
+        return []
 
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> "BitsAndBytesConfig":
