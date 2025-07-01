@@ -393,6 +393,38 @@ def run_internvl(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+# Keye-VL
+def run_keye_vl(questions: list[str], modality: str) -> ModelRequestData:
+    model_name = "Kwai-Keye/Keye-VL-8B-Preview"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=4096,
+        trust_remote_code=True,
+        limit_mm_per_prompt={modality: 1},
+    )
+
+    if modality == "image":
+        placeholder = "<|image_pad|>"
+    elif modality == "video":
+        placeholder = "<|video_pad|>"
+
+    prompts = [
+        (
+            "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
+            f"<|im_start|>user\n<|vision_start|>{placeholder}<|vision_end|>"
+            f"{question}<|im_end|>\n"
+            "<|im_start|>assistant\n"
+        )
+        for question in questions
+    ]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
 # Kimi-VL
 def run_kimi_vl(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
