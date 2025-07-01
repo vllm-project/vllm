@@ -190,10 +190,26 @@ class UnquantizedLinearMethod(LinearMethodBase):
                        output_partition_sizes: list[int], input_size: int,
                        output_size: int, params_dtype: torch.dtype,
                        **extra_weight_attrs):
-        weight = Parameter(torch.empty(sum(output_partition_sizes),
-                                       input_size_per_partition,
-                                       dtype=params_dtype),
-                           requires_grad=False)
+        # This method creates unquantized linear weights.
+        # The weights are not quantized, and they are not sharded.
+        # The amount of memory allocated for the weights is
+        # sum(output_partition_sizes) * input_size_per_partition.
+        try:
+            weight = Parameter(torch.empty(sum(output_partition_sizes),
+                                        input_size_per_partition,
+                                        dtype=params_dtype),
+                            requires_grad=False)
+        except RuntimeError as e:
+            if torch.cuda.is_available():
+                # This helps to see how much memory is allocated when using CUDA
+                logger.error(f"Failed to create unquantized linear weights: {e}")
+                logger.debug(f"CUDA device: {torch.cuda.current_device()}")
+                logger.debug(f"Allocated: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+                logger.debug(f"Reserved: {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
+            raise RuntimeError(
+                "Failed to create unquantized linear weights. "
+                "This may be caused by insufficient memory to allocate the weight."
+            ) from e
         set_weight_attrs(weight, {"input_dim": 1, "output_dim": 0})
         layer.register_parameter("weight", weight)
         set_weight_attrs(weight, extra_weight_attrs)

@@ -216,9 +216,20 @@ class Attention(nn.Module, AttentionLayerBase):
             ).parallel_config.pipeline_parallel_size)
         ]
 
-        self.q_range = torch.tensor(envs.Q_SCALE_CONSTANT, dtype=torch.float32)
-        self.k_range = torch.tensor(envs.K_SCALE_CONSTANT, dtype=torch.float32)
-        self.v_range = torch.tensor(envs.V_SCALE_CONSTANT, dtype=torch.float32)
+        try:
+            self.q_range = torch.tensor(envs.Q_SCALE_CONSTANT, dtype=torch.float32)
+            self.k_range = torch.tensor(envs.K_SCALE_CONSTANT, dtype=torch.float32)
+            self.v_range = torch.tensor(envs.V_SCALE_CONSTANT, dtype=torch.float32)
+        except Exception as e:
+            if torch.cuda.is_available():
+                logger.error("Failed to initialize attention q/k/v range constants: %s", e)
+                logger.debug("CUDA device: %s", torch.cuda.current_device())
+                logger.debug("Allocated: %.2f GiB", torch.cuda.memory_allocated() / (1 << 30))
+                logger.debug("Reserved: %.2f GiB", torch.cuda.memory_reserved() / (1 << 30))
+            raise RuntimeError(
+                "Failed to initialize q/k/v range constants. "
+                "This may be caused by insufficient memory to allocate kv cache."
+            ) from e
 
     def forward(
         self,
