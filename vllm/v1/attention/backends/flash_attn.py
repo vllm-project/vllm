@@ -336,8 +336,8 @@ class FlashAttentionMetadataBuilder(
             scheduler_metadata = self.scheduler_metadata[:n]
 
         max_num_splits = 0
-        if (self.use_full_cuda_graph and
-                num_actual_tokens <= self.max_cudagraph_size):
+        if (self.use_full_cuda_graph
+                and num_actual_tokens <= self.max_cudagraph_size):
             # NOTE(woosuk): Setting num_splits > 1 may increase the memory
             # usage, because the intermediate buffers of size [num_splits,
             # num_heads, num_tokens, head_size] are allocated. Therefore,
