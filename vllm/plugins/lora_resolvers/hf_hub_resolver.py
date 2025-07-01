@@ -27,7 +27,8 @@ class HfHubResolver(FilesystemResolver):
         """
         if self.adapter_dirs is None:
             self.adapter_dirs = await self._get_adapter_dirs()
-        if lora_name in self.adapter_dirs:
+
+        if self.adapter_dirs and lora_name in self.adapter_dirs:
             repo_path = await asyncio.to_thread(
                 snapshot_download,
                 repo_id=self.repo_name,
