@@ -280,7 +280,7 @@ def _fwd_kernel(Q,
              cur_head * stride_oh + offs_d[None, :] * stride_od)
     out_ptrs = Out + off_o
     if USE_FP8:
-        acc = acc / tl.load(out_scale)
+        acc = acc * tl.load(out_scale)
         acc = tl.clamp(acc, FP8_MIN, FP8_MAX)
     tl.store(out_ptrs,
              acc,
@@ -866,7 +866,7 @@ def context_attention_fwd(q,
         sm_scale,
         k_scale,
         v_scale,
-        fp8_out_scale,
+        1.0 / fp8_out_scale if fp8_out_scale is not None else 1.0,
         b_start_loc,
         b_seq_len,
         k_cache.shape[4],
