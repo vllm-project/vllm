@@ -57,6 +57,8 @@ We currently support the following OpenAI APIs:
     - Only applicable to [embedding models](../models/pooling_models.md) (`--task embed`).
 - [Transcriptions API][transcriptions-api] (`/v1/audio/transcriptions`)
     - Only applicable to Automatic Speech Recognition (ASR) models (OpenAI Whisper) (`--task generate`).
+- [Translation API][translations-api] (`/v1/audio/translations`)
+    - Only applicable to Automatic Speech Recognition (ASR) models (OpenAI Whisper) (`--task generate`).
 
 In addition, we have the following custom APIs:
 
@@ -143,11 +145,6 @@ completion = client.chat.completions.create(
 
 Only `X-Request-Id` HTTP request header is supported for now. It can be enabled
 with `--enable-request-id-headers`.
-
-> Note that enablement of the headers can impact performance significantly at high QPS
-> rates. We recommend implementing HTTP headers at the router level (e.g. via Istio),
-> rather than within the vLLM layer for this reason.
-> See [this PR](https://github.com/vllm-project/vllm/pull/11529) for more details.
 
 ??? Code
 
@@ -374,6 +371,34 @@ The following extra parameters are supported:
     ```python
     --8<-- "vllm/entrypoints/openai/protocol.py:transcription-extra-params"
     ```
+  
+[](){ #translations-api }
+
+### Translations API
+
+Our Translation API is compatible with [OpenAI's Translations API](https://platform.openai.com/docs/api-reference/audio/createTranslation);
+you can use the [official OpenAI Python client](https://github.com/openai/openai-python) to interact with it.
+Whisper models can translate audio from one of the 55 non-English supported languages into English.
+Please mind that the popular `openai/whisper-large-v3-turbo` model does not support translating.
+
+!!! note
+    To use the Translation API, please install with extra audio dependencies using `pip install vllm[audio]`.
+
+Code example: <gh-file:examples/online_serving/openai_translation_client.py>
+
+#### Extra Parameters
+
+The following [sampling parameters][sampling-params] are supported.
+
+```python
+--8<-- "vllm/entrypoints/openai/protocol.py:translation-sampling-params"
+```
+
+The following extra parameters are supported:
+
+```python
+--8<-- "vllm/entrypoints/openai/protocol.py:translation-extra-params"
+```
 
 [](){ #tokenizer-api }
 

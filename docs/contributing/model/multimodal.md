@@ -538,11 +538,13 @@ return a schema of the tensors outputted by the HF processor that are related to
             prompt: str,
             mm_data: Mapping[str, object],
             mm_kwargs: Mapping[str, object],
+            tok_kwargs: Mapping[str, object],
         ) -> BatchFeature:
             processed_outputs = super()._call_hf_processor(
                 prompt=prompt,
                 mm_data=mm_data,
                 mm_kwargs=mm_kwargs,
+                tok_kwargs=tok_kwargs,
             )
 
             image_patches = processed_outputs.get("image_patches")
@@ -565,6 +567,11 @@ return a schema of the tensors outputted by the HF processor that are related to
     !!! note
         Our [actual code](gh-file:vllm/model_executor/models/fuyu.py) has special handling
         for text-only inputs to prevent unnecessary warnings from HF processor.
+
+    !!! note
+        The `_call_hf_processor` method specifies both `mm_kwargs` and `tok_kwargs` for
+        processing. `mm_kwargs` is used to both initialize and call the huggingface
+        processor, whereas `tok_kwargs` is only used to call the huggingface processor.
 
     This lets us override [_get_mm_fields_config][vllm.multimodal.processing.BaseMultiModalProcessor._get_mm_fields_config] as follows:
 

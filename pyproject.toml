@@ -150,6 +150,7 @@ skip_gitignore = true
 markers = [
     "skip_global_cleanup",
     "core_model: enable this model test in each PR instead of only nightly",
+    "hybrid_model: models that contain mamba layers (including pure SSM and hybrid architectures)",
     "cpu_model: enable this model test in CPU tests",
     "split: run this test as part of a split",
     "distributed: run this test only in distributed GPU tests",
