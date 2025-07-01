@@ -1530,7 +1530,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 continue
 
             self.input_batch.token_ids_cpu[req_idx,
-                                            start_idx:end_idx] = sampled_ids
+                                           start_idx:end_idx] = sampled_ids
             self.input_batch.num_tokens_no_spec[req_idx] = end_idx
             self.input_batch.num_tokens[req_idx] = end_idx
             req_id = self.input_batch.req_ids[req_idx]
