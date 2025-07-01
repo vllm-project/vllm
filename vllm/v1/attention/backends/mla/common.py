@@ -504,8 +504,6 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         seq_lens = common_attn_metadata.seq_lens
         
         query_seq_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
-        print(f"query_start_loc_cpu.shape: {query_start_loc_cpu.shape}")
-        print(f"query_seq_lens_cpu.shape: {query_seq_lens_cpu.shape}")
         num_computed_tokens_cpu = common_attn_metadata.seq_lens_cpu - query_seq_lens_cpu
         
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = \

@@ -239,7 +239,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             == CompilationLevel.PIECEWISE
             and self.vllm_config.compilation_config.use_cudagraph
             and not self.model_config.enforce_eager)
-        self.use_cuda_graph = True
+        self.use_cuda_graph = False
         logger.info(f"self.use_cuda_graph {self.use_cuda_graph}")
         # TODO(woosuk): Provide an option to tune the max cudagraph batch size.
         # The convention is different.
@@ -1788,8 +1788,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 cudagraph_metadata.cudagraph.replay()
                 return cudagraph_metadata.outputs
             else:
-                assert False
-                return _run_ubatches(ubatch_metadata)
+                return _run_ubatches(ubatch_metadata, num_scheduled_tokens)
         # run single batch
         else:
             input_ids, positions, inputs_embeds, intermediate_tensors = \
