@@ -4040,6 +4040,9 @@ class CompilationConfig:
     splitting certain operations such as attention into subgraphs. Thus this
     flag cannot be used together with splitting_ops. This may provide
     performance benefits for smaller models."""
+    simple_cuda_graph: bool = False
+    """Whether to use simple CUDA graph, which uses full CUDA graphs without
+    torch.compile. This can speed up the startup time of vLLM."""
 
     pass_config: PassConfig = field(default_factory=PassConfig)
     """Custom inductor passes, see PassConfig for more details"""
@@ -4163,6 +4166,13 @@ class CompilationConfig:
 
         if isinstance(self.pass_config, dict):
             self.pass_config = PassConfig(**self.pass_config)
+
+        if self.simple_cuda_graph:
+            # When using simple CUDA graph, we skip torch.compile.
+            self.level = CompilationLevel.NO_COMPILATION
+            # Simple CUDA graph does not support piecewise CUDA graphs.
+            self.full_cuda_graph = True
+            self.use_cudagraph = True
 
     def init_backend(self, vllm_config: "VllmConfig") -> Union[str, Callable]:
         if self.level == CompilationLevel.NO_COMPILATION:
@@ -4518,9 +4528,14 @@ class VllmConfig:
             not self.model_config.enforce_eager:
             # By default, V1 uses piecewise CUDA graphs. If full_cuda_graph
             # is set to True, full CUDA graphs will be used.
+            self.use_cudagraph = True
             self.compilation_config.cudagraph_num_of_warmups = 1
-            self.compilation_config.level = CompilationLevel.PIECEWISE
-            self.compilation_config.set_splitting_ops_for_v1()
+            if self.compilation_config.simple_cuda_graph:
+                self.compilation_config.full_cuda_graph = True
+                self.compilation_config.level = CompilationLevel.NO_COMPILATION
+            else:
+                self.compilation_config.level = CompilationLevel.PIECEWISE
+                self.compilation_config.set_splitting_ops_for_v1()
 
         self._set_cudagraph_sizes()
 
