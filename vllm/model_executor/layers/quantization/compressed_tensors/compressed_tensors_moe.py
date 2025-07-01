@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import enum
+import functools
 from enum import Enum
 from typing import Callable, Optional
 
@@ -12,6 +13,7 @@ from compressed_tensors.quantization import (ActivationOrdering,
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
+from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEMethodBase,
                                                   FusedMoeWeightScaleSupported)
@@ -32,7 +34,7 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
-from vllm.utils import has_pplx
+from vllm.utils import has_deep_gemm, has_pplx
 
 if current_platform.is_cuda_alike():
     from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
@@ -362,6 +364,12 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
                                device=x.device).to(x.dtype)
 
 
+def _is_col_major(x: torch.Tensor) -> bool:
+    assert x.dim() == 3
+    b, m, n = x.shape
+    return x.stride(0) == m * n and x.stride(1) == 1 and x.stride(2) == m
+
+
 class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
 
     def __init__(
@@ -380,17 +388,21 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         per_channel = (
             self.weight_quant.strategy == QuantizationStrategy.CHANNEL
             and self.input_quant.strategy == QuantizationStrategy.TOKEN)
-        if not (per_tensor or per_channel):
+        block_quant = (self.weight_quant.strategy == QuantizationStrategy.BLOCK
+                       and self.input_quant.strategy
+                       == QuantizationStrategy.GROUP
+                       and self.weight_quant.block_structure is not None)
+        if not (per_tensor or per_channel or block_quant):
             raise ValueError(
-                "For FP8 Fused MoE layers, we require per tensor "
-                "or channelwise, dynamic per token quantization. Found "
+                "For FP8 Fused MoE layers, we require tensor/tensor, "
+                "channel/token, or block/group quantization. Found "
                 f"{self.weight_quant}, {self.input_quant}")
 
         self.static_input_scales = not self.input_quant.dynamic
-        if self.static_input_scales and per_channel:
+        if self.static_input_scales and not per_tensor:
             raise ValueError(
-                "For FP8 Fused MoE layer, we require either per tensor or "
-                "channelwise, dynamic per token quantization.")
+                "For FP8 Fused MoE layer with static input scales, we require "
+                "either per tensor quantization.")
 
         # For GPUs that lack FP8 hardware support, we can leverage the Marlin
         # kernel for fast weight-only FP8 quantization
@@ -404,6 +416,33 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
 
         self.rocm_aiter_moe_enabled = is_rocm_aiter_moe_enabled()
 
+        if self.weight_quant.block_structure is None:
+            block_size = None
+        elif isinstance(self.weight_quant.block_structure, str):
+            block_size = [
+                int(x) for x in self.weight_quant.block_structure.split("x")
+            ]
+        else:
+            block_size = self.weight_quant.block_structure
+        self.weight_block_size = block_size
+        self.block_quant = block_quant
+
+        # Check for DeepGemm support.
+        self.allow_deep_gemm = False
+        if envs.VLLM_USE_DEEP_GEMM:
+            if not has_deep_gemm():
+                logger.warning_once("Failed to import DeepGemm kernels.")
+            elif not self.block_quant:
+                logger.warning_once("Model is not block quantized. Not using "
+                                    " DeepGemm kernels")
+            elif (current_platform.is_cuda()
+                  and current_platform.has_device_capability(90)):
+                logger.info_once("Using DeepGemm kernels for Fp8MoEMethod.")
+                self.allow_deep_gemm = True
+            else:
+                logger.warning_once(
+                    "DeepGemm not supported on the current platform.")
+
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
                        hidden_size: int, intermediate_size_per_partition: int,
                        params_dtype: torch.dtype, **extra_weight_attrs):
@@ -415,6 +454,31 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         layer.weight_block_size = None
 
         params_dtype = torch.float8_e4m3fn
+
+        if self.block_quant:
+            assert self.weight_block_size is not None
+            layer.weight_block_size = self.weight_block_size
+            tp_size = get_tensor_model_parallel_world_size()
+            block_n, block_k = (
+                self.weight_block_size[0],
+                self.weight_block_size[1],
+            )
+            # NOTE: To ensure proper alignment of the block-wise quantization
+            # scales, the output_size of the weights for both the gate and up
+            # layers must be divisible by block_n.
+            # Required by column parallel or enabling merged weights
+            if intermediate_size_per_partition % block_n != 0:
+                raise ValueError(
+                    f"The output_size of gate's and up's weight = "
+                    f"{intermediate_size_per_partition} is not divisible by "
+                    f"weight quantization block_n = {block_n}.")
+            if (tp_size > 1
+                    and intermediate_size_per_partition % block_k != 0):
+                # Required by row parallel
+                raise ValueError(
+                    f"The input_size of down's weight = "
+                    f"{intermediate_size_per_partition} is not divisible by "
+                    f"weight quantization block_k = {block_k}.")
 
         # WEIGHTS
         w13_weight = torch.nn.Parameter(torch.empty(
@@ -450,10 +514,8 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             # Add PER-TENSOR quantization for FusedMoE.weight_loader.
             extra_weight_attrs.update(
                 {"quant_method": FusedMoeWeightScaleSupported.TENSOR.value})
-            set_weight_attrs(w13_weight_scale, extra_weight_attrs)
-            set_weight_attrs(w2_weight_scale, extra_weight_attrs)
-
         elif self.weight_quant.strategy == QuantizationStrategy.CHANNEL:
+            assert self.static_input_scales is False
             w13_weight_scale = torch.nn.Parameter(torch.ones(
                 num_experts,
                 2 * intermediate_size_per_partition,
@@ -468,8 +530,35 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             # Add PER-CHANNEL quantization for FusedMoE.weight_loader.
             extra_weight_attrs.update(
                 {"quant_method": FusedMoeWeightScaleSupported.CHANNEL.value})
-            set_weight_attrs(w13_weight_scale, extra_weight_attrs)
-            set_weight_attrs(w2_weight_scale, extra_weight_attrs)
+        elif self.block_quant:
+            assert self.static_input_scales is False
+            w13_weight_scale = torch.nn.Parameter(
+                torch.ones(
+                    num_experts,
+                    2 * ((intermediate_size_per_partition + block_n - 1) //
+                         block_n),
+                    (hidden_size + block_k - 1) // block_k,
+                    dtype=torch.float32,
+                ),
+                requires_grad=False,
+            )
+            w2_weight_scale = torch.nn.Parameter(
+                torch.ones(
+                    num_experts,
+                    (hidden_size + block_n - 1) // block_n,
+                    (intermediate_size_per_partition + block_k - 1) // block_k,
+                    dtype=torch.float32,
+                ),
+                requires_grad=False,
+            )
+            layer.register_parameter("w13_weight_scale", w13_weight_scale)
+            layer.register_parameter("w2_weight_scale", w2_weight_scale)
+            # Add PER-BLOCK quantization for FusedMoE.weight_loader.
+            extra_weight_attrs.update(
+                {"quant_method": FusedMoeWeightScaleSupported.BLOCK.value})
+
+        set_weight_attrs(w13_weight_scale, extra_weight_attrs)
+        set_weight_attrs(w2_weight_scale, extra_weight_attrs)
 
         # INPUT_SCALES
         if self.static_input_scales:
@@ -489,6 +578,59 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             layer.w2_input_scale = None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if self.rocm_aiter_moe_enabled:
+            from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (  # noqa E501
+                rocm_aiter_fused_experts, shuffle_weights)
+
+        # TODO (rob): refactor block quant into separate class.
+        if self.block_quant:
+            assert self.static_input_scales is False
+            if current_platform.is_fp8_fnuz():
+                w13_weight, w13_weight_scale, w13_input_scale = \
+                    normalize_e4m3fn_to_e4m3fnuz(
+                        layer.w13_weight, layer.w13_weight_scale,
+                        layer.w13_input_scale)
+                w2_weight, w2_weight_scale, w2_input_scale = \
+                    normalize_e4m3fn_to_e4m3fnuz(
+                        layer.w2_weight, layer.w2_weight_scale,
+                        layer.w2_input_scale)
+            else:
+                w13_weight = layer.w13_weight.data
+                w13_weight_scale = layer.w13_weight_scale.data
+                w2_weight = layer.w2_weight
+                w2_weight_scale = layer.w2_weight_scale
+
+            # torch.compile() cannot use Parameter subclasses.
+            layer.w13_weight = torch.nn.Parameter(w13_weight,
+                                                  requires_grad=False)
+            layer.w13_weight_scale = torch.nn.Parameter(w13_weight_scale,
+                                                        requires_grad=False)
+            layer.w2_weight = torch.nn.Parameter(w2_weight,
+                                                 requires_grad=False)
+            layer.w2_weight_scale = torch.nn.Parameter(w2_weight_scale,
+                                                       requires_grad=False)
+            if self.rocm_aiter_moe_enabled:
+                # reshaping weights is required for aiter moe kernel.
+                shuffled_w13, shuffled_w2 = shuffle_weights(
+                    layer.w13_weight.data, layer.w2_weight.data)
+
+                layer.w13_weight = torch.nn.Parameter(shuffled_w13,
+                                                      requires_grad=False)
+                layer.w2_weight = torch.nn.Parameter(shuffled_w2,
+                                                     requires_grad=False)
+
+            # DeepGemm scales need to be transposed and aligned.  We try to do
+            # it ahead of time for performance reasons.
+            if self.allow_deep_gemm:
+                # Lazy import to avoid CUDA initialization problems.
+                import deep_gemm as dg
+                if _is_col_major(layer.w13_weight_scale):
+                    layer.w13_weight_scale = \
+                        dg.get_col_major_tma_aligned_tensor(layer.w13_weight_scale).contiguous()
+                if _is_col_major(layer.w2_weight_scale):
+                    layer.w2_weight_scale = \
+                        dg.get_col_major_tma_aligned_tensor(layer.w2_weight_scale).contiguous()
+
         # Fp8 moe kernels require a single activation scale.
         # We take the max of all the scales in case they differ.
         if self.static_input_scales:
@@ -556,9 +698,6 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
 
         # Property to determine if AITER is used
         if self.rocm_aiter_moe_enabled:
-            from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (  # noqa E501
-                rocm_aiter_fused_experts, shuffle_weights)
-
             # reshaping weights is required for aiter moe kernel.
             shuffled_w13, shuffled_w2 = shuffle_weights(
                 layer.w13_weight.data, layer.w2_weight.data)
@@ -571,7 +710,11 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             self.rocm_aiter_fused_experts_func = rocm_aiter_fused_experts
         else:
             from vllm.model_executor.layers.fused_moe import fused_experts
-            self.fused_experts_func = fused_experts
+            self.fused_experts_func = functools.partial(  # type: ignore
+                fused_experts,
+                use_fp8_w8a8=True,
+                block_shape=self.weight_block_size,
+                allow_deep_gemm=self.allow_deep_gemm)
 
         if self.use_marlin:
             prepare_moe_fp8_layer_for_marlin(layer, False)
@@ -633,7 +776,8 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 w1_scale=layer.w13_weight_scale,
                 w2_scale=layer.w2_weight_scale,
                 a1_scale=layer.w13_input_scale,
-                a2_scale=layer.w2_input_scale)
+                a2_scale=layer.w2_input_scale,
+                block_shape=self.weight_block_size)
         if self.use_marlin:
             assert activation == "silu", (
                 f"{activation} not supported for Marlin MoE.")
@@ -661,7 +805,6 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             inplace=True,
             activation=activation,
             apply_router_weight_on_input=apply_router_weight_on_input,
-            use_fp8_w8a8=True,
             per_channel_quant=self.weight_quant.strategy ==
             QuantizationStrategy.CHANNEL,
             global_num_experts=global_num_experts,

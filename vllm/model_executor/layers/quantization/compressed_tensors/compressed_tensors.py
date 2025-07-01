@@ -315,8 +315,11 @@ class CompressedTensorsConfig(QuantizationConfig):
 
     def _is_fp8_w8a8_sm90(self, weight_quant: QuantizationArgs,
                           input_quant: QuantizationArgs) -> bool:
+        # Block quantization is not supported for SM90 CUTLASS yet
+        is_block_quant = weight_quant.strategy == QuantizationStrategy.BLOCK
         return (self._check_scheme_supported(90, error=False, match_exact=True)
-                and self._is_fp8_w8a8(weight_quant, input_quant))
+                and self._is_fp8_w8a8(weight_quant, input_quant)
+                and not is_block_quant)
 
     def _is_fp8_w8a16(self, weight_quant: QuantizationArgs,
                       input_quant: QuantizationArgs) -> bool:
