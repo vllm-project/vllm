@@ -145,7 +145,10 @@ def kernel_unified_attention_2d(
                               mask=query_mask_1,
                               other=0.0)
 
-    num_blocks = cdiv_fn(tl.minimum(context_len + q_block_local_idx * BLOCK_Q + (BLOCK_M - 1)//num_queries_per_kv + 1, seq_len), BLOCK_SIZE)
+    num_blocks = cdiv_fn(
+        tl.minimum(
+            context_len + q_block_local_idx * BLOCK_Q +
+            (BLOCK_M - 1) // num_queries_per_kv + 1, seq_len), BLOCK_SIZE)
 
     # iterate through tiles
     for j in range(0, num_blocks):
