@@ -11,6 +11,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
 
 # DeepEP kernels quantize dispatch inputs in 128 element chunks.
 DEEPEP_QUANT_BLOCK_SIZE = 128
+DEEPEP_QUANT_BLOCK_SHAPE = [DEEPEP_QUANT_BLOCK_SIZE, DEEPEP_QUANT_BLOCK_SIZE]
 
 
 def dequant_fp8(expert_x_fp8: torch.Tensor,

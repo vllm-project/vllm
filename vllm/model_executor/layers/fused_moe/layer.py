@@ -44,7 +44,7 @@ if current_platform.is_cuda_alike():
                                             pplx_hidden_dim_scale_bytes)
     if has_deep_ep():
         from .deepep_ht_prepare_finalize import DeepEPHTPrepareAndFinalize
-        from .deepep_ll_prepare_finalize import (DEEPEP_QUANT_BLOCK_SIZE,
+        from .deepep_ll_prepare_finalize import (DEEPEP_QUANT_BLOCK_SHAPE,
                                                  DeepEPLLPrepareAndFinalize)
 else:
     fused_experts = None  # type: ignore
@@ -159,11 +159,11 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 
             # Note : We may want to use FP8 dispatch even otherwise just to
             # reduce datamovement
-            assert (moe.quant_config is not None
-                    and moe.quant_config.block_shape is not None)
-            use_fp8_dispatch = (
-                moe.quant_config.quant_dtype == current_platform.fp8_dtype()
-                and moe.quant_config.block_shape[1] == DEEPEP_QUANT_BLOCK_SIZE)
+            assert moe.quant_config is not None
+            use_fp8_dispatch = (moe.quant_config.quant_dtype
+                                == current_platform.fp8_dtype()
+                                and moe.quant_config.block_shape[1]
+                                == DEEPEP_QUANT_BLOCK_SHAPE)
 
             # Note (varun): Whether to use FP8 dispatch or not needs some
             # profiling. Turning it off for now.

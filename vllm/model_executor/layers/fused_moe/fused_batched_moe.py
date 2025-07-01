@@ -685,7 +685,7 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         local_num_experts: int,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
         assert a.dim() == 2
-        num_dp = self.world_size // self.dp_size
+        num_dp = self.world_size
         num_experts = local_num_experts
         max_num_tokens = self.max_num_tokens
         workspace13 = (num_experts, max_num_tokens * num_dp, max(K, N))
