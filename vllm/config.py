@@ -1434,10 +1434,12 @@ class ModelConfig:
         return getattr(self.hf_config, "matryoshka_dimensions", None)
 
     def get_and_verify_max_len(self, max_model_len: int):
-        tokenizer_config = try_get_tokenizer_config(
-            self.tokenizer,
-            trust_remote_code=self.trust_remote_code,
-            revision=self.tokenizer_revision)
+        tokenizer_config = None
+        if self.runner_type == "pooling":
+            tokenizer_config = try_get_tokenizer_config(
+                self.tokenizer,
+                trust_remote_code=self.trust_remote_code,
+                revision=self.tokenizer_revision)
         max_model_len = _get_and_verify_max_len(
             hf_config=self.hf_text_config,
             tokenizer_config=tokenizer_config,

@@ -412,6 +412,8 @@ def test_load_config_pt_load_map_location(pt_load_map_location):
         ("BAAI/bge-reranker-base", None, 512, False),
         ("BAAI/bge-reranker-base", 256, 256, False),
         ("BAAI/bge-reranker-base", 513, 512, True),
+        ("deepseek-ai/DeepSeek-R1-Distill-Qwen-7B", None, 131072, False),
+        ("deepseek-ai/DeepSeek-R1-Distill-Qwen-7B", 131073, 131072, True),
     ])
 def test_get_and_verify_max_len(model_id, max_model_len, expected_max_len,
                                 should_raise):
