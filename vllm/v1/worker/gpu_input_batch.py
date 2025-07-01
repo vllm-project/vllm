@@ -385,7 +385,14 @@ class InputBatch:
         return req_index
 
     def remove_request(self, req_id: str) -> Optional[int]:
-        """This method must always be followed by a call to condense()."""
+        """This method must always be followed by a call to condense().
+        
+        Args:
+          req_id: request to remove
+
+        Returns:
+          Removed request index, or `None` if `req_id` not recognized
+        """
 
         req_index = self.req_id_to_index.pop(req_id, None)
         if req_index is None:
