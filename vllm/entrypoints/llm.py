@@ -481,6 +481,13 @@ class LLM:
             # Use default sampling params.
             sampling_params = self.get_default_sampling_params()
 
+        tokenization_kwargs: dict[str, Any] = {}
+        truncate_prompt_tokens = None
+        if isinstance(sampling_params, SamplingParams):
+            truncate_prompt_tokens = sampling_params.truncate_prompt_tokens
+        _validate_truncation_size(self.llm_engine.model_config.max_model_len,
+                                  truncate_prompt_tokens, tokenization_kwargs)
+
         self._validate_and_add_requests(
             prompts=parsed_prompts,
             params=sampling_params,
@@ -488,6 +495,7 @@ class LLM:
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
             guided_options=guided_options_request,
+            tokenization_kwargs=tokenization_kwargs,
             priority=priority,
         )
 
@@ -1450,15 +1458,15 @@ class LLM:
             prompts = [prompts]
 
         num_requests = len(prompts)
-        if isinstance(params, list) and len(params) != num_requests:
+        if isinstance(params, Sequence) and len(params) != num_requests:
             raise ValueError("The lengths of prompts and params "
                              "must be the same.")
         if isinstance(lora_request,
-                      list) and len(lora_request) != num_requests:
+                      Sequence) and len(lora_request) != num_requests:
             raise ValueError("The lengths of prompts and lora_request "
                              "must be the same.")
 
-        for sp in params if isinstance(params, list) else (params, ):
+        for sp in params if isinstance(params, Sequence) else (params, ):
             if isinstance(sp, SamplingParams):
                 self._add_guided_params(sp, guided_options)
 
@@ -1568,6 +1576,8 @@ class LLM:
                             pbar.update(n)
                         else:
                             pbar.update(1)
+                        if pbar.n == num_requests:
+                            pbar.refresh()
 
         if use_tqdm:
             pbar.close()

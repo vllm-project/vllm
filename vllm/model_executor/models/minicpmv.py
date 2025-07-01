@@ -534,6 +534,7 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
         self,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
     ) -> Mapping[str, NestedTensors]:
         if (images := mm_data.get("images")) is None:
             return {}
@@ -550,6 +551,7 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
                 prompts=[self.info.image_pattern] * len(parsed_images),
                 mm_data={"images": [[image] for image in parsed_images]},
                 mm_kwargs=mm_kwargs,
+                tok_kwargs=tok_kwargs,
                 out_keys={"pixel_values", "image_sizes", "tgt_sizes"},
             )
 
@@ -563,6 +565,7 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
         self,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
     ) -> Mapping[str, NestedTensors]:
         if (videos := mm_data.get("videos")) is None:
             return {}
@@ -586,6 +589,7 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
                     "max_slice_nums":
                     self.info.get_video_max_slice_num(),
                 },
+                tok_kwargs=tok_kwargs,
                 out_keys={"pixel_values", "image_sizes", "tgt_sizes"},
             )
 
@@ -601,10 +605,11 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
         self,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
     ) -> Mapping[str, NestedTensors]:
         return {
-            **self.process_images(mm_data, mm_kwargs),
-            **self.process_videos(mm_data, mm_kwargs),
+            **self.process_images(mm_data, mm_kwargs, tok_kwargs),
+            **self.process_videos(mm_data, mm_kwargs, tok_kwargs),
         }
 
     def _base_call_hf_processor(
@@ -612,6 +617,7 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
         prompts: list[str],
         mm_data: Mapping[str, Sequence[object]],
         mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
         *,
         out_keys: set[str],
     ) -> dict[str, NestedTensors]:
@@ -621,6 +627,7 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
                 prompt=prompts,  # type: ignore
                 mm_data=mm_data,
                 mm_kwargs=mm_kwargs,
+                tok_kwargs=tok_kwargs,
             )
         else:
             inputs = defaultdict[str, list[torch.Tensor]](list)
@@ -633,6 +640,7 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
                         for k, v in mm_data.items()
                     },
                     mm_kwargs=mm_kwargs,
+                    tok_kwargs=tok_kwargs,
                 )
 
                 for k, v in inputs_one.items():
@@ -646,11 +654,12 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         tokenizer = self.info.get_tokenizer()
 
-        input_ids = torch.tensor([tokenizer.encode(prompt)])
-        mm_inputs = self.process_mm_inputs(mm_data, mm_kwargs)
+        input_ids = torch.tensor([tokenizer.encode(prompt, **tok_kwargs)])
+        mm_inputs = self.process_mm_inputs(mm_data, mm_kwargs, tok_kwargs)
 
         return BatchFeature({
             "input_ids": input_ids,
@@ -662,6 +671,7 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
         prompt_text: str,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
+        tokenization_kwargs: Mapping[str, object],
     ) -> bool:
         return False
 
