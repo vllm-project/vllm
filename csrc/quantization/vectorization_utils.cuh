@@ -28,6 +28,8 @@ __device__ inline void vectorize_with_alignment(
   uintptr_t addr = reinterpret_cast<uintptr_t>(in);
 
   // fast path when the whole region is already aligned
+  // Note: currently the output is guaranteed to be same as the input, so we
+  // don't check it here, comments here just for future reference.
   bool can_vec = ((addr & (WIDTH - 1)) == 0) && ((len & (VEC_SIZE - 1)) == 0);
   if (can_vec) {
     int num_vec = len / VEC_SIZE;
