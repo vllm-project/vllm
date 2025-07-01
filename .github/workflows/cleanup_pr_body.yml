@@ -20,7 +20,12 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Install Python dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install regex
+
       - name: Update PR description
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: .github/scripts/cleanup_pr_body.sh "${{ github.event.number }}"
+        run: bash .github/scripts/cleanup_pr_body.sh "${{ github.event.number }}"

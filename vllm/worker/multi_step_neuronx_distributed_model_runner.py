@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import List, Optional
 
 import torch
@@ -49,8 +50,10 @@ class MultiStepNeuronxDistributedModelRunner(NeuronxDistributedModelRunner):
             positions=model_input.input_positions,
             input_block_ids=model_input.input_block_ids,
             sampling_params=sampling_params,
-            **MultiModalKwargs.as_kwargs(model_input.multi_modal_kwargs or {},
-                                         device=self.device),
+            **MultiModalKwargs.as_kwargs(
+                model_input.multi_modal_kwargs or {},
+                device=self.device,
+            ),
         )
 
         output = self.model.sample(

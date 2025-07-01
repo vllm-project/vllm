@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
 import torch
@@ -6,8 +7,7 @@ import torch
 import vllm.envs as envs
 import vllm.plugins
 from vllm.compilation.fusion import (FUSED_OPS, QUANT_OPS, FusedRMSQuantKey,
-                                     FusionPass, QuantKey)
-from vllm.compilation.fx_utils import find_auto_fn, find_auto_fn_maybe
+                                     FusionPass, GroupShape, QuantKey)
 from vllm.compilation.noop_elimination import NoOpEliminationPass
 from vllm.config import (CompilationConfig, CompilationLevel, PassConfig,
                          VllmConfig)
@@ -29,6 +29,11 @@ class TestModel(torch.nn.Module):
         self.cutlass_fp8_enabled = cutlass_fp8_enabled
         self.norm = [RMSNorm(hidden_size, eps) for _ in range(3)]
         self.wscale = [torch.rand(1, dtype=torch.float32) for _ in range(2)]
+        group_shape = GroupShape.PER_TENSOR if static else GroupShape.PER_TOKEN
+        self.key = QuantKey(dtype=FP8_DTYPE,
+                            static=static,
+                            group_shape=group_shape,
+                            symmetric=True)
         if static:
             self.scale = [torch.rand(1, dtype=torch.float32) for _ in range(2)]
         else:
@@ -58,6 +63,15 @@ class TestModel(torch.nn.Module):
                                    input_scale=self.scale[1])
         y3, resid = self.norm[2](x3, resid)  # use resid here
         return y3
+
+    def ops_in_model_before(self):
+        return [QUANT_OPS[self.key]]
+
+    def ops_in_model_after(self):
+        return [
+            FUSED_OPS[FusedRMSQuantKey(self.key, False)],
+            FUSED_OPS[FusedRMSQuantKey(self.key, True)]
+        ]
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
@@ -107,25 +121,8 @@ def test_fusion_rmsnorm_quant(dtype, hidden_size, num_tokens, eps, static,
 
         torch.testing.assert_close(result, result2, atol=ATOL, rtol=RTOL)
 
-        # Check substitution worked
-        pre_nodes = backend.graph_pre_pass.nodes
-        post_nodes = backend.graph_post_pass.nodes
-
-        # static is per-tensor, dynamic is per-token
-        key = QuantKey(dtype=FP8_DTYPE,
-                       static=static,
-                       per_tensor=static,
-                       symmetric=True)
-        rms_quant = FUSED_OPS[FusedRMSQuantKey(key, False)]
-        add_rms_quant = FUSED_OPS[FusedRMSQuantKey(key, True)]
-        fp8_quant = QUANT_OPS[key]
-
         # In pre-nodes, fp8 quant should be there and fused kernels should not
-        assert find_auto_fn_maybe(pre_nodes, rms_quant) is None
-        assert find_auto_fn_maybe(pre_nodes, add_rms_quant) is None
-        find_auto_fn(pre_nodes, fp8_quant)
+        backend.check_before_ops(model.ops_in_model_before())
 
         # In post-nodes, fused kernels should be there and fp8 quant should not
-        find_auto_fn(post_nodes, rms_quant)
-        find_auto_fn(post_nodes, add_rms_quant)
-        assert find_auto_fn_maybe(post_nodes, fp8_quant) is None
+        backend.check_after_ops(model.ops_in_model_after())

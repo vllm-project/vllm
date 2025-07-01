@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from itertools import groupby
 from pathlib import Path
@@ -8,10 +9,13 @@ from urllib.parse import ParseResult, urlparse
 import numpy as np
 import numpy.typing as npt
 import torch
-from PIL import Image
+from PIL import Image, UnidentifiedImageError
 
 import vllm.envs as envs
 from vllm.connections import HTTPConnection, global_http_connection
+from vllm.distributed import (get_tensor_model_parallel_rank,
+                              get_tensor_model_parallel_world_size,
+                              tensor_model_parallel_all_gather)
 
 from .audio import AudioMediaIO
 from .base import MediaIO
@@ -181,11 +185,15 @@ class MediaConnector:
         """
         image_io = ImageMediaIO(image_mode=image_mode)
 
-        return self.load_from_url(
-            image_url,
-            image_io,
-            fetch_timeout=envs.VLLM_IMAGE_FETCH_TIMEOUT,
-        )
+        try:
+            return self.load_from_url(
+                image_url,
+                image_io,
+                fetch_timeout=envs.VLLM_IMAGE_FETCH_TIMEOUT,
+            )
+        except UnidentifiedImageError as e:
+            # convert to ValueError to be properly caught upstream
+            raise ValueError(str(e)) from e
 
     async def fetch_image_async(
         self,
@@ -200,11 +208,15 @@ class MediaConnector:
         """
         image_io = ImageMediaIO(image_mode=image_mode)
 
-        return await self.load_from_url_async(
-            image_url,
-            image_io,
-            fetch_timeout=envs.VLLM_IMAGE_FETCH_TIMEOUT,
-        )
+        try:
+            return await self.load_from_url_async(
+                image_url,
+                image_io,
+                fetch_timeout=envs.VLLM_IMAGE_FETCH_TIMEOUT,
+            )
+        except UnidentifiedImageError as e:
+            # convert to ValueError to be properly caught upstream
+            raise ValueError(str(e)) from e
 
     def fetch_video(
         self,
@@ -259,7 +271,8 @@ class MediaConnector:
 
 
 global_media_connector = MediaConnector()
-"""The global {class}`MediaConnector` instance used by vLLM."""
+"""The global [`MediaConnector`][vllm.multimodal.utils.MediaConnector]
+instance used by vLLM."""
 
 fetch_audio = global_media_connector.fetch_audio
 fetch_image = global_media_connector.fetch_image
@@ -311,7 +324,7 @@ def merge_and_sort_multimodal_metadata(
     Returns:
         list[str]: List of item modalities in order of their positions in the
         input sequence.
-        list[PlaceholderRange]: Sorted list of all PlaceholdeRanges from
+        list[PlaceholderRange]: Sorted list of all PlaceholderRanges from
         mm_positions.
         Optional[list[str]]: Sorted list of all hashes from mm_hashes if given,
         None otherwise.
@@ -389,3 +402,35 @@ def group_mm_inputs_by_modality(
     return [
         list(group) for _, group in groupby(mm_inputs, key=modality_group_func)
     ]
+
+
+def run_dp_sharded_vision_model(image_input: torch.Tensor,
+                                vision_model: torch.nn.Module) -> torch.Tensor:
+    """Run a vision model with data parallelism (DP) sharding. The function 
+    will shard the input image tensor on the first dimension and run the vision
+    model
+
+    Args:
+        image_input (torch.Tensor): Image input tensor.
+        vision_model (torch.nn.Module): Vision model.
+
+    Returns:
+        torch.Tensor: Output image embeddings
+    """
+
+    num_chunks = image_input.shape[0]
+    mp_world_size = get_tensor_model_parallel_world_size()
+    num_chunks_per_rank = (num_chunks + mp_world_size - 1) // mp_world_size
+    num_padded_chunks = num_chunks_per_rank * mp_world_size - num_chunks
+    pad = (0, ) * (2 * (image_input.dim() - 1)) + (0, num_padded_chunks)
+    image_input_padded = torch.nn.functional.pad(image_input, pad)
+    rank = get_tensor_model_parallel_rank()
+    image_input_per_rank = image_input_padded[rank *
+                                              num_chunks_per_rank:(rank + 1) *
+                                              num_chunks_per_rank, ...]
+
+    vision_embeddings = vision_model(image_input_per_rank)
+    vision_embeddings = tensor_model_parallel_all_gather(vision_embeddings,
+                                                         dim=0)
+    vision_embeddings = vision_embeddings[:num_chunks, ...]
+    return vision_embeddings

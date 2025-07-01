@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 Based on:
 Chen, L., Ye, Z., Wu, Y., Zhuo, D., Ceze, L., & Krishnamurthy, A. (2023).
@@ -153,7 +154,7 @@ def _lora_expand(
         lora_token_start_loc (torch.Tensor): A cumulative sum of
             num_tokens_per_lora. lora_token_start_loc[0] is always 0 so that
             lora_token_start_loc[i], along with num_tokens_per_lora[i]
-            identifies the the region in token_indices_sorted_by_lora_ids that
+            identifies the region in token_indices_sorted_by_lora_ids that
             LoRA lora_ids[i] should process.
         lora_ids (torch.Tensor): LoRA ids to process.
         no_lora_flag_cpu (torch.Tensor): A CPU tensor of size 1, that indicates

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from argparse import Namespace
 
@@ -10,9 +11,12 @@ def parse_args():
     parser = FlexibleArgumentParser()
     parser = EngineArgs.add_cli_args(parser)
     # Set example specific arguments
-    parser.set_defaults(model="intfloat/e5-mistral-7b-instruct",
-                        task="embed",
-                        enforce_eager=True)
+    parser.set_defaults(
+        model="intfloat/e5-mistral-7b-instruct",
+        task="embed",
+        enforce_eager=True,
+        max_model_len=1024,
+    )
     return parser.parse_args()
 
 
@@ -36,10 +40,10 @@ def main(args: Namespace):
     print("\nGenerated Outputs:\n" + "-" * 60)
     for prompt, output in zip(prompts, outputs):
         embeds = output.outputs.embedding
-        embeds_trimmed = ((str(embeds[:16])[:-1] +
-                           ", ...]") if len(embeds) > 16 else embeds)
-        print(f"Prompt: {prompt!r} \n"
-              f"Embeddings: {embeds_trimmed} (size={len(embeds)})")
+        embeds_trimmed = (
+            (str(embeds[:16])[:-1] + ", ...]") if len(embeds) > 16 else embeds
+        )
+        print(f"Prompt: {prompt!r} \nEmbeddings: {embeds_trimmed} (size={len(embeds)})")
         print("-" * 60)
 
 

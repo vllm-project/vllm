@@ -172,7 +172,7 @@ __device__ void paged_attention_kernel(
 
   // Load the query to registers.
   // Each thread in a thread group has a different part of the query.
-  // For example, if the the thread group size is 4, then the first thread in
+  // For example, if the thread group size is 4, then the first thread in
   // the group has 0, 4, 8, ... th vectors of the query, and the second thread
   // has 1, 5, 9, ... th vectors of the query, and so on. NOTE(woosuk): Because
   // q is split from a qkv tensor, it may not be contiguous.
@@ -259,7 +259,7 @@ __device__ void paged_attention_kernel(
 
     // Load a key to registers.
     // Each thread in a thread group has a different part of the key.
-    // For example, if the the thread group size is 4, then the first thread in
+    // For example, if the thread group size is 4, then the first thread in
     // the group has 0, 4, 8, ... th vectors of the key, and the second thread
     // has 1, 5, 9, ... th vectors of the key, and so on.
     for (int i = 0; i < NUM_TOKENS_PER_THREAD_GROUP; i++) {

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import argparse
 import copy
@@ -18,7 +19,7 @@ from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     w8a8_block_fp8_matmul,
 )
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils import FlexibleArgumentParser, cdiv
 
 DEFAULT_MODELS = list(WEIGHT_SHAPES.keys())
 DEFAULT_BATCH_SIZES = [1, 16, 32, 64, 128, 256, 512]
@@ -115,8 +116,11 @@ def bench_fp8(
     a_cont = a.contiguous()
     scale_a = torch.tensor(1.0, device="cuda", dtype=torch.float32)
     scale_b = torch.tensor(1.0, device="cuda", dtype=torch.float32)
-    block_scale_a = torch.rand((m, k // 128), device="cuda", dtype=torch.float32)
-    block_scale_b = torch.rand((k // 128, n // 128), device="cuda", dtype=torch.float32)
+
+    block_scale_a = torch.rand((m, cdiv(k, 128)), device="cuda", dtype=torch.float32)
+    block_scale_b = torch.rand(
+        cdiv(k, 128), cdiv(n, 128), device="cuda", dtype=torch.float32
+    )
     block_scale_a_M_major = block_scale_a.t().contiguous().t()
     block_scale_b_K_major = block_scale_b.t().contiguous().t()
     bias = torch.zeros((n,), device="cuda", dtype=torch.bfloat16)
