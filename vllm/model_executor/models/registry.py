@@ -52,12 +52,15 @@ _TEXT_GENERATION_MODELS = {
     "DeepseekForCausalLM": ("deepseek", "DeepseekForCausalLM"),
     "DeepseekV2ForCausalLM": ("deepseek_v2", "DeepseekV2ForCausalLM"),
     "DeepseekV3ForCausalLM": ("deepseek_v2", "DeepseekV3ForCausalLM"),
+    "Dots1ForCausalLM": ("dots1", "Dots1ForCausalLM"),
     "ExaoneForCausalLM": ("exaone", "ExaoneForCausalLM"),
     "FalconForCausalLM": ("falcon", "FalconForCausalLM"),
     "Fairseq2LlamaForCausalLM": ("fairseq2_llama", "Fairseq2LlamaForCausalLM"),
     "GemmaForCausalLM": ("gemma", "GemmaForCausalLM"),
     "Gemma2ForCausalLM": ("gemma2", "Gemma2ForCausalLM"),
     "Gemma3ForCausalLM": ("gemma3", "Gemma3ForCausalLM"),
+    #TODO(ywang96): Support multimodal gemma3n
+    "Gemma3nForConditionalGeneration": ("gemma3n", "Gemma3nForConditionalGeneration"),    # noqa: E501
     "GlmForCausalLM": ("glm", "GlmForCausalLM"),
     "Glm4ForCausalLM": ("glm4", "Glm4ForCausalLM"),
     "GPT2LMHeadModel": ("gpt2", "GPT2LMHeadModel"),
@@ -70,6 +73,7 @@ _TEXT_GENERATION_MODELS = {
     "GraniteMoeSharedForCausalLM": ("granitemoeshared", "GraniteMoeSharedForCausalLM"),   # noqa: E501
     "GritLM": ("gritlm", "GritLM"),
     "Grok1ModelForCausalLM": ("grok1", "Grok1ForCausalLM"),
+    "HunYuanMoEV1ForCausalLM": ("hunyuan_v1_moe", "HunYuanMoEV1ForCausalLM"),
     "InternLMForCausalLM": ("llama", "LlamaForCausalLM"),
     "InternLM2ForCausalLM": ("internlm2", "InternLM2ForCausalLM"),
     "InternLM2VEForCausalLM": ("internlm2_ve", "InternLM2VEForCausalLM"),
@@ -187,6 +191,7 @@ _MULTIMODAL_MODELS = {
     "FuyuForCausalLM": ("fuyu", "FuyuForCausalLM"),
     "Gemma3ForConditionalGeneration": ("gemma3_mm", "Gemma3ForConditionalGeneration"),  # noqa: E501
     "GLM4VForCausalLM": ("glm4v", "GLM4VForCausalLM"),
+    "Glm4vForConditionalGeneration": ("glm4_1v", "Glm4vForConditionalGeneration"),  # noqa: E501
     "GraniteSpeechForConditionalGeneration": ("granite_speech", "GraniteSpeechForConditionalGeneration"),  # noqa: E501
     "H2OVLChatModel": ("h2ovl", "H2OVLChatModel"),
     "InternVLChatModel": ("internvl", "InternVLChatModel"),
