@@ -192,6 +192,7 @@ _MULTIMODAL_MODELS = {
     "InternVLChatModel": ("internvl", "InternVLChatModel"),
     "Idefics3ForConditionalGeneration":("idefics3","Idefics3ForConditionalGeneration"),
     "SmolVLMForConditionalGeneration": ("smolvlm","SmolVLMForConditionalGeneration"),  # noqa: E501
+    "KeyeForConditionalGeneration": ("keye", "KeyeForConditionalGeneration"),
     "KimiVLForConditionalGeneration": ("kimi_vl", "KimiVLForConditionalGeneration"),  # noqa: E501
     "LlavaForConditionalGeneration": ("llava", "LlavaForConditionalGeneration"),
     "LlavaNextForConditionalGeneration": ("llava_next", "LlavaNextForConditionalGeneration"),  # noqa: E501
@@ -224,7 +225,6 @@ _MULTIMODAL_MODELS = {
     "Llama4ForConditionalGeneration": ("mllama4", "Llama4ForConditionalGeneration"),  # noqa: E501
     "SkyworkR1VChatModel": ("skyworkr1v", "SkyworkR1VChatModel"),
     "WhisperForConditionalGeneration": ("whisper", "WhisperForConditionalGeneration"),  # noqa: E501
-    "KeyeForConditionalGeneration": ("keye", "KeyeForConditionalGeneration"),
 }
 
 _SPECULATIVE_DECODING_MODELS = {

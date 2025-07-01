@@ -10,7 +10,6 @@ import torch
 import torch.nn as nn
 from einops import rearrange
 from flash_attn import flash_attn_varlen_func
-from flash_attn.layers.rotary import apply_rotary_emb
 from transformers import PretrainedConfig
 from transformers.activations import GELUActivation
 from transformers.feature_extraction_utils import BatchFeature
@@ -48,6 +47,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.config import uses_mrope
 from vllm.transformers_utils.processor import (
     cached_image_processor_from_config)
+from vllm.vllm_flash_attn.layers.rotary import apply_rotary_emb
 
 from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
                          SupportsMultiModal, SupportsPP)
@@ -336,7 +336,7 @@ def apply_rotary_pos_emb_flashatt(
     return q_embed, k_embed
 
 
-class SiglipAttention(nn.Module):
+class KeyeSiglipAttention(nn.Module):
     """Multi-headed attention from 'Attention Is All You
     Need' paper."""
 
@@ -475,7 +475,7 @@ class SigLIPRotaryEmbedding(nn.Module):
         return freqs
 
 
-class SiglipEncoderLayer(nn.Module):
+class KeyeSiglipEncoderLayer(nn.Module):
 
     def __init__(
         self,
@@ -487,7 +487,7 @@ class SiglipEncoderLayer(nn.Module):
         self.embed_dim = config.hidden_size
         self.layer_norm1 = nn.LayerNorm(self.embed_dim,
                                         eps=config.layer_norm_eps)
-        self.self_attn = SiglipAttention(
+        self.self_attn = KeyeSiglipAttention(
             config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
@@ -530,7 +530,7 @@ class SiglipEncoderLayer(nn.Module):
         return hidden_states
 
 
-class SiglipEncoder(nn.Module):
+class KeyeSiglipEncoder(nn.Module):
 
     def __init__(
         self,
@@ -544,7 +544,7 @@ class SiglipEncoder(nn.Module):
         num_heads = config.num_attention_heads
         head_dim = embed_dim // num_heads
         self.layers = nn.ModuleList([
-            SiglipEncoderLayer(
+            KeyeSiglipEncoderLayer(
                 config,
                 quant_config=quant_config,
                 prefix=f"{prefix}.layers.{layer_idx}",
@@ -624,7 +624,7 @@ class SiglipEncoder(nn.Module):
         return hidden_states
 
 
-class SiglipVisionTransformer(nn.Module):
+class KeyeSiglipVisionTransformer(nn.Module):
 
     def __init__(
         self,
@@ -637,7 +637,7 @@ class SiglipVisionTransformer(nn.Module):
         embed_dim = config.hidden_size
 
         self.embeddings = KeyeVisionEmbeddings(config)
-        self.encoder = SiglipEncoder(
+        self.encoder = KeyeSiglipEncoder(
             config,
             quant_config=quant_config,
             prefix=f"{prefix}.encoder",
@@ -705,7 +705,7 @@ class SiglipVisionTransformer(nn.Module):
         return sample_hidden_state
 
 
-class SiglipVisionModel(nn.Module):
+class KeyeSiglipVisionModel(nn.Module):
     config_class = PretrainedConfig
     main_input_name = "pixel_values"
 
@@ -717,7 +717,7 @@ class SiglipVisionModel(nn.Module):
     ):
         super().__init__()
 
-        self.vision_model = SiglipVisionTransformer(
+        self.vision_model = KeyeSiglipVisionTransformer(
             config,
             quant_config=quant_config,
             prefix=f"{prefix}.vision_model",
@@ -1327,7 +1327,7 @@ class KeyeForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsLoRA,
         self.config = config
         self.multimodal_config = multimodal_config
 
-        self.visual = SiglipVisionModel(
+        self.visual = KeyeSiglipVisionModel(
             config.vision_config,
             quant_config=self._maybe_ignore_quant_config(quant_config),
             prefix=maybe_prefix(prefix, "visual"),

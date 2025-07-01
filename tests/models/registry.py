@@ -337,6 +337,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                          trust_remote_code=True),
     "Idefics3ForConditionalGeneration": _HfExamplesInfo("HuggingFaceM4/Idefics3-8B-Llama3",  # noqa: E501
                                                         {"tiny": "HuggingFaceTB/SmolVLM-256M-Instruct"}),  # noqa: E501
+    "KeyeForConditionalGeneration": _HfExamplesInfo("Kwai-Keye/Keye-VL-8B-Preview"), # noqa: E501
     "KimiVLForConditionalGeneration": _HfExamplesInfo("moonshotai/Kimi-VL-A3B-Instruct",  # noqa: E501
                                                       extras={"thinking": "moonshotai/Kimi-VL-A3B-Thinking"},  # noqa: E501
                                                       trust_remote_code=True,
@@ -409,7 +410,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                                          trust_remote_code=True),  # noqa: E501
     "MllamaForConditionalGeneration": _HfExamplesInfo("meta-llama/Llama-3.2-11B-Vision-Instruct"),  # noqa: E501
     "WhisperForConditionalGeneration": _HfExamplesInfo("openai/whisper-large-v3"),  # noqa: E501
-    "KeyeForConditionalGeneration": _HfExamplesInfo("Kwai-Keye/Keye-VL-8B-Preview"), # noqa: E501
 }
 
 _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
