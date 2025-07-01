@@ -127,8 +127,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         # TODO (varun): Maybe it is better to re-compute the expert_num_tokens
         # on GPU.
         expert_tokens_meta = mk.ExpertTokensMetadata.make_from_list(
-            expert_num_tokens_per_expert_list,
-            device = expert_x.device)
+            expert_num_tokens_per_expert_list, device = expert_x.device)
 
         return (expert_x, expert_x_scale, expert_tokens_meta, expert_topk_ids,
                 expert_topk_weights)

@@ -271,7 +271,7 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         a2_scale: Optional[torch.Tensor],
         workspace13: torch.Tensor,
         workspace2: torch.Tensor,
-        expert_tokens_meta: Optional[torch.Tensor],
+        expert_tokens_meta: Optional[ExpertTokensMetadata],
     ):
         """
         This function computes the intermediate result of a Mixture of Experts
