@@ -25,10 +25,13 @@ from vllm.entrypoints.openai.protocol import (CompletionLogProbs,
                                               ErrorResponse,
                                               RequestResponseMetadata,
                                               UsageInfo)
-# yapf: enable
+from vllm.entrypoints.openai.serving_engine import (
+    EmbedsPrompt as ServingEngineEmbedsPrompt)
 from vllm.entrypoints.openai.serving_engine import (OpenAIServing,
+                                                    TextTokensPrompt,
                                                     clamp_prompt_logprobs,
                                                     is_text_tokens_prompt)
+# yapf: enable
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.inputs.data import (EmbedsPrompt, TokensPrompt, is_embeds_prompt,
                               is_tokens_prompt)
@@ -52,12 +55,14 @@ class OpenAIServingCompletion(OpenAIServing):
         *,
         request_logger: Optional[RequestLogger],
         return_tokens_as_token_ids: bool = False,
+        enable_force_include_usage: bool = False,
     ):
         super().__init__(engine_client=engine_client,
                          model_config=model_config,
                          models=models,
                          request_logger=request_logger,
-                         return_tokens_as_token_ids=return_tokens_as_token_ids)
+                         return_tokens_as_token_ids=return_tokens_as_token_ids,
+                         enable_force_include_usage=enable_force_include_usage)
         self.default_sampling_params = (
             self.model_config.get_diff_sampling_param())
         if self.default_sampling_params:
@@ -221,13 +226,15 @@ class OpenAIServingCompletion(OpenAIServing):
         if stream:
             return self.completion_stream_generator(
                 request,
+                request_prompts,
                 result_generator,
                 request_id,
                 created_time,
                 model_name,
                 num_prompts=num_prompts,
                 tokenizer=tokenizer,
-                request_metadata=request_metadata)
+                request_metadata=request_metadata,
+                enable_force_include_usage=self.enable_force_include_usage)
 
         # Non-streaming response
         final_res_batch: list[Optional[RequestOutput]] = [None] * num_prompts
@@ -282,6 +289,8 @@ class OpenAIServingCompletion(OpenAIServing):
     async def completion_stream_generator(
         self,
         request: CompletionRequest,
+        request_prompts: list[Union[TextTokensPrompt,
+                                    ServingEngineEmbedsPrompt]],
         result_generator: AsyncIterator[tuple[int, RequestOutput]],
         request_id: str,
         created_time: int,
@@ -289,6 +298,7 @@ class OpenAIServingCompletion(OpenAIServing):
         num_prompts: int,
         tokenizer: AnyTokenizer,
         request_metadata: RequestResponseMetadata,
+        enable_force_include_usage: bool,
     ) -> AsyncGenerator[str, None]:
         num_choices = 1 if request.n is None else request.n
         previous_text_lens = [0] * num_choices * num_prompts
@@ -298,7 +308,8 @@ class OpenAIServingCompletion(OpenAIServing):
 
         stream_options = request.stream_options
         if stream_options:
-            include_usage = stream_options.include_usage
+            include_usage = stream_options.include_usage or \
+                            enable_force_include_usage
             include_continuous_usage = include_usage and \
                                        stream_options.continuous_usage_stats
         else:
@@ -308,7 +319,15 @@ class OpenAIServingCompletion(OpenAIServing):
             async for prompt_idx, res in result_generator:
                 prompt_token_ids = res.prompt_token_ids
                 prompt_logprobs = res.prompt_logprobs
-                prompt_text = res.prompt
+
+                if res.prompt is not None:
+                    prompt_text = res.prompt
+                else:
+                    request_prompt = request_prompts[prompt_idx]
+                    if is_text_tokens_prompt(request_prompt):
+                        prompt_text = request_prompt["prompt"]
+                    else:
+                        prompt_text = None
 
                 # Prompt details are excluded from later streamed outputs
                 if prompt_token_ids is not None:
@@ -331,14 +350,13 @@ class OpenAIServingCompletion(OpenAIServing):
                             delta_token_ids = prompt_token_ids
                             out_logprobs = prompt_logprobs
                         else:
-                            assert prompt_logprobs is not None
                             # echo the prompt and first token
                             delta_text = prompt_text + output.text
                             delta_token_ids = [
                                 *prompt_token_ids, *output.token_ids
                             ]
                             out_logprobs = [
-                                *prompt_logprobs,
+                                *(prompt_logprobs or []),
                                 *(output.logprobs or []),
                             ]
                         has_echoed[i] = True
