@@ -411,7 +411,6 @@ def run_keye_vl(questions: list[str], modality: str) -> ModelRequestData:
 
     prompts = [
         (
-            "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
             f"<|im_start|>user\n<|vision_start|>{placeholder}<|vision_end|>"
             f"{question}<|im_end|>\n"
             "<|im_start|>assistant\n"
