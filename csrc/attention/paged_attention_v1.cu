@@ -18,12 +18,7 @@
  */
 
 #include "attention_kernels.cuh"
-
-#if defined(USE_ROCM) && defined(__GFX9__)
-  #define WARP_SIZE 64
-#else
-  #define WARP_SIZE 32
-#endif
+#include "cuda_compat.h"
 
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
@@ -187,7 +182,6 @@ void paged_attention_v1(
                              CALL_V1_LAUNCHER_BLOCK_SIZE)
 }
 
-#undef WARP_SIZE
 #undef MAX
 #undef MIN
 #undef DIVIDE_ROUND_UP
