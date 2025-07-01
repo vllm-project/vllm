@@ -467,6 +467,7 @@ class TransformersForCausalLM(nn.Module, SupportsQuant, SupportsLoRA,
     # FIXME(Isotr0py): Don't use any weights mapper for Transformers backend,
     # this makes thing complicated. We need to remove this mapper after refactor
     # `TransformersModel` in the future.
+    # NOTE: `SupportsQuant` can be updated after property decorator is removed
     @property
     def hf_to_vllm_mapper(self):
         prefix_mapper = {
