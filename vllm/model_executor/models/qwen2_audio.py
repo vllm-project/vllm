@@ -150,6 +150,7 @@ class Qwen2AudioMultiModalProcessor(
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, Any],
+        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         # NOTE - we rename audios -> audio in mm data because transformers has
         # deprecated audios for the qwen2audio processor and will remove
@@ -174,6 +175,7 @@ class Qwen2AudioMultiModalProcessor(
             prompt=prompt,
             mm_data=mm_data,
             mm_kwargs=mm_kwargs,
+            tok_kwargs=tok_kwargs,
         )
 
     def _get_mm_fields_config(
@@ -364,7 +366,8 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal,
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
-        if multimodal_embeddings is not None:
+        if multimodal_embeddings is not None \
+            and len(multimodal_embeddings) != 0:
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids, inputs_embeds, multimodal_embeddings,
                 self.config.audio_token_index)

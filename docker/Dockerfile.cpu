@@ -66,7 +66,7 @@ ENV VLLM_CPU_DISABLE_AVX512=${VLLM_CPU_DISABLE_AVX512}
 WORKDIR /workspace/vllm
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=bind,src=requirements/build.txt,target=requirements/build.txt \
+    --mount=type=bind,src=requirements/cpu-build.txt,target=requirements/build.txt \
     uv pip install -r requirements/build.txt
 
 COPY . .
@@ -78,6 +78,22 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/workspace/vllm/.deps,sharing=locked \
     --mount=type=bind,source=.git,target=.git \
     VLLM_TARGET_DEVICE=cpu python3 setup.py bdist_wheel 
+
+######################### TEST DEPS #########################
+FROM base AS vllm-test-deps
+
+WORKDIR /workspace/vllm
+
+RUN --mount=type=bind,src=requirements/test.in,target=requirements/test.in \
+    cp requirements/test.in requirements/cpu-test.in && \
+    sed -i '/mamba_ssm/d' requirements/cpu-test.in && \
+    sed -i 's/torch==.*/torch==2.6.0/g' requirements/cpu-test.in && \
+    sed -i 's/torchaudio.*/torchaudio/g' requirements/cpu-test.in && \
+    sed -i 's/torchvision.*/torchvision/g' requirements/cpu-test.in && \
+    uv pip compile requirements/cpu-test.in -o requirements/cpu-test.txt --index-strategy unsafe-best-match --torch-backend cpu
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install -r requirements/cpu-test.txt 
 
 ######################### DEV IMAGE #########################
 FROM vllm-build AS vllm-dev
@@ -97,27 +113,18 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=.git,target=.git \
     VLLM_TARGET_DEVICE=cpu python3 setup.py develop 
 
+COPY --from=vllm-test-deps /workspace/vllm/requirements/cpu-test.txt requirements/test.txt
+
 RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=bind,src=requirements/test.in,target=requirements/test.in \
-    cp requirements/test.in requirements/test-cpu.in && \
-    sed -i '/mamba_ssm/d' requirements/test-cpu.in && \
-    uv pip compile requirements/test-cpu.in -o requirements/test.txt && \
     uv pip install -r requirements/dev.txt && \
     pre-commit install --hook-type pre-commit --hook-type commit-msg
 
 ENTRYPOINT ["bash"]
 
 ######################### TEST IMAGE #########################
-FROM base AS vllm-test
+FROM vllm-test-deps AS vllm-test
 
 WORKDIR /workspace/
-
-RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=bind,src=requirements/test.in,target=requirements/test.in \
-    cp requirements/test.in requirements/test-cpu.in && \
-    sed -i '/mamba_ssm/d' requirements/test-cpu.in && \
-    uv pip compile requirements/test-cpu.in -o requirements/cpu-test.txt && \
-    uv pip install -r requirements/cpu-test.txt
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,from=vllm-build,src=/workspace/vllm/dist,target=dist \

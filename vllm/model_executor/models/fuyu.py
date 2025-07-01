@@ -42,7 +42,7 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
-from .utils import (AutoWeightsLoader, flatten_bn, maybe_prefix,
+from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn, maybe_prefix,
                     merge_multimodal_embeddings)
 
 # Cannot find the following 2 numbers from hf config.
@@ -153,6 +153,7 @@ class FuyuMultiModalProcessor(BaseMultiModalProcessor[FuyuProcessingInfo]):
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         if not mm_data:
             # Avoid warning from HF logger for text-only input
@@ -164,6 +165,7 @@ class FuyuMultiModalProcessor(BaseMultiModalProcessor[FuyuProcessingInfo]):
             prompt=prompt,
             mm_data=mm_data,
             mm_kwargs=mm_kwargs,
+            tok_kwargs=tok_kwargs,
         )
 
         image_patches = processed_outputs.get("image_patches")
@@ -244,6 +246,13 @@ class FuyuMultiModalProcessor(BaseMultiModalProcessor[FuyuProcessingInfo]):
                                         info=FuyuProcessingInfo,
                                         dummy_inputs=FuyuDummyInputsBuilder)
 class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
+
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={
+            "model.vision_embed_tokens.": "vision_embed_tokens.",
+            "model.language_model.": "language_model.model.",
+            "lm_head.": "language_model.lm_head.",
+        })
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -338,7 +347,8 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
-        if multimodal_embeddings is not None:
+        if multimodal_embeddings is not None \
+            and len(multimodal_embeddings) != 0:
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids,
                 inputs_embeds,

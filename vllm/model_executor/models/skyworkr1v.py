@@ -534,11 +534,13 @@ class SkyworkR1VMultiModalProcessor(BaseMultiModalProcessor[_I]):
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
     ) -> Mapping[str, NestedTensors]:
         processed_outputs = super()._call_hf_processor(
             prompt=prompt,
             mm_data=mm_data,
             mm_kwargs=mm_kwargs,
+            tok_kwargs=tok_kwargs,
         )
 
         hf_processor = self.info.get_hf_processor(**mm_kwargs)
@@ -883,7 +885,8 @@ class SkyworkR1VChatModel(nn.Module, SupportsMultiModal, SupportsPP):
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
-        if multimodal_embeddings is not None:
+        if multimodal_embeddings is not None \
+            and len(multimodal_embeddings) != 0:
             assert self.img_context_token_id is not None
             self._set_visual_token_mask(input_ids)
             inputs_embeds = merge_multimodal_embeddings(

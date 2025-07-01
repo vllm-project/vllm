@@ -758,11 +758,13 @@ class BaseInternVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
     ) -> Mapping[str, NestedTensors]:
         processed_outputs = super()._call_hf_processor(
             prompt=prompt,
             mm_data=mm_data,
             mm_kwargs=mm_kwargs,
+            tok_kwargs=tok_kwargs,
         )
 
         hf_processor = self.info.get_hf_processor(**mm_kwargs)
@@ -941,9 +943,10 @@ class InternVLMultiModalProcessor(
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
     ) -> Mapping[str, NestedTensors]:
         processed_outputs = super()._call_hf_processor(prompt, mm_data,
-                                                       mm_kwargs)
+                                                       mm_kwargs, tok_kwargs)
 
         hf_processor = self.info.get_hf_processor(**mm_kwargs)
         if self.info.supports_video and (
@@ -1336,7 +1339,8 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP,
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
-        if multimodal_embeddings is not None:
+        if multimodal_embeddings is not None \
+            and len(multimodal_embeddings) != 0:
             context_token_ids = [
                 token_id for token_id in (self.img_context_token_id,
                                           self.video_context_token_id)
