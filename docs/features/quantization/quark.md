@@ -232,3 +232,24 @@ python3 quantize_quark.py --model_dir meta-llama/Llama-2-70b-chat-hf \
                           --model_export hf_format \
                           --tasks gsm8k
 ```
+
+## Quark Feature
+Quark now supports the MXFP4 (Mixed FP4) precision format, achieving high compression at ultra-low
+bit widths by static weights quantizaiton and dynamic activations quantization.  Compared to
+traditional FP8 or INT4 solutions, MXFP4 offers significant advantages in reducing memory
+footprint and computational latency, while maintaining minimal loss in accuracy. This enables new
+possibilities for deploying large-scale models in resource-constrained environments.
+The following is a demonstration of the Quark MXFP4 quantization script. Quark has already been
+integrated into the vLLM codebase with MXFP4 support, so you can directly load a Quark-quantized
+model using vLLM.
+
+```bash
+python3 quantize_quark.py --model_dir meta-llama/Llama-2-70b-chat-hf \
+                          --output_dir /path/to/output \
+                          --quant_scheme w_mxfp4_a_mxfp4 \
+                          --kv_cache_dtype fp8 \
+                          --quant_algo autosmoothquant \
+                          --num_calib_data 512 \
+                          --model_export hf_format \
+                          --tasks gsm8k
+```
