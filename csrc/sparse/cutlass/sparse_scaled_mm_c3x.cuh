@@ -69,7 +69,7 @@ struct cutlass_sparse_3x_gemm {
 
   using Epilogue = Epilogue_<ElementAcc, ElementD, TileShape>;
 
-  using ElementC = void;
+  using ElementC = ElementD_;
   using LayoutC = cutlass::layout::RowMajor;
   using LayoutC_Transpose =
       typename cutlass::layout::LayoutTranspose<LayoutC>::type;
@@ -79,7 +79,8 @@ struct cutlass_sparse_3x_gemm {
   // These are the minimum alignments needed for the kernels to compile
   static constexpr int AlignmentAB =
       128 / cutlass::sizeof_bits<ElementAB>::value;
-  static constexpr int AlignmentCD = 4;
+  static constexpr int AlignmentCD =
+      128 / cutlass::sizeof_bits<ElementD>::value;
 
   using CollectiveEpilogue =
       typename cutlass::epilogue::collective::CollectiveBuilder<

@@ -43,7 +43,7 @@ struct cutlass_3x_gemm {
   using Epilogue = Epilogue_<ElementAcc, ElementD, TileShape>;
 
   using StrideD = Stride<int64_t, Int<1>, Int<0>>;
-  using ElementC = void;
+  using ElementC = ElementD_;
   using StrideC = StrideD;
 
   using EVTCompute = typename Epilogue::EVTCompute;
@@ -51,7 +51,8 @@ struct cutlass_3x_gemm {
   // These are the minimum alignments needed for the kernels to compile
   static constexpr int AlignmentAB =
       128 / cutlass::sizeof_bits<ElementAB>::value;
-  static constexpr int AlignmentCD = 4;
+  static constexpr int AlignmentCD =
+      128 / cutlass::sizeof_bits<ElementD>::value;
 
   using CollectiveEpilogue =
       typename cutlass::epilogue::collective::CollectiveBuilder<
