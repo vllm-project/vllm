@@ -22,6 +22,8 @@ from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
 from vllm.attention.selector import get_attn_backend
 from vllm.config import VllmConfig
+from vllm.distributed.kv_transfer import (get_kv_transfer_group,
+                                          has_kv_transfer_group)
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
@@ -377,6 +379,7 @@ class HpuModelAdapter(torch.nn.Module):
         #        selected_token_indices = kwargs.pop('selected_token_indices')
         if 'warmup_mode' in kwargs:
             kwargs.pop('warmup_mode')
+        is_warmup = kwargs.get('is_warmup', False)
         input_ids = kwargs['input_ids']
         kwargs['attn_metadata'] = self._update_metadata(
             kwargs['attn_metadata'], input_ids.size(0), input_ids.size(1),
@@ -386,7 +389,9 @@ class HpuModelAdapter(torch.nn.Module):
         attn_meta = kwargs.pop('attn_metadata')
         if 'kv_caches' in kwargs:
             kwargs.pop('kv_caches')
-        with set_forward_context(attn_meta, self.vllm_config):
+        with set_forward_context(attn_meta, self.vllm_config, is_warmup):
+            if 'is_warmup' in kwargs:
+                kwargs.pop('is_warmup')
             hidden_states = self.model(*args, **kwargs)
         return hidden_states
 
@@ -577,7 +582,7 @@ class HPUModelRunner:
             device=self.device,
             pin_memory=self.pin_memory,
             vocab_size=self.model_config.get_vocab_size(),
-            block_sizes=[self.block_size]
+            block_sizes=[self.block_size],
         )
         self.mem_margin = None
 
@@ -687,6 +692,8 @@ class HPUModelRunner:
             req_index = self.input_batch.remove_request(req_id)
             if req_index is not None:
                 removed_req_indices.append(req_index)
+            if req_id in self.input_batch.req_type:
+                del self.input_batch.req_type[req_id]
 
         # Remove the unscheduled requests from the persistent batch.
         # NOTE(woosuk): The unscheduled requests are either preempted requests
@@ -817,6 +824,10 @@ class HPUModelRunner:
         assert self.model is not None
         return self.model
 
+    def is_decoder_only(self, req_id) -> bool:
+        return bool(req_id in self.input_batch.req_type and \
+            self.input_batch.req_type[req_id] == "decode")
+
     def _get_prompts_and_decodes(
         self,
         scheduler_output: "SchedulerOutput",
@@ -826,23 +837,37 @@ class HPUModelRunner:
         num_reqs = self.input_batch.num_reqs
         assert num_reqs > 0
 
+        if scheduler_output.kv_connector_metadata:
+            requests = scheduler_output.kv_connector_metadata.requests
+        else:
+            requests = None
+
         # Traverse decodes first
         decode_req_ids = []
         for i in range(num_reqs):
             req_id = self.input_batch.req_ids[i]
             assert req_id is not None
 
+            if requests is not None and req_id not in self.input_batch.req_type:
+                for request in requests:
+                    if request.req_id == req_id:
+                        self.input_batch.req_type[req_id] = "prefill" \
+                            if request.load_spec is None else "decode"
+                        break
+
             num_computed_tokens = self.input_batch.num_computed_tokens_cpu[i]
             num_prompt_tokens = self.input_batch.num_prompt_tokens[i]
             num_scheduled_tokens = scheduler_output.num_scheduled_tokens[
                 req_id]
 
-            if num_computed_tokens < num_prompt_tokens:
+            if num_computed_tokens < num_prompt_tokens and \
+                not self.is_decoder_only(req_id):
                 # This is prompt
                 break
 
             # This is decode
-            assert num_scheduled_tokens == 1
+            if not self.is_decoder_only(req_id):
+                assert num_scheduled_tokens == 1
             decode_req_ids.append(req_id)
 
         # Traverse prompts
@@ -1024,7 +1049,7 @@ class HPUModelRunner:
         prefill_position_ids = []
         prefill_attn_metadata = []
         prefill_logits_indices = []
-        block_table_cpu_tensor = self.input_batch.block_table.get_cpu_tensor()
+        block_table_cpu_tensor = self.input_batch.block_table[0].get_cpu_tensor()
         fake_prefix_prefill = False
 
         # DECODES are the first num_decodes REQUESTS.
@@ -1221,7 +1246,7 @@ class HPUModelRunner:
         # logic knows to ignore those indicies. Otherwise, the
         # padding data can be dummy since we have a causal mask.
 
-        block_table_cpu_tensor = self.input_batch.block_table.get_cpu_tensor()
+        block_table_cpu_tensor = self.input_batch.block_table[0].get_cpu_tensor()
         if num_decodes == 0:
             return DecodeInputData(num_decodes=0)
 
@@ -1354,7 +1379,7 @@ class HPUModelRunner:
             num_scheduled_tokens.append(seq_num_scheduled_tokens)
             num_prompt_tokens.append(seq_num_prompt_tokens)
             # NOTE: assert that all the decodes are "decodes".
-            if idx < num_decodes:
+            if idx < num_decodes and not self.is_decoder_only(req_id):
                 assert seq_num_scheduled_tokens == 1
         return (
             self._prepare_prefill_inputs(num_prefills, num_decodes,
@@ -1379,8 +1404,8 @@ class HPUModelRunner:
         self.seen_configs.add(cfg)
         if not seen and not warmup_mode:
             logger.warning(
-                "Configuration: (%s, %s, %s, %s) was not warmed-up!", phase,
-                batch_size, seq_len, num_blocks)
+                "Configuration: rank (%s, %s, %s, %s, %s) was not warmed-up!",
+                os.getenv('RANK', '0'), phase, batch_size, seq_len, num_blocks)
 
     def _execute_model_generic(self,
                                token_ids,
@@ -1552,6 +1577,10 @@ class HPUModelRunner:
         # On CPU, sanitize [tokD0, tokD1, tokD2, 0, tokP0, tokP1, tokP2, 0] -> [tokD0, tokD1, tokD2, tokP0, tokP1, tokP2] # noqa
         # Return [tokD0, tokD1, tokD2, tokP0, tokP1, tokP2]
 
+        # Update KVConnector with the KVConnector metadata forward().
+        if has_kv_transfer_group():
+            get_kv_transfer_group().bind_connector_metadata(
+                scheduler_output.kv_connector_metadata)
         batch_changed = self._update_states(scheduler_output)
         if not scheduler_output.total_num_scheduled_tokens:
             # Return empty ModelRunnerOuptut if there's no work to do.
@@ -1724,6 +1753,13 @@ class HPUModelRunner:
             prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore[arg-type]
         )
 
+        # Clear KVConnector state after all KVs are generated.
+        if has_kv_transfer_group():
+            get_kv_transfer_group().clear_connector_metadata()
+
+        for req_id, token_ids in zip(all_req_ids, postprocessed_sampled_token_ids):
+            text = self._tokenizer.decode(token_ids)
+            print(f">> req:{req_id}, out: {text}")
         return model_runner_output
 
     def load_model(self) -> None:
@@ -2218,8 +2254,10 @@ class HPUModelRunner:
         if prompt_profile_cfg or decode_profile_cfg:
             self._generate_profiling(prompt_profile_cfg, decode_profile_cfg)
             raise AssertionError("Finished profiling")
+        self.bucketing_ctx.generate_prompt_buckets()
         kv_caches = self.kv_caches
         max_blocks = int(kv_caches[0][0].size(0) // self.block_size)
+        self.bucketing_ctx.generate_prompt_buckets()
         self.bucketing_ctx.generate_decode_buckets(max_blocks)
 
         if not htorch.utils.internal.is_lazy(
@@ -2346,12 +2384,20 @@ class HPUModelRunner:
                 "Hybrid models with more than one KV cache type are not "
                 "supported yet.")
 
+        # build a map from layer_name -> KVCacheTensor
+        tensor_map: dict[str, KVCacheTensor] = {}
+        for tensor in kv_cache_config.kv_cache_tensors:
+            for lname in tensor.shared_by:
+                tensor_map[lname] = tensor
+
         kv_caches: dict[str, torch.Tensor] = {}
 
         for kv_cache_group in kv_cache_config.kv_cache_groups:
             kv_cache_spec = kv_cache_group.kv_cache_spec
             for layer_name in kv_cache_group.layer_names:
-                tensor_config = kv_cache_config.tensors[layer_name]
+                tensor_config = tensor_map.get(layer_name)
+                if tensor_config is None:
+                    raise KeyError(f"No KVCacheTensor config for layer '{layer_name}'")
                 assert tensor_config.size % kv_cache_spec.page_size_bytes == 0
                 num_blocks = tensor_config.size // kv_cache_spec.page_size_bytes
                 # `num_blocks` is the number of blocks the model runner can use.

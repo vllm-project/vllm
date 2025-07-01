@@ -1,0 +1,6 @@
+local_cpu: False
+max_local_cpu_size: 5.0
+#local_disk: 
+max_local_disk_size: 0
+remote_serde: naive
+remote_url: "lm://localhost:8100"

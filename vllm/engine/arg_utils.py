@@ -933,18 +933,18 @@ class EngineArgs:
                                 **vllm_kwargs["additional_config"])
 
         # Other arguments
-        parser.add_argument('--use-v2-block-manager',
-                            action='store_true',
-                            default=True,
-                            deprecated=True,
-                            help='[DEPRECATED] block manager v1 has been '
-                            'removed and SelfAttnBlockSpaceManager (i.e. '
-                            'block manager v2) is now the default. '
-                            'Setting this flag to True or False'
-                            ' has no effect on vLLM behavior.')
-        parser.add_argument('--disable-log-stats',
-                            action='store_true',
-                            help='Disable logging statistics.')
+#        parser.add_argument('--use-v2-block-manager',
+#                            action='store_true',
+#                            default=True,
+#                            deprecated=True,
+#                            help='[DEPRECATED] block manager v1 has been '
+#                            'removed and SelfAttnBlockSpaceManager (i.e. '
+#                            'block manager v2) is now the default. '
+#                            'Setting this flag to True or False'
+#                            ' has no effect on vLLM behavior.')
+#        parser.add_argument('--disable-log-stats',
+#                            action='store_true',
+#                            help='Disable logging statistics.')
 
         return parser
 
