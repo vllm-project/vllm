@@ -141,8 +141,8 @@ class FusedMoEPrepareAndFinalize(ABC):
         Returns a tuple of:
         - quantized + dispatched a.
         - quantized + dispatched a1_scales.
-        - Optional ExpertTokensMetadata containing a gpu/cpu tensors
-          as big as number of local experts with the information about the
+        - Optional ExpertTokensMetadata containing gpu/cpu tensors
+          as big as the number of local experts with the information about the
           number of tokens assigned to each local expert.
         - Optional dispatched expert topk IDs
         - Optional dispatched expert topk weight
@@ -306,7 +306,7 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
           function.
         - expert_tokens_meta (Optional[ExpertTokensMetadata]) - An optional
           ExpertTokensMetadata object containing gpu/cpu tensors
-          as big as number of local experts with the information about the
+          as big as the number of local experts with the information about the
           number of tokens assigned to each local expert.
         """
         raise NotImplementedError
