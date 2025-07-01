@@ -36,6 +36,9 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+# NOTE(woosuk): This is an arbitrary number. Tune it if needed.
+_DEFAULT_MAX_NUM_SPLITS_FOR_CUDA_GRAPH = 16
+
 
 class FlashAttentionBackend(AttentionBackend):
 
@@ -184,10 +187,10 @@ class FlashAttentionMetadataBuilder(
                 dtype=torch.int32,
                 device=self.runner.device,
             )
-            # When using cuda graph, we need to set the number of splits for
-            # the pre-allocation of the intermediate buffers.
-            # NOTE(woosuk): This is an arbitrary number. Tune it if needed.
-            self.max_num_splits = 16
+            # When using cuda graph, we need to set the upper bound of the
+            # number of splits so that large enough intermediate buffers are
+            # pre-allocated during capture.
+            self.max_num_splits = _DEFAULT_MAX_NUM_SPLITS_FOR_CUDA_GRAPH
 
         # Sliding window size to be used with the AOT scheduler will be
         # populated on first build() call.
