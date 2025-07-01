@@ -20,6 +20,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.p2p.tensor_memory_pool import 
 from vllm.utils import current_stream, get_ip
 
 if TYPE_CHECKING:
+    from vllm.config import VllmConfig
     from vllm.forward_context import ForwardContext
 
 logger = logging.getLogger(__name__)
@@ -495,11 +496,7 @@ class P2pNcclEngine:
             sock.send(msgpack.dumps(data))
             time.sleep(3)
 
-    def send(self,
-             comm,
-             tensor: torch.Tensor,
-             dst: int,
-             stream=None):
+    def send(self, comm, tensor: torch.Tensor, dst: int, stream=None):
         assert tensor.device == self.device, (
             f"this nccl communicator is created to work on {self.device}, "
             f"but the input tensor is on {tensor.device}")
@@ -511,12 +508,7 @@ class P2pNcclEngine:
         event.record(stream)
         event.synchronize()
 
-    def recv(self,
-             comm,
-             shape: str,
-             dtype: str,
-             src: int,
-             stream=None):
+    def recv(self, comm, shape: str, dtype: str, src: int, stream=None):
         stream = stream if stream is not None else current_stream()
         event = torch.cuda.Event()
         with torch.cuda.stream(stream):
@@ -532,6 +524,6 @@ class P2pNcclEngine:
 
     def close(self) -> None:
         self.listener_thread.join()
-        self._send_thread.join()
+        self.send_thread.join()
         if self.ping_thread is not None:
             self.ping_thread.join()
