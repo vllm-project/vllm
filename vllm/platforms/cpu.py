@@ -90,7 +90,9 @@ class CpuPlatform(Platform):
         from vllm.utils import GiB_bytes
         model_config = vllm_config.model_config
 
-        model_config.disable_cascade_attn = True
+        if model_config:
+            # Cascade attention is not supported on CPU.
+            model_config.disable_cascade_attn = True
 
         cache_config = vllm_config.cache_config
 
