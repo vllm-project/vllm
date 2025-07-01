@@ -2575,15 +2575,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         mamba_layers = get_layers_from_vllm_config(self.vllm_config,
                                                    MambaMixer2)
         if len(mamba_layers) > 0:
-            if len(attn_layers) > 0:
-                # Mamba state must be padded to an integer number of
-                # 16th tokens worth of attention pages
-                attn_layer_name = next(iter(attn_layers))
-                attn_page_size = kv_cache_spec[attn_layer_name].page_size_bytes
-                multiple_of = 16 * attn_page_size // block_size
-            else:
-                multiple_of = None
-
             if self.vllm_config.speculative_config is not None:
                 raise NotImplementedError(
                     "Mamba with speculative decoding is not supported yet.")
@@ -2594,6 +2585,32 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 raise NotImplementedError(
                     "Prefix caching is not supported for Mamba yet.")
             max_model_len = self.vllm_config.model_config.max_model_len
+
+            if len(attn_layers) > 0:
+                attn_layer_name = next(iter(attn_layers))
+                attn_page_size = kv_cache_spec[attn_layer_name].page_size_bytes
+                mamba_layer_name = next(iter(mamba_layers))
+                mamba_page_size = MambaSpec(
+                    shapes=mamba_layers[mamba_layer_name].get_state_shape(),
+                    dtype=self.kv_cache_dtype,
+                    block_size=max_model_len).page_size_bytes
+                if attn_page_size < mamba_page_size:
+                    # attention page size (for 16 tokens)
+                    attn_page_size_16 = 16 * attn_page_size // block_size
+                    # some attention backends (e.g. FA) only support setting
+                    # block size to multiple of 16, so let's suggest a value
+                    # that would work (note: FA is currently not compatible
+                    # with mamba layers, use FlashInfer instead).
+                    suggest_attn_block_size = 16 * cdiv(
+                        mamba_page_size, attn_page_size_16)
+                    raise ValueError(
+                        "Attention block size should be increased to at least "
+                        f"{suggest_attn_block_size} in order to match "
+                        "the mamba page size")
+                page_size_padded = attn_page_size
+            else:
+                page_size_padded = None
+
             # Set block_size to max_model_len, so that mamba model will always
             # have only one block in the KV cache.
             for layer_name, mamba_module in mamba_layers.items():
@@ -2601,18 +2618,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     shapes=mamba_module.get_state_shape(),
                     dtype=self.kv_cache_dtype,
                     block_size=max_model_len,
-                    multiple_of=multiple_of)
-
-            if len(attn_layers) > 0:
-                mamba_layer_name = next(iter(mamba_layers))
-                mamba_page_size = kv_cache_spec[
-                    mamba_layer_name].page_size_bytes
-                if attn_page_size < mamba_page_size:
-                    required_attn_block_size = cdiv(mamba_page_size,
-                                                    multiple_of) * 16
-                    raise ValueError(
-                        "Attention block size must be increased to "
-                        f"{required_attn_block_size} in order to match "
-                        "the mamba page size")
+                    page_size_padded=page_size_padded)
 
         return kv_cache_spec
