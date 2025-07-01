@@ -1188,8 +1188,8 @@ class LLM:
     def _cross_encoding_score(
         self,
         tokenizer: AnyTokenizer,
-        data_1: Union[SingletonPrompt, Sequence[SingletonPrompt]],
-        data_2: Union[SingletonPrompt, Sequence[SingletonPrompt]],
+        data_1: Union[Sequence[SingletonPrompt]],
+        data_2: Union[Sequence[SingletonPrompt]],
         truncate_prompt_tokens: Optional[int] = None,
         use_tqdm: Union[bool, Callable[..., tqdm]] = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
@@ -1218,7 +1218,7 @@ class LLM:
                 _type = "text"
                 if isinstance(prompt, dict):
                     if "multi_modal_data" in prompt:
-                        _type = "image"
+                        _type = next(iter(prompt["multi_modal_data"]))
                     elif "prompt_token_ids" in prompt:
                         prompt = tokenizer.decode(
                             cast(TokensPrompt, prompt)["prompt_token_ids"])
@@ -1236,27 +1236,8 @@ class LLM:
                                        doc_type))
         else:
 
-            def ensure_str(prompt: SingletonPrompt):
-                if isinstance(prompt, dict):
-                    if "multi_modal_data" in prompt:
-                        raise ValueError(
-                            "Multi-modal prompt is not "
-                            "supported for Model %s",
-                            self.llm_engine.model_config.architectures)
-                    elif "prompt_token_ids" in prompt:
-                        prompt = tokenizer.decode(
-                            cast(TokensPrompt, prompt)["prompt_token_ids"])
-                    elif "prompt" in prompt:
-                        prompt = cast(TextPrompt, prompt)["prompt"]
-                assert type(prompt) is str
-                return prompt
-
-            input_text_1: list[str] = [ensure_str(t) for t in data_1]
-
-            input_text_2: list[str] = [ensure_str(t) for t in data_2]
-
             input_pairs = [(t1, t2)
-                           for t1, t2 in zip(input_text_1, input_text_2)]
+                           for t1, t2 in zip(data_1, data_2)]
 
             for q, t in input_pairs:
                 if self.llm_engine.model_config.use_pad_token:
@@ -1358,6 +1339,26 @@ class LLM:
         # "cross-encoder/ms-marco-MiniLM-L-6-v2" doesn't support passing
         # lists of tokens to the `text` and `text_pair` kwargs
         tokenizer = self.get_tokenizer()
+
+        if not self.llm_engine.model_config.is_multimodal_model:        
+            def ensure_str(prompt: SingletonPrompt):
+                if isinstance(prompt, dict):
+                    if "multi_modal_data" in prompt:
+                        raise ValueError(
+                            "Multi-modal prompt is not "
+                            "supported for Model %s",
+                            self.llm_engine.model_config.architectures)
+                    elif "prompt_token_ids" in prompt:
+                        prompt = tokenizer.decode(
+                            cast(TokensPrompt, prompt)["prompt_token_ids"])
+                    elif "prompt" in prompt:
+                        prompt = cast(TextPrompt, prompt)["prompt"]
+                assert type(prompt) is str
+                return prompt
+
+            data_1 = [ensure_str(t) for t in data_1]
+
+            data_2 = [ensure_str(t) for t in data_2]
 
         if isinstance(data_1, (str, dict)):
             # Convert a single prompt to a list.

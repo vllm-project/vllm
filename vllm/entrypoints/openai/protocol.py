@@ -31,6 +31,8 @@ from vllm.sampling_params import (BeamSearchParams, GuidedDecodingParams,
 from vllm.sequence import Logprob
 from vllm.utils import random_uuid, resolve_obj_by_qualname
 
+from vllm.entrypoints.score_utils import ScoreMultiModalParam
+
 logger = init_logger(__name__)
 
 _LONG_INFO = torch.iinfo(torch.long)
@@ -1261,8 +1263,8 @@ PoolingRequest = Union[PoolingCompletionRequest, PoolingChatRequest]
 
 class ScoreRequest(OpenAIBaseModel):
     model: Optional[str] = None
-    text_1: Union[list[str], str]
-    text_2: Union[list[str], str]
+    data_1: Union[list[str], str, ScoreMultiModalParam]
+    data_2: Union[list[str], str, ScoreMultiModalParam]
     truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None
 
     # --8<-- [start:score-pooling-params]
