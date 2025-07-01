@@ -14,19 +14,6 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8)
 from vllm.scalar_type import scalar_types
 
-"""
-This function computes a a8w8-blockwise quantized Mixture of Experts (MoE)
-layer  using two sets of quantized weight-scale pairs, w1-w1_scale and
-w2-w2_scale, and top-k gating mechanism. The matrix multiplications are
-implemented with CUTLASS grouped gemm. The weights are quantized with block
-size 128x128. When per_act_block is True, the input is quantized with
-per-token 128-blocked scales (equivalent to block size 1x128). When
-it's False, the input is quantized with per-tensor scales.
-
-Parameters:
-- output (torch.Tensor): The output tensor.
-"""
-
 
 def run_blocked_cutlass_moe_fp8(
     output: torch.Tensor,
@@ -46,6 +33,19 @@ def run_blocked_cutlass_moe_fp8(
     out_dtype: torch.dtype,
     per_act_block: bool,
 ) -> torch.Tensor:
+    """
+    This function computes a a8w8-blockwise quantized Mixture of Experts (MoE)
+    layer  using two sets of quantized weight-scale pairs, w1-w1_scale and
+    w2-w2_scale, and top-k gating mechanism. The matrix multiplications are
+    implemented with CUTLASS grouped gemm. The weights are quantized with block
+    size 128x128. When per_act_block is True, the input is quantized with
+    per-token 128-blocked scales (equivalent to block size 1x128). When
+    it's False, the input is quantized with per-tensor scales.
+
+    Parameters:
+    - output (torch.Tensor): The output tensor.
+    """
+
     a1q = hidden_states
 
     assert w1_scale is not None
@@ -139,6 +139,9 @@ def run_blocked_cutlass_moe_fp8(
             a1q_scale, expert_offsets, problem_sizes1)
     else:
         a1q_scale = a1q_scale.repeat(a1q.shape[1] // 128, a1q.shape[0])
+
+    if expert_map is not None:
+        c1.fill_(0)
 
     ops.cutlass_moe_blockwise_mm(c1, a1q.contiguous(), w1.contiguous(),
                                  a1q_scale_t if per_act_block else a1q_scale,
