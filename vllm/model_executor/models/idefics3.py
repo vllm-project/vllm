@@ -326,6 +326,7 @@ class Idefics3MultiModalProcessor(
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         # Text-only input not supported in composite processor
         if not (images := mm_data.get("images", [])):
@@ -337,6 +338,7 @@ class Idefics3MultiModalProcessor(
             prompt,
             mm_data,
             mm_kwargs,
+            tok_kwargs,
         )
 
         parsed_images = (self._get_data_parser().parse_mm_data({
@@ -720,7 +722,8 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal,
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.model.get_input_embeddings(input_ids)
-        if multimodal_embeddings is not None:
+        if multimodal_embeddings is not None \
+            and len(multimodal_embeddings) != 0:
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids,
                 inputs_embeds,

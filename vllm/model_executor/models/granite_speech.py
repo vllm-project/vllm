@@ -141,6 +141,7 @@ class GraniteSpeechMultiModalProcessor(
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         mm_data = dict(mm_data)
         audios = mm_data.pop("audios", [])
@@ -153,6 +154,7 @@ class GraniteSpeechMultiModalProcessor(
             prompt=prompt,
             mm_data=mm_data,
             mm_kwargs=mm_kwargs,
+            tok_kwargs=tok_kwargs,
         )
 
         if "audio" in mm_data:
@@ -721,7 +723,8 @@ class GraniteSpeechForConditionalGeneration(
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
         """Compute the merged LLM / audio embeddings."""
-        if multimodal_embeddings is None:
+        if multimodal_embeddings is None \
+            or len(multimodal_embeddings) == 0:
             return self.language_model.get_input_embeddings(input_ids)
 
         inputs_embeds = embed_multimodal(

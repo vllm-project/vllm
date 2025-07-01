@@ -107,6 +107,7 @@ class ChameleonMultiModalProcessor(
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         if not mm_data:
             prompt_ids = self.info.get_tokenizer().encode(prompt)
@@ -117,6 +118,7 @@ class ChameleonMultiModalProcessor(
             prompt=prompt,
             mm_data=mm_data,
             mm_kwargs=mm_kwargs,
+            tok_kwargs=tok_kwargs,
         )
 
     def _apply_hf_processor_tokens_only(
@@ -1005,7 +1007,8 @@ class ChameleonForConditionalGeneration(nn.Module, SupportsMultiModal,
     ) -> torch.Tensor:
 
         inputs_embeds = self.model.get_input_embeddings(input_ids)
-        if multimodal_embeddings is not None:
+        if multimodal_embeddings is not None \
+            and len(multimodal_embeddings) != 0:
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids, inputs_embeds, multimodal_embeddings,
                 self.model.vocabulary_mapping.image_token_id)

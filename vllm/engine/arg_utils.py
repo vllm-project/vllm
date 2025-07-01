@@ -3,7 +3,9 @@
 
 # yapf: disable
 import argparse
+import copy
 import dataclasses
+import functools
 import json
 import sys
 import threading
@@ -168,7 +170,8 @@ def get_type_hints(type_hint: TypeHint) -> set[TypeHint]:
     return type_hints
 
 
-def get_kwargs(cls: ConfigType) -> dict[str, Any]:
+@functools.lru_cache(maxsize=30)
+def _compute_kwargs(cls: ConfigType) -> dict[str, Any]:
     cls_docs = get_attr_docs(cls)
     kwargs = {}
     for field in fields(cls):
@@ -199,7 +202,10 @@ def get_kwargs(cls: ConfigType) -> dict[str, Any]:
         passed individually. For example, the following sets of arguments are
         equivalent:\n\n
         - `--json-arg '{"key1": "value1", "key2": {"key3": "value2"}}'`\n
-        - `--json-arg.key1 value1 --json-arg.key2.key3 value2`\n\n"""
+        - `--json-arg.key1 value1 --json-arg.key2.key3 value2`\n
+        Additionally, list elements can be passed individually using '+':
+        - `--json-arg '{"key4": ["value3", "value4", "value5"]}'`\n
+        - `--json-arg.key4+ value3 --json-arg.key4+='value4,value5'`\n\n"""
         if dataclass_cls is not None:
 
             def parse_dataclass(val: str, cls=dataclass_cls) -> Any:
@@ -269,6 +275,16 @@ def get_kwargs(cls: ConfigType) -> dict[str, Any]:
     return kwargs
 
 
+def get_kwargs(cls: ConfigType) -> dict[str, Any]:
+    """Return argparse kwargs for the given Config dataclass.
+
+    The heavy computation is cached via functools.lru_cache, and a deep copy
+    is returned so callers can mutate the dictionary without affecting the
+    cached version.
+    """
+    return copy.deepcopy(_compute_kwargs(cls))
+
+
 @dataclass
 class EngineArgs:
     """Arguments for vLLM engine."""
@@ -307,6 +323,11 @@ class EngineArgs:
     data_parallel_rpc_port: Optional[int] = None
     data_parallel_backend: str = ParallelConfig.data_parallel_backend
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
+    enable_eplb: bool = ParallelConfig.enable_eplb
+    num_redundant_experts: int = ParallelConfig.num_redundant_experts
+    eplb_window_size: int = ParallelConfig.eplb_window_size
+    eplb_step_interval: int = ParallelConfig.eplb_step_interval
+    eplb_log_balancedness: bool = ParallelConfig.eplb_log_balancedness
     max_parallel_loading_workers: Optional[
         int] = ParallelConfig.max_parallel_loading_workers
     block_size: Optional[BlockSize] = CacheConfig.block_size
@@ -653,6 +674,16 @@ class EngineArgs:
         parallel_group.add_argument(
             "--enable-expert-parallel",
             **parallel_kwargs["enable_expert_parallel"])
+        parallel_group.add_argument("--enable-eplb",
+                                    **parallel_kwargs["enable_eplb"])
+        parallel_group.add_argument("--num-redundant-experts",
+                                    **parallel_kwargs["num_redundant_experts"])
+        parallel_group.add_argument("--eplb-window-size",
+                                    **parallel_kwargs["eplb_window_size"])
+        parallel_group.add_argument("--eplb-step-interval",
+                                    **parallel_kwargs["eplb_step_interval"])
+        parallel_group.add_argument("--eplb-log-balancedness",
+                                    **parallel_kwargs["eplb_log_balancedness"])
         parallel_group.add_argument(
             "--max-parallel-loading-workers",
             **parallel_kwargs["max_parallel_loading_workers"])
@@ -1041,7 +1072,7 @@ class EngineArgs:
 
         # Set default arguments for V0 or V1 Engine.
         if use_v1:
-            self._set_default_args_v1(usage_context)
+            self._set_default_args_v1(usage_context, model_config)
         else:
             self._set_default_args_v0(model_config)
 
@@ -1122,6 +1153,11 @@ class EngineArgs:
             data_parallel_rpc_port=data_parallel_rpc_port,
             data_parallel_backend=data_parallel_backend,
             enable_expert_parallel=self.enable_expert_parallel,
+            enable_eplb=self.enable_eplb,
+            num_redundant_experts=self.num_redundant_experts,
+            eplb_window_size=self.eplb_window_size,
+            eplb_step_interval=self.eplb_step_interval,
+            eplb_log_balancedness=self.eplb_log_balancedness,
             max_parallel_loading_workers=self.max_parallel_loading_workers,
             disable_custom_all_reduce=self.disable_custom_all_reduce,
             ray_workers_use_nsight=self.ray_workers_use_nsight,
@@ -1276,11 +1312,6 @@ class EngineArgs:
                                recommend_to_remove=True)
             return False
 
-        if self.scheduling_policy != SchedulerConfig.policy:
-            _raise_or_fallback(feature_name="--scheduling-policy",
-                               recommend_to_remove=False)
-            return False
-
         if self.num_scheduler_steps != SchedulerConfig.num_scheduler_steps:
             _raise_or_fallback(feature_name="--num-scheduler-steps",
                                recommend_to_remove=True)
@@ -1303,7 +1334,7 @@ class EngineArgs:
         # Skip this check if we are running on a non-GPU platform,
         # or if the device capability is not available
         # (e.g. in a Ray actor without GPUs).
-        from vllm.platforms import CpuArchEnum, current_platform
+        from vllm.platforms import current_platform
         if (current_platform.is_cuda()
                 and current_platform.get_device_capability()
                 and current_platform.get_device_capability().major < 8):
@@ -1349,16 +1380,15 @@ class EngineArgs:
                                recommend_to_remove=False)
             return False
 
-        # No Embedding Models so far.
-        if model_config.task not in ["generate"]:
-            _raise_or_fallback(feature_name=f"--task {model_config.task}",
-                               recommend_to_remove=False)
-            return False
-
         # No Mamba or Encoder-Decoder so far.
         if not model_config.is_v1_compatible:
             _raise_or_fallback(feature_name=model_config.architectures,
                                recommend_to_remove=False)
+            return False
+
+        # V1 mamba models are unoptimized.
+        if model_config.has_inner_state and _warn_or_fallback(
+                feature_name="Mamba"):
             return False
 
         # No Concurrent Partial Prefills so far.
@@ -1445,15 +1475,18 @@ class EngineArgs:
             _raise_or_fallback(feature_name=name, recommend_to_remove=False)
             return False
 
-        # Non-[CUDA, TPU, x86 CPU] may be supported on V1,
-        # but off by default for now.
-        v0_hardware = not any(
-            (current_platform.is_cuda_alike(), current_platform.is_tpu(),
-             (current_platform.is_cpu()
-              and current_platform.get_cpu_architecture() == CpuArchEnum.X86)))
-        if v0_hardware and _warn_or_fallback(  # noqa: SIM103
-                current_platform.device_name):
+        # The platform may be supported on V1, but off by default for now.
+        if not current_platform.default_v1(  # noqa: SIM103
+                model_config=model_config) and _warn_or_fallback(
+                    current_platform.device_name):
             return False
+
+        if (current_platform.is_cpu()
+                and model_config.get_sliding_window() is not None):
+            _raise_or_fallback(feature_name="sliding window (CPU backend)",
+                               recommend_to_remove=False)
+            return False
+
         #############################################################
 
         return True
@@ -1522,15 +1555,38 @@ class EngineArgs:
         if self.max_num_seqs is None:
             self.max_num_seqs = 256
 
-    def _set_default_args_v1(self, usage_context: UsageContext) -> None:
+    def _set_default_args_v1(self, usage_context: UsageContext,
+                             model_config: ModelConfig) -> None:
         """Set Default Arguments for V1 Engine."""
 
-        # V1 always uses chunked prefills.
-        self.enable_chunked_prefill = True
+        # V1 always uses chunked prefills and prefix caching
+        # for non-pooling tasks.
+        # For pooling tasks the default is False
+        if model_config.runner_type != "pooling":
+            self.enable_chunked_prefill = True
+            if self.enable_prefix_caching is None:
+                self.enable_prefix_caching = True
+        else:
 
-        # V1 enables prefix caching by default.
-        if self.enable_prefix_caching is None:
-            self.enable_prefix_caching = True
+            pooling_type = model_config.pooler_config.pooling_type
+
+            # TODO: when encoder models are supported we'll have to
+            # check for causal attention here.
+            incremental_prefill_supported = (pooling_type is not None and
+                                             pooling_type.lower() == "last")
+
+            action = "Enabling" if \
+                incremental_prefill_supported else "Disabling"
+
+            if self.enable_chunked_prefill is None:
+                self.enable_chunked_prefill = incremental_prefill_supported
+                logger.info("(%s) chunked prefill by default", action)
+            if self.enable_prefix_caching is None:
+                self.enable_prefix_caching = incremental_prefill_supported
+                logger.info("(%s) prefix caching by default", action)
+
+        if not self.enable_chunked_prefill:
+            self.max_num_batched_tokens = model_config.max_model_len
 
         # V1 should use the new scheduler by default.
         # Swap it only if this arg is set to the original V0 default

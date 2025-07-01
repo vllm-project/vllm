@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
-import importlib.util
 from typing import Optional
 
 import torch
@@ -12,13 +11,12 @@ from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import (
     _moe_permute)
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP)
-from vllm.model_executor.layers.fused_moe.utils import (
-    _resize_cache, per_token_group_quant_fp8)
-from vllm.utils import round_up
+from vllm.model_executor.layers.fused_moe.utils import _resize_cache
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    per_token_group_quant_fp8)
+from vllm.utils import has_deep_gemm, round_up
 
 logger = init_logger(__name__)
-
-has_deep_gemm = importlib.util.find_spec("deep_gemm") is not None
 
 
 @functools.cache
@@ -41,14 +39,14 @@ def _valid_deep_gemm(hidden_states: torch.Tensor, w1: torch.Tensor,
     gemm kernel.  All of M, N, K and the quantization block_shape must be
     aligned by `dg.get_m_alignment_for_contiguous_layout()`.
     """
-    if not has_deep_gemm:
+    if not has_deep_gemm():
         logger.debug("DeepGemm disabled: deep_gemm not available.")
         return False
 
     M = hidden_states.size(0)
     _, K, N = w2.size()
     if not _valid_deep_gemm_shape(M, N, K):
-        logger.debug("DeepGemm disabled: unalinged problem size.")
+        logger.debug("DeepGemm disabled: unaligned problem size.")
         return False
 
     if (w1.dtype != torch.float8_e4m3fn or w2.dtype != torch.float8_e4m3fn):
