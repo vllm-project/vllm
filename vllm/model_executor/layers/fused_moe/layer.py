@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import importlib
 from abc import abstractmethod
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -32,10 +31,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
-from vllm.utils import direct_register_custom_op
-
-has_pplx = importlib.util.find_spec("pplx_kernels") is not None
-has_deepep = importlib.util.find_spec("deep_ep") is not None
+from vllm.utils import direct_register_custom_op, has_deep_ep, has_pplx
 
 if current_platform.is_cuda_alike():
     from .fused_batched_moe import BatchedTritonExperts
@@ -43,9 +39,9 @@ if current_platform.is_cuda_alike():
     from .modular_kernel import (FusedMoEModularKernel,
                                  FusedMoEPermuteExpertsUnpermute,
                                  FusedMoEPrepareAndFinalize)
-    if has_pplx:
+    if has_pplx():
         from .pplx_prepare_finalize import PplxPrepareAndFinalize
-    if has_deepep:
+    if has_deep_ep():
         from .deepep_ht_prepare_finalize import DeepEPHTPrepareAndFinalize
         from .deepep_ll_prepare_finalize import (DEEPEP_QUANT_BLOCK_SIZE,
                                                  DeepEPLLPrepareAndFinalize)
@@ -554,12 +550,23 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
         if current_platform.is_cpu():
             if current_platform.get_cpu_architecture() == CpuArchEnum.X86:
-                import intel_extension_for_pytorch as ipex
-                layer.ipex_fusion = ipex.llm.modules.GatedMLPMOE(
-                    layer.w13_weight,
-                    layer.w2_weight,
-                    use_prepack=envs.VLLM_CPU_MOE_PREPACK,
-                )
+                from vllm.model_executor.layers.fused_moe import cpu_fused_moe
+                dtype = layer.w13_weight.dtype
+                if (envs.VLLM_CPU_SGL_KERNEL
+                        and torch._C._cpu._is_amx_tile_supported()
+                        and dtype == torch.bfloat16):
+                    packed_w13_weight = torch.ops._C.convert_weight_packed(
+                        layer.w13_weight)
+                    assert packed_w13_weight.size() == layer.w13_weight.size()
+                    layer.w13_weight.copy_(packed_w13_weight)
+                    del packed_w13_weight
+                    packed_w2_weight = torch.ops._C.convert_weight_packed(
+                        layer.w2_weight)
+                    assert packed_w2_weight.size() == layer.w2_weight.size()
+                    layer.w2_weight.copy_(packed_w2_weight)
+                    layer.cpu_fused_moe = cpu_fused_moe.SGLFusedMOE(layer)
+                else:
+                    layer.cpu_fused_moe = cpu_fused_moe.IPEXFusedMOE(layer)
             else:
                 raise NotImplementedError("CPU MOE only supports x86 arch.")
 
@@ -677,13 +684,12 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
         e_score_correction_bias: Optional[torch.Tensor] = None,
-        activation: str = "silu",
         apply_router_weight_on_input: bool = False,
+        activation: str = "silu",
         **kwargs,
     ):
-        assert activation == "silu", f"{activation} is not supported."
-        assert apply_router_weight_on_input is False
-        return layer.ipex_fusion(
+        return layer.cpu_fused_moe(
+            layer,
             x,
             use_grouped_topk,
             top_k,
@@ -691,9 +697,13 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             renormalize,
             topk_group,
             num_expert_group,
+            global_num_experts,
+            expert_map,
             custom_routing_function,
             scoring_func,
             e_score_correction_bias,
+            apply_router_weight_on_input,
+            activation,
         )
 
     def forward_hpu(
@@ -768,7 +778,12 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                                 expert_map=expert_map,
                                 renormalize=renormalize)
 
-    forward_native = forward_tpu if current_platform.is_tpu() else forward_cuda
+    if current_platform.is_tpu():
+        forward_native = forward_tpu
+    elif current_platform.is_cpu():
+        forward_native = forward_cpu
+    else:
+        forward_native = forward_cuda
 
 
 def determine_expert_map(
@@ -1250,6 +1265,7 @@ class FusedMoE(torch.nn.Module):
             param.materialize(final_shape, dtype=loaded_weight.dtype)
 
         expert_data = param.data if full_load else param.data[expert_id]
+
         # Case input scale: input_scale loading is only supported for fp8
         if "input_scale" in weight_name:
             # this is needed for compressed-tensors only
@@ -1277,6 +1293,7 @@ class FusedMoE(torch.nn.Module):
                              tp_rank=self.tp_rank)
             return True if return_success else None
 
+        # TODO @dsikka: ModelOpt should follow the proper MoE loading pattern
         if "ModelOpt" in quant_method_name:
             if ('weight_scale_2' in weight_name
                     or 'input_scale' in weight_name):
@@ -1293,7 +1310,7 @@ class FusedMoE(torch.nn.Module):
                     tp_rank=self.tp_rank)
             return True if return_success else None
 
-        # Case weight scales, zero_points and offset
+        # Case weight scales, zero_points and offset, weight/input global scales
         if ("scale" in weight_name or "zero" in weight_name
                 or "offset" in weight_name):
             # load the weight scales and zp based on the quantization scheme
@@ -1743,7 +1760,8 @@ def moe_forward_fake(hidden_states: torch.Tensor, router_logits: torch.Tensor,
 direct_register_custom_op(
     op_name="moe_forward",
     op_func=moe_forward,
-    mutates_args=[],
+    mutates_args=["hidden_states"],
     fake_impl=moe_forward_fake,
     dispatch_key=current_platform.dispatch_key,
+    tags=(torch.Tag.needs_fixed_stride_order, ),
 )
