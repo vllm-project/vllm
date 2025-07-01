@@ -61,13 +61,13 @@ except ImportError:
 
 
 class NixlAgentMetadata(KVConnectorHandshakeMetadata):
+    connector_type: str = "nixl"
     engine_id: str
     agent_metadata: bytes
     kv_caches_base_addr: list[int]
     num_blocks: int
     block_len: int
     attn_backend_name: str
-    connector_type: str = "nixl"
 
 
 @dataclass
