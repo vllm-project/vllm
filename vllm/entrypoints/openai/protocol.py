@@ -1750,12 +1750,11 @@ class TranscriptionRequest(OpenAIBaseModel):
     timestamps incurs additional latency.
     """
 
-    # --8<-- [start:transcription-extra-params]
     stream: Optional[bool] = False
-    """Custom field not present in the original OpenAI definition. When set,
-    it will enable output to be streamed in a similar fashion as the Chat
-    Completion endpoint.
+    """When set, it will enable output to be streamed in a similar fashion 
+    as the Chat Completion endpoint.
     """
+    # --8<-- [start:transcription-extra-params]
     # Flattened stream option to simplify form data.
     stream_include_usage: Optional[bool] = False
     stream_continuous_usage_stats: Optional[bool] = False
