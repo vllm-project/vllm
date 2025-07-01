@@ -55,6 +55,8 @@ try:
 except ImportError:
     from argparse import ArgumentParser as FlexibleArgumentParser
 
+from collections import Counter
+
 logger = logging.getLogger(__name__)
 
 # -----------------------------------------------------------------------------
@@ -648,6 +650,9 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
             args.hf_split = "train"
         elif args.dataset_path in ASRDataset.SUPPORTED_DATASET_PATHS:
             dataset_class = ASRDataset
+            args.hf_split = "train"
+        elif args.dataset_path in MLPerfDataset.SUPPORTED_DATASET_PATHS:
+            dataset_class = MLPerfDataset
             args.hf_split = "train"
         else:
             supported_datasets = set([
@@ -1438,4 +1443,130 @@ class ASRDataset(HuggingFaceDataset):
                 skipped,
             )
         self.maybe_oversample_requests(sampled_requests, num_requests)
+        return sampled_requests
+
+
+# -----------------------------------------------------------------------------
+# MLPerf Dataset Implementation
+# -----------------------------------------------------------------------------
+
+
+class MLPerfDataset(HuggingFaceDataset):
+    """
+    MLPerf Inference Dataset.
+
+    Dataset on HF:
+    https://huggingface.co/datasets/mgoin/mlperf-inference-llama2-data
+    https://huggingface.co/datasets/mgoin/mlperf-inference-llama3.1-data
+
+    Each record contains:
+      - "system_prompt": system role instruction.
+      - "question": user question.
+      - "output": reference answer.
+
+    We combine the system prompt and question into a chat-formatted prompt
+    (using the tokenizer's chat template) and set the expected output length to
+    the tokenized length of the provided reference answer.
+    """
+
+    SUPPORTED_DATASET_PATHS = {
+        "mgoin/mlperf-inference-llama2-data",
+        "mgoin/mlperf-inference-llama3.1-data",
+    }
+
+    def sample(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        num_requests: int,
+        output_len: Optional[int] = None,
+        enable_multimodal_chat: bool = False,  # Unused, kept for signature compatibility
+        **kwargs,
+    ) -> list[SampleRequest]:
+        # Force dynamic output length based on reference completion.
+        dynamic_output = output_len is None
+        sampled_requests: list[SampleRequest] = []
+
+        for item in self.data:
+            if len(sampled_requests) >= num_requests:
+                break
+
+            system_prompt = item["system_prompt"]
+            question = item["question"]
+            reference_answer = item["output"]
+
+            # Build chat-style prompt using tokenizer template, if available.
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": question},
+            ]
+            prompt_formatted = tokenizer.apply_chat_template(
+                messages, add_generation_prompt=True, tokenize=False
+            )
+            prompt_len = len(tokenizer(prompt_formatted).input_ids)
+
+            # Determine output length from reference answer tokens.
+            ref_out_len = len(
+                tokenizer(reference_answer, add_special_tokens=False).input_ids
+            )
+            expected_output_len = ref_out_len if dynamic_output else output_len
+
+            # Validate sequence lengths.
+            if not is_valid_sequence(prompt_len, expected_output_len):
+                continue
+
+            sampled_requests.append(
+                SampleRequest(
+                    prompt=prompt_formatted,
+                    prompt_len=prompt_len,
+                    expected_output_len=expected_output_len,
+                )
+            )
+
+        self.maybe_oversample_requests(sampled_requests, num_requests)
+        # -----------------------------------------------------------------
+        # Logging helper: histogram of prompt / output lengths
+        # -----------------------------------------------------------------
+        try:
+            bin_width = 50
+
+            def _log_histogram(values: list[int], name: str):
+                """Log a histogram for the provided values using the logger.
+
+                Args:
+                    values: List of integer lengths.
+                    name: Name for the histogram (e.g., "tok_input_length").
+                """
+                if not values:
+                    return
+
+                min_val = min(values)
+                max_val = max(values)
+                # Anchor the first bucket to the nearest lower multiple of
+                # bin_width so that all values are covered.
+                base = (min_val // bin_width) * bin_width
+                # Build bucket counts.
+                buckets = Counter(((v - base) // bin_width) for v in values)
+
+                logger.info(
+                    "Histogram Table for %s (bin width = %d):", name, bin_width
+                )
+                logger.info("Bin Range            | Count")
+                logger.info("--------------------------------")
+
+                for idx in range(min(buckets), max(buckets) + 1):
+                    low = base + idx * bin_width
+                    high = low + bin_width
+                    count = buckets.get(idx, 0)
+                    logger.info("[%d, %d)              | %d", low, high, count)
+
+            # Compute and log histograms for output and input lengths.
+            _log_histogram([req.expected_output_len for req in sampled_requests],
+                           "tok_output_length")
+            _log_histogram([req.prompt_len for req in sampled_requests],
+                           "tok_input_length")
+        except Exception as e:  # pragma: no cover
+            # Histogram computation is best-effort; ignore errors to avoid
+            # breaking dataset sampling.
+            logger.debug("Failed to compute histogram: %s", e)
+        # -----------------------------------------------------------------
         return sampled_requests
