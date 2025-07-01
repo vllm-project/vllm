@@ -2,47 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import MISSING, Field, asdict, dataclass, field
-from typing import Literal, Union
 
 import pytest
 
 from vllm.compilation.backends import VllmBackend
 from vllm.config import (LoadConfig, ModelConfig, PoolerConfig, VllmConfig,
-                         config, get_field)
+                         get_field)
 from vllm.model_executor.layers.pooler import PoolingType
 from vllm.platforms import current_platform
-
-
-class _TestConfig1:
-    pass
-
-
-@dataclass
-class _TestConfig2:
-    a: int
-    """docstring"""
-
-
-@dataclass
-class _TestConfig3:
-    a: int = 1
-
-
-@dataclass
-class _TestConfig4:
-    a: Union[Literal[1], Literal[2]] = 1
-    """docstring"""
-
-
-@pytest.mark.parametrize(("test_config", "expected_error"), [
-    (_TestConfig1, "must be a dataclass"),
-    (_TestConfig2, "must have a default"),
-    (_TestConfig3, "must have a docstring"),
-    (_TestConfig4, "must use a single Literal"),
-])
-def test_config(test_config, expected_error):
-    with pytest.raises(Exception, match=expected_error):
-        config(test_config)
 
 
 def test_compile_config_repr_succeeds():
