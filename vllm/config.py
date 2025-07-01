@@ -4140,9 +4140,9 @@ class CompilationConfig:
 
     @classmethod
     def from_cli(cls, cli_value: str) -> "CompilationConfig":
-        """Parse the CLI value for the compilation config."""
-        if cli_value in ["0", "1", "2", "3"]:
-            return cls(level=int(cli_value))
+        """Parse the CLI value for the compilation config.
+        -O1, -O2, -O3, etc. is handled in FlexibleArgumentParser.
+        """
         return TypeAdapter(CompilationConfig).validate_json(cli_value)
 
     def __post_init__(self) -> None:
@@ -4303,17 +4303,16 @@ class VllmConfig:
     """Quantization configuration."""
     compilation_config: CompilationConfig = field(
         default_factory=CompilationConfig)
-    """`torch.compile` configuration for the model.
+    """`torch.compile` and cudagraph capture configuration for the model.
 
-    When it is a number (0, 1, 2, 3), it will be interpreted as the
-    optimization level.
+    As a shorthand, `-O<n>` can be used to directly specify the compilation
+    level `n`: `-O3` is equivalent to `-O.level=3` (same as `-O='{"level":3}'`).
+    Currently, -O <n> and -O=<n> are supported as well but this will likely be 
+    removed in favor of clearer -O<n> syntax in the future.
 
     NOTE: level 0 is the default level without any optimization. level 1 and 2
     are for internal testing only. level 3 is the recommended level for
-    production.
-
-    Following the convention of traditional compilers, using `-O` without space
-    is also supported. `-O3` is equivalent to `-O 3`.
+    production, also default in V1.
 
     You can specify the full compilation config like so:
     `{"level": 3, "cudagraph_capture_sizes": [1, 2, 4, 8]}`
