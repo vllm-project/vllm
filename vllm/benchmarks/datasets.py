@@ -55,8 +55,6 @@ try:
 except ImportError:
     from argparse import ArgumentParser as FlexibleArgumentParser
 
-from collections import Counter
-
 logger = logging.getLogger(__name__)
 
 # -----------------------------------------------------------------------------
@@ -1523,50 +1521,4 @@ class MLPerfDataset(HuggingFaceDataset):
             )
 
         self.maybe_oversample_requests(sampled_requests, num_requests)
-        # -----------------------------------------------------------------
-        # Logging helper: histogram of prompt / output lengths
-        # -----------------------------------------------------------------
-        try:
-            bin_width = 50
-
-            def _log_histogram(values: list[int], name: str):
-                """Log a histogram for the provided values using the logger.
-
-                Args:
-                    values: List of integer lengths.
-                    name: Name for the histogram (e.g., "tok_input_length").
-                """
-                if not values:
-                    return
-
-                min_val = min(values)
-                max_val = max(values)
-                # Anchor the first bucket to the nearest lower multiple of
-                # bin_width so that all values are covered.
-                base = (min_val // bin_width) * bin_width
-                # Build bucket counts.
-                buckets = Counter(((v - base) // bin_width) for v in values)
-
-                logger.info(
-                    "Histogram Table for %s (bin width = %d):", name, bin_width
-                )
-                logger.info("Bin Range            | Count")
-                logger.info("--------------------------------")
-
-                for idx in range(min(buckets), max(buckets) + 1):
-                    low = base + idx * bin_width
-                    high = low + bin_width
-                    count = buckets.get(idx, 0)
-                    logger.info("[%d, %d)              | %d", low, high, count)
-
-            # Compute and log histograms for output and input lengths.
-            _log_histogram([req.expected_output_len for req in sampled_requests],
-                           "tok_output_length")
-            _log_histogram([req.prompt_len for req in sampled_requests],
-                           "tok_input_length")
-        except Exception as e:  # pragma: no cover
-            # Histogram computation is best-effort; ignore errors to avoid
-            # breaking dataset sampling.
-            logger.debug("Failed to compute histogram: %s", e)
-        # -----------------------------------------------------------------
         return sampled_requests
