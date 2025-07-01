@@ -226,7 +226,7 @@ class Attention(nn.Module, AttentionLayerBase):
             self.v_range = torch.tensor(
                 envs.V_SCALE_CONSTANT, dtype=torch.float32
             )
-        except Exception as e:
+        except RuntimeError as e:
             if torch.cuda.is_available():
                 logger.error(
                     "Failed to initialize attention q/k/v range constants: %s",
