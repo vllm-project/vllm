@@ -97,6 +97,7 @@ class CpuPlatform(Platform):
         model_config = vllm_config.model_config
 
         if model_config is not None:
+            #  Cascade attention is not supported on CPU.
             model_config.disable_cascade_attn = True
 
         cache_config = vllm_config.cache_config
