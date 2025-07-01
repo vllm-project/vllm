@@ -181,7 +181,7 @@ def _support_torch_compile(
             return self.forward(*args, **kwargs)
 
         if self.do_not_compile:
-            if not self.vllm_config.compilation_config.use_simple_cuda_graph:
+            if not self.vllm_config.compilation_config.simple_cuda_graph:
                 return self.forward(*args, **kwargs)
             return self.forward_graph(*args, **kwargs)
 

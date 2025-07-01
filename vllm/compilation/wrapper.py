@@ -148,7 +148,7 @@ class CudaGraphWrapper:
             self.compilation_config.cudagraph_capture_sizes)
         self.cudagraph_num_of_warmups = (
             self.compilation_config.cudagraph_num_of_warmups)
-        assert self.compilation_config.use_simple_cuda_graph
+        assert self.compilation_config.simple_cuda_graph
         assert self.compilation_config.full_cuda_graph
 
         # states
