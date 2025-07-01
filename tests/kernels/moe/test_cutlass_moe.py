@@ -509,7 +509,7 @@ def test_blocked_cutlass_moe_8_bit(
 
         # Note that we are using the dequantized versions of the tensors.
         # Using a, w1 and w2 directly results in minor output differences.
-        torch_output = torch_moe(mt.a_d, mt.w1_d, mt.w2_d, score, topk, None)
+        torch_output = torch_moe(mt.a_d, mt.w1_d, mt.w2_d, score, topk)
 
         cutlass_output = run_blocked_8_bit(mt, topk_weights, topk_ids,
                                            per_act_block)
