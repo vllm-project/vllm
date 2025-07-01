@@ -252,7 +252,7 @@ def load_logitsprocs(allowed_logitsprocs: list[str]) -> None:
         # TODO(andy) - vLLM V1 on TPU does not support custom logitsprocs
         return
     plugins = load_plugins_by_group(group=LOGITSPROCS_GROUP,
-                                    allowed_logitsprocs=allowed_logitsprocs)
+                                    allowed_plugins=allowed_logitsprocs)
     # general plugins, we only need to execute the loaded functions
     for func in plugins.values():
         func()
