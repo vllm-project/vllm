@@ -143,6 +143,7 @@ class Ernie4_5_MoeMoE(nn.Module):
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
                 prefix=f"{prefix}.shared_experts",
+                reduce_results=self.experts.must_reduce_shared_expert_outputs()
             )
 
 
