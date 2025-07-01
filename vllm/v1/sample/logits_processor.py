@@ -5,15 +5,21 @@ from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 from itertools import chain
-from typing import Optional, Union
+from typing import Callable, Optional, Union
 
 import torch
 from torch._prims_common import DeviceLikeType
 
 from vllm import PoolingParams, SamplingParams
 from vllm.logger import init_logger
+from vllm.plugins import load_plugins_by_group
 
 logger = init_logger(__name__)
+
+LOGITSPROCS_GROUP = 'vllm.logits_processors'
+
+# make sure one process only loads logitsprocs once
+logitsprocs_loaded = False
 
 
 class MoveDirectionality(Enum):
@@ -204,6 +210,10 @@ class LogitsProcessor(ABC):
         raise NotImplementedError
 
 
+LogitprocCtor = Callable[[], LogitsProcessor]
+logitsprocs_ctors: list[LogitprocCtor] = []
+
+
 @dataclass
 class LogitsProcessorManager:
     """Encapsulates initialized logitsproc objects."""
@@ -212,34 +222,39 @@ class LogitsProcessorManager:
     non_argmax_invariant: list[LogitsProcessor] = field(
         default_factory=list)  # non-argmax-invariant logitsprocs
 
-    # def add_logitsprocs_by_ids(
-    #         self, ids_logitsprocs: Sequence[tuple[str,
-    #                                               LogitsProcessor]]) -> None:
-    #     """Add a sequence of (logitproc ID, logitproc instance)'s to the
-    #     logitsprocs manager
-
-    #     Args:
-    #       ids_logitsprocs: sequence of
-    #       (logitproc ID, logitproc instance pairs)
-    #     """
-    #     ids = self.all_ids
-    #     for id, logitproc in ids_logitsprocs:
-    #         # Ensure no duplicate IDs
-    #         if id in ids:
-    #             raise ValueError(
-    #                 f"Logits processor ID {id} already loaded (loaded IDs: "
-    #                 f"{ids})")
-    #         ids.add(id)
-    #         if logitproc.requires_nongreedy():
-    #             self.nongreedy[id] = logitproc
-    #         else:
-    #             # Greedy-compatible logitproc
-    #             self.greedy[id] = logitproc
+    def add_logitsprocs_by_ctor(self, ctor_list: list[LogitprocCtor]) -> None:
+        for ctor in ctor_list:
+            logitproc: LogitsProcessor = ctor()
+            (self.argmax_invariant if logitproc.is_argmax_invariant() else
+             self.non_argmax_invariant).append(logitproc)
 
     @property
     def all(self) -> Iterator[LogitsProcessor]:
         """Iterator over all logits processors."""
         return chain(self.argmax_invariant, self.non_argmax_invariant)
+
+
+def load_logitsprocs(allowed_logitsprocs=list[str]) -> None:
+    """WARNING: logitsprocs can be loaded for multiple times in different
+    processes. They should be designed in a way that they can be loaded
+    multiple times without causing issues.
+    """
+    global logitsprocs_loaded
+    if logitsprocs_loaded:
+        return
+    logitsprocs_loaded = True
+
+    # some platform-specific configurations
+    from vllm.platforms import current_platform
+
+    if current_platform.is_tpu():
+        # TODO(andy) - vLLM V1 on TPU does not support custom logitsprocs
+        return
+    plugins = load_plugins_by_group(group=LOGITSPROCS_GROUP,
+                                    allowed_logitsprocs=allowed_logitsprocs)
+    # general plugins, we only need to execute the loaded functions
+    for func in plugins.values():
+        func()
 
 
 ###### ----- Built-in LogitsProcessor impls below here

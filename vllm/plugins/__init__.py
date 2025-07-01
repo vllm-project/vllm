@@ -17,14 +17,17 @@ DEFAULT_PLUGINS_GROUP = 'vllm.general_plugins'
 plugins_loaded = False
 
 
-def load_plugins_by_group(group: str) -> dict[str, Callable[[], Any]]:
+def load_plugins_by_group(
+        group: str,
+        allowed_plugins: list[str]) -> dict[str, Callable[[], Any]]:
     import sys
     if sys.version_info < (3, 10):
         from importlib_metadata import entry_points
     else:
         from importlib.metadata import entry_points
 
-    allowed_plugins = envs.VLLM_PLUGINS
+    if not allowed_plugins:
+        allowed_plugins = envs.VLLM_PLUGINS
 
     discovered_plugins = entry_points(group=group)
     if len(discovered_plugins) == 0:

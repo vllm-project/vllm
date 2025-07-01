@@ -17,7 +17,8 @@ from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.pool.metadata import PoolingMetadata
 from vllm.v1.sample.logits_processor import (BatchUpdateBuilder,
                                              MoveDirectionality,
-                                             init_builtin_logitsprocs)
+                                             init_builtin_logitsprocs,
+                                             logitsprocs_ctors)
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.utils import is_spec_decode_unsupported
 from vllm.v1.utils import copy_slice
@@ -215,13 +216,13 @@ class InputBatch:
         # updates. Should reset each step.
         self.batch_update_builder = BatchUpdateBuilder()
 
-        # Define logits processors.
-        # TODO(andy): logits processor list should be extensible via engine
-        # constructor argument; for now the list is fixed.
+        # Init builtin logits processors
         self.logitsprocs = init_builtin_logitsprocs(
             pin_memory_available=pin_memory,
             max_num_reqs=max_num_reqs + 1,
             device=device)
+        # Init custom logits processors
+        self.logitsprocs.add_logitsprocs_by_ctor(logitsprocs_ctors)
 
         # TODO convert this to LogitsProcessor
         self.has_allowed_token_ids: set[str] = set()
