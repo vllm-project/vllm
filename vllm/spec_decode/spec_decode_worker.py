@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import copy
 from collections import defaultdict
@@ -114,7 +115,7 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
     return spec_decode_worker
 
 
-# Reminder: Please update docs/source/features/compatibility_matrix.md
+# Reminder: Please update docs/features/compatibility_matrix.md
 # If the feature combo become valid
 class SpecDecodeWorker(LoRANotSupportedWorkerBase):
     """Worker which implements speculative decoding.
@@ -410,9 +411,9 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         NOTE(cade): This will require a special check if the proposer worker
         does not have a sampler (e.g. ngram speculation).
         """
-        (self.scorer_worker.model_runner.model.sampler.include_gpu_probs_tensor
+        (self.scorer_worker.model_runner.sampler.include_gpu_probs_tensor
          ) = True
-        (self.scorer_worker.model_runner.model.sampler.
+        (self.scorer_worker.model_runner.sampler.
          should_modify_greedy_probs_inplace) = True
         self.proposer_worker.set_include_gpu_probs_tensor()
         self.proposer_worker.set_should_modify_greedy_probs_inplace()
@@ -695,6 +696,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
                     seq_group_meta_with_hidden):
                 self.previous_hidden_states.update(hidden_states,
                                                    seq_group_meta_with_hidden)
+                self.previous_hidden_states.prune(seq_group_meta_with_hidden)
 
         if not skip_proposer:
             # We prepare the prefill hidden states here so that there no

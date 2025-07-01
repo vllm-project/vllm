@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from __future__ import annotations
 
@@ -9,7 +10,7 @@ import torch
 
 from tests.quantization.utils import is_quant_method_supported
 from vllm import LLM, SamplingParams
-from vllm.config import CompilationConfig, CompilationLevel
+from vllm.config import CompilationConfig, CompilationLevel, PassConfig
 from vllm.platforms import current_platform
 
 from ..utils import create_new_process_for_each_test
@@ -20,15 +21,11 @@ def models_list(*, all: bool = True, keywords: Optional[list[str]] = None):
         ("facebook/opt-125m", {}),
         ("nm-testing/tinyllama-oneshot-w8w8-test-static-shape-change", {
             "dtype": torch.float16,
-            "quantization": "compressed-tensors"
         }),
         ("neuralmagic/Llama-3.2-1B-Instruct-FP8-dynamic", {
             "dtype": torch.float16,
-            "quantization": "compressed-tensors"
         }),
-        ("neuralmagic/Llama-3.2-1B-Instruct-quantized.w8a8", {
-            "quantization": "compressed-tensors"
-        }),
+        ("neuralmagic/Llama-3.2-1B-Instruct-quantized.w8a8", {}),
         ("meta-llama/Llama-3.2-1B-Instruct", {}),
     ]
 
@@ -97,9 +94,6 @@ def test_full_graph(
         print(f"MODEL={model}")
 
         run_model(optimization_level, model, model_kwargs)
-
-
-PassConfig = CompilationConfig.PassConfig
 
 
 # TODO(luka) add other supported compilation config scenarios here

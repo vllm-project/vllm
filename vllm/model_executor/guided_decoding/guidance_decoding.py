@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
-from re import escape as regex_escape
 
 import llguidance
+from regex import escape as regex_escape
 from transformers import PreTrainedTokenizerBase
 
 from vllm.model_executor.guided_decoding.guidance_logits_processors import (
@@ -21,13 +22,12 @@ def get_local_guidance_guided_decoding_logits_processor(
     """
 
     grm = ""
-    any_whitespace = 'disable-any-whitespace' not in \
-        guided_params.backend_options()
+    any_whitespace = not guided_params.disable_any_whitespace
     if (guide_json := guided_params.json) is not None:
         # Optionally set additionalProperties to False at the top-level
         # By default, other backends do not allow additional top-level
         # properties, so this makes guidance more similar to other backends
-        if 'no-additional-properties' in guided_params.backend_options():
+        if guided_params.disable_additional_properties:
             if not isinstance(guide_json, str):
                 guide_json = json.dumps(guide_json)
             guide_json = process_for_additional_properties(guide_json)

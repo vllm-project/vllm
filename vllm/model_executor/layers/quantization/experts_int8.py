@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Optional
 
 import torch
 
@@ -8,6 +9,7 @@ from vllm.distributed import get_tensor_model_parallel_rank, get_tp_group
 from vllm.model_executor.layers.fused_moe import FusedMoE, FusedMoEMethodBase
 from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
+from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.utils import set_weight_attrs
@@ -20,11 +22,11 @@ class ExpertsInt8Config(QuantizationConfig):
         super().__init__()
 
     @classmethod
-    def get_name(cls) -> str:
+    def get_name(cls) -> QuantizationMethods:
         return "experts_int8"
 
     @classmethod
-    def get_supported_act_dtypes(cls) -> List[torch.dtype]:
+    def get_supported_act_dtypes(cls) -> list[torch.dtype]:
         return [torch.bfloat16, torch.half]
 
     @classmethod
@@ -32,11 +34,11 @@ class ExpertsInt8Config(QuantizationConfig):
         return 80
 
     @classmethod
-    def get_config_filenames(cls) -> List[str]:
+    def get_config_filenames(cls) -> list[str]:
         return []
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "ExpertsInt8Config":
+    def from_config(cls, config: dict[str, Any]) -> "ExpertsInt8Config":
         return cls()
 
     def get_quant_method(self, layer: torch.nn.Module,
@@ -115,7 +117,15 @@ class ExpertsInt8MoEMethod(FusedMoEMethodBase):
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
+        enable_eplb: bool = False,
+        expert_load_view: Optional[torch.Tensor] = None,
+        logical_to_physical_map: Optional[torch.Tensor] = None,
+        logical_replica_count: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        if enable_eplb:
+            raise NotImplementedError(
+                "EPLB not supported for `ExpertsInt8MoEMethod` yet.")
+
         from vllm.model_executor.layers.fused_moe import fused_experts
 
         topk_weights, topk_ids = FusedMoE.select_experts(

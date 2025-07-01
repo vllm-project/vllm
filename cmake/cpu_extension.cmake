@@ -75,6 +75,7 @@ if (MACOSX_FOUND AND CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64")
 else()
     find_isa(${CPUINFO} "avx2" AVX2_FOUND)
     find_isa(${CPUINFO} "avx512f" AVX512_FOUND)
+    find_isa(${CPUINFO} "Power11" POWER11_FOUND)
     find_isa(${CPUINFO} "POWER10" POWER10_FOUND)
     find_isa(${CPUINFO} "POWER9" POWER9_FOUND)
     find_isa(${CPUINFO} "asimd" ASIMD_FOUND) # Check for ARM NEON support
@@ -106,13 +107,19 @@ elseif (AVX2_FOUND)
     list(APPEND CXX_COMPILE_FLAGS "-mavx2")
     message(WARNING "vLLM CPU backend using AVX2 ISA")
     
-elseif (POWER9_FOUND OR POWER10_FOUND)
+elseif (POWER9_FOUND OR POWER10_FOUND OR POWER11_FOUND)
     message(STATUS "PowerPC detected")
-    # Check for PowerPC VSX support
-    list(APPEND CXX_COMPILE_FLAGS
-        "-mvsx"
-        "-mcpu=native"
-        "-mtune=native")
+    if (POWER9_FOUND)
+        list(APPEND CXX_COMPILE_FLAGS
+            "-mvsx"
+            "-mcpu=power9"
+            "-mtune=power9")
+    elseif (POWER10_FOUND OR POWER11_FOUND)
+        list(APPEND CXX_COMPILE_FLAGS
+            "-mvsx"
+            "-mcpu=power10"
+            "-mtune=power10")
+    endif()
 
 elseif (ASIMD_FOUND)
     message(STATUS "ARMv8 or later architecture detected")
@@ -168,6 +175,33 @@ if (AVX512_FOUND AND NOT AVX512_DISABLED)
     FetchContent_MakeAvailable(oneDNN)
     
     list(APPEND LIBS dnnl)
+elseif(POWER10_FOUND)
+    FetchContent_Declare(
+        oneDNN
+        GIT_REPOSITORY https://github.com/oneapi-src/oneDNN.git
+        GIT_TAG v3.7.2
+        GIT_PROGRESS TRUE
+        GIT_SHALLOW TRUE
+    )
+
+    set(ONEDNN_LIBRARY_TYPE "STATIC")
+    set(ONEDNN_BUILD_DOC "OFF")
+    set(ONEDNN_BUILD_EXAMPLES "OFF")
+    set(ONEDNN_BUILD_TESTS "OFF")
+    set(ONEDNN_ENABLE_WORKLOAD "INFERENCE")
+    set(ONEDNN_ENABLE_PRIMITIVE "MATMUL;REORDER")
+    set(ONEDNN_BUILD_GRAPH "OFF")
+    set(ONEDNN_ENABLE_JIT_PROFILING "OFF")
+    set(ONEDNN_ENABLE_ITT_TASKS "OFF")
+    set(ONEDNN_ENABLE_MAX_CPU_ISA "OFF")
+    set(ONEDNN_ENABLE_CPU_ISA_HINTS "OFF")
+    set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
+
+    set(DNNL_CPU_RUNTIME "OMP")
+
+    FetchContent_MakeAvailable(oneDNN)
+
+    list(APPEND LIBS dnnl)
 endif()
 
 message(STATUS "CPU extension compile flags: ${CXX_COMPILE_FLAGS}")
@@ -196,6 +230,10 @@ if (AVX512_FOUND AND NOT AVX512_DISABLED)
     set(VLLM_EXT_SRC
         "csrc/cpu/quant.cpp"
         "csrc/cpu/shm.cpp"
+        ${VLLM_EXT_SRC})
+elseif(POWER10_FOUND)
+    set(VLLM_EXT_SRC
+        "csrc/cpu/quant.cpp"
         ${VLLM_EXT_SRC})
 endif()
 

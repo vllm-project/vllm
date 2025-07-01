@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Adapted from
 # https://github.com/ROCm/vllm/blob/cea7419f151cc50293a05b7fac8547f8f887c9f6/vllm/model_executor/models/grok1.py
 # Copyright 2023 The vLLM team.
@@ -21,13 +22,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only Grok1 model."""
-from typing import Iterable, List, Optional, Set, Tuple, Union
+from collections.abc import Iterable
+from typing import Optional, Union
 
 import torch
 import torch.nn.functional as F
 from torch import nn
 
-from vllm.attention import Attention, AttentionMetadata
+from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
@@ -39,7 +41,6 @@ from vllm.model_executor.layers.linear import (QKVParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
@@ -182,25 +183,20 @@ class Grok1Attention(nn.Module):
                               quant_config=quant_config,
                               logits_soft_cap=attn_logits_soft_cap,
                               prefix=f"{prefix}.attn")
+        self.attn_multiplier = getattr(self.config, "attn_output_multiplier",
+                                       1.0) if self.config else 1.0
 
     def forward(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
+        attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
-
-        # Apply attention output multiplier if specified in config
-        attn_multiplier = getattr(self.config, "attn_output_multiplier",
-                                  None) if self.config else None
-        if attn_multiplier is not None:
-            output = output * attn_multiplier
+        output *= self.attn_multiplier
         return output
 
 
@@ -261,10 +257,8 @@ class Grok1DecoderLayer(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
         residual: Optional[torch.Tensor],
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
         if residual is None:
             residual = hidden_states
@@ -276,8 +270,6 @@ class Grok1DecoderLayer(nn.Module):
         hidden_states = self.attn(
             positions=positions,
             hidden_states=hidden_states,
-            kv_cache=kv_cache,
-            attn_metadata=attn_metadata,
         )
 
         # Post attention normalization
@@ -341,8 +333,6 @@ class Grok1Model(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors],
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
@@ -359,9 +349,7 @@ class Grok1Model(nn.Module):
 
         for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
-            hidden_states, residual = layer(positions, hidden_states,
-                                            kv_caches[i - self.start_layer],
-                                            attn_metadata, residual)
+            hidden_states, residual = layer(positions, hidden_states, residual)
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
@@ -372,8 +360,8 @@ class Grok1Model(nn.Module):
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -391,7 +379,7 @@ class Grok1Model(nn.Module):
             num_experts=num_experts)
 
         params_dict = dict(self.named_parameters())
-        loaded_params: Set[str] = set()
+        loaded_params: set[str] = set()
 
         for name, loaded_weight in weights:
             if (self.quant_config is not None and
@@ -505,9 +493,7 @@ class Grok1ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             self.unpadded_vocab_size,
             config.hidden_size,
             org_num_embeddings=config.vocab_size,
-            padding_size=DEFAULT_VOCAB_PADDING_SIZE
-            # We need bigger padding if using lora for kernel compatibility
-            if not lora_config else lora_config.lora_vocab_padding_size,
+            padding_size=DEFAULT_VOCAB_PADDING_SIZE,
             quant_config=quant_config,
             prefix=maybe_prefix(prefix, "lm_head"),
         )
@@ -521,7 +507,6 @@ class Grok1ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                                                 config.vocab_size,
                                                 self.output_multiplier_scale)
 
-        self.sampler = get_sampler()
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 
@@ -532,13 +517,10 @@ class Grok1ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        hidden_states = self.model(input_ids, positions, kv_caches,
-                                   attn_metadata, intermediate_tensors,
+        hidden_states = self.model(input_ids, positions, intermediate_tensors,
                                    inputs_embeds)
         return hidden_states
 
@@ -551,20 +533,14 @@ class Grok1ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                                        sampling_metadata)
         return logits
 
-    def sample(
-        self,
-        logits: Optional[torch.Tensor],
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(logits, sampling_metadata)
-        return next_tokens
-
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
-        skip_prefixes = ["rotary_emb.inv_freq"]
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         # Skip lm_head when tie_word_embeddings is True
-        if self.config.tie_word_embeddings:
-            skip_prefixes.append("lm_head")
+        skip_prefixes = (["lm_head"]
+                         if self.config.tie_word_embeddings else None)
 
-        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
+        loader = AutoWeightsLoader(
+            self,
+            skip_prefixes=skip_prefixes,
+        )
         return loader.load_weights(weights)

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
     Implements a distributed key-value (KV) cache transfer mechanism.
 
@@ -11,7 +12,7 @@
 """
 import threading
 from collections import deque
-from typing import Deque, List, Optional, Union
+from typing import Optional, Union
 
 import torch
 
@@ -38,7 +39,7 @@ class SimpleBuffer(KVLookupBufferBase):
         data_pipe: on device (e.g. GPU)
         """
 
-        self.buffer: Deque[List[torch.Tensor]] = deque()
+        self.buffer: deque[list[torch.Tensor]] = deque()
 
         self.buffer_size = 0
         self.buffer_size_threshold = buffer_size_thresh
@@ -50,8 +51,8 @@ class SimpleBuffer(KVLookupBufferBase):
         self.normal_signal = torch.tensor([0], device="cpu")
         self.end_signal = None
 
-    def _matches(self, tokens_roi_sender: List[torch.Tensor],
-                 tokens_roi_recver: List[torch.Tensor]):
+    def _matches(self, tokens_roi_sender: list[torch.Tensor],
+                 tokens_roi_recver: list[torch.Tensor]):
 
         # tokens_roi_sender: tokens and roi of the producer (in the buffer)
         # tokens_roi_recver: tokens and roi of the consumer (query)
@@ -88,7 +89,7 @@ class SimpleBuffer(KVLookupBufferBase):
             tensor = tensor.float()
         self.data_pipe.send_tensor(tensor)
 
-    def _get_element_size(self, data: Optional[Union[List, torch.Tensor]]):
+    def _get_element_size(self, data: Optional[Union[list, torch.Tensor]]):
 
         if isinstance(data, torch.Tensor):
             return data.element_size() * data.numel()
@@ -151,7 +152,7 @@ class SimpleBuffer(KVLookupBufferBase):
                 tokens_roi_recver = [input_tokens, roi]
 
                 def is_buffer_available(
-                    tokens_roi_recver: List[torch.Tensor], ) -> bool:
+                    tokens_roi_recver: list[torch.Tensor], ) -> bool:
                     # perform input tokens and roi matching
                     # FIXME: this matching is O(n), ideally it should be O(1)
                     # but this buffer size won't (and shouldn't) be too large so
@@ -184,7 +185,7 @@ class SimpleBuffer(KVLookupBufferBase):
 
     def drop_select(
             self, input_tokens: Optional[torch.Tensor],
-            roi: Optional[torch.Tensor]) -> List[Optional[torch.Tensor]]:
+            roi: Optional[torch.Tensor]) -> list[Optional[torch.Tensor]]:
 
         assert self.request_handling_thread is None, \
             "drop_select should be called by the KV cache consumer "\

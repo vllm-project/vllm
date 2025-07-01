@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import contextlib
+import copy
 import os
 import warnings
 from functools import lru_cache
@@ -12,7 +14,7 @@ import huggingface_hub
 from transformers import (AutoTokenizer, PreTrainedTokenizer,
                           PreTrainedTokenizerFast)
 
-from vllm.envs import VLLM_USE_MODELSCOPE
+from vllm import envs
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.transformers_utils.tokenizer_base import (TokenizerBase,
@@ -38,9 +40,9 @@ def decode_tokens(
 ) -> str:
     """
     Backend-agnostic equivalent of HF's
-    :code:`tokenizer.decode(token_ids, ...)`.
+    `tokenizer.decode(token_ids, ...)`.
 
-    :code:`skip_special_tokens=None` means to use the backend's default
+    `skip_special_tokens=None` means to use the backend's default
     settings.
     """
     if skip_special_tokens is not None:
@@ -54,34 +56,43 @@ def encode_tokens(
     tokenizer: AnyTokenizer,
     text: str,
     *,
+    truncation: Optional[bool] = None,
+    max_length: Optional[int] = None,
     add_special_tokens: Optional[bool] = None,
 ) -> list[int]:
     """
     Backend-agnostic equivalent of HF's
-    :code:`tokenizer.encode(text, ...)`.
+    `tokenizer.encode(text, ...)`.
 
-    :code:`add_special_tokens=None` means to use the backend's default
+    `add_special_tokens=None` means to use the backend's default
     settings.
     """
-    if add_special_tokens is not None:
-        return tokenizer.encode(text, add_special_tokens=add_special_tokens)
 
-    return tokenizer.encode(text)
+    kw_args: dict[str, Any] = {}
+    if max_length is not None:
+        kw_args["max_length"] = max_length
+
+    if truncation is not None:
+        kw_args["truncation"] = truncation
+
+    if add_special_tokens is not None:
+        kw_args["add_special_tokens"] = add_special_tokens
+
+    return tokenizer.encode(text, **kw_args)
 
 
 def get_cached_tokenizer(tokenizer: AnyTokenizer) -> AnyTokenizer:
-    """Get tokenizer with cached properties.
-
-    This will patch the tokenizer object in place.
-
+    """
     By default, transformers will recompute multiple tokenizer properties
-    each time they are called, leading to a significant slowdown. This
-    function caches these properties for faster access."""
+    each time they are called, leading to a significant slowdown.
+    This proxy caches these properties for faster access.
+    """
+    cached_tokenizer = copy.copy(tokenizer)
 
-    tokenizer_all_special_ids = set(tokenizer.all_special_ids)
+    tokenizer_all_special_ids = tokenizer.all_special_ids
+    tokenizer_all_special_tokens = tokenizer.all_special_tokens
     tokenizer_all_special_tokens_extended = (
         tokenizer.all_special_tokens_extended)
-    tokenizer_all_special_tokens = set(tokenizer.all_special_tokens)
     tokenizer_vocab = tokenizer.get_vocab()
     tokenizer_len = len(tokenizer)
 
@@ -97,31 +108,34 @@ def get_cached_tokenizer(tokenizer: AnyTokenizer) -> AnyTokenizer:
     class CachedTokenizer(tokenizer.__class__):  # type: ignore
 
         @property
-        def all_special_ids(self):
+        def all_special_ids(self) -> list[int]:
             return tokenizer_all_special_ids
 
         @property
-        def all_special_tokens(self):
+        def all_special_tokens(self) -> list[str]:
             return tokenizer_all_special_tokens
 
         @property
-        def all_special_tokens_extended(self):
+        def all_special_tokens_extended(self) -> list[str]:
             return tokenizer_all_special_tokens_extended
 
         @property
-        def max_token_id(self):
+        def max_token_id(self) -> int:
             return max_token_id
 
-        def get_vocab(self):
+        def get_vocab(self) -> dict[str, int]:
             return tokenizer_vocab
 
-        def __len__(self):
+        def __len__(self) -> int:
             return tokenizer_len
+
+        def __reduce__(self):
+            return get_cached_tokenizer, (tokenizer, )
 
     CachedTokenizer.__name__ = f"Cached{tokenizer.__class__.__name__}"
 
-    tokenizer.__class__ = CachedTokenizer
-    return tokenizer
+    cached_tokenizer.__class__ = CachedTokenizer
+    return cached_tokenizer
 
 
 def patch_padding_side(tokenizer: PreTrainedTokenizer) -> None:
@@ -155,7 +169,7 @@ def get_tokenizer(
 ) -> AnyTokenizer:
     """Gets a tokenizer for the given model name via HuggingFace or ModelScope.
     """
-    if VLLM_USE_MODELSCOPE:
+    if envs.VLLM_USE_MODELSCOPE:
         # download model from ModelScope hub,
         # lazy import so that modelscope is not required for normal use.
         # pylint: disable=C.

@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for phi3v's multimodal preprocessing kwargs."""
 import pytest
 
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
-from ....conftest import _ImageAssets
+from ....conftest import ImageTestAssets
 from ...utils import build_model_context
 
 
@@ -22,7 +23,7 @@ from ...utils import build_model_context
 @pytest.mark.parametrize("num_imgs", [1, 2])
 @pytest.mark.parametrize("kwargs_on_init", [True, False])
 def test_processor_override(
-    image_assets: _ImageAssets,
+    image_assets: ImageTestAssets,
     model_id: str,
     mm_processor_kwargs: dict[str, int],
     expected_toks_per_img: int,

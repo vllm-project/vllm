@@ -141,8 +141,8 @@ __device__ inline FragB dequant_per_group(int q, FragS_GROUP& frag_s, int i) {
   static constexpr uint32_t HI = 0x00f000f0;
   static constexpr uint32_t EX = 0x64006400;
   // Guarantee that the `(a & b) | c` operations are LOP3s.
-  uint32_t t0 = lop3 < (0xf0 & 0xcc) | 0xaa > (q, LO, EX);
-  uint32_t t1 = lop3 < (0xf0 & 0xcc) | 0xaa > (q, HI, EX);
+  uint32_t t0 = lop3<(0xf0 & 0xcc) | 0xaa>(q, LO, EX);
+  uint32_t t1 = lop3<(0xf0 & 0xcc) | 0xaa>(q, HI, EX);
   // We want signed int4 outputs, hence we fuse the `-8` symmetric zero point
   // directly into `SUB` and `ADD`.
   static constexpr uint32_t SUB = 0x64086408;

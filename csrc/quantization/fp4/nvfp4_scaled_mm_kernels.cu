@@ -134,7 +134,7 @@ typename T::Gemm::Arguments args_from_options(
   using StrideB = typename T::StrideB;
   using StrideD = typename T::StrideD;
   using Sm100BlkScaledConfig =
-      typename T::Gemm::GemmKernel::CollectiveMainloop::Sm100BlkScaledConfig;
+      typename T::Gemm::GemmKernel::CollectiveMainloop::Sm1xxBlkScaledConfig;
 
   int m = static_cast<int>(M);
   int n = static_cast<int>(N);
@@ -267,7 +267,7 @@ void cutlass_scaled_fp4_mm_sm100a(torch::Tensor& D, torch::Tensor const& A,
               B_sf.sizes()[1], ")");
 
   auto out_dtype = D.dtype();
-  at::cuda::CUDAGuard device_guard{(char)A.get_device()};
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(A));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream(A.get_device());
 
   if (out_dtype == at::ScalarType::Half) {

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from __future__ import annotations
 
@@ -26,8 +27,8 @@ def maybe_backend_fallback(
     def fallback_or_error(guided_params: GuidedDecodingParams, message: str,
                           fallback: str) -> None:
         """Change the backend to the specified fallback with a warning log,
-        or raise a ValueError if the `no-fallback` option is specified."""
-        if guided_params.no_fallback():
+        or raise a ValueError if the `disable_fallback` option is specified."""
+        if guided_params.disable_fallback:
             raise ValueError(message)
 
         logger.warning("%s Falling back to use %s instead.", message, fallback)
@@ -40,7 +41,7 @@ def maybe_backend_fallback(
         guided_params.backend = "xgrammar"
 
     # lm-format-enforce doesn't support grammar, fallback to xgrammar
-    if guided_params.backend_name == "lm-format-enforcer":
+    if guided_params.backend == "lm-format-enforcer":
         if guided_params.grammar is not None:
             fallback_or_error(
                 guided_params,
@@ -55,7 +56,7 @@ def maybe_backend_fallback(
                 "lm-format-enforcer does not support advanced JSON schema "
                 "features like patterns or numeric ranges.", "outlines")
 
-    if guided_params.backend_name == "xgrammar":
+    if guided_params.backend == "xgrammar":
         from vllm.model_executor.guided_decoding.xgrammar_decoding import (
             xgr_installed)
 
@@ -65,7 +66,7 @@ def maybe_backend_fallback(
             fallback_or_error(
                 guided_params,
                 "xgrammar does not support advanced JSON schema features like "
-                "enums, patterns or numeric ranges.", "outlines")
+                "string length, item limits, or property bounds.", "outlines")
 
         # xgrammar only supports GBNF grammars, so we must convert Lark.
         # We must check if the grammar is likely Lark and if that
@@ -87,7 +88,7 @@ def maybe_backend_fallback(
                 guided_params,
                 "xgrammar module cannot be imported successfully.", "outlines")
 
-    if (guided_params.backend_name == "outlines"
+    if (guided_params.backend == "outlines"
             and guided_params.json_object is not None):
         # outlines doesn't support json_object, fallback to guidance
         fallback_or_error(guided_params,
@@ -103,7 +104,7 @@ async def get_guided_decoding_logits_processor(
         reasoning_backend: str | None = None) -> LogitsProcessor | None:
 
     reasoner = None
-    if reasoning_backend is not None:
+    if reasoning_backend:
         reasoner_class = ReasoningParserManager.get_reasoning_parser(
             reasoning_backend)
         reasoner = reasoner_class(tokenizer)
@@ -111,7 +112,7 @@ async def get_guided_decoding_logits_processor(
     guided_params = maybe_backend_fallback(guided_params)
 
     # CFG grammar not supported by LMFE, so we use outlines instead
-    if guided_params.backend_name == 'outlines':
+    if guided_params.backend == 'outlines':
         # NOTE: lazy import outlines to avoid https://github.com/vllm-project/vllm/issues/4193
         from vllm.model_executor.guided_decoding.outlines_decoding import (  # noqa
             get_outlines_guided_decoding_logits_processor)
@@ -122,12 +123,12 @@ async def get_guided_decoding_logits_processor(
             get_local_lm_format_enforcer_guided_decoding_logits_processor)
         return get_local_lm_format_enforcer_guided_decoding_logits_processor(
             guided_params, tokenizer)
-    if guided_params.backend_name == 'xgrammar':
+    if guided_params.backend == 'xgrammar':
         from vllm.model_executor.guided_decoding.xgrammar_decoding import (  # noqa
             get_local_xgrammar_guided_decoding_logits_processor)
         return get_local_xgrammar_guided_decoding_logits_processor(
             guided_params, tokenizer, model_config, reasoner)
-    if guided_params.backend_name == 'guidance':
+    if guided_params.backend == 'guidance':
         from vllm.model_executor.guided_decoding.guidance_decoding import (
             get_local_guidance_guided_decoding_logits_processor)
         return get_local_guidance_guided_decoding_logits_processor(
@@ -146,29 +147,29 @@ def get_local_guided_decoding_logits_processor(
     guided_params = maybe_backend_fallback(guided_params)
 
     reasoner = None
-    if reasoning_backend is not None:
+    if reasoning_backend:
         reasoner_class = ReasoningParserManager.get_reasoning_parser(
             reasoning_backend)
         reasoner = reasoner_class(tokenizer)
 
     # CFG grammar not supported by LMFE, so we use outlines instead
-    if guided_params.backend_name == 'outlines':
+    if guided_params.backend == 'outlines':
         # NOTE: lazy import outlines to avoid https://github.com/vllm-project/vllm/issues/4193
         from vllm.model_executor.guided_decoding.outlines_decoding import (  # noqa
             get_local_outlines_guided_decoding_logits_processor)
         return get_local_outlines_guided_decoding_logits_processor(
             guided_params, tokenizer, reasoner)
-    if guided_params.backend_name == 'lm-format-enforcer':
+    if guided_params.backend == 'lm-format-enforcer':
         from vllm.model_executor.guided_decoding.lm_format_enforcer_decoding import (  # noqa
             get_local_lm_format_enforcer_guided_decoding_logits_processor)
         return get_local_lm_format_enforcer_guided_decoding_logits_processor(
             guided_params, tokenizer)
-    if guided_params.backend_name == 'xgrammar':
+    if guided_params.backend == 'xgrammar':
         from vllm.model_executor.guided_decoding.xgrammar_decoding import (  # noqa
             get_local_xgrammar_guided_decoding_logits_processor)
         return get_local_xgrammar_guided_decoding_logits_processor(
             guided_params, tokenizer, model_config, reasoner)
-    if guided_params.backend_name == 'guidance':
+    if guided_params.backend == 'guidance':
         from vllm.model_executor.guided_decoding.guidance_decoding import (
             get_local_guidance_guided_decoding_logits_processor)
         return get_local_guidance_guided_decoding_logits_processor(

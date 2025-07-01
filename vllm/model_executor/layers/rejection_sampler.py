@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from functools import cached_property
 from importlib.util import find_spec
-from typing import Dict, Optional, Tuple
+from typing import Optional
 
 import torch
 import torch.jit
@@ -65,7 +66,7 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
         bonus_token_ids: torch.Tensor,
         draft_probs: torch.Tensor,
         draft_token_ids: torch.Tensor,
-        seeded_seqs: Optional[Dict[int, torch.Generator]] = None,
+        seeded_seqs: Optional[dict[int, torch.Generator]] = None,
     ) -> torch.Tensor:
         """Sample token ids using rejection sampling. This accepts or rejects
         tokens proposed by the draft model using the probability of each token
@@ -123,12 +124,13 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
         # for rejection sampling
         if self.use_flashinfer and chain_speculative_sampling is not None:
             batch_size, k, _ = draft_probs.shape
-            uniform_samples = self._create_uniform_samples(
-                seeded_seqs, batch_size, k, draft_probs.device)
-            output_token_ids, accepted_token_num, emitted_token_num \
-                = chain_speculative_sampling(
-                draft_probs, draft_token_ids, uniform_samples,
-                target_with_bonus_probs)
+
+            (output_token_ids, accepted_token_num,
+             emitted_token_num) = chain_speculative_sampling(
+                 draft_probs,
+                 draft_token_ids,
+                 target_with_bonus_probs,
+             )
 
             # num_emitted_tokens returned by flashinfer
             # does not include the bonus token
@@ -161,8 +163,8 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
         target_probs: torch.Tensor,  # [batch_size, k, vocab_size]
         draft_probs: torch.Tensor,  # [batch_size, k, vocab_size]
         draft_token_ids: torch.Tensor,  # [batch_size, k]
-        seeded_seqs: Optional[Dict[int, torch.Generator]],
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        seeded_seqs: Optional[dict[int, torch.Generator]],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Perform modified rejection sampling on each sequence.
 
         Returns:
@@ -194,7 +196,7 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
         return accepted, recovered_token_ids
 
     def _create_uniform_samples(self,
-                                seeded_seqs: Optional[Dict[int,
+                                seeded_seqs: Optional[dict[int,
                                                            torch.Generator]],
                                 batch_size: int, k: int,
                                 device: torch.device) -> torch.Tensor:
@@ -210,7 +212,7 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
         a seed.
 
         Args:
-            seeded_seqs : Optional[Dict[int, torch.Generator]]
+            seeded_seqs : Optional[dict[int, torch.Generator]]
                 A dictionary mapping indices in the batch to 
                 `torch.Generator` objects. If `None`, all samples are 
                 generated without a seed.
@@ -255,21 +257,22 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
         target_probs: torch.Tensor,  # [batch_size, k, vocab_size]
         draft_probs: torch.Tensor,  # [batch_size, k, vocab_size]
         draft_token_ids: torch.Tensor,  # [batch_size, k]
-        seeded_seqs: Optional[Dict[int, torch.Generator]],
+        seeded_seqs: Optional[dict[int, torch.Generator]],
     ) -> torch.Tensor:
         r"""Create bool matrix over the proposed draft tokens. If
         True, then a token can be accepted, else it should be
         rejected.
 
-        Given :math:`q(\hat{x}_{n+1}|x_1, \dots, x_n)`, the probability of
-        :math:`\hat{x}_{n+1}` given context :math:`x_1, \dots, x_n` according
-        to the target model, and :math:`p(\hat{x}_{n+1}|x_1, \dots, x_n)`, the
+        Given $q(\hat{x}_{n+1}|x_1, \dots, x_n)$, the probability of
+        $\hat{x}_{n+1}$ given context $x_1, \dots, x_n$ according
+        to the target model, and $p(\hat{x}_{n+1}|x_1, \dots, x_n)$, the
         same conditional probability according to the draft model, the token
         is accepted with probability:
 
-        .. math::
-            \min\left(1, \frac{q(\hat{x}_{n+1}|x_1, \dots, x_n)}
-                           {p(\hat{x}_{n+1}|x_1, \dots, x_n)}\right)
+        $$
+        \min\left(1, \frac{q(\hat{x}_{n+1}|x_1, \dots, x_n)}
+                        {p(\hat{x}_{n+1}|x_1, \dots, x_n)}\right)
+        $$
 
         This implementation does not apply causality. When using the output,
         if a token is rejected, subsequent tokens should not be used.
@@ -280,14 +283,14 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
         batch_size, k, _ = draft_probs.shape
         batch_indices = torch.arange(batch_size,
                                      device=target_probs.device)[:, None]
-        probs_indicies = torch.arange(k, device=target_probs.device)
+        probs_indices = torch.arange(k, device=target_probs.device)
 
         # shape [batch_size, k]
-        selected_draft_probs = draft_probs[batch_indices, probs_indicies,
+        selected_draft_probs = draft_probs[batch_indices, probs_indices,
                                            draft_token_ids]
 
         # shape [batch_size, k]
-        selected_target_probs = target_probs[batch_indices, probs_indicies,
+        selected_target_probs = target_probs[batch_indices, probs_indices,
                                              draft_token_ids]
 
         uniform_rand = self._create_uniform_samples(seeded_seqs, batch_size,
@@ -312,28 +315,31 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
         target model is recovered (within hardware numerics).
 
         The probability distribution used in this rejection case is constructed
-        as follows. Given :math:`q(x|x_1, \dots, x_n)`, the probability of
-        :math:`x` given context :math:`x_1, \dots, x_n` according to the target
-        model and :math:`p(x|x_1, \dots, x_n)`, the same conditional probability
+        as follows. Given $q(x|x_1, \dots, x_n)$, the probability of
+        $x$ given context $x_1, \dots, x_n$ according to the target
+        model and $p(x|x_1, \dots, x_n)$, the same conditional probability
         according to the draft model:
 
-        .. math::
-            x_{n+1} \sim (q(x|x_1, \dots, x_n) - p(x|x_1, \dots, x_n))_+
+        $$
+        x_{n+1} \sim (q(x|x_1, \dots, x_n) - p(x|x_1, \dots, x_n))_+
+        $$
 
-        where :math:`(f(x))_+` is defined as:
+        where $(f(x))_+$ is defined as:
 
-        .. math::
-            (f(x))_+ = \frac{\max(0, f(x))}{\sum_x \max(0, f(x))}
+        $$
+        (f(x))_+ = \frac{\max(0, f(x))}{\sum_x \max(0, f(x))}
+        $$
 
         See https://github.com/vllm-project/vllm/pull/2336 for a visualization
         of the draft, target, and recovered probability distributions.
 
         Returns a tensor of shape [batch_size, k, vocab_size].
 
-        Note: This batches operations on GPU and thus constructs the recovered
-        distribution for all tokens, even if they are accepted. This causes
-        division-by-zero errors, so we use self._smallest_positive_value to
-        avoid that. This introduces some drift to the distribution.
+        Note: 
+            This batches operations on GPU and thus constructs the recovered
+            distribution for all tokens, even if they are accepted. This causes
+            division-by-zero errors, so we use self._smallest_positive_value to
+            avoid that. This introduces some drift to the distribution.
         """
         _, k, _ = draft_probs.shape
 
@@ -376,7 +382,7 @@ def _multinomial(
     probs: torch.Tensor,
     num_samples: int,
     k: int,
-    seeded_seqs: Dict[int, torch.Generator],
+    seeded_seqs: dict[int, torch.Generator],
 ) -> torch.Tensor:
 
     if num_samples > 1:

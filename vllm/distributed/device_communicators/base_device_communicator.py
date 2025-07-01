@@ -1,9 +1,74 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import threading
 from typing import Optional
+from weakref import WeakValueDictionary
 
 import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
+
+
+class Cache:
+
+    def __init__(self):
+        self._cache: WeakValueDictionary = WeakValueDictionary()
+        self._lock = threading.RLock()  # Reentrant lock for thread safety
+
+    def get_or_create(self, kwargs, func):
+        # Create a hashable key from the kwargs
+        key = tuple(sorted((k, v) for k, v in kwargs.items()))
+
+        with self._lock:
+            instance = self._cache.get(key)
+            if instance is None:
+                instance = func(**kwargs)
+                self._cache[key] = instance
+            return instance
+
+
+class All2AllManagerBase:
+
+    def __init__(self, cpu_group):
+        self.cpu_group = cpu_group
+
+        # compute some common properties
+        from vllm.distributed.parallel_state import (get_dp_group,
+                                                     get_tp_group,
+                                                     in_the_same_node_as)
+
+        # all2all lives in ep group, which is merged from dp and tp group
+        self.dp_group = get_dp_group()
+        self.tp_group = get_tp_group()
+        # no self.ep_group since self.ep_group is still in construction
+        # when we create this object
+        self.dp_rank = self.dp_group.rank_in_group
+        self.dp_world_size = self.dp_group.world_size
+        self.rank = dist.get_rank(cpu_group)
+        self.world_size = dist.get_world_size(cpu_group)
+
+        # all2all communication often has separate implementations for
+        # intra-node and inter-node communication
+        self.internode = not all(in_the_same_node_as(cpu_group, source_rank=0))
+
+    def get_handle(self, kwargs):
+        # get a handle for the all2all communication,
+        # based on the kwargs.
+        # different layers can have different configs,
+        # e.g. one layer has hidden size 1024, another has 2048.
+        # usually the underlying implementation caches the handle
+        # and reuse it for the same config.
+        raise NotImplementedError
+
+    def dispatch(self, hidden_states: torch.Tensor,
+                 router_logits: torch.Tensor):
+        raise NotImplementedError
+
+    def combine(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        raise NotImplementedError
+
+    def destroy(self):
+        pass
 
 
 class DeviceCommunicatorBase:
@@ -30,6 +95,18 @@ class DeviceCommunicatorBase:
         self.global_world_size = dist.get_world_size()
         self.rank_in_group = dist.get_group_rank(self.cpu_group,
                                                  self.global_rank)
+
+        use_ep = False
+        from vllm.config import get_current_vllm_config
+        config = get_current_vllm_config()
+        if config is not None:
+            # as long as we use data parallel (coupled data parallel
+            # where all data parallel ranks execute forward together),
+            # we initialize the all2all manager used in expert parallel.
+            use_ep = config.parallel_config.data_parallel_size > 1
+
+        self.use_all2all = "ep" in unique_name and use_ep
+        self.all2all_manager: Optional[All2AllManagerBase] = None
 
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
         dist.all_reduce(input_, group=self.device_group)
@@ -60,6 +137,40 @@ class DeviceCommunicatorBase:
                                                input_size[dim], ) +
                                               input_size[dim + 1:])
         return output_tensor
+
+    def reduce_scatter(self,
+                       input_: torch.Tensor,
+                       dim: int = -1) -> torch.Tensor:
+        world_size = self.world_size
+        # Bypass the function if we are using only 1 GPU.
+        if world_size == 1:
+            return input_
+        assert -input_.dim() <= dim < input_.dim(), (
+            f"Invalid dim ({dim}) for input tensor with shape {input_.size()}")
+
+        if dim < 0:
+            # Convert negative dim to positive.
+            dim += input_.dim()
+
+        # Note: This will produce an incorrect answer if we don't make
+        # the input_tensor contiguous. Possible bug in reduce_scatter_tensor?
+        input_tensor = input_.movedim(0, dim).contiguous()
+
+        assert input_tensor.shape[0] % world_size == 0
+        chunk_size = input_tensor.shape[0] // world_size
+        output_shape = (chunk_size, ) + input_tensor.shape[1:]
+
+        output_tensor = torch.empty(output_shape,
+                                    dtype=input_tensor.dtype,
+                                    device=input_tensor.device)
+
+        # Perform reduce-scatter operation
+        torch.distributed.reduce_scatter_tensor(output_tensor,
+                                                input_tensor,
+                                                group=self.device_group)
+
+        # Reshape before returning
+        return output_tensor.movedim(0, dim).contiguous()
 
     def gather(self,
                input_: torch.Tensor,
@@ -115,3 +226,35 @@ class DeviceCommunicatorBase:
 
     def destroy(self):
         pass
+
+    def prepare_communication_buffer_for_model(self,
+                                               model: torch.nn.Module) -> None:
+        """
+        Prepare the communication buffer for the model.
+        """
+        if not self.use_all2all:
+            return
+
+        moe_modules = [
+            module for module in model.modules()
+            if module.__class__.__name__ == "FusedMoE"
+        ]
+        for module in moe_modules:
+            module.quant_method.init_prepare_finalize(module.moe_config,
+                                                      module.quant_config)
+
+    def dispatch(
+            self, hidden_states: torch.Tensor,
+            router_logits: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Dispatch the hidden states and router logits to the appropriate device.
+        This is a no-op in the base class.
+        """
+        return hidden_states, router_logits
+
+    def combine(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """
+        Combine the hidden states and router logits from the appropriate device.
+        This is a no-op in the base class.
+        """
+        return hidden_states

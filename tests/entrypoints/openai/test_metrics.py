@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import subprocess
 import sys
@@ -171,10 +172,8 @@ async def test_metrics_counts(server: RemoteOpenAIServer,
 
 EXPECTED_METRICS = [
     "vllm:num_requests_running",
-    "vllm:num_requests_swapped",  # deprecated
     "vllm:num_requests_waiting",
     "vllm:gpu_cache_usage_perc",
-    "vllm:cpu_cache_usage_perc",  # deprecated
     "vllm:time_to_first_token_seconds_sum",
     "vllm:time_to_first_token_seconds_bucket",
     "vllm:time_to_first_token_seconds_count",
@@ -274,10 +273,7 @@ EXPECTED_METRICS_V1 = [
     "vllm:request_decode_time_seconds_count",
 ]
 
-HIDDEN_DEPRECATED_METRICS = [
-    "vllm:num_requests_swapped",
-    "vllm:cpu_cache_usage_perc",
-]
+HIDDEN_DEPRECATED_METRICS: list[str] = []
 
 
 @pytest.mark.asyncio
