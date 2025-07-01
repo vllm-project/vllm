@@ -654,8 +654,6 @@ class NixlConnectorWorker:
         self._done_sending_count: defaultdict[ReqId,
                                               int] = defaultdict(lambda: 0)
 
-        # Background thread for handling new handshake requests.
-        self._nixl_handshake_listener_t: Optional[threading.Thread] = None
         # Background thread for initializing new NIXL handshakes.
         self._handshake_initiation_executor = ThreadPoolExecutor(
             # NIXL is not guaranteed to be thread-safe, limit 1 worker.
@@ -713,8 +711,6 @@ class NixlConnectorWorker:
         self._handshake_initiation_executor.shutdown(wait=False)
         if hasattr(self, '_handshake_strategy'):
             self._handshake_strategy.cleanup()
-        if self._nixl_handshake_listener_t:
-            self._nixl_handshake_listener_t.join(timeout=0)
 
     def _nixl_handshake(self, host: str, port: int,
                         remote_tp_size: int) -> dict[int, str]:
