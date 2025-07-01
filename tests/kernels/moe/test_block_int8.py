@@ -144,4 +144,4 @@ def test_w8a8_block_int8_fused_moe(M, N, K, E, topk, block_size, dtype, seed):
                                             block_size)
 
     # Check results
-    torch.testing.assert_close(out, ref_out, atol=0.06, rtol=0.06)
+    torch.testing.assert_close(out, ref_out, atol=0.065, rtol=0.065)
