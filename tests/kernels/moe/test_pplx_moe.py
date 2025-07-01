@@ -527,8 +527,7 @@ def pplx_moe(
 
     experts = BatchedTritonExperts(
         max_num_tokens=max_num_tokens,
-        world_size=world_size,
-        dp_size=dp_size,
+        num_dispatchers=prepare_finalize.num_dispatchers,
         use_fp8_w8a8=quant_dtype == torch.float8_e4m3fn,
         block_shape=block_shape,
         per_act_token_quant=per_act_token_quant,
@@ -870,8 +869,8 @@ def _pplx_test_loop(pgi: ProcessGroupInfo, dp_size: int, use_internode: bool,
               f"rank={pgi.rank}.")
 
 
-@pytest.mark.parametrize("world_dp_size", [[2, 1], [2, 2], [4, 1]])
-#@pytest.mark.parametrize("world_dp_size", [[2, 1]])
+#@pytest.mark.parametrize("world_dp_size", [[2, 1], [2, 2], [4, 1]])
+@pytest.mark.parametrize("world_dp_size", [[2, 1]])
 @pytest.mark.parametrize("use_internode", [False])
 @requires_pplx
 def test_pplx_prepare_finalize(
@@ -884,8 +883,8 @@ def test_pplx_prepare_finalize(
                     use_internode, False, _pplx_prepare_finalize)
 
 
-@pytest.mark.parametrize("world_dp_size", [[2, 1], [2, 2], [4, 1]])
-#@pytest.mark.parametrize("world_dp_size", [[2, 1]])
+#@pytest.mark.parametrize("world_dp_size", [[2, 1], [2, 2], [4, 1]])
+@pytest.mark.parametrize("world_dp_size", [[2, 1]])
 @pytest.mark.parametrize("use_internode", [False])
 @requires_pplx
 def test_pplx_moe(

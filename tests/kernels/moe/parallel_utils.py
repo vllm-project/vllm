@@ -137,7 +137,6 @@ def make_deepep_ht_a2a(pg: ProcessGroup,
                             low_latency_mode=low_latency_mode,
                             num_qps_per_rank=num_qps_per_rank)
     return DeepEPHTPrepareAndFinalize(buffer=buffer,
-                                      world_size=pgi.world_size,
                                       rank=pgi.rank,
                                       dp_size=dp_size,
                                       rank_expert_offset=pgi.rank *
@@ -146,7 +145,6 @@ def make_deepep_ht_a2a(pg: ProcessGroup,
 
 def make_deepep_ll_a2a(pg: ProcessGroup,
                        pgi: ProcessGroupInfo,
-                       dp_size: int,
                        deepep_ll_args: DeepEPLLArgs,
                        q_dtype: Optional[torch.dtype] = None,
                        block_shape: Optional[list[int]] = None):
@@ -166,8 +164,6 @@ def make_deepep_ll_a2a(pg: ProcessGroup,
 
     return DeepEPLLPrepareAndFinalize(
         buffer=buffer,
-        world_size=pgi.world_size,
-        dp_size=dp_size,
         max_tokens_per_rank=deepep_ll_args.max_tokens_per_rank,
         use_fp8_dispatch=deepep_ll_args.use_fp8_dispatch,
     )

@@ -115,18 +115,19 @@ def pplx_cutlass_moe(
 
     assert num_experts % world_size == 0
     num_local_experts = cdiv(num_experts, world_size)
+    num_dispatchers = pgi.world_size // dp_size
 
     prepare_finalize = PplxPrepareAndFinalize(
         ata,
         max_num_tokens=max_num_tokens,
         num_local_experts=num_local_experts,
-        num_dispatchers=pgi.world_size // dp_size,
-    )
+        num_dispatchers=num_dispatchers)
 
     experts = CutlassExpertsFp8(num_local_experts,
                                 out_dtype,
                                 per_act_token,
                                 per_out_ch,
+                                num_dispatchers=num_dispatchers,
                                 use_batched_format=True)
 
     fused_cutlass_experts = FusedMoEModularKernel(
