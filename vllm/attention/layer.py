@@ -24,7 +24,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.platforms import _Backend, current_platform
-from vllm.utils import direct_register_custom_op
+from vllm.utils import direct_register_custom_op, GiB_bytes
 
 logger = init_logger(__name__)
 USE_XFORMERS_OPS = None
@@ -222,10 +222,15 @@ class Attention(nn.Module, AttentionLayerBase):
             self.v_range = torch.tensor(envs.V_SCALE_CONSTANT, dtype=torch.float32)
         except Exception as e:
             if torch.cuda.is_available():
-                logger.error("Failed to initialize attention q/k/v range constants: %s", e)
+                logger.error(
+                    "Failed to initialize attention q/k/v range constants: %s",
+                    e,
+                )
                 logger.debug("CUDA device: %s", torch.cuda.current_device())
-                logger.debug("Allocated: %.2f GiB", torch.cuda.memory_allocated() / (1 << 30))
-                logger.debug("Reserved: %.2f GiB", torch.cuda.memory_reserved() / (1 << 30))
+                logger.debug("Allocated: %.2f GiB",
+                             torch.cuda.memory_allocated() / GiB_bytes)
+                logger.debug("Reserved: %.2f GiB",
+                             torch.cuda.memory_reserved() / GiB_bytes)
             raise RuntimeError(
                 "Failed to initialize q/k/v range constants. "
                 "This may be caused by insufficient memory to allocate kv cache."

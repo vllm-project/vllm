@@ -29,6 +29,7 @@ from vllm.model_executor.parameter import (BasevLLMParameter,
 # yapf: enable
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
+from vllm.utils import GiB_bytes
 
 logger = init_logger(__name__)
 
@@ -195,21 +196,24 @@ class UnquantizedLinearMethod(LinearMethodBase):
         # The amount of memory allocated for the weights is
         # sum(output_partition_sizes) * input_size_per_partition.
         try:
-            weight = Parameter(torch.empty(sum(output_partition_sizes),
-                                        input_size_per_partition,
-                                        dtype=params_dtype),
-                            requires_grad=False)
+            weight = Parameter(
+                torch.empty(sum(output_partition_sizes),
+                            input_size_per_partition,
+                            dtype=params_dtype),
+                requires_grad=False,
+            )
         except RuntimeError as e:
             if torch.cuda.is_available():
-                # This helps to see how much memory is allocated when using CUDA
-                logger.error(f"Failed to create unquantized linear weights: {e}")
-                logger.debug(f"CUDA device: {torch.cuda.current_device()}")
-                logger.debug(f"Allocated: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
-                logger.debug(f"Reserved: {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
+                logger.error(
+                    "Failed to create unquantized linear weights: %s", e)
+                logger.debug("CUDA device: %s", torch.cuda.current_device())
+                logger.debug("Allocated: %.2f GiB",
+                             torch.cuda.memory_allocated() / GiB_bytes)
+                logger.debug("Reserved: %.2f GiB",
+                             torch.cuda.memory_reserved() / GiB_bytes)
             raise RuntimeError(
                 "Failed to create unquantized linear weights. "
-                "This may be caused by insufficient memory to allocate the weight."
-            ) from e
+                "This may be caused by insufficient memory to allocate the weight.") from e
         set_weight_attrs(weight, {"input_dim": 1, "output_dim": 0})
         layer.register_parameter("weight", weight)
         set_weight_attrs(weight, extra_weight_attrs)
