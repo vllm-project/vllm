@@ -13,7 +13,7 @@ import warnings
 from dataclasses import MISSING, dataclass, fields, is_dataclass
 from itertools import permutations
 from typing import (Annotated, Any, Callable, Dict, List, Literal, Optional,
-                    Type, TypeVar, Union, cast, get_args, get_origin)
+                    Sequence, Type, TypeVar, Union, cast, get_args, get_origin)
 
 import regex as re
 import torch
@@ -465,6 +465,8 @@ class EngineArgs:
     enable_multimodal_encoder_data_parallel: bool = \
         ParallelConfig.enable_multimodal_encoder_data_parallel
 
+    allowed_logitsprocs: Sequence[str] = ()
+
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
         # without having to manually construct a
@@ -889,6 +891,20 @@ class EngineArgs:
         scheduler_group.add_argument(
             "--disable-hybrid-kv-cache-manager",
             **scheduler_kwargs["disable_hybrid_kv_cache_manager"])
+
+        # Logits processor arguments
+        def comma_separated_list(value: str) -> list[str]:
+            return value.split(',')
+
+        logitsprocs_group = parser.add_argument_group(
+            title="Logits processors",
+            description="Logits processors settings.",
+        )
+        logitsprocs_group.add_argument(
+            "--allowed-logitsprocs",
+            type=comma_separated_list,
+            default=[],
+            help="Allowed logits processor plugins.")
 
         # vLLM arguments
         vllm_kwargs = get_kwargs(VllmConfig)

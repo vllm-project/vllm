@@ -11,6 +11,7 @@ import textwrap
 import uuid
 import warnings
 from collections import Counter
+from collections.abc import Sequence
 from contextlib import contextmanager
 from dataclasses import (MISSING, Field, asdict, field, fields, is_dataclass,
                          replace)
@@ -4330,6 +4331,8 @@ class VllmConfig:
     you are using. Contents must be hashable."""
     instance_id: str = ""
     """The ID of the vLLM instance."""
+    allowed_logitsprocs: Sequence[str] = ()
+    """Allowed logitsprocs plugin names"""
 
     def compute_hash(self) -> str:
         """

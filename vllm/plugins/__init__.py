@@ -3,6 +3,7 @@
 
 import logging
 import os
+from collections.abc import Sequence
 from typing import Any, Callable
 
 import torch
@@ -18,8 +19,8 @@ plugins_loaded = False
 
 
 def load_plugins_by_group(
-        group: str,
-        allowed_plugins: list[str]) -> dict[str, Callable[[], Any]]:
+    group: str, allowed_plugins: Sequence[str] = ()
+) -> dict[str, Callable[[], Any]]:
     import sys
     if sys.version_info < (3, 10):
         from importlib_metadata import entry_points
