@@ -63,7 +63,7 @@ __global__ void rms_norm_dynamic_per_token_quant_kernel(
     return rms_norm_dynamic_per_token_quant_vec<scalar_t, scalar_out_t,
                                                 has_residual>(
         out, scales, input, weight, scale_ub, var_epsilon, hidden_size,
-        residual);
+        residual_out, residual);
   }
 
   float rms = 0.0f;
