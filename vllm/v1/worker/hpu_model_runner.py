@@ -2252,13 +2252,17 @@ class HPUModelRunner:
                 "supported yet.")
 
         kv_caches: dict[str, torch.Tensor] = {}
+        kv_cache_sizes = {}
+        for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
+            assert len(kv_cache_tensor.shared_by) == 1
+            kv_cache_sizes[kv_cache_tensor.shared_by[0]] = kv_cache_tensor.size
 
         for kv_cache_group in kv_cache_config.kv_cache_groups:
             kv_cache_spec = kv_cache_group.kv_cache_spec
             for layer_name in kv_cache_group.layer_names:
-                tensor_config = kv_cache_config.tensors[layer_name]
-                assert tensor_config.size % kv_cache_spec.page_size_bytes == 0
-                num_blocks = tensor_config.size // kv_cache_spec.page_size_bytes
+                tensor_size = kv_cache_sizes[layer_name]
+                assert tensor_size % kv_cache_spec.page_size_bytes == 0
+                num_blocks = tensor_size // kv_cache_spec.page_size_bytes
                 # `num_blocks` is the number of blocks the model runner can use.
                 # `kv_cache_config.num_blocks` is the number of blocks that
                 # KVCacheManager may allocate.
