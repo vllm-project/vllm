@@ -73,7 +73,8 @@ class ExternalLBServerManager:
                             "CUDA_VISIBLE_DEVICES":
                             ",".join(
                                 str(Platform.device_id_to_physical_device_id(
-                                    i)) for i in range(DP_SIZE * TP_SIZE))
+                                    i))
+                                for i in range(r * TP_SIZE, (r + 1) * TP_SIZE))
                         })
                     server.__enter__()
                     print(f"Server rank {r} started successfully with "
