@@ -33,10 +33,10 @@ typedef __hip_bfloat16 __nv_bfloat16;
   #include "../quantization/fp8/nvidia/quant_utils.cuh"
 #endif
 
-#ifndef USE_ROCM
-  #define WARP_SIZE 32
+#if defined(USE_ROCM) && defined(__GFX9__)
+  #define WARP_SIZE 64
 #else
-  #define WARP_SIZE warpSize
+  #define WARP_SIZE 32
 #endif
 
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
