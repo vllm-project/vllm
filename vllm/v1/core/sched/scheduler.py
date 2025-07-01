@@ -580,11 +580,11 @@ class Scheduler(SchedulerInterface):
             batch = KVEventBatch(ts=time.time(), events=events)
             self.kv_event_publisher.publish(batch)
 
-        self.update_before_output(scheduler_output)
+        self._update_before_output(scheduler_output)
         self.finished_req_ids = set()
         return scheduler_output
 
-    def update_before_output(
+    def _update_before_output(
         self,
         scheduler_output: SchedulerOutput,
     ) -> None:
