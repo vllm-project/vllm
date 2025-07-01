@@ -16,11 +16,12 @@ from vllm.utils import swap_dict_values
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.pool.metadata import PoolingMetadata
 from vllm.v1.sample.logits_processor import (BatchUpdateBuilder,
-                                             MoveDirectionality)
+                                             MoveDirectionality,
+                                             init_builtin_logitsprocs)
 from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.spec_decode.utils import is_spec_decode_unsupported
 from vllm.v1.utils import copy_slice
 from vllm.v1.worker.block_table import MultiGroupBlockTable
-from vllm.v1.worker.utils import init_builtin_logitsprocs
 
 
 @dataclass
@@ -68,8 +69,10 @@ class InputBatch:
         pin_memory: bool,
         vocab_size: int,
         block_sizes: list[int],  # The block_size of each kv cache group
+        is_spec_decode: bool = False,
         logits_processing_needs_token_ids: bool = False,
     ):
+        self.is_spec_decode = is_spec_decode
         self.max_num_reqs = max_num_reqs
         self.max_model_len = max_model_len
         self.max_num_batched_tokens = max_num_batched_tokens
@@ -147,6 +150,9 @@ class InputBatch:
         self.top_k_cpu = self.top_k_cpu_tensor.numpy()
         self.top_k_reqs: set[str] = set()
 
+        # IDs of requests which do not support spec decoding
+        self.spec_decode_unsupported_reqs: set[str] = set()
+
         # Frequency penalty related data structures
         self.frequency_penalties = torch.empty((max_num_reqs, ),
                                                dtype=torch.float,
@@ -209,9 +215,7 @@ class InputBatch:
         # updates. Should reset each step.
         self.batch_update_builder = BatchUpdateBuilder()
 
-        # Define logits processors. Note that Min-P logitsproc is returned
-        # both on its own as min_p_logitsproc (to support spec decoding
-        # compatibility check) and also as part of logits_procs
+        # Define logits processors.
         # TODO(andy): logits processor list should be extensible via engine
         # constructor argument; for now the list is fixed.
         self.logitsprocs = init_builtin_logitsprocs(
@@ -243,8 +247,7 @@ class InputBatch:
         return cast(list[str], self._req_ids)
 
     def _get_next_add_index(self) -> int:
-        if (req_index :=
-                self.batch_update_builder.pop_removed_if_can()) is not None:
+        if (req_index := self.batch_update_builder.pop_removed()) is not None:
             # Fill the empty index.
             return req_index
         # Append to end
@@ -259,9 +262,6 @@ class InputBatch:
         self.batch_update_builder.added.append(
             (req_index, params, request.output_token_ids))
         return req_index
-
-    def has_step_removed_requests(self) -> bool:
-        return self.batch_update_builder.has_removed()
 
     def add_request(
         self,
@@ -298,6 +298,9 @@ class InputBatch:
         self.block_table.add_row(request.block_ids, req_index)
 
         if sampling_params := request.sampling_params:
+            if (self.is_spec_decode
+                    and is_spec_decode_unsupported(sampling_params)):
+                self.spec_decode_unsupported_reqs.add(req_id)
             if sampling_params.sampling_type == SamplingType.GREEDY:
                 # Avoid later division by zero.
                 self.temperature_cpu[req_index] = -1.0
@@ -382,7 +385,14 @@ class InputBatch:
         return req_index
 
     def remove_request(self, req_id: str) -> Optional[int]:
-        """This method must always be followed by a call to condense()."""
+        """This method must always be followed by a call to condense().
+        
+        Args:
+          req_id: request to remove
+
+        Returns:
+          Removed request index, or `None` if `req_id` not recognized
+        """
 
         req_index = self.req_id_to_index.pop(req_id, None)
         if req_index is None:
@@ -395,6 +405,7 @@ class InputBatch:
         self.random_reqs.discard(req_id)
         self.top_p_reqs.discard(req_id)
         self.top_k_reqs.discard(req_id)
+        self.spec_decode_unsupported_reqs.discard(req_id)
         self.frequency_penalties_reqs.discard(req_id)
         self.presence_penalties_reqs.discard(req_id)
         self.repetition_penalties_reqs.discard(req_id)
@@ -475,10 +486,6 @@ class InputBatch:
                     self.allowed_token_ids_mask_cpu_tensor[i1]
         self.block_table.swap_row(i1, i2)
 
-    def _register_move_request(self, from_idx: int, to_idx: int) -> None:
-        self.batch_update_builder.moved.append(
-            (from_idx, to_idx, MoveDirectionality.UNIDIRECTIONAL))
-
     def condense(self) -> None:
         """Slide non-empty requests down into lower, empty indices.
 
@@ -492,7 +499,10 @@ class InputBatch:
           swaps: list of (from,to) swap tuples for moved requests
           empty_req_indices: indices not filled by condensation
         """
-        empty_req_indices = self.batch_update_builder.removed
+        if not (empty_req_indices := self.batch_update_builder.removed):
+            # All removed requests were replaced by added requests, or else no
+            # requests were removed at all. No condense() needed
+            return
         num_reqs = self.num_reqs
         if num_reqs == 0:
             # The batched states are empty.
@@ -509,14 +519,14 @@ class InputBatch:
                 last_req_index -= 1
 
             # Find the smallest empty index.
-            empty_index = self.batch_update_builder.peek_removed_if_can()
+            empty_index = self.batch_update_builder.peek_removed()
             assert empty_index is not None
             if empty_index >= last_req_index:
                 break
 
             # Move active request down into empty request
             # index.
-            self.batch_update_builder.pop_removed_if_can()
+            self.batch_update_builder.pop_removed()
             self.batch_update_builder.moved.append(
                 (last_req_index, empty_index,
                  MoveDirectionality.UNIDIRECTIONAL))
@@ -575,18 +585,16 @@ class InputBatch:
         del self._req_ids[self.num_reqs:]
         del self.req_output_token_ids[self.num_reqs:]
 
-    def _commit_logit_procs_state_changes(self) -> None:
-        """Apply batch add/remove/permute to logits procs' states"""
-        batch_update = self.batch_update_builder.buildBatchUpdate(
-            self.num_reqs)
-        for logit_proc in self.logitsprocs.all_list:
+    def update_reset(self):
+        """Apply batch updates, reset input batch at end of step
+        * Apply batch add/remove/permute to logits procs' states
+        * If batch state is modified, update sampling metadata
+        """
+        batch_update = self.batch_update_builder.get_and_reset(self.num_reqs)
+        for logit_proc in self.logitsprocs.all:
             logit_proc.update_state(batch_update)
-        # Clear state change representation to prepare for next step
-        self.batch_update_builder.reset()
-
-    def refresh(self):
-        self._commit_logit_procs_state_changes()
-        self.sampling_metadata = self._make_sampling_metadata()
+        if batch_update:
+            self.sampling_metadata = self._make_sampling_metadata()
 
     def _make_sampling_metadata(self) -> SamplingMetadata:
         num_reqs = self.num_reqs

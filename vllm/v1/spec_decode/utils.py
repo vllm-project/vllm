@@ -1,29 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from vllm.sampling_params import SamplingParams
 from vllm.triton_utils import tl, triton
-from vllm.v1.sample.logits_processor import MinPLogitsProcessor
-from vllm.v1.worker.gpu_input_batch import InputBatch
+
+_SAMPLING_EPS = 1e-5
 
 
-def is_spec_decode_supported(req_id: str, input_batch: InputBatch) -> bool:
-    min_p_lp = input_batch.logitsprocs.get_logitproc_by_id("min_p")
-    if (isinstance(min_p_lp, MinPLogitsProcessor) and
-            min_p_lp.get_min_p_by_index(input_batch.req_id_to_index[req_id])):
-        # Spec decode doesn't support min_p sampling.
-        # Note: isinstance implicitly catches the case where the logitproc
-        # is None (i.e. no min-p logitproc is loaded.)
-        return False
-
-    if (req_id in input_batch.frequency_penalties_reqs
-            or req_id in input_batch.presence_penalties_reqs
-            or req_id in input_batch.repetition_penalties_reqs):
-        # Spec decode doesn't support penalties.
-        return False
-    elif req_id in input_batch.num_logprobs:
-        # Spec decode doesn't support logprobs.
-        return False
-
-    return True
+def is_spec_decode_unsupported(sampling_params: SamplingParams) -> bool:
+    """True if request is incompatible with speculative decoding"""
+    return (sampling_params.frequency_penalty != 0.0
+            or sampling_params.presence_penalty != 0.0
+            or sampling_params.repetition_penalty != 1.0
+            or sampling_params.min_p > _SAMPLING_EPS
+            or sampling_params.logprobs is not None)
 
 
 @triton.jit

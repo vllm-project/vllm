@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 import dataclasses
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
+from itertools import chain
 from typing import Optional, Union
 
 import torch
@@ -59,18 +60,18 @@ class BatchUpdateBuilder:
     * All information about requests removed from persistent batch
       during a step is aggregated in self._removed through calls to
       self.removed_append() at the beginning of a step. This must happen
-      before the first time that self.removed, self.pop_removed_if_can()
-      or self.peek_removed_if_can() are invoked in a given step
-    * After the first time that self.removed, self.pop_removed_if_can()
-      or self.peek_removed_if_can() are read in a step, no new removals
+      before the first time that self.removed, self.pop_removed()
+      or self.peek_removed() are invoked in a given step
+    * After the first time that self.removed, self.pop_removed()
+      or self.peek_removed() are read in a step, no new removals
       are registered using self.removed_append()
     * Elements of self._removed are never directly modified, added or
       removed (i.e. modification is only via self.removed_append() and
-      self.pop_removed_if_can())
+      self.pop_removed())
     
     Guarantees under above assumptions:
     * self.removed is always sorted in descending order
-    * self.pop_removed_if_can() and self.peek_removed_if_can() both return
+    * self.pop_removed() and self.peek_removed() both return
       the lowest removed request index in the current step
     """
 
@@ -90,7 +91,7 @@ class BatchUpdateBuilder:
         self.added = added or []
         self._is_removed_sorted = False
 
-    def _sort_removed(self) -> None:
+    def _ensure_removed_sorted(self) -> None:
         """Sort removed request indices in
         descending order.
         
@@ -105,7 +106,7 @@ class BatchUpdateBuilder:
     def removed(self) -> list[RemovedRequest]:
         """Removed request indices sorted in
         descending order"""
-        self._sort_removed()
+        self._ensure_removed_sorted()
         return self._removed
 
     def removed_append(self, index: int) -> None:
@@ -113,8 +114,8 @@ class BatchUpdateBuilder:
         the persistent batch.
 
         Must not be called after the first time
-        self.removed, self.pop_removed_if_can() or
-        self.peek_removed_if_can() are invoked.
+        self.removed, self.pop_removed() or
+        self.peek_removed() are invoked.
         
         Args:
           index: request index
@@ -127,42 +128,47 @@ class BatchUpdateBuilder:
     def has_removed(self) -> bool:
         return bool(self._removed)
 
-    def peek_removed_if_can(self) -> Optional[int]:
+    def peek_removed(self) -> Optional[int]:
         """Return lowest removed request index"""
         if self.has_removed():
-            self._sort_removed()
+            self._ensure_removed_sorted()
             return self._removed[-1]
         return None
 
-    def pop_removed_if_can(self) -> Optional[int]:
+    def pop_removed(self) -> Optional[int]:
         """Pop lowest removed request index"""
         if self.has_removed():
-            self._sort_removed()
+            self._ensure_removed_sorted()
             return self._removed.pop()
         return None
 
-    def reset(self):
-        """Reset batch info at end of step"""
-        self._removed = []
-        self._is_removed_sorted = False
-        self.moved = []
-        self.added = []
-
-    def buildBatchUpdate(self, batch_size: int) -> BatchUpdate:
-        """Generate a logitsprocs batch update data structure.
+    def get_and_reset(self, batch_size: int) -> Optional[BatchUpdate]:
+        """Generate a logitsprocs batch update data structure
+        and reset internal batch update builder state.
         
         Args:
           batch_size: current persistent batch size
 
         Returns:
-          Frozen logitsprocs batch update dataclass instance
+          Frozen logitsprocs batch update instance; `None` if no updates
         """
-        return BatchUpdate(
+        # Reset removal-sorting logic
+        self._is_removed_sorted = False
+        if not any((self._removed, self.moved, self.added)):
+            # No update; short-circuit
+            return None
+        # Build batch state update
+        batch_update = BatchUpdate(
             batch_size=batch_size,
-            removed=self.removed,
+            removed=self._removed,
             moved=self.moved,
             added=self.added,
         )
+        # Reset removed/moved/added update lists
+        self._removed = []
+        self.moved = []
+        self.added = []
+        return batch_update
 
 
 class LogitsProcessor(ABC):
@@ -171,11 +177,13 @@ class LogitsProcessor(ABC):
     def apply(self, logits: torch.Tensor) -> torch.Tensor:
         raise NotImplementedError
 
-    @classmethod
     @abstractmethod
-    def requires_nongreedy(cls) -> bool:
-        """True if logits processor is incompatible with
-        greedy sampling.
+    def is_argmax_invariant(self) -> bool:
+        """True if logits processor has no impact on the
+        argmax computation in greedy sampling.
+        NOTE: may or may not have the same value for all
+        instances of a given LogitsProcessor subclass,
+        depending on subclass implementation.
         TODO(andy): won't be utilized until logits
         processors are user-extensible
         """
@@ -184,7 +192,7 @@ class LogitsProcessor(ABC):
     @abstractmethod
     def update_state(
         self,
-        batch_update: BatchUpdate,
+        batch_update: Optional[BatchUpdate],
     ) -> None:
         """Called when there are new output tokens, prior
         to each forward pass.
@@ -198,70 +206,40 @@ class LogitsProcessor(ABC):
 
 @dataclass
 class LogitsProcessorManager:
-    """Encapsulates initialized logitsproc objects.
+    """Encapsulates initialized logitsproc objects."""
+    argmax_invariant: list[LogitsProcessor] = field(
+        default_factory=list)  # argmax-invariant logitsprocs
+    non_argmax_invariant: list[LogitsProcessor] = field(
+        default_factory=list)  # non-argmax-invariant logitsprocs
 
-    Each logits processor has a unique id.
-    """
-    nongreedy: dict[str, LogitsProcessor] = field(
-        default_factory=dict)  # id -> nongreedy-sampling-only logitsproc
-    greedy: dict[str, LogitsProcessor] = field(
-        default_factory=dict)  # id -> greedy-sampling compatible logitsproc
+    # def add_logitsprocs_by_ids(
+    #         self, ids_logitsprocs: Sequence[tuple[str,
+    #                                               LogitsProcessor]]) -> None:
+    #     """Add a sequence of (logitproc ID, logitproc instance)'s to the
+    #     logitsprocs manager
 
-    def __post_init__(self):
-        """Guarantee unique ids"""
-        if (self.nongreedy.keys() & self.greedy.keys()):
-            raise ValueError("Greedy and non-greedy logits "
-                             "processors must not share ids")
-
-    def get_logitproc_by_id(self, id: str) -> Optional[LogitsProcessor]:
-        """Find logits processor by id, if it exists"""
-        return self.all.get(id, None)
-
-    def add_logitsprocs_by_ids(
-            self, ids_logitsprocs: Sequence[tuple[str,
-                                                  LogitsProcessor]]) -> None:
-        """Add a sequence of (logitproc ID, logitproc instance)'s to the
-        logitsprocs manager
-        
-        Args:
-          ids_logitsprocs: sequence of (logitproc ID, logitproc instance pairs)
-        """
-        ids = self.all_ids
-        for id, logitproc in ids_logitsprocs:
-            # Ensure no duplicate IDs
-            if id in ids:
-                raise ValueError(
-                    f"Logits processor ID {id} already loaded (loaded IDs: "
-                    f"{ids})")
-            ids.add(id)
-            if logitproc.requires_nongreedy():
-                self.nongreedy[id] = logitproc
-            else:
-                # Greedy-compatible logitproc
-                self.greedy[id] = logitproc
+    #     Args:
+    #       ids_logitsprocs: sequence of
+    #       (logitproc ID, logitproc instance pairs)
+    #     """
+    #     ids = self.all_ids
+    #     for id, logitproc in ids_logitsprocs:
+    #         # Ensure no duplicate IDs
+    #         if id in ids:
+    #             raise ValueError(
+    #                 f"Logits processor ID {id} already loaded (loaded IDs: "
+    #                 f"{ids})")
+    #         ids.add(id)
+    #         if logitproc.requires_nongreedy():
+    #             self.nongreedy[id] = logitproc
+    #         else:
+    #             # Greedy-compatible logitproc
+    #             self.greedy[id] = logitproc
 
     @property
-    def all(self) -> dict[str, LogitsProcessor]:
-        """All logits processors"""
-        return self.greedy | self.nongreedy
-
-    @property
-    def all_ids(self) -> set[str]:
-        "All logits processors' IDs"
-        return self.greedy.keys() | self.nongreedy.keys()
-
-    @property
-    def nongreedy_list(self) -> list[LogitsProcessor]:
-        return list(self.nongreedy.values())
-
-    @property
-    def greedy_list(self) -> list[LogitsProcessor]:
-        return list(self.greedy.values())
-
-    @property
-    def all_list(self) -> list[LogitsProcessor]:
-        """List of all logits processors"""
-        return self.nongreedy_list + self.greedy_list
+    def all(self) -> Iterator[LogitsProcessor]:
+        """Iterator over all logits processors."""
+        return chain(self.argmax_invariant, self.non_argmax_invariant)
 
 
 ###### ----- Built-in LogitsProcessor impls below here
@@ -286,14 +264,17 @@ class MinPLogitsProcessor(LogitsProcessor):
         # Current slice of the device tensor
         self.min_p: torch.Tensor = self.min_p_device[:0]
 
-    @classmethod
-    def requires_nongreedy(cls) -> bool:
+    def is_argmax_invariant(self) -> bool:
+        """Min-p never impacts greedy sampling"""
         return True
 
     def get_min_p_by_index(self, index: int) -> float:
         return float(self.min_p_cpu[index])
 
-    def update_state(self, batch_update: BatchUpdate):
+    def update_state(self, batch_update: Optional[BatchUpdate]):
+        if not batch_update:
+            return
+
         needs_update = False
         # Process added requests.
         for index, params, _ in batch_update.added:
@@ -360,11 +341,15 @@ class LogitBiasLogitsProcessor(LogitsProcessor):
         self.logits_slice = (self._device_tensor([], torch.int32),
                              self._device_tensor([], torch.int32))
 
-    @classmethod
-    def requires_nongreedy(cls) -> bool:
+    def is_argmax_invariant(self) -> bool:
+        """Logit bias can rebalance token probabilities and change the
+        outcome of argmax in greedy sampling."""
         return False
 
-    def update_state(self, batch_update: BatchUpdate):
+    def update_state(self, batch_update: Optional[BatchUpdate]):
+        if not batch_update:
+            return
+
         # Process added requests.
         needs_update = bool(batch_update.added)
         for index, params, _ in batch_update.added:
@@ -439,50 +424,54 @@ class MinTokensLogitsProcessor(LogitsProcessor):
                                                   self._device_tensor(
                                                       [], torch.int32))
 
-    @classmethod
-    def requires_nongreedy(cls) -> bool:
+    def is_argmax_invariant(self) -> bool:
+        """By censoring stop tokens, min-tokens can change the outcome
+        of the argmax operation in greedy sampling."""
         return False
 
-    def update_state(self, batch_update: BatchUpdate):
+    def update_state(self, batch_update: Optional[BatchUpdate]):
+        needs_update = False
 
-        # Process added requests.
-        needs_update = bool(batch_update.added)
-        for index, params, output_tok_ids in batch_update.added:
-            if (isinstance(params, SamplingParams)
-                    and (min_tokens := params.min_tokens)
-                    and len(output_tok_ids) < min_tokens):
-                # Replace request metadata at batch index
-                self.min_toks[index] = (min_tokens, output_tok_ids,
-                                        params.all_stop_token_ids)
-            else:
-                # Drop request metadata at batch index
-                self.min_toks.pop(index, None)
+        if batch_update:
+            # Process added requests.
+            needs_update |= bool(batch_update.added)
+            for index, params, output_tok_ids in batch_update.added:
+                if (isinstance(params, SamplingParams)
+                        and (min_tokens := params.min_tokens)
+                        and len(output_tok_ids) < min_tokens):
+                    # Replace request metadata at batch index
+                    self.min_toks[index] = (min_tokens, output_tok_ids,
+                                            params.all_stop_token_ids)
+                else:
+                    # Drop request metadata at batch index
+                    self.min_toks.pop(index, None)
 
-        if self.min_toks:
-            # Process removed requests.
-            for index in batch_update.removed:
-                if self.min_toks.pop(index, None):
-                    needs_update = True
+            if self.min_toks:
+                # Process removed requests.
+                for index in batch_update.removed:
+                    if self.min_toks.pop(index, None):
+                        needs_update = True
 
-            # Process moved requests, unidirectional (a->b) and
-            # swapped (a<->b)
-            for a_index, b_index, direct in batch_update.moved:
-                if direct == MoveDirectionality.UNIDIRECTIONAL:
-                    if (a_entry := self.min_toks.pop(a_index, None)) is None:
-                        if self.min_toks.pop(b_index, None) is not None:
+                # Process moved requests, unidirectional (a->b) and
+                # swapped (a<->b)
+                for a_index, b_index, direct in batch_update.moved:
+                    if direct == MoveDirectionality.UNIDIRECTIONAL:
+                        if (a_entry := self.min_toks.pop(a_index,
+                                                         None)) is None:
+                            if self.min_toks.pop(b_index, None) is not None:
+                                needs_update = True
+                        else:
+                            self.min_toks[b_index] = a_entry
                             needs_update = True
                     else:
-                        self.min_toks[b_index] = a_entry
-                        needs_update = True
-                else:
-                    a_entry = self.min_toks.pop(a_index, None)
-                    if (b_entry := self.min_toks.pop(b_index,
-                                                     None)) is not None:
-                        self.min_toks[a_index] = b_entry
-                        needs_update = True
-                    if a_entry is not None:
-                        self.min_toks[b_index] = a_entry
-                        needs_update = True
+                        a_entry = self.min_toks.pop(a_index, None)
+                        if (b_entry := self.min_toks.pop(b_index,
+                                                         None)) is not None:
+                            self.min_toks[a_index] = b_entry
+                            needs_update = True
+                        if a_entry is not None:
+                            self.min_toks[b_index] = a_entry
+                            needs_update = True
 
         if self.min_toks:
             # Check for any requests that have attained their min tokens.
@@ -517,3 +506,35 @@ class MinTokensLogitsProcessor(LogitsProcessor):
             # Inhibit EOS token for requests which have not reached min length
             logits[self.logits_slice] = -float("inf")
         return logits
+
+
+def init_builtin_logitsprocs(pin_memory_available: bool, max_num_reqs: int,
+                             device: torch.device) -> LogitsProcessorManager:
+    """Construct 'builtin' vLLM logitsprocs which the engine
+    loads by default.
+
+    Args:
+      pin_memory_available: pinned memory is available for use
+                            for use by logitsproc
+      max_num_reqs: ceiling on request count in persistent batch
+      device: inference device
+
+    Returns:
+      Data structure encapsulating loaded logitsprocs
+    """
+    min_tokens_logitproc = MinTokensLogitsProcessor(
+        pin_memory=pin_memory_available, device=device)
+    logit_bias_logitproc = LogitBiasLogitsProcessor(
+        pin_memory=pin_memory_available, device=device)
+    min_p_logitproc = MinPLogitsProcessor(
+        pin_memory=pin_memory_available,
+        device=device,
+        # +1 for temporary swap space
+        max_num_reqs=max_num_reqs + 1)
+    return LogitsProcessorManager(
+        non_argmax_invariant=[
+            min_tokens_logitproc,
+            logit_bias_logitproc,
+        ],
+        argmax_invariant=[min_p_logitproc],
+    )

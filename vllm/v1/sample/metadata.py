@@ -39,7 +39,5 @@ class SamplingMetadata:
     # req_index -> bad_words_token_ids
     bad_words_token_ids: dict[int, list[list[int]]]
 
-    # Some logits processors don't affect greedy decoding (or if they do,
-    # only due to precision errors); "non-greedy" processors are
-    # only applied to random-sampled requests in the batch.
+    # Loaded logits processors
     logitsprocs: LogitsProcessorManager

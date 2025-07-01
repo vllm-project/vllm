@@ -2,7 +2,7 @@
 
 import random
 from collections.abc import Callable
-from typing import NamedTuple, Optional
+from typing import NamedTuple, Optional, Union
 
 import numpy as np
 import pytest
@@ -16,14 +16,16 @@ from tests.v1.sample.utils import (LogitsprocsTestFakes, create_fake_logits,
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.utils import is_pin_memory_available
+# yapf: disable
 from vllm.v1.sample.logits_processor import (BatchUpdate, BatchUpdateBuilder,
+                                             LogitBiasLogitsProcessor,
+                                             LogitsProcessor,
+                                             MinPLogitsProcessor,
                                              MinTokensLogitsProcessor,
-                                             MoveDirectionality)
+                                             MoveDirectionality,
+                                             init_builtin_logitsprocs)
+# yapf: enable
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.worker.utils import (STR_LOGITS_BIAS_LOGITPROC_ID,
-                                  STR_MIN_P_LOGITPROC_ID,
-                                  STR_MIN_TOKENS_LOGITPROC_ID,
-                                  STR_NO_LOGITPROC, init_builtin_logitsprocs)
 
 PIN_MEMORY_AVAILABLE = is_pin_memory_available()
 MAX_NUM_REQS = 256
@@ -36,6 +38,10 @@ CUDA_DEVICES = [
 MAX_NUM_PROMPT_TOKENS = 64
 MIN_TOKENS_LEN_THRESHOLD = 5
 REQS_PER_LOGITPROC = 50
+STR_NO_LOGITPROC = "none"
+
+# LogitsProcessor subclass or "none"
+LogitprocType = Union[type[LogitsProcessor], str]
 
 
 class LogitsProcsRequestParams:
@@ -44,19 +50,19 @@ class LogitsProcsRequestParams:
     Params can be customized based on the enabled logitproc
     """
     workload_index: int
-    logitproc_id: str  # Logitproc enabled, specified by str id
+    logitproc_type: LogitprocType  # Logitproc enabled, specified by str id
     out_tokens: list[int]  # Output tokens required for min tokens test
     params: SamplingParams  # Settings customized for logitproc
 
-    def __init__(self, workload_index: int, logitproc_id: str):
+    def __init__(self, workload_index: int, logitproc_type: LogitprocType):
         self.workload_index = workload_index
-        self.logitproc_id = logitproc_id
+        self.logitproc_type = logitproc_type
         # Number of output tokens is randomly 0 or twice the min-tokens
         # threshold which will be used in testing. Output token values
         # don't matter *for these tests* so use 0 as a dummy value
         self.out_tokens = ([0] *
                            (MIN_TOKENS_LEN_THRESHOLD * random.randint(0, 2)))
-        self.params = _sampling_params_from_logitproc(logitproc_id)
+        self.params = _sampling_params_from_logitproc(logitproc_type)
 
     def __str__(self):
         """For debugging"""
@@ -122,37 +128,38 @@ def _generate_test_fakes(batch_size: int, device: str) -> LogitsprocsTestFakes:
     )
 
 
-def _sampling_params_from_logitproc(logitproc_id: str) -> SamplingParams:
+def _sampling_params_from_logitproc(
+        logitproc_type: LogitprocType) -> SamplingParams:
     """Customize request SamplingParams for a specified logitproc"""
     # SamplingParams for req with no logitproc
     kwargs = {"min_p": 0.0, "logit_bias": None, "min_tokens": 0}
-    if fxn := logitsprocs_test_mapping[logitproc_id].gen_request_fxn:
+    if fxn := logitsprocs_test_mapping[logitproc_type].gen_request_fxn:
         fxn(kwargs)
     return SamplingParams(**kwargs)
 
 
 def _generate_mixed_logitsprocs_batch_params(
     reqs_per_logitproc: int,
-    logitsprocs_ids: list[str],
+    logitsprocs_types: list[str],
 ) -> list[LogitsProcsRequestParams]:
     """Define key params for a batch of requests with a different
     logitproc enabled per request.
     
     The batch will have `reqs_per_logitproc` repeats for all
-    `logitsprocs_ids` under test, including the case where
+    `logitsprocs_types` under test, including the case where
     no logitsproc is enabled. The batch is randomly shuffled. The
     size of the batch is `reqs_per_logitproc` times
-    `n = len(logitsprocs_ids)`
+    `n = len(logitsprocs_types)`
 
     Args:
       reqs_per_logitproc: number of requests using each logitproc
-      logitsprocs_ids: logitsprocs under test
+      logitsprocs_types: logitsprocs under test
 
     Returns:
       List of per-request params which configure the engine for that request's
       enabled logitproc
     """
-    batch_size = len(logitsprocs_ids) * reqs_per_logitproc
+    batch_size = len(logitsprocs_types) * reqs_per_logitproc
     # Generate multiple repeats of key params for each logitproc;
     # apply random inverse permutation to the iteration
     # over logitsprocs, such that logitsprocs are shuffled.
@@ -160,7 +167,7 @@ def _generate_mixed_logitsprocs_batch_params(
     return [
         LogitsProcsRequestParams(
             workload_index=idx,
-            logitproc_id=logitsprocs_ids[pdx // reqs_per_logitproc])
+            logitproc_type=logitsprocs_types[pdx // reqs_per_logitproc])
         for idx, pdx in enumerate(batch_perm)
     ]
 
@@ -289,9 +296,8 @@ def _min_tokens_validate(
     ref_num_out_tokens = len(request_params.out_tokens)
     min_reached = ref_num_out_tokens >= MIN_TOKENS_LEN_THRESHOLD
     ref_all_stop_token_ids = request_params.params.all_stop_token_ids
-    mt_lp: MinTokensLogitsProcessor = (
-        test_fakes.sampling_metadata.logitsprocs.get_logitproc_by_id(
-            STR_MIN_TOKENS_LOGITPROC_ID))
+    mt_lp: MinTokensLogitsProcessor = next(
+        test_fakes.get_logitsprocs_by_cls(MinTokensLogitsProcessor))
     assert isinstance(mt_lp, MinTokensLogitsProcessor)
     min_tok = mt_lp.min_toks.get(batch_index, None)
 
@@ -392,13 +398,13 @@ class LogitsprocTestHelpers(NamedTuple):
 logitsprocs_test_mapping = {
     STR_NO_LOGITPROC:
     LogitsprocTestHelpers(eval_fxn=_none_validate),
-    STR_LOGITS_BIAS_LOGITPROC_ID:
+    LogitBiasLogitsProcessor:
     LogitsprocTestHelpers(gen_request_fxn=_logit_bias_params,
                           eval_fxn=_logit_bias_validate),
-    STR_MIN_P_LOGITPROC_ID:
+    MinPLogitsProcessor:
     LogitsprocTestHelpers(gen_request_fxn=_min_p_params,
                           eval_fxn=_min_p_validate),
-    STR_MIN_TOKENS_LOGITPROC_ID:
+    MinTokensLogitsProcessor:
     LogitsprocTestHelpers(gen_request_fxn=_min_tokens_params,
                           eval_fxn=_min_tokens_validate),
 }
@@ -406,18 +412,19 @@ logitsprocs_test_mapping = {
 
 def _get_test_cases() -> list[list[str]]:
     """Each test case is a set of logitsprocs"""
-    logitsprocs_ids = list(logitsprocs_test_mapping.keys())
-    return [[STR_NO_LOGITPROC]] + [[logitproc_id, STR_NO_LOGITPROC]
-                                   for logitproc_id in logitsprocs_ids
-                                   if logitproc_id != STR_NO_LOGITPROC
-                                   ] + [logitsprocs_ids]
+    logitsprocs_types = list(logitsprocs_test_mapping.keys())
+    return [[STR_NO_LOGITPROC]] + [[logitproc_type, STR_NO_LOGITPROC]
+                                   for logitproc_type in logitsprocs_types
+                                   if logitproc_type != STR_NO_LOGITPROC
+                                   ] + [logitsprocs_types]
 
 
 def _generate_fake_step_update(
     persistent_batch: list[LogitsProcsRequestParams],
     workload_params: list[LogitsProcsRequestParams],
     wdx: int,
-) -> tuple[BatchUpdate, int, int]:
+    batch_update_builder: BatchUpdateBuilder,
+) -> tuple[Optional[BatchUpdate], int, int]:
     batch_size = len(persistent_batch)
     workload_size = len(workload_params)
     workload_reqs_remaining = workload_size - wdx
@@ -445,15 +452,14 @@ def _generate_fake_step_update(
 
     num_step_add_replace = min(num_step_add, num_step_remove)
 
-    # Generate fake removed request indices from current persistent
-    # batch before adds
-    batch_update_builder = BatchUpdateBuilder(
-        removed=random.sample(range(batch_size), num_step_remove))
+    # Generate fake removed request indices drawn from persistent batch indices
+    for removal in random.sample(range(batch_size), num_step_remove):
+        batch_update_builder.removed_append(removal)
 
     # Get added requests from workload
     for add_req_params in workload_params[wdx:(wdx + num_step_add_replace)]:
         # Replace as many removed requests as possible with added requests
-        add_remove_idx = batch_update_builder.pop_removed_if_can()
+        add_remove_idx = batch_update_builder.pop_removed()
         batch_update_builder.added.append(
             (add_remove_idx, add_req_params.params, add_req_params.out_tokens))
         persistent_batch[add_remove_idx] = add_req_params
@@ -480,7 +486,7 @@ def _generate_fake_step_update(
             continue
         # last_nonempty_index is the highest persistent batch index that was
         # not removed
-        first_empty_index = batch_update_builder.peek_removed_if_can()
+        first_empty_index = batch_update_builder.peek_removed()
         assert first_empty_index is not None
         if first_empty_index > last_nonempty_index:
             break
@@ -488,7 +494,7 @@ def _generate_fake_step_update(
         # that is less than last_nonempty_index
         #
         # move last_nonempty_index -> first_empty_index
-        batch_update_builder.pop_removed_if_can()
+        batch_update_builder.pop_removed()
         condensed_to_idxs.add(first_empty_index)
         persistent_batch[first_empty_index] = persistent_batch[
             last_nonempty_index]
@@ -520,7 +526,7 @@ def _generate_fake_step_update(
             persistent_batch[adx], persistent_batch[bdx] = persistent_batch[
                 bdx], persistent_batch[adx]
 
-    return (batch_update_builder.buildBatchUpdate(condensed_batch_size), wdx,
+    return (batch_update_builder.get_and_reset(condensed_batch_size), wdx,
             workload_size - wdx)
 
 
@@ -545,7 +551,7 @@ def _assert_valid(
         request_params = persistent_batch[batch_index]
         # Invoke the appropriate validation function for
         # the logitproc employed by this request
-        fxn = logitsprocs_test_mapping[request_params.logitproc_id].eval_fxn
+        fxn = logitsprocs_test_mapping[request_params.logitproc_type].eval_fxn
         fxn(test_fakes=test_fakes,
             persistent_batch=persistent_batch,
             logits_new=logits_w_lp,
@@ -566,7 +572,7 @@ def test_logitsprocs(device: str, reqs_per_logitproc: int,
     # logitproc, or no logitproc at all
     workload_params = _generate_mixed_logitsprocs_batch_params(
         reqs_per_logitproc=reqs_per_logitproc,
-        logitsprocs_ids=logitsprocs_under_test)
+        logitsprocs_types=logitsprocs_under_test)
     workload_size = len(workload_params)
 
     # Create fake test data structures for testing.
@@ -575,6 +581,10 @@ def test_logitsprocs(device: str, reqs_per_logitproc: int,
     wdx = 0  # Next request index in workload to add
     persistent_batch: list[LogitsProcsRequestParams] = [
     ]  # Persistent batch state, as list of workload indices
+
+    # Generate fake removed request indices from current persistent
+    # batch before adds
+    batch_update_builder = BatchUpdateBuilder()
 
     # Break when entire workload has been added previously and persistent
     # batch is empty
@@ -593,13 +603,14 @@ def test_logitsprocs(device: str, reqs_per_logitproc: int,
             persistent_batch=persistent_batch,
             workload_params=workload_params,
             wdx=wdx,
+            batch_update_builder=batch_update_builder,
         )
-        batch_size = batch_update.batch_size
+        batch_size = len(persistent_batch)
 
         # Apply fake batch update to logitsprocs
         fake_update_logitsprocs_state(test_fakes, batch_update)
 
-        # Emulate application of greedy logits processors in engine
+        # Emulate application of logits processors in engine
         slice_idxs = [req.workload_index for req in persistent_batch]
         logits_w_lp = fake_apply_logitsprocs(test_fakes, slice_idxs).cpu()
 

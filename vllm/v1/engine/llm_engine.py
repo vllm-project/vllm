@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from copy import copy
 from typing import Any, Callable, Optional, Union
 
@@ -32,7 +32,6 @@ from vllm.v1.metrics.loggers import (PrometheusStatLogger, StatLoggerBase,
                                      StatLoggerFactory)
 from vllm.v1.metrics.reader import Metric, get_metrics_snapshot
 from vllm.v1.metrics.stats import IterationStats
-from vllm.v1.sample.logits_processor import LogitsProcessor
 
 logger = init_logger(__name__)
 
@@ -52,7 +51,6 @@ class LLMEngine:
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         use_cached_outputs: bool = False,
         multiprocess_mode: bool = False,
-        custom_logitsprocs: Sequence[LogitsProcessor] = [],
     ) -> None:
         if not envs.VLLM_USE_V1:
             raise ValueError(
@@ -194,6 +192,11 @@ class LLMEngine:
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
     ) -> None:
+        # Validate the request_id type.
+        if not isinstance(request_id, str):
+            raise TypeError(
+                f"request_id must be a string, got {type(request_id)}")
+
         # Process raw inputs into the request.
         prompt_str, request = self.processor.process_inputs(
             request_id, prompt, params, arrival_time, lora_request,
