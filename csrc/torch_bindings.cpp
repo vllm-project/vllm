@@ -441,6 +441,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("cutlass_moe_mm", torch::kCUDA, &cutlass_moe_mm);
 
   // CUTLASS w8a8 blockwise-scaled grouped GEMM
+  // This function supports 128x128 weights block size.
+  // When per_act_block is true, the input is quantized with per-token
+  // 128-elements-blocked scales (equivalent to block size 1x128).
+  // When it's false, the input is quantized with per-tensor scales.
   ops.def(
       "cutlass_moe_blockwise_mm(Tensor! out_tensors, Tensor a_tensors, Tensor "
       "b_tensors, "
