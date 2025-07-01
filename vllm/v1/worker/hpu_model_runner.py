@@ -1000,7 +1000,7 @@ class HPUModelRunner:
         # DECODES are the first num_decodes REQUESTS.
         # PREFILLS are the next num_reqs - num_decodes REQUESTS.
         num_reqs = num_prefills + num_decodes
-        block_table_cpu_tensor = self.input_batch.block_table.get_cpu_tensor()
+        block_table_cpu_tensor = self.input_batch.block_table[0].get_cpu_tensor()
         all_batch_contents = [BatchContents()]
 
         for batch_idx in range(num_decodes, num_reqs):
@@ -1195,7 +1195,7 @@ class HPUModelRunner:
         # logic knows to ignore those indicies. Otherwise, the
         # padding data can be dummy since we have a causal mask.
 
-        block_table_cpu_tensor = self.input_batch.block_table.get_cpu_tensor()
+        block_table_cpu_tensor = self.input_batch.block_table[0].get_cpu_tensor()
         if num_decodes == 0:
             return DecodeInputData(num_decodes=0)
 
