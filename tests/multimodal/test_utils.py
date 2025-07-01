@@ -172,7 +172,9 @@ async def test_fetch_video_http(video_url: str, num_frames: int):
     video_sync = connector.fetch_video(video_url, num_frames=num_frames)
     video_async = await connector.fetch_video_async(video_url,
                                                     num_frames=num_frames)
-    assert np.array_equal(video_sync, video_async)
+    # Check that the video frames are equal and metadata are same
+    assert np.array_equal(video_sync[0], video_async[0])
+    assert video_sync[1] == video_async[1]
 
 
 # Used for the next two tests related to `merge_and_sort_multimodal_metadata`.

@@ -24,6 +24,7 @@ def resize_video(frames: npt.NDArray, size: tuple[int, int]) -> npt.NDArray:
                               dtype=frames.dtype)
     # lazy import cv2 to avoid bothering users who only use text models
     import cv2
+
     for i, frame in enumerate(frames):
         resized_frame = cv2.resize(frame, (new_width, new_height))
         resized_frames[i] = resized_frame
@@ -92,14 +93,16 @@ class OpenCVVideoBackend(VideoLoader):
                 continue
             if not vr.isBackendBuiltIn(backend):
                 _, abi, api = vr.getStreamBufferedBackendPluginVersion(backend)
-                if (abi < 1 or (abi == 1 and api < 2)):
+                if abi < 1 or (abi == 1 and api < 2):
                     continue
             api_pref = backend
             break
         return api_pref
 
     @classmethod
-    def load_bytes(cls, data: bytes, num_frames: int = -1) -> npt.NDArray:
+    def load_bytes(cls,
+                   data: bytes,
+                   num_frames: int = -1) -> tuple[npt.NDArray, dict]:
         import cv2
 
         backend = cls().get_cv2_video_api()
@@ -108,6 +111,9 @@ class OpenCVVideoBackend(VideoLoader):
             raise ValueError("Could not open video stream")
 
         total_frames_num = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        original_fps = cap.get(cv2.CAP_PROP_FPS)
+        duration = total_frames_num / original_fps if original_fps > 0 else 0
+
         full_read = num_frames == -1 or total_frames_num < num_frames
         if full_read:
             num_frames = total_frames_num
@@ -125,18 +131,27 @@ class OpenCVVideoBackend(VideoLoader):
 
         i = 0
         for idx in range(total_frames_num):
-            ok = cap.grab()  # next img
+            ok = cap.grab()
             if not ok:
                 break
-            if idx in frame_idx:  # only decompress needed
+            if idx in frame_idx:
                 ret, frame = cap.retrieve()
                 if ret:
                     frames[i] = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                     i += 1
-        # we expect all frames loaded
+
         assert i == num_frames, (f"Expected reading {num_frames} frames, "
                                  f"but only loaded {i} frames from video.")
-        return frames
+
+        # Use transformers transformers.video_utils.VideoMetadata format
+        metadata = {
+            "total_num_frames": total_frames_num,
+            "fps": original_fps,
+            "duration": duration,
+            "video_backend": "opencv"
+        }
+
+        return frames, metadata
 
 
 class VideoMediaIO(MediaIO[npt.NDArray]):
