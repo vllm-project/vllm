@@ -336,6 +336,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # the same order of requests. We ensure this by only allowing the first
         # group to reorder the batch and asserting that all other groups do not
         # reorder the batch.
+        # TODO(tdoublep): make this more flexible so that any group can
+        # re-order the batch (not only the first).
         for i in range(1, len(self.kv_cache_config.kv_cache_groups)):
             assert not self.attn_metadata_builders[i].reorder_batch(
                 self.input_batch, scheduler_output)
