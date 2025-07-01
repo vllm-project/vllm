@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import bisect
+import dataclasses
 import gc
 import time
-from typing import TYPE_CHECKING, Optional, cast
+from typing import TYPE_CHECKING, Any, Optional, cast
 from unittest.mock import patch
 
 import numpy as np
@@ -1105,6 +1106,15 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         self._verify_num_xla_graphs("execute_model")
 
         return model_runner_output
+
+    def update_config(self, overrides: dict[str, Any]) -> None:
+        for config_name, config_overrides in overrides.items():
+            try:
+                config = getattr(self, config_name)
+            except AttributeError as exc:
+                raise ValueError(f"Unknown config {config_name}") from exc
+            new_config = dataclasses.replace(config, **config_overrides)
+            setattr(self, config_name, new_config)
 
     def load_model(self) -> None:
         self.device = self.device_config.device
