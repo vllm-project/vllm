@@ -16,6 +16,7 @@ from tests.v1.sample.utils import (LogitsprocsTestFakes, create_fake_logits,
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.utils import is_pin_memory_available
+# yapf: disable
 from vllm.v1.sample.logits_processor import (BatchUpdate, BatchUpdateBuilder,
                                              LogitBiasLogitsProcessor,
                                              LogitsProcessor,
@@ -23,6 +24,7 @@ from vllm.v1.sample.logits_processor import (BatchUpdate, BatchUpdateBuilder,
                                              MinTokensLogitsProcessor,
                                              MoveDirectionality,
                                              init_builtin_logitsprocs)
+# yapf: enable
 from vllm.v1.sample.metadata import SamplingMetadata
 
 PIN_MEMORY_AVAILABLE = is_pin_memory_available()
