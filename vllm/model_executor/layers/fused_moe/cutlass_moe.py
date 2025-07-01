@@ -14,6 +14,19 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8)
 from vllm.scalar_type import scalar_types
 
+"""
+This function computes a a8w8-blockwise quantized Mixture of Experts (MoE)
+layer  using two sets of quantized weight-scale pairs, w1-w1_scale and
+w2-w2_scale, and top-k gating mechanism. The matrix multiplications are
+implemented with CUTLASS grouped gemm. The weights are quantized with block
+size 128x128. When per_act_block is True, the input is quantized with
+per-token 128-blocked scales (equivalent to block size 1x128). When
+it's False, the input is quantized with per-tensor scales.
+
+Parameters:
+- output (torch.Tensor): The output tensor.
+"""
+
 
 def run_blocked_cutlass_moe_fp8(
     output: torch.Tensor,
