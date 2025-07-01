@@ -2407,6 +2407,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             corresponding memory buffer for KV cache.
         """
         kv_caches: dict[str, torch.Tensor] = {}
+        needs_validation = False
         for i, kv_cache_group_spec in enumerate(
                 kv_cache_config.kv_cache_groups):
             kv_cache_spec = kv_cache_group_spec.kv_cache_spec
@@ -2444,6 +2445,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         layer_name].view(dtype).view(kv_cache_shape).permute(
                             *inv_order)
                 elif isinstance(kv_cache_spec, MambaSpec):
+                    needs_validation = True
                     raw_tensor = kv_cache_raw_tensors[layer_name]
                     dtype = kv_cache_spec.dtype
                     num_element_per_page = (kv_cache_spec.page_size_bytes //
@@ -2467,6 +2469,28 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 else:
                     raise NotImplementedError
 
+        # Validate layout for hybrid models
+        if needs_validation:
+            for i, kv_cache_group_spec in enumerate(
+                    kv_cache_config.kv_cache_groups):
+                kv_cache_spec = kv_cache_group_spec.kv_cache_spec
+                for layer_name in kv_cache_group_spec.layer_names:
+                    raw_tensor = kv_cache_raw_tensors[layer_name]
+                    num_blocks = (raw_tensor.numel() //
+                                  kv_cache_spec.page_size_bytes)
+                    if isinstance(kv_cache_spec, AttentionSpec):
+                        kv_cache_shape = self.attn_backends[
+                            i].get_kv_cache_shape(num_blocks,
+                                                  kv_cache_spec.block_size,
+                                                  kv_cache_spec.num_kv_heads,
+                                                  kv_cache_spec.head_size)
+                        if kv_cache_shape[0] != num_blocks or kv_cache_shape[
+                                1] != 2:
+                            raise ValueError(
+                                "Hybrid models in V1 require an attention "
+                                "backend with kv_cache_shape="
+                                "(num_blocks, 2, ...). Please try setting "
+                                "VLLM_ATTENTION_BACKEND=FLASHINFER")
         return kv_caches
 
     def initialize_kv_cache_tensors(
