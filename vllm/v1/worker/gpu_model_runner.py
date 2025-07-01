@@ -2444,14 +2444,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 elif isinstance(kv_cache_spec, MambaSpec):
                     raw_tensor = kv_cache_raw_tensors[layer_name]
                     dtype = kv_cache_spec.dtype
-                    page_size = kv_cache_spec.page_size_bytes // get_dtype_size(
-                        dtype)
+                    num_element_per_page = (kv_cache_spec.page_size_bytes //
+                                            get_dtype_size(dtype))
                     state_tensors = []
                     storage_offset = 0
                     for shape in kv_cache_spec.shapes:
                         target_shape = (num_blocks, *shape)
                         stride = torch.empty(target_shape).stride()
-                        target_stride = (page_size, *stride[1:])
+                        target_stride = (num_element_per_page, *stride[1:])
                         tensor = torch.as_strided(
                             raw_tensor.view(dtype),
                             size=target_shape,
