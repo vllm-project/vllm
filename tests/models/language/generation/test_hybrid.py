@@ -46,7 +46,7 @@ HF_UNSUPPORTED_MODELS = [
     # Note: I'm not seeing the same output from vLLM V0 vs. HF transformers
     # for Nemotron-H-8B; currently only compare vLLM V0 vs. vLLM V1
     "nvidia/Nemotron-H-8B-Base-8K",
-    # NOTE: Currently the test failes due to HF transformers issue fixed in:
+    # NOTE: Currently the test fails due to HF transformers issue fixed in:
     # https://github.com/huggingface/transformers/pull/39033
     # We will enable vLLM test for Granite after next HF transformers release.
     "ibm-granite/granite-4.0-tiny-preview",
