@@ -521,27 +521,29 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_computed_tokens)
             self.input_batch.block_table.append_row(new_block_ids, req_index)
 
-            if is_last_rank:
-                # For the last rank, we don't need to update the token_ids_cpu
-                # because the sampled tokens are already cached.
-                continue
-
-            # Add new_token_ids to token_ids_cpu.
-            start_token_index = num_computed_tokens
-            end_token_index = num_computed_tokens + len(new_token_ids)
-            self.input_batch.token_ids_cpu[
-                req_index, start_token_index:end_token_index] = new_token_ids
-            self.input_batch.num_tokens_no_spec[req_index] = end_token_index
-            # Add spec_token_ids to token_ids_cpu.
-            spec_token_ids = scheduler_output.scheduled_spec_decode_tokens.get(
-                req_id, ())
-            if spec_token_ids:
-                start_index = end_token_index
-                end_token_index += len(spec_token_ids)
+            # For the last rank, we don't need to update the token_ids_cpu
+            # because the sampled tokens are already cached.
+            if not is_last_rank:
+                # Add new_token_ids to token_ids_cpu.
+                start_token_index = num_computed_tokens
+                end_token_index = num_computed_tokens + len(new_token_ids)
                 self.input_batch.token_ids_cpu[
-                    req_index, start_index:end_token_index] = spec_token_ids
-            # NOTE(woosuk): `num_tokens` here may include spec decode tokens.
-            self.input_batch.num_tokens[req_index] = end_token_index
+                    req_index,
+                    start_token_index:end_token_index] = new_token_ids
+                self.input_batch.num_tokens_no_spec[
+                    req_index] = end_token_index
+                # Add spec_token_ids to token_ids_cpu.
+                spec_token_ids = (
+                    scheduler_output.scheduled_spec_decode_tokens.get(
+                        req_id, ()))
+                if spec_token_ids:
+                    start_index = end_token_index
+                    end_token_index += len(spec_token_ids)
+                    self.input_batch.token_ids_cpu[
+                        req_index,
+                        start_index:end_token_index] = spec_token_ids
+                # NOTE(woosuk): `num_tokens` here may include spec tokens.
+                self.input_batch.num_tokens[req_index] = end_token_index
 
         # Check if the batch has changed. If not, we can skip copying the
         # sampling metadata from CPU to GPU.
@@ -1533,8 +1535,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
             start_idx = self.input_batch.num_tokens_no_spec[req_idx]
             end_idx = start_idx + len(sampled_ids)
-            if end_idx >= self.max_model_len:
-                continue
+            assert end_idx <= self.max_model_len, (
+                "Sampled token IDs exceed the max model length. "
+                f"Total number of tokens: {end_idx} > max_model_len: "
+                f"{self.max_model_len}")
 
             self.input_batch.token_ids_cpu[req_idx,
                                            start_idx:end_idx] = sampled_ids
@@ -1765,16 +1769,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 draft_token_ids.append([])
                 continue
 
-            # Add sampled_token_ids to token_ids_cpu.
-            start_idx = self.input_batch.num_tokens_no_spec[i]
-            end_idx = start_idx + num_sampled_ids
-            if end_idx >= self.max_model_len:
+            num_tokens = self.input_batch.num_tokens_no_spec[i]
+            if num_tokens >= self.max_model_len:
                 # Skip requests that have already reached the max model length.
                 draft_token_ids.append([])
                 continue
 
             drafter_output = self.drafter.propose(
-                self.input_batch.token_ids_cpu[i, :end_idx])
+                self.input_batch.token_ids_cpu[i, :num_tokens])
             if drafter_output is None or len(drafter_output) == 0:
                 draft_token_ids.append([])
             else:
