@@ -250,7 +250,7 @@ class FlashAttentionMetadataBuilder(
                     cu_seqlens_q=cu_query_lens,
                     causal=causal,
                     window_size=self.aot_sliding_window,
-                    max_num_splits=self.max_num_splits,
+                    num_splits=self.max_num_splits,
                 )
             return None
 
