@@ -27,7 +27,8 @@ class AsyncScheduler(Scheduler):
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
         for req_id in num_scheduled_tokens:
             request = self.requests[req_id]
-            self._free_encoder_inputs(request)
+            if request.has_encoder_inputs:
+                self._free_encoder_inputs(request)
 
             if request.num_computed_tokens == request.num_tokens:
                 # Pre-allocate.
