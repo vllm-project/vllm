@@ -217,9 +217,15 @@ class Attention(nn.Module, AttentionLayerBase):
         ]
 
         try:
-            self.q_range = torch.tensor(envs.Q_SCALE_CONSTANT, dtype=torch.float32)
-            self.k_range = torch.tensor(envs.K_SCALE_CONSTANT, dtype=torch.float32)
-            self.v_range = torch.tensor(envs.V_SCALE_CONSTANT, dtype=torch.float32)
+            self.q_range = torch.tensor(
+                envs.Q_SCALE_CONSTANT, dtype=torch.float32
+            )
+            self.k_range = torch.tensor(
+                envs.K_SCALE_CONSTANT, dtype=torch.float32
+            )
+            self.v_range = torch.tensor(
+                envs.V_SCALE_CONSTANT, dtype=torch.float32
+            )
         except Exception as e:
             if torch.cuda.is_available():
                 logger.error(
@@ -233,7 +239,8 @@ class Attention(nn.Module, AttentionLayerBase):
                              torch.cuda.memory_reserved() / GiB_bytes)
             raise RuntimeError(
                 "Failed to initialize q/k/v range constants. "
-                "This may be caused by insufficient memory to allocate kv cache."
+                "This may be caused by insufficient memory to allocate "
+                "kv cache."
             ) from e
 
     def forward(
