@@ -12,7 +12,7 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
-from .fusion import QUANT_OPS, GroupShape, QuantKey, empty_bf16, empty_fp32
+from .fusion import QUANT_OPS, GroupShape, QuantKey, empty_fp32
 from .vllm_inductor_pass import VllmInductorPass
 
 logger = init_logger(__name__)
@@ -98,13 +98,26 @@ class AttentionStaticQuantPattern:
         # That would not work for the unified_attention custom op.
         with unset_fake_temporarily(), FakeTensorMode():
             inputs = [
-                empty_bf16(5, self.num_heads, self.head_size),  # q
-                empty_bf16(5, self.num_heads, self.head_size),  # k
-                empty_bf16(5, self.num_heads, self.head_size),  # v
-                torch.full((5, self.num_heads, self.head_size),
-                           0.0,
-                           dtype=self.dtype,
-                           device="cuda"),
+                torch.empty(5,
+                            self.num_heads,
+                            self.head_size,
+                            device="cuda",
+                            dtype=self.dtype),  # q
+                torch.empty(5,
+                            self.num_heads,
+                            self.head_size,
+                            device="cuda",
+                            dtype=self.dtype),  # k
+                torch.empty(5,
+                            self.num_heads,
+                            self.head_size,
+                            device="cuda",
+                            dtype=self.dtype),  # v
+                torch.empty(5,
+                            self.num_heads,
+                            self.head_size,
+                            dtype=self.dtype,
+                            device="cuda"),
                 self.empty_quant(5, self.num_heads *
                                  self.head_size),  # quant_output
                 empty_fp32(1, 1)  # scale
