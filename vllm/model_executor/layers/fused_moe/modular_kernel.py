@@ -94,7 +94,7 @@ class ExpertTokensMetadata:
     @staticmethod
     def make_from_list(expert_num_tokens_list: list[int],
                        device: str) -> "ExpertTokensMetadata":
-        expert_num_tokens_cpu = torch.Tensor(expert_num_tokens_list,
+        expert_num_tokens_cpu = torch.tensor(expert_num_tokens_list,
                                              device="cpu",
                                              dtype=torch.int32)
         return ExpertTokensMetadata(
