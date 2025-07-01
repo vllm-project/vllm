@@ -58,21 +58,7 @@ class FakeTraceService(TraceServiceServicer):
         return ExportTraceServiceResponse()
 
 
-@pytest.fixture
-def trace_service() -> Generator[FakeTraceService, None, None]:
-    """Fixture to set up a fake gRPC trace service"""
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=1))
-    service = FakeTraceService()
-    add_TraceServiceServicer_to_server(service, server)
-    server.add_insecure_port(FAKE_TRACE_SERVER_ADDRESS)
-    server.start()
-
-    yield service
-
-    server.stop(None)
-
-
-def test_traces(trace_service: FakeTraceService, ):
+def start_server(env_dict: dict[str, str]):
     args = [
         # use half precision for speed and memory savings in CI environment
         "--dtype",
@@ -87,12 +73,31 @@ def test_traces(trace_service: FakeTraceService, ):
         OTEL_EXPORTER_OTLP_TRACES_PROTOCOL: "grpc",
         OTEL_EXPORTER_OTLP_TRACES_INSECURE: "true",
         'VLLM_USE_V1': '1',
+        **env_dict
     }
 
-    with RemoteOpenAIServer(MODEL_NAME, args, env_dict=envs):
+    return RemoteOpenAIServer(MODEL_NAME, args, env_dict=envs)
+
+
+@pytest.fixture
+def trace_service() -> Generator[FakeTraceService, None, None]:
+    """Fixture to set up a fake gRPC trace service"""
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=1))
+    service = FakeTraceService()
+    add_TraceServiceServicer_to_server(service, server)
+    server.add_insecure_port(FAKE_TRACE_SERVER_ADDRESS)
+    server.start()
+
+    yield service
+
+    server.stop(None)
+
+
+def test_otel_grpc_trace_export(trace_service: FakeTraceService):
+    with start_server({}):
         pass
 
-    timeout = 15
+    timeout = 5
     if not trace_service.evt.wait(timeout):
         raise TimeoutError(
             f"The fake trace service didn't receive a trace within "
@@ -122,8 +127,6 @@ def test_traces(trace_service: FakeTraceService, ):
         'vllm.engine_core.model_runner.profile_run',
         'vllm.api_server.init_app_state',
     ])
-    print(spans)
-    print(found_spans)
     assert expected_spans <= found_spans, (
         f"Missing expected span names: {expected_spans - found_spans}")
 
@@ -141,3 +144,27 @@ def test_traces(trace_service: FakeTraceService, ):
 
     assert attributes["model.load_format"] == "auto", (
         f"Unexpected model name {attributes['model.load_format']}.")
+
+
+def test_vllm_noop_trace_export(trace_service: FakeTraceService,
+                                monkeypatch: pytest.MonkeyPatch):
+    """Use vLLM custom noop tracer and span classes."""
+
+    with start_server({'VLLM_OTEL_TRACING_DISABLED': 'true'}):
+        pass
+
+    timeout = 5
+    assert not trace_service.evt.wait(
+        timeout), "Unexpected traces received with tracing disabled"
+
+
+def test_otel_noop_trace_export(trace_service: FakeTraceService,
+                                monkeypatch: pytest.MonkeyPatch):
+    """Use opentelemetry provided noop tracer and span classes."""
+
+    with start_server({'OTEL_SDK_DISABLED': 'true'}):
+        pass
+
+    timeout = 5
+    assert not trace_service.evt.wait(
+        timeout), "Unexpected traces received with tracing disabled"

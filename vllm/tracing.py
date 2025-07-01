@@ -20,6 +20,8 @@ _is_otel_imported = False
 _is_tracer_provider_initialized = False
 otel_import_error_traceback: Optional[str] = None
 try:
+    if os.environ.get("VLLM_OTEL_TRACING_DISABLED", False):
+        raise ImportError("Force disable opentelemetry for testing.")
     from opentelemetry import context, propagate, trace
     from opentelemetry.context.context import Context
     from opentelemetry.sdk import resources
@@ -49,6 +51,13 @@ except ImportError:
         pass
 
     class Span:  # type: ignore
+        """No-op span used when otel is unavailable."""
+
+        def set_attribute(*args, **kwargs):
+            pass
+
+        def set_attributes(*args, **kwargs):
+            pass
 
         def end(*args, **kwargs):
             pass
