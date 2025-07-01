@@ -78,15 +78,15 @@ class P2pNcclEngine:
         port = int(self.config.kv_port) + port_offset
         if port == 0:
             raise ValueError("Port cannot be 0")
-        self._hostname = hostname
-        self._port = port
+        self.hostname = hostname
+        self.port = port
 
         # Each card corresponds to a ZMQ address.
-        self.zmq_address = f"{self._hostname}:{self._port}"
+        self.zmq_address = f"{self.hostname}:{self.port}"
 
         # The `http_port` must be consistent with the port of OpenAI.
         self.http_address = (
-            f"{self._hostname}:"
+            f"{self.hostname}:"
             f"{self.config.kv_connector_extra_config['http_port']}")
 
         # If `proxy_ip` or `proxy_port` is `""`,
@@ -144,15 +144,15 @@ class P2pNcclEngine:
         self.nccl_num_channels = self.config.get_from_extra_config(
             "nccl_num_channels", "8")
 
-        self._listener_thread = threading.Thread(
+        self.listener_thread = threading.Thread(
             target=self.listen_for_requests, daemon=True)
-        self._listener_thread.start()
+        self.listener_thread.start()
 
-        self._ping_thread = None
+        self.ping_thread = None
         if port_offset == 0 and self.proxy_address != "":
-            self._ping_thread = threading.Thread(target=self.ping,
+            self.ping_thread = threading.Thread(target=self.ping,
                                                  daemon=True)
-            self._ping_thread.start()
+            self.ping_thread.start()
 
         self.num_layers = 0
         self.finished_recving: set[str] = set()
@@ -536,7 +536,7 @@ class P2pNcclEngine:
         return tensor
 
     def close(self) -> None:
-        self._listener_thread.join()
+        self.listener_thread.join()
         self._send_thread.join()
-        if self._ping_thread is not None:
-            self._ping_thread.join()
+        if self.ping_thread is not None:
+            self.ping_thread.join()
