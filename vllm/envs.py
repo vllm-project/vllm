@@ -92,6 +92,7 @@ if TYPE_CHECKING:
     # Deprecated env variables for profiling, kept for backward compatibility
     # See also vllm/config/profiler.py and `--profiler-config` argument
     VLLM_TORCH_CUDA_PROFILE: str | None = None
+    VLLM_LORA_RESOLVER_HF_REPO: str | None = None
     VLLM_TORCH_PROFILER_DIR: str | None = None
     VLLM_TORCH_PROFILER_RECORD_SHAPES: str | None = None
     VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY: str | None = None
@@ -866,6 +867,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Enables torch CUDA profiling if set to 1.
     # Deprecated, see profiler_config.
     "VLLM_TORCH_CUDA_PROFILE": lambda: os.getenv("VLLM_TORCH_CUDA_PROFILE"),
+    # A remote HF repo containing one or more LoRA adapters, which
+    # may be downloaded and leveraged as needed. Only works if plugins
+    # are enabled and VLLM_ALLOW_RUNTIME_LORA_UPDATING is enabled.
+    "VLLM_LORA_RESOLVER_HF_REPO": lambda: os.getenv("VLLM_LORA_RESOLVER_HF_REPO", None),
     # Enables torch profiler if set.
     # Deprecated, see profiler_config.
     "VLLM_TORCH_PROFILER_DIR": lambda: os.getenv("VLLM_TORCH_PROFILER_DIR"),
