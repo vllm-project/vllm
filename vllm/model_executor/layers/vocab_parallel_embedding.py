@@ -43,7 +43,7 @@ class UnquantizedEmbeddingMethod(QuantizeMethodBase):
               layer: torch.nn.Module,
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-        return dispatch_unquantized_gemm()(x, layer.weight, bias)
+        return dispatch_unquantized_gemm()(layer, x, layer.weight, bias)
 
     def embedding(self, layer: torch.nn.Module,
                   input_: torch.Tensor) -> torch.Tensor:
