@@ -14,7 +14,7 @@ from torch.multiprocessing import (
     spawn)  # pyright: ignore[reportPrivateImportUsage]
 from typing_extensions import Concatenate, ParamSpec
 
-from vllm.model_executor.layers.fused_moe.utils import find_free_port
+from vllm.utils import get_open_port
 
 has_deep_ep = importlib.util.find_spec("deep_ep") is not None
 if has_deep_ep:
@@ -95,7 +95,7 @@ def parallel_launch(
             world_size,
             world_size,
             0,
-            f"tcp://{os.getenv('LOCALHOST', 'localhost')}:{find_free_port()}",
+            f"tcp://{os.getenv('LOCALHOST', 'localhost')}:{get_open_port()}",
             worker,
         ) + args,
         nprocs=world_size,
