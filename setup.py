@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import ctypes
 import importlib.util
@@ -54,7 +55,7 @@ elif (sys.platform.startswith("linux") and torch.version.cuda is None
     # fallback to cpu
     VLLM_TARGET_DEVICE = "cpu"
 
-MAIN_CUDA_VERSION = "12.4"
+MAIN_CUDA_VERSION = "12.8"
 
 
 def is_sccache_available() -> bool:
@@ -251,11 +252,8 @@ class cmake_build_ext(build_ext):
 
             # CMake appends the extension prefix to the install path,
             # and outdir already contains that prefix, so we need to remove it.
-            # We assume only the final component of extension prefix is added by
-            # CMake, this is currently true for current extensions but may not
-            # always be the case.
             prefix = outdir
-            if '.' in ext.name:
+            for _ in range(ext.name.count('.')):
                 prefix = prefix.parent
 
             # prefix here should actually be the same for all components
@@ -269,15 +267,17 @@ class cmake_build_ext(build_ext):
         # First, run the standard build_ext command to compile the extensions
         super().run()
 
-        # copy vllm/vllm_flash_attn/*.py from self.build_lib to current
+        # copy vllm/vllm_flash_attn/**/*.py from self.build_lib to current
         # directory so that they can be included in the editable build
         import glob
-        files = glob.glob(
-            os.path.join(self.build_lib, "vllm", "vllm_flash_attn", "*.py"))
+        files = glob.glob(os.path.join(self.build_lib, "vllm",
+                                       "vllm_flash_attn", "**", "*.py"),
+                          recursive=True)
         for file in files:
             dst_file = os.path.join("vllm/vllm_flash_attn",
-                                    os.path.basename(file))
+                                    file.split("vllm/vllm_flash_attn/")[-1])
             print(f"Copying {file} to {dst_file}")
+            os.makedirs(os.path.dirname(dst_file), exist_ok=True)
             self.copy_file(file, dst_file)
 
 
@@ -377,13 +377,21 @@ class repackage_wheel(build_ext):
                 "vllm/_flashmla_C.abi3.so",
                 "vllm/vllm_flash_attn/_vllm_fa2_C.abi3.so",
                 "vllm/vllm_flash_attn/_vllm_fa3_C.abi3.so",
-                "vllm/vllm_flash_attn/flash_attn_interface.py",
-                "vllm/vllm_flash_attn/__init__.py",
                 "vllm/cumem_allocator.abi3.so",
                 # "vllm/_version.py", # not available in nightly wheels yet
             ]
-            file_members = filter(lambda x: x.filename in files_to_copy,
-                                  wheel.filelist)
+
+            file_members = list(
+                filter(lambda x: x.filename in files_to_copy, wheel.filelist))
+
+            # vllm_flash_attn python code:
+            # Regex from
+            #  `glob.translate('vllm/vllm_flash_attn/**/*.py', recursive=True)`
+            compiled_regex = re.compile(
+                r"vllm/vllm_flash_attn/(?:[^/.][^/]*/)*(?!\.)[^/]*\.py")
+            file_members += list(
+                filter(lambda x: compiled_regex.match(x.filename),
+                       wheel.filelist))
 
             for file in file_members:
                 print(f"Extracting and including {file.filename} "
@@ -680,6 +688,7 @@ setup(
     ext_modules=ext_modules,
     install_requires=get_requirements(),
     extras_require={
+        "bench": ["pandas", "datasets"],
         "tensorizer": ["tensorizer>=2.9.0"],
         "fastsafetensors": ["fastsafetensors >= 0.1.10"],
         "runai": ["runai-model-streamer", "runai-model-streamer-s3", "boto3"],

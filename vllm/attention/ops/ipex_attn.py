@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 try:
     import intel_extension_for_pytorch.llm.modules as ipex_modules
     _use_ipex = True
-except ImportError:
+# AttributeError is to handle a bug in ipex https://github.com/intel/intel-extension-for-pytorch/pull/813
+except (ImportError, AttributeError):
     _use_ipex = False
 
 import torch
@@ -27,7 +29,7 @@ class _PagedAttention:
         head_size: int,
         *args,
     ) -> Tuple[int, ...]:
-        return (2, num_blocks, block_size * num_kv_heads * head_size)
+        return 2, num_blocks, block_size * num_kv_heads * head_size
 
     @staticmethod
     def split_kv_cache(
@@ -118,7 +120,7 @@ class _PagedAttention:
     @staticmethod
     def copy_blocks(
         kv_caches: List[torch.Tensor],
-        src_to_dists: Dict[int, List[int]],
+        src_to_dists: torch.Tensor,
         *args,
     ) -> None:
         key_caches = [kv_cache[0] for kv_cache in kv_caches]

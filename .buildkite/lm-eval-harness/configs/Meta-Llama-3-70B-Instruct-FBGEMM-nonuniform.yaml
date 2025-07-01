@@ -1,3 +1,4 @@
+# For hf script, without -t option (tensor parallel size).
 # bash .buildkite/lm-eval-harness/run-lm-eval-gsm-hf-baseline.sh -m nm-testing/Meta-Llama-3-70B-Instruct-FBGEMM-nonuniform -b auto -l 1000 -f 5
 model_name: "nm-testing/Meta-Llama-3-70B-Instruct-FBGEMM-nonuniform"
 tasks:

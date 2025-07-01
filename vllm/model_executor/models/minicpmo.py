@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Adapted from
 # https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/llama/modeling_llama.py
@@ -23,17 +24,20 @@
 # limitations under the License.
 """Inference-only MiniCPM-O model compatible with HuggingFace weights."""
 from collections.abc import Iterable, Mapping, Sequence
-from typing import (Any, Callable, Literal, Optional, Set, Tuple, TypedDict,
-                    Union)
+from typing import Any, Callable, Literal, Optional, TypedDict, Union
 
 import torch
 from torch import nn
-from transformers import BatchFeature
+from transformers import BatchFeature, PretrainedConfig
 from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.models.whisper.modeling_whisper import (
     ACT2FN, WHISPER_ATTENTION_CLASSES, WhisperConfig, WhisperEncoder)
 
 from vllm.config import VllmConfig
+from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.gptq import GPTQConfig
+from vllm.model_executor.layers.quantization.gptq_marlin import (
+    GPTQMarlinConfig)
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     NestedTensors)
@@ -256,6 +260,7 @@ class MiniCPMOMultiModalProcessor(
         self,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
     ) -> Mapping[str, NestedTensors]:
         if (audios := mm_data.get("audios")) is None:
             return {}
@@ -272,9 +277,9 @@ class MiniCPMOMultiModalProcessor(
                 prompts=[self.info.audio_pattern] * len(parsed_audios),
                 mm_data={"audios": [[audio] for audio in parsed_audios]},
                 mm_kwargs={
-                    **mm_kwargs,
-                    "chunk_input": True,
+                    **mm_kwargs, "chunk_input": True
                 },
+                tok_kwargs=tok_kwargs,
                 out_keys={"audio_features", "audio_feature_lens"},
             )
 
@@ -298,10 +303,11 @@ class MiniCPMOMultiModalProcessor(
         self,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
     ) -> Mapping[str, NestedTensors]:
         return {
-            **super().process_mm_inputs(mm_data, mm_kwargs),
-            **self.process_audios(mm_data, mm_kwargs),
+            **super().process_mm_inputs(mm_data, mm_kwargs, tok_kwargs),
+            **self.process_audios(mm_data, mm_kwargs, tok_kwargs),
         }
 
     def _get_prompt_updates(
@@ -512,6 +518,36 @@ class MiniCPMO(MiniCPMV2_6):
 
         self.audio_token_id = None
 
+    def _maybe_ignore_quant_config(self, quant_config: QuantizationConfig):
+        # GPTQ configs do not have a list of ignored modules, however AutoGPTQ
+        # seems to avoid vision encoder sections for some models.
+        # See: https://huggingface.co/openbmb/MiniCPM-o-2_6-int4
+        if isinstance(quant_config, (GPTQConfig, GPTQMarlinConfig)):
+            return None
+        return quant_config
+
+    def init_vision_module(
+        self,
+        config: PretrainedConfig,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+    ) -> nn.Module:
+        # MiniCPMO GPTQ model leave vpm unquantized.
+        quant_config = self._maybe_ignore_quant_config(quant_config)
+        return super().init_vision_module(config, quant_config, prefix)
+
+    def init_resampler(
+        self,
+        embed_dim: int,
+        vision_dim: int,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+    ) -> nn.Module:
+        # MiniCPMO GPTQ model leave resampler unquantized.
+        quant_config = self._maybe_ignore_quant_config(quant_config)
+        return super().init_resampler(embed_dim, vision_dim, quant_config,
+                                      prefix)
+
     def init_audio_module(self, *, vllm_config: VllmConfig, prefix: str = ""):
         # Do not use parameters temporarily
         audio_config = self.config.audio_config
@@ -525,8 +561,8 @@ class MiniCPMO(MiniCPMV2_6):
         self.audio_encoder_layer = -1
         return model
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self, skip_prefixes=["tts"])
         return loader.load_weights(weights)
 

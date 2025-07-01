@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import time
 from collections.abc import Mapping, Sequence
-from typing import Literal, Optional, Union
+from typing import Any, Literal, Optional, Union
 
 from vllm.config import VllmConfig
 from vllm.inputs import ProcessorInputs, PromptType, SingletonInputs
@@ -17,7 +18,7 @@ from vllm.multimodal.utils import merge_and_sort_multimodal_metadata
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
-from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
+from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.mm_input_cache import MirroredProcessingCache
 from vllm.v1.structured_output.backend_guidance import (
@@ -31,7 +32,7 @@ class Processor:
     def __init__(
         self,
         vllm_config: VllmConfig,
-        tokenizer: BaseTokenizerGroup,
+        tokenizer: TokenizerGroup,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
     ):
 
@@ -51,9 +52,12 @@ class Processor:
         self.mm_input_cache_client = MirroredProcessingCache(self.model_config)
 
         # Multi-modal hasher (for images)
-        self.use_hash = (
-            not self.model_config.disable_mm_preprocessor_cache) or \
+        self.use_hash = self.mm_input_cache_client.use_cache or \
             self.cache_config.enable_prefix_caching
+
+    @property
+    def mm_registry(self):
+        return self.input_preprocessor.mm_registry
 
     def _validate_logprobs(
         self,
@@ -75,6 +79,7 @@ class Processor:
     def _validate_sampling_params(
         self,
         params: SamplingParams,
+        lora_request: Optional[LoRARequest],
     ) -> None:
         self._validate_structured_output(params)
         self._validate_logit_bias(params)
@@ -83,7 +88,8 @@ class Processor:
             return
         if not params.allowed_token_ids:
             raise ValueError("allowed_token_ids is not None and empty!")
-        vocab_size = self.model_config.get_vocab_size()
+        tokenizer = self.tokenizer.get_lora_tokenizer(lora_request)
+        vocab_size = len(tokenizer)
         if not all(0 <= tid < vocab_size for tid in params.allowed_token_ids):
             raise ValueError(
                 "allowed_token_ids contains out-of-vocab token id!")
@@ -123,17 +129,18 @@ class Processor:
     def _validate_params(
         self,
         params: Union[SamplingParams, PoolingParams],
+        lora_request: Optional[LoRARequest],
     ):
         """
         Validate supported SamplingParam.
         Should raise ValueError if unsupported for API Server.
         """
 
-        if not isinstance(params, SamplingParams):
-            raise ValueError("V1 does not yet support Pooling models.")
+        if isinstance(params, PoolingParams):
+            return
 
         self._validate_logprobs(params)
-        self._validate_sampling_params(params)
+        self._validate_sampling_params(params, lora_request)
         self._validate_supported_sampling_params(params)
 
     def _validate_lora(self, lora_request: Optional[LoRARequest]) -> None:
@@ -145,7 +152,7 @@ class Processor:
         if not params.guided_decoding or not self.decoding_config:
             return
 
-        engine_level_backend = self.decoding_config.guided_decoding_backend
+        engine_level_backend = self.decoding_config.backend
         if params.guided_decoding.backend:
             # Request-level backend selection is not supported in V1.
             # The values may differ if `params` is reused and was set
@@ -153,8 +160,8 @@ class Processor:
             # request. We remember that it was set as a result of `auto`
             # using the `_auto` option set on the backend in the params.
             if (params.guided_decoding.backend != engine_level_backend
-                    and not (engine_level_backend == "auto" and "_auto"
-                             in params.guided_decoding.backend_options())):
+                    and not (engine_level_backend == "auto"
+                             and params.guided_decoding.backend_was_auto)):
                 raise ValueError(
                     "Request-level structured output backend selection is no "
                     "longer supported. The request specified "
@@ -166,6 +173,12 @@ class Processor:
             params.guided_decoding.backend = engine_level_backend
 
         # Request content validation
+        if (isinstance(params.guided_decoding.choice, list)
+                and not params.guided_decoding.choice):
+            # It is invalid for choice to be an empty list
+            raise ValueError(f"Choice '{params.guided_decoding.choice}' "
+                             "cannot be an empty list")
+
         if engine_level_backend.startswith("xgrammar"):
             # xgrammar with no fallback
             validate_xgrammar_grammar(params)
@@ -186,11 +199,13 @@ class Processor:
                 validate_xgrammar_grammar(params)
                 params.guided_decoding.backend = "xgrammar"
             except ValueError:
-                # The request includes some jsonschema feature(s) that
+                # The request either failed validation
+                # or includes some jsonschema feature(s) that
                 # are not supported in xgrammar. Fall back to guidance.
+                validate_guidance_grammar(params, tokenizer=None)
                 params.guided_decoding.backend = "guidance"
             # Remember that this backend was set automatically
-            params.guided_decoding.add_option("_auto")
+            params.guided_decoding.backend_was_auto = True
 
     def process_inputs(
         self,
@@ -199,21 +214,27 @@ class Processor:
         params: Union[SamplingParams, PoolingParams],
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
+        tokenization_kwargs: Optional[dict[str, Any]] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
-    ) -> EngineCoreRequest:
+        data_parallel_rank: Optional[int] = None,
+    ) -> tuple[Optional[str], EngineCoreRequest]:
 
         # TODO(woosuk): Support pooling models.
         # TODO(woosuk): Support encoder-decoder models.
         self._validate_lora(lora_request)
-        self._validate_params(params)
-        if priority != 0:
-            raise ValueError("V1 does not support priority yet.")
+        self._validate_params(params, lora_request)
         if trace_headers is not None:
             raise ValueError("V1 does not support tracing yet.")
         if prompt_adapter_request is not None:
             raise ValueError("V1 does not support prompt_adapter_request.")
+
+        data_parallel_size = self.vllm_config.parallel_config.data_parallel_size
+        if data_parallel_rank is not None and not (0 <= data_parallel_rank <
+                                                   data_parallel_size):
+            raise ValueError(f"data_parallel_rank {data_parallel_rank} "
+                             f"is out of range [0, {data_parallel_size}).")
 
         if arrival_time is None:
             arrival_time = time.time()
@@ -225,6 +246,7 @@ class Processor:
         # 3. Apply prompt adapter to prompt token ids if one exists.
         processed_inputs: ProcessorInputs = self.input_preprocessor.preprocess(
             prompt,
+            tokenization_kwargs=tokenization_kwargs,
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
             return_mm_hashes=self.use_hash,
@@ -245,18 +267,22 @@ class Processor:
         if encoder_inputs is not None:
             raise NotImplementedError
 
-        assert isinstance(params, SamplingParams)
-        # TODO: can we avoid cloning here in multiproc case?
-        sampling_params = params.clone()
-        # If unset max tokens, then generate up to the max_model_len.
-        if sampling_params.max_tokens is None:
-            sampling_params.max_tokens = (
-                self.model_config.max_model_len -
-                len(decoder_inputs["prompt_token_ids"]))
-        sampling_params.update_from_generation_config(
-            self.generation_config_fields, eos_token_id)
-        sampling_params.update_from_tokenizer(
-            self.tokenizer.get_lora_tokenizer(lora_request))
+        sampling_params = None
+        pooling_params = None
+        if isinstance(params, SamplingParams):
+            # TODO: can we avoid cloning here in multiproc case?
+            sampling_params = params.clone()
+            # If unset max tokens, then generate up to the max_model_len.
+            if sampling_params.max_tokens is None:
+                sampling_params.max_tokens = (
+                    self.model_config.max_model_len -
+                    len(decoder_inputs["prompt_token_ids"]))
+            sampling_params.update_from_generation_config(
+                self.generation_config_fields, eos_token_id)
+            sampling_params.update_from_tokenizer(
+                self.tokenizer.get_lora_tokenizer(lora_request))
+        else:
+            pooling_params = params.clone()
 
         # Multimodal related.
         sorted_mm_inputs: Optional[Sequence[Optional[MultiModalKwargs]]] = None
@@ -306,17 +332,20 @@ class Processor:
             else:
                 sorted_mm_inputs = orig_sorted_mm_inputs
 
-        return EngineCoreRequest(
+        return decoder_inputs.get("prompt"), EngineCoreRequest(
             request_id=request_id,
-            prompt=decoder_inputs.get("prompt"),
             prompt_token_ids=decoder_inputs["prompt_token_ids"],
             mm_inputs=sorted_mm_inputs,
             mm_hashes=sorted_mm_hashes,
             mm_placeholders=sorted_mm_positions,
             sampling_params=sampling_params,
+            pooling_params=pooling_params,
             eos_token_id=eos_token_id,
             arrival_time=arrival_time,
             lora_request=lora_request,
+            cache_salt=decoder_inputs.get("cache_salt"),
+            priority=priority,
+            data_parallel_rank=data_parallel_rank,
         )
 
     def _validate_model_inputs(self,

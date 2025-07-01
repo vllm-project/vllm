@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
 import time
 from collections.abc import AsyncGenerator, Mapping
@@ -18,6 +19,7 @@ from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.score_utils import (_cosine_similarity,
                                           _validate_score_input_lens)
+from vllm.entrypoints.utils import _validate_truncation_size
 from vllm.inputs.data import TokensPrompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -172,8 +174,8 @@ class ServingScores(OpenAIServing):
               for t1, t2 in input_pairs))
 
         for prompt_inputs, (t1, t2) in zip(tokenized_prompts, input_pairs):
-
-            request_prompt = f"{t1}{tokenizer.sep_token}{t2}"
+            sep_token = tokenizer.sep_token if tokenizer.sep_token else ''
+            request_prompt = f"{t1}{sep_token}{t2}"
 
             input_ids = prompt_inputs["input_ids"]
             text_token_prompt = \
@@ -231,11 +233,6 @@ class ServingScores(OpenAIServing):
         truncate_prompt_tokens: Optional[int] = None,
     ) -> list[PoolingRequestOutput]:
 
-        tokenization_kwargs: dict[str, Any] = {}
-        if truncate_prompt_tokens is not None:
-            tokenization_kwargs["truncation"] = True
-            tokenization_kwargs["max_length"] = truncate_prompt_tokens
-
         (
             lora_request,
             prompt_adapter_request,
@@ -247,12 +244,9 @@ class ServingScores(OpenAIServing):
 
         tokenizer = await self.engine_client.get_tokenizer(lora_request)
 
-        if truncate_prompt_tokens is not None and \
-                truncate_prompt_tokens > self.max_model_len:
-            raise ValueError(
-                f"truncate_prompt_tokens value ({truncate_prompt_tokens}) "
-                f"is greater than max_model_len ({self.max_model_len})."
-                f" Please, select a smaller truncation size.")
+        tokenization_kwargs: dict[str, Any] = {}
+        _validate_truncation_size(self.max_model_len, truncate_prompt_tokens,
+                                  tokenization_kwargs)
 
         trace_headers = (None if raw_request is None else await
                          self._get_trace_headers(raw_request.headers))

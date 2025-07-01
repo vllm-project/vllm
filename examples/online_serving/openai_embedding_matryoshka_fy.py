@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Example Python client for embedding API dimensions using vLLM API server
 NOTE:
     start a supported Matryoshka Embeddings model server with `vllm serve`, e.g.
@@ -25,11 +26,11 @@ def main():
     responses = client.embeddings.create(
         input=["Follow the white rabbit."],
         model=model,
-        dimensions=1,
+        dimensions=32,
     )
 
     for data in responses.data:
-        print(data.embedding)  # List of float of len 1
+        print(data.embedding)  # List of float of len 32
 
 
 if __name__ == "__main__":

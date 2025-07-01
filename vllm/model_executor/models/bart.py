@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Derived from BART implementation posted on HuggingFace; license below:
 #
@@ -19,7 +20,8 @@
 # limitations under the License.
 """PyTorch BART model."""
 import math
-from typing import Iterable, Optional, Tuple
+from collections.abc import Iterable
+from typing import Optional
 
 import torch
 from torch import nn
@@ -37,7 +39,6 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -791,7 +792,6 @@ class BartForConditionalGeneration(nn.Module, SupportsV0Only, SupportsQuant):
 
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size)
-        self.sampler = get_sampler()
 
     def forward(
         self,
@@ -828,14 +828,6 @@ class BartForConditionalGeneration(nn.Module, SupportsV0Only, SupportsQuant):
                                        sampling_metadata)
         return logits
 
-    def sample(
-        self,
-        logits: Optional[torch.Tensor],
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(logits, sampling_metadata)
-        return next_tokens
-
     stacked_params_mapping = {
         "q_proj": {
             "param_name": "qkv_proj",
@@ -869,14 +861,14 @@ class BartForConditionalGeneration(nn.Module, SupportsV0Only, SupportsQuant):
     def _rename_stacked_param(
         self,
         name: str,
-    ) -> Tuple[str, Optional[str]]:
+    ) -> tuple[str, Optional[str]]:
         for key, mapping in self.stacked_params_mapping.items():
             if key in name:
                 name = name.replace(key, mapping["param_name"])
                 return name, mapping["shard_id"]
         return name, None
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
 
         model_params_dict = dict(self.model.named_parameters())
         top_params_dict = dict(self.named_parameters())

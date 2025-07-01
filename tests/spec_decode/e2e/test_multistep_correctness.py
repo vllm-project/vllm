@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The tests in this file verify end-to-end speculative decoding correctness.
 
 This docstring details important information on the testing methodology.
@@ -56,6 +57,9 @@ from .conftest import (get_output_from_llm_generator,
 
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
+
+        # The original model is float32, keep it for numerical stability.
+        "dtype": "float32",
     }])
 @pytest.mark.parametrize(
     "per_test_common_llm_kwargs",
@@ -138,6 +142,9 @@ def test_spec_decode_e2e_with_detokenization(test_llm_generator,
 
         # Print spec metrics.
         "disable_log_stats": False,
+
+        # The original model is float32, keep it for numerical stability.
+        "dtype": "float32",
     }])
 @pytest.mark.parametrize(
     "per_test_common_llm_kwargs",
@@ -215,6 +222,9 @@ def test_spec_decode_e2e_greedy_correctness_tiny_model_bs1(
 
         # Print spec metrics.
         "disable_log_stats": False,
+
+        # The original model is float32, keep it for numerical stability.
+        "dtype": "float32",
     }])
 @pytest.mark.parametrize(
     "per_test_common_llm_kwargs",
@@ -278,6 +288,9 @@ def test_spec_decode_e2e_greedy_correctness_tiny_model_large_bs(
     [{
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
+
+        # The original model is float32, keep it for numerical stability.
+        "dtype": "float32",
     }])
 @pytest.mark.parametrize(
     "per_test_common_llm_kwargs",
@@ -456,13 +469,15 @@ def test_spec_decode_e2e_greedy_correctness_real_model_large_bs(
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
-        "block_size": 8,
+        "block_size": 16,
         # 2 for small prompt, 256//8 for generated.
         "num_gpu_blocks_override": 2 + 256 // 8,
         "max_model_len": (2 + 256 // 8) * 8,
 
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
+        # The original model is float32, keep it for numerical stability.
+        "dtype": "float32",
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [
     {
@@ -522,15 +537,14 @@ def test_spec_decode_e2e_greedy_correctness_with_preemption(
 
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
+        # The original model is float32, keep it for numerical stability.
+        "dtype": "float32",
     }])
 @pytest.mark.parametrize(
     "per_test_common_llm_kwargs",
     [
-        # As of this writing, vLLM only compiles with these 3 block sizes by
-        # default.
-        {
-            "block_size": 8,
-        },
+        # https://github.com/triton-lang/triton/issues/2266 tl.dot
+        # doesn't support embedding < 16
         {
             "block_size": 16,
         },
@@ -591,6 +605,8 @@ def test_spec_decode_different_block_size(vllm_runner, common_llm_kwargs,
 
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
+        # The original model is float32, keep it for numerical stability.
+        "dtype": "float32",
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
@@ -657,6 +673,8 @@ def test_skip_speculation(vllm_runner, common_llm_kwargs,
 
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
+        # The original model is float32, keep it for numerical stability.
+        "dtype": "float32",
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
@@ -708,6 +726,8 @@ def test_disable_speculation(vllm_runner, common_llm_kwargs,
 
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
+        # The original model is float32, keep it for numerical stability.
+        "dtype": "float32",
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
@@ -765,6 +785,8 @@ def test_many_k(vllm_runner, common_llm_kwargs, per_test_common_llm_kwargs,
 
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
+        # The original model is float32, keep it for numerical stability.
+        "dtype": "float32",
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])

@@ -59,6 +59,31 @@ void merge_attn_states(torch::Tensor& output,
                        const torch::Tensor& prefix_lse,
                        const torch::Tensor& suffix_output,
                        const torch::Tensor& suffix_lse);
+
+void convert_vertical_slash_indexes(
+    torch::Tensor& block_count,      // [BATCH, N_HEADS, NUM_ROWS]
+    torch::Tensor& block_offset,     // [BATCH, N_HEADS, NUM_ROWS, NNZ_S]
+    torch::Tensor& column_count,     // [BATCH, N_HEADS, NUM_ROWS]
+    torch::Tensor& column_index,     // [BATCH, N_HEADS, NUM_ROWS, NNZ_V]
+    torch::Tensor q_seqlens,         // [BATCH, ]
+    torch::Tensor kv_seqlens,        // [BATCH, ]
+    torch::Tensor vertical_indexes,  // [BATCH, N_HEADS, NNZ_V]
+    torch::Tensor slash_indexes,     // [BATCH, N_HEADS, NNZ_S]
+    int64_t context_size, int64_t block_size_M, int64_t block_size_N,
+    bool causal);
+
+void convert_vertical_slash_indexes_mergehead(
+    torch::Tensor& block_count,            // [BATCH, N_HEADS, NUM_ROWS]
+    torch::Tensor& block_offset,           // [BATCH, N_HEADS, NUM_ROWS, NNZ_S]
+    torch::Tensor& column_count,           // [BATCH, N_HEADS, NUM_ROWS]
+    torch::Tensor& column_index,           // [BATCH, N_HEADS, NUM_ROWS, NNZ_V]
+    torch::Tensor q_seqlens,               // [BATCH, ]
+    torch::Tensor kv_seqlens,              // [BATCH, ]
+    torch::Tensor vertical_indexes,        // [BATCH, N_HEADS, NNZ_V]
+    torch::Tensor slash_indexes,           // [BATCH, N_HEADS, NNZ_S]
+    torch::Tensor vertical_indices_count,  // [N_HEADS, ]
+    torch::Tensor slash_indices_count, int64_t context_size,
+    int64_t block_size_M, int64_t block_size_N, bool causal);
 #endif
 
 void rms_norm(torch::Tensor& out, torch::Tensor& input, torch::Tensor& weight,
@@ -66,6 +91,11 @@ void rms_norm(torch::Tensor& out, torch::Tensor& input, torch::Tensor& weight,
 
 void fused_add_rms_norm(torch::Tensor& input, torch::Tensor& residual,
                         torch::Tensor& weight, double epsilon);
+
+void apply_repetition_penalties_(torch::Tensor& logits,
+                                 const torch::Tensor& prompt_mask,
+                                 const torch::Tensor& output_mask,
+                                 const torch::Tensor& repetition_penalties);
 
 void rms_norm_static_fp8_quant(torch::Tensor& out, torch::Tensor& input,
                                torch::Tensor& weight, torch::Tensor& scale,
@@ -86,16 +116,19 @@ void rms_norm_dynamic_per_token_quant(torch::Tensor& out,
                                       std::optional<torch::Tensor> residual);
 
 void rotary_embedding(torch::Tensor& positions, torch::Tensor& query,
-                      torch::Tensor& key, int64_t head_size,
+                      std::optional<torch::Tensor> key, int64_t head_size,
                       torch::Tensor& cos_sin_cache, bool is_neox);
 
 void batched_rotary_embedding(torch::Tensor& positions, torch::Tensor& query,
-                              torch::Tensor& key, int64_t head_size,
-                              torch::Tensor& cos_sin_cache, bool is_neox,
-                              int64_t rot_dim,
+                              std::optional<torch::Tensor> key,
+                              int64_t head_size, torch::Tensor& cos_sin_cache,
+                              bool is_neox, int64_t rot_dim,
                               torch::Tensor& cos_sin_cache_offsets);
 
 void silu_and_mul(torch::Tensor& out, torch::Tensor& input);
+
+void silu_and_mul_quant(torch::Tensor& out, torch::Tensor& input,
+                        torch::Tensor& scale);
 
 void mul_and_silu(torch::Tensor& out, torch::Tensor& input);
 
@@ -127,6 +160,12 @@ void advance_step_flashinfer(
     torch::Tensor& slot_mapping, torch::Tensor& block_tables,
     torch::Tensor& paged_kv_indices, torch::Tensor& paged_kv_indptr,
     torch::Tensor& paged_kv_last_page_len, torch::Tensor& block_table_bounds);
+
+void cutlass_mla_decode(torch::Tensor const& out, torch::Tensor const& q_nope,
+                        torch::Tensor const& q_pe,
+                        torch::Tensor const& kv_c_and_k_pe_cache,
+                        torch::Tensor const& seq_lens,
+                        torch::Tensor const& page_table, double scale);
 
 torch::Tensor get_cuda_view_from_cpu_tensor(torch::Tensor& cpu_tensor);
 
@@ -169,6 +208,10 @@ torch::Tensor ggml_moe_a8(torch::Tensor X, torch::Tensor W,
                           torch::Tensor num_tokens_post_padded, int64_t type,
                           int64_t row, int64_t top_k, int64_t tokens);
 
+torch::Tensor ggml_moe_a8_vec(torch::Tensor X, torch::Tensor W,
+                              torch::Tensor topk_ids, int64_t top_k,
+                              int64_t type, int64_t row, int64_t tokens);
+
 int64_t ggml_moe_get_block_size(int64_t type);
 
 #ifndef USE_ROCM
@@ -193,13 +236,29 @@ void cutlass_moe_mm(
     torch::Tensor const& b_tensors, torch::Tensor const& a_scales,
     torch::Tensor const& b_scales, torch::Tensor const& expert_offsets,
     torch::Tensor const& problem_sizes, torch::Tensor const& a_strides,
-    torch::Tensor const& b_strides, torch::Tensor const& c_strides);
+    torch::Tensor const& b_strides, torch::Tensor const& c_strides,
+    bool per_act_token, bool per_out_ch);
+
+void cutlass_fp4_group_mm(
+    torch::Tensor& output, const torch::Tensor& a, const torch::Tensor& b,
+    const torch::Tensor& a_blockscale, const torch::Tensor& b_blockscales,
+    const torch::Tensor& alphas, const torch::Tensor& problem_sizes,
+    const torch::Tensor& expert_offsets, const torch::Tensor& sf_offsets);
 
 void get_cutlass_moe_mm_data(
     const torch::Tensor& topk_ids, torch::Tensor& expert_offsets,
     torch::Tensor& problem_sizes1, torch::Tensor& problem_sizes2,
     torch::Tensor& input_permutation, torch::Tensor& output_permutation,
-    const int64_t num_experts, const int64_t n, const int64_t k);
+    const int64_t num_experts, const int64_t n, const int64_t k,
+    const std::optional<torch::Tensor>& blockscale_offsets);
+
+void get_cutlass_pplx_moe_mm_data(torch::Tensor& expert_offsets,
+                                  torch::Tensor& problem_sizes1,
+                                  torch::Tensor& problem_sizes2,
+                                  const torch::Tensor& expert_num_tokens,
+                                  const int64_t num_local_experts,
+                                  const int64_t padded_m, const int64_t n,
+                                  const int64_t k);
 
 void cutlass_scaled_mm_azp(torch::Tensor& out, torch::Tensor const& a,
                            torch::Tensor const& b,
@@ -222,6 +281,12 @@ std::vector<torch::Tensor> cutlass_sparse_compress(torch::Tensor const& a);
 void scaled_fp4_quant(torch::Tensor& output, torch::Tensor const& input,
                       torch::Tensor& output_scale,
                       torch::Tensor const& input_scale);
+
+void scaled_fp4_experts_quant(
+    torch::Tensor& output, torch::Tensor& output_scale,
+    torch::Tensor const& input, torch::Tensor const& input_global_scale,
+    torch::Tensor const& input_offset_by_experts,
+    torch::Tensor const& output_scale_offset_by_experts);
 #endif
 
 void static_scaled_int8_quant(torch::Tensor& out, torch::Tensor const& input,
@@ -295,3 +360,14 @@ std::tuple<int64_t, torch::Tensor> allocate_shared_buffer_and_handle(
     int64_t size);
 int64_t open_mem_handle(torch::Tensor& mem_handle);
 void free_shared_buffer(int64_t buffer);
+
+#ifdef USE_ROCM
+fptr_t init_custom_qr(int64_t rank, int64_t world_size,
+                      std::optional<int64_t> qr_max_size = std::nullopt);
+void qr_destroy(fptr_t _fa);
+torch::Tensor qr_get_handle(fptr_t _fa);
+void qr_open_handles(fptr_t _fa, const std::vector<torch::Tensor>& handles);
+void qr_all_reduce(fptr_t _fa, torch::Tensor& inp, torch::Tensor& out,
+                   int64_t quant_level, bool cast_bf2half = false);
+int64_t qr_max_size();
+#endif
