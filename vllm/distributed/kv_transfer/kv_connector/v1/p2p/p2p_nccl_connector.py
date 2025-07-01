@@ -416,7 +416,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
                 token_ids = request.all_token_ids[:total_tokens]
 
                 logger.info("🚧%s is resumed from preemption, total_tokens:%d",
-                            cached_req.req_id, total_tokens)
+                            req_id, total_tokens)
                 # NOTE(rob): For resumed req, new_block_ids is all
                 # of the block_ids for the request.
                 block_ids = new_block_ids[0]
