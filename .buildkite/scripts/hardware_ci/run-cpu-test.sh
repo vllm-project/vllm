@@ -51,6 +51,7 @@ function cpu_tests() {
     pytest -v -s tests/kernels/attention/test_cache.py -m cpu_model
     pytest -v -s tests/kernels/attention/test_mla_decode_cpu.py -m cpu_model
     pytest -v -s tests/models/language/generation -m cpu_model
+    VLLM_CPU_SGL_KERNEL=1 pytest -v -s tests/models/language/generation -m cpu_model
     pytest -v -s tests/models/language/pooling -m cpu_model
     pytest -v -s tests/models/multimodal/generation \
                 --ignore=tests/models/multimodal/generation/test_mllama.py \
@@ -98,4 +99,4 @@ function cpu_tests() {
 
 # All of CPU tests are expected to be finished less than 40 mins.
 export -f cpu_tests
-timeout 1h bash -c "cpu_tests $CORE_RANGE $NUMA_NODE"
+timeout 1.5h bash -c "cpu_tests $CORE_RANGE $NUMA_NODE"

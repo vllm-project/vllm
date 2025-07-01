@@ -78,7 +78,7 @@ AITER_MODEL_LIST = [
         ),
         pytest.param(
             "Qwen/Qwen2.5-0.5B-Instruct",  # qwen2
-            marks=[pytest.mark.core_model],
+            marks=[pytest.mark.core_model, pytest.mark.cpu_model],
         ),
         pytest.param(
             "Qwen/Qwen3-8B",  # qwen (text-only)
@@ -87,6 +87,7 @@ AITER_MODEL_LIST = [
         pytest.param("bigcode/starcoder2-3b"),  # starcoder2
         pytest.param(
             "TitanML/tiny-mixtral",  # mixtral
+            marks=[pytest.mark.core_model, pytest.mark.cpu_model],
         )
     ])
 @pytest.mark.parametrize("max_tokens", [32])

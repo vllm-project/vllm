@@ -194,6 +194,8 @@ class CpuPlatform(Platform):
                 "epilogue_fusion":
                 True,
             })
+            if compilation_config.use_inductor:
+                compilation_config.custom_ops = ["none"]
 
         if vllm_config.lora_config is not None:
             compilation_config.level = CompilationLevel.NO_COMPILATION

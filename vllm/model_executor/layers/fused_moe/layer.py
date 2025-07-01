@@ -550,12 +550,23 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
         if current_platform.is_cpu():
             if current_platform.get_cpu_architecture() == CpuArchEnum.X86:
-                import intel_extension_for_pytorch as ipex
-                layer.ipex_fusion = ipex.llm.modules.GatedMLPMOE(
-                    layer.w13_weight,
-                    layer.w2_weight,
-                    use_prepack=envs.VLLM_CPU_MOE_PREPACK,
-                )
+                from vllm.model_executor.layers.fused_moe import cpu_fused_moe
+                dtype = layer.w13_weight.dtype
+                if (envs.VLLM_CPU_SGL_KERNEL
+                        and torch._C._cpu._is_amx_tile_supported()
+                        and dtype == torch.bfloat16):
+                    packed_w13_weight = torch.ops._C.convert_weight_packed(
+                        layer.w13_weight)
+                    assert packed_w13_weight.size() == layer.w13_weight.size()
+                    layer.w13_weight.copy_(packed_w13_weight)
+                    del packed_w13_weight
+                    packed_w2_weight = torch.ops._C.convert_weight_packed(
+                        layer.w2_weight)
+                    assert packed_w2_weight.size() == layer.w2_weight.size()
+                    layer.w2_weight.copy_(packed_w2_weight)
+                    layer.cpu_fused_moe = cpu_fused_moe.SGLFusedMOE(layer)
+                else:
+                    layer.cpu_fused_moe = cpu_fused_moe.IPEXFusedMOE(layer)
             else:
                 raise NotImplementedError("CPU MOE only supports x86 arch.")
 
@@ -673,13 +684,12 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
         e_score_correction_bias: Optional[torch.Tensor] = None,
-        activation: str = "silu",
         apply_router_weight_on_input: bool = False,
+        activation: str = "silu",
         **kwargs,
     ):
-        assert activation == "silu", f"{activation} is not supported."
-        assert apply_router_weight_on_input is False
-        return layer.ipex_fusion(
+        return layer.cpu_fused_moe(
+            layer,
             x,
             use_grouped_topk,
             top_k,
@@ -687,9 +697,13 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             renormalize,
             topk_group,
             num_expert_group,
+            global_num_experts,
+            expert_map,
             custom_routing_function,
             scoring_func,
             e_score_correction_bias,
+            apply_router_weight_on_input,
+            activation,
         )
 
     def forward_hpu(
@@ -764,7 +778,12 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                                 expert_map=expert_map,
                                 renormalize=renormalize)
 
-    forward_native = forward_tpu if current_platform.is_tpu() else forward_cuda
+    if current_platform.is_tpu():
+        forward_native = forward_tpu
+    elif current_platform.is_cpu():
+        forward_native = forward_cpu
+    else:
+        forward_native = forward_cuda
 
 
 def determine_expert_map(

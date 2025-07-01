@@ -63,7 +63,15 @@ def apply_penalties(logits: torch.Tensor, prompt_tokens_tensor: torch.Tensor,
     return logits
 
 
-def rocm_unquantized_gemm(x: torch.Tensor,
+def default_unquantized_gemm(layer: torch.nn.Module,
+                             x: torch.Tensor,
+                             weight: torch.Tensor,
+                             bias: Optional[torch.Tensor] = None):
+    return torch.nn.functional.linear(x, weight, bias)
+
+
+def rocm_unquantized_gemm(layer: torch.nn.Module,
+                          x: torch.Tensor,
                           weight: torch.Tensor,
                           bias: Optional[torch.Tensor] = None):
     from vllm.platforms.rocm import on_gfx9
@@ -89,7 +97,20 @@ def rocm_unquantized_gemm(x: torch.Tensor,
     return torch.nn.functional.linear(x, weight, bias)
 
 
+def cpu_unquantized_gemm(layer: torch.nn.Module,
+                         x: torch.Tensor,
+                         weight: torch.Tensor,
+                         bias: Optional[torch.Tensor] = None):
+    if getattr(layer, "use_cpu_sgl", False):
+        return torch.ops._C.weight_packed_linear(x, weight, bias, True)
+    else:
+        return torch.nn.functional.linear(x, weight, bias)
+
+
 def dispatch_unquantized_gemm() -> Callable[..., torch.Tensor]:
     if current_platform.is_rocm():
         return rocm_unquantized_gemm
-    return torch.nn.functional.linear
+    elif current_platform.is_cpu():
+        return cpu_unquantized_gemm
+    else:
+        return default_unquantized_gemm
