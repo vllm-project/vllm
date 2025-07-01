@@ -192,7 +192,7 @@ class Attention(nn.Module):
             self.v_range = torch.tensor(
                 envs.V_SCALE_CONSTANT, dtype=torch.float32
             )
-        except Exception as e:
+        except RuntimeError as e:
             if torch.cuda.is_available():
                 # This helps to see how much memory is allocated when using CUDA
                 logger.error(
