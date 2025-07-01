@@ -25,7 +25,7 @@
 
 {#- System message #}
 {%- if ns.system_prompt != '' %}
-{{ '<beginning_of_sentence>system ai_setting=MiniMax AI\n' + ns.system_prompt + '<end_of_sentence>\n' -}}
+{{ '<beginning_of_sentence>system ai_setting=assistant\n' + ns.system_prompt + '<end_of_sentence>\n' -}}
 {%- endif %}
 
 {#- Tools configuration #}
@@ -53,7 +53,7 @@
 {%- endif %}
 {{ '<end_of_sentence>\n' -}}
         {%- elif message['role'] == 'assistant' %}
-{{ '<beginning_of_sentence>ai name=MiniMax AI\n' -}}
+{{ '<beginning_of_sentence>ai name=assistant\n' -}}
 {%- if message['content'] is string %}
 {{ message['content']|trim -}}
 {%- else %}
@@ -64,7 +64,7 @@
 {{ '<end_of_sentence>\n' -}}
         {%- endif %}
     {%- elif 'tool_calls' in message %}
-{{ '<beginning_of_sentence>ai name=MiniMax AI\n<tool_calls>\n' -}}
+{{ '<beginning_of_sentence>ai name=assistant\n<tool_calls>\n' -}}
 {%- for tool_call in message.tool_calls %}
 {{ '{"name": "' + tool_call.function.name + '", "arguments": ' + tool_call.function.arguments | tojson + '}\n' -}}
 {%- endfor %}
@@ -87,5 +87,5 @@
 {%- endfor %}
 
 {%- if add_generation_prompt %}
-{{ '<beginning_of_sentence>ai name=MiniMax AI\n' -}}
+{{ '<beginning_of_sentence>ai name=assistant\n' -}}
 {%- endif %}
