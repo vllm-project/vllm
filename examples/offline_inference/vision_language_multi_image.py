@@ -428,7 +428,8 @@ def load_keye_vl(question: str, image_urls: list[str]) -> ModelRequestData:
 
     engine_args = EngineArgs(
         model=model_name,
-        max_model_len=4096,
+        trust_remote_code=True,
+        max_model_len=8192,
         max_num_seqs=5,
         limit_mm_per_prompt={"image": len(image_urls)},
     )
@@ -444,7 +445,7 @@ def load_keye_vl(question: str, image_urls: list[str]) -> ModelRequestData:
         },
     ]
 
-    processor = AutoProcessor.from_pretrained(model_name)
+    processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
 
     prompt = processor.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True
@@ -898,6 +899,7 @@ model_example_map = {
     "h2ovl_chat": load_h2ovl,
     "idefics3": load_idefics3,
     "internvl_chat": load_internvl,
+    "keye_vl": load_keye_vl,
     "kimi_vl": load_kimi_vl,
     "llava": load_llava,
     "llava-next": load_llava_next,
