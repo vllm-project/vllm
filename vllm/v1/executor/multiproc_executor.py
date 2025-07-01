@@ -271,10 +271,7 @@ class MultiprocExecutor(Executor):
 
     @property
     def max_concurrent_batches(self) -> int:
-        if self.scheduler_config.async_scheduling:
-            return 2
-        else:
-            return self.parallel_config.pipeline_parallel_size
+        return self.parallel_config.pipeline_parallel_size
 
     def _get_output_rank(self) -> int:
         # Only returns ModelRunnerOutput from TP rank=0 and PP rank=-1
