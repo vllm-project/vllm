@@ -9,7 +9,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 from einops import rearrange
-from flash_attn import flash_attn_varlen_func
 from transformers import PretrainedConfig
 from transformers.activations import GELUActivation
 from transformers.feature_extraction_utils import BatchFeature
@@ -47,7 +46,6 @@ from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.config import uses_mrope
 from vllm.transformers_utils.processor import (
     cached_image_processor_from_config)
-from vllm.vllm_flash_attn.layers.rotary import apply_rotary_emb
 
 from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
                          SupportsMultiModal, SupportsPP)
@@ -331,6 +329,9 @@ def apply_rotary_pos_emb_flashatt(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     cos = cos.chunk(2, dim=-1)[0].contiguous()
     sin = sin.chunk(2, dim=-1)[0].contiguous()
+
+    from vllm.vllm_flash_attn.layers.rotary import apply_rotary_emb
+
     q_embed = apply_rotary_emb(q.float(), cos.float(), sin.float()).type_as(q)
     k_embed = apply_rotary_emb(k.float(), cos.float(), sin.float()).type_as(k)
     return q_embed, k_embed
@@ -385,7 +386,7 @@ class KeyeSiglipAttention(nn.Module):
         self.attn_backend: _Backend = get_vit_attn_backend(support_fa=True)
         if self.attn_backend not in {_Backend.FLASH_ATTN}:
             raise RuntimeError(
-                f"Siglip does not support {self.attn_backend} backend now.")
+                f"Keye-VL does not support {self.attn_backend} backend now.")
 
     def forward(
         self,
@@ -434,6 +435,8 @@ class KeyeSiglipAttention(nn.Module):
             ).squeeze(0)
 
         max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
+
+        from flash_attn import flash_attn_varlen_func
 
         output = flash_attn_varlen_func(
             q,
