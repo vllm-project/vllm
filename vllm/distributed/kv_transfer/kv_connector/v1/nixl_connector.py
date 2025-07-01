@@ -335,7 +335,7 @@ class NixlConnectorWorker:
 
         # Agent.
         import os
-        num_workers = 16
+        num_workers = 32
         # setting num_workers on the prefiller causes no notifs to be recved???
         # this is a hack to make sure we set num workers on the prefiller to 1.
         if os.getenv("VLLM_IS_PREFILL", "0") == "1":
@@ -985,7 +985,7 @@ class NixlConnectorWorker:
         assert len(local_block_descs_ids) == len(remote_block_descs_ids)
 
         # Prepare transfer with Nixl.
-        CHUNK_SIZE = 1000
+        CHUNK_SIZE = 500
         handles = []
         # NOTE: this is a hack to make make_prepped_xfer into threads so that
         # different workers are allocated for each chuck. Without this change,
