@@ -704,7 +704,7 @@ class Zamba2Model(nn.Module):
         # Initialize layers according to block type configuration
         layers = []
         for layer_idx, layer_type in enumerate(config.layers_block_type):
-            # tpa: avoid layers getting same index
+            # tdoublep: avoid layers getting same index
             # somewhat hacky but correct (I think)
             prefix = str(len(layer2block_map) + layer_idx)
             if layer_type == "hybrid":
