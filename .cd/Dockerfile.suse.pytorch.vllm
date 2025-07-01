@@ -1,7 +1,7 @@
-# Parameterize base image components
+# Parameterize base image components for SUSE (tested on 15.5)
 ARG DOCKER_URL=vault.habana.ai/gaudi-docker
 ARG VERSION=1.21.1
-ARG BASE_NAME=ubuntu22.04
+ARG BASE_NAME=sles15sp5
 ARG PT_VERSION=2.6.0
 ARG REVISION=latest
 ARG REPO_TYPE=habanalabs
@@ -13,9 +13,11 @@ ARG VLLM_FORK_COMMIT=v0.7.2+Gaudi-1.21.0
 
 ENV OMPI_MCA_btl_vader_single_copy_mechanism=none
 
-RUN apt update && \
-    apt install -y gettext moreutils jq && \
+# Install required packages for SUSE
+RUN zypper --non-interactive refresh && \
+    zypper --non-interactive install gettext jq python3-pip git && \
     ln -sf /usr/bin/python3 /usr/bin/python
+
 WORKDIR /root
 
 ENV VLLM_PATH=/workspace/vllm
@@ -30,12 +32,11 @@ RUN mkdir -p $VLLM_PATH && \
 
 # Install vllm-fork inside the container
 ENV VLLM_TARGET_DEVICE=hpu
-RUN pip install -v -e $VLLM_PATH
-RUN pip install -v -e $VLLM_PATH/tests/vllm_test_utils
+RUN pip3 install -v -e $VLLM_PATH
+RUN pip3 install -v -e $VLLM_PATH/tests/vllm_test_utils
 
 # Install additional Python packages
-RUN pip install datasets && \
-    pip install pandas
+RUN pip3 install datasets pandas
 
 # Copy utility scripts and configuration
 RUN mkdir -p /root/scripts/

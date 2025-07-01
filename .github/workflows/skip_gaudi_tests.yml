@@ -10,7 +10,7 @@ permissions:
 jobs:
   read_codeowners:
     name: Check Commenter
-    runs-on: generic-runner
+    runs-on: ubuntu-latest
     if: ${{ contains(github.event.comment.body, '/skip-gaudi-tests') && github.event.issue.pull_request }}
     outputs:
       pr_sha: ${{ steps.extract_pr.outputs.pr_sha }}
@@ -38,7 +38,7 @@ jobs:
             echo "pr_sha=$pr_sha" >> $GITHUB_OUTPUT
   Summarize:
       name: Summarize Test Results
-      runs-on: generic-runner
+      runs-on: ubuntu-latest
       needs: [read_codeowners]
       if: always() && !contains(fromJSON('["skipped","cancelled"]'), needs.read_codeowners.result)
       steps:

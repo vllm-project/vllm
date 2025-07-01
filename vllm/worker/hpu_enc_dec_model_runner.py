@@ -40,8 +40,8 @@ _PAD_BLOCK_ID = 0
 
 class HpuModelAdapterEncoderDecoder(HpuModelAdapter):
 
-    def __init__(self, model, vllm_config, layer_names, is_causal, sampler):
-        super().__init__(model, vllm_config, layer_names, is_causal, sampler)
+    def __init__(self, model, vllm_config, is_causal, sampler):
+        super().__init__(model, vllm_config, is_causal, sampler)
 
         # We only wrap the language model in HPU graph because some Ops in
         # vision model will fallback to CPU and cause the graph building fail.
@@ -259,6 +259,8 @@ class HPUEncoderDecoderModelRunner(
         kv_caches,
         is_pt_profiler_run=False,
         temperature=0,
+        num_iters=3,
+        align_worker=False,
     ) -> None:
         phase = 'prompt' if is_prompt else 'decode'
         use_graphs = self._use_graphs()
@@ -269,7 +271,7 @@ class HPUEncoderDecoderModelRunner(
                          f"ctx{ctx}_"
                          f"graphs{'T' if use_graphs else 'F'}")
         self.profiler.start('internal', scenario_name)
-        times = 3 if use_graphs or is_pt_profiler_run else 1
+        times = num_iters if use_graphs or is_pt_profiler_run else 1
         if is_prompt:
             seqs = [
                 self.create_dummy_seq_group_metadata(i,
@@ -299,7 +301,10 @@ class HPUEncoderDecoderModelRunner(
             is_single_step = \
                 self.vllm_config.scheduler_config.num_scheduler_steps == 1
             if is_prompt or is_single_step:
-                self.execute_model(inputs, kv_caches, warmup_mode=True)
+                self.execute_model(inputs,
+                                   kv_caches,
+                                   warmup_mode=True,
+                                   ctx_blocks=ctx)
             else:  # decode with multi-step
                 inputs = dataclasses.replace(inputs,
                                              is_first_multi_step=True,

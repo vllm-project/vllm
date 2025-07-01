@@ -1,0 +1,27 @@
+benchmark_small:
+  MODEL: meta-llama/Llama-3.1-8B-Instruct
+  INPUT_TOK: 100
+  OUTPUT_TOK: 50
+  NUM_PROMPTS: 100
+  CONCURRENT_REQ: 4
+
+benchmark_medium:
+  MODEL: meta-llama/Llama-3.1-8B-Instruct
+  INPUT_TOK: 200
+  OUTPUT_TOK: 100
+  NUM_PROMPTS: 500
+  CONCURRENT_REQ: 16
+
+benchmark_large:
+  MODEL: meta-llama/Llama-3.1-8B-Instruct
+  INPUT_TOK: 400
+  OUTPUT_TOK: 200
+  NUM_PROMPTS: 1000
+  CONCURRENT_REQ: 32
+
+benchmark_high_concurrency:
+  MODEL: meta-llama/Llama-3.1-8B-Instruct
+  INPUT_TOK: 150
+  OUTPUT_TOK: 75
+  NUM_PROMPTS: 200
+  CONCURRENT_REQ: 64

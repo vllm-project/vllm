@@ -11,6 +11,7 @@ import torch
 import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
+from vllm.distributed import get_dp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
     _valid_deep_gemm, deep_gemm_moe_fp8)
@@ -877,8 +878,9 @@ def fused_topk(
     renormalize: bool,
     indices_type: Optional[torch.dtype] = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    assert hidden_states.shape[0] == gating_output.shape[0], (
-        "Number of tokens mismatch")
+    if not (get_dp_group().world_size > 1 and current_platform.is_hpu()):
+        assert hidden_states.shape[0] == gating_output.shape[0], (
+            "Number of tokens mismatch")
 
     M, _ = hidden_states.shape
 
@@ -919,8 +921,9 @@ def grouped_topk(
     e_score_correction_bias: Optional[torch.Tensor] = None
 ) -> tuple[torch.Tensor, torch.Tensor]:
 
-    assert hidden_states.shape[0] == gating_output.shape[0], (
-        "Number of tokens mismatch")
+    if not (get_dp_group().world_size > 1 and current_platform.is_hpu()):
+        assert hidden_states.shape[0] == gating_output.shape[0], (
+            "Number of tokens mismatch")
 
     gating_output = gating_output.float()
     if e_score_correction_bias is not None:

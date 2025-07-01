@@ -123,6 +123,8 @@ export PT_HPU_LAZY_MODE=1
 export VLLM_USE_V1=0
 export VLLM_MLA_DISABLE_REQUANTIZATION=1
 export PT_HPU_ENABLE_LAZY_COLLECTIVES="true"
+# enable delayed sampling on decode
+export VLLM_DELAYED_SAMPLING="true"
 
 python3 -m vllm.entrypoints.openai.api_server \
     --model deepseek-ai/DeepSeek-R1 \

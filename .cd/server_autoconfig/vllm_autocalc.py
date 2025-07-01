@@ -5,7 +5,7 @@ import os
 
 import pandas as pd
 import yaml
-from vllm_autocalc_rules import PARAM_CALC_FUNCS
+from server_autoconfig.vllm_autocalc_rules import PARAM_CALC_FUNCS
 
 
 class VarsGenerator:

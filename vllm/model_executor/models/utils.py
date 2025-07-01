@@ -6,6 +6,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Callable, Literal, Optional, Protocol, Union, overload
 
+import habana_frameworks.torch.core as htcore
 import torch
 import torch.nn as nn
 from torch.func import functional_call
@@ -408,6 +409,7 @@ def _merge_multimodal_embeddings(
     """
     # skip check for HPU, the number of tokens is a cpu fallback during HPU lazy
     if current_platform.is_hpu():
+        htcore.mark_step()
         flattened = _flatten_embeddings(multimodal_embeddings)
         inputs_embeds[is_multimodal] = flattened
         return inputs_embeds
