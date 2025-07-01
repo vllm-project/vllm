@@ -481,6 +481,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             req_state.num_computed_tokens = num_computed_tokens
 
             if get_pp_group().world_size > 1:
+                # When using PP, the scheduler sends the sampled tokens back,
+                # because there's no direct communication between the first-
+                # stage worker and the last-stage worker.
                 new_token_ids = req_data.new_token_ids[i]
                 # Add the sampled token(s) from the previous step (if any).
                 # This doesn't include "unverified" tokens like spec tokens.
