@@ -480,7 +480,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Update the cached states.
             req_state.num_computed_tokens = num_computed_tokens
 
-            if get_pp_group().world_size > 1:
+            if not get_pp_group().is_last_rank:
                 # When using PP, the scheduler sends the sampled tokens back,
                 # because there's no direct communication between the first-
                 # stage worker and the last-stage worker.
