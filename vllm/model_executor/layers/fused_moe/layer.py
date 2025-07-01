@@ -1236,12 +1236,13 @@ class FusedMoE(torch.nn.Module):
         use_bitsandbytes_4bit = getattr(param, "use_bitsandbytes_4bit", False)
         if use_bitsandbytes_4bit:
             shard_dim = 0
-            # BNB inflight quantization has already sharded the weights
-            full_load = True
+
             expert_data = param.data[expert_id]
             if shard_id == "w2":
                 expert_data.copy_(loaded_weight)
             elif shard_id in ("w1", "w3"):
+                # BNB inflight quantization has already sharded the weights
+                full_load = True
                 self._load_w13(
                     shard_id=shard_id,
                     shard_dim=shard_dim,
@@ -1250,7 +1251,7 @@ class FusedMoE(torch.nn.Module):
                     tp_rank=self.tp_rank,
                     load_full=full_load,
                 )
-            return
+            return True if return_success else None
 
         # is_transposed: if the dim to shard the weight
         # should be flipped. Required by GPTQ, compressed-tensors
