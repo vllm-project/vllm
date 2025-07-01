@@ -62,11 +62,12 @@ class P2pNcclEngine:
 
     def __init__(self,
                  local_rank: int,
-                 config: KVTransferConfig,
+                 vllm_config: "VllmConfig",
                  hostname: str = "",
                  port_offset: int = 0,
                  library_path: Optional[str] = None) -> None:
-        self.config = config
+        self.config = vllm_config.kv_transfer_config
+        self.compilation_config = vllm_config.compilation_config
         self.rank = port_offset
         self.local_rank = local_rank
         self.device = torch.device(f"cuda:{self.local_rank}")
@@ -153,6 +154,7 @@ class P2pNcclEngine:
                                                  daemon=True)
             self._ping_thread.start()
 
+        self.num_layers = 0
         self.finished_recving: set[str] = set()
         self.finished_sending: set[str] = set()
 
@@ -370,17 +372,29 @@ class P2pNcclEngine:
                     "🚧Unexpected, Received message from %s, data:%s",
                     remote_address, data)
 
+    def get_num_layers(self):
+        if self.num_layers == 0:
+            self.num_layers = len(self.compilation_config.static_forward_context)
+            logger.debug("get_num_layers, num_layers:%d", self.num_layers)
+        return self.num_layers
+
     def _have_sent_tensor_id(self, tensor_id: str):
         request_id = tensor_id.split('#')[0]
         if request_id not in self.send_request_id_to_tensor_ids:
             self.send_request_id_to_tensor_ids[request_id] = set()
         self.send_request_id_to_tensor_ids[request_id].add(tensor_id)
+        if self.get_num_layers() == len(
+                self.send_request_id_to_tensor_ids[request_id]):
+            self.finished_sending.add(request_id)
 
     def _have_received_tensor_id(self, tensor_id: str):
         request_id = tensor_id.split('#')[0]
         if request_id not in self.recv_request_id_to_tensor_ids:
             self.recv_request_id_to_tensor_ids[request_id] = set()
         self.recv_request_id_to_tensor_ids[request_id].add(tensor_id)
+        if self.get_num_layers() == len(
+                self.recv_request_id_to_tensor_ids[request_id]):
+            self.finished_recving.add(request_id)
 
     def _send_async(self):
         while True:
@@ -461,28 +475,14 @@ class P2pNcclEngine:
                         self.pool.free(addr)
             logger.debug("🔵get_finished, request_id:%s", request_id)
 
-        # TODO: 1)Avoid polling. 2)Validate chunked prefill and preemption.
-        num_layers = len(forward_context.no_compile_layers)
         # Retrieve requests that have already sent the KV cache.
-        self.finished_sending.clear()
-        if self.send_type != "GET":
-            for request_id in self.send_request_id_to_tensor_ids:
-                if (num_layers == len(
-                        self.send_request_id_to_tensor_ids[request_id])):
-                    self.finished_sending.add(request_id)
-            for request_id in self.finished_sending:
-                self.send_request_id_to_tensor_ids.pop(request_id, None)
+        finished_sending = self.finished_sending.copy()
         # Retrieve requests that have already received the KV cache.
+        finished_recving = self.finished_recving.copy()
+        self.finished_sending.clear()
         self.finished_recving.clear()
-        for request_id in self.recv_request_id_to_tensor_ids:
-            if num_layers == len(
-                    self.recv_request_id_to_tensor_ids[request_id]):
-                self.finished_recving.add(request_id)
-        for request_id in self.finished_recving:
-            self.recv_request_id_to_tensor_ids.pop(request_id, None)
-
         # TODO: Add failed requests (e.g., transmission errors)
-        return self.finished_sending or None, self.finished_recving or None
+        return finished_sending or None, finished_recving or None
 
     def _ping(self):
         sock = self.context.socket(zmq.DEALER)
