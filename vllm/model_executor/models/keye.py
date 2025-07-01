@@ -383,8 +383,9 @@ class KeyeSiglipAttention(nn.Module):
             prefix=f"{prefix}.out_proj",
         )
 
+        # Detect attention implementation.
         self.attn_backend: _Backend = get_vit_attn_backend(support_fa=True)
-        if self.attn_backend not in {_Backend.FLASH_ATTN}:
+        if self.attn_backend not in {_Backend.FLASH_ATTN, _Backend.XFORMERS}:
             raise RuntimeError(
                 f"Keye-VL does not support {self.attn_backend} backend now.")
 
@@ -402,18 +403,22 @@ class KeyeSiglipAttention(nn.Module):
             dim=-1,
         )
 
+        max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
+        seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
+        batch_size = q.shape[0]
+
         if rope_emb is None:
-            q = q.view(*q.shape[:-1], self.num_heads, self.head_dim).squeeze(0)
+            q = q.view(*q.shape[:-1], self.num_heads, self.head_dim)
             k = k.view(
                 *k.shape[:-1],
                 self.num_kv_heads,
                 self.head_dim,
-            ).squeeze(0)
+            )
             v = v.view(
                 *v.shape[:-1],
                 self.num_kv_heads,
                 self.head_dim,
-            ).squeeze(0)
+            )
         else:
             if cu_seqlens is None:
                 raise ValueError(
@@ -426,31 +431,45 @@ class KeyeSiglipAttention(nn.Module):
                 self.head_dim,
             )
             q, k = apply_rotary_pos_emb_flashatt(q, k, cos, sin)
-            q = q.squeeze(0)
-            k = k.squeeze(0)
             v = v.view(
                 *v.shape[:-1],
                 self.num_kv_heads,
                 self.head_dim,
-            ).squeeze(0)
+            )
 
-        max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
+        if self.attn_backend == _Backend.FLASH_ATTN:
+            from flash_attn import flash_attn_varlen_func
 
-        from flash_attn import flash_attn_varlen_func
+            q, k, v = (rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
 
-        output = flash_attn_varlen_func(
-            q,
-            k,
-            v,
-            cu_seqlens_q=cu_seqlens,
-            cu_seqlens_k=cu_seqlens,
-            max_seqlen_q=max_seqlen,
-            max_seqlen_k=max_seqlen,
-            causal=False,
-            softmax_scale=self.scale,
-        )
+            output = flash_attn_varlen_func(
+                q,
+                k,
+                v,
+                cu_seqlens_q=cu_seqlens,
+                cu_seqlens_k=cu_seqlens,
+                max_seqlen_q=max_seqlen,
+                max_seqlen_k=max_seqlen,
+                causal=False,
+                softmax_scale=self.scale,
+            )
+            context_layer = rearrange(output,
+                                      "(b s) ... -> b s ...",
+                                      b=batch_size)
+        elif self.attn_backend == _Backend.XFORMERS:
+            from xformers import ops as xops
+            from xformers.ops.fmha.attn_bias import BlockDiagonalMask
 
-        context_layer = output.flatten(-2).unsqueeze(0)
+            attn_bias = BlockDiagonalMask.from_seqlens(q_seqlen=seqlens,
+                                                       kv_seqlen=None,
+                                                       device=q.device)
+
+            context_layer = xops.memory_efficient_attention_forward(
+                q, k, v, attn_bias=attn_bias, p=0, scale=None)
+
+        context_layer = rearrange(context_layer,
+                                  "b s h d -> b s (h d)").contiguous()
+
         output, _ = self.out_proj(context_layer)
         return output
 
@@ -528,6 +547,7 @@ class KeyeSiglipEncoderLayer(nn.Module):
         residual = hidden_states
         hidden_states = self.layer_norm2(hidden_states)
         hidden_states = self.mlp(hidden_states)
+
         hidden_states = residual + hidden_states
 
         return hidden_states
