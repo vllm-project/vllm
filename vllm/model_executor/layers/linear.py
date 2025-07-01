@@ -196,12 +196,10 @@ class UnquantizedLinearMethod(LinearMethodBase):
         # The amount of memory allocated for the weights is
         # sum(output_partition_sizes) * input_size_per_partition.
         try:
-            weight = Parameter(
-                torch.empty(sum(output_partition_sizes),
-                            input_size_per_partition,
-                            dtype=params_dtype),
-                requires_grad=False,
-            )
+            weight = Parameter(torch.empty(sum(output_partition_sizes),
+                                           input_size_per_partition,
+                                           dtype=params_dtype),
+                               requires_grad=False)
         except RuntimeError as e:
             if torch.cuda.is_available():
                 logger.error(
