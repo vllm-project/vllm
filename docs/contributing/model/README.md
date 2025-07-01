@@ -14,9 +14,9 @@ However, this can be more complex for models that include new operators (e.g., a
 
 Read through these pages for a step-by-step guide:
 
-- [Implementing a Basic Model](basic.md)
-- [Registering a Model to vLLM](registration.md)
-- [Writing Unit Tests](tests.md)
+- [Basic Model](basic.md)
+- [Registering a Model](registration.md)
+- [Unit Testing](tests.md)
 - [Multi-Modal Support](multimodal.md)
 
 !!! tip

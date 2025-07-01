@@ -14,10 +14,16 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
 from vllm.attention.layer import Attention
 from vllm.attention.ops.merge_attn_states import merge_attn_states
 from vllm.attention.utils.fa_utils import (flash_attn_supports_fp8,
-                                           get_flash_attn_version)
+                                           get_flash_attn_version,
+                                           is_flash_attn_varlen_func_available)
+
+if is_flash_attn_varlen_func_available():
+    from vllm.attention.utils.fa_utils import (flash_attn_varlen_func,
+                                               get_scheduler_metadata,
+                                               reshape_and_cache_flash)
+
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
 from vllm.utils import cdiv
 from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder, CommonAttentionMetadata, get_kv_cache_layout,
@@ -27,10 +33,6 @@ from vllm.v1.worker.block_table import BlockTable
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
-
-if current_platform.is_cuda():
-    from vllm.vllm_flash_attn import (flash_attn_varlen_func,
-                                      get_scheduler_metadata)
 
 logger = init_logger(__name__)
 
@@ -443,7 +445,7 @@ class FlashAttentionImpl(AttentionImpl):
             # and value[:num_actual_tokens] because the reshape_and_cache_flash
             # op uses the slot_mapping's shape to determine the number of
             # actual tokens.
-            torch.ops._C_cache_ops.reshape_and_cache_flash(
+            reshape_and_cache_flash(
                 key,
                 value,
                 key_cache,

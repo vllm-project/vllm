@@ -293,6 +293,7 @@ def _try_extract_ast(chat_template: str) -> Optional[jinja2.nodes.Template]:
         return None
 
 
+@lru_cache(maxsize=32)
 def _detect_content_format(
     chat_template: str,
     *,
@@ -514,6 +515,8 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         if modality in ("image", "image_embeds"):
             if model_type == "chatglm":
                 return "<|begin_of_image|><|endoftext|><|end_of_image|>"
+            if model_type == "glm4v":
+                return "<|begin_of_image|><|image|><|end_of_image|>"
             if model_type in ("phi3_v", "phi4mm"):
                 return f"<|image_{current_count}|>"
             if model_type in ("minicpmo", "minicpmv"):
@@ -562,6 +565,8 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         elif modality == "video":
             if model_type == "internvl_chat":
                 return "<video>"
+            if model_type == "glm4v":
+                return "<|begin_of_video|><|video|><|end_of_video|>"
             if model_type in ("qwen2_vl", "qwen2_5_vl", "keye", "Keye"):
                 return "<|vision_start|><|video_pad|><|vision_end|>"
             if model_type == "qwen2_5_omni":
