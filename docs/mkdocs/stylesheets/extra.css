@@ -134,3 +134,12 @@ body[data-md-color-scheme="slate"] .md-nav__item--section > label.md-nav__link .
   opacity: 0.9;
   transform: translateY(2px);
 }
+
+/* For logo css */
+[data-md-color-scheme="default"] .logo-dark {
+  display: none;
+}
+
+[data-md-color-scheme="slate"] .logo-light {
+  display: none;
+}
