@@ -16,7 +16,7 @@ class HfHubResolver(FilesystemResolver):
 
     def __init__(self, repo_name: str):
         self.repo_name = repo_name
-        self.adapter_dirs = None
+        self.adapter_dirs: Optional[set[str]] = None
 
     async def resolve_lora(self, base_model_name: str,
                            lora_name: str) -> Optional[LoRARequest]:
@@ -28,7 +28,8 @@ class HfHubResolver(FilesystemResolver):
         """
         if self.adapter_dirs is None:
             self.adapter_dirs = await self._get_adapter_dirs()
-        if lora_name in self.adapter_dirs:
+
+        if self.adapter_dirs and lora_name in self.adapter_dirs:
             repo_path = await asyncio.to_thread(
                 snapshot_download,
                 repo_id=self.repo_name,
@@ -39,7 +40,7 @@ class HfHubResolver(FilesystemResolver):
             return maybe_lora_request
         return None
 
-    async def _get_adapter_dirs(self):
+    async def _get_adapter_dirs(self) -> set[str]:
         """Gets the subpaths within a HF repo containing an adapter config."""
         repo_files = await asyncio.to_thread(HfApi().list_repo_files,
                                              repo_id=self.repo_name)
