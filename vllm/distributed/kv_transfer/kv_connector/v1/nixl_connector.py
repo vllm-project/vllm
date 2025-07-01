@@ -64,6 +64,7 @@ class NixlAgentMetadata(
     num_blocks: int
     block_len: int
     attn_backend_name: str
+    remote_node_time: Optional[float] = None
 
 
 @dataclass
@@ -74,6 +75,7 @@ class ReqMeta:
     remote_port: int
     remote_engine_id: str
     tp_size: int
+    request_ttl: float
 
 
 class NixlConnectorMetadata(KVConnectorMetadata):
@@ -96,6 +98,7 @@ class NixlConnectorMetadata(KVConnectorMetadata):
             remote_port=kv_transfer_params["remote_port"],
             # P workers don't need to receive tp_size from proxy here.
             tp_size=kv_transfer_params.get("tp_size", 1),
+            request_ttl=kv_transfer_params.get("request_ttl", -1),
         )
 
 
@@ -331,12 +334,10 @@ class NixlConnectorScheduler:
         # If prompt < block_size, no xfer so free blocks immediately.
         delay_free_blocks = len(computed_block_ids) > 0
 
-        if delay_free_blocks and params.get("do_remote_decode"):
-            now = time.monotonic()
+        if delay_free_blocks:
             # Prefill request on remote. It will be read from D upon completion
-            self._reqs_need_send[
-                request.
-                request_id] = now + envs.VLLM_NIXL_ABORT_REQUEST_TIMEOUT
+            self._reqs_need_send[request.request_id] = (
+                time.perf_counter() + envs.VLLM_NIXL_ABORT_REQUEST_TIMEOUT)
 
         return delay_free_blocks, dict(
             do_remote_prefill=True,
@@ -345,7 +346,8 @@ class NixlConnectorScheduler:
             remote_engine_id=self.engine_id,
             remote_host=self.side_channel_host,
             remote_port=self.side_channel_port,
-            tp_size=self.vllm_config.parallel_config.tensor_parallel_size)
+            tp_size=self.vllm_config.parallel_config.tensor_parallel_size,
+            request_ttl=self._reqs_need_send.get(request.request_id, -1))
 
 
 class NixlConnectorWorker:
@@ -457,6 +459,10 @@ class NixlConnectorWorker:
         # finish reading before safely freeing the blocks.
         self.consumer_notification_counts_by_req = defaultdict[ReqId, int](int)
 
+        # Map of remote agent name -> time offset to keep clocks synced.
+        self._remote_agent_time_offsets: dict[str, float] = {}
+        self._reqs_expired_ttl: set[ReqId] = set()
+
     def __del__(self):
         """Cleanup background threads on destruction."""
         self._handshake_initiation_executor.shutdown(wait=False)
@@ -488,13 +494,15 @@ class NixlConnectorWorker:
                 if msg != GET_META_MSG:
                     logger.warning(
                         "Connection listener got unexpected message %s", msg)
+
+                # Add current node time to the metadata for clock sync with D.
+                metadata.remote_node_time = time.perf_counter()
+                encoded_data = encoder.encode(metadata)
                 sock.send_multipart((identity, b"", encoded_data))
 
     def _nixl_handshake(self, host: str, port: int,
                         remote_tp_size: int) -> dict[int, str]:
         """Do a NIXL handshake with a remote instance."""
-
-        start_time = time.perf_counter()
 
         # NOTE(rob): we need each rank to have a unique port. This is
         # a hack to keep us moving. We will switch when moving to etcd
@@ -503,11 +511,18 @@ class NixlConnectorWorker:
         def handshake(path: str, rank: int) -> str:
             # Send query for the request.
             with zmq_ctx(zmq.REQ, path) as sock:
+                start_time = time.perf_counter()
                 sock.send(GET_META_MSG)
                 metadata_bytes = sock.recv()
                 decoder = msgspec.msgpack.Decoder(NixlAgentMetadata)
-                metadata = decoder.decode(metadata_bytes)
+                metadata: NixlAgentMetadata = decoder.decode(metadata_bytes)
                 got_metadata_time = time.perf_counter()
+
+                # "Sync" clocks between local and remote by registering offset.
+                rtt = got_metadata_time - start_time
+                assert metadata.remote_node_time
+                self._remote_agent_time_offsets[metadata.engine_id] = (
+                    metadata.remote_node_time + rtt / 2 - got_metadata_time)
 
                 # Register Remote agent.
                 remote_agent_name = self.add_remote_agent(
@@ -842,7 +857,7 @@ class NixlConnectorWorker:
                 len(done_sending), len(done_recving))
 
         # Handle timeout to avoid stranding blocks on remote.
-        now = time.monotonic()
+        now = time.perf_counter()
         while self._reqs_to_send:
             req_id, expires = next(iter(self._reqs_to_send.items()))
             # Sorted dict, oldest requests are put first so we can exit early.
@@ -850,6 +865,12 @@ class NixlConnectorWorker:
                 break
             del self._reqs_to_send[req_id]
             done_sending.add(req_id)
+
+        # Handle remote requests with expired TTL without attempting to read.
+        while self._reqs_expired_ttl:
+            req_id = next(iter(self._reqs_expired_ttl))
+            done_recving.add(req_id)
+            self._reqs_expired_ttl.remove(req_id)
 
         if self.world_size == 1:
             return done_sending, done_recving
@@ -949,11 +970,6 @@ class NixlConnectorWorker:
         """
         for req_id, meta in metadata.reqs_to_recv.items():
             remote_engine_id = meta.remote_engine_id
-            logger.debug(
-                "start_load_kv for request %s from remote engine %s. "
-                "Num local_block_ids: %s. Num remote_block_ids: %s. ", req_id,
-                remote_engine_id, len(meta.local_block_ids),
-                len(meta.remote_block_ids))
             if remote_engine_id not in self._remote_agents:
                 # Initiate handshake with remote engine to exchange metadata.
                 with self._handshake_lock:
@@ -973,9 +989,20 @@ class NixlConnectorWorker:
         self._reqs_to_send.update(metadata.reqs_to_send)
 
     def _read_blocks_for_req(self, req_id: str, meta: ReqMeta):
+        # Make sure request TTL is not expired before reading.
+        assert self._remote_agent_time_offsets[
+            meta.remote_engine_id] is not None
+        remote_offset = self._remote_agent_time_offsets[meta.remote_engine_id]
+        if time.perf_counter() + remote_offset > meta.request_ttl:
+            logger.warning("Request remote TTL expired for request %s", req_id)
+            self._reqs_expired_ttl.add(req_id)
+            return
+
         logger.debug(
-            "Remote agent %s available, calling _read_blocks for req %s",
-            meta.remote_engine_id, req_id)
+            "start_load_kv for request %s from remote engine %s. "
+            "Num local_block_ids: %s. Num remote_block_ids: %s. ", req_id,
+            meta.remote_engine_id, len(meta.local_block_ids),
+            len(meta.remote_block_ids))
         self._read_blocks(
             request_id=req_id,
             dst_engine_id=meta.remote_engine_id,
@@ -1076,7 +1103,8 @@ class NixlConnectorWorker:
 
         # Use handle to check completion in future step().
         # TODO (NickLucche) surface xfer elapsed time
-        self._recving_transfers[request_id].append((handle, time.monotonic()))
+        self._recving_transfers[request_id].append(
+            (handle, time.perf_counter()))
 
     def _get_block_descs_ids(self,
                              engine_id: str,
