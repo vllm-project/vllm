@@ -134,7 +134,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             parallel_config)
         self.hidden_size = model_config.get_hidden_size()
         self.attention_chunk_size = model_config.attention_chunk_size
-        self.use_pp = parallel_config.pipeline_parallel_size > 1
 
         self.cascade_attn_enabled = not self.model_config.disable_cascade_attn
 
@@ -481,7 +480,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Update the cached states.
             req_state.num_computed_tokens = num_computed_tokens
 
-            if self.use_pp:
+            if get_pp_group().world_size > 1:
                 new_token_ids = req_data.new_token_ids[i]
                 # Add the sampled token(s) from the previous step (if any).
                 # This doesn't include "unverified" tokens like spec tokens.
