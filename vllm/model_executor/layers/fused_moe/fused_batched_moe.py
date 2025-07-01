@@ -676,7 +676,7 @@ class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         local_num_experts: int,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
         assert a.dim() == 2
-        num_dp = self.world_size // self.dp_size
+        num_dp = self.world_size
         num_experts = local_num_experts
         workspace13 = (num_experts, self.max_num_tokens * num_dp, K)
         workspace2 = (self.max_num_tokens * num_dp, N)
@@ -766,7 +766,7 @@ def batched_moe_kernel_quantize_input(
     per_act_token_quant: bool,
     block_shape: Optional[list[int]] = None,
 ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
-    if (True or torch.compiler.is_compiling()
+    if (torch.compiler.is_compiling()
             or torch.cuda.is_current_stream_capturing()):
         # Note: this does a bunch of extra work because expert_num_tokens is
         # ignored but it does support torch.compile + cudagraphs.
@@ -805,7 +805,7 @@ def batched_moe_kernel_quantize_input(
         A_scale = normalize_batched_scales_shape(A_scale, num_experts)
 
         for e in range(E):
-            num_tokens = expert_num_tokens[e]
+            num_tokens = int(expert_num_tokens[e].item())
             if num_tokens > 0:
                 if A_scale is not None:
                     scales = A_scale[e, :min(num_tokens, A_scale.shape[1])]
