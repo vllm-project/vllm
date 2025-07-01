@@ -580,11 +580,10 @@ class Scheduler(SchedulerInterface):
             batch = KVEventBatch(ts=time.time(), events=events)
             self.kv_event_publisher.publish(batch)
 
-        self._update_before_output(scheduler_output)
-        self.finished_req_ids = set()
+        self._update_after_schedule(scheduler_output)
         return scheduler_output
 
-    def _update_before_output(
+    def _update_after_schedule(
         self,
         scheduler_output: SchedulerOutput,
     ) -> None:
@@ -601,6 +600,11 @@ class Scheduler(SchedulerInterface):
         for req_id, num_scheduled_token in num_scheduled_tokens.items():
             request = self.requests[req_id]
             request.num_computed_tokens += num_scheduled_token
+
+        # Clear the finished request IDs.
+        # NOTE: We shouldn't do self.finished_req_ids.clear() here because
+        # it will also affect the scheduler output.
+        self.finished_req_ids = set()
 
     def _make_cached_request_data(
         self,
