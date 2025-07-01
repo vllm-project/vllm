@@ -274,7 +274,7 @@ void get_cutlass_moe_mm_data(
   // mm to run it for.
   int32_t version_num = get_sm_version_num();
 #if (defined ENABLE_CUTLASS_MOE_SM90 && ENABLE_CUTLASS_MOE_SM90) || \
-    (defined ENABLE_SCALED_MM_SM100 && ENABLE_SCALED_MM_SM90)
+    (defined ENABLE_CUTLASS_MOE_SM100 && ENABLE_CUTLASS_MOE_SM100)
   get_cutlass_moe_mm_data_caller(topk_ids, expert_offsets, problem_sizes1,
                                  problem_sizes2, input_permutation,
                                  output_permutation, num_experts, n, k,
@@ -285,7 +285,7 @@ void get_cutlass_moe_mm_data(
       false,
       "No compiled get_cutlass_moe_mm_data: no cutlass_scaled_mm kernel for "
       "CUDA device capability: ",
-      version_num, ". Required capability: 90");
+      version_num, ". Required capability: 90 or 100");
 }
 
 void get_cutlass_pplx_moe_mm_data(torch::Tensor& expert_offsets,
@@ -298,7 +298,8 @@ void get_cutlass_pplx_moe_mm_data(torch::Tensor& expert_offsets,
   // This function currently gets compiled only if we have a valid cutlass moe
   // mm to run it for.
   int32_t version_num = get_sm_version_num();
-#if defined ENABLE_CUTLASS_MOE_SM90 && ENABLE_CUTLASS_MOE_SM90
+#if (defined ENABLE_CUTLASS_MOE_SM90 && ENABLE_CUTLASS_MOE_SM90) || \
+    (defined ENABLE_CUTLASS_MOE_SM100 && ENABLE_CUTLASS_MOE_SM100)
   get_cutlass_pplx_moe_mm_data_caller(expert_offsets, problem_sizes1,
                                       problem_sizes2, expert_num_tokens,
                                       num_local_experts, padded_m, n, k);
@@ -308,7 +309,7 @@ void get_cutlass_pplx_moe_mm_data(torch::Tensor& expert_offsets,
       false,
       "No compiled get_cutlass_pplx_moe_mm_data: no cutlass_scaled_mm kernel "
       "for CUDA device capability: ",
-      version_num, ". Required capability: 90");
+      version_num, ". Required capability: 90 or 100");
 }
 
 torch::Tensor transpose_cutlass_moe_a_scales(torch::Tensor& a_scales,
