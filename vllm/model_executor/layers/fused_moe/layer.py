@@ -121,8 +121,6 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 
             handle = all2all_manager.get_handle(all_to_all_args)
 
-            #assert moe.tp_size == all2all_manager.tp_group.world_size
-
             prepare_finalize = PplxPrepareAndFinalize(
                 handle,
                 max_num_tokens=moe.max_num_tokens,
@@ -160,10 +158,9 @@ class FusedMoEMethodBase(QuantizeMethodBase):
             # Note : We may want to use FP8 dispatch even otherwise just to
             # reduce datamovement
             assert moe.quant_config is not None
-            use_fp8_dispatch = (moe.quant_config.quant_dtype
-                                == current_platform.fp8_dtype()
-                                and moe.quant_config.block_shape[1]
-                                == DEEPEP_QUANT_BLOCK_SHAPE)
+            use_fp8_dispatch = (
+                moe.quant_config.quant_dtype == current_platform.fp8_dtype()
+                and moe.quant_config.block_shape == DEEPEP_QUANT_BLOCK_SHAPE)
 
             # Note (varun): Whether to use FP8 dispatch or not needs some
             # profiling. Turning it off for now.
