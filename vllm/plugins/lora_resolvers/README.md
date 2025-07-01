@@ -9,7 +9,8 @@ to work, and `VLLM_PLUGINS` must be set to include the desired resolver plugins.
 # lora_filesystem_resolver
 The LoRA Resolvers listed below are installed with vLLM by default.
 
-To use, set `VLLM_PLUGIN_LORA_CACHE_DIR` to a local directory. When vLLM receives a request
+# lora_filesystem_resolver
+To use, set `VLLM_LORA_RESOLVER_CACHE_DIR` to a local directory. When vLLM receives a request
 for a LoRA adapter `foobar` it doesn't currently recognize, it will look in that local directory
 for a subdirectory `foobar` containing a LoRA adapter. If such an adapter exists and matches the
 model's `base_model_name_or_path`, it will load that adapter, and then service the request
