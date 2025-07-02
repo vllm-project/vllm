@@ -162,11 +162,11 @@ class CPUWorker(LocalOrDistributedWorkerBase):
         if omp_cpuids == "auto":
             arch = platform.machine()
             if arch == "ppc64le":
-                self.local_omp_cpuid = self.get_cpus_id_binding_based_on_numa_nodes_ppc64le(
-                )
+                self.local_omp_cpuid = (
+                    self.get_cpus_id_binding_based_on_numa_nodes_ppc64le())
             else:
-                self.local_omp_cpuid = self.get_cpus_id_binding_based_on_numa_nodes(
-                )
+                self.local_omp_cpuid = (
+                    self.get_cpus_id_binding_based_on_numa_nodes())
         else:
             self.local_omp_cpuid = omp_cpuids.split("|")[rank]
 
@@ -457,9 +457,10 @@ class CPUWorker(LocalOrDistributedWorkerBase):
 
     def get_cpus_id_binding_based_on_numa_nodes_ppc64le(self) -> str:
         """
-        Power (ppc64le) specific: Selects a subset of threads per core for each NUMA node.
-        This is robust to SMT mode (SMT-8, SMT-4, etc) because the OS only exposes available threads.
-        This maximizes performance by avoiding oversubscription of logical CPUs on Power systems.
+        Power (ppc64le) specific: Selects a subset of threads per core for 
+        each NUMA node.This is robust to SMT mode (SMT-8, SMT-4, etc) 
+        because the OS only exposes available threads.This maximizes 
+        performance by avoiding oversubscription of logical CPUs on Power.
         """
 
         def select_threads_per_power_core(node_cpu_ids):
