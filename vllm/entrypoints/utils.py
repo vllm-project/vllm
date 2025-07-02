@@ -171,6 +171,10 @@ def _validate_truncation_size(
             tokenization_kwargs["truncation"] = True
             tokenization_kwargs["max_length"] = truncate_prompt_tokens
 
+    else:
+        if tokenization_kwargs is not None:
+            tokenization_kwargs["truncation"] = False
+
     return truncate_prompt_tokens
 
 
