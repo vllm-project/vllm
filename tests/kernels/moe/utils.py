@@ -63,6 +63,7 @@ def batched_moe(
 
     fused_experts = FusedMoEModularKernel(
         BatchedPrepareAndFinalize(max_num_tokens,
+                                  num_dispatchers=1,
                                   num_local_experts=w1.shape[0],
                                   rank=0),
         BatchedTritonExperts(
@@ -103,6 +104,7 @@ def naive_batched_moe(
 
     fused_experts = FusedMoEModularKernel(
         BatchedPrepareAndFinalize(max_num_tokens,
+                                  num_dispatchers=1,
                                   num_local_experts=w1.shape[0],
                                   rank=0),
         NaiveBatchedExperts(
