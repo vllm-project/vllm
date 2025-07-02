@@ -8,8 +8,7 @@ import random
 import time
 from collections import defaultdict
 from collections.abc import Iterable
-from typing import Any, Optional, Union, Tuple
-from functools import reduce
+from typing import Any, Optional, Union
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import EventPublisherFactory, KVEventBatch
@@ -39,64 +38,73 @@ from vllm.v1.structured_output import StructuredOutputManager
 
 logger = init_logger(__name__)
 
-class TokenBudget():
+
+class TokenBudget:
+
     def __init__(self, scheduler: Scheduler):
         self.scheduler = scheduler
-        
+
         self.use_pp = scheduler.use_pp
         self.pp_size = scheduler.parallel_config.pipeline_parallel_size
 
         self.max_num_scheduled_tokens = scheduler.max_num_scheduled_tokens
-        
+
         self.num_iterp = scheduler.scheduler_config.num_iterp
         self.kv_thresh = scheduler.scheduler_config.kv_thresh
-        
-    def update(self) -> Tuple:
+        self.minp = scheduler.scheduler_config.minp
+
+    def update(self):
         if not self.scheduler.use_pp:
             self.token_budget = self.max_num_scheduled_tokens
         else:
             # NOTE(guoty) Token Throttling
-            # Reference: https://arxiv.org/abs/2504.14775 
+            # Reference: https://arxiv.org/abs/2504.14775
             # Code: https://github.com/gty111/gLLM
-            
+
             # system states
-            num_prefill_tokens = reduce(lambda num_acc, req: num_acc + req.num_prompt_tokens - req.num_computed_tokens, self.scheduler.waiting, 0)
+            num_prefill_tokens = sum(req.num_prompt_tokens -
+                                     req.num_computed_tokens
+                                     for req in self.scheduler.waiting)
             num_decode_tokens = 0
             for request in self.scheduler.running:
                 if request.computed_prompt:
                     num_decode_tokens += 1
                 else:
-                    num_prefill_tokens += request.num_prompt_tokens - request.num_computed_tokens
+                    num_prefill_tokens += (request.num_prompt_tokens -
+                                           request.num_computed_tokens)
             kv_free = 1 - self.scheduler.kv_cache_manager.usage
-            
-            
+
             # prefill token budget
-            prefill_ratio = max(0, (kv_free - self.kv_thresh) / (1 - self.kv_thresh))
-            prefill_token_budget = max(num_prefill_tokens // self.num_iterp, 32)
-            prefill_token_budget = min(self.max_num_scheduled_tokens * prefill_ratio, prefill_token_budget)
-            
+            prefill_ratio = max(0, (kv_free - self.kv_thresh) /
+                                (1 - self.kv_thresh))
+            prefill_token_budget = max(num_prefill_tokens // self.num_iterp,
+                                       self.minp)
+            prefill_token_budget = min(
+                self.max_num_scheduled_tokens * prefill_ratio,
+                prefill_token_budget)
+
             # decode token budget
             if num_decode_tokens < self.pp_size:
                 decode_token_budget = 1
             else:
-                decode_token_budget = (num_decode_tokens + random.randint(0, self.pp_size-1)) // self.pp_size
-            
-            # print(f'P:{prefill_token_budget} D:{decode_token_budget} WP:{num_prefill_tokens} RD:{num_decode_tokens} KV:{kv_free}')
+                decode_token_budget = (num_decode_tokens + random.randint(
+                    0, self.pp_size - 1)) // self.pp_size
+
             self.prefill_token_budget = int(prefill_token_budget)
             self.decode_token_budget = int(decode_token_budget)
-    
+
     def has_running(self):
         if not self.use_pp:
             return self.token_budget > 0
         else:
             return self.prefill_token_budget > 0 or self.decode_token_budget > 0
-    
+
     def has_waiting(self):
         if not self.use_pp:
             return self.token_budget > 0
         else:
             return self.prefill_token_budget > 0
-        
+
     def get(self, computed_prompt: bool):
         if not self.use_pp:
             return self.token_budget
@@ -105,7 +113,7 @@ class TokenBudget():
                 return self.decode_token_budget
             else:
                 return self.prefill_token_budget
-    
+
     def consume(self, num_new_tokens: int, computed_prompt: bool):
         if not self.use_pp:
             self.token_budget -= num_new_tokens
@@ -114,13 +122,13 @@ class TokenBudget():
                 self.decode_token_budget -= num_new_tokens
             else:
                 self.prefill_token_budget -= num_new_tokens
-                
+
     def verify(self):
         if not self.use_pp:
             assert self.token_budget >= 0
         else:
-            assert self.prefill_token_budget >= 0 and self.decode_token_budget >= 0
-        
+            assert (self.prefill_token_budget >= 0
+                    and self.decode_token_budget >= 0)
 
 
 class Scheduler(SchedulerInterface):
@@ -246,7 +254,7 @@ class Scheduler(SchedulerInterface):
             enable_kv_cache_events=self.enable_kv_cache_events,
         )
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
-        
+
         self.token_budget = TokenBudget(self)
 
     def schedule(self) -> SchedulerOutput:
@@ -287,7 +295,7 @@ class Scheduler(SchedulerInterface):
 
         token_budget = self.token_budget
         token_budget.update()
-        
+
         # First, schedule the RUNNING requests.
         req_index = 0
         while req_index < len(self.running) and token_budget.has_running():
@@ -299,7 +307,8 @@ class Scheduler(SchedulerInterface):
                     num_new_tokens):
                 num_new_tokens = (
                     self.scheduler_config.long_prefill_token_threshold)
-            num_new_tokens = min(num_new_tokens, token_budget.get(request.computed_prompt))
+            num_new_tokens = min(num_new_tokens,
+                                 token_budget.get(request.computed_prompt))
 
             # Make sure the input position does not exceed the max model len.
             # This is necessary when using spec decoding.
@@ -514,7 +523,8 @@ class Scheduler(SchedulerInterface):
                         skipped_waiting_requests.prepend_request(request)
                         continue
 
-                    num_new_tokens = min(num_new_tokens, token_budget.get(False))
+                    num_new_tokens = min(num_new_tokens,
+                                         token_budget.get(False))
                     assert num_new_tokens > 0
 
                     # Schedule encoder inputs.
