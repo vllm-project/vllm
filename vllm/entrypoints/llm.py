@@ -28,9 +28,13 @@ from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
                                          apply_mistral_chat_template,
                                          parse_chat_messages,
                                          resolve_chat_template_content_format)
-from vllm.entrypoints.score_utils import (_cosine_similarity,
+from vllm.entrypoints.score_utils import (ScoreContentPartParam,
+                                          ScoreMultiModalParam,
+                                          _cosine_similarity,
                                           _validate_score_input_lens,
-                                          formatting_prompts)
+                                          apply_score_template,
+                                          parse_score_data,
+                                          post_process_tokens_mm_data)
 from vllm.entrypoints.utils import _validate_truncation_size
 from vllm.inputs import PromptType, SingletonPrompt, TextPrompt, TokensPrompt
 from vllm.inputs.parse import parse_and_batch_prompt
@@ -1188,8 +1192,8 @@ class LLM:
     def _cross_encoding_score(
         self,
         tokenizer: AnyTokenizer,
-        data_1: Union[Sequence[SingletonPrompt]],
-        data_2: Union[Sequence[SingletonPrompt]],
+        data_1: Union[Sequence[SingletonPrompt], list[ScoreContentPartParam]],
+        data_2: Union[Sequence[SingletonPrompt], list[ScoreContentPartParam]],
         truncate_prompt_tokens: Optional[int] = None,
         use_tqdm: Union[bool, Callable[..., tqdm]] = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
@@ -1210,34 +1214,39 @@ class LLM:
 
         parsed_prompts = []
 
+        input_pairs = [(t1, t2) for t1, t2 in zip(data_1, data_2)]
+
         if self.llm_engine.model_config.is_multimodal_model:
 
-            model_architectures = self.llm_engine.model_config.architectures
+            model_config = self.llm_engine.model_config
+            model_arch = model_config.architectures
 
-            def check_prompt(prompt: SingletonPrompt):
-                _type = "text"
-                if isinstance(prompt, dict):
-                    if "multi_modal_data" in prompt:
-                        _type = next(iter(prompt["multi_modal_data"]))
-                    elif "prompt_token_ids" in prompt:
-                        prompt = tokenizer.decode(
-                            cast(TokensPrompt, prompt)["prompt_token_ids"])
-                    elif "prompt" in prompt:
-                        prompt = cast(TextPrompt, prompt)["prompt"]
-                return prompt, _type
+            for q, d in input_pairs:
+                prompt_1, prompt_2, mm_data = parse_score_data(
+                    q,
+                    d,
+                    model_config,
+                    tokenizer,
+                )
 
-            for q, d in zip(data_1, data_2):
-                q, query_type = check_prompt(q)
-                d, doc_type = check_prompt(d)
+                full_prompt = apply_score_template(model_arch, prompt_1,
+                                                   prompt_2)
 
-                parsed_prompts.append(
-                    formatting_prompts(model_architectures, tokenizer,
-                                       tokenization_kwargs, q, d, query_type,
-                                       doc_type))
+                prompt_inputs = tokenizer(full_prompt, **tokenization_kwargs)
+
+                engine_prompt = TokensPrompt(
+                    prompt_token_ids=prompt_inputs["input_ids"])
+
+                post_process_tokens_mm_data(model_arch, engine_prompt, mm_data)
+
+                if mm_data is not None:
+                    engine_prompt["multi_modal_data"] = mm_data
+
+                parsed_prompts.append(engine_prompt)
+
+                print(parsed_prompts)
+
         else:
-
-            input_pairs = [(t1, t2)
-                           for t1, t2 in zip(data_1, data_2)]
 
             for q, t in input_pairs:
                 if self.llm_engine.model_config.use_pad_token:
@@ -1269,8 +1278,10 @@ class LLM:
 
     def score(
         self,
-        data_1: Union[SingletonPrompt, Sequence[SingletonPrompt]],
-        data_2: Union[SingletonPrompt, Sequence[SingletonPrompt]],
+        data_1: Union[SingletonPrompt, Sequence[SingletonPrompt],
+                      ScoreMultiModalParam],
+        data_2: Union[SingletonPrompt, Sequence[SingletonPrompt],
+                      ScoreMultiModalParam],
         /,
         *,
         truncate_prompt_tokens: Optional[int] = None,
@@ -1289,12 +1300,12 @@ class LLM:
         considering the memory constraint. For the best performance, put all
         of your inputs into a single list and pass it to this method.
 
-        Supports both text and multi-modal data (images, video, etc.) when used with
+        Supports both text and multi-modal data (images, etc.) when used with
         appropriate multi-modal models. For multi-modal inputs, ensure the prompt
         structure matches the model's expected input format.
 
         Args:
-            data_1: can be a single prompt or a list of prompts, which can contain
+            data_1: can be a single prompt, a list of prompts or `ScoreMultiModalParam`, which can contain
                 either text or multi-modal data. When a list, it must have the same
                 length as the `data_2` list.
             data_2: The data to pair with the query to form the input to the LLM.
@@ -1340,7 +1351,19 @@ class LLM:
         # lists of tokens to the `text` and `text_pair` kwargs
         tokenizer = self.get_tokenizer()
 
-        if not self.llm_engine.model_config.is_multimodal_model:        
+        if not self.llm_engine.model_config.is_multimodal_model:
+
+            def check_data_type(data: Union[SingletonPrompt,
+                                            Sequence[SingletonPrompt],
+                                            ScoreMultiModalParam]):
+                if isinstance(data, dict) and "content" in data:
+                    raise ValueError(
+                        "Multi-modal prompt is not supported for Model %s",
+                        self.llm_engine.model_config.architectures)
+
+            check_data_type(data_1)
+            check_data_type(data_2)
+
             def ensure_str(prompt: SingletonPrompt):
                 if isinstance(prompt, dict):
                     if "multi_modal_data" in prompt:
@@ -1356,17 +1379,23 @@ class LLM:
                 assert type(prompt) is str
                 return prompt
 
+            if isinstance(data_1, (str, dict)):
+                # Convert a single prompt to a list.
+                data_1 = [data_1]
+
             data_1 = [ensure_str(t) for t in data_1]
+
+            if isinstance(data_2, (str, dict)):
+                # Convert a single prompt to a list.
+                data_2 = [data_2]
 
             data_2 = [ensure_str(t) for t in data_2]
 
-        if isinstance(data_1, (str, dict)):
-            # Convert a single prompt to a list.
-            data_1 = [data_1]
+        if isinstance(data_1, dict) and "content" in data_1:
+            data_1 = data_1.get("content")
 
-        if isinstance(data_2, (str, dict)):
-            # Convert a single prompt to a list.
-            data_2 = [data_2]
+        if isinstance(data_2, dict) and "content" in data_2:
+            data_2 = data_2.get("content")
 
         _validate_score_input_lens(data_1, data_2)
 

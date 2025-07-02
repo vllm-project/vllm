@@ -3,7 +3,6 @@
 # ruff: noqa: E501
 
 from vllm import LLM
-from vllm.multimodal.utils import MediaConnector
 
 model_name = "jinaai/jina-reranker-m0"
 
@@ -29,22 +28,22 @@ def get_model() -> LLM:
 
 def main() -> None:
     query = ["slm markdown"]
-    documents = [
-        "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/handelsblatt-preview.png",
-        "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/paper-11.png",
-        "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/wired-preview.png",
-        "https://jina.ai/blog-banner/using-deepseek-r1-reasoning-model-in-deepsearch.webp",
-    ]
-
-    connector = MediaConnector()
-
-    documents = [
-        {
-            "prompt": "",
-            "multi_modal_data": {"image": connector.fetch_image(image)},
-        }
-        for image in documents
-    ]
+    documents = {
+        "content": [
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/handelsblatt-preview.png"
+                },
+            },
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/paper-11.png"
+                },
+            },
+        ]
+    }
 
     model = get_model()
     outputs = model.score(query, documents)

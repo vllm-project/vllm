@@ -24,14 +24,13 @@ from typing_extensions import TypeAlias
 from vllm import envs
 from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
                                          random_tool_call_id)
+from vllm.entrypoints.score_utils import ScoreMultiModalParam
 from vllm.logger import init_logger
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import (BeamSearchParams, GuidedDecodingParams,
                                   RequestOutputKind, SamplingParams)
 from vllm.sequence import Logprob
 from vllm.utils import random_uuid, resolve_obj_by_qualname
-
-from vllm.entrypoints.score_utils import ScoreMultiModalParam
 
 logger = init_logger(__name__)
 
@@ -1272,6 +1271,12 @@ class ScoreRequest(OpenAIBaseModel):
     # --8<-- [end:score-pooling-params]
 
     # --8<-- [start:score-extra-params]
+
+    mm_processor_kwargs: Optional[dict[str, Any]] = Field(
+        default=None,
+        description=("Additional kwargs to pass to the HF processor."),
+    )
+
     priority: int = Field(
         default=0,
         description=(

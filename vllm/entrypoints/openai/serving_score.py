@@ -17,19 +17,21 @@ from vllm.entrypoints.openai.protocol import (ErrorResponse, RerankDocument,
                                               ScoreResponseData, UsageInfo)
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
-from vllm.entrypoints.score_utils import (_cosine_similarity,
-                                          _validate_score_input_lens)
+from vllm.entrypoints.score_utils import (ScoreContentPartParam,
+                                          ScoreMultiModalParam,
+                                          _cosine_similarity,
+                                          _validate_score_input_lens,
+                                          apply_score_template,
+                                          parse_score_data,
+                                          post_process_tokens_mm_data)
 from vllm.entrypoints.utils import _validate_truncation_size
-from vllm.inputs.data import TokensPrompt
+from vllm.inputs.data import SingletonPrompt, TokensPrompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.outputs import PoolingRequestOutput, ScoringRequestOutput
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
 from vllm.utils import make_async, merge_async_iterators
-from vllm.entrypoints.score_utils import ScoreMultiModalParam, ScoreContentPartParam, formatting_prompts
-from vllm.entrypoints.chat_utils import _parse_chat_message_content_mm_part
-from vllm.multimodal.utils import MediaConnector
 
 logger = init_logger(__name__)
 
@@ -140,6 +142,41 @@ class ServingScores(OpenAIServing):
 
         return final_res_batch
 
+    def _preprocess_score(
+        self,
+        request: Union[RerankRequest, ScoreRequest],
+        tokenizer: AnyTokenizer,
+        tokenization_kwargs: Optional[dict[str, Any]],
+        data_1: Union[str, ScoreContentPartParam],
+        data_2: Union[str, ScoreContentPartParam],
+    ) -> tuple[SingletonPrompt, TokensPrompt]:
+
+        model_config = self.model_config
+        model_arch = model_config.architectures
+
+        prompt_1, prompt_2, mm_data = parse_score_data(
+            data_1,
+            data_2,
+            model_config,
+            tokenizer,
+        )
+
+        full_prompt = apply_score_template(model_arch, prompt_1, prompt_2)
+
+        prompt_inputs = tokenizer(full_prompt, **tokenization_kwargs)
+
+        engine_prompt = TokensPrompt(
+            prompt_token_ids=prompt_inputs["input_ids"])
+
+        post_process_tokens_mm_data(model_arch, engine_prompt, mm_data)
+
+        if mm_data is not None:
+            engine_prompt["multi_modal_data"] = mm_data
+        if request.mm_processor_kwargs is not None:
+            engine_prompt["mm_processor_kwargs"] = request.mm_processor_kwargs
+
+        return full_prompt, engine_prompt
+
     async def _cross_encoding_score(
         self,
         tokenizer: AnyTokenizer,
@@ -160,30 +197,33 @@ class ServingScores(OpenAIServing):
         if len(data_1) == 1:
             data_1 = data_1 * len(data_2)
 
-
         if isinstance(tokenizer, MistralTokenizer):
             raise ValueError(
                 "MistralTokenizer not supported for cross-encoding")
-        
+
+        tokenization_kwargs = tokenization_kwargs or {}
+
+        input_pairs = [(t1, t2) for t1, t2 in zip(data_1, data_2)]
+
         if self.model_config.is_multimodal_model:
 
-            model_architectures = self.model_config.architectures
+            preprocess_async = make_async(self._preprocess_score,
+                                          executor=self._tokenizer_executor)
 
-            def check_content(content: Union[str, ScoreContentPartParam]):
-                _type = "text"
-                if isinstance(content, dict):
-                    _type, prompt = _parse_chat_message_content_mm_part(content)
-                return content, _type
+            preprocessed_prompts = await asyncio.gather(
+                *(preprocess_async(request=request,
+                                   tokenizer=tokenizer,
+                                   tokenization_kwargs=tokenization_kwargs,
+                                   data_1=t1,
+                                   data_2=t2) for t1, t2 in input_pairs))
 
-            input_pairs = [((check_content(d1)), (check_content(d2))) for d1, d2 in zip(data_1, data_2)] 
-
-
+            for full_prompt, engine_prompt in preprocessed_prompts:
+                request_prompts.append(full_prompt)
+                engine_prompts.append(engine_prompt)
 
         else:
-            
-            input_pairs = [(t1, t2) for t1, t2 in zip(data_1, data_2)]
-
-            tokenization_kwargs = tokenization_kwargs or {}
+            tokenize_async = make_async(tokenizer.__call__,
+                                        executor=self._tokenizer_executor)
             use_pad_token = self.model_config.use_pad_token
 
             if use_pad_token:
@@ -271,8 +311,13 @@ class ServingScores(OpenAIServing):
 
         if isinstance(data_1, str):
             data_1 = [data_1]
+        elif isinstance(data_1, dict):
+            data_1 = data_1.get("content")
+
         if isinstance(data_2, str):
             data_2 = [data_2]
+        elif isinstance(data_2, dict):
+            data_2 = data_2.get("content")
 
         _validate_score_input_lens(data_1, data_2)
 

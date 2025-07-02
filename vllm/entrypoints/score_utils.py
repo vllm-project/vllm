@@ -1,23 +1,39 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Sequence
-from typing import Any, Union
+from typing import Optional, Union
 
 from torch.nn import CosineSimilarity
+from typing_extensions import Required, TypeAlias, TypedDict
 
+from vllm.config import ModelConfig
+from vllm.entrypoints.chat_utils import (
+    BaseMultiModalItemTracker, ChatCompletionContentPartImageEmbedsParam,
+    ChatCompletionContentPartImageParam, ChatCompletionContentPartTextParam,
+    MultiModalItemTracker, _parse_chat_message_content_part)
 from vllm.inputs import SingletonPrompt, TokensPrompt
+from vllm.multimodal.inputs import MultiModalDataDict
 from vllm.outputs import PoolingRequestOutput
 from vllm.transformers_utils.tokenizer import (AnyTokenizer,
                                                PreTrainedTokenizer,
                                                PreTrainedTokenizerFast)
-from typing_extensions import Required, TypeAlias, TypedDict
-from vllm.entrypoints.chat_utils import ChatCompletionContentPartImageParam, ChatCompletionContentPartImageEmbedsParam
 
-ScoreContentPartParam: TypeAlias = Union[ChatCompletionContentPartImageParam, ChatCompletionContentPartImageEmbedsParam]
+ScoreContentPartParam: TypeAlias = Union[
+    ChatCompletionContentPartImageParam,
+    ChatCompletionContentPartImageEmbedsParam]
+
+
 class ScoreMultiModalParam(TypedDict, total=False):
-
+    """
+    A specialized parameter type for scoring multimodal content
+    
+    The reasons why don't reuse `CustomChatCompletionMessageParam` directly:
+    1. Score tasks don't need the 'role' field (user/assistant/system) that's required in chat completions
+    2. Including chat-specific fields would confuse users about their purpose in scoring
+    3. This is a more focused interface that only exposes what's needed for scoring
+    """
     content: Required[list[ScoreContentPartParam]]
-    """The contents of the message."""
+    """The multimodal contents"""
 
 
 def _cosine_similarity(
@@ -50,15 +66,11 @@ def _cosine_similarity(
 
 
 def _validate_score_input_lens(
-    data_1: Union[Sequence[SingletonPrompt], ScoreMultiModalParam],
-    data_2: Union[Sequence[SingletonPrompt], ScoreMultiModalParam],
+    data_1: Union[Sequence[SingletonPrompt], list[ScoreContentPartParam]],
+    data_2: Union[Sequence[SingletonPrompt], list[ScoreContentPartParam]],
 ):
     len_1 = len(data_1)
     len_2 = len(data_2)
-    if isinstance(data_1, dict):
-        len_1 = len(data_1["content"])
-    if isinstance(data_2, dict):
-        len_2 = len(data_2["content"])
 
     if len_1 > 1 and len_1 != len_2:
         raise ValueError("Input lengths must be either 1:1, 1:N or N:N")
@@ -67,69 +79,74 @@ def _validate_score_input_lens(
     if len_2 == 0:
         raise ValueError("At least one text_pair element must be given")
 
-# TODO: it will be better to implement this as parse_chat_messages
-def formatting_prompts(
-    model_arch: str,
-    tokenizer: AnyTokenizer,
-    tokenization_kwargs: dict[str, Any],
-    query: SingletonPrompt,
-    doc: SingletonPrompt,
-    query_type: str = 'text',
-    doc_type: str = 'text',
-    prefix_str: str = '',
-) -> TokensPrompt:
 
-    engine_prompt = TokensPrompt()
-    if 'JinaVLForRanking' in model_arch:
-
-        # Format content part
-        if doc_type == 'image':
-            doc_part = "**Document**:\n<|vision_start|><|image_pad|><|vision_end|>"
-            if engine_prompt.get('multi_modal_data') is None:
-                engine_prompt['multi_modal_data'] = {}
-
-            if engine_prompt['multi_modal_data'].get('image') is None:
-                engine_prompt['multi_modal_data']['image'] = []
-
-            engine_prompt['multi_modal_data']['image'] += [
-                doc['multi_modal_data']['image']
-            ]
-        else:
-            doc_part = f"**Document**:\n{doc}"
-
-        # Format query part
-        if query_type == 'image':
-            query_part = "**Query**:\n<|vision_start|><|image_pad|><|vision_end|>"
-            if engine_prompt.get('multi_modal_data') is None:
-                engine_prompt['multi_modal_data'] = {}
-
-            if engine_prompt['multi_modal_data'].get('image') is None:
-                engine_prompt['multi_modal_data']['image'] = []
-
-            engine_prompt['multi_modal_data']['image'] += [
-                query['multi_modal_data']['image']
-            ]
-        else:
-            query_part = f"**Query**:\n{query}"
-
-        # Combine parts
-        prompt = doc_part + '\n' + query_part
-
-        # Add prefix if provided
-        if prefix_str:
-            prompt = prefix_str + '\n' + prompt
-
-        engine_prompt['prompt_token_ids'] = tokenizer(
-            prompt, **tokenization_kwargs)["input_ids"] + [100]
-    else:
-        raise ValueError(f"Unsupported model architecture: {model_arch}")
-
-    return engine_prompt
-
-# TODO: implement this as parse_chat_messages_futures
-def parse_score_content_futures(
-    content: list[str, ScoreContentPartParam],
+def parse_score_data(
+    data_1: Union[str, ScoreContentPartParam],
+    data_2: Union[str, ScoreContentPartParam],
     model_config: ModelConfig,
     tokenizer: AnyTokenizer,
-) -> tuple[list[SingletonPrompt], Awaitable[Optional[MultiModalDataDict]]]:
-    pass
+) -> tuple[SingletonPrompt, SingletonPrompt, Optional[MultiModalDataDict]]:
+    mm_tracker = MultiModalItemTracker(model_config, tokenizer)
+
+    content_1 = _parse_score_content(data_1, mm_tracker)
+
+    content_2 = _parse_score_content(data_2, mm_tracker)
+
+    return content_1, content_2, mm_tracker.all_mm_data()
+
+
+def _parse_score_content(
+    data: Union[str, ScoreContentPartParam],
+    mm_tracker: BaseMultiModalItemTracker,
+) -> SingletonPrompt:
+
+    if isinstance(data, str):
+        data = ChatCompletionContentPartTextParam(type="text", text=data)
+
+    mm_parser = mm_tracker.create_parser()
+
+    parse_res = _parse_chat_message_content_part(
+        data,
+        mm_parser,
+        wrap_dicts=False,
+    )
+
+    if parse_res:
+        return parse_res
+
+    mm_placeholder_counts = mm_parser.mm_placeholder_counts()
+
+    if len(mm_placeholder_counts) != 1 and mm_placeholder_counts[0] != 1:
+        raise ValueError("Only one multi-modal item is supported")
+
+    return next(iter(mm_placeholder_counts))
+
+
+def apply_score_template(
+    model_arch: str,
+    prompt_1: SingletonPrompt,
+    prompt_2: SingletonPrompt,
+) -> SingletonPrompt:
+
+    if 'JinaVLForRanking' in model_arch:
+        return f"**Document**:\n{prompt_2}\n**Query**:\n{prompt_1}"
+
+    raise ValueError(f"Unsupported model architecture: {model_arch}")
+
+
+def post_process_tokens_mm_data(
+    model_arch: str,
+    prompt: TokensPrompt,
+    mm_data: Optional[MultiModalDataDict],
+):
+    """
+    Manipulation tokens and mm_data for some model architecture such as `JinaVLForRanking`
+    """
+    if 'JinaVLForRanking' in model_arch:
+        prompt['prompt_token_ids'].append(100)  # add score target token
+
+        if mm_data is not None:
+            for key, value in mm_data.items():
+                print(value)
+                if isinstance(value, list):
+                    mm_data[key].reverse()
