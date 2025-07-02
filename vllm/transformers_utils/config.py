@@ -56,6 +56,22 @@ MISTRAL_CONFIG_NAME = "params.json"
 
 logger = init_logger(__name__)
 
+
+def _get_hf_token() -> Optional[str]:
+    """
+    Get the HuggingFace token from environment variable.
+
+    Returns None if the token is not set, is an empty string, 
+    or contains only whitespace.
+    This follows the same pattern as huggingface_hub library which
+    treats empty string tokens as None to avoid authentication errors.
+    """
+    token = os.getenv('HF_TOKEN')
+    if token and token.strip():
+        return token
+    return None
+
+
 _CONFIG_REGISTRY_OVERRIDE_HF: dict[str, type[PretrainedConfig]] = {
     "mllama": MllamaConfig
 }
@@ -195,7 +211,7 @@ def file_or_path_exists(model: Union[str, Path], config_name: str,
     return file_exists(str(model),
                        config_name,
                        revision=revision,
-                       token=os.getenv('HF_TOKEN', None))
+                       token=_get_hf_token())
 
 
 def patch_rope_scaling(config: PretrainedConfig) -> None:
@@ -322,7 +338,7 @@ def get_config(
             model,
             revision=revision,
             code_revision=code_revision,
-            token=os.getenv('HF_TOKEN', None),
+            token=_get_hf_token(),
             **kwargs,
         )
 
@@ -334,7 +350,7 @@ def get_config(
                 model,
                 revision=revision,
                 code_revision=code_revision,
-                token=os.getenv('HF_TOKEN', None),
+                token=_get_hf_token(),
                 **kwargs,
             )
         else:
@@ -344,7 +360,7 @@ def get_config(
                     trust_remote_code=trust_remote_code,
                     revision=revision,
                     code_revision=code_revision,
-                    token=os.getenv('HF_TOKEN', None),
+                    token=_get_hf_token(),
                     **kwargs,
                 )
             except ValueError as e:
@@ -571,7 +587,7 @@ def get_sentence_transformer_tokenizer_config(model: str,
             # If model is on HuggingfaceHub, get the repo files
             repo_files = list_repo_files(model,
                                          revision=revision,
-                                         token=os.getenv('HF_TOKEN', None))
+                                         token=_get_hf_token())
         except Exception:
             repo_files = []
 
@@ -862,7 +878,7 @@ def try_get_safetensors_metadata(
         get_safetensors_metadata,
         model,
         revision=revision,
-        token=os.getenv('HF_TOKEN', None),
+        token=_get_hf_token(),
     )
 
     try:
