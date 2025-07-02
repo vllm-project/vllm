@@ -661,7 +661,7 @@ class ModelConfig:
         return self._architecture
 
     @property
-    def model_info(self) -> dict[str, Any]:
+    def model_info(self):
         return self._model_info
 
     def maybe_pull_model_tokenizer_for_s3(self, model: str,
