@@ -234,7 +234,7 @@ class FlashAttentionMetadataBuilder(
         # num_decode_tokens: [1, 2, 1]
         num_decode_tokens = torch.bincount(request_ids, minlength=num_reqs)
 
-        # Calculate new query_start_loc only considering tokens in decode_indices
+        # Calculate new query_start_loc with tokens in decode_indices
         # decode_query_start_loc: [0, 1, 3, 4]
         decode_query_start_loc = torch.empty(num_reqs + 1,
                                              device=query_start_loc.device,
