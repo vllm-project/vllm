@@ -24,6 +24,7 @@ from vllm.entrypoints.utils import _validate_truncation_size
 from vllm.inputs.data import TokensPrompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.multimodal.inputs import MultiModalDataDict
 from vllm.outputs import PoolingRequestOutput, ScoringRequestOutput
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.transformers_utils.tokenizer import (AnyTokenizer, MistralTokenizer,
@@ -183,7 +184,7 @@ class ServingScores(OpenAIServing):
                 self._validate_input(request, input_ids, request_prompt)
 
             token_type_ids = prompt_inputs.get("token_type_ids")
-            mm_data = None
+            mm_data: MultiModalDataDict = {}
             if envs.VLLM_USE_V1 and token_type_ids is not None:
                 mm_data = {"token_type_ids": token_type_ids}
                 token_type_ids = None

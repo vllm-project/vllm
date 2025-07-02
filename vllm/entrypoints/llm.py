@@ -39,6 +39,7 @@ from vllm.lora.request import LoRARequest
 from vllm.model_executor.guided_decoding.guided_fields import (
     GuidedDecodingRequest, LLMGuidedOptions)
 from vllm.model_executor.layers.quantization import QuantizationMethods
+from vllm.multimodal.inputs import MultiModalDataDict
 from vllm.outputs import (ClassificationRequestOutput, EmbeddingRequestOutput,
                           PoolingRequestOutput, RequestOutput,
                           ScoringRequestOutput)
@@ -1211,7 +1212,7 @@ class LLM:
                                       **tokenization_kwargs)
 
             token_type_ids = prompt_inputs.get("token_type_ids")
-            mm_data = None
+            mm_data: MultiModalDataDict = {}
             if envs.VLLM_USE_V1 and token_type_ids is not None:
                 mm_data = {"token_type_ids": token_type_ids}
                 token_type_ids = None
