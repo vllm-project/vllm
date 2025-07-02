@@ -14,7 +14,6 @@ import vllm.envs as envs
 from vllm.config import get_current_vllm_config
 from vllm.distributed import (get_dp_group, get_ep_group,
                               get_tensor_model_parallel_world_size,
-                              get_world_group,
                               tensor_model_parallel_all_reduce)
 from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.forward_context import ForwardContext, get_forward_context
@@ -114,8 +113,8 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                 hidden_dim_scale_bytes=hidden_scale_bytes,
             )
 
-            assert (all2all_manager.world_size //
-                    all2all_manager.tp_group.world_size) == moe.num_dispatchers
+            num_dispatchers = (all2all_manager.world_size //
+                               all2all_manager.tp_group.world_size)
 
             # Intranode pplx a2a takes a group name while internode does not.
             if not all2all_manager.internode:
@@ -128,7 +127,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                 handle,
                 max_num_tokens=moe.max_num_tokens,
                 num_local_experts=moe.num_local_experts,
-                num_dispatchers=moe.num_dispatchers,
+                num_dispatchers=num_dispatchers,
             )
         elif moe.use_deepep_ht_kernels:
             assert moe.dp_size == all2all_manager.dp_world_size
@@ -137,6 +136,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
             handle = all2all_manager.get_handle(all_to_all_args)
             prepare_finalize = DeepEPHTPrepareAndFinalize(
                 handle,
+                num_dispatchers=all2all_manager.world_size,
                 rank=all2all_manager.rank,
                 dp_size=all2all_manager.dp_world_size,
                 rank_expert_offset=all2all_manager.rank *
@@ -166,6 +166,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
             prepare_finalize = DeepEPLLPrepareAndFinalize(
                 handle,
                 max_tokens_per_rank=moe.max_num_tokens,
+                num_dispatchers=all2all_manager.world_size,
                 use_fp8_dispatch=use_fp8_dispatch,
             )
 
@@ -246,7 +247,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             logger.debug("BatchedTritonExperts %s", self.moe)
             return BatchedTritonExperts(
                 max_num_tokens=self.moe.max_num_tokens,
-                num_dispatchers=self.moe.num_dispatchers,
+                num_dispatchers=prepare_finalize.num_dispatchers(),
             )
         else:
             logger.debug("TritonExperts %s", self.moe)
@@ -642,16 +643,12 @@ class FusedMoE(torch.nn.Module):
                     get_tensor_model_parallel_world_size())
         dp_size_ = (dp_size
                     if dp_size is not None else get_dp_group().world_size)
-        world_size_ = get_world_group().world_size
-
-        num_dispatchers = world_size_ // tp_size_
 
         vllm_config = get_current_vllm_config()
         self.moe_parallel_config: FusedMoEParallelConfig = (
             FusedMoEParallelConfig.make(
                 tp_size_=tp_size_,
                 dp_size_=dp_size_,
-                num_dispatchers_=num_dispatchers,
                 vllm_parallel_config=vllm_config.parallel_config))
 
         self.global_num_experts = num_experts + num_redundant_experts
@@ -1324,12 +1321,8 @@ class FusedMoE(torch.nn.Module):
 
     def forward(self, hidden_states: torch.Tensor,
                 router_logits: torch.Tensor):
-        # TBD
-        if hidden_states.shape[0] < envs.VLLM_FUSED_MOE_CHUNK_SIZE:
-            return self.forward_impl(hidden_states, router_logits)
-        else:
-            return torch.ops.vllm.moe_forward(hidden_states, router_logits,
-                                              self.layer_name)
+        return torch.ops.vllm.moe_forward(hidden_states, router_logits,
+                                          self.layer_name)
 
     def forward_impl_chunked(self, full_hidden_states: torch.Tensor,
                              full_router_logits: torch.Tensor):

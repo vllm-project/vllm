@@ -592,7 +592,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
 
         return BatchedTritonExperts(
             max_num_tokens=max_num_tokens_per_rank,
-            num_dispatchers=moe.num_dispatchers,
+            num_dispatchers=prepare_finalize.num_dispatchers(),
             use_fp8_w8a8=True,
             block_shape=self.quant_config.weight_block_size,
             per_act_token_quant=(
@@ -866,7 +866,7 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
 
         experts = CutlassExpertsFp8(
             num_experts,
-            moe.num_dispatchers,
+            prepare_finalize.num_dispatchers(),
             moe.in_dtype,
             self.input_quant.strategy == QuantizationStrategy.TOKEN,
             self.weight_quant.strategy == QuantizationStrategy.CHANNEL,

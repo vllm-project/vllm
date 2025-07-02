@@ -161,7 +161,6 @@ class FusedMoEParallelConfig:
     tp_rank: int
     dp_rank: int
     ep_rank: int
-    num_dispatchers: int
 
     use_ep: bool  # whether to use EP or not
 
@@ -185,7 +184,7 @@ class FusedMoEParallelConfig:
                 and envs.VLLM_ALL2ALL_BACKEND == "deepep_low_latency")
 
     @staticmethod
-    def make(tp_size_: int, dp_size_: int, num_dispatchers_: int,
+    def make(tp_size_: int, dp_size_: int,
              vllm_parallel_config: ParallelConfig) -> "FusedMoEParallelConfig":
         """
         Determine MoE parallel configuration. Based on the input tp_size_,
@@ -196,7 +195,6 @@ class FusedMoEParallelConfig:
             tp_size_ (int): tp_size passed into the FusedMoE constructor.
             dp_size_ (int): dp_size passed into the FusedMoE constructor.
             ep_size_ (int): ep_size passed into the FusedMoE constructor.
-            num_dispatchers_ (int): the number of DP dispatchers.
             vllm_parallel_config (ParallelConfig): vllm's parallel config
             object.
 
@@ -275,7 +273,6 @@ class FusedMoEParallelConfig:
                                           dp_rank=dp_rank,
                                           ep_size=1,
                                           ep_rank=0,
-                                          num_dispatchers=num_dispatchers_,
                                           use_ep=False)
         # DP + EP / TP + EP / DP + TP + EP
         assert use_ep
@@ -289,7 +286,6 @@ class FusedMoEParallelConfig:
                                       dp_rank=dp_rank,
                                       ep_size=ep_size,
                                       ep_rank=ep_rank,
-                                      num_dispatchers=num_dispatchers_,
                                       use_ep=True)
 
 
@@ -356,10 +352,6 @@ class FusedMoEConfig:
     @property
     def ep_size(self):
         return self.moe_parallel_config.ep_size
-
-    @property
-    def num_dispatchers(self):
-        return self.moe_parallel_config.num_dispatchers
 
     @property
     def tp_rank(self):

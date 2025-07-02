@@ -472,12 +472,14 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         self,
         max_num_tokens: int,
         num_local_experts: int,
+        num_dispatchers: int,
         rank: int,
     ):
         super().__init__()
         self.max_num_tokens = max_num_tokens
         self.num_local_experts = num_local_experts
         self.rank = rank
+        self.num_dispatchers_ = num_dispatchers
 
     @property
     def activation_format(self) -> mk.FusedMoEActivationFormat:
@@ -488,6 +490,9 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
     def topk_indices_dtype(self) -> Optional[torch.dtype]:
         return None
+
+    def num_dispatchers(self) -> int:
+        return self.num_dispatchers_
 
     def prepare(
         self,
@@ -670,7 +675,7 @@ class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         local_num_experts: int,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
         assert a.dim() == 2
-        num_dp = self.num_dispatchers  # global // local?
+        num_dp = self.num_dispatchers
         num_experts = local_num_experts
         workspace13 = (num_experts, self.max_num_tokens * num_dp, K)
         workspace2 = (self.max_num_tokens * num_dp, N)

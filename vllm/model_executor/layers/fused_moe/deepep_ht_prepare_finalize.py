@@ -16,10 +16,11 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     Prepare/Finalize using DeepEP High-Throughput kernels.
     """
 
-    def __init__(self, buffer: deep_ep.Buffer, rank: int, dp_size: int,
-                 rank_expert_offset: int):
+    def __init__(self, buffer: deep_ep.Buffer, num_dispatchers: int, rank: int,
+                 dp_size: int, rank_expert_offset: int):
         super().__init__()
         self.buffer = buffer
+        self.num_dispatchers_ = num_dispatchers
         self.dp_size = dp_size
         self.rank_expert_offset = rank_expert_offset
         # The dispatch function returns a handle that the combine function
@@ -29,6 +30,9 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         # From https://github.com/deepseek-ai/DeepEP/blob/9fe9021f29c9083cd1808ab36b740208524d9f63/deep_ep/buffer.py#L164
         self.available_rank_configs = [2, 4, 8, 16, 24, 32, 64, 128, 144, 160]
+
+    def num_dispatchers(self) -> int:
+        return self.num_dispatchers_
 
     @property
     def activation_format(self) -> mk.FusedMoEActivationFormat:

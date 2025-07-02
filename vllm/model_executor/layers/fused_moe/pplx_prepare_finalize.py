@@ -68,7 +68,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         self.a2a = a2a
         self.max_num_tokens = max_num_tokens
         self.num_local_experts = num_local_experts
-        self.num_dispatchers = num_dispatchers
+        self.num_dispatchers_ = num_dispatchers
 
     @property
     def activation_format(self) -> mk.FusedMoEActivationFormat:
@@ -79,6 +79,9 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
     def topk_indices_dtype(self) -> Optional[torch.dtype]:
         return torch.uint32
+
+    def num_dispatchers(self) -> int:
+        return self.num_dispatchers_
 
     def prepare(
         self,
@@ -145,7 +148,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         expert_x = torch.empty(
             (self.num_local_experts,
-             self.max_num_tokens * self.num_dispatchers, hidden_dim),
+             self.max_num_tokens * self.num_dispatchers(), hidden_dim),
             dtype=a1q.dtype,
             device=device,
         )

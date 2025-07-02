@@ -42,6 +42,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     def __init__(self,
                  buffer: deep_ep.Buffer,
                  max_tokens_per_rank: int,
+                 num_dispatchers: int,
                  use_fp8_dispatch: bool = False):
         super().__init__()
 
@@ -52,6 +53,10 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         # requires. We store the handle here so it is available to the
         # combine function.
         self.handle = None
+        self.num_dispatchers_ = num_dispatchers
+
+    def num_dispatchers(self) -> int:
+        return self.num_dispatchers_
 
     @property
     def activation_format(self) -> mk.FusedMoEActivationFormat:
