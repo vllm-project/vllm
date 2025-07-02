@@ -22,17 +22,18 @@ from typing_extensions import TypeIs, deprecated
 
 import vllm.envs as envs
 from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
-                         ConfigFormat, ConfigType, DecodingConfig,
-                         DetailedTraceModules, Device, DeviceConfig,
-                         DistributedExecutorBackend, GuidedDecodingBackend,
-                         GuidedDecodingBackendV1, HfOverrides, KVEventsConfig,
-                         KVTransferConfig, LoadConfig, LoadFormat, LoRAConfig,
-                         ModelConfig, ModelDType, ModelImpl, MultiModalConfig,
+                         ConfigFormat, ConfigType, DetailedTraceModules,
+                         Device, DeviceConfig, DistributedExecutorBackend,
+                         GuidedDecodingBackend, GuidedDecodingBackendV1,
+                         HfOverrides, KVEventsConfig, KVTransferConfig,
+                         LoadConfig, LoadFormat, LoRAConfig, ModelConfig,
+                         ModelDType, ModelImpl, MultiModalConfig,
                          ObservabilityConfig, ParallelConfig, PoolerConfig,
                          PrefixCachingHashAlgo, PromptAdapterConfig,
                          SchedulerConfig, SchedulerPolicy, SpeculativeConfig,
-                         TaskOption, TokenizerMode, TokenizerPoolConfig,
-                         VllmConfig, get_attr_docs, get_field)
+                         StructuredOutputConfig, TaskOption, TokenizerMode,
+                         TokenizerPoolConfig, VllmConfig, get_attr_docs,
+                         get_field)
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -416,12 +417,14 @@ class EngineArgs:
     disable_hybrid_kv_cache_manager: bool = (
         SchedulerConfig.disable_hybrid_kv_cache_manager)
 
-    guided_decoding_backend: GuidedDecodingBackend = DecodingConfig.backend
-    guided_decoding_disable_fallback: bool = DecodingConfig.disable_fallback
+    guided_decoding_backend: GuidedDecodingBackend = \
+        StructuredOutputConfig.backend
+    guided_decoding_disable_fallback: bool = \
+        StructuredOutputConfig.disable_fallback
     guided_decoding_disable_any_whitespace: bool = \
-        DecodingConfig.disable_any_whitespace
+        StructuredOutputConfig.disable_any_whitespace
     guided_decoding_disable_additional_properties: bool = \
-        DecodingConfig.disable_additional_properties
+        StructuredOutputConfig.disable_additional_properties
     logits_processor_pattern: Optional[
         str] = ModelConfig.logits_processor_pattern
 
@@ -462,7 +465,7 @@ class EngineArgs:
     additional_config: dict[str, Any] = \
         get_field(VllmConfig, "additional_config")
     enable_reasoning: Optional[bool] = None  # DEPRECATED
-    reasoning_parser: str = DecodingConfig.reasoning_backend
+    reasoning_parser: str = StructuredOutputConfig.reasoning_backend
 
     use_tqdm_on_load: bool = LoadConfig.use_tqdm_on_load
     pt_load_map_location: str = LoadConfig.pt_load_map_location
@@ -608,10 +611,10 @@ class EngineArgs:
                                 **load_kwargs["pt_load_map_location"])
 
         # Guided decoding arguments
-        guided_decoding_kwargs = get_kwargs(DecodingConfig)
+        guided_decoding_kwargs = get_kwargs(StructuredOutputConfig)
         guided_decoding_group = parser.add_argument_group(
-            title="DecodingConfig",
-            description=DecodingConfig.__doc__,
+            title="StructuredOutputConfig",
+            description=StructuredOutputConfig.__doc__,
         )
         guided_decoding_group.add_argument("--guided-decoding-backend",
                                            **guided_decoding_kwargs["backend"])
@@ -1259,7 +1262,7 @@ class EngineArgs:
             max_prompt_adapter_token=self.max_prompt_adapter_token) \
                                         if self.enable_prompt_adapter else None
 
-        decoding_config = DecodingConfig(
+        structured_output_config = StructuredOutputConfig(
             backend=self.guided_decoding_backend,
             disable_fallback=self.guided_decoding_disable_fallback,
             disable_any_whitespace=self.guided_decoding_disable_any_whitespace,
@@ -1284,7 +1287,7 @@ class EngineArgs:
             lora_config=lora_config,
             speculative_config=speculative_config,
             load_config=load_config,
-            decoding_config=decoding_config,
+            structured_output_config=structured_output_config,
             observability_config=observability_config,
             prompt_adapter_config=prompt_adapter_config,
             compilation_config=self.compilation_config,

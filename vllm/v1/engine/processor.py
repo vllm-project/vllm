@@ -40,7 +40,7 @@ class Processor:
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
         self.lora_config = vllm_config.lora_config
-        self.decoding_config = vllm_config.decoding_config
+        self.structured_output_config = vllm_config.structured_output_config
         self.tokenizer = tokenizer
 
         self.generation_config_fields = (
@@ -149,10 +149,10 @@ class Processor:
                              "not enabled!")
 
     def _validate_structured_output(self, params: SamplingParams) -> None:
-        if not params.guided_decoding or not self.decoding_config:
+        if not params.guided_decoding or not self.structured_output_config:
             return
 
-        engine_level_backend = self.decoding_config.backend
+        engine_level_backend = self.structured_output_config.backend
         if params.guided_decoding.backend:
             # Request-level backend selection is not supported in V1.
             # The values may differ if `params` is reused and was set
