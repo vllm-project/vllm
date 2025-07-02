@@ -7,8 +7,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-import warnings
-
 from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 from vllm.model_executor.custom_op import CustomOp
@@ -17,6 +15,7 @@ from vllm.platforms import current_platform
 from vllm.utils import LazyDict
 
 from torch._dynamo import allow_in_graph
+import warnings
 
 @CustomOp.register("xielu")
 class XIELU(CustomOp):
@@ -30,19 +29,15 @@ class XIELU(CustomOp):
 
     def __init__(self, alpha_p_init=0.8, alpha_n_init=0.8, beta=0.5, eps=-1e-6):
         super().__init__()
-        # Initialize parameters (good)
         self.alpha_p = nn.Parameter(torch.log(torch.exp(torch.tensor(alpha_p_init)) - 1.0).unsqueeze(0))
         self.alpha_n = nn.Parameter(torch.log(torch.exp(torch.tensor(alpha_n_init - beta)) - 1.0).unsqueeze(0))
         self.beta = beta
         self.eps = torch.tensor(eps, dtype=torch.bfloat16, device='cuda')
 
-        # Default to native implementation
         self._forward_method = self.forward_native
-
         if current_platform.is_cuda_alike():
             try:
                 from xielu.ops.wrappers import XIELU as XIELUCUDA
-                
                 # Create CUDA instance without Dynamo interference first
                 self._xielu_cuda = XIELUCUDA(
                     alpha_p=self.alpha_p,
