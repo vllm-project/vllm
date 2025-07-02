@@ -7,7 +7,7 @@ import torch
 import torch.nn.functional as F
 
 from vllm.platforms import current_platform
-from vllm.v1.sample.logits_processor import LogitsProcessorManager
+from vllm.v1.sample.logits_processor.state import LogitsProcessorManager
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import (PLACEHOLDER_TOKEN_ID,
                                               RejectionSampler)

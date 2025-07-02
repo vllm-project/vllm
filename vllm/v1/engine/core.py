@@ -63,7 +63,7 @@ class EngineCore:
 
         # plugins need to be loaded at the engine/scheduler level too
         from vllm.plugins import load_general_plugins
-        from vllm.v1.sample.logits_processor import load_logitsprocs
+        from vllm.v1.sample.logits_processor.load import load_logitsprocs
         load_general_plugins()
         load_logitsprocs(vllm_config.allowed_logitsprocs)
 
