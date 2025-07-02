@@ -15,7 +15,6 @@ MODEL_NAME = "intfloat/e5-small"
 expected_brief = EmbedBrief(
     task="embed",
     served_model_name=MODEL_NAME,
-    architectures=["BertModel"],
     embedding_dim=384,
     max_model_len=512,
     is_matryoshka=False,
@@ -38,8 +37,6 @@ def test_embed_offline_metadata(vllm_runner):
         assert isinstance(metadata, EmbedMetadata)
 
         assert metadata.brief == expected_brief
-
-        assert metadata.hf_config["architectures"][0] == "BertModel"
         assert metadata.pooler_config == expected_pooler_config
 
 
@@ -48,7 +45,7 @@ def server():
     from tests.utils import RemoteOpenAIServer
     args = [
         "--task", "embed", "--enforce-eager", "--disable-uvicorn-access-log",
-        "--disable-brief-metadata-only"
+        "--enable-metadata-dev-mode"
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:

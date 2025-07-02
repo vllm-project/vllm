@@ -3,11 +3,10 @@
 
 from typing import TYPE_CHECKING
 
+from .base import Metadata
 from .classify import ClassifyMetadata
-from .draft import DraftMetadata
 from .embed import EmbedMetadata
 from .generate import GenerateMetadata
-from .transcription import TranscriptionMetadata
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -16,8 +15,8 @@ TASK2METADATA_CLASS = {
     "embed": EmbedMetadata,
     "classify": ClassifyMetadata,
     "generate": GenerateMetadata,
-    "transcription": TranscriptionMetadata,
-    "draft": DraftMetadata,
+    "transcription": Metadata,
+    "draft": Metadata,
 }
 
 

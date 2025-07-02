@@ -21,7 +21,6 @@ class GenerateBrief(BriefMetadata):
         return cls(
             task=vllm_config.model_config.task,
             served_model_name=vllm_config.model_config.served_model_name,
-            architectures=vllm_config.model_config.architectures,
             max_model_len=vllm_config.model_config.max_model_len,
             enable_prefix_caching=vllm_config.cache_config.
             enable_prefix_caching)

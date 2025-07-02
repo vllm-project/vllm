@@ -1450,7 +1450,7 @@ async def run_server_worker(listen_address,
 
         app.include_router(
             get_metadata(vllm_config).get_router(
-                brief_metadata_only=not args.disable_brief_metadata_only))
+                metadata_dev_mode=not args.enable_metadata_dev_mode))
 
         logger.info("Starting vLLM API server %d on %s", server_index,
                     listen_address)

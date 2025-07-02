@@ -25,7 +25,6 @@ class EmbedBrief(BriefMetadata):
         return cls(
             task=vllm_config.model_config.task,
             served_model_name=vllm_config.model_config.served_model_name,
-            architectures=vllm_config.model_config.architectures,
             embedding_dim=vllm_config.model_config.hf_config.hidden_size,
             max_model_len=vllm_config.model_config.max_model_len,
             is_matryoshka=vllm_config.model_config.is_matryoshka,

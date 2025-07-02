@@ -21,7 +21,6 @@ class ClassifyBrief(BriefMetadata):
         return cls(
             task=vllm_config.model_config.task,
             served_model_name=vllm_config.model_config.served_model_name,
-            architectures=vllm_config.model_config.architectures,
             max_model_len=vllm_config.model_config.max_model_len,
             num_labels=vllm_config.model_config.hf_config.num_labels,
         )

@@ -13,11 +13,9 @@ MODEL_NAME = "Qwen/Qwen3-0.6B"
 task = "generate"
 max_model_len = 1024
 enable_prefix_caching = False
-architectures = ["Qwen3ForCausalLM"]
 
 expected_brief = GenerateBrief(task=task,
                                served_model_name=MODEL_NAME,
-                               architectures=architectures,
                                max_model_len=max_model_len,
                                enable_prefix_caching=enable_prefix_caching)
 
@@ -31,9 +29,7 @@ def test_generate_offline_metadata(vllm_runner):
         metadata: GenerateMetadata = vllm_model.model.metadata
 
         assert isinstance(metadata, GenerateMetadata)
-
         assert metadata.brief == expected_brief
-        assert metadata.hf_config["architectures"] == architectures
 
 
 @pytest.fixture(scope="module")
@@ -42,7 +38,7 @@ def server():
     args = [
         "--task", "generate", "--max-model-len", f"{max_model_len}",
         "--enforce-eager", "--disable-uvicorn-access-log",
-        "--disable-brief-metadata-only"
+        "--enable-metadata-dev-mode"
     ]
 
     if enable_prefix_caching:

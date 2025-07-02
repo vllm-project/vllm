@@ -12,12 +12,10 @@ os.environ["VLLM_LOGGING_LEVEL"] = "WARNING"
 
 MODEL_NAME = "jason9693/Qwen2.5-1.5B-apeach"
 
-expected_brief = ClassifyBrief(
-    task="classify",
-    served_model_name=MODEL_NAME,
-    architectures=["Qwen2ForSequenceClassification"],
-    max_model_len=131072,
-    num_labels=2)
+expected_brief = ClassifyBrief(task="classify",
+                               served_model_name=MODEL_NAME,
+                               max_model_len=131072,
+                               num_labels=2)
 
 expected_pooler_config = PoolerConfigMetadata(pooling_type=None,
                                               normalize=None,
@@ -34,9 +32,6 @@ def test_classify_offline_metadata(vllm_runner):
         assert isinstance(metadata, ClassifyMetadata)
 
         assert metadata.brief == expected_brief
-
-        assert metadata.hf_config["architectures"][
-            0] == "Qwen2ForSequenceClassification"
         assert metadata.pooler_config == expected_pooler_config
 
 
@@ -45,7 +40,7 @@ def server():
     from tests.utils import RemoteOpenAIServer
     args = [
         "--task", "classify", "--enforce-eager",
-        "--disable-uvicorn-access-log", "--disable-brief-metadata-only"
+        "--disable-uvicorn-access-log", "--enable-metadata-dev-mode"
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:

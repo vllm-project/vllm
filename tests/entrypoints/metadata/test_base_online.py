@@ -14,11 +14,9 @@ MODEL_NAME = "Qwen/Qwen3-0.6B"
 task = "generate"
 max_model_len = 1024
 enable_prefix_caching = False
-architectures = ["Qwen3ForCausalLM"]
 
 expected_brief = GenerateBrief(task=task,
                                served_model_name=MODEL_NAME,
-                               architectures=architectures,
                                max_model_len=max_model_len,
                                enable_prefix_caching=enable_prefix_caching)
 
@@ -42,7 +40,7 @@ def server():
 
 def test_brief_metadata_only(server):
     # default brief metadata only,
-    # unless --disable-brief-metadata-only is set
+    # unless --enable-metadata-dev-mode is set
 
     url = server.url_for("metadata/brief")
     response = requests.get(url)

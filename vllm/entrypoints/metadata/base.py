@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import asdict, dataclass, fields
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
 
@@ -32,21 +32,24 @@ class ReadOnlyBaseModel(BaseModel):
 
 
 class BriefMetadata(ReadOnlyBaseModel):
+    # Hacky way to get the defined docs and typing.
+    # Getting the corresponding typing from the dictionary returned
+    # by get_attr_typing is not a valid mypy expression,
+    # but it can make Swagger: API Documentation work.
+    # mypy: disable-error-code=name-defined,attr-defined
     task: model_config_typing["task"] = Field(
         ..., description=model_config_docs["task"])
     served_model_name: model_config_typing["served_model_name"] = Field(
         ..., description=model_config_docs["served_model_name"])
     max_model_len: model_config_typing["max_model_len"] = Field(
         ..., description=model_config_docs["max_model_len"])
-    architectures: Optional[list[str]] = Field(...,
-                                               title="Model architectures")
+    # mypy: enable-error-code=name-defined,attr-defined
 
     @classmethod
     def from_vllm_config(cls, vllm_config: "VllmConfig") -> "BriefMetadata":
         return cls(
             task=vllm_config.model_config.task,
             served_model_name=vllm_config.model_config.served_model_name,
-            architectures=vllm_config.model_config.architectures,
             max_model_len=vllm_config.model_config.max_model_len,
         )
 
@@ -59,6 +62,7 @@ class HfConfigMetadata:
 
 
 class PoolerConfigMetadata(ReadOnlyBaseModel):
+    # mypy: disable-error-code=name-defined,attr-defined
     pooling_type: pooler_config_typing["pooling_type"] = Field(
         ..., description=pooler_config_docs["pooling_type"])
     normalize: pooler_config_typing["normalize"] = Field(
@@ -69,6 +73,7 @@ class PoolerConfigMetadata(ReadOnlyBaseModel):
         ..., description=pooler_config_docs["step_tag_id"])
     returned_token_ids: pooler_config_typing["returned_token_ids"] = Field(
         ..., description=pooler_config_docs["returned_token_ids"])
+    # mypy: enable-error-code=name-defined,attr-defined
 
     @classmethod
     def from_vllm_config(cls,
@@ -93,7 +98,7 @@ class Metadata:
             })
 
     @classmethod
-    def get_router(cls, brief_metadata_only) -> "APIRouter":
+    def get_router(cls, metadata_dev_mode) -> "APIRouter":
         from fastapi import APIRouter, HTTPException, Request
         router = APIRouter()
 
@@ -132,9 +137,12 @@ class Metadata:
                 router.get(f"/metadata/{name}/" + "{key}")(
                     quick_access(metadata_class))
 
-        if brief_metadata_only:
-            add_api_route("brief", cls.__annotations__["brief"])
-        else:
+        if metadata_dev_mode:
+            # metadata will show more information in dev mode.
             for name, metadata_class in cls.__annotations__.items():
                 add_api_route(name, metadata_class)
+        else:
+            # metadata only shows brief when default mode.
+            add_api_route("brief", cls.__annotations__["brief"])
+
         return router
