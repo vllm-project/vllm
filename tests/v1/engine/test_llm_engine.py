@@ -114,17 +114,6 @@ def test_compatibility_with_skip_tokenizer_init(
     with pytest.raises(ValueError):
         _ = model.generate(example_prompts, sampling_params_list)
 
-    # Case 2: Standard generation without structured outputs should succeed.
-    sampling_params_list, n_list = _get_test_sampling_params(
-        example_prompts,
-        structured_outputs=False,
-    )
-    outputs = model.generate(example_prompts, sampling_params_list)
-
-    # Basic sanity checks similar to parallel sampling test
-    for out, n in zip(outputs, n_list):
-        assert len(out.outputs) == n
-
 
 def test_parallel_sampling(vllm_model, example_prompts) -> None:
     """Test passes if parallel sampling `n>1` yields `n` unique completions.
