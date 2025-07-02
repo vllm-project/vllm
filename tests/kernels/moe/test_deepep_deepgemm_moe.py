@@ -6,7 +6,6 @@ fp8 block-quantized case.
 """
 
 import dataclasses
-import importlib
 from typing import Optional
 
 import pytest
@@ -21,38 +20,33 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8)
 from vllm.platforms import current_platform
+from vllm.utils import has_deep_ep, has_deep_gemm
 
-from .deepep_utils import ProcessGroupInfo, parallel_launch
+from .utils import ProcessGroupInfo, parallel_launch
 
-has_deep_ep = importlib.util.find_spec("deep_ep") is not None
-
-try:
-    import deep_gemm
-    has_deep_gemm = True
-except ImportError:
-    has_deep_gemm = False
-
-if has_deep_ep:
+if has_deep_ep():
     from vllm.model_executor.layers.fused_moe.deepep_ht_prepare_finalize import (  # noqa: E501
         DeepEPHTPrepareAndFinalize)
     from vllm.model_executor.layers.fused_moe.deepep_ll_prepare_finalize import (  # noqa: E501
         DeepEPLLPrepareAndFinalize)
 
-    from .deepep_utils import DeepEPHTArgs, DeepEPLLArgs, make_deepep_a2a
+    from .utils import DeepEPHTArgs, DeepEPLLArgs, make_deepep_a2a
 
-if has_deep_gemm:
+if has_deep_gemm():
+    import deep_gemm
+
     from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
         BatchedDeepGemmExperts)
     from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
         DeepGemmExperts)
 
 requires_deep_ep = pytest.mark.skipif(
-    not has_deep_ep,
+    not has_deep_ep(),
     reason="Requires deep_ep kernels",
 )
 
 requires_deep_gemm = pytest.mark.skipif(
-    not has_deep_gemm,
+    not has_deep_gemm(),
     reason="Requires deep_gemm kernels",
 )
 
