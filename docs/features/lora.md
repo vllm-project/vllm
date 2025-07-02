@@ -167,7 +167,7 @@ To enable either of these resolvers, you must `set VLLM_ALLOW_RUNTIME_LORA_UPDAT
 - To leverage a local directory, set `VLLM_PLUGINS` to include `lora_filesystem_resolver` and set `VLLM_LORA_RESOLVER_CACHE_DIR` to a local directory. When vLLM receives a request using a LoRA adapter `foobar`,
 it will first look in the local directory for a directory `foobar`, and attempt to load the contents of that directory as a LoRA adapter. If successful, the request will complete as normal and
 that adapter will then be available for normal use on the server.
-- To leverage a repository on Hugging Face Hub, set `VLLM_PLUGINS` to include `lora_hf_hub_resolver` and set `VLLM_LORA_RESOLVER_HF_REPO` to a repository ID on Hugging Face Hub. When vLLM receives a request for the LoRA adapter `foobar`, it will download the adapter, then build a request to the cached dir for the adapter, similar to the `lora_filesystem_resolver`.
+- To leverage repositories on Hugging Face Hub, set `VLLM_PLUGINS` to include `lora_hf_hub_resolver` and set `VLLM_LORA_RESOLVER_HF_REPO_LIST` to a comma separated list of repository IDs on Hugging Face Hub. When vLLM receives a request for the LoRA adapter `my/repo/subpath`, it will download the adapter at the `subpath` of `my/repo` if it exists, then build a request to the cached dir for the adapter, similar to the `lora_filesystem_resolver`.
 
 Alternatively, follow these example steps to implement your own plugin:
 
