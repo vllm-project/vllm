@@ -194,6 +194,8 @@ class CpuPlatform(Platform):
                 "epilogue_fusion":
                 True,
             })
+            if compilation_config.use_inductor:
+                compilation_config.custom_ops = ["none"]
 
         if vllm_config.lora_config is not None:
             compilation_config.level = CompilationLevel.NO_COMPILATION
@@ -269,3 +271,11 @@ class CpuPlatform(Platform):
         model configuration.
         """
         return True
+
+    @classmethod
+    def default_v1(cls, model_config) -> bool:
+        """Returns whether the current platform can use v1 by default for the
+        supplied model configuration.
+        """
+        return cls.supports_v1(
+            model_config) and cls.get_cpu_architecture() == CpuArchEnum.X86

@@ -420,9 +420,9 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     endif()
   endif()
 
-  # The cutlass_scaled_mm kernels for Blackwell (c3x, i.e. CUTLASS 3.x) require
-  # CUDA 12.8 or later
-  cuda_archs_loose_intersection(SCALED_MM_ARCHS "10.0a;10.1a;12.0a" "${CUDA_ARCHS}")
+  # The cutlass_scaled_mm kernels for Blackwell SM100 (c3x, i.e. CUTLASS 3.x)
+  # require CUDA 12.8 or later
+  cuda_archs_loose_intersection(SCALED_MM_ARCHS "10.0a;10.1a" "${CUDA_ARCHS}")
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.8 AND SCALED_MM_ARCHS)
     set(SRCS
       "csrc/quantization/cutlass_w8a8/scaled_mm_c3x_sm100.cu"
@@ -513,6 +513,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       CUDA_ARCHS "${FP4_ARCHS}")
     list(APPEND VLLM_EXT_SRC "${SRCS}")
     list(APPEND VLLM_GPU_FLAGS "-DENABLE_NVFP4=1")
+    list(APPEND VLLM_GPU_FLAGS "-DENABLE_CUTLASS_MOE_SM100=1")
     message(STATUS "Building NVFP4 for archs: ${FP4_ARCHS}")
   else()
     message(STATUS "Not building NVFP4 as no compatible archs were found.")
@@ -547,8 +548,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # if it's possible to compile MoE kernels that use its output.
   cuda_archs_loose_intersection(SCALED_MM_ARCHS "9.0a" "${CUDA_ARCHS}")
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.3 AND SCALED_MM_ARCHS)
-    set(SRCS "csrc/quantization/cutlass_w8a8/moe/grouped_mm_c3x.cu"
-             "csrc/quantization/cutlass_w8a8/moe/moe_data.cu")
+    set(SRCS "csrc/quantization/cutlass_w8a8/moe/grouped_mm_c3x.cu")
     set_gencode_flags_for_srcs(
       SRCS "${SRCS}"
       CUDA_ARCHS "${SCALED_MM_ARCHS}")
@@ -562,7 +562,27 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
                      "if you intend on running FP8 quantized MoE models on Hopper.")
     else()
       message(STATUS "Not building grouped_mm_c3x as no compatible archs found "
-                     "in CUDA target architectures")
+                     "in CUDA target architectures.")
+    endif()
+  endif()
+
+  # moe_data.cu is used by all CUTLASS MoE kernels.
+  cuda_archs_loose_intersection(CUTLASS_MOE_DATA_ARCHS "9.0a;10.0a" "${CUDA_ARCHS}")
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.3 AND CUTLASS_MOE_DATA_ARCHS)
+    set(SRCS "csrc/quantization/cutlass_w8a8/moe/moe_data.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${SRCS}"
+      CUDA_ARCHS "${CUTLASS_MOE_DATA_ARCHS}")
+    list(APPEND VLLM_EXT_SRC "${SRCS}")
+    message(STATUS "Building moe_data for archs: ${CUTLASS_MOE_DATA_ARCHS}")
+  else()
+    if (NOT ${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.3 AND CUTLASS_MOE_DATA_ARCHS)
+      message(STATUS "Not building moe_data as CUDA Compiler version is "
+                     "not >= 12.3, we recommend upgrading to CUDA 12.3 or later "
+                     "if you intend on running FP8 quantized MoE models on Hopper or Blackwell.")
+    else()
+      message(STATUS "Not building moe_data as no compatible archs found "
+                     "in CUDA target architectures.")
     endif()
   endif()
 
@@ -636,6 +656,14 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     endif()
   endif()
 # if CUDA endif
+endif()
+
+if (VLLM_GPU_LANG STREQUAL "HIP")
+  # Add QuickReduce kernels
+  list(APPEND VLLM_EXT_SRC
+    "csrc/custom_quickreduce.cu"
+  )
+# if ROCM endif
 endif()
 
 message(STATUS "Enabling C extension.")

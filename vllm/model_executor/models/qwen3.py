@@ -375,7 +375,12 @@ class Qwen3ForSequenceClassification(nn.Module, SupportsLoRA,
     ) -> Optional[PoolerOutput]:
         hidden_states = self._pooler.extract_states(hidden_states,
                                                     pooling_metadata)
-        logits, _ = self.score(hidden_states)
+
+        if isinstance(hidden_states, list):
+            logits = [self.score(state)[0] for state in hidden_states]
+        else:
+            logits, _ = self.score(hidden_states)
+
         pooled_data = self._pooler.head(logits, pooling_metadata)
         pooled_outputs = [
             self._pooler.build_output(data.squeeze(-1)) for data in pooled_data
@@ -395,22 +400,10 @@ class Qwen3ForSequenceClassification(nn.Module, SupportsLoRA,
 
     def load_weights_from_original_qwen3_reranker(
             self, weights: Iterable[tuple[str, torch.Tensor]]):
-        tokens = getattr(self.config, "classifier_from_token", None)
-        assert tokens is not None and len(tokens) == 2, \
-            ("Try loading the original Qwen3 Reranker?, see: "
-             "https://github.com/vllm-project/vllm/tree/main/examples/offline_inference/qwen3_reranker.py")
 
-        self.config.num_labels = 1
         model_config = self.vllm_config.model_config
-
+        tokens = getattr(self.config, "classifier_from_token", None)
         device = self.score.weight.device
-        self.score = RowParallelLinear(self.config.hidden_size,
-                                       self.config.num_labels,
-                                       quant_config=self.quant_config,
-                                       input_is_parallel=False,
-                                       bias=False,
-                                       prefix=maybe_prefix(
-                                           self.prefix, "score")).to(device)
 
         if self.config.tie_word_embeddings:
             self.lm_head = self.model.embed_tokens
@@ -438,5 +431,6 @@ class Qwen3ForSequenceClassification(nn.Module, SupportsLoRA,
         self.score.weight.data.copy_(weight)
 
         del self.lm_head
-        loaded_weights.add("classifier.weight")
+        loaded_weights.add("score.weight")
         loaded_weights.discard("lm_head.weight")
+        return loaded_weights

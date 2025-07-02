@@ -14,6 +14,7 @@ if TYPE_CHECKING:
         KVConnectorMetadata)
     from vllm.lora.request import LoRARequest
     from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
+    from vllm.pooling_params import PoolingParams
     from vllm.sampling_params import SamplingParams
     from vllm.v1.request import Request
 
@@ -26,7 +27,8 @@ class NewRequestData:
     mm_inputs: list[MultiModalKwargs]
     mm_hashes: list[str]
     mm_positions: list[PlaceholderRange]
-    sampling_params: SamplingParams
+    sampling_params: Optional[SamplingParams]
+    pooling_params: Optional[PoolingParams]
     block_ids: tuple[list[int], ...]
     num_computed_tokens: int
     lora_request: Optional[LoRARequest]
@@ -44,6 +46,7 @@ class NewRequestData:
             mm_hashes=request.mm_hashes,
             mm_positions=request.mm_positions,
             sampling_params=request.sampling_params,
+            pooling_params=request.pooling_params,
             block_ids=block_ids,
             num_computed_tokens=request.num_computed_tokens,
             lora_request=request.lora_request,
@@ -80,29 +83,29 @@ class NewRequestData:
 @dataclass
 class CachedRequestData:
 
-    req_id: str
+    req_ids: list[str]
     # If resumed_from_preemption is False, new_block_ids will be appended to
     # the request's block IDs. If True, new_block_ids will be used as the
     # request's block IDs instead of appending to the existing block IDs.
-    resumed_from_preemption: bool
-    new_token_ids: list[int]
-    new_block_ids: tuple[list[int], ...]
-    num_computed_tokens: int
+    resumed_from_preemption: list[bool]
+    # NOTE(woosuk): new_token_ids is only used for pipeline parallelism.
+    # When PP is not used, new_token_ids will be empty.
+    new_token_ids: list[list[int]]
+    new_block_ids: list[tuple[list[int], ...]]
+    num_computed_tokens: list[int]
+
+    @property
+    def num_reqs(self) -> int:
+        return len(self.req_ids)
 
     @classmethod
-    def from_request(
-        cls,
-        request: Request,
-        resumed_from_preemption: bool,
-        new_token_ids: list[int],
-        new_block_ids: tuple[list[int], ...],
-    ) -> CachedRequestData:
+    def make_empty(cls) -> CachedRequestData:
         return cls(
-            req_id=request.request_id,
-            resumed_from_preemption=resumed_from_preemption,
-            new_token_ids=new_token_ids,
-            new_block_ids=new_block_ids,
-            num_computed_tokens=request.num_computed_tokens,
+            req_ids=[],
+            resumed_from_preemption=[],
+            new_token_ids=[],
+            new_block_ids=[],
+            num_computed_tokens=[],
         )
 
 
@@ -116,7 +119,7 @@ class SchedulerOutput:
     # list of the requests that have been scheduled before.
     # Since the request's data is already cached in the worker processes,
     # we only send the diff to minimize the communication cost.
-    scheduled_cached_reqs: list[CachedRequestData]
+    scheduled_cached_reqs: CachedRequestData
 
     # req_id -> num_scheduled_tokens
     # Number of tokens scheduled for each request.

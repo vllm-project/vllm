@@ -18,7 +18,7 @@ from typing_extensions import ParamSpec
 import vllm._C  # noqa
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.utils import import_pynvml
+from vllm.utils import cuda_device_count_stateless, import_pynvml
 
 from .interface import DeviceCapability, Platform, PlatformEnum, _Backend
 
@@ -70,6 +70,17 @@ class CudaPlatformBase(Platform):
         # Kepler and Maxwell NVIDIA GPUs, only FP32 is supported,
         # though vLLM doesn't support these GPUs.
         return [torch.float32]
+
+    @classmethod
+    def set_device(cls, device: torch.device) -> None:
+        """
+        Set the device for the current platform.
+        """
+        super().set_device(device)
+        # With this trick we can force the device to be set eagerly
+        # see https://github.com/pytorch/pytorch/issues/155668
+        # for why and when it is needed
+        _ = torch.zeros(1, device=device)
 
     @classmethod
     def get_device_capability(cls,
@@ -255,7 +266,7 @@ class CudaPlatformBase(Platform):
                         "install FlashInfer for better performance.")
                     pass
             # FlashAttention is the default for SM 8.0+ GPUs
-            elif cls.has_device_capability(80):
+            if cls.has_device_capability(80):
                 logger.info_once("Using Flash Attention backend on V1 engine.")
                 return ("vllm.v1.attention.backends."
                         "flash_attn.FlashAttentionBackend")
@@ -389,6 +400,10 @@ class CudaPlatformBase(Platform):
 
         pg._register_backend(device, backend_type, backend_class)
         return pg
+
+    @classmethod
+    def device_count(cls) -> int:
+        return cuda_device_count_stateless()
 
 
 # NVML utils
