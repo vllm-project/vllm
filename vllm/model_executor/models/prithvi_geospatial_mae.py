@@ -101,10 +101,10 @@ class PrithviGeoSpatialMAEMultiModalProcessor(BaseMultiModalProcessor):
         mm_kwargs = {}
 
         for k, v in mm_data.items():
-            if isinstance(v,dict) and k == "tensors":
-                for tensor_name,tensor in v.items():
-                    mm_kwargs[tensor_name] = tensor 
-            else:        
+            if isinstance(v, dict) and k == "tensors":
+                for tensor_name, tensor in v.items():
+                    mm_kwargs[tensor_name] = tensor
+            else:
                 mm_kwargs[k] = v
         mm_place_holders = {"image": [PlaceholderRange(offset=0, length=0)]}
 
