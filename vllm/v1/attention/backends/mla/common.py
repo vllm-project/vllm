@@ -472,16 +472,8 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         self._num_prefill_tokens = 0
         return self.build(0, m)
 
-    def build(
-        self,
-        common_prefix_len: int,
-        common_attn_metadata: CommonAttentionMetadata,
-        decode_only_common_attn_metadata: Optional[
-            CommonAttentionMetadata] = None,
-    ) -> M:
-        if decode_only_common_attn_metadata is not None:
-            raise NotImplementedError(
-                "MLA backend does not support decode-only attention yet.")
+    def build(self, common_prefix_len: int,
+              common_attn_metadata: CommonAttentionMetadata) -> M:
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len

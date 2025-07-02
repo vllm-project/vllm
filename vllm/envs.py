@@ -955,7 +955,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # models
     "VLLM_USE_NVFP4_CT_EMULATIONS":
     lambda: bool(int(os.getenv("VLLM_USE_NVFP4_CT_EMULATIONS", "0"))),
-
     "VLLM_V1_KV_SHARING_SKIP_PREFILL":
     lambda: os.environ.get("VLLM_V1_KV_SHARING_SKIP_PREFILL", "0") == "1",
 }
