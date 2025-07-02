@@ -25,7 +25,7 @@ infiles += [
 infiles += [
     "vllm/model_executor/layers/sampler.py",
     "vllm/sampling_params.py",
-    "vllm/utils.py",
+    "vllm/utils/__init__.py",
 ]
 
 setup(ext_modules=cythonize(infiles,
