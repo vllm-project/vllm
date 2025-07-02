@@ -230,7 +230,6 @@ class Processor:
     ) -> tuple[Optional[str], EngineCoreRequest]:
 
         # TODO(woosuk): Support pooling models.
-        # TODO(woosuk): Support encoder-decoder models.
         self._validate_lora(lora_request)
         self._validate_params(params, lora_request)
         if trace_headers is not None:
@@ -266,10 +265,6 @@ class Processor:
         self._validate_model_inputs(processed_inputs, lora_request)
 
         encoder_inputs, decoder_inputs = split_enc_dec_inputs(processed_inputs)
-
-        # TODO: Impl encoder-decoder
-        if encoder_inputs is not None:
-            raise NotImplementedError
 
         sampling_params = None
         pooling_params = None

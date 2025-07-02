@@ -307,6 +307,45 @@ class KVCacheManager:
 
         return KVCacheBlocks(new_blocks)
 
+    def allocate_slots_for_cross_attn(
+        self,
+        request: Request,
+        num_encoder_tokens: int,
+    ) -> Optional[KVCacheBlocks]:
+        """Add slots for cross-attention blocks.
+
+        This is separate from the main `allocate_slots` function because
+        cross-attention blocks are allocated based on the max encoder length,
+        which is a static value. The number of blocks to allocate is not
+        affected by the number of decoder tokens.
+
+        Args:
+            request: The request to allocate slots.
+            num_encoder_tokens: The number of tokens sent to the encoder.
+
+        Returns:
+            A list of new allocated blocks.
+        """
+        if num_encoder_tokens == 0:
+            raise ValueError("num_encoder_tokens must be greater than 0")
+
+        num_blocks_to_allocate = self.coordinator.get_num_blocks_to_allocate(
+            request_id=request.request_id,
+            num_tokens=num_encoder_tokens,
+            new_computed_blocks=tuple(),
+            cross_attn=True,
+        )
+
+        if num_blocks_to_allocate > self.block_pool.get_num_free_blocks():
+            # Cannot allocate new blocks
+            return None
+
+        new_blocks = self.coordinator.allocate_new_blocks(request.request_id,
+                                                          num_encoder_tokens,
+                                                          cross_attn=True)
+
+        return KVCacheBlocks(new_blocks)
+
     def free(self, request: Request) -> None:
         """Free the blocks allocated for the request.
         We free the blocks in reverse order so that he tail blocks are evicted 

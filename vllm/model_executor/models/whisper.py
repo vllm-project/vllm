@@ -42,7 +42,7 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.transformers_utils.processor import cached_get_processor
 
 from .interfaces import (MultiModalEmbeddings, SupportsMultiModal,
-                         SupportsTranscription, SupportsV0Only)
+                         SupportsTranscription)
 from .utils import (AutoWeightsLoader, WeightsMapper, cast_overflow_tensors,
                     make_layers)
 
@@ -790,7 +790,7 @@ class WhisperMultiModalProcessor(
                                         info=WhisperProcessingInfo,
                                         dummy_inputs=WhisperDummyInputsBuilder)
 class WhisperForConditionalGeneration(nn.Module, SupportsTranscription,
-                                      SupportsMultiModal, SupportsV0Only):
+                                      SupportsMultiModal):
     packed_modules_mapping = {
         "self_attn.qkv_proj": [
             "self_attn.q_proj",
@@ -916,10 +916,9 @@ class WhisperForConditionalGeneration(nn.Module, SupportsTranscription,
 
     def get_multimodal_embeddings(self,
                                   **kwargs: object) -> MultiModalEmbeddings:
-        # TODO: This method does not obey the interface for SupportsMultiModal.
-        # Refactor this once encoder/decoder support is implemented in V1.
+        # Required as part of SupportsMultiModal interface.
         audio_input = self._parse_and_validate_audio_input(**kwargs)
-        return self.model.get_encoder_outputs(audio_input["input_features"])
+        return [self.model.get_encoder_outputs(audio_input["input_features"])]
 
     def get_input_embeddings(
         self,
