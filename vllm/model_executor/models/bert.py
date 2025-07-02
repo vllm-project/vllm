@@ -581,7 +581,7 @@ class BertMMTokenIdsMixin(SupportsMultiModal):
     ) -> torch.Tensor:
 
         # save for forward()
-        self.get_language_model().embeddings.maybe_store_input_ids(input_ids)
+        self.maybe_store_input_ids(input_ids)
 
         token_type_ids: Optional[torch.Tensor] = None
 
