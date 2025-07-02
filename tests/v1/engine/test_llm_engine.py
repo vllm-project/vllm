@@ -20,7 +20,7 @@ DTYPE = "half"
 
 def _vllm_model(
     apc: bool,
-    vllm_runner: VllmRunner,
+    vllm_runner: type[VllmRunner],
     monkeypatch: pytest.MonkeyPatch,
     *,
     skip_tokenizer_init: bool = False,
@@ -65,10 +65,12 @@ def vllm_model_apc(vllm_runner, monkeypatch):
     params=[False, True])
 def vllm_model_skip_tokenizer_init(vllm_runner, request, monkeypatch):
     """VllmRunner test fixture with APC."""
-    with _vllm_model(request.param,
-                     vllm_runner,
-                     monkeypatch,
-                     skip_tokenizer_init=True) as vllm_model:
+    with _vllm_model(
+            request.param,
+            vllm_runner,
+            monkeypatch,
+            skip_tokenizer_init=True,
+    ) as vllm_model:
         yield vllm_model
 
 
