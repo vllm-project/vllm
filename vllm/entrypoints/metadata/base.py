@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Any, Optional
 
 from pydantic import BaseModel, Field
@@ -10,14 +10,6 @@ from vllm.config import ModelConfig, PoolerConfig, VllmConfig, get_attr_docs
 
 if TYPE_CHECKING:
     from fastapi import APIRouter
-
-
-def get_attr_typing(cls: type[Any]):
-    out = {}
-    for f in fields(cls):
-        out[f.name] = f.type
-    return out
-
 
 model_config_docs = get_attr_docs(ModelConfig)
 pooler_config_docs = get_attr_docs(PoolerConfig)

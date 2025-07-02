@@ -480,6 +480,7 @@ class ModelConfig:
                     "affect the random state of the Python process that "
                     "launched vLLM.", self.seed)
 
+        # keep setting served_model_name before maybe_model_redirect(self.model)
         self.served_model_name = get_served_model_name(self.model,
                                                        self.served_model_name)
         self.model = maybe_model_redirect(self.model)
