@@ -39,6 +39,7 @@ nav:
       - models/generative_models.md
       - models/pooling_models.md
       - models/extensions
+      - Hardware Supported Models: models/hardware_supported_models
     - Features:
       - features/compatibility_matrix.md
       - features/*
