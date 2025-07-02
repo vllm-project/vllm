@@ -310,10 +310,14 @@ class P2pNcclEngine:
             elif data["cmd"] == "PUT":
                 tensor_id = data["tensor_id"]
                 try:
+                    with torch.cuda.stream(self.recv_stream):
+                        tensor = torch.empty(data["shape"],
+                                             dtype=getattr(
+                                                 torch, data["dtype"]),
+                                             device=self.device)
                     self.router_socket.send_multipart([remote_address, b"0"])
                     comm, rank = self.comms[remote]
-                    tensor = self.recv(comm, data["shape"], data["dtype"],
-                                       rank ^ 1, self.recv_stream)
+                    self.recv(comm, tensor, rank ^ 1, self.recv_stream)
                     tensor_size = tensor.element_size() * tensor.numel()
                     if (self.buffer_size + tensor_size
                             > self.buffer_size_threshold):
@@ -508,13 +512,10 @@ class P2pNcclEngine:
         event.record(stream)
         event.synchronize()
 
-    def recv(self, comm, shape: str, dtype: str, src: int, stream=None):
+    def recv(self, comm, tensor: torch.Tensor, src: int, stream=None):
         stream = stream if stream is not None else current_stream()
         event = torch.cuda.Event()
         with torch.cuda.stream(stream):
-            tensor = torch.empty(shape,
-                                 dtype=getattr(torch, dtype),
-                                 device=self.device)
             self.nccl.ncclRecv(buffer_type(tensor.data_ptr()), tensor.numel(),
                                ncclDataTypeEnum.from_torch(tensor.dtype), src,
                                comm, cudaStream_t(stream.cuda_stream))
