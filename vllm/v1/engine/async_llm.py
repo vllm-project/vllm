@@ -21,6 +21,7 @@ from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
+from vllm.tracing import get_tracer
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
 from vllm.transformers_utils.tokenizer import AnyTokenizer
@@ -41,10 +42,12 @@ from vllm.v1.metrics.prometheus import shutdown_prometheus
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 
 logger = init_logger(__name__)
+tracer = get_tracer(__name__)
 
 
 class AsyncLLM(EngineClient):
 
+    @tracer.start_as_current_span("vllm.asyncllm")
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -102,11 +105,18 @@ class AsyncLLM(EngineClient):
             custom_stat_loggers=stat_loggers,
         )
 
-        # Tokenizer (+ ensure liveness if running in another process).
-        self.tokenizer = init_tokenizer_from_configs(
-            model_config=vllm_config.model_config,
-            scheduler_config=vllm_config.scheduler_config,
-            lora_config=vllm_config.lora_config)
+        with tracer.start_as_current_span("vllm.asyncllm.tokenizer") as span:
+            # Tokenizer (+ ensure liveness if running in another process).
+            self.tokenizer = init_tokenizer_from_configs(
+                model_config=vllm_config.model_config,
+                scheduler_config=vllm_config.scheduler_config,
+                lora_config=vllm_config.lora_config)
+            span.set_attributes({
+                'tokenizer.id':
+                vllm_config.model_config.tokenizer,
+                'tokenizer.mode':
+                vllm_config.model_config.tokenizer_mode,
+            })
 
         # Processor (converts Inputs --> EngineCoreRequests).
         self.processor = Processor(
@@ -119,15 +129,17 @@ class AsyncLLM(EngineClient):
         self.output_processor = OutputProcessor(self.tokenizer,
                                                 log_stats=self.log_stats)
 
-        # EngineCore (starts the engine in background process).
+        with tracer.start_as_current_span("vllm.engine_core_client") as span:
+            # EngineCore (starts the engine in background process).
 
-        self.engine_core = EngineCoreClient.make_async_mp_client(
-            vllm_config=vllm_config,
-            executor_class=executor_class,
-            log_stats=self.log_stats,
-            client_addresses=client_addresses,
-            client_index=client_index,
-        )
+            self.engine_core = EngineCoreClient.make_async_mp_client(
+                vllm_config=vllm_config,
+                executor_class=executor_class,
+                log_stats=self.log_stats,
+                client_addresses=client_addresses,
+                client_index=client_index,
+            )
+
         if self.stat_loggers:
             for stat_logger in self.stat_loggers[0]:
                 stat_logger.log_engine_initialized()

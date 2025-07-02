@@ -21,6 +21,7 @@ import zmq.asyncio
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.tracing import get_traceparent
 from vllm.utils import (get_open_zmq_inproc_path, make_zmq_socket,
                         zmq_socket_ctx)
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
@@ -480,6 +481,10 @@ class MPClient(EngineCoreClient):
         handshake_address = get_engine_client_zmq_addr(
             local_only, host, parallel_config.data_parallel_rpc_port)
 
+        # Propagate trace context to the engine subprocess so the
+        # full set of start up spans are attached to the same trace.
+        traceparent = get_traceparent()
+
         with zmq_socket_ctx(handshake_address, zmq.ROUTER,
                             bind=True) as handshake_socket:
 
@@ -490,6 +495,7 @@ class MPClient(EngineCoreClient):
                 self.resources.engine_manager = CoreEngineProcManager(
                     EngineCoreProc.run_engine_core,
                     vllm_config=vllm_config,
+                    traceparent=traceparent,
                     executor_class=executor_class,
                     log_stats=log_stats,
                     handshake_address=handshake_address,

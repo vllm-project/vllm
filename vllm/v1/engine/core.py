@@ -23,6 +23,7 @@ from vllm.executor.multiproc_worker_utils import _add_prefix
 from vllm.logger import init_logger
 from vllm.logging_utils.dump_input import dump_engine_exception
 from vllm.lora.request import LoRARequest
+from vllm.tracing import get_root_span, get_tracer, init_tracer
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
 from vllm.utils import make_zmq_socket, resolve_obj_by_qualname
@@ -45,6 +46,7 @@ from vllm.v1.utils import EngineHandshakeMetadata, EngineZmqAddresses
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
+tracer = get_tracer(__name__)
 
 POLLING_TIMEOUT_S = 2.5
 HANDSHAKE_TIMEOUT_MINS = 5
@@ -71,15 +73,17 @@ class EngineCore:
 
         self.log_stats = log_stats
 
-        # Setup Model.
-        self.model_executor = executor_class(vllm_config)
-        if executor_fail_callback is not None:
-            self.model_executor.register_failure_callback(
-                executor_fail_callback)
+        with tracer.start_as_current_span("vllm.engine_core.model_executor"):
+            # Setup Model.
+            self.model_executor = executor_class(vllm_config)
+            if executor_fail_callback is not None:
+                self.model_executor.register_failure_callback(
+                    executor_fail_callback)
 
-        # Setup KV Caches and update CacheConfig after profiling.
-        num_gpu_blocks, num_cpu_blocks, kv_cache_config = \
-            self._initialize_kv_caches(vllm_config)
+        with tracer.start_as_current_span("vllm.engine_core.kv_cache"):
+            # Setup KV Caches and update CacheConfig after profiling.
+            num_gpu_blocks, num_cpu_blocks, kv_cache_config = \
+                self._initialize_kv_caches(vllm_config)
 
         vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
         vllm_config.cache_config.num_cpu_blocks = num_cpu_blocks
@@ -476,8 +480,12 @@ class EngineCoreProc(EngineCore):
     def run_engine_core(*args,
                         dp_rank: int = 0,
                         local_dp_rank: int = 0,
+                        traceparent: Optional[dict] = None,
                         **kwargs):
         """Launch EngineCore busy loop in background process."""
+        tracer = init_tracer(__name__)
+        engine_startup_span = get_root_span(tracer, "vllm.engine_core",
+                                            traceparent or {})
 
         # Signal handler used for graceful termination.
         # SystemExit exception is only raised once to allow this and worker
@@ -509,6 +517,7 @@ class EngineCoreProc(EngineCore):
             else:
                 engine_core = EngineCoreProc(*args, **kwargs)
 
+            engine_startup_span.end()
             engine_core.run_busy_loop()
 
         except SystemExit:

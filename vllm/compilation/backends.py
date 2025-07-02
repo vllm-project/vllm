@@ -18,6 +18,7 @@ import vllm.envs as envs
 from vllm.config import CompilationConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.tracing import get_tracer, set_span_attributes
 from vllm.utils import is_torch_equal_or_newer, resolve_obj_by_qualname
 
 from .compiler_interface import (CompilerInterface, EagerAdaptor,
@@ -27,6 +28,7 @@ from .inductor_pass import InductorPass
 from .pass_manager import PostGradPassManager
 
 logger = init_logger(__name__)
+tracer = get_tracer(__name__)
 
 
 def make_compiler(compilation_config: CompilationConfig) -> CompilerInterface:
@@ -433,6 +435,7 @@ class VllmBackend:
                 self.post_grad_pass_manager.add(inductor_config[PASS_KEY])
         inductor_config[PASS_KEY] = self.post_grad_pass_manager
 
+    @tracer.start_as_current_span("vllm.engine_core.torch_compile")
     def __call__(self, graph: fx.GraphModule, example_inputs) -> Callable:
 
         vllm_config = self.vllm_config
@@ -606,5 +609,10 @@ class VllmBackend:
                 # replace the tensor in the list_args to the static buffer
                 list_args[index] = static_tensor
             return self.split_gm(*list_args)
+
+        set_span_attributes({
+            'torch_compile.cache_dir':
+            self.compilation_config.cache_dir,
+        })
 
         return copy_and_call
