@@ -77,8 +77,13 @@ class MsgpackEncoder:
             # top-level encoded buffer instead of copying their data into the
             # new buffer.
             return bufs
+        # Add serialization error handling to alert the user
+        except TypeError as e:
+            print(f"Fatal error {e} !!")
+            exit(-1)
         finally:
             self.aux_buffers = None
+
 
     def encode_into(self, obj: Any, buf: bytearray) -> Sequence[bytestr]:
         try:
