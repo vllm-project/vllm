@@ -113,7 +113,7 @@ A code example can be found here: <gh-file:examples/offline_inference/basic/scor
 
 ## Online Serving
 
-Our [OpenAI-Compatible Server][openai-compatible-server] provides endpoints that correspond to the offline APIs:
+Our [OpenAI-Compatible Server][serving-openai-compatible-server] provides endpoints that correspond to the offline APIs:
 
 - [Pooling API][pooling-api] is similar to `LLM.encode`, being applicable to all types of pooling models.
 - [Embeddings API][embeddings-api] is similar to `LLM.embed`, accepting both text and [multi-modal inputs][multimodal-inputs] for embedding models.
