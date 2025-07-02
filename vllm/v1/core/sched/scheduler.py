@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import itertools
+import random
 import time
 from collections import defaultdict
 from collections.abc import Iterable
-from typing import Any, Optional, Union
+from typing import Any, Optional, Union, Tuple
+from functools import reduce
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import EventPublisherFactory, KVEventBatch
@@ -161,6 +163,37 @@ class Scheduler(SchedulerInterface):
             enable_kv_cache_events=self.enable_kv_cache_events,
         )
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
+        
+    def get_throttling_token_budget(self) -> Tuple:
+        # NOTE(guoty) Token Throttling
+        # Reference: https://arxiv.org/abs/2504.14775 
+        # Code: https://github.com/gty111/gLLM
+        
+        # hyperparameters
+        # TODO: make them pass in config
+        iterp = 8
+        kv_thresh = 0.1
+        
+        # system states
+        num_prefill_tokens = reduce(lambda num_acc, req: num_acc + req.num_prompt_tokens - req.num_computed_tokens, self.waiting, 0)
+        kv_free = 1 - self.kv_cache_manager.usage
+        num_decode_tokens = len(self.running)
+        pp_size = self.parallel_config.pipeline_parallel_size
+        
+        # prefill token budget
+        prefill_ratio = max(0, (kv_free - kv_thresh) / (1 - kv_thresh))
+        prefill_token_budget = min(self.max_num_scheduled_tokens * prefill_ratio, num_prefill_tokens // iterp)
+        prefill_token_budget = int(prefill_token_budget)
+        
+        # decode token budget
+        if num_decode_tokens < pp_size:
+            decode_token_budget = 1
+        else:
+            decode_token_budget = (num_decode_tokens + random.randint(0, pp_size-1)) // pp_size
+        decode_token_budget = int(decode_token_budget)
+        
+        # print(f'P:{prefill_token_budget} D:{decode_token_budget} WP:{num_prefill_tokens} RD:{num_decode_tokens} KV:{kv_free}')
+        return prefill_token_budget, decode_token_budget
 
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
@@ -199,8 +232,13 @@ class Scheduler(SchedulerInterface):
         # For logging.
         scheduled_timestamp = time.monotonic()
 
+        # Token Throttling 
+        if self.use_pp:
+            prefill_token_budget, decode_token_budget = self.get_throttling_token_budget()
+
         # First, schedule the RUNNING requests.
         req_index = 0
+        token_budget = decode_token_budget if self.use_pp else token_budget
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
 
@@ -331,6 +369,7 @@ class Scheduler(SchedulerInterface):
         skipped_waiting_requests = create_request_queue(self.policy)
 
         # Next, schedule the WAITING requests.
+        token_budget = prefill_token_budget if self.use_pp else token_budget
         if not preempted_reqs:
             while self.waiting and token_budget > 0:
                 if len(self.running) == self.max_num_running_reqs:
