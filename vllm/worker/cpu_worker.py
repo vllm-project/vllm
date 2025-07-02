@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """A CPU worker class."""
 import os
+import platform
 from importlib import util
 from typing import List, Optional, Set, Tuple, Type
 
@@ -161,9 +162,11 @@ class CPUWorker(LocalOrDistributedWorkerBase):
         if omp_cpuids == "auto":
             arch = platform.machine()
             if arch == "ppc64le":
-                self.local_omp_cpuid = self.get_cpus_id_binding_based_on_numa_nodes_ppc64le()
+                self.local_omp_cpuid = self.get_cpus_id_binding_based_on_numa_nodes_ppc64le(
+                )
             else:
-                self.local_omp_cpuid = self.get_cpus_id_binding_based_on_numa_nodes()
+                self.local_omp_cpuid = self.get_cpus_id_binding_based_on_numa_nodes(
+                )
         else:
             self.local_omp_cpuid = omp_cpuids.split("|")[rank]
 
@@ -452,10 +455,14 @@ class CPUWorker(LocalOrDistributedWorkerBase):
                 "please try to manually bind threads.")
         return rank_to_cpus
 
-     def get_cpus_id_binding_based_on_numa_nodes_ppc64le(self) -> str:
-        """ppc64le-specific: Always select CPUs whose id % 8 < 4 (first 4 threads per core), robust to SMT mode."""
-        def select_first_4_of_each_power_core(node_cpu_ids):
-            # Select CPUs whose id % 8 is in {0,1,2,3}
+    def get_cpus_id_binding_based_on_numa_nodes_ppc64le(self) -> str:
+        """
+        Power (ppc64le) specific: Selects a subset of threads per core for each NUMA node.
+        This is robust to SMT mode (SMT-8, SMT-4, etc) because the OS only exposes available threads.
+        This maximizes performance by avoiding oversubscription of logical CPUs on Power systems.
+        """
+
+        def select_threads_per_power_core(node_cpu_ids):
             return [cpu for cpu in node_cpu_ids if cpu % 8 < 4]
 
         rank_to_cpus = self.local_omp_cpuid
@@ -470,7 +477,8 @@ class CPUWorker(LocalOrDistributedWorkerBase):
 
             node_to_cpus = []
             for i in range(numa_size):
-                node_intersect = set(info.node_to_cpus(i)).intersection(cpus_allow_list)
+                node_intersect = set(
+                    info.node_to_cpus(i)).intersection(cpus_allow_list)
                 if bool(node_intersect):
                     node_to_cpus.append(sorted(list(node_intersect)))
 
@@ -483,8 +491,8 @@ class CPUWorker(LocalOrDistributedWorkerBase):
                     len(node_to_cpus))
             else:
                 node_cpus_this_rank = node_to_cpus[self.rank]
-                # Always select CPUs whose id % 8 < 4 (first 4 threads per core)
-                node_cpus_this_rank = select_first_4_of_each_power_core(node_cpus_this_rank)
+                node_cpus_this_rank = select_threads_per_power_core(
+                    node_cpus_this_rank)
                 cpu_count_per_numa = len(node_cpus_this_rank)
                 num_of_reserved_cpu = min(envs.VLLM_CPU_NUM_OF_RESERVED_CPU,
                                           cpu_count_per_numa // 2)
@@ -499,4 +507,3 @@ class CPUWorker(LocalOrDistributedWorkerBase):
                 "fallback to no thread-binding. To get better performance,"
                 "please try to manually bind threads.")
         return rank_to_cpus
-
