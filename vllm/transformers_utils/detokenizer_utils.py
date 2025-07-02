@@ -20,21 +20,17 @@ def _convert_tokens_to_string_with_added_encoders(
 ) -> str:
     # Adapted from
     # https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/tokenization_utils.py#L921
+    # NOTE(woosuk): The following code is slow because it runs a for loop over
+    # the output_tokens. In Python, running a for loop over a list can be slow
+    # even when the loop body is very simple.
     # Performance improvements: avoid repeated attribute and function lookups;
-    # localize frequently used objects; avoid growing intermediate lists unnecessarily.
-    convert_tokens_to_string = tokenizer.convert_tokens_to_string
-    all_special_tokens_s = tokenizer.all_special_tokens
-    added_vocab = tokenizer.get_added_vocab()
-    # Precompute set for O(1) lookups and avoid recreating them in the loop
-    all_special_tokens = (
-        set(all_special_tokens_s) if skip_special_tokens else ()
-    )
-    added_vocab_set = set(
-        added_vocab
-    )  # keys of dict[str,int]: the added tokens
+    # localize frequently used objects;
 
-    sub_texts = []
-    current_sub_text = []
+    sub_texts: list[str] = []
+    current_sub_text: list[str] = []
+    convert_tokens_to_string = tokenizer.convert_tokens_to_string
+    added_vocab_set = set(tokenizer.get_added_vocab())
+    all_special_tokens = set(tokenizer.all_special_tokens) if skip_special_tokens else ()
 
     for token in output_tokens:
         # Use precomputed set for skip-special check
@@ -49,12 +45,9 @@ def _convert_tokens_to_string_with_added_encoders(
             current_sub_text.append(token)
     if current_sub_text:
         sub_texts.append(convert_tokens_to_string(current_sub_text))
-    # Use join in place, no need to test length since sub_texts may be empty.
-    return (
-        (" ".join(sub_texts))
-        if spaces_between_special_tokens
-        else ("".join(sub_texts))
-    )
+    if spaces_between_special_tokens:
+        return " ".join(sub_texts)
+    return "".join(sub_texts)
 
 
 # 5 is an arbitrary value that should work for all
