@@ -686,10 +686,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
         if "tool_choice" not in data and data.get("tools"):
             data["tool_choice"] = "auto"
 
-        # if "tool_choice" is "none" -- ignore tools if present
+        # if "tool_choice" is "none" -- no validation is needed for tools
         if "tool_choice" in data and data["tool_choice"] == "none":
-            # ensure that no tools are present
-            data.pop("tools", None)
             return data
 
         # if "tool_choice" is specified -- validation
@@ -1750,12 +1748,11 @@ class TranscriptionRequest(OpenAIBaseModel):
     timestamps incurs additional latency.
     """
 
-    # --8<-- [start:transcription-extra-params]
     stream: Optional[bool] = False
-    """Custom field not present in the original OpenAI definition. When set,
-    it will enable output to be streamed in a similar fashion as the Chat
-    Completion endpoint.
+    """When set, it will enable output to be streamed in a similar fashion 
+    as the Chat Completion endpoint.
     """
+    # --8<-- [start:transcription-extra-params]
     # Flattened stream option to simplify form data.
     stream_include_usage: Optional[bool] = False
     stream_continuous_usage_stats: Optional[bool] = False
