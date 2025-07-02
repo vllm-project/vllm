@@ -9,6 +9,7 @@ import torch
 from vllm.attention import Attention
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig, VllmConfig, set_current_vllm_config)
+from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.utils import GiB_bytes
 from vllm.v1.core.kv_cache_utils import (estimate_max_model_len,
@@ -23,7 +24,7 @@ from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 BLOCK_SIZE = 16
 NUM_BLOCKS = 10
-DEVICE = "cuda"
+DEVICE = current_platform.device_type
 
 
 def initialize_kv_cache(runner: GPUModelRunner):
@@ -172,7 +173,7 @@ def _is_req_state_block_table_match(model_runner, req_id: str) -> bool:
             req_state.block_ids[0]).all()
 
 
-def test_update_states_new_request(model_runner):
+def test_update_states_new_request(model_runner, dist_init):
     req_id = "req_0"
 
     # new req
@@ -186,7 +187,7 @@ def test_update_states_new_request(model_runner):
     assert _is_req_state_block_table_match(model_runner, req_id)
 
 
-def test_update_states_request_finished(model_runner):
+def test_update_states_request_finished(model_runner, dist_init):
     req_id = "req_0"
 
     # new req
@@ -218,7 +219,7 @@ def test_update_states_request_finished(model_runner):
     assert not _is_req_scheduled(model_runner, req_id)
 
 
-def test_update_states_request_resumed(model_runner):
+def test_update_states_request_resumed(model_runner, dist_init):
     req_id = "req_0"
 
     # new req
@@ -278,7 +279,7 @@ def test_update_states_request_resumed(model_runner):
     assert _is_req_state_block_table_match(model_runner, req_id)
 
 
-def test_get_nans_in_logits(model_runner):
+def test_get_nans_in_logits(model_runner, dist_init):
     req_ids = ("req_0", "req_1")
 
     scheduler_output = _schedule_new_request(*req_ids)
@@ -326,7 +327,7 @@ def test_get_nans_in_logits(model_runner):
     assert result == {'req_0': 2, 'req_1': 0}
 
 
-def test_update_states_no_changes(model_runner):
+def test_update_states_no_changes(model_runner, dist_init):
     req_id = "req_0"
 
     # new req
@@ -359,7 +360,7 @@ def test_update_states_no_changes(model_runner):
     assert _is_req_state_block_table_match(model_runner, req_id)
 
 
-def test_update_states_request_unscheduled(model_runner):
+def test_update_states_request_unscheduled(model_runner, dist_init):
     req_ids = ("req_0", "req_1")
 
     # new reqs

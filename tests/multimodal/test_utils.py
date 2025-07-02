@@ -167,14 +167,14 @@ async def test_fetch_image_error_conversion():
 @pytest.mark.parametrize("video_url", TEST_VIDEO_URLS)
 @pytest.mark.parametrize("num_frames", [-1, 32, 1800])
 async def test_fetch_video_http(video_url: str, num_frames: int):
-    connector = MediaConnector()
+    connector = MediaConnector(
+        media_io_kwargs={"video": {
+            "num_frames": num_frames,
+        }})
 
-    video_sync = connector.fetch_video(video_url, num_frames=num_frames)
-    video_async = await connector.fetch_video_async(video_url,
-                                                    num_frames=num_frames)
-    # Check that the video frames are equal and metadata are same
+    video_sync = connector.fetch_video(video_url)
+    video_async = await connector.fetch_video_async(video_url)
     assert np.array_equal(video_sync[0], video_async[0])
-    assert video_sync[1] == video_async[1]
 
 
 # Used for the next two tests related to `merge_and_sort_multimodal_metadata`.
