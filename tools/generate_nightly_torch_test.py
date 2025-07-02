@@ -24,12 +24,23 @@ with open(input_file) as f:
 
 skip_next = False
 
+filtered_lines = []
+skip_next = False
+
 for line in lines:
+    stripped = line.strip()
+
     if skip_next:
-        if line.startswith((" ", "\t")) or line.strip() == "":
+        if line.startswith((" ", "\t")) or stripped == "":
+            # Skip continuation lines
             continue
         skip_next = False
 
-    if any(k in line.lower() for k in white_list):
+    if any(pkg in stripped.lower() for pkg in white_list):
         skip_next = True
         continue
+
+    filtered_lines.append(line)
+
+with open(output_file, "w") as f:
+    f.writelines(filtered_lines)
