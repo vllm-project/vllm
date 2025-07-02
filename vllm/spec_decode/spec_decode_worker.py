@@ -1276,7 +1276,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         if not self.proposer_worker.pard:
             assert all(vocab_sizes[0] == vocab_size
                        for vocab_size in vocab_sizes)
-        return vocab_sizes[0]
+        return vocab_sizes[1]
 
     @property
     def rank(self):
