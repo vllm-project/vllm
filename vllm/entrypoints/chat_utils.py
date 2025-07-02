@@ -538,9 +538,6 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
 
         self._items_by_modality[modality].append(item)
 
-        if modality in self._model_config.mm_placeholder_str_override:
-            return self._model_config.mm_placeholder_str_override[modality]
-
         return model_cls.get_placeholder_str(modality, current_count)
 
     @abstractmethod
