@@ -137,6 +137,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
             handle = all2all_manager.get_handle(all_to_all_args)
             prepare_finalize = DeepEPHTPrepareAndFinalize(
                 handle,
+                rank=all2all_manager.rank,
                 dp_size=all2all_manager.dp_world_size,
                 rank_expert_offset=all2all_manager.rank *
                 moe.num_local_experts,
@@ -240,18 +241,12 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
         assert self.fused_experts == fused_experts
 
-        all2all_manager = get_ep_group().device_communicator.all2all_manager
-        assert all2all_manager is not None
-
         if (prepare_finalize.activation_format ==
                 FusedMoEActivationFormat.BatchedExperts):
             logger.debug("BatchedTritonExperts %s", self.moe)
-            assert self.moe.dp_size == all2all_manager.dp_world_size
             return BatchedTritonExperts(
                 max_num_tokens=self.moe.max_num_tokens,
-                world_size=all2all_manager.world_size,
-                # dp_size actually means tp_size, bug in pplx kernels
-                dp_size=all2all_manager.tp_group.world_size,
+                num_dispatchers=self.moe.num_dispatchers,
             )
         else:
             logger.debug("TritonExperts %s", self.moe)
