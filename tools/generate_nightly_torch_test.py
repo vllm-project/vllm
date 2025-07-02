@@ -7,7 +7,7 @@ This script reads the main test requirements input file (`requirements/test.in`)
 and splits its content into two files:
 1.  `requirements/nightly_torch_test.txt`: Contains dependencies
 except PyTorch-related.
-2.  `torch_nightly_test.txt`: Contains only PyTorch-related packages.
+2.  `nightly_torch_test.txt.txt`: Contains only PyTorch-related packages.
 """
 
 input_file = "requirements/test.in"
@@ -16,7 +16,7 @@ output_file = "requirements/nightly_torch_test.txt"
 # white list of packages that are not compatible with PyTorch nightly directly
 # with pip install. Please add your package to this list if it is not compatible
 # or make the dependency test fails. If you find the compatibile version, put
-# it in the torch_nightly_test_manual.txt.
+# it in the nightly_torch_test_manual.txt.
 white_list = ["torch", "torchaudio", "torchvision"]
 
 with open(input_file) as f:
