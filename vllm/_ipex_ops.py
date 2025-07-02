@@ -270,6 +270,7 @@ class ipex_ops:
         q_descale=None,
         k_descale=None,
         v_descale=None,
+        num_splits=0,
     ):
         if cu_seqlens_k is None:
             # cu_seqlens_k is not used in ipex kernel.
