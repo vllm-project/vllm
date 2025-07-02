@@ -134,14 +134,14 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 do_recv=not send,
             )
 
-        # yield_and_switch_from_compute_to_comm_impl(schedule="default")
+        yield_and_switch_from_compute_to_comm_impl(schedule="default")
         dispatch(True)  # Send
         # torch.cuda.synchronize()
         # print(f"{ubatch_id} AFTER SEND SYNC", flush=True)
         dispatch(False)  # Recv
         # torch.cuda.synchronize()
         # print(f"{ubatch_id} AFTER RECV SYNC", flush=True)
-        # yield_and_switch_from_comm_to_compute_impl(schedule="default")
+        yield_and_switch_from_comm_to_compute_impl(schedule="default")
         # torch.cuda.synchronize()
         if expert_x_scale is not None:
             expert_x_scale = expert_x_scale[:, :, 0:1]
@@ -185,11 +185,11 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 do_recv=not send,
             )
 
-        # yield_and_switch_from_compute_to_comm_impl(schedule="default")
+        yield_and_switch_from_compute_to_comm_impl(schedule="default")
         combine(True)
         # torch.cuda.synchronize()
         # print(f"{ubatch_id} AFTER COMBINE SEND SYNC", flush=True)
         combine(False)
         # print(f"{ubatch_id} AFTER COMBINE RECV SYNC", flush=True)
-        # yield_and_switch_from_comm_to_compute_impl(schedule="default")
+        yield_and_switch_from_comm_to_compute_impl(schedule="default")
         # torch.cuda.synchronize()
