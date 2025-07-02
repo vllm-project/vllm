@@ -99,9 +99,7 @@ class ReqMeta:
     remote_port: int
     remote_engine_id: str
     tp_size: int
-    do_remote_prefill: bool = False
-    do_remote_decode: bool = False
-    # NOTE: needed when use_host_buffer is true.
+    # NOTE: needed when host_xfer_buffer is used.
     do_save_to_host: bool = False
     do_load_to_device: bool = False
 
@@ -127,8 +125,6 @@ class NixlConnectorMetadata(KVConnectorMetadata):
             remote_port=kv_transfer_params["remote_port"],
             # P workers don't need to receive tp_size from proxy here.
             tp_size=kv_transfer_params.get("tp_size", 1),
-            do_remote_prefill=kv_transfer_params["do_remote_prefill"],
-            do_remote_decode=kv_transfer_params["do_remote_decode"],
             do_save_to_host=do_save_to_host,
             do_load_to_device=do_load_to_device,
         )
@@ -346,13 +342,14 @@ class NixlConnectorScheduler:
                 do_load_to_device=self.use_host_buffer,
             )
 
+        # NOTE: only needed when use_host_buffer is true.
         for req_id, (req, block_ids) in self._reqs_need_save.items():
             assert req.kv_transfer_params is not None
             meta.add_new_req(
                 request_id=req_id,
                 local_block_ids=block_ids,
                 kv_transfer_params=req.kv_transfer_params,
-                do_save_to_host=self.use_host_buffer,
+                do_save_to_host=True,
             )
 
         # Clear the list once workers start the transfers
@@ -988,34 +985,26 @@ class NixlConnectorWorker:
 
         return remote_agent_name
 
-    def sync_recved_kv_to_device(self,
-                                 req_id: str,
-                                 meta: Optional[ReqMeta] = None):
+    def sync_recved_kv_to_device(self, req_id: str, meta: ReqMeta):
         """copy recved kv from host buffer to device."""
-        if not self.use_host_buffer:
-            return
+        assert self.use_host_buffer
         assert self.copy_blocks is not None
+        assert req_id not in self._recving_transfers
+        if not meta.do_load_to_device:
+            return
 
-        if meta is None:
-            meta = self._recving_metadata.get(req_id)
-        if meta and req_id not in self._recving_transfers:
-            # local decode only
-            if not meta.do_load_to_device:
-                return
-            local_block_ids = meta.local_block_ids
-            self.copy_blocks(self.host_xfer_buffers, self.device_kv_caches,
-                             local_block_ids, local_block_ids, "h2d")
-            if logger.isEnabledFor(logging.DEBUG):
-                logger.debug(
-                    "synced recved kv of request[%s] to device kv buffer,"
-                    "local_block_ids: %s. ", req_id,
-                    ",".join(map(str, meta.local_block_ids)))
-        return
+        local_block_ids = meta.local_block_ids
+        self.copy_blocks(self.host_xfer_buffers, self.device_kv_caches,
+                         local_block_ids, local_block_ids, "h2d")
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "synced recved kv of request[%s] to device kv buffer,"
+                "local_block_ids: %s. ", req_id,
+                ",".join(map(str, meta.local_block_ids)))
 
     def save_kv_to_host(self, metadata: NixlConnectorMetadata):
         """copy kv from device to host buffer."""
-        if not self.use_host_buffer:
-            return
+        assert self.use_host_buffer
         assert self.copy_blocks is not None
 
         for req_id, meta in metadata.requests.items():
@@ -1030,7 +1019,6 @@ class NixlConnectorWorker:
             # blocking
             self.copy_blocks(self.device_kv_caches, self.host_xfer_buffers,
                              meta.local_block_ids, meta.local_block_ids, "d2h")
-        return
 
     def get_finished(self) -> tuple[set[str], set[str]]:
         """
@@ -1164,7 +1152,8 @@ class NixlConnectorWorker:
                 "Num local_block_ids: %s. Num remote_block_ids: %s. ", req_id,
                 remote_engine_id, len(meta.local_block_ids),
                 len(meta.remote_block_ids))
-            self._recving_metadata[req_id] = meta
+            if self.use_host_buffer:
+                self._recving_metadata[req_id] = meta
             if remote_engine_id not in self._remote_agents:
                 # Initiate handshake with remote engine to exchange metadata.
                 with self._handshake_lock:
