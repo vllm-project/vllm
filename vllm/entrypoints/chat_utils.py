@@ -507,6 +507,9 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
 
     def _placeholder_str(self, modality: ModalityStr,
                          current_count: int) -> Optional[str]:
+        if modality in self._model_config.mm_placeholder_str_override:
+            return self._model_config.mm_placeholder_str_override[modality]
+
         # TODO: Let user specify how to insert image tokens into prompt
         # (similar to chat template)
         hf_config = self._model_config.hf_config
@@ -537,7 +540,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
                 return "<image>"
             if model_type in ("mllama", "llama4"):
                 return "<|image|>"
-            if model_type in ("qwen2_vl", "qwen2_5_vl"):
+            if model_type in ("qwen2_vl", "qwen2_5_vl", "keye", "Keye"):
                 return "<|vision_start|><|image_pad|><|vision_end|>"
             if model_type == "qwen2_5_omni":
                 return "<|vision_start|><|IMAGE|><|vision_end|>"
@@ -567,7 +570,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
                 return "<video>"
             if model_type == "glm4v":
                 return "<|begin_of_video|><|video|><|end_of_video|>"
-            if model_type in ("qwen2_vl", "qwen2_5_vl"):
+            if model_type in ("qwen2_vl", "qwen2_5_vl", "keye", "Keye"):
                 return "<|vision_start|><|video_pad|><|vision_end|>"
             if model_type == "qwen2_5_omni":
                 return "<|vision_start|><|VIDEO|><|vision_end|>"
@@ -725,6 +728,7 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         self._tracker = tracker
 
         self._connector = MediaConnector(
+            media_io_kwargs=self._tracker._model_config.media_io_kwargs,
             allowed_local_media_path=tracker.allowed_local_media_path,
         )
 
@@ -763,7 +767,7 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         return self.parse_audio(audio_url)
 
     def parse_video(self, video_url: str) -> None:
-        video = self._connector.fetch_video(video_url)
+        video = self._connector.fetch_video(video_url=video_url)
 
         placeholder = self._tracker.add("video", video)
         self._add_placeholder(placeholder)
@@ -776,7 +780,8 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
 
         self._tracker = tracker
         self._connector = MediaConnector(
-            allowed_local_media_path=tracker.allowed_local_media_path,
+            media_io_kwargs=self._tracker._model_config.media_io_kwargs,
+            allowed_local_media_path=tracker.allowed_local_media_path
         )
 
     def parse_image(self, image_url: str) -> None:
@@ -818,7 +823,7 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         return self.parse_audio(audio_url)
 
     def parse_video(self, video_url: str) -> None:
-        video = self._connector.fetch_video_async(video_url)
+        video = self._connector.fetch_video_async(video_url=video_url)
 
         placeholder = self._tracker.add("video", video)
         self._add_placeholder(placeholder)

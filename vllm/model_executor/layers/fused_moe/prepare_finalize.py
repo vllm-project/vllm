@@ -5,6 +5,7 @@ from typing import Optional
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import (
     _moe_unpermute_and_reduce)
 from vllm.model_executor.layers.fused_moe.utils import (
@@ -13,16 +14,9 @@ from vllm.model_executor.layers.fused_moe.utils import (
 
 class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
 
-    def __init__(
-        self,
-        quant_dtype: Optional[torch.dtype] = None,
-        per_channel_quant: bool = False,
-        block_shape: Optional[list[int]] = None,
-    ):
-        super().__init__()
-        self.per_channel_quant = per_channel_quant
-        self.block_shape = block_shape
-        self.quant_dtype = quant_dtype
+    @property
+    def activation_format(self) -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.Standard
 
     def max_num_tokens_per_rank(self) -> Optional[int]:
         return None
@@ -39,7 +33,8 @@ class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
         topk_ids: torch.Tensor,
         num_experts: int,
         expert_map: Optional[torch.Tensor],
-        apply_router_weight_on_input: bool = False,
+        apply_router_weight_on_input: bool,
+        quant_config: FusedMoEQuantConfig,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor],
                Optional[torch.Tensor], Optional[torch.Tensor]]:
 
@@ -50,10 +45,9 @@ class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
                 "apply_router_weight_on_input is only implemented for topk=1"
             a1.mul_(topk_weights.to(a1.dtype))
 
-        a1q, a1q_scale = moe_kernel_quantize_input(a1, a1_scale,
-                                                   self.quant_dtype,
-                                                   self.per_channel_quant,
-                                                   self.block_shape)
+        a1q, a1q_scale = moe_kernel_quantize_input(
+            a1, a1_scale, quant_config.quant_dtype,
+            quant_config.per_act_token_quant, quant_config.block_shape)
 
         return a1q, a1q_scale, None, None, None
 
