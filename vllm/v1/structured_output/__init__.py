@@ -61,8 +61,7 @@ class StructuredOutputManager:
                 self.reasoner = reasoner_cls(tokenizer=self.tokenizer)
 
     def grammar_init(self, request: Request) -> None:
-        if request.structured_output_request is None or \
-            self.vllm_config.model_config.skip_tokenizer_init:
+        if request.structured_output_request is None:
             return
 
         if TYPE_CHECKING:
@@ -119,8 +118,7 @@ class StructuredOutputManager:
         scheduled_spec_decode_tokens: dict[str, list[int]],
     ) -> Optional[npt.NDArray[np.int32]]:
         # Prepare the structured output bitmask for this batch.
-        if not structured_output_request_ids \
-            or self.vllm_config.model_config.skip_tokenizer_init:
+        if not structured_output_request_ids:
             return None
 
         max_num_spec_tokens = 0
@@ -198,8 +196,7 @@ class StructuredOutputManager:
         return bitmask_tensor.numpy()
 
     def should_advance(self, request: Request) -> bool:
-        if not request.use_structured_output \
-            or self.vllm_config.model_config.skip_tokenizer_init:
+        if not request.use_structured_output:
             return False
 
         # To determine whether we can advance the FSM.
