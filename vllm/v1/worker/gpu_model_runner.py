@@ -63,12 +63,12 @@ from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.medusa import MedusaProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
-from vllm.v1.spec_decode.utils import is_spec_decode_supported
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.block_table import BlockTable
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
+from ..sample.logits_processor import LogitsProcessorManager
 from .utils import (gather_mm_placeholders, initialize_kv_cache_for_kv_sharing,
                     sanity_check_mm_encoder_outputs, scatter_mm_placeholders)
 
@@ -212,6 +212,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             pin_memory=self.pin_memory,
             vocab_size=self.model_config.get_vocab_size(),
             block_sizes=[self.cache_config.block_size],
+            is_spec_decode=bool(self.vllm_config.speculative_config),
         )
 
         self.use_cuda_graph = (
@@ -316,7 +317,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # from the KV cache of `shared_kv_cache_layers[layer_name]`.
         self.shared_kv_cache_layers: dict[str, str] = {}
 
-    def _may_reorder_batch(self, scheduler_output: "SchedulerOutput") -> bool:
+    def _may_reorder_batch(self, scheduler_output: "SchedulerOutput") -> None:
         """
         Update the order of requests in the batch based on the attention
         backend's needs. For example, some attention backends (namely MLA) may
@@ -325,21 +326,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         Args:
             scheduler_output: The scheduler output.
-
-        Returns:
-            True if the batch was reordered, False otherwise.
         """
-        batch_reordered = self.attn_metadata_builders[0].reorder_batch(
-            self.input_batch, scheduler_output)
+        self.attn_metadata_builders[0].reorder_batch(self.input_batch,
+                                                     scheduler_output)
 
         # For models with multiple KV cache groups, the groups should agree on
         # the same order of requests. We ensure this by only allowing the first
         # group to reorder the batch and asserting that all other groups do not
         # reorder the batch.
         for i in range(1, len(self.kv_cache_config.kv_cache_groups)):
-            assert not self.attn_metadata_builders[i].reorder_batch(
+            batch_reordered = self.attn_metadata_builders[i].reorder_batch(
                 self.input_batch, scheduler_output)
-        return batch_reordered
+            assert not batch_reordered
 
     # Note: used for model runner override.
     def _init_device_properties(self) -> None:
@@ -372,11 +370,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # then resubmitted with the same ID. In this case, we treat them as two
         # distinct requests - clearing the cached states for the first request
         # and handling the second as a new request.
-        removed_req_indices: list[int] = []
         for req_id in scheduler_output.finished_req_ids:
-            req_index = self.input_batch.remove_request(req_id)
-            if req_index is not None:
-                removed_req_indices.append(req_index)
+            self.input_batch.remove_request(req_id)
 
         # Free the cached encoder outputs.
         for req_id, input_id in scheduler_output.free_encoder_input_ids:
@@ -399,9 +394,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # have low request overlap (e.g., alternating between two distinct
         # sets of requests), this optimization becomes very inefficient.
         for req_id in unscheduled_req_ids:
-            req_index = self.input_batch.remove_request(req_id)
-            assert req_index is not None
-            removed_req_indices.append(req_index)
+            self.input_batch.remove_request(req_id)
 
         req_ids_to_add: list[str] = []
         # Add new requests to the cached states.
@@ -545,31 +538,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 # NOTE(woosuk): `num_tokens` here may include spec tokens.
                 self.input_batch.num_tokens[req_index] = end_token_index
 
-        # Check if the batch has changed. If not, we can skip copying the
-        # sampling metadata from CPU to GPU.
-        batch_changed = len(removed_req_indices) > 0 or len(req_ids_to_add) > 0
-
         # Add the new or resumed requests to the persistent batch.
         # The smaller empty indices are filled first.
-        removed_req_indices.sort(reverse=True)
         for req_id in req_ids_to_add:
             req_state = self.requests[req_id]
-            if removed_req_indices:
-                # Fill the empty index.
-                req_index = removed_req_indices.pop()
-            else:
-                # Append to the end.
-                req_index = None
-            self.input_batch.add_request(req_state, req_index)
+            self.input_batch.add_request(req_state)
 
-        # Condense the batched states if there are empty indices.
-        if removed_req_indices:
-            self.input_batch.condense(removed_req_indices)
-
-        batch_reordered = self._may_reorder_batch(scheduler_output)
-
-        if batch_changed or batch_reordered:
-            self.input_batch.refresh_sampling_metadata()
+        # Condense the batched states if there are gaps left by removed requests
+        self.input_batch.condense()
+        # Allow attention backend to reorder the batch, potentially
+        self._may_reorder_batch(scheduler_output)
+        # Refresh batch metadata with any pending updates.
+        self.input_batch.refresh_metadata()
 
     def _get_cumsum_and_arange(
         self,
@@ -1296,7 +1276,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> Union[ModelRunnerOutput, IntermediateTensors]:
-
         self._update_states(scheduler_output)
         if not scheduler_output.total_num_scheduled_tokens:
             if not has_kv_transfer_group():
@@ -1765,7 +1744,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Skip requests that require sampling parameters that are not
             # supported with speculative decoding.
             req_id = self.input_batch.req_ids[i]
-            if not is_spec_decode_supported(req_id, self.input_batch):
+            if req_id in self.input_batch.spec_decode_unsupported_reqs:
                 draft_token_ids.append([])
                 continue
 
@@ -2121,7 +2100,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             all_random=False,
             top_p=dummy_tensors(0.9),
             top_k=dummy_tensors(logits.size(1) - 1),
-            min_p=None,
             generators={},
             max_num_logprobs=None,
             no_penalties=True,
@@ -2130,10 +2108,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             presence_penalties=dummy_tensors(0.1),
             repetition_penalties=dummy_tensors(0.1),
             output_token_ids=[[] for _ in range(num_reqs)],
-            min_tokens={},
-            logit_bias=[None for _ in range(num_reqs)],
             allowed_token_ids_mask=None,
             bad_words_token_ids={},
+            logitsprocs=LogitsProcessorManager(),
         )
         try:
             sampler_output = self.sampler(logits=logits,
@@ -2425,6 +2402,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 pin_memory=self.pin_memory,
                 vocab_size=self.model_config.get_vocab_size(),
                 block_sizes=block_sizes,
+                is_spec_decode=bool(self.vllm_config.speculative_config),
             )
 
     def _allocate_kv_cache_tensors(

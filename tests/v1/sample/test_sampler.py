@@ -8,10 +8,13 @@ import pytest
 import torch
 
 from vllm.platforms import current_platform
-from vllm.utils import make_tensor_with_pad
+from vllm.utils import is_pin_memory_available, make_tensor_with_pad
+from vllm.v1.sample.logits_processor import LogitsProcessorManager
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.sampler import Sampler
 
+PIN_MEMORY_AVAILABLE = is_pin_memory_available()
+MAX_NUM_REQS = 256
 VOCAB_SIZE = 1024
 NUM_OUTPUT_TOKENS = 20
 CUDA_DEVICES = [
@@ -46,18 +49,6 @@ def _create_prompt_tokens_tensor(
         dtype=torch.int64,
         pin_memory=False,
     )
-
-
-def _create_logit_bias(
-    batch_size: int,
-    vocab_size: int,
-    bias_value: float,
-) -> list[Optional[dict[int, float]]]:
-    res: list[Optional[dict[int, float]]] = []
-    for i in range(batch_size):
-        logit_bias = {min(i, vocab_size - 1): bias_value}
-        res.append(logit_bias)
-    return res
 
 
 def _create_allowed_token_ids(
@@ -145,7 +136,6 @@ def _create_default_sampling_metadata(
         all_random=False,
         top_p=None,
         top_k=None,
-        min_p=None,
         generators={},
         max_num_logprobs=0,
         prompt_token_ids=_create_prompt_tokens_tensor(prompt_token_ids,
@@ -155,41 +145,11 @@ def _create_default_sampling_metadata(
         presence_penalties=_create_penalty_tensor(batch_size, 0.0, device),
         repetition_penalties=_create_penalty_tensor(batch_size, 1.0, device),
         no_penalties=True,
-        min_tokens={},
-        logit_bias=[None] * batch_size,
         allowed_token_ids_mask=None,
         bad_words_token_ids={},
+        logitsprocs=LogitsProcessorManager(),
     )
     return fake_sampling_metadata
-
-
-def _generate_min_token_penalties_and_stop_tokens(
-    num_output_tokens: int, batch_size: int, vocab_size: int,
-    batch_indices_for_min_token_penalty: list[int]
-) -> dict[int, tuple[int, set[int]]]:
-    """
-    Generates and returns a dict of minimum token penalties and
-    corresponding stop token IDs (`min_tokens`, `stop_token_ids`) for each
-    batch.
-
-    If a batch index is included in `batch_indices_for_min_token_penalty`,
-    a higher `min_tokens` value is assigned (within a randomized range),
-    and a random set of stop token IDs is created. Otherwise, a lower
-    `min_tokens` value is assigned, and the stop token IDs set is empty.
-    """
-    min_tokens: dict[int, tuple[int, set[int]]] = {}
-    for index in range(batch_size):
-        if index in batch_indices_for_min_token_penalty:
-            min_tokens[index] = (
-                np.random.randint(num_output_tokens + 1,
-                                  2 * num_output_tokens),
-                set(
-                    np.random.randint(0, vocab_size - 1)
-                    for _ in range(np.random.randint(0, vocab_size))))
-        else:
-            min_tokens[index] = (np.random.randint(0,
-                                                   num_output_tokens), set())
-    return min_tokens
 
 
 def _create_weighted_output_token_list(
@@ -225,36 +185,6 @@ def _create_weighted_output_token_list(
                 [token_id for _ in range(index + 1)])
         output_token_ids.append(output_token_ids_for_batch)
     return output_token_ids, sorted_token_ids_in_output
-
-
-@pytest.mark.parametrize("device", CUDA_DEVICES)
-@pytest.mark.parametrize("batch_size", [1, 2, 32])
-def test_sampler_min_tokens_penalty(device: str, batch_size: int):
-    """
-    Tests that if the number of output tokens is less than
-    SamplingParams.min_tokens then we will set the logits for
-    the stop token ids to -inf.
-    """
-    torch.set_default_device(device)
-    fake_logits = _create_fake_logits(batch_size, VOCAB_SIZE)
-    sampling_metadata = _create_default_sampling_metadata(
-        NUM_OUTPUT_TOKENS, batch_size, VOCAB_SIZE, torch.device(device))
-    batch_indices_for_min_token_penalty = np.random.randint(
-        0, batch_size - 1, size=np.random.randint(0, batch_size)).tolist()
-    min_tokens = _generate_min_token_penalties_and_stop_tokens(
-        NUM_OUTPUT_TOKENS, batch_size, VOCAB_SIZE,
-        batch_indices_for_min_token_penalty)
-    sampling_metadata.min_tokens = min_tokens
-    sampler = Sampler()
-    logits = sampler.apply_penalties(fake_logits, sampling_metadata)
-    logits = logits.cpu()
-    for batch_idx in range(batch_size):
-        for token_id in range(VOCAB_SIZE):
-            _, stop_token_ids = min_tokens.get(batch_idx, (0, set()))
-            if token_id in stop_token_ids:
-                assert logits[batch_idx][token_id] == -float("inf")
-            else:
-                assert logits[batch_idx][token_id] != -float("inf")
 
 
 @pytest.mark.parametrize("device", CUDA_DEVICES)
@@ -399,80 +329,6 @@ def test_sampler_repetition_penalty(device: str, batch_size: int,
                     and penalized_token_id not in output_tokens)
             assert (non_penalized_token_id in prompt_tokens
                     or non_penalized_token_id in output_tokens)
-
-
-@pytest.mark.parametrize("device", CUDA_DEVICES)
-@pytest.mark.parametrize("batch_size", [1, 2, 32])
-@pytest.mark.parametrize("min_p", [0.0, 0.1])
-def test_sampler_min_p(device: str, batch_size: int, min_p: float):
-    """
-    Tests that when min_p is applied, tokens with probability below 
-    min_p * max_prob are masked with -inf.
-    """
-    torch.set_default_device(device)
-    fake_logits = _create_fake_logits(batch_size, VOCAB_SIZE)
-
-    # Create one dominant token per batch
-    for i in range(batch_size):
-        fake_logits[i, 0] = 10.0  # High logit for first token
-        fake_logits[i, 1:] = 1e-2  # Others remain low
-
-    sampling_metadata = _create_default_sampling_metadata(
-        NUM_OUTPUT_TOKENS, batch_size, VOCAB_SIZE, torch.device(device))
-
-    # Configure min_p parameters
-    sampling_metadata.min_p = torch.full((batch_size, ), min_p, device=device)
-
-    sampler = Sampler()
-    logits = sampler.apply_min_p(fake_logits, sampling_metadata.min_p)
-    logits = logits.cpu()
-
-    for batch_idx in range(batch_size):
-        for token_id in range(VOCAB_SIZE):
-            if token_id == 0:
-                # Dominant token should always be unmasked
-                assert logits[batch_idx][token_id] != -float("inf")
-            else:
-                if min_p > 0.0:
-                    # Non-dominant tokens should be masked when min_p > 0
-                    assert logits[batch_idx][token_id] == -float("inf")
-                else:
-                    # No masking when min_p is 0
-                    assert logits[batch_idx][token_id] != -float("inf")
-
-
-@pytest.mark.parametrize("device", CUDA_DEVICES)
-@pytest.mark.parametrize("batch_size", [1, 2, 32])
-@pytest.mark.parametrize("bias_value", [-0.1, 1.2])
-def test_sampler_logit_bias(device: str, batch_size: int, bias_value: float):
-    """
-    Test to verify that when the repetition penalty is enabled, tokens
-    are penalized based on their presence in the prompt or the existing
-    output.
-    """
-    torch.set_default_device(device)
-    # Create fake logits where each token is assigned the same
-    # logit value.
-    fake_logits = _create_fake_logits(batch_size, VOCAB_SIZE)
-    sampling_metadata = _create_default_sampling_metadata(
-        NUM_OUTPUT_TOKENS, batch_size, VOCAB_SIZE, torch.device(device))
-    sampling_metadata.logit_bias = _create_logit_bias(
-        batch_size=batch_size,
-        vocab_size=VOCAB_SIZE,
-        bias_value=bias_value,
-    )
-    sampler = Sampler()
-    logits = sampler.apply_logits_bias(fake_logits, sampling_metadata)
-    logits = logits.cpu()
-    for batch_idx in range(batch_size):
-        logits_for_req = logits[batch_idx]
-        biased_index = min(batch_idx, VOCAB_SIZE - 1)
-        for token_id in range(VOCAB_SIZE):
-            if biased_index == token_id:
-                assert logits_for_req[token_id] == pytest.approx(bias_value +
-                                                                 1e-2)
-            else:
-                assert logits_for_req[token_id] == pytest.approx(1e-2)
 
 
 @pytest.mark.parametrize("device", CUDA_DEVICES)
