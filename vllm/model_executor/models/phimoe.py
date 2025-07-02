@@ -394,7 +394,7 @@ class PhiMoEDecoderLayer(nn.Module):
             num_heads=config.num_attention_heads,
             max_position=config.max_position_embeddings,
             num_kv_heads=config.num_key_value_heads,
-            head_dim=getattr(config, "head_dim", 
+            head_dim=getattr(config, "head_dim",
                              self.hidden_size // config.num_attention_heads),
             rope_theta=rope_theta,
             cache_config=cache_config,
