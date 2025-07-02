@@ -188,7 +188,7 @@ class Request:
             return None
         events, self.events = self.events, []
         return events
-    
+
     @property
     def computed_prompt(self) -> bool:
         return self.num_computed_tokens >= self.num_prompt_tokens
