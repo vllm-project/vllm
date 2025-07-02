@@ -1,4 +1,4 @@
-# syntax=docker.io/docker/dockerfile:1.17
+# syntax=docker.io/docker/dockerfile:1.2-labs
 # The vLLM Dockerfile is used to construct vLLM image that can be directly used
 # to run the OpenAI compatible server.
 
@@ -16,7 +16,7 @@ ARG PYTHON_VERSION=3.12
 # Example:
 # docker build --build-arg BUILD_BASE_IMAGE=registry.acme.org/mirror/nvidia/cuda:${CUDA_VERSION}-devel-ubuntu20.04
 ARG BUILD_BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-devel-ubuntu20.04
-ARG FINAL_BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04
+ARG FINAL_BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu22.04
 
 # By parameterizing the Deadsnakes repository URL, we allow third-party to use
 # their own mirror. When doing so, we don't benefit from the transparent
@@ -518,3 +518,101 @@ FROM vllm-openai-base AS vllm-openai
 
 ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
 #################### OPENAI API SERVER ####################
+
+# Provide a devel-based run image (with nvcc) for the test stage.
+#################### vLLM DEVEL BASE IMAGE ####################
+FROM base AS vllm-devel-base
+
+WORKDIR /vllm-workspace
+
+# Re-export build-time args needed below
+ARG CUDA_VERSION
+ARG TARGETPLATFORM
+ARG PIP_INDEX_URL UV_INDEX_URL
+ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
+ARG PYTORCH_CUDA_INDEX_BASE_URL
+ARG PYTORCH_CUDA_NIGHTLY_INDEX_BASE_URL
+
+# uv config
+ENV UV_HTTP_TIMEOUT=500
+ENV UV_INDEX_STRATEGY="unsafe-best-match"
+
+# Ensure compatibility libs are discoverable (same workaround as other stages)
+RUN ldconfig /usr/local/cuda-$(echo $CUDA_VERSION | cut -d. -f1,2)/compat/
+
+# Install the vLLM wheel that was built in the previous stage
+COPY --from=build /workspace/dist /vllm-workspace/dist
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system /vllm-workspace/dist/*.whl --verbose \
+        --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
+
+# FlashInfer support (same logic as the runtime image)
+ARG FLASHINFER_CUDA128_INDEX_URL="https://download.pytorch.org/whl/cu128/flashinfer"
+ARG FLASHINFER_CUDA128_WHEEL="flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl"
+ARG FLASHINFER_GIT_REPO="https://github.com/flashinfer-ai/flashinfer.git"
+ARG FLASHINFER_GIT_REF="v0.2.6.post1"
+RUN --mount=type=cache,target=/root/.cache/uv <<EOF
+set -ex
+if [ "$TARGETPLATFORM" != "linux/arm64" ]; then
+    if [[ "$CUDA_VERSION" == 12.8* ]]; then
+        uv pip install --system ${FLASHINFER_CUDA128_INDEX_URL}/${FLASHINFER_CUDA128_WHEEL}
+    else
+        export TORCH_CUDA_ARCH_LIST='7.5 8.0 8.9 9.0a 10.0a 12.0'
+        git clone ${FLASHINFER_GIT_REPO} --single-branch --branch ${FLASHINFER_GIT_REF} --recursive
+        (cd flashinfer && python3 -m flashinfer.aot && uv pip install --system --no-build-isolation .)
+        rm -rf flashinfer
+    fi
+fi
+EOF
+
+#################### TEST IMAGE ####################
+# image to run unit testing suite
+# note that this uses vllm installed by `pip`
+FROM vllm-devel-base AS test
+
+ADD . /vllm-workspace/
+
+ARG PYTHON_VERSION
+
+ARG PIP_INDEX_URL UV_INDEX_URL
+ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
+
+# This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
+# Reference: https://github.com/astral-sh/uv/pull/1694
+ENV UV_HTTP_TIMEOUT=500
+ENV UV_INDEX_STRATEGY="unsafe-best-match"
+
+# Workaround for #17068
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system --no-build-isolation "git+https://github.com/state-spaces/mamba@v2.2.4"
+
+# install development dependencies (for testing)
+RUN --mount=type=cache,target=/root/.cache/uv <<EOF
+set -ex
+CUDA_MAJOR="${CUDA_VERSION%%.*}"
+if [ "$CUDA_MAJOR" -ge 12 ]; then
+    uv pip install --system -r requirements/dev.txt
+fi
+EOF
+
+# install development dependencies (for testing)
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system -e tests/vllm_test_utils
+
+# enable fast downloads from hf (for testing)
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system hf_transfer
+ENV HF_HUB_ENABLE_HF_TRANSFER 1
+
+# Copy in the v1 package for testing (it isn't distributed yet)
+COPY vllm/v1 /usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm/v1
+
+# doc requires source code
+# we hide them inside `test_docs/` , so that this source code
+# will not be imported by other tests
+RUN mkdir test_docs
+RUN mv docs test_docs/
+RUN cp -r examples test_docs/
+RUN mv vllm test_docs/
+RUN mv mkdocs.yaml test_docs/
+#################### TEST IMAGE ####################
