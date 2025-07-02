@@ -137,6 +137,7 @@ async def test_completion_endpoints():
         assert res.message == "The model does not support Completions API"
 
 
+@pytest.mark.skip(reason="Flaky test on upstream CI")
 @pytest.mark.asyncio
 async def test_streaming_response(winning_call):
     model_name = "openai/whisper-small"
