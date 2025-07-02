@@ -34,7 +34,6 @@ from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams
 from vllm.transformers_utils.utils import maybe_model_redirect
-from vllm.utils import cuda_device_count_stateless
 
 logger = init_logger(__name__)
 
@@ -1094,7 +1093,8 @@ def num_gpus_available():
     """Get number of GPUs without initializing the CUDA context
     in current process."""
 
-    return cuda_device_count_stateless()
+    from vllm.platforms import current_platform
+    return current_platform.device_count()
 
 
 temp_dir = tempfile.gettempdir()
