@@ -1149,7 +1149,7 @@ class Llama_Nemotron_Nano_VL_Model(nn.Module, SupportsMultiModal, SupportsPP,
         # https://huggingface.co/nvidia/Llama-3.1-Nemotron-Nano-VL-8B-V1/blob/main/modeling.py#L177
         vit_embeds = self.vision_model(x=pixel_values).features
         vit_embeds = vit_embeds.to(dtype=torch.bfloat16)
-        
+
         h = w = int(vit_embeds.shape[1]**0.5)
         vit_embeds = vit_embeds.reshape(vit_embeds.shape[0], h, w, -1)
         vit_embeds = self.pixel_shuffle(vit_embeds,
@@ -1315,12 +1315,12 @@ class Llama_Nemotron_Nano_VL_Model(nn.Module, SupportsMultiModal, SupportsPP,
         return modalities
 
     def _set_visual_token_mask(self, input_ids: torch.Tensor) -> None:
-        if self.is_mono:
-            assert self.img_context_token_id is not None
-            self.visual_token_mask = (
-                input_ids == self.img_context_token_id).reshape(-1, 1)
-        else:
-            self.visual_token_mask = None
+        # if self.is_mono:
+        #     assert self.img_context_token_id is not None
+        #     self.visual_token_mask = (
+        #         input_ids == self.img_context_token_id).reshape(-1, 1)
+        # else:
+        self.visual_token_mask = None
 
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
@@ -1419,15 +1419,8 @@ class Llama_Nemotron_Nano_VL_Model(nn.Module, SupportsMultiModal, SupportsPP,
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
-        # unused modules appear in OpenGVLab/InternVideo2_5_Chat_8B
-        skip_prefixes = [
-            "action_embed", "temporal_embed", "track_embed",
-            "track_embed_decoder", "box_token", "cg_criterion", "cg_model",
-            "loc_encoder", "loc_decoder", "sam", "temporal_token",
-            "track_token"
-        ]
-        ## khuang ignore these two, which are registered_buffer instead of submodules
-        ## see https://huggingface.co/nvidia/C-RADIOv2-H/blob/main/input_conditioner.py#L28
+        ## khuang ignore these two, which are registered_buffer instead of submodules # noqa: E501
+        ## see https://huggingface.co/nvidia/C-RADIOv2-H/blob/main/input_conditioner.py#L28 # noqa: E501
         skip_substrs = ["norm_mean", "norm_std"]
         loader = AutoWeightsLoader(self, skip_substrs=skip_substrs)
         return loader.load_weights(weights)
