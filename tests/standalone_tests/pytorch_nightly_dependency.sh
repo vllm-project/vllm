@@ -26,6 +26,9 @@ cat before.txt
 echo ">>> Installing requirements/nightly_torch_test.txt"
 uv pip install --quiet -r requirements/nightly_torch_test.txt
 
+echo ">>> Installing requirements/nightly_torch_test_manual.txt"
+uv pip install --quiet -r requirements/nightly_torch_test_manual.txt
+
 echo ">>> Capturing torch-related versions after requirements install"
 uv pip freeze | grep -E '^torch|^torchvision|^torchaudio' | sort > after.txt
 echo "After:"
@@ -35,7 +38,8 @@ echo ">>> Comparing versions"
 if diff before.txt after.txt; then
   echo "torch version not overridden."
 else
-  echo "torch version overridden by nightly_torch_test.txt, \
+  echo "torch version overridden by nightly_torch_test.txt, and user put customized dependencies \
+   in nightly_torch_test_manual\
   if the dependency is not triggered by the pytroch nightly test,\
   please add the dependency to the list 'white_list'  in tools/generate_nightly_torch_test.py"
   exit 1

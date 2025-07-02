@@ -15,7 +15,8 @@ output_file = "requirements/nightly_torch_test.txt"
 
 # white list of packages that are not compatible with PyTorch nightly directly
 # with pip install. Please add your package to this list if it is not compatible
-# or make the dependency test fails.
+# or make the dependency test fails. If you find the compatibile version, put
+# it in the torch_nightly_test_manual.txt.
 white_list = ["torch", "torchaudio", "torchvision", "mamba_ssm"]
 
 with open(input_file) as f:
