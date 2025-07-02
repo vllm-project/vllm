@@ -1049,12 +1049,25 @@ class FusedMoE(torch.nn.Module):
 
         # TODO @dsikka: ModelOpt should follow the proper MoE loading pattern
         if "ModelOpt" in quant_method_name:
-            if ('weight_scale_2' in weight_name
-                    or 'input_scale' in weight_name):
-                self._load_per_tensor_weight_scale(shard_id=shard_id,
-                                                   param=param,
-                                                   loaded_weight=loaded_weight,
-                                                   expert_id=expert_id)
+            # Determine per-tensor weight scale patterns based on variant
+            is_fp4_variant = (
+                "ModelOptNvFp4FusedMoEMethod" in self.quant_method.__class__.__name__
+            )
+
+            # FP4 uses "weight_scale_2" for per-tensor, FP8 uses "weight_scale" for per-tensor
+            per_tensor_conditions = (
+                "weight_scale_2" in weight_name
+                if is_fp4_variant
+                else "weight_scale" in weight_name
+            ) or "input_scale" in weight_name
+
+            if per_tensor_conditions:
+                self._load_per_tensor_weight_scale(
+                    shard_id=shard_id,
+                    param=param,
+                    loaded_weight=loaded_weight,
+                    expert_id=expert_id,
+                )
             elif "weight" in weight_name:
                 self._load_model_weight_or_group_weight_scale(
                     shard_id=shard_id,
