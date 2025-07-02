@@ -169,12 +169,12 @@ class NVSHMEMAllreduce:
         self.nvshmem_allreduce.all_reduce(inp, out)
         return out
 
-    def custom_all_reduce(self, input: torch.Tensor) -> Optional[torch.Tensor]:
+    def nvshmem_all_reduce(self, input: torch.Tensor) -> Optional[torch.Tensor]:
         """The main allreduce API that provides support for cuda graph."""
         # TODO(asamani): check if this works with nvshmem
         # TODO(asamani): check if we can add output too!
         # When custom allreduce is disabled, this will be None.
-        if self.disabled or not self.should_custom_ar(input):
+        if self.disabled or not self.should_nvshmem_ar(input):
             return None
         if self._IS_CAPTURING:
             if torch.cuda.is_current_stream_capturing():
@@ -190,10 +190,7 @@ class NVSHMEMAllreduce:
             return self.all_reduce(input)
 
     def close(self):
-        if not self.disabled and self._ptr:
-            if ops is not None:
-                ops.dispose(self._ptr)
-            self._ptr = 0
+        if not self.disabled:
             self.nvshmem_allreduce.shutdown()
 
     # TODO(asamani): check if I need to have this
