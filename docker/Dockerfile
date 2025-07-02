@@ -1,3 +1,4 @@
+
 # The vLLM Dockerfile is used to construct vLLM image that can be directly used
 # to run the OpenAI compatible server.
 
@@ -63,7 +64,7 @@ ARG PIP_KEYRING_PROVIDER=disabled
 ARG UV_KEYRING_PROVIDER=${PIP_KEYRING_PROVIDER}
 
 # Flag enables build-in KV-connector dependency libs into docker images
-ARG INSTALL_KV_CONNECTOR=false
+ARG INSTALL_KV_CONNECTORS=false
 
 #################### BASE BUILD IMAGE ####################
 # prepare basic build environment
@@ -71,7 +72,7 @@ FROM ${BUILD_BASE_IMAGE} AS base
 ARG CUDA_VERSION
 ARG PYTHON_VERSION
 ARG TARGETPLATFORM
-ARG INSTALL_KV_CONNECTOR=false
+ARG INSTALL_KV_CONNECTORS=false
 ENV DEBIAN_FRONTEND=noninteractive
 
 ARG DEADSNAKES_MIRROR_URL
@@ -280,7 +281,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 FROM ${FINAL_BASE_IMAGE} AS vllm-base
 ARG CUDA_VERSION
 ARG PYTHON_VERSION
-ARG INSTALL_KV_CONNECTOR=false
+ARG INSTALL_KV_CONNECTORS=false
 WORKDIR /vllm-workspace
 ENV DEBIAN_FRONTEND=noninteractive
 ARG TARGETPLATFORM
@@ -490,7 +491,7 @@ RUN mv mkdocs.yaml test_docs/
 # base openai image with additional requirements, for any subsequent openai-style images
 FROM vllm-base AS vllm-openai-base
 ARG TARGETPLATFORM
-ARG INSTALL_KV_CONNECTOR=false
+ARG INSTALL_KV_CONNECTORS=false
 
 ARG PIP_INDEX_URL UV_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
@@ -503,7 +504,7 @@ COPY requirements/kv_connectors.txt requirements/kv_connectors.txt
 
 # install additional dependencies for openai api server
 RUN --mount=type=cache,target=/root/.cache/uv \
-    if [ "$INSTALL_KV_CONNECTOR" = "true" ]; then \
+    if [ "$INSTALL_KV_CONNECTORS" = "true" ]; then \
         uv pip install --system -r requirements/kv_connectors.txt; \
     fi; \
     if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
