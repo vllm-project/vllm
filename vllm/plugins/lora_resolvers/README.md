@@ -16,7 +16,5 @@ model's `base_model_name_or_path`, it will load that adapter, and then service t
 as normal. That adapter will then be available for future requests as normal.
 
 # hf_hub_resolver
-To use, set `VLLM_LORA_RESOLVER_HF_REPO` to a repository ID on Huggingface Hub. When vLLM receives
-a request for a LoRA adapter `foobar` it doesn't currently recognize that is a directory in the repo
-containing an adapter config, it will download that suibdirectory from the repository, then proceed
-in an identical manner to the `lora_filesystem_resolver` using the cached directory.
+To use, set `VLLM_LORA_RESOLVER_HF_REPO_LIST` to a comma separated list of repositories on Huggingface Hub. When vLLM receives
+a request for a LoRA adapter `my/repo/foobar` it doesn't currently recognize, it will download the `foobar` subpath from `my/repo` if it contains an adapter config, then proceed in an identical manner to the `lora_filesystem_resolver` using the cached directory.
