@@ -284,8 +284,13 @@ class P2pNcclEngine:
                            remote_address, tensor_id, data["ret"])
             return None
 
-        return self.recv(comm, data["shape"], data["dtype"], rank ^ 1,
-                         self.recv_stream)
+        with torch.cuda.stream(self.recv_stream):
+            tensor = torch.empty(data["shape"],
+                                 dtype=getattr(
+                                     torch, data["dtype"]),
+                                 device=self.device)
+
+        return self.recv(comm, tensor, rank ^ 1, self.recv_stream)
 
     def listen_for_requests(self):
         while True:
