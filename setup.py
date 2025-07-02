@@ -403,6 +403,11 @@ class repackage_wheel(build_ext):
                     package_data[package_name] = []
 
                 wheel.extract(file)
+                # copy extracted files to self.build_lib directory
+                # so that they can be included in the packed wheel
+                dst_file = os.path.join(self.build_lib, file.filename)
+                os.makedirs(os.path.dirname(dst_file), exist_ok=True)
+                self.copy_file(file.filename, dst_file)
                 if file_name.endswith(".py"):
                     # python files shouldn't be added to package_data
                     continue
