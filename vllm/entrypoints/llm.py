@@ -14,6 +14,7 @@ from pydantic import ValidationError
 from tqdm.auto import tqdm
 from typing_extensions import TypeVar, deprecated
 
+import vllm.envs as envs
 from vllm.beam_search import (BeamSearchInstance, BeamSearchOutput,
                               BeamSearchSequence,
                               create_sort_beams_key_function)
@@ -1208,9 +1209,18 @@ class LLM:
             prompt_inputs = tokenizer(text=q,
                                       text_pair=t,
                                       **tokenization_kwargs)
+
+            token_type_ids = prompt_inputs.get("token_type_ids")
+            mm_data = None
+            if envs.VLLM_USE_V1 and token_type_ids is not None:
+                mm_data = {"token_type_ids": token_type_ids}
+                token_type_ids = None
+
             engine_prompt = TokensPrompt(
-                prompt_token_ids=prompt_inputs["input_ids"],
-                token_type_ids=prompt_inputs.get("token_type_ids"))
+                prompt_token_ids=prompt_inputs["prompt_token_ids"],
+                token_type_ids=token_type_ids,
+                multi_modal_data=mm_data)
+
             parsed_prompts.append(engine_prompt)
 
         self._validate_and_add_requests(

@@ -310,7 +310,8 @@ def replace_roberta_positions(input_ids: torch.Tensor,
         # References:
         # - https://github.com/huggingface/transformers/blob/a3d69a8994d673899608a7c17fbf4f953f50474e/src/transformers/models/roberta/modeling_roberta.py#L133
         # - https://github.com/huggingface/transformers/blob/a3d69a8994d673899608a7c17fbf4f953f50474e/src/transformers/models/roberta/modeling_roberta.py#L1669
-        token_list = torch.split(input_ids, seq_lens.tolist())
+        token_list = torch.split(input_ids[:torch.sum(seq_lens)],
+                                 seq_lens.tolist())
 
         offset = 0
         for tokens in token_list:
