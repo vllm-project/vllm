@@ -42,6 +42,11 @@ logger = init_logger(__name__)
 class TokenBudget:
     """ Unified management of the token budget in the chunked prefill 
     and the prefill and decode budget of Token Throttling
+    
+    NOTE(guoty) Token Throttling: Dynamically adjust prefill and 
+    decode token budget according to system states
+    Reference: https://arxiv.org/abs/2504.14775
+    Code: https://github.com/gty111/gLLM
     """
 
     def __init__(self, scheduler: Scheduler):
@@ -57,13 +62,11 @@ class TokenBudget:
         self.minp = scheduler.scheduler_config.minp
 
     def update(self):
+        # fixed token budget
         if not self.scheduler.use_pp:
             self.token_budget = self.max_num_scheduled_tokens
+        # Token Throttling
         else:
-            # NOTE(guoty) Token Throttling
-            # Reference: https://arxiv.org/abs/2504.14775
-            # Code: https://github.com/gty111/gLLM
-
             # system states
             num_prefill_tokens = sum(req.num_prompt_tokens -
                                      req.num_computed_tokens
