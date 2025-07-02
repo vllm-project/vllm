@@ -22,6 +22,7 @@ sentence-transformers # required for embedding tests
 soundfile # required for audio tests
 jiwer # required for audio tests
 timm # required for internvl test.
+
 torch==2.7.0
 torchaudio==2.7.0
 torchvision==0.22.0
