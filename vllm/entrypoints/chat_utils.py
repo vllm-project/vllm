@@ -540,7 +540,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
                 return "<image>"
             if model_type in ("mllama", "llama4"):
                 return "<|image|>"
-            if model_type in ("qwen2_vl", "qwen2_5_vl"):
+            if model_type in ("qwen2_vl", "qwen2_5_vl", "keye", "Keye"):
                 return "<|vision_start|><|image_pad|><|vision_end|>"
             if model_type == "qwen2_5_omni":
                 return "<|vision_start|><|IMAGE|><|vision_end|>"
@@ -570,7 +570,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
                 return "<video>"
             if model_type == "glm4v":
                 return "<|begin_of_video|><|video|><|end_of_video|>"
-            if model_type in ("qwen2_vl", "qwen2_5_vl"):
+            if model_type in ("qwen2_vl", "qwen2_5_vl", "keye", "Keye"):
                 return "<|vision_start|><|video_pad|><|vision_end|>"
             if model_type == "qwen2_5_omni":
                 return "<|vision_start|><|VIDEO|><|vision_end|>"
