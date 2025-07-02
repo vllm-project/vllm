@@ -54,10 +54,6 @@ class RobertaEmbedding(nn.Module):
         if self.position_embedding_type != "absolute":
             raise ValueError("Only 'absolute' position_embedding_type" +
                              " is supported")
-        self.input_ids: Optional[torch.Tensor] = None
-
-    def maybe_store_input_ids(self, input_ids: torch.Tensor):
-        self.input_ids = input_ids
 
     def forward(
         self,
@@ -220,6 +216,10 @@ class RobertaForSequenceClassification(nn.Module, BertMMTokenIdsMixin,
 
         self._pooler = ClassifierPooler(vllm_config.model_config,
                                         self.classifier)
+        self.input_ids: Optional[torch.Tensor] = None
+
+    def maybe_store_input_ids(self, input_ids: torch.Tensor):
+        self.input_ids = input_ids
 
     def get_language_model(self) -> torch.nn.Module:
         return self.roberta
@@ -254,7 +254,7 @@ class RobertaForSequenceClassification(nn.Module, BertMMTokenIdsMixin,
         inputs_embeds: Optional[torch.Tensor] = None,
         token_type_ids: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        replace_roberta_positions(input_ids=input_ids,
+        replace_roberta_positions(input_ids=input_ids or self.input_ids,
                                   position_ids=positions,
                                   padding_idx=self.padding_idx)
         return self.roberta(input_ids=input_ids,

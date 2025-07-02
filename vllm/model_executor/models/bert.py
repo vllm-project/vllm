@@ -63,9 +63,6 @@ class BertEmbedding(nn.Module):
             raise ValueError("Only 'absolute' position_embedding_type" +
                              " is supported")
 
-    def maybe_store_input_ids(self, input_ids: torch.Tensor):
-        pass
-
     def forward(
         self,
         input_ids: Optional[torch.Tensor] = None,
@@ -573,6 +570,9 @@ class BertMMTokenIdsMixin(SupportsMultiModal):
 
         return self.get_language_model().embeddings(
             token_type_ids=token_type_ids, apply_layer_norm=False)
+
+    def maybe_store_input_ids(self, input_ids: torch.Tensor):
+        pass
 
     def get_input_embeddings(
         self,
