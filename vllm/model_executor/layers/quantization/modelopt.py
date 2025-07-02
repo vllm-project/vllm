@@ -398,7 +398,14 @@ class ModelOptFp8MoEMethod:
         inplace: bool = True,
         no_combine: bool = False,
         routed_scaling_factor: Optional[float] = None,
+        enable_eplb: bool = False,
+        expert_load_view: Optional[torch.Tensor] = None,
+        logical_to_physical_map: Optional[torch.Tensor] = None,
+        logical_replica_count: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        if enable_eplb:
+            raise NotImplementedError(
+                "EPLB not supported for `ModelOptFp8MoEMethod` yet.")
 
         # Expert selection
         topk_weights, topk_ids = FusedMoE.select_experts(
