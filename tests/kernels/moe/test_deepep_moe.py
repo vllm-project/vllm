@@ -31,7 +31,7 @@ if has_deep_ep():
     from vllm.model_executor.layers.fused_moe.deepep_ll_prepare_finalize import (  # noqa: E501
         DeepEPLLPrepareAndFinalize)
 
-    from .deepep_utils import DeepEPHTArgs, DeepEPLLArgs, make_deepep_a2a
+    from .utils import DeepEPHTArgs, DeepEPLLArgs, make_deepep_a2a
 
 requires_deep_ep = pytest.mark.skipif(
     not has_deep_ep(),
