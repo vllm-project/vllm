@@ -99,7 +99,9 @@ class Metadata:
                 response_field = metadata_class if issubclass(
                     metadata_class, BaseModel) else dict
 
-                async def func(raw_request: Request) -> response_field:
+                async def func(
+                        raw_request: Request
+                ) -> response_field:  # type: ignore
                     metadata = metadata_class.from_vllm_config(
                         raw_request.app.state.vllm_config)
                     if isinstance(metadata, (BaseModel, dict)):
