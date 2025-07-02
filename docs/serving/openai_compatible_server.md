@@ -1,7 +1,7 @@
 ---
 title: OpenAI-Compatible Server
 ---
-[](){ #openai-compatible-server }
+[](){ #serving-openai-compatible-server }
 
 vLLM provides an HTTP server that implements OpenAI's [Completions API](https://platform.openai.com/docs/api-reference/completions), [Chat API](https://platform.openai.com/docs/api-reference/chat), and more! This functionality lets you serve models and interact with them using an HTTP client.
 
