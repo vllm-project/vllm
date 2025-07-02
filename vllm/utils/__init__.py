@@ -39,14 +39,14 @@ from argparse import (Action, ArgumentDefaultsHelpFormatter, ArgumentParser,
 from asyncio import FIRST_COMPLETED, AbstractEventLoop, Task
 from collections import UserDict, defaultdict
 from collections.abc import (AsyncGenerator, Awaitable, Collection, Generator,
-                             Hashable, Iterable, Iterator, KeysView, Mapping)
+                             Hashable, Iterable, Iterator, KeysView, Mapping,
+                             Sequence)
 from concurrent.futures.process import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from functools import cache, lru_cache, partial, wraps
 from types import MappingProxyType
 from typing import (TYPE_CHECKING, Any, Callable, Generic, Literal, NamedTuple,
-                    Optional, Sequence, Tuple, Type, TypeVar, Union, cast,
-                    overload)
+                    Optional, TypeVar, Union, cast, overload)
 from urllib.parse import urlparse
 from uuid import uuid4
 
@@ -1921,9 +1921,9 @@ class LazyDict(Mapping[str, T], Generic[T]):
         return len(self._factory)
 
 
-class ClassRegistry(UserDict[Type[T], _V]):
+class ClassRegistry(UserDict[type[T], _V]):
 
-    def __getitem__(self, key: Type[T]) -> _V:
+    def __getitem__(self, key: type[T]) -> _V:
         for cls in key.mro():
             if cls in self.data:
                 return self.data[cls]
@@ -2234,7 +2234,7 @@ def direct_register_custom_op(
         fake_impl: Optional[Callable] = None,
         target_lib: Optional[Library] = None,
         dispatch_key: str = "CUDA",
-        tags: Tuple[torch.Tag, ...] = (),
+        tags: tuple[torch.Tag, ...] = (),
 ):
     """
     `torch.library.custom_op` can have significant overhead because it
@@ -2489,7 +2489,7 @@ def get_exception_traceback():
     return err_str
 
 
-def split_zmq_path(path: str) -> Tuple[str, str, str]:
+def split_zmq_path(path: str) -> tuple[str, str, str]:
     """Split a zmq path into its parts."""
     parsed = urlparse(path)
     if not parsed.scheme:
