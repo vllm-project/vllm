@@ -112,8 +112,7 @@ def create_scheduler(
         vllm_config=vllm_config,
         kv_cache_config=kv_cache_config,
         log_stats=True,
-        structured_output_manager=StructuredOutputManager(
-            vllm_config=vllm_config),
+        structured_output_manager=StructuredOutputManager(vllm_config),
     )
 
 
