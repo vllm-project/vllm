@@ -132,7 +132,6 @@ class BitsAndBytesConfig(QuantizationConfig):
             return BitsAndBytesLinearMethod(self)
         elif isinstance(layer, FusedMoE):
             return BitsAndBytesMoEMethod(self)
-
         return None
 
 
@@ -596,11 +595,11 @@ class BitsAndBytesMoEMethod(FusedMoEMethodBase):
         from bitsandbytes.functional import dequantize_4bit
         w13 = dequantize_4bit(
             layer.w13_weight.reshape(-1, 1),
-            layer.w13_weight.bnb_quant_state[0],
+            layer.w13_weight.bnb_quant_state,
         )
         w2 = dequantize_4bit(
             layer.w2_weight.reshape(-1, 1),
-            layer.w2_weight.bnb_quant_state[0],
+            layer.w2_weight.bnb_quant_state,
         )
         w13 = w13.reshape(layer.w13_weight.experts_shape)
         w2 = w2.reshape(layer.w2_weight.experts_shape)
