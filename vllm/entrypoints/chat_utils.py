@@ -772,7 +772,7 @@ class MultiModalContentParser(BaseMultiModalContentParser):
 
         if isinstance(tensor_encodings, str):
             tensor= self._connector.fetch_tensor_encoding(tensor_encodings)
-            placeholder = self._tracker.add("image_embeds", tensor)
+            placeholder = self._tracker.add(modality_str, tensor)
 
         self._add_placeholder(placeholder)
 
