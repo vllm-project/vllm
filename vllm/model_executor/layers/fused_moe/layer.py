@@ -646,13 +646,13 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             indices_type=self.topk_indices_dtype)
 
         if self.rocm_aiter_moe_enabled:
-            assert expert_map is None
             return self.rocm_aiter_fused_experts(
                 hidden_states=x,
                 w1=layer.w13_weight,
                 w2=layer.w2_weight,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
+                expert_map=expert_map,
                 activation=activation,
                 apply_router_weight_on_input=apply_router_weight_on_input)
         else:

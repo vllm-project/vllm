@@ -8,7 +8,7 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.utils.machete_utils import (
-    MACHETE_SUPPORTED_GROUP_SIZES, check_machete_supports_shape,
+    check_machete_supports_shape, query_machete_supported_group_sizes,
     query_machete_supported_quant_types)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     pack_quantized_values_into_int32, unpack_quantized_values_into_int32)
@@ -40,10 +40,10 @@ class MacheteLinearKernel(MPLinearKernel):
                            "Machete, supported types are: "\
                            f"{query_machete_supported_quant_types(c.zero_points)}"
 
-        if c.group_size not in MACHETE_SUPPORTED_GROUP_SIZES:
+        if c.group_size not in query_machete_supported_group_sizes(c.act_type):
             return False, f"Group size ({c.group_size}) not supported by "\
                             "Machete, supported group sizes are: "\
-                            f"{MACHETE_SUPPORTED_GROUP_SIZES}"
+                            f"{query_machete_supported_group_sizes(c.act_type)}"
 
         return check_machete_supports_shape(c.partition_weight_shape[0],
                                             c.partition_weight_shape[1])
