@@ -137,7 +137,6 @@ class FusedMoEMethodBase(QuantizeMethodBase):
             prepare_finalize = DeepEPHTPrepareAndFinalize(
                 handle,
                 num_dispatchers=all2all_manager.world_size,
-                rank=all2all_manager.rank,
                 dp_size=all2all_manager.dp_world_size,
                 rank_expert_offset=all2all_manager.rank *
                 moe.num_local_experts,

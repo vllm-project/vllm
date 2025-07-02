@@ -138,7 +138,6 @@ def make_deepep_ht_a2a(pg: ProcessGroup,
                             num_qps_per_rank=num_qps_per_rank)
     return DeepEPHTPrepareAndFinalize(buffer=buffer,
                                       num_dispatchers=pgi.world_size,
-                                      rank=pgi.rank,
                                       dp_size=dp_size,
                                       rank_expert_offset=pgi.rank *
                                       ht_args.num_local_experts)

@@ -82,7 +82,7 @@ class FusedMoEQuantConfig:
         return self.per_act_token_quant
 
     @property
-    def is_grouped(self) -> bool:
+    def is_block_quantized(self) -> bool:
         return self.block_shape is not None
 
     @property
@@ -95,7 +95,7 @@ class FusedMoEQuantConfig:
         hidden_dim: int,
     ) -> Optional[tuple[int, int]]:
         if self.is_quantized:
-            if self.is_grouped:
+            if self.is_block_quantized:
                 assert self.block_shape is not None
                 _, block_k = self.block_shape
                 k_tiles = cdiv(hidden_dim, block_k)

@@ -304,7 +304,6 @@ def pplx_prepare_finalize(
     device = pgi.device
     rank = pgi.rank
     world_size = pgi.world_size
-    print(f"PGI {pgi} {world_size} {dp_size}")
 
     topk_ids = topk_ids.to(dtype=torch.uint32)
 
@@ -869,7 +868,6 @@ def _pplx_test_loop(pgi: ProcessGroupInfo, dp_size: int, use_internode: bool,
               f"rank={pgi.rank}.")
 
 
-#@pytest.mark.parametrize("world_dp_size", [[2, 1], [2, 2], [4, 1]])
 @pytest.mark.parametrize("world_dp_size", [[2, 1]])
 @pytest.mark.parametrize("use_internode", [False])
 @requires_pplx
@@ -883,7 +881,6 @@ def test_pplx_prepare_finalize(
                     use_internode, False, _pplx_prepare_finalize)
 
 
-#@pytest.mark.parametrize("world_dp_size", [[2, 1], [2, 2], [4, 1]])
 @pytest.mark.parametrize("world_dp_size", [[2, 1]])
 @pytest.mark.parametrize("use_internode", [False])
 @requires_pplx

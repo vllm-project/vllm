@@ -133,7 +133,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
             orig_a_scale_block_shape = a1q_scale.shape[-1]
 
-            if not quant_config.is_grouped:
+            if not quant_config.is_block_quantized:
                 # TODO (bnell): use group_broadcast instead?
                 a1q_scale = a1q_scale.repeat(repeat_rows, repeat_cols)
 

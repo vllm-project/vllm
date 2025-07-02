@@ -16,7 +16,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     Prepare/Finalize using DeepEP High-Throughput kernels.
     """
 
-    def __init__(self, buffer: deep_ep.Buffer, num_dispatchers: int, rank: int,
+    def __init__(self, buffer: deep_ep.Buffer, num_dispatchers: int,
                  dp_size: int, rank_expert_offset: int):
         super().__init__()
         self.buffer = buffer
