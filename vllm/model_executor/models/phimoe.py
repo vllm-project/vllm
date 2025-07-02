@@ -298,7 +298,7 @@ class PhiMoEAttention(nn.Module):
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
-        head_dim: int = None,
+        head_dim: Optional[int] = None,
         max_position: int = 4096 * 32,
         rope_theta: float = 10000,
         cache_config: Optional[CacheConfig] = None,
