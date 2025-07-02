@@ -23,6 +23,8 @@ uv pip freeze | grep -E '^torch|^torchvision|^torchaudio' | sort > before.txt
 echo "Before:"
 cat before.txt
 
+python -c "import torch; print('torch version:', torch.__version__)"
+
 echo ">>> Installing requirements/nightly_torch_test.txt"
 uv pip install --quiet -r requirements/nightly_torch_test.txt
 
