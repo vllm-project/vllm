@@ -1784,6 +1784,10 @@ class ParallelConfig:
     """Port of the data parallel master."""
     data_parallel_backend: str = "mp"
     """Backend to use for data parallel, either "mp" or "ray"."""
+    data_parallel_external_lb: bool = False
+    """Whether to use "external" DP LB mode. Applies only to online serving
+    and when data_parallel_size > 0. Set implicitly when
+    data_parallel_rank is provided explicitly to vllm serve."""
     enable_expert_parallel: bool = False
     """Use expert parallelism instead of tensor parallelism for MoE layers."""
     enable_eplb: bool = False
@@ -1953,6 +1957,11 @@ class ParallelConfig:
         if self.data_parallel_size > 1 or self.data_parallel_size_local == 0:
             # Data parallel was specified in the engine args.
             self.data_parallel_master_port = get_open_port()
+
+            if not (0 <= self.data_parallel_rank < self.data_parallel_size):
+                raise ValueError(
+                    f"data_parallel_rank ({self.data_parallel_rank})"
+                    f" must be in the range [0, {self.data_parallel_size})")
         else:
             # Otherwise fall back to env vars (e.g. for offline SPMD case).
             self.data_parallel_size = envs.VLLM_DP_SIZE
@@ -1960,6 +1969,10 @@ class ParallelConfig:
             self.data_parallel_rank_local = envs.VLLM_DP_RANK_LOCAL
             self.data_parallel_master_ip = envs.VLLM_DP_MASTER_IP
             self.data_parallel_master_port = envs.VLLM_DP_MASTER_PORT
+
+            if self.data_parallel_external_lb:
+                raise ValueError("data_parallel_external_lb can only "
+                                 "be set when data_parallel_size > 1")
 
         if self.distributed_executor_backend == "external_launcher":
             import os
