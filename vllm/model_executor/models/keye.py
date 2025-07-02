@@ -1268,11 +1268,13 @@ class KeyeMultiModalProcessor(BaseMultiModalProcessor[KeyeProcessingInfo]):
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
+        mm_kwargs = self.info._get_image_processor_kwargs(**mm_kwargs)
         return self.info.ctx.call_hf_processor(
             self.info.get_hf_processor(**mm_kwargs),
             dict(text=prompt, **mm_data),
-            self.info._get_image_processor_kwargs(**mm_kwargs),
+            dict(**mm_kwargs, **tok_kwargs),
         )
 
     def _get_prompt_updates(
