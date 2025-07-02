@@ -43,7 +43,7 @@ struct cutlass_3x_gemm {
   using Epilogue = Epilogue_<ElementAcc, ElementD, TileShape>;
 
   using StrideD = Stride<int64_t, Int<1>, Int<0>>;
-  using ElementC = ElementD_;
+  using ElementC = void;
   using StrideC = StrideD;
 
   using EVTCompute = typename Epilogue::EVTCompute;

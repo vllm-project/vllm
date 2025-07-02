@@ -69,7 +69,7 @@ struct cutlass_sparse_3x_gemm {
 
   using Epilogue = Epilogue_<ElementAcc, ElementD, TileShape>;
 
-  using ElementC = ElementD_;
+  using ElementC = void;
   using LayoutC = cutlass::layout::RowMajor;
   using LayoutC_Transpose =
       typename cutlass::layout::LayoutTranspose<LayoutC>::type;
