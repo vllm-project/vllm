@@ -410,6 +410,9 @@ class FusedMoEModularKernel(torch.nn.Module):
         a1_scale: Optional[torch.Tensor] = None,
         a2_scale: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
+        extra_expert_args: Optional[dict] = None,
+        extra_prepare_args: Optional[dict] = None,
+        extra_finalize_args: Optional[dict] = None,
     ) -> torch.Tensor:
         """
         This function computes a Mixture of Experts (MoE) layer using two sets
@@ -442,6 +445,9 @@ class FusedMoEModularKernel(torch.nn.Module):
         - apply_router_weight_on_input (bool): When true, the topk weights are
           applied directly on the inputs. This is only applicable when topk is
           1.
+        - extra_expert_args (Optional[dict]): Extra keyword arguments to pass to fused_experts.apply.
+        - extra_prepare_args (Optional[dict]): Extra keyword arguments to pass to prepare.
+        - extra_finalize_args (Optional[dict]): Extra keyword arguments to pass to finalize.
 
         Returns:
         - torch.Tensor: The output tensor after applying the MoE layer.
@@ -454,18 +460,12 @@ class FusedMoEModularKernel(torch.nn.Module):
         if global_num_experts == -1:
             global_num_experts = local_num_experts
 
+        prepare_kwargs = extra_prepare_args or {}
         (a1q, a1q_scale, expert_num_tokens, _expert_topk_ids,
          _expert_topk_weights) = self.prepare_finalize.prepare(
-             a1,
-             a1_scale,
-             a2_scale,
-             topk_weights,
-             topk_ids,
-             global_num_experts,
-             expert_map,
-             apply_router_weight_on_input,
-             self.fused_experts.quant_config,
-         )
+             a1, a1_scale, a2_scale, topk_weights, topk_ids,
+             global_num_experts, expert_map, apply_router_weight_on_input,
+             **prepare_kwargs)
 
         # Maybe prepare gathered topk_ids and topk_weights from other EP ranks.
         topk_ids = topk_ids if _expert_topk_ids is None else _expert_topk_ids
@@ -517,10 +517,13 @@ class FusedMoEModularKernel(torch.nn.Module):
             workspace2 = torch.empty(prod(workspace2_shape),
                                      device=a1.device,
                                      dtype=workspace_dtype)
-
+            expert_kwargs = extra_expert_args or {}
+            import pdb
+            # pdb.set_trace()
             if num_chunks == 1:
                 fused_out = _resize_cache(workspace13, fused_out_shape)
-
+                if 'topk_weights' in expert_kwargs:
+                    expert_kwargs['topk_weights'] = topk_weights
                 self.fused_experts.apply(
                     fused_out,
                     a1q,
@@ -539,6 +542,7 @@ class FusedMoEModularKernel(torch.nn.Module):
                     workspace13=workspace13,
                     workspace2=workspace2,
                     expert_num_tokens=expert_num_tokens,
+                    **expert_kwargs,
                 )
             else:
                 # The leading output dimension may not be equal to M, so
@@ -586,9 +590,11 @@ class FusedMoEModularKernel(torch.nn.Module):
                         workspace13=workspace13,
                         workspace2=workspace2,
                         expert_num_tokens=expert_num_tokens,
+                        **expert_kwargs,
                     )
-
+        finalize_kwargs = extra_finalize_args or {}
         self.prepare_finalize.finalize(output, fused_out, topk_weights,
-                                       topk_ids, apply_router_weight_on_input)
+                                       topk_ids, apply_router_weight_on_input,
+                                       **finalize_kwargs)
 
         return output

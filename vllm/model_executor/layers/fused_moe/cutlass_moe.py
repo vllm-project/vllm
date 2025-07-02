@@ -393,82 +393,41 @@ FLOAT4_E2M1_MAX = scalar_types.float4_e2m1f.max()
 FLOAT8_E4M3_MAX = torch.finfo(torch.float8_e4m3fn).max
 
 
-def cutlass_moe_fp4(a: torch.Tensor, a1_gscale: torch.Tensor,
-                    w1_fp4: torch.Tensor, w1_blockscale: torch.Tensor,
-                    w1_alphas: torch.Tensor, a2_gscale: torch.Tensor,
-                    w2_fp4: torch.Tensor, w2_blockscale: torch.Tensor,
-                    w2_alphas: torch.Tensor, topk_weights: torch.Tensor,
-                    topk_ids: torch.Tensor, m: int, n: int, k: int, e: int,
-                    device: torch.device):
-    """
-    MoE implementation for FP4 Inputs
-    
-    # Gemm 1
-    a: Input tensor: [m, k] (half/bfloat16)
-    a1_gscale: Activation scale per expert: [e]  (float32)
-    w1(gate up) (not an argument to cutlass_moe_fp4): [e, 2 * n, k]
-    w1_fp4: [e, 2 * n, k // 2], dtype: torch.uint8 (stacked fp4: E2M1)
-    (Note: `n` is the up projection output dim, `k` is the input dim in
-     full precision)
-    w1_blockscale: [e, 2 * n, k // block_size] (float8_e4m3)
-                   (Block size = 16 for NVFP4)
-    
-    # Gemm 2
-    a2_gscale: Activation scale per expert: [e]
-    w2(down projection) (not an argument to cutlass_moe_fp4): [e, k, n]
-    w2_fp4: [e, k, n // 2], dtype: torch.uint8 (stacked E2M1)
-    w2_blockscale: [e, k, n // block_size], dtype: float8_e4m3
-    
-    topk_weights: [m, topk] dtype: float8
-    topk_ids: [m, topk] dtype: float8
-    
-    m, n, k: Unquantized weight shapes, dtype: int
-    e: number of experts, dtype: int
 
-    assumes that topk < k < n to satisfy - up/down projection expectations.
-    """
-    assert topk_weights.shape == topk_ids.shape, "topk shape mismatch"
-    assert w1_fp4.dtype == torch.uint8, "weight 1 must be uint8"
-    assert w2_fp4.dtype == torch.uint8, "weight 2 must be uint8"
-    assert (w1_fp4.ndim == 3 and w2_fp4.ndim == 3 and w1_blockscale.ndim == 3
-            and w2_blockscale.ndim
-            == 3), ("All Weights must be of rank 3 for cutlass_moe_fp4")
-    m_a, k_a = a.shape
-    e_w1, nx2_w1, half_k_w1 = w1_fp4.shape
-    e_w2, k_w2, half_n_w2 = w2_fp4.shape
+# === FP4 Fused MoE Implementation ===
 
-    assert (e_w1 == e_w2 and e_w1 == e), ("Number of experts must match",
-                                          " between weights.")
-    assert (k_a // 2 == half_k_w1
-            and k == k_w2), ("Hidden size mismatch between a, w1 and w2")
-    assert (nx2_w1 == n * 2 and half_n_w2 == n // 2), ("mismatch in "
-                                                       "expected `n`")
-    assert (m == m_a), "input shape mismatch"
-    assert 2 * half_k_w1 == k_w2, "Hidden size mismatch w2 and w1"
-    assert a.dtype in [torch.half, torch.bfloat16], "Invalid input dtype"
-    assert (topk_weights.size(0) == m and topk_ids.size(0)
-            == m), ("topk must be provided for each row of a")
-
-    out_dtype = a.dtype
-    num_topk = topk_ids.size(1)
-
+def run_cutlass_moe_fp4(
+    output: torch.Tensor,
+    hidden_states: torch.Tensor,
+    w1_fp4: torch.Tensor,
+    w1_blockscale: torch.Tensor,
+    w1_alphas: torch.Tensor,
+    w2_fp4: torch.Tensor,
+    w2_blockscale: torch.Tensor,
+    w2_alphas: torch.Tensor,
+    topk_ids: torch.Tensor,
+    a1_gscale: torch.Tensor,
+    a2_gscale: torch.Tensor,
+    topk_weights: torch.Tensor,
+    m: int,
+    n: int,
+    k: int,
+    e: int,
+    device: torch.device,
+):
+    num_topk = topk_ids.shape[1]
     expert_offsets = torch.empty((e + 1), dtype=torch.int32, device=device)
     blockscale_offsets = torch.empty((e + 1), dtype=torch.int32, device=device)
-    # Problem size:  (num_experts, (m,2n,k))
     problem_sizes1 = torch.empty((e, 3), dtype=torch.int32, device=device)
-    # Problem size:  (num_experts, (m,n,k))
     problem_sizes2 = torch.empty((e, 3), dtype=torch.int32, device=device)
-
     a_map = torch.empty((topk_ids.numel()), dtype=torch.int32, device=device)
     c_map = torch.empty((topk_ids.numel()), dtype=torch.int32, device=device)
 
-    # problem shapes should have [m, n, k]
-    # Note that problem sizes are based on logical number of elements.
     ops.get_cutlass_moe_mm_data(topk_ids, expert_offsets, problem_sizes1,
                                 problem_sizes2, a_map, c_map, e, n, k,
                                 blockscale_offsets)
 
-    a = ops.shuffle_rows(a, a_map)
+    a = ops.shuffle_rows(hidden_states, a_map)
 
     rep_a_fp4, rep_a_blockscale = ops.scaled_fp4_experts_quant(
         a,
@@ -481,13 +440,12 @@ def cutlass_moe_fp4(a: torch.Tensor, a1_gscale: torch.Tensor,
     c1 = ops.cutlass_fp4_moe_mm(rep_a_fp4, w1_fp4, rep_a_blockscale,
                                 w1_blockscale, w1_alphas, problem_sizes1,
                                 expert_offsets[:-1], blockscale_offsets[:-1],
-                                out_dtype, device)
+                                output.dtype, device)
     del rep_a_fp4, rep_a_blockscale
     # hidden size dimension is split to one halfpytho sized tensor.
     intermediate = torch.empty((m * num_topk, w1_fp4.size(1) // 2),
                                device=device,
-                               dtype=out_dtype)
-
+                               dtype=output.dtype)
     torch.ops._C.silu_and_mul(intermediate, c1)
 
     int_fp4, int_blockscale = ops.scaled_fp4_experts_quant(
@@ -495,10 +453,146 @@ def cutlass_moe_fp4(a: torch.Tensor, a1_gscale: torch.Tensor,
 
     c2 = ops.cutlass_fp4_moe_mm(int_fp4, w2_fp4, int_blockscale, w2_blockscale,
                                 w2_alphas, problem_sizes2, expert_offsets[:-1],
-                                blockscale_offsets[:-1], out_dtype, device)
+                                blockscale_offsets[:-1], output.dtype, device)
     del int_fp4, int_blockscale
 
     c2 = ops.shuffle_rows(c2, c_map)
-    out = (c2.view(m, num_topk, k) *
-           topk_weights.view(m, num_topk, 1).half()).sum(dim=1)
-    return out.to(dtype=out_dtype)
+    out = (c2.view(m, num_topk, k) * topk_weights.view(m, num_topk, 1).half()).sum(dim=1)
+    output.copy_(out.to(dtype=output.dtype), non_blocking=True)
+
+
+class CutlassExpertsFp4(mk.FusedMoEPermuteExpertsUnpermute):
+    def __init__(
+        self,
+        max_experts_per_worker: int,
+        out_dtype: torch.dtype,
+    ):
+        super().__init__()
+        self.max_experts_per_worker = max_experts_per_worker
+        self.out_dtype = out_dtype
+
+    def supports_chunking(self) -> bool:
+        return True
+
+    def workspace_shapes(
+        self,
+        a: torch.Tensor,
+        aq: torch.Tensor,
+        M: int,
+        N: int,
+        K: int,
+        topk: int,
+        global_num_experts: int,
+        local_num_experts: int,
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
+        # Workspace1: for c1, Workspace2: for intermediate, Output: for final output
+        workspace1 = (M * topk, max(2 * N, K))
+        workspace2 = (M * topk, N)
+        output = (M, K)
+        return (workspace1, workspace2, output, self.out_dtype)
+
+    def apply(
+        self,
+        output: torch.Tensor,
+        hidden_states: torch.Tensor,
+        w1_fp4: torch.Tensor,
+        w2_fp4: torch.Tensor,
+        topk_ids: torch.Tensor,
+        activation: str,
+        global_num_experts: int,
+        expert_map: Optional[torch.Tensor],
+        w1_blockscale: Optional[torch.Tensor],
+        w2_blockscale: Optional[torch.Tensor],
+        w1_alphas: Optional[torch.Tensor],
+        w2_alphas: Optional[torch.Tensor],
+        a1_gscale: Optional[torch.Tensor],
+        a2_gscale: Optional[torch.Tensor],
+        expert_num_tokens: Optional[torch.Tensor],
+        topk_weights: Optional[torch.Tensor] = None,
+        m: Optional[int] = None,
+        n: Optional[int] = None,
+        k: Optional[int] = None,
+        e: Optional[int] = None,
+        device: Optional[torch.device] = None,
+    ):
+        # All required args must be provided
+        assert w1_blockscale is not None and w2_blockscale is not None
+        assert w1_alphas is not None and w2_alphas is not None
+        assert a1_gscale is not None and a2_gscale is not None
+        assert topk_weights is not None
+        assert m is not None and n is not None and k is not None and e is not None
+        assert device is not None
+        assert expert_map is None, ("Expert Parallelism / expert_map "
+                                    "is currently not supported for "
+                                    "ModelOptNvFp4FusedMoE.")        
+        run_cutlass_moe_fp4(
+            output,
+            hidden_states,
+            w1_fp4,
+            w1_blockscale,
+            w1_alphas,
+            w2_fp4,
+            w2_blockscale,
+            w2_alphas,
+            topk_ids,
+            a1_gscale,
+            a2_gscale,
+            topk_weights,
+            m,
+            n,
+            k,
+            e,
+            device,
+        )
+
+
+def cutlass_moe_fp4(
+    a: torch.Tensor,
+    w1_fp4: torch.Tensor,
+    w2_fp4: torch.Tensor,
+    w1_blockscale: torch.Tensor,
+    w2_blockscale: torch.Tensor,
+    g1_alphas: torch.Tensor,
+    g2_alphas: torch.Tensor,
+    a1_gscale: torch.Tensor,
+    a2_gscale: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    m: int,
+    n: int,
+    k: int,
+    e: int,
+    device: torch.device,
+) -> torch.Tensor:
+    fn = mk.FusedMoEModularKernel(
+        MoEPrepareAndFinalizeNoEP(
+            quant_dtype=torch.uint8,  # FP4 packed in uint8
+            per_channel_quant=False,
+        ),
+        CutlassExpertsFp4(
+            max_experts_per_worker=e,
+            out_dtype=a.dtype,
+        ),
+    )
+    return fn(
+        a,
+        w1_fp4,
+        w2_fp4,
+        topk_weights,
+        topk_ids,
+        False,
+        "silu",
+        e,
+        None,
+        w1_blockscale,
+        w2_blockscale,
+        g1_alphas,
+        g2_alphas,
+        a1_gscale=a1_gscale,
+        a2_gscale=a2_gscale,
+        m=m,
+        n=n,
+        k=k,
+        e=e,
+        device=device,
+    )
