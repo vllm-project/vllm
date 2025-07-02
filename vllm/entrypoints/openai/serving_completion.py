@@ -46,6 +46,7 @@ from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.sequence import Logprob
+from vllm.tracing import init_tracer
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import merge_async_iterators
 
@@ -83,6 +84,9 @@ class OpenAIServingCompletion(OpenAIServing):
             
         self.beam_scorer = BeamScorer(classi_idx=MEOW_CLASSI_IDX)
         self.beam_validator = BeamValidator(classi_idx=MEOW_CLASSI_IDX, classifier_names=MEOW_CLASSI_IDX.keys())
+        self.tracer = init_tracer(
+                "vllm.entrypoints.openai.serving_completion",
+                "http://localhost:4317")
 
     async def create_completion_with_chunkwise_beam(
         self,
