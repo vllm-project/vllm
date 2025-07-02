@@ -72,22 +72,25 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             "only supports block size 1."
 
         # Preparing persistent buffers
-        self.paged_kv_indptr = torch.zeros(self.runner.max_num_reqs + 1,
-                                           dtype=torch.int32,
-                                           device=self.runner.device)
-        self.paged_kv_indices = torch.zeros(
-            block_table.get_device_tensor().numel(),  # max num pages possible
-            dtype=torch.int32,
-            device=self.runner.device)
-        self.paged_kv_last_page_len = torch.zeros(self.runner.max_num_reqs,
-                                                  dtype=torch.int32,
-                                                  device=self.runner.device)
+        if self.runner.full_cuda_graph:
+            device = self.runner.device
+            max_num_reqs = self.runner.max_num_reqs
+            self.paged_kv_indptr = torch.zeros(max_num_reqs + 1,
+                                               dtype=torch.int32,
+                                               device=device)
+            self.paged_kv_indices = torch.zeros(
+                block_table.get_device_tensor().numel(
+                ),  # max num pages possible
+                dtype=torch.int32,
+                device=device)
+            self.paged_kv_last_page_len = torch.zeros(max_num_reqs,
+                                                      dtype=torch.int32,
+                                                      device=device)
 
-        self.qo_indptr = torch.arange(0,
-                                      self.runner.max_num_reqs + 1,
-                                      step=1,
-                                      dtype=torch.int32,
-                                      device=self.runner.device)
+            self.qo_indptr = torch.arange(0,
+                                          max_num_reqs + 1,
+                                          dtype=torch.int32,
+                                          device=device)
 
     def _build_decode(self, block_table_tensor: torch.Tensor,
                       seq_lens: torch.Tensor) -> AiterMLADecodeMetadata:
@@ -100,37 +103,52 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                              device=device).unsqueeze(0)
                 < block_table_bounds.unsqueeze(1))
         paged_kv_indices = block_table_tensor[mask]
-        num_actual_pages = paged_kv_indices.size(0)
 
-        self.paged_kv_indices[:num_actual_pages].copy_(paged_kv_indices,
-                                                       non_blocking=True)
-        self.paged_kv_indices[num_actual_pages:].fill_(-1)
-
-        num_reqs = self._num_decodes
+        paged_kv_last_page_len = seq_lens % page_size
+        paged_kv_last_page_len = torch.where(paged_kv_last_page_len == 0,
+                                             page_size, paged_kv_last_page_len)
 
         paged_kv_indptr = torch.cat([
             torch.zeros(1, dtype=block_table_bounds.dtype, device=device),
             block_table_bounds.cumsum(dim=0, dtype=torch.int32)
         ])
 
-        self.paged_kv_indptr[:1 + num_reqs].copy_(paged_kv_indptr,
-                                                  non_blocking=True)
-        self.paged_kv_indptr[1 + num_reqs:].fill_(paged_kv_indptr[-1])
+        if self.runner.full_cuda_graph:
+            num_reqs = self._num_decodes
 
-        paged_kv_last_page_len = seq_lens % page_size
-        paged_kv_last_page_len = torch.where(paged_kv_last_page_len == 0,
-                                             page_size, paged_kv_last_page_len)
-        self.paged_kv_last_page_len[:num_reqs].copy_(paged_kv_last_page_len,
-                                                     non_blocking=True)
-        self.paged_kv_last_page_len[num_reqs:].fill_(1)
+            num_actual_pages = paged_kv_indices.size(0)
+
+            self.paged_kv_indices[:num_actual_pages].copy_(paged_kv_indices,
+                                                           non_blocking=True)
+            self.paged_kv_indices[num_actual_pages:].fill_(-1)
+            paged_kv_indices = self.paged_kv_indices[:num_actual_pages]
+
+            self.paged_kv_indptr[:1 + num_reqs].copy_(paged_kv_indptr,
+                                                      non_blocking=True)
+            self.paged_kv_indptr[1 + num_reqs:].fill_(paged_kv_indptr[-1])
+            paged_kv_indptr = self.paged_kv_indptr[:1 + num_reqs]
+
+            self.paged_kv_last_page_len[:num_reqs].copy_(
+                paged_kv_last_page_len, non_blocking=True)
+            self.paged_kv_last_page_len[num_reqs:].fill_(1)
+            paged_kv_last_page_len = self.paged_kv_last_page_len[:num_reqs]
+
+            qo_indptr = self.qo_indptr[:1 + num_reqs]
+
+        else:
+            qo_indptr = torch.arange(0,
+                                     self._num_decodes + 1,
+                                     step=1,
+                                     dtype=torch.int32,
+                                     device=device)
 
         attn_metadata = AiterMLADecodeMetadata(
             block_table=block_table_tensor,
             seq_lens=seq_lens,
-            paged_kv_indptr=self.paged_kv_indptr[:1 + num_reqs],
-            paged_kv_indices=self.paged_kv_indices[:num_actual_pages],
-            paged_kv_last_page_len=self.paged_kv_last_page_len[:num_reqs],
-            qo_indptr=self.qo_indptr[:1 + num_reqs])
+            paged_kv_indptr=paged_kv_indptr,
+            paged_kv_indices=paged_kv_indices,
+            paged_kv_last_page_len=paged_kv_last_page_len,
+            qo_indptr=qo_indptr)
 
         return attn_metadata
 
