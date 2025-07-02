@@ -6,6 +6,9 @@ import multiprocessing
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Optional
 
+from pydantic import ConfigDict, Field
+from pydantic.dataclasses import dataclass
+
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
@@ -29,36 +32,56 @@ else:
 logger = init_logger(__name__)
 
 
+@dataclass(config=ConfigDict(arbitrary_types_allowed=True))
 class StructuredOutputManager:
     """Engine-level manager for structured output requests."""
+    vllm_config: VllmConfig
 
-    def __init__(self, vllm_config: VllmConfig):
-        self.backend: Optional[StructuredOutputBackend] = None
-        self.reasoner: Optional[ReasoningParser] = None
-        self.vllm_config = vllm_config
+    backend: Optional[StructuredOutputBackend] = Field(
+        default=None,
+        init=False,
+        repr=False,
+    )
+    reasoner: Optional[ReasoningParser] = Field(
+        default=None,
+        init=False,
+        repr=False,
+    )
+    _grammar_bitmask: Optional[torch.Tensor] = Field(
+        default=None,
+        init=False,
+        repr=False,
+    )
+    _full_mask: torch.Tensor = Field(
+        default_factory=lambda: torch.tensor(-1, dtype=torch.int32),
+        init=False,
+        repr=False,
+    )
 
-        self._grammar_bitmask: Optional[torch.Tensor] = None
-        self._full_mask = torch.tensor(-1, dtype=torch.int32)
-
-        # The default max_workers if not specified is the number of CPUs * 5,
-        # which is way too high since these tasks are CPU-bound, not I/O bound.
-        # We also know we would never dominate CPU usage with just grammar
-        # compilation, so we set it to half the number of CPUs.
-        max_workers = max(1, (multiprocessing.cpu_count() + 1) // 2)
-        self.executor = ThreadPoolExecutor(max_workers=max_workers)
-        self.tokenizer = init_tokenizer_from_configs(
-            model_config=self.vllm_config.model_config,
-            scheduler_config=self.vllm_config.scheduler_config,
-            lora_config=self.vllm_config.lora_config,
-        ).get_lora_tokenizer(None)
-        reasoning_backend = vllm_config.decoding_config.reasoning_backend
-        if reasoning_backend:
-            reasoner_cls = ReasoningParserManager.get_reasoning_parser(
-                reasoning_backend)
-            self.reasoner = reasoner_cls(tokenizer=self.tokenizer)
+    def __post_init__(self):
+        if not self.vllm_config.model_config.skip_tokenizer_init:
+            # The default max_workers if not specified is the number
+            # of CPUs * 5, which is way too high since these tasks are
+            # CPU-bound, not I/O bound. We also know we would never dominate
+            # CPU usage with just grammar compilation, so we set it to half
+            # the number of CPUs.
+            max_workers = max(1, (multiprocessing.cpu_count() + 1) // 2)
+            self.executor = ThreadPoolExecutor(max_workers=max_workers)
+            self.tokenizer = init_tokenizer_from_configs(
+                model_config=self.vllm_config.model_config,
+                scheduler_config=self.vllm_config.scheduler_config,
+                lora_config=self.vllm_config.lora_config,
+            ).get_lora_tokenizer(None)
+            reasoning_backend = \
+                self.vllm_config.decoding_config.reasoning_backend
+            if reasoning_backend:
+                reasoner_cls = ReasoningParserManager.get_reasoning_parser(
+                    reasoning_backend)
+                self.reasoner = reasoner_cls(tokenizer=self.tokenizer)
 
     def grammar_init(self, request: Request) -> None:
-        if request.structured_output_request is None:
+        if request.structured_output_request is None or \
+            self.vllm_config.model_config.skip_tokenizer_init:
             return
 
         if TYPE_CHECKING:
@@ -115,7 +138,8 @@ class StructuredOutputManager:
         scheduled_spec_decode_tokens: dict[str, list[int]],
     ) -> Optional[npt.NDArray[np.int32]]:
         # Prepare the structured output bitmask for this batch.
-        if not structured_output_request_ids:
+        if not structured_output_request_ids \
+            or self.vllm_config.model_config.skip_tokenizer_init:
             return None
 
         max_num_spec_tokens = 0
@@ -193,7 +217,8 @@ class StructuredOutputManager:
         return bitmask_tensor.numpy()
 
     def should_advance(self, request: Request) -> bool:
-        if not request.use_structured_output:
+        if not request.use_structured_output \
+            or self.vllm_config.model_config.skip_tokenizer_init:
             return False
 
         # To determine whether we can advance the FSM.

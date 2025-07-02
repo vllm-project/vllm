@@ -152,6 +152,11 @@ class Processor:
         if not params.guided_decoding or not self.decoding_config:
             return
 
+        if self.model_config.skip_tokenizer_init and self.decoding_config:
+            raise ValueError(
+                "'skip_tokenizer_init' is specified during engine startup. This implies that the model doesn't contain sufficient files to setup tokenizers, which structured outputs requires tokenizers to work. Specifying structured outputs parameters will not be supported in conjunction with 'skip_tokenizer_init'."  # noqa: E501
+            )
+
         engine_level_backend = self.decoding_config.backend
         if params.guided_decoding.backend:
             # Request-level backend selection is not supported in V1.
