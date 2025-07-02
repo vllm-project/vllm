@@ -95,7 +95,9 @@ class ForwardContext:
     # set dynamically for each forward pass
     dp_metadata: Optional[DPMetadata] = None
     skip_cuda_graphs: bool = False
+
     decode_indices: Optional[torch.Tensor] = None
+    """indices used for decoding"""
 
 
 _forward_context: Optional[ForwardContext] = None

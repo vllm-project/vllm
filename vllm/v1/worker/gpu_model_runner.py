@@ -45,10 +45,10 @@ from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
                         GiB_bytes, LazyLoader, async_tensor_h2d, cdiv,
                         check_use_alibi, get_dtype_size,
                         is_pin_memory_available, round_up)
+from vllm.v1.attention.backends.flash_attn import FlashAttentionImpl
 from vllm.v1.attention.backends.mamba_attn import Mamba2AttentionBackend
 from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
-                                              CommonAttentionMetadata,
-                                              compute_decode_only_common_attn_metadata)
+                                              CommonAttentionMetadata)
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.kv_cache_interface import (AttentionSpec, FullAttentionSpec,
                                         KVCacheConfig, KVCacheSpec, MambaSpec,
@@ -317,6 +317,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # from the KV cache of `shared_kv_cache_layers[layer_name]`.
         self.shared_kv_cache_layers: dict[str, str] = {}
 
+        self.decode_indices = torch.zeros(self.max_num_tokens,
+                                          dtype=torch.int32,
+                                          device=self.device)
+
     def _may_reorder_batch(self, scheduler_output: "SchedulerOutput") -> None:
         """
         Update the order of requests in the batch based on the attention
@@ -575,11 +579,31 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         return cu_num_tokens, arange
 
+    def _calc_decode_indices(self, logits_indices: torch.Tensor):
+        """
+        Pads logits_indices to align with CUDA graph capture sizes
+        """
+        num_decodes = logits_indices.shape[0]
+        # TODO(sarckk): With chunked prefills, logits_indices contains
+        # indices for partial requests though we do not sample any token
+        # from these partial requests, for simplicity. In the future, we
+        # can calculate the 'true' decode indices based on logits_indices
+        self.decode_indices[:num_decodes].copy_(logits_indices)
+        # pad with last idx instead of zero
+        self.decode_indices[num_decodes:].fill_(logits_indices[-1].item())
+        if (self.use_cuda_graph
+                and num_decodes <= self.cudagraph_batch_sizes[-1]):
+            num_decodes_padded = self.vllm_config.pad_for_cudagraph(
+                num_decodes)
+        else:
+            num_decodes_padded = num_decodes
+        return self.decode_indices[:num_decodes_padded]
+
     def _prepare_inputs(
         self,
         scheduler_output: "SchedulerOutput",
     ) -> tuple[dict[str, Any], bool, torch.Tensor,
-               Optional[SpecDecodeMetadata], np.ndarray]:
+               Optional[SpecDecodeMetadata], np.ndarray, torch.Tensor]:
         """
         :return: tuple[
             attn_metadata: layer-to-attention_metadata mapping,
@@ -700,15 +724,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         query_start_loc_np = self.query_start_loc_np[:num_reqs + 1]
         seq_lens = self.seq_lens[:num_reqs]
 
-        common_attn_metadata = CommonAttentionMetadata(
-            query_start_loc=query_start_loc,
-            query_start_loc_np=query_start_loc_np,
-            seq_lens=seq_lens,
-            num_reqs=num_reqs,
-            num_actual_tokens=total_num_scheduled_tokens,
-            max_query_len=max_num_scheduled_tokens,
-        )
-
         use_spec_decode = len(
             scheduler_output.scheduled_spec_decode_tokens) > 0
         if not use_spec_decode:
@@ -733,20 +748,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_draft_tokens, cu_num_tokens)
             logits_indices = spec_decode_metadata.logits_indices
 
-        decode_only_common_attn_metadata = None
-        if envs.VLLM_V1_KV_SHARING_SKIP_PREFILL:
-            decode_only_common_attn_metadata = (
-                compute_decode_only_common_attn_metadata(
-                    num_reqs=num_reqs,
-                    # TODO(sarckk): logits_indices contains tokens for partial
-                    # prefill requests, so we can optimize further by only
-                    # considering tokens if its index is more than or equal to
-                    # input_batch.num_prompt_tokens[req_index], which correspond
-                    # to positions that are required for sampling output tokens
-                    decode_indices=logits_indices,
-                    query_start_loc=query_start_loc,
-                    seq_lens=seq_lens,
-                ))
+        decode_indices = self._calc_decode_indices(logits_indices)
+
+        common_attn_metadata = CommonAttentionMetadata(
+            query_start_loc=query_start_loc,
+            query_start_loc_np=query_start_loc_np,
+            seq_lens=seq_lens,
+            num_reqs=num_reqs,
+            num_actual_tokens=total_num_scheduled_tokens,
+            max_query_len=max_num_scheduled_tokens,
+            decode_indices=decode_indices,
+        )
 
         attn_metadata: dict[str, Any] = {}
         # Prepare the attention metadata for each KV cache group and make layers
@@ -769,8 +781,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             attn_metadata_i = (builder.build(
                 common_prefix_len=common_prefix_len,
                 common_attn_metadata=common_attn_metadata,
-                decode_only_common_attn_metadata=
-                decode_only_common_attn_metadata,
             ))
 
             for layer_name in kv_cache_group_spec.layer_names:
@@ -785,7 +795,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.set_active_loras(self.input_batch, num_scheduled_tokens)
 
         return (attn_metadata, attention_cuda_graphs, logits_indices,
-                spec_decode_metadata, num_scheduled_tokens)
+                spec_decode_metadata, num_scheduled_tokens, decode_indices)
 
     def _compute_cascade_attn_prefix_len(
         self,
@@ -1306,8 +1316,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Prepare the decoder inputs.
         (attn_metadata, attention_cuda_graphs, logits_indices,
-         spec_decode_metadata,
-         num_scheduled_tokens_np) = (self._prepare_inputs(scheduler_output))
+         spec_decode_metadata, num_scheduled_tokens_np,
+         decode_indices) = (self._prepare_inputs(scheduler_output))
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         if (self.use_cuda_graph
                 and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]):
@@ -1378,8 +1388,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Run the model.
         # Use persistent buffers for CUDA graphs.
-        decode_indices = (logits_indices
-                          if envs.VLLM_V1_KV_SHARING_SKIP_PREFILL else None)
         with set_forward_context(attn_metadata,
                                  self.vllm_config,
                                  num_tokens=num_input_tokens,
@@ -1978,6 +1986,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                         dtype=np.int32)
 
         attn_metadata: Optional[dict[str, Any]] = None
+        decode_indices = torch.arange(num_tokens,
+                                      device=self.device,
+                                      dtype=torch.int)
+
         if capture_attn_cudagraph:
             attn_metadata = {}
 
@@ -1997,6 +2009,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_reqs=num_reqs,
                 num_actual_tokens=num_tokens,
                 max_query_len=num_tokens,
+                decode_indices=decode_indices,
             )
 
             for kv_cache_group_id, kv_cache_group_spec in enumerate(
@@ -2039,7 +2052,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     attn_metadata,
                     self.vllm_config,
                     num_tokens=num_tokens,
-                    num_tokens_across_dp=num_tokens_across_dp):
+                    num_tokens_across_dp=num_tokens_across_dp,
+                    decode_indices=decode_indices):
                 outputs = model(
                     input_ids=input_ids,
                     positions=positions,
@@ -2671,6 +2685,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     dtype=self.kv_cache_dtype,
                     block_size=max_model_len,
                     page_size_padded=page_size_padded)
+
+        # Second pass to determine if N-1 prompt tokens can be skipped
+        # during prefill for layers that re-use shared KV cache
+        # Iterate in reversed order and note shared kv cache layers where
+        # there is no layer after it that allocates its own KV cache
+        for layer_name in reversed(attn_layers.keys()):
+            if layer_name in self.shared_kv_cache_layers:
+                attn_module = attn_layers[layer_name]
+                if isinstance(attn_module.impl, FlashAttentionImpl):
+                    attn_module.impl.kv_sharing_skip_prefill = True
+            else:
+                break
 
         return kv_cache_spec
 

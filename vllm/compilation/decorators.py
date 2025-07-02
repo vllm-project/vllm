@@ -23,6 +23,13 @@ logger = init_logger(__name__)
 _T = TypeVar("_T", bound=type[nn.Module])
 
 
+def skip_torch_compile(cls: _T) -> _T:
+    cls._skip_compile_vllm = True
+    for base in cls.__bases__:
+        base._skip_compile_vllm = True
+    return cls
+
+
 @overload
 def support_torch_compile(
     *,
@@ -156,7 +163,7 @@ def _support_torch_compile(
         self.do_not_compile = \
             vllm_config.compilation_config.level in [
             CompilationLevel.NO_COMPILATION, CompilationLevel.DYNAMO_AS_IS
-        ] or not supports_dynamo()
+        ] or not supports_dynamo() or getattr(self, "_skip_compile_vllm", False)
         if self.do_not_compile:
             return
         compilation_counter.num_models_seen += 1

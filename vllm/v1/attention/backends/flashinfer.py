@@ -423,17 +423,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         kv_data_type=attn_metadata.kv_data_type,
                     )
 
-    def build(
-        self,
-        common_prefix_len: int,
-        common_attn_metadata: CommonAttentionMetadata,
-        decode_only_common_attn_metadata: Optional[
-            CommonAttentionMetadata] = None,
-    ):
-        if decode_only_common_attn_metadata is not None:
-            raise NotImplementedError(
-                "FlashInfer backend does not support decode-only attention yet."
-            )
+    def build(self, common_prefix_len: int,
+              common_attn_metadata: CommonAttentionMetadata):
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
 

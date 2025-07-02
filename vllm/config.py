@@ -4114,6 +4114,8 @@ class CompilationConfig:
     """Sizes to capture cudagraph.
     - None (default): capture sizes are inferred from vllm config.
     - list[int]: capture sizes are specified as given."""
+    cudagraph_share_memory_pool: bool = True
+    """Whether to share a single global memory pool for each CUDA graph captured"""
     cudagraph_copy_inputs: bool = False
     """Whether to copy input tensors for
     cudagraph. If the caller can guarantee that the same input buffers
