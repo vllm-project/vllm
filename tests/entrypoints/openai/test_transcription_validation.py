@@ -137,9 +137,9 @@ async def test_completion_endpoints():
         assert res.message == "The model does not support Completions API"
 
 
-@pytest.mark.skip(reason="Flaky test on upstream CI")
 @pytest.mark.asyncio
 async def test_streaming_response(winning_call):
+    print("VERSION", openai.__version__, "\n\n")
     model_name = "openai/whisper-small"
     server_args = ["--enforce-eager"]
     transcription = ""
@@ -151,27 +151,17 @@ async def test_streaming_response(winning_call):
             response_format="json",
             language="en",
             temperature=0.0)
-        # Unfortunately this only works when the openai client is patched
-        # to use streaming mode, not exposed in the transcription api.
-        original_post = AsyncAPIClient.post
 
-        async def post_with_stream(*args, **kwargs):
-            kwargs['stream'] = True
-            return await original_post(*args, **kwargs)
-
-        with patch.object(AsyncAPIClient, "post", new=post_with_stream):
-            client = remote_server.get_async_client()
-            res = await client.audio.transcriptions.create(
-                model=model_name,
-                file=winning_call,
-                language="en",
-                temperature=0.0,
-                extra_body=dict(stream=True))
-            # Reconstruct from chunks and validate
-            async for chunk in res:
-                # just a chunk
-                text = chunk.choices[0]['delta']['content']
-                transcription += text
+        res = await client.audio.transcriptions.create(model=model_name,
+                                                       file=winning_call,
+                                                       language="en",
+                                                       temperature=0.0,
+                                                       stream=True)
+        # Reconstruct from chunks and validate
+        async for chunk in res:
+            # just a chunk
+            text = chunk.choices[0]['delta']['content']
+            transcription += text
 
         assert transcription == res_no_stream.text
 
