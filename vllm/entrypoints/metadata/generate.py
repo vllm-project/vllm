@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 from pydantic import Field
 
@@ -14,7 +14,8 @@ if TYPE_CHECKING:
 
 
 class GenerateBrief(BriefMetadata):
-    enable_prefix_caching: bool = Field(..., title="Enable prefix caching")
+    enable_prefix_caching: Optional[bool] = Field(
+        ..., title="Enable prefix caching")
 
     @classmethod
     def from_vllm_config(cls, vllm_config: "VllmConfig") -> "BriefMetadata":

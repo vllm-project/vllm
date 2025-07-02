@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-# mypy: disable-error-code="valid-type, name-defined, attr-defined"
 
 from dataclasses import asdict, dataclass, fields
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Optional
 
 from pydantic import BaseModel, Field
 
@@ -21,10 +20,7 @@ def get_attr_typing(cls: type[Any]):
 
 
 model_config_docs = get_attr_docs(ModelConfig)
-model_config_typing = get_attr_typing(ModelConfig)
-
 pooler_config_docs = get_attr_docs(PoolerConfig)
-pooler_config_typing = get_attr_typing(PoolerConfig)
 
 
 class ReadOnlyBaseModel(BaseModel):
@@ -34,16 +30,12 @@ class ReadOnlyBaseModel(BaseModel):
 
 
 class BriefMetadata(ReadOnlyBaseModel):
-    # Hacky way to get the defined docs and typing.
-    # Getting the corresponding typing from the dictionary returned
-    # by get_attr_typing is not a valid mypy expression,
-    # but it can make Swagger: API Documentation work.
-    task: model_config_typing["task"] = Field(
-        ..., description=model_config_docs["task"])
-    served_model_name: model_config_typing["served_model_name"] = Field(
+    # Hacky way to get the defined docs.
+    task: str = Field(..., description=model_config_docs["task"])
+    served_model_name: str = Field(
         ..., description=model_config_docs["served_model_name"])
-    max_model_len: model_config_typing["max_model_len"] = Field(
-        ..., description=model_config_docs["max_model_len"])
+    max_model_len: int = Field(...,
+                               description=model_config_docs["max_model_len"])
 
     @classmethod
     def from_vllm_config(cls, vllm_config: "VllmConfig") -> "BriefMetadata":
@@ -62,15 +54,16 @@ class HfConfigMetadata:
 
 
 class PoolerConfigMetadata(ReadOnlyBaseModel):
-    pooling_type: pooler_config_typing["pooling_type"] = Field(
+    # Hacky way to get the defined docs.
+    pooling_type: Optional[str] = Field(
         ..., description=pooler_config_docs["pooling_type"])
-    normalize: pooler_config_typing["normalize"] = Field(
+    normalize: Optional[bool] = Field(
         ..., description=pooler_config_docs["normalize"])
-    softmax: pooler_config_typing["softmax"] = Field(
-        ..., description=pooler_config_docs["softmax"])
-    step_tag_id: pooler_config_typing["step_tag_id"] = Field(
+    softmax: Optional[bool] = Field(...,
+                                    description=pooler_config_docs["softmax"])
+    step_tag_id: Optional[int] = Field(
         ..., description=pooler_config_docs["step_tag_id"])
-    returned_token_ids: pooler_config_typing["returned_token_ids"] = Field(
+    returned_token_ids: Optional[list[int]] = Field(
         ..., description=pooler_config_docs["returned_token_ids"])
 
     @classmethod
