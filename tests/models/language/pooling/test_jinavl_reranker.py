@@ -151,8 +151,8 @@ class JinaVLForRanking(Qwen2VLForConditionalGeneration):
 
             self._processor = AutoProcessor.from_pretrained(
                 self.name_or_path,
-                max_pixels=1280 * 28 * 28,
-                min_pixels=28 * 28,
+                max_pixels=602112,
+                min_pixels=3136,
                 trust_remote_code=True)
 
         assert isinstance(pairs, list)
@@ -287,24 +287,17 @@ def vllm_reranker(model_name,
         limit_mm_per_prompt=limit_mm_per_prompt,
     )
 
+    def create_image_param(url: str):
+        return {"type": "image_url", "image_url": {"url": f"{url}"}}
+
     if query_type == "image":
-        images = load_images(query)
-        query = [{
-            "prompt": "",
-            "multi_modal_data": {
-                "image": image
-            },
-        } for image in images]
+        query = {"content": [create_image_param(url) for url in query]}
 
     if doc_type == "image":
-        images = load_images(documents)
-        documents = [{
-            "prompt": "",
-            "multi_modal_data": {
-                "image": image
-            },
-        } for image in images]
+        documents = {"content": [create_image_param(url) for url in documents]}
 
+    print(query)
+    print(documents)
     outputs = model.score(query, documents)
 
     return [output.outputs.score for output in outputs]
@@ -324,9 +317,9 @@ def hf_reranker(model_name,
     model = JinaVLForRanking.from_pretrained(
         model_name, key_mapping=checkpoint_to_hf_mapper).eval()
 
-    text_pairs = [[query[0], d] for d in documents]
+    data_pairs = [[query[0], d] for d in documents]
 
-    scores = model.compute_score(text_pairs,
+    scores = model.compute_score(data_pairs,
                                  max_length=2048,
                                  query_type=query_type,
                                  doc_type=doc_type)
@@ -402,5 +395,5 @@ def test_model_image_image(model_name):
     vllm_outputs = vllm_reranker(model_name, query, documents, "image",
                                  "image")
 
-    assert hf_outputs[0] == pytest.approx(vllm_outputs[0], rel=0.01)
+    assert hf_outputs == pytest.approx(vllm_outputs[0], rel=0.01)
     assert hf_outputs[1] == pytest.approx(vllm_outputs[1], rel=0.01)
