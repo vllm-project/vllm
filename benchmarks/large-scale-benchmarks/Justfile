@@ -10,9 +10,12 @@ leader_address := "10.96.0.64" # nb1-h100-60
 # Decode
 # hosts := "nb1-h100-60 nb1-h100-1 nb1-h100-2 nb1-h100-3 nb1-h100-4 nb1-h100-5 nb1-h100-6 nb1-h100-7 nb1-h100-8 nb1-h100-10 nb1-h100-11 nb1-h100-12 nb1-h100-13 nb1-h100-14 nb1-h100-15 nb1-h100-16 nb1-h100-45 nb1-h100-61"
 # num_nodes := "18"
-hosts := "nb1-h100-60 nb1-h100-1 nb1-h100-2 nb1-h100-3 nb1-h100-4 nb1-h100-5 nb1-h100-6 nb1-h100-7 nb1-h100-8 nb1-h100-10 nb1-h100-11 nb1-h100-12 nb1-h100-13 nb1-h100-14 nb1-h100-15 nb1-h100-16"
-num_nodes := "16"
 
+# hosts := "nb1-h100-60 nb1-h100-1 nb1-h100-2 nb1-h100-3 nb1-h100-4 nb1-h100-5 nb1-h100-6 nb1-h100-7 nb1-h100-8 nb1-h100-10 nb1-h100-11 nb1-h100-12 nb1-h100-13 nb1-h100-14 nb1-h100-15 nb1-h100-16"
+# num_nodes := "16"
+
+hosts := "nb1-h100-0 nb1-h100-1 nb1-h100-2 nb1-h100-3 nb1-h100-4 nb1-h100-5 nb1-h100-6 nb1-h100-7 nb1-h100-8 nb1-h100-9 nb1-h100-10 nb1-h100-11 nb1-h100-12 nb1-h100-13 nb1-h100-14 nb1-h100-15 nb1-h100-16 nb1-h100-17 nb1-h100-18 nb1-h100-19 nb1-h100-20 nb1-h100-21 nb1-h100-22 nb1-h100-23 nb1-h100-24 nb1-h100-25 nb1-h100-26 nb1-h100-27 nb1-h100-28 nb1-h100-29 nb1-h100-30 nb1-h100-31 nb1-h100-32 nb1-h100-33 nb1-h100-34 nb1-h100-35 nb1-h100-36 nb1-h100-37 nb1-h100-38 nb1-h100-39 nb1-h100-40 nb1-h100-41 nb1-h100-42 nb1-h100-43 nb1-h100-44 nb1-h100-45 nb1-h100-46 nb1-h100-47 nb1-h100-48 nb1-h100-49 nb1-h100-50 nb1-h100-51 nb1-h100-52 nb1-h100-53 nb1-h100-54 nb1-h100-55 nb1-h100-56 nb1-h100-57 nb1-h100-58 nb1-h100-59 nb1-h100-60 nb1-h100-61 nb1-h100-62 nb1-h100-63"
+num_nodes := "64"
 
 
 # Helper function to run commands on all hosts with proper signal handling
@@ -97,10 +100,8 @@ run-commands-on-all-nodes:
     #!/usr/bin/env bash
     for host in {{hosts}}; do
         # ssh $host "bash -l -c 'hostname'" &
-        # ssh $host "bash -l -c 'nvcc --version'" &
-        # ssh $host "bash -l -c 'curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y'" &
-        # ssh $host "bash -l -c 'cargo install just'" &
-        ssh $host "bash -l -c 'HF_TRANSFER=1 /mnt/data/home/smo/vllm/.venv/bin/huggingface-cli download deepseek-ai/DeepSeek-R1'" &
+        # ssh $host "bash -l -c 'HF_TRANSFER=1 /mnt/data/home/smo/vllm/.venv/bin/huggingface-cli download deepseek-ai/DeepSeek-R1-0528'" &
+        ssh $host "bash -l -c 'HF_TRANSFER=1 /mnt/data/home/smo/vllm/.venv/bin/huggingface-cli download deepseek-ai/DeepSeek-V3-0324'" &
     done
     wait 
 
@@ -147,7 +148,7 @@ kill-vllm-processes:
     #!/usr/bin/env bash
     echo "Killing vLLM processes on all nodes..."
     for host in {{hosts}}; do
-        ssh $host "pkill -f 'vllm serve' || true; pkill -f 'python.*' || true" &
+        ssh $host "pkill -f 'vllm serve' || true; pkill -f 'python3.*' || true" &
     done
     wait
     echo "All vLLM processes killed."
