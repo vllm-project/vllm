@@ -18,6 +18,10 @@ elif current_platform.is_xpu():
     reshape_and_cache_flash = ops.reshape_and_cache_flash
     flash_attn_varlen_func = ops.flash_attn_varlen_func
     get_scheduler_metadata = ops.get_scheduler_metadata
+else:
+    reshape_and_cache_flash = None
+    flash_attn_varlen_func = None
+    get_scheduler_metadata = None
 
 
 def get_flash_attn_version(requires_alibi: bool = False) -> Optional[int]:
