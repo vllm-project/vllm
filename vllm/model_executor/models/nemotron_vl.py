@@ -1145,9 +1145,11 @@ class Llama_Nemotron_Nano_VL_Model(nn.Module, SupportsMultiModal, SupportsPP,
 
     def extract_feature(self, pixel_values: torch.Tensor) -> torch.Tensor:
         #kh vit_embeds = self.vision_model(pixel_values=pixel_values)
-        vit_embeds = self.vision_model(x=pixel_values)
-        vit_embeds = vit_embeds[:, 1:, :]
-
+        #kh vit_embeds = vit_embeds[:, 1:, :]
+        # https://huggingface.co/nvidia/Llama-3.1-Nemotron-Nano-VL-8B-V1/blob/main/modeling.py#L177
+        vit_embeds = self.vision_model(x=pixel_values).features
+        vit_embeds = vit_embeds.to(dtype=torch.bfloat16)
+        
         h = w = int(vit_embeds.shape[1]**0.5)
         vit_embeds = vit_embeds.reshape(vit_embeds.shape[0], h, w, -1)
         vit_embeds = self.pixel_shuffle(vit_embeds,
