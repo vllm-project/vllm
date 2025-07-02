@@ -5,8 +5,7 @@ import torch
 from torch.nn.parameter import Parameter
 
 import vllm.envs as envs
-from vllm._custom_ops import (cutlass_scaled_fp4_mm,
-                              cutlass_scaled_mm_supports_fp4, scaled_fp4_quant)
+from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme)
@@ -15,7 +14,6 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import 
 from vllm.model_executor.parameter import (GroupQuantScaleParameter,
                                            ModelWeightParameter,
                                            PerTensorScaleParameter)
-from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -32,15 +30,6 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
         if envs.VLLM_USE_NVFP4_CT_EMULATIONS:
             return 80
         return 100
-
-    @classmethod
-    def cutlass_fp4_supported(cls) -> bool:
-        if not current_platform.is_cuda():
-            return False
-        capability_tuple = current_platform.get_device_capability()
-        capability = -1 if capability_tuple is None else capability_tuple.to_int(  # noqa: E501
-        )
-        return cutlass_scaled_mm_supports_fp4(capability)
 
     def create_weights(self, layer: torch.nn.Module,
                        output_partition_sizes: list[int],

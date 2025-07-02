@@ -1,7 +1,8 @@
 # Welcome to vLLM
 
 <figure markdown="span">
-  ![](./assets/logos/vllm-logo-text-light.png){ align="center" alt="vLLM" class="no-scaled-link" width="60%" }
+  ![](./assets/logos/vllm-logo-text-light.png){ align="center" alt="vLLM Light" class="logo-light" width="60%" }
+  ![](./assets/logos/vllm-logo-text-dark.png){ align="center" alt="vLLM Dark" class="logo-dark" width="60%" }
 </figure>
 
 <p style="text-align:center">
@@ -40,7 +41,7 @@ vLLM is flexible and easy to use with:
 - OpenAI-compatible API server
 - Support NVIDIA GPUs, AMD CPUs and GPUs, Intel CPUs, Gaudi® accelerators and GPUs, IBM Power CPUs, TPU, and AWS Trainium and Inferentia Accelerators.
 - Prefix caching support
-- Multi-lora support
+- Multi-LoRA support
 
 For more information, check out the following:
 

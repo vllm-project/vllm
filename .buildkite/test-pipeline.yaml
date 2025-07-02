@@ -41,6 +41,16 @@ steps:
   # TODO: add `--strict` once warnings in docstrings are fixed
   - mkdocs build
 
+- label: Pytorch Nightly Dependency Override Check # 2min
+  # if this test fails, it means the nightly torch version is not compatible with some
+  # of the dependencies. Please check the error message and add the package to whitelist
+  # in /vllm/tools/generate_nightly_torch_test.py
+  soft_fail: true
+  source_file_dependencies:
+  - requirements/nightly_torch_test.txt
+  commands:
+  - bash standalone_tests/pytorch_nightly_dependency.sh
+
 - label: Async Engine, Inputs, Utils, Worker Test # 24min
   mirror_hardwares: [amdexperimental]
   source_file_dependencies:
@@ -167,6 +177,23 @@ steps:
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 rlhf.py
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 RAY_DEDUP_LOGS=0 python3 rlhf_colocate.py
   - popd
+
+- label: EPLB Algorithm Test
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/distributed/eplb
+  - tests/distributed/test_eplb_algo.py
+  commands:
+  - pytest -v -s distributed/test_eplb_algo.py
+
+- label: EPLB Execution Test # 5min
+  working_dir: "/vllm-workspace/tests"
+  num_gpus: 4
+  source_file_dependencies:
+  - vllm/distributed/eplb
+  - tests/distributed/test_eplb_execute.py
+  commands:
+  - pytest -v -s distributed/test_eplb_execute.py
 
 - label: Metrics, Tracing Test # 10min
   mirror_hardwares: [amdexperimental, amdproduction]
@@ -509,6 +536,17 @@ steps:
     - pip freeze | grep -E 'torch'
     - pytest -v -s models/language -m core_model
 
+- label: Language Models Test (Hybrid) # 35 min
+  mirror_hardwares: [amdexperimental]
+  torch_nightly: true
+  source_file_dependencies:
+  - vllm/
+  - tests/models/language/generation
+  commands:
+    # Install causal-conv1d for plamo2 models here, as it is not compatible with pip-compile.
+    - pip install 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.0.post8'
+    - pytest -v -s models/language/generation -m hybrid_model
+
 - label: Language Models Test (Extended Generation) # 1hr20min
   mirror_hardwares: [amdexperimental]
   optional: true
@@ -518,7 +556,7 @@ steps:
   commands:
     # Install causal-conv1d for plamo2 models here, as it is not compatible with pip-compile.
     - pip install 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.0.post8'
-    - pytest -v -s models/language/generation -m 'not core_model'
+    - pytest -v -s models/language/generation -m '(not core_model) and (not hybrid_model)'
 
 - label: Language Models Test (Extended Pooling)  # 36min
   mirror_hardwares: [amdexperimental]
@@ -750,7 +788,7 @@ steps:
     - bash weight_loading/run_model_weight_loading_test.sh -c weight_loading/models.txt
 
 - label: Weight Loading Multiple GPU Test - Large Models # optional
-  mirror_hardwares: [amdexperimental] 
+  mirror_hardwares: [amdexperimental]
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
   gpu: a100

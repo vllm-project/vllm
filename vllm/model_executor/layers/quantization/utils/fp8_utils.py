@@ -3,7 +3,6 @@
 
 # Adapted from https://github.com/sgl-project/sglang/pull/2575
 import functools
-import importlib.util
 import json
 import os
 from typing import Any, Callable, Optional, Union
@@ -19,10 +18,9 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     CUTLASS_BLOCK_FP8_SUPPORTED)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils import cdiv, direct_register_custom_op
+from vllm.utils import cdiv, direct_register_custom_op, has_deep_gemm
 
 logger = init_logger(__name__)
-has_deep_gemm = importlib.util.find_spec("deep_gemm") is not None
 
 
 def is_fp8(x: Union[torch.dtype, torch.Tensor]) -> bool:
@@ -109,7 +107,7 @@ def should_use_deepgemm(output_dtype: torch.dtype, weight: torch.Tensor):
     """
 
     return (current_platform.is_cuda()
-            and current_platform.is_device_capability(90) and has_deep_gemm
+            and current_platform.is_device_capability(90) and has_deep_gemm()
             and envs.VLLM_USE_DEEP_GEMM and output_dtype == torch.bfloat16
             and weight.shape[0] % 128 == 0 and weight.shape[1] % 128 == 0)
 
