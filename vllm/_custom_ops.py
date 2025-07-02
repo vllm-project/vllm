@@ -5,7 +5,6 @@ import contextlib
 from typing import TYPE_CHECKING, Optional, Union
 
 import torch
-import torch.library
 
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -594,7 +593,7 @@ if hasattr(torch.ops._C, "ggml_dequantize"):
         quant_type: int,
         row: torch.SymInt,
     ) -> torch.Tensor:
-        return torch.empty((1, row), dtype=X.dtype, device=W.device)
+        return torch.empty((X.shape[0], row), dtype=X.dtype, device=W.device)
 
     @register_fake("_C::ggml_mul_mat_a8")
     def _ggml_mul_mat_a8_fake(
@@ -1284,13 +1283,12 @@ def scaled_fp8_quant(
                                 device=input.device,
                                 dtype=torch.float32)
             torch.ops._C.dynamic_per_token_scaled_fp8_quant(
-                output, input, scale, scale_ub)
+                output, input.contiguous(), scale, scale_ub)
         else:
             scale = torch.zeros(1, device=input.device, dtype=torch.float32)
             torch.ops._C.dynamic_scaled_fp8_quant(output, input, scale)
     else:
-        # num_token_padding not implemented for this case
-        assert (scale.numel() == 1 or num_token_padding is None)
+        assert scale.numel() == 1, f"{scale.shape}"
         torch.ops._C.static_scaled_fp8_quant(output, input, scale)
 
     return output, scale
@@ -1393,8 +1391,8 @@ def scaled_int8_quant(
                                dtype=torch.float32)
     input_azp = None if symmetric else torch.empty_like(input_scales,
                                                         dtype=torch.int32)
-    torch.ops._C.dynamic_scaled_int8_quant(output, input, input_scales,
-                                           input_azp)
+    torch.ops._C.dynamic_scaled_int8_quant(output, input.contiguous(),
+                                           input_scales, input_azp)
     return output, input_scales, input_azp
 
 
@@ -1536,15 +1534,6 @@ def moe_align_block_size(topk_ids: torch.Tensor, num_experts: int,
     torch.ops._moe_C.moe_align_block_size(topk_ids, num_experts, block_size,
                                           sorted_token_ids, experts_ids,
                                           num_tokens_post_pad)
-
-
-def sgl_moe_align_block_size(topk_ids: torch.Tensor, num_experts: int,
-                             block_size: int, sorted_token_ids: torch.Tensor,
-                             experts_ids: torch.Tensor,
-                             num_tokens_post_pad: torch.Tensor) -> None:
-    torch.ops._moe_C.sgl_moe_align_block_size(topk_ids, num_experts,
-                                              block_size, sorted_token_ids,
-                                              experts_ids, num_tokens_post_pad)
 
 
 def moe_wna16_gemm(input: torch.Tensor, output: torch.Tensor,
@@ -1772,6 +1761,38 @@ def free_shared_buffer(ptr: int) -> None:
     torch.ops._C_custom_ar.free_shared_buffer(ptr)
 
 
+# quick all reduce
+def init_custom_qr(rank: int,
+                   world_size: int,
+                   qr_max_size: Optional[int] = None) -> int:
+    return torch.ops._C_custom_ar.init_custom_qr(rank, world_size, qr_max_size)
+
+
+def qr_destroy(fa: int) -> None:
+    torch.ops._C_custom_ar.qr_destroy(fa)
+
+
+def qr_all_reduce(fa: int,
+                  inp: torch.Tensor,
+                  out: torch.Tensor,
+                  quant_level: int,
+                  cast_bf2half: bool = False) -> None:
+    torch.ops._C_custom_ar.qr_all_reduce(fa, inp, out, quant_level,
+                                         cast_bf2half)
+
+
+def qr_get_handle(fa: int) -> torch.Tensor:
+    return torch.ops._C_custom_ar.qr_get_handle(fa)
+
+
+def qr_open_handles(fa: int, handles: list[torch.Tensor]) -> None:
+    return torch.ops._C_custom_ar.qr_open_handles(fa, handles)
+
+
+def qr_max_size() -> int:
+    return torch.ops._C_custom_ar.qr_max_size()
+
+
 def get_flash_mla_metadata(
     cache_seqlens: torch.Tensor,
     num_heads_per_head_k: int,
@@ -1843,3 +1864,52 @@ def cutlass_mla_decode(out: torch.Tensor, q_nope: torch.Tensor,
     torch.ops._C.cutlass_mla_decode(out, q_nope, q_pe, kv_c_and_k_pe_cache,
                                     seq_lens, page_table, scale)
     return out
+
+
+if hasattr(torch.ops._C, "weight_packed_linear"):
+
+    @register_fake("_C::weight_packed_linear")
+    def weight_packed_linear_fake(mat1: torch.Tensor, mat2: torch.Tensor,
+                                  bias: Optional[torch.Tensor],
+                                  is_vnni: bool) -> torch.Tensor:
+        return torch.empty((mat1.size(0), mat2.size(0)),
+                           dtype=mat1.dtype,
+                           device=mat2.device)
+
+
+if hasattr(torch.ops._C, "fused_experts_cpu"):
+
+    @register_fake("_C::fused_experts_cpu")
+    def fused_experts_cpu_fake(
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        inplace: bool,
+        use_int8_w8a8: bool,
+        use_fp8_w8a16: bool,
+        w1_scale: Optional[torch.Tensor],
+        w2_scale: Optional[torch.Tensor],
+        block_size: Optional[list[int]],
+        a1_scale: Optional[torch.Tensor],
+        a2_scale: Optional[torch.Tensor],
+        is_vnni: bool,
+    ) -> torch.Tensor:
+        return torch.empty_like(hidden_states)
+
+
+if hasattr(torch.ops._C, "int8_scaled_mm_with_quant"):
+
+    @register_fake("_C::int8_scaled_mm_with_quant")
+    def int8_scaled_mm_with_quant_fake(
+        mat1: torch.Tensor,
+        mat2: torch.Tensor,
+        scales2: torch.Tensor,
+        bias: Optional[torch.Tensor],
+        out_dtype: torch.dtype,
+        is_vnni: bool,
+    ) -> torch.Tensor:
+        M = mat1.size(0)
+        N = mat2.size(0)
+        return torch.empty((M, N), dtype=out_dtype)

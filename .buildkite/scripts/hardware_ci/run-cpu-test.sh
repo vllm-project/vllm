@@ -24,12 +24,21 @@ numactl -C "$CORE_RANGE" -N "$NUMA_NODE" docker build --tag cpu-test-"$NUMA_NODE
 numactl -C "$CORE_RANGE" -N "$NUMA_NODE" docker build --build-arg VLLM_CPU_DISABLE_AVX512="true" --tag cpu-test-"$NUMA_NODE"-avx2 --target vllm-test -f docker/Dockerfile.cpu .
 
 # Run the image, setting --shm-size=4g for tensor parallel.
-docker run -itd --cpuset-cpus="$CORE_RANGE" --cpuset-mems="$NUMA_NODE" --entrypoint /bin/bash -v ~/.cache/huggingface:/root/.cache/huggingface --privileged=true -e HF_TOKEN --env VLLM_CPU_KVCACHE_SPACE=4 --env VLLM_CPU_OMP_THREADS_BIND="$OMP_CORE_RANGE" --shm-size=4g --name cpu-test-"$NUMA_NODE" cpu-test-"$NUMA_NODE"
-docker run -itd --cpuset-cpus="$CORE_RANGE" --cpuset-mems="$NUMA_NODE" --entrypoint /bin/bash -v ~/.cache/huggingface:/root/.cache/huggingface --privileged=true -e HF_TOKEN --env VLLM_CPU_KVCACHE_SPACE=4 --env VLLM_CPU_OMP_THREADS_BIND="$OMP_CORE_RANGE" --shm-size=4g --name cpu-test-"$NUMA_NODE"-avx2 cpu-test-"$NUMA_NODE"-avx2
+docker run -itd --cpuset-cpus="$CORE_RANGE" --cpuset-mems="$NUMA_NODE" --entrypoint /bin/bash -v ~/.cache/huggingface:/root/.cache/huggingface --privileged=true -e HF_TOKEN --env VLLM_CPU_KVCACHE_SPACE=4 --env VLLM_CPU_OMP_THREADS_BIND="$OMP_CORE_RANGE" --env VLLM_CPU_CI_ENV=1 --shm-size=4g --name cpu-test-"$NUMA_NODE" cpu-test-"$NUMA_NODE"
+docker run -itd --cpuset-cpus="$CORE_RANGE" --cpuset-mems="$NUMA_NODE" --entrypoint /bin/bash -v ~/.cache/huggingface:/root/.cache/huggingface --privileged=true -e HF_TOKEN --env VLLM_CPU_KVCACHE_SPACE=4 --env VLLM_CPU_OMP_THREADS_BIND="$OMP_CORE_RANGE" --env VLLM_CPU_CI_ENV=1 --shm-size=4g --name cpu-test-"$NUMA_NODE"-avx2 cpu-test-"$NUMA_NODE"-avx2
 
 function cpu_tests() {
   set -e
   export NUMA_NODE=$2
+
+  # list packages
+  docker exec cpu-test-"$NUMA_NODE"-avx2 bash -c "
+    set -e
+    pip list"
+
+  docker exec cpu-test-"$NUMA_NODE" bash -c "
+    set -e
+    pip list"
 
   # offline inference
   docker exec cpu-test-"$NUMA_NODE"-avx2 bash -c "
@@ -42,6 +51,7 @@ function cpu_tests() {
     pytest -v -s tests/kernels/attention/test_cache.py -m cpu_model
     pytest -v -s tests/kernels/attention/test_mla_decode_cpu.py -m cpu_model
     pytest -v -s tests/models/language/generation -m cpu_model
+    VLLM_CPU_SGL_KERNEL=1 pytest -v -s tests/models/language/generation -m cpu_model
     pytest -v -s tests/models/language/pooling -m cpu_model
     pytest -v -s tests/models/multimodal/generation \
                 --ignore=tests/models/multimodal/generation/test_mllama.py \
@@ -72,7 +82,7 @@ function cpu_tests() {
     set -e
     python3 -m vllm.entrypoints.openai.api_server --model facebook/opt-125m --dtype half & 
     timeout 600 bash -c 'until curl localhost:8000/v1/models; do sleep 1; done' || exit 1
-    python3 benchmarks/benchmark_serving.py \
+    VLLM_CPU_CI_ENV=0 python3 benchmarks/benchmark_serving.py \
       --backend vllm \
       --dataset-name random \
       --model facebook/opt-125m \
@@ -89,4 +99,4 @@ function cpu_tests() {
 
 # All of CPU tests are expected to be finished less than 40 mins.
 export -f cpu_tests
-timeout 1h bash -c "cpu_tests $CORE_RANGE $NUMA_NODE"
+timeout 1.5h bash -c "cpu_tests $CORE_RANGE $NUMA_NODE"

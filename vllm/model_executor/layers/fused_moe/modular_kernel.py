@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
+from enum import Enum
 from math import prod
-from typing import Optional
+from typing import Optional, final
 
 import torch
 
 import vllm.envs as envs
+from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.utils import _resize_cache
 from vllm.utils import cdiv
 
@@ -82,6 +84,18 @@ def _moe_problem_size(
     return E, M, N, K, topk
 
 
+class FusedMoEActivationFormat(Enum):
+    """
+    The standard activation format (num_tokens, hidden dim).
+    """
+    Standard = "standard",
+    """
+    The batched experts format (num experts, max tokens per expert, hidden dim)
+    """
+    BatchedExperts = "batched_experts",
+
+
+# TODO: pass FusedMoEParallelConfig in as ctor parameter?
 class FusedMoEPrepareAndFinalize(ABC):
     """
     An abstract base class for the [Quantize-Prepare] and [Finalize] steps
@@ -99,6 +113,7 @@ class FusedMoEPrepareAndFinalize(ABC):
         num_experts: int,
         expert_map: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
+        quant_config: FusedMoEQuantConfig,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor],
                Optional[torch.Tensor], Optional[torch.Tensor]]:
         """
@@ -148,6 +163,15 @@ class FusedMoEPrepareAndFinalize(ABC):
         """
         raise NotImplementedError
 
+    @property
+    @abstractmethod
+    def activation_format(self) -> FusedMoEActivationFormat:
+        """
+        A property indicating the output format of the activations for the
+        'prepare' method.
+        """
+        raise NotImplementedError
+
     @abstractmethod
     def topk_indices_dtype(self) -> Optional[torch.dtype]:
         """
@@ -176,12 +200,54 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
     above.
     """
 
+    def __init__(
+        self,
+        quant_config: Optional[FusedMoEQuantConfig],
+    ):
+        if quant_config is not None:
+            self.quant_config = quant_config
+        else:
+            self.quant_config = FusedMoEQuantConfig()
+
+    @property
+    @abstractmethod
+    def activation_formats(
+            self) -> tuple[FusedMoEActivationFormat, FusedMoEActivationFormat]:
+        """
+        A property which is a tuple of the input and output activation formats
+        for the 'apply' method.
+        """
+        raise NotImplementedError
+
+    @property
+    def quant_dtype(self) -> Optional[torch.dtype]:
+        return self.quant_config.quant_dtype
+
+    @property
+    def block_shape(self) -> Optional[list[int]]:
+        return self.quant_config.block_shape
+
+    @property
+    def per_act_token_quant(self) -> bool:
+        return self.quant_config.per_act_token_quant
+
+    @property
+    def per_out_ch_quant(self) -> bool:
+        return self.quant_config.per_out_ch_quant
+
     # TODO (bnell): make this return a CHUNK_SIZE or None instead?
     @abstractmethod
     def supports_chunking(self) -> bool:
         """
         A flag indicating whether or not this class supports activation
         chunking.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def supports_expert_map(self) -> bool:
+        """
+        A flag indicating whether or not this class supports expert maps
         """
         raise NotImplementedError
 
@@ -194,7 +260,8 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         N: int,
         K: int,
         topk: int,
-        num_experts: int,
+        global_num_experts: int,
+        local_num_experts: int,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
         """
         Compute the shapes for the temporary and final outputs of the two gemms
@@ -223,6 +290,10 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
             torch.ops._C.gelu_and_mul(output, input)
         else:
             raise ValueError(f"Unsupported FusedMoe activation: {activation}")
+
+    def enable_chunking(self):
+        return envs.VLLM_ENABLE_FUSED_MOE_ACTIVATION_CHUNKING and \
+          self.supports_chunking()
 
     @abstractmethod
     def apply(
@@ -292,6 +363,7 @@ def _chunk_scales(scales: Optional[torch.Tensor], start: int,
     return None
 
 
+@final
 class FusedMoEModularKernel(torch.nn.Module):
     """
     This class combines a FusedMoEPrepareAndFinalize instance and
@@ -313,6 +385,12 @@ class FusedMoEModularKernel(torch.nn.Module):
         super().__init__()
         self.prepare_finalize = prepare_finalize
         self.fused_experts = fused_experts
+        assert prepare_finalize.activation_format == \
+            fused_experts.activation_formats[0], (
+                f"{prepare_finalize.__class__.__name__}."
+                f"{prepare_finalize.activation_format} == "
+                f"{fused_experts.__class__.__name__}."
+                f"{fused_experts.activation_formats[0]}")
 
     def forward(
         self,
@@ -372,13 +450,22 @@ class FusedMoEModularKernel(torch.nn.Module):
         a1 = hidden_states
         output = a1 if inplace else torch.zeros_like(a1)
 
+        local_num_experts = w1.size(0)
         if global_num_experts == -1:
-            global_num_experts = w1.size(0)
+            global_num_experts = local_num_experts
 
         (a1q, a1q_scale, expert_num_tokens, _expert_topk_ids,
          _expert_topk_weights) = self.prepare_finalize.prepare(
-             a1, a1_scale, a2_scale, topk_weights, topk_ids,
-             global_num_experts, expert_map, apply_router_weight_on_input)
+             a1,
+             a1_scale,
+             a2_scale,
+             topk_weights,
+             topk_ids,
+             global_num_experts,
+             expert_map,
+             apply_router_weight_on_input,
+             self.fused_experts.quant_config,
+         )
 
         # Maybe prepare gathered topk_ids and topk_weights from other EP ranks.
         topk_ids = topk_ids if _expert_topk_ids is None else _expert_topk_ids
@@ -398,7 +485,7 @@ class FusedMoEModularKernel(torch.nn.Module):
         else:
             _, M, N, K, top_k = _moe_problem_size(a1q, w1, w2, topk_ids)
 
-            if self.fused_experts.supports_chunking():
+            if self.fused_experts.enable_chunking():
                 CHUNK_SIZE = envs.VLLM_FUSED_MOE_CHUNK_SIZE
                 num_chunks = cdiv(M, CHUNK_SIZE)
             else:
@@ -408,23 +495,26 @@ class FusedMoEModularKernel(torch.nn.Module):
             if num_chunks == 1:
                 (workspace13_shape, workspace2_shape, fused_out_shape,
                  workspace_dtype) = self.fused_experts.workspace_shapes(
-                     a1, a1q, M, N, K, top_k, global_num_experts)
+                     a1, a1q, M, N, K, top_k, global_num_experts,
+                     local_num_experts)
             else:
                 # Use the full M to get the final output shape.
                 _, _, fused_out_shape, _ = (
                     self.fused_experts.workspace_shapes(
-                        a1, a1q, M, N, K, top_k, global_num_experts))
+                        a1, a1q, M, N, K, top_k, global_num_experts,
+                        local_num_experts))
                 # Use the CHUNK_SIZE to get the workspace shapes.
                 workspace13_shape, workspace2_shape, _, workspace_dtype = (
                     self.fused_experts.workspace_shapes(
-                        a1, a1q, CHUNK_SIZE, N, K, top_k, global_num_experts))
+                        a1, a1q, CHUNK_SIZE, N, K, top_k, global_num_experts,
+                        local_num_experts))
 
             # We can reuse the memory between cache1 and cache3 because by the
             # time we need cache3, we're done with cache1.
-            workspace13 = torch.zeros(prod(workspace13_shape),
+            workspace13 = torch.empty(prod(workspace13_shape),
                                       device=a1.device,
                                       dtype=workspace_dtype)
-            workspace2 = torch.zeros(prod(workspace2_shape),
+            workspace2 = torch.empty(prod(workspace2_shape),
                                      device=a1.device,
                                      dtype=workspace_dtype)
 

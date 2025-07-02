@@ -1,0 +1,8 @@
+[project]
+name = "examples-online-structured-outputs"
+requires-python = ">=3.9, <3.13"
+dependencies = ["openai==1.78.1", "pydantic==2.11.4"]
+version = "0.0.0"
+
+[project.scripts]
+structured-outputs = "structured_outputs:main"

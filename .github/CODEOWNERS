@@ -18,6 +18,10 @@
 /vllm/entrypoints @aarnphm
 CMakeLists.txt @tlrmchlsmth
 
+# Any change to the VllmConfig changes can have a large user-facing impact,
+# so spam a lot of people
+/vllm/config.py @simon-mo @WoosukKwon @youkaichao @robertgshaw2-redhat @mgoin @tlrmchlsmth @houseroad @hmellor
+
 # vLLM V1
 /vllm/v1 @WoosukKwon @robertgshaw2-redhat @njhill @ywang96 @comaniac @alexm-redhat
 /vllm/v1/structured_output @mgoin @russellb @aarnphm
