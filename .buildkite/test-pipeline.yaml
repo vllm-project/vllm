@@ -215,7 +215,7 @@ steps:
 #####  1 GPU test  #####
 
 - label: Regression Test # 5min
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental]
   source_file_dependencies:
   - vllm/
   - tests/test_regression
@@ -225,7 +225,7 @@ steps:
   working_dir: "/vllm-workspace/tests" # optional
 
 - label: Engine Test # 10min
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental]
   source_file_dependencies:
   - vllm/
   - tests/engine
@@ -338,7 +338,7 @@ steps:
   parallelism: 4
 
 - label: PyTorch Compilation Unit Tests
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental]
   torch_nightly: true
   source_file_dependencies:
     - vllm/
@@ -420,7 +420,7 @@ steps:
     - pytest -v -s kernels/mamba
 
 - label: Tensorizer Test # 11min
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental]
   soft_fail: true
   source_file_dependencies:
   - vllm/model_executor/model_loader
@@ -512,7 +512,7 @@ steps:
 #####  models test  #####
 
 - label: Basic Models Test # 24min
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental]
   torch_nightly: true
   source_file_dependencies:
   - vllm/
@@ -601,7 +601,7 @@ steps:
     - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=0) and not core_model'
 
 - label: Multi-Modal Models Test (Extended) 3
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental]
   optional: true
   source_file_dependencies:
   - vllm/
