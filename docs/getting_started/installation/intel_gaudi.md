@@ -110,7 +110,7 @@ docker run \
 ### Supported features
 
 - [Offline inference][offline-inference]
-- Online serving via [OpenAI-Compatible Server][openai-compatible-server]
+- Online serving via [OpenAI-Compatible Server][serving-openai-compatible-server]
 - HPU autodetection - no need to manually select device within vLLM
 - Paged KV cache with algorithms enabled for Intel Gaudi accelerators
 - Custom Intel Gaudi implementations of Paged Attention, KV cache ops,
