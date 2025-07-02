@@ -35,7 +35,8 @@ from vllm.transformers_utils.config import (
 from vllm.transformers_utils.s3_utils import S3Model
 from vllm.transformers_utils.utils import is_s3
 from vllm.utils import (GiB_bytes, LayerBlockType, cuda_device_count_stateless,
-                        get_cpu_memory, random_uuid, resolve_obj_by_qualname)
+                        get_cpu_memory, get_open_port, random_uuid,
+                        resolve_obj_by_qualname)
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
@@ -1313,6 +1314,8 @@ class ParallelConfig:
     tensor_parallel_size: int = 1  # Number of tensor parallel groups.
     data_parallel_size: int = 1  # Number of data parallel groups.
     data_parallel_rank: int = 0  # Rank of the data parallel group.
+    # Local rank of the data parallel group, defaults to global rank.Add commentMore actions
+    data_parallel_rank_local: Optional[int] = None
     # IP of the data parallel master.
     data_parallel_master_ip: str = "127.0.0.1"
     data_parallel_master_port: int = 29500  # Port of the data parallel master.
@@ -1416,10 +1419,17 @@ class ParallelConfig:
         self.world_size = self.pipeline_parallel_size * \
             self.tensor_parallel_size
 
-        self.data_parallel_size = envs.VLLM_DP_SIZE
-        self.data_parallel_rank = envs.VLLM_DP_RANK
-        self.data_parallel_master_ip = envs.VLLM_DP_MASTER_IP
-        self.data_parallel_master_port = envs.VLLM_DP_MASTER_PORT
+        if self.data_parallel_size > 1:
+            # Data parallel was specified in the engine args.
+            self.data_parallel_master_port = get_open_port()
+            # TODO multi-node
+        else:
+            # Otherwise fall back to env vars (e.g. for offline SPMD case).
+            self.data_parallel_size = envs.VLLM_DP_SIZE
+            self.data_parallel_rank = envs.VLLM_DP_RANK
+            self.data_parallel_rank_local = envs.VLLM_DP_RANK_LOCAL
+            self.data_parallel_master_ip = envs.VLLM_DP_MASTER_IP
+            self.data_parallel_master_port = envs.VLLM_DP_MASTER_PORT
         self.world_size_across_dp = self.world_size * self.data_parallel_size
 
         ray_only_devices = ["tpu"]

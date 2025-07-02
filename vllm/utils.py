@@ -532,7 +532,7 @@ def get_open_port() -> int:
         dp_port = envs.VLLM_DP_MASTER_PORT
         while True:
             port = _get_open_port()
-            if port >= dp_port and port < dp_port + 10:
+            if dp_port <= port < dp_port + 10:
                 continue
             return port
     return _get_open_port()
