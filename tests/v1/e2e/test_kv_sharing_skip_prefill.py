@@ -3,7 +3,7 @@
 
 import gc
 from collections.abc import Iterable
-from typing import List, Optional, Union
+from typing import Optional, Union
 
 import pytest
 import torch
@@ -112,7 +112,7 @@ class DecoderLayerGroup(nn.Module):
         *,
         vllm_config: VllmConfig,
         prefix: str = "",
-        layers: List[nn.Module],
+        layers: list[nn.Module],
     ):
         super().__init__()
         self.layers = layers
@@ -162,7 +162,8 @@ class Qwen2ModelWithKVSharing(Qwen2Model):
             )
 
         # Pre-allocate static buffers for CUDA graph
-        self.max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        self.max_num_tokens =\
+            vllm_config.scheduler_config.max_num_batched_tokens
         self.dtype = vllm_config.model_config.dtype
         self.device = next(self.parameters()).device
         self.hidden_size = vllm_config.model_config.get_hidden_size()
