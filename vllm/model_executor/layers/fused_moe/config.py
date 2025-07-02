@@ -390,12 +390,11 @@ class FusedMoEConfig:
                     block_shape=block_shape,
                 )
             else:
+                _quant_config = FusedMoEQuantConfig()
                 logger.warning_once("MoE DP setup unable to determine "
                                     "quantization scheme or unsupported "
                                     "quantization type. This model will "
                                     "not run with DP enabled.")
-
-            _quant_config = FusedMoEQuantConfig()
         else:
             _quant_config = quant_config
 
