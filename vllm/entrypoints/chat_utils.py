@@ -96,7 +96,7 @@ class PILImage(BaseModel):
     """
     A PIL.Image.Image object.
     """
-    image: Image.Image
+    image_pil: Image.Image
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
