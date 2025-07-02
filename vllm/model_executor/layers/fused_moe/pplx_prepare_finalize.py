@@ -174,8 +174,6 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 round_up(final_dim, 4)  # round up for alignment
             )
 
-            # TODO (bnell): make sure shape matches up with pplx hidden bytes
-
             expert_x_scale = torch.empty(
                 expert_x_scale_shape,
                 dtype=torch.float32,
