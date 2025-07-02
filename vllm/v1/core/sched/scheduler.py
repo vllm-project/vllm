@@ -40,6 +40,9 @@ logger = init_logger(__name__)
 
 
 class TokenBudget:
+    """ Unified management of the token budget in the chunked prefill 
+    and the prefill and decode budget of Token Throttling
+    """
 
     def __init__(self, scheduler: Scheduler):
         self.scheduler = scheduler
@@ -75,6 +78,7 @@ class TokenBudget:
             kv_free = 1 - self.scheduler.kv_cache_manager.usage
 
             # prefill token budget
+            assert self.kv_thresh != 1
             prefill_ratio = max(0, (kv_free - self.kv_thresh) /
                                 (1 - self.kv_thresh))
             prefill_token_budget = max(num_prefill_tokens // self.num_iterp,
