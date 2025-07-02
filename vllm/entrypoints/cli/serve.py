@@ -44,11 +44,15 @@ class ServeSubcommand(CLISubcommand):
 
         if args.headless or args.api_server_count < 1:
             run_headless(args)
-        elif args.api_server_count > 1:
-            run_multi_api_server(args)
         else:
-            # Single API server (this process).
-            uvloop.run(run_server(args))
+            if args.data_parallel_start_rank:
+                raise ValueError("data_parallel_start_rank is only "
+                                 "applicable in headless mode")
+            if args.api_server_count > 1:
+                run_multi_api_server(args)
+            else:
+                # Single API server (this process).
+                uvloop.run(run_server(args))
 
     def validate(self, args: argparse.Namespace) -> None:
         validate_parsed_serve_args(args)
@@ -117,13 +121,18 @@ def run_headless(args: argparse.Namespace):
 
     parallel_config = vllm_config.parallel_config
     local_engine_count = parallel_config.data_parallel_size_local
-    host = parallel_config.data_parallel_master_ip
-    port = engine_args.data_parallel_rpc_port  # add to config too
-    handshake_address = get_tcp_uri(host, port)
 
     if local_engine_count <= 0:
         raise ValueError("data_parallel_size_local must be > 0 in "
                          "headless mode")
+
+    if parallel_config.data_parallel_rank is not None:
+        raise ValueError("data_parallel_rank is not applicable in "
+                         "headless mode")
+
+    host = parallel_config.data_parallel_master_ip
+    port = engine_args.data_parallel_rpc_port  # add to config too
+    handshake_address = get_tcp_uri(host, port)
 
     # Catch SIGTERM and SIGINT to allow graceful shutdown.
     def signal_handler(signum, frame):
