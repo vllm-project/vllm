@@ -50,11 +50,10 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
-from vllm.utils import F
 
 from .interfaces import SupportsPP
-from .utils import (PPMissingLayer, 
-                    extract_layer_index, is_pp_missing_parameter,
+from .utils import (PPMissingLayer, extract_layer_index,
+                    is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
 
@@ -92,9 +91,10 @@ class Ernie4_5_MoeMLP(nn.Module):
 
     def forward(self, x):
         gate_up, _ = self.gate_up_proj(x)
-        x = self.act_fn(gate_up) 
+        x = self.act_fn(gate_up)
         x, _ = self.down_proj(x)
         return x
+
 
 class Ernie4_5_MoeMoE(nn.Module):
 
@@ -105,34 +105,32 @@ class Ernie4_5_MoeMoE(nn.Module):
         prefix: str = "",
     ):
         super().__init__()
-        
+
         layer_idx = extract_layer_index(prefix)
         self.layer_idx = layer_idx
         self.tp_size = get_tensor_model_parallel_world_size()
-        self.moe_num_shared_experts = getattr(config, "moe_num_shared_experts", None) 
-        
+        self.moe_num_shared_experts = getattr(config, "moe_num_shared_experts",
+                                              None)
+
         if self.tp_size > config.moe_num_experts:
             raise ValueError(
                 f"Tensor parallel size {self.tp_size} is greater than "
                 f"the number of experts {config.moe_num_experts}.")
 
-
         self.gate = ReplicatedLinear(config.hidden_size,
-                                config.moe_num_experts,
-                                bias=False,
-                                quant_config=None,
-                                prefix=f"{prefix}.gate")
+                                     config.moe_num_experts,
+                                     bias=False,
+                                     quant_config=None,
+                                     prefix=f"{prefix}.gate")
 
-        self.experts = FusedMoE(
-                                num_experts=config.moe_num_experts,
-                                top_k=config.moe_k, 
+        self.experts = FusedMoE(num_experts=config.moe_num_experts,
+                                top_k=config.moe_k,
                                 hidden_size=config.hidden_size,
                                 intermediate_size=config.moe_intermediate_size,
                                 reduce_results=False,
                                 renormalize=True,
                                 quant_config=quant_config,
-                                prefix=f"{prefix}.experts"
-                                )
+                                prefix=f"{prefix}.experts")
 
         if self.moe_num_shared_experts is not None:
             intermediate_size = (config.moe_intermediate_size *
@@ -143,11 +141,8 @@ class Ernie4_5_MoeMoE(nn.Module):
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
                 prefix=f"{prefix}.shared_experts",
-                reduce_results=self.experts.must_reduce_shared_expert_outputs()
-            )
-
-
-
+                reduce_results=self.experts.must_reduce_shared_expert_outputs(
+                ))
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         orig_shape = hidden_states.shape
@@ -161,13 +156,14 @@ class Ernie4_5_MoeMoE(nn.Module):
         final_hidden_states = self.experts(hidden_states=hidden_states,
                                            router_logits=router_logits)
 
-        if self.moe_num_shared_experts is not None and shared_output is not None:
+        if self.moe_num_shared_experts is not None and \
+              shared_output is not None:
             final_hidden_states = final_hidden_states + shared_output
-            
-        
+
         if self.tp_size > 1:
-            final_hidden_states = self.experts.maybe_all_reduce_tensor_model_parallel(  
-                final_hidden_states)
+            final_hidden_states = (
+                self.experts.maybe_all_reduce_tensor_model_parallel(
+                    final_hidden_states))
 
         return final_hidden_states.view(orig_shape)
 
@@ -179,13 +175,12 @@ class Ernie4_5_MoeAttention(nn.Module):
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
-        head_dim: Optional[int] = None, 
-        rope_theta: float = 500000, 
-        rope_scaling: Optional[dict[str, Any]] = None, 
+        head_dim: Optional[int] = None,
+        rope_theta: float = 500000,
+        rope_scaling: Optional[dict[str, Any]] = None,
         max_position_embeddings: int = 131072,
         rms_norm_eps: float = 1e-05,
         qkv_bias: bool = False,
-
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
@@ -196,8 +191,8 @@ class Ernie4_5_MoeAttention(nn.Module):
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
         self.total_num_heads = num_heads
-        assert self.total_num_heads % tp_size == 0 
-        self.num_heads = self.total_num_heads // tp_size 
+        assert self.total_num_heads % tp_size == 0
+        self.num_heads = self.total_num_heads // tp_size
 
         self.total_num_kv_heads = num_kv_heads
         if self.total_num_kv_heads >= tp_size:
@@ -213,10 +208,9 @@ class Ernie4_5_MoeAttention(nn.Module):
 
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
-        self.scaling = self.head_dim**-0.5 
+        self.scaling = self.head_dim**-0.5
         self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
-
 
         self.qkv_proj = QKVParallelLinear(hidden_size,
                                           self.head_dim,
@@ -248,7 +242,6 @@ class Ernie4_5_MoeAttention(nn.Module):
                               quant_config=quant_config,
                               prefix=f"{prefix}.attn")
 
-
     def forward(
         self,
         positions: torch.Tensor,
@@ -266,6 +259,7 @@ class Ernie4_5_MoeAttention(nn.Module):
         output, _ = self.o_proj(attn_output)
         return output
 
+
 class Ernie4_5_MoeDecoderLayer(nn.Module):
 
     def __init__(
@@ -278,8 +272,9 @@ class Ernie4_5_MoeDecoderLayer(nn.Module):
         super().__init__()
         self.hidden_size = config.hidden_size
         rope_theta = getattr(config, "rope_theta", 500000)
-        rope_scaling = getattr(config, "rope_scaling", None) 
-        max_position_embeddings = getattr(config, "max_position_embeddings", 131072)
+        rope_scaling = getattr(config, "rope_scaling", None)
+        max_position_embeddings = getattr(config, "max_position_embeddings",
+                                          131072)
         self.self_attn = Ernie4_5_MoeAttention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
@@ -301,19 +296,17 @@ class Ernie4_5_MoeDecoderLayer(nn.Module):
         # MoE
         moe_num_experts = getattr(config, "moe_num_experts", 0)
         moe_layer_start_index = getattr(config, "moe_layer_start_index", 0)
-        moe_layer_end_index = getattr(config, "moe_layer_end_index", config.num_hidden_layers - 1)
+        moe_layer_end_index = getattr(config, "moe_layer_end_index",
+                                      config.num_hidden_layers - 1)
         moe_layer_interval = getattr(config, "moe_layer_interval", 1)
         use_moe = getattr(config, "use_moe", moe_num_experts > 0)
 
-
         if (use_moe and ((layer_idx + 1) % moe_layer_interval == 0)
-            and layer_idx >= moe_layer_start_index
-            and layer_idx <= moe_layer_end_index):
-            self.mlp = Ernie4_5_MoeMoE(
-                config=config,
-                quant_config=quant_config,
-                prefix=f"{prefix}.mlp"
-            )
+                and layer_idx >= moe_layer_start_index
+                and layer_idx <= moe_layer_end_index):
+            self.mlp = Ernie4_5_MoeMoE(config=config,
+                                       quant_config=quant_config,
+                                       prefix=f"{prefix}.mlp")
         else:
             self.mlp = Ernie4_5_MoeMLP(
                 hidden_size=config.hidden_size,
@@ -321,8 +314,7 @@ class Ernie4_5_MoeDecoderLayer(nn.Module):
                 hidden_act=config.hidden_act,
                 use_bias=getattr(config, 'use_bias', False),
                 quant_config=quant_config,
-                prefix=f"{prefix}.mlp"
-            )
+                prefix=f"{prefix}.mlp")
 
         self.input_layernorm = RMSNorm(config.hidden_size,
                                        eps=config.rms_norm_eps)
@@ -343,18 +335,18 @@ class Ernie4_5_MoeDecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.input_layernorm(
                 hidden_states, residual)
-        
+
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
         )
 
-        # Fully Connected 
+        # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual)
 
         hidden_states = self.mlp(hidden_states)
-        
+
         return hidden_states, residual
 
 
@@ -384,9 +376,9 @@ class Ernie4_5_MoeModel(nn.Module):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: Ernie4_5_MoeDecoderLayer(config=config,
-                                                cache_config=cache_config,
-                                                quant_config=quant_config,
-                                                prefix=prefix),
+                                                    cache_config=cache_config,
+                                                    quant_config=quant_config,
+                                                    prefix=prefix),
             prefix=f"{prefix}.layers",
         )
 
@@ -435,6 +427,7 @@ class Ernie4_5_MoeModel(nn.Module):
 
         return hidden_states
 
+
 class Ernie4_5_MoeForCausalLM(nn.Module, SupportsPP):
     packed_modules_mapping = {
         "qkv_proj": [
@@ -457,8 +450,8 @@ class Ernie4_5_MoeForCausalLM(nn.Module, SupportsPP):
         self.config = config
         self.quant_config = quant_config
         self.model = Ernie4_5_MoeModel(vllm_config=vllm_config,
-                                   prefix=maybe_prefix(prefix, "model")) 
-        
+                                       prefix=maybe_prefix(prefix, "model"))
+
         if get_pp_group().is_last_rank:
             self.lm_head = ParallelLMHead(config.vocab_size,
                                           config.hidden_size,
@@ -483,7 +476,7 @@ class Ernie4_5_MoeForCausalLM(nn.Module, SupportsPP):
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         hidden_states = self.model(input_ids, positions, intermediate_tensors,
-                                   inputs_embeds)  
+                                   inputs_embeds)
         return hidden_states
 
     def compute_logits(
@@ -492,7 +485,7 @@ class Ernie4_5_MoeForCausalLM(nn.Module, SupportsPP):
         sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
         logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata) 
+                                       sampling_metadata)
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str,
@@ -517,9 +510,10 @@ class Ernie4_5_MoeForCausalLM(nn.Module, SupportsPP):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
-            if self.config.tie_word_embeddings and name.endswith("lm_head.weight") :
+            if self.config.tie_word_embeddings and name.endswith(
+                    "lm_head.weight"):
                 continue
-            # MTP will be supported soon
+            # MTP will be supported soon.
             if "mtp" in name:
                 continue
 
@@ -538,7 +532,7 @@ class Ernie4_5_MoeForCausalLM(nn.Module, SupportsPP):
                 # Skip layers on other devices.
                 if is_pp_missing_parameter(name, self):
                     continue
-                
+
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
@@ -546,7 +540,7 @@ class Ernie4_5_MoeForCausalLM(nn.Module, SupportsPP):
             else:
                 for mapping in expert_params_mapping:
                     param_name, weight_name, expert_id, shard_id = mapping
-                    
+
                     if weight_name not in name:
                         continue
 
