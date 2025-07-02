@@ -3540,7 +3540,10 @@ GuidedDecodingBackend = Literal[GuidedDecodingBackendV0,
 @config
 @dataclass
 class StructuredOutputConfig:
-    """Dataclass which contains the decoding strategy of the engine."""
+    """
+    Dataclass which contains parameters for
+    structured output / guided decoding.
+    """
 
     @property
     @deprecated(

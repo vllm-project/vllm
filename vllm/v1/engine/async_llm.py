@@ -8,7 +8,7 @@ from typing import Any, Optional, Union
 import numpy as np
 
 import vllm.envs as envs
-from vllm.config import ModelConfig, VllmConfig
+from vllm.config import ModelConfig, StructuredOutputConfig, VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
 from vllm.envs import VLLM_V1_OUTPUT_PROC_CHUNK_SIZE
@@ -526,8 +526,8 @@ class AsyncLLM(EngineClient):
     async def get_model_config(self) -> ModelConfig:
         return self.model_config
 
-    async def get_structured_output_config(self):
-        raise ValueError("Not Supported on V1 yet.")
+    async def get_structured_output_config(self) -> "StructuredOutputConfig":
+        raise self.vllm_config.structured_output_config
 
     async def get_input_preprocessor(self) -> InputPreprocessor:
         return self.processor.input_preprocessor

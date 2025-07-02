@@ -1121,7 +1121,7 @@ class AsyncLLMEngine(EngineClient):
         return self.engine.get_parallel_config()
 
     async def get_structured_output_config(self) -> StructuredOutputConfig:
-        """Get the structured ouptput configuration of the vLLM engine."""
+        """Get the structured output configuration of the vLLM engine."""
         return self.engine.get_structured_output_config()
 
     async def get_scheduler_config(self) -> SchedulerConfig:
