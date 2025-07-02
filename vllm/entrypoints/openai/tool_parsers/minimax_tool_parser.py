@@ -124,8 +124,34 @@ class MinimaxToolParser(ToolParser):
                                          function_call["arguments"],
                                          ensure_ascii=False))))
 
-            content = model_output[:model_output.find(self.
-                                                      tool_call_start_token)]
+            # Extract content before the first valid tool call
+            # Find the position in processed output, then map back to original
+            processed_pos = processed_output.find(self.tool_call_start_token)
+            if processed_pos != -1:
+                # Get the content before tool calls in processed output
+                processed_content = processed_output[:processed_pos].strip()
+                
+                # The content should be everything before the first valid tool call
+                # Since we know the processed content, we need to find where it ends in original
+                if processed_content:
+                    # Find the end of this content in the original output
+                    # Look for the last non-empty line of processed content
+                    lines = processed_content.split('\n')
+                    for line in reversed(lines):
+                        line = line.strip()
+                        if line:
+                            # Find this line in original output
+                            pos = model_output.find(line)
+                            if pos != -1:
+                                content = model_output[:pos + len(line)]
+                                break
+                    else:
+                        content = ""
+                else:
+                    content = ""
+            else:
+                content = model_output
+                
             return ExtractedToolCallInformation(
                 tools_called=len(tool_calls) > 0,
                 tool_calls=tool_calls,
