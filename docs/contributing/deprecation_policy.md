@@ -37,14 +37,14 @@ multiple Y releases:
 - **Timeline**: A removal version is explicitly stated in the deprecation
 warning (e.g., "This will be removed in v0.10.0").
 - **Communication**: Deprecation is noted in the following, as applicable:
-  - Help strings
-  - Log output
-  - API responses
-  - `/metrics` output (for metrics features)
-  - User-facing documentation
-  - Release notes
-  - GitHub Issue (RFC) for feedback
-  - Documentation and use of the `@typing_extensions.deprecated` decorator for Python APIs
+    - Help strings
+    - Log output
+    - API responses
+    - `/metrics` output (for metrics features)
+    - User-facing documentation
+    - Release notes
+    - GitHub Issue (RFC) for feedback
+    - Documentation and use of the `@typing_extensions.deprecated` decorator for Python APIs
 
 **2.Deprecated (Off By Default)**
 
