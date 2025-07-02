@@ -5,7 +5,7 @@ DeepEP test utilities
 import dataclasses
 import os
 import traceback
-from typing import Callable, Optional, any
+from typing import Any, Callable, Optional
 
 import torch
 from torch.distributed import ProcessGroup
@@ -147,7 +147,7 @@ def parallel_launch_with_config(
     world_size: int,
     worker: Callable[Concatenate[ProcessGroupInfo, P], None],
     vllm_config: VllmConfig,
-    env_dict: dict[any, any],
+    env_dict: dict[Any, Any],
     *args: P.args,
     **kwargs: P.kwargs,
 ) -> None:

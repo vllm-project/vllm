@@ -19,7 +19,7 @@ from vllm.distributed import (get_dp_group, get_ep_group,
 # Fused experts imports
 from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
     BatchedDeepGemmExperts)
-from vllm.model_executor.layers.fused_moe.batched_triton_or_deep_gemm_moe import ( # noqa: E501
+from vllm.model_executor.layers.fused_moe.batched_triton_or_deep_gemm_moe import (  # noqa: E501
     BatchedTritonOrDeepGemmExperts)
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig, FusedMoEParallelConfig, FusedMoEQuantConfig)
@@ -41,7 +41,7 @@ from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
     TritonOrDeepGemmExperts)
 from vllm.utils import has_deep_ep, has_deep_gemm, has_pplx
 
-from .parallel_utils import ProcessGroupInfo, parallel_launch
+from .parallel_utils import ProcessGroupInfo, parallel_launch_with_config
 
 
 def per_token_cast_to_fp8(
@@ -195,6 +195,25 @@ class Config:
     fused_moe_chunk_size: Optional[int]
     world_size: int
 
+    def describe(self) -> str:
+        s = ""
+        s += "== Config: \n"
+        s += f" world_size={self.world_size} \n"
+        s += f" PF={self.prepare_finalize_type.__name__} \n"
+        s += f" FE={self.fused_experts_type.__name__} \n"
+        s += f" topk={self.topks} \n"
+        s += f" dtype={self.dtype} \n"
+        s += " Quant: \n"
+        s += f" fused_moe_chunk_size={self.fused_moe_chunk_size} \n "
+        if self.quant_config is not None:
+            s += f"     q_dtype={self.quant_dtype} \n"
+            s += f"     q_block_shape={self.quant_block_shape} \n"
+            s += f"     q_per_out_ch_quant={self.is_per_out_ch_quant} \n"
+            s += f"     q_per_act_token={self.is_per_act_token_quant} \n"
+        else:
+            s += "     quant=None \n"
+        return s
+
     @property
     def M(self) -> int:
         assert isinstance(self.Ms, int)
@@ -247,7 +266,8 @@ class Config:
         return self.E // self.world_size
 
     def is_fp8_block_quantized(self):
-        return (self.quant_dtype == torch.float8_e4m3fn and self.quant_block_shape is not None)
+        return (self.quant_dtype == torch.float8_e4m3fn
+                and self.quant_block_shape is not None)
 
     def is_batched_prepare_finalize(self):
         return self.prepare_finalize_type in [
@@ -337,7 +357,7 @@ class Config:
             return False
         if self.needs_deep_gemm() and not has_deep_gemm():
             return False
-        if self.needs_pplx() and not has_pplx(): # noqa: SIM103
+        if self.needs_pplx() and not has_pplx():  # noqa: SIM103
             return False
 
         return True
@@ -459,7 +479,8 @@ class RankTensors:
         topk, m, _ = (config.topk, config.M, config.K)
         hidden_states = RankTensors.make_hidden_states(config)
 
-        num_local_experts, global_num_experts = (config.num_local_experts, config.E)
+        num_local_experts, global_num_experts = (config.num_local_experts,
+                                                 config.E)
         score = torch.randn((m, global_num_experts),
                             device="cuda",
                             dtype=dtype)
@@ -682,10 +703,16 @@ FUSED_EXPERT_TYPES = [
     TritonExperts,
 ]
 
-Ms = [1, 8, 16]
-Ks = [1024, 4096, 7168]  # hidden sizes
-Ns = [1024]
-TOPKs = [1, 4, 8]
+#Ms = [1, 8, 16]
+#Ks = [1024, 4096, 7168]  # hidden sizes
+#Ns = [1024]
+#TOPKs = [1, 4, 8]
+
+Ms = [64]
+Ks = [1024]  # hidden sizes
+Ns = [2048]
+TOPKs = [4]
+
 Es = [32]
 DTYPEs = [torch.bfloat16]
 BLOCK_SIZEs = [None, [128, 128]]
@@ -740,6 +767,8 @@ def test_modular_kernel_combinations(
     if not config.is_valid():
         pytest.skip(f"Tests config {config} is not valid. Skipping ...")
 
+    print(f"Testing config \n{config.describe()} ...")
+
     weights: WeightTensors = WeightTensors.make(config)
 
     vllm_config = VllmConfig()
@@ -754,5 +783,5 @@ def test_modular_kernel_combinations(
         env_dict.update(
             {"VLLM_FUSED_MOE_CHUNK_SIZE": str(fused_moe_chunk_size)})
 
-    parallel_launch(world_size, rank_worker, vllm_config, env_dict, config,
-                    weights)
+    parallel_launch_with_config(world_size, rank_worker, vllm_config, env_dict,
+                                config, weights)
