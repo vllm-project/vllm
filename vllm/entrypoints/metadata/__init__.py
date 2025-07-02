@@ -22,7 +22,8 @@ TASK2METADATA_CLASS = {
 
 def get_metadata(vllm_config: "VllmConfig"):
     task = vllm_config.model_config.task
-    metadata_class = TASK2METADATA_CLASS.get(task)
+    metadata_class = TASK2METADATA_CLASS.get(
+        task)  # type: ignore[attr-defined]
     assert metadata_class is not None, \
         (f"Task {task} is not supported yet. "
          f"Please add it to TASK2METADATA_CLASS in __init__.py.")
