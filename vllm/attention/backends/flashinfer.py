@@ -1099,16 +1099,15 @@ class FlashInferImpl(AttentionImpl):
             assert decode_meta.decode_wrapper._logits_soft_cap == (
                 logits_soft_cap or 0.0)
             assert decode_meta.decode_wrapper._sm_scale == softmax_scale
-
-            solver = os.environ.get('KERNEL', 'FI')
-            if solver == 'FI':
+            # TODO: @pavanimajety Remove this once the switch happens inside flashinfer.
+            if not envs.VLLM_USE_TRTLLM_DECODE_ATTENTION:
                 decode_output = decode_meta.decode_wrapper.run(
                     decode_query,
                     kv_cache.permute(*stride_order),
                     k_scale=layer._k_scale_float,
                     v_scale=layer._v_scale_float,
                 )
-            elif solver == 'GEN':
+            else:
                 workspace_buffer = decode_meta.decode_wrapper._int_workspace_buffer
                 decode_output = trtllm_batch_decode_with_kv_cache(
                     decode_query,
@@ -1123,8 +1122,6 @@ class FlashInferImpl(AttentionImpl):
                     attn_metadata.max_decode_seq_len,
                     kv_cache_dtype, layer._k_scale_float,
                     layer._v_scale_float)
-            else:
-                raise ValueError(f"Unrecognized decode solver: {solver}")
 
         if prefill_output is None and decode_output is not None:
             # Decode only batch.

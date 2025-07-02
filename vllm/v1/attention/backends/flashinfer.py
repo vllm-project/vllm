@@ -426,24 +426,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         q_data_type=attn_metadata.q_data_type,
                         kv_data_type=attn_metadata.kv_data_type,
                     )
-                else:
-                    # kv_cache_shape = (NUM_BLOCKS, 2, num_kv_heads, page_size, head_dim)
-                    # 2048 is an arbitrary NUM_BLOCKS to download and load the kernel
-                    trtllm_batch_decode_with_kv_cache(
-                    query=torch.zeros(self._num_decodes, attn_metadata.num_qo_heads, attn_metadata.head_dim, device=self.runner.device, dtype=attn_metadata.q_data_type).half(),
-                    kv_cache=torch.zeros(2048, 2, attn_metadata.num_kv_heads, attn_metadata.head_dim, device=self.runner.device, dtype=attn_metadata.kv_data_type).half(),
-                    workspace_buffer=attn_metadata.workspace_buffer,
-                    num_heads=attn_metadata.num_qo_heads,
-                    num_kv_heads=attn_metadata.num_kv_heads,
-                    scale=1.0,
-                    block_tables=attn_metadata.block_table_tensor[:self._num_decodes],
-                    seq_lens=attn_metadata.seq_lens[:self._num_decodes],
-                    block_size=attn_metadata.page_size,
-                    max_seq_len=attn_metadata.block_table_tensor.shape[1] * attn_metadata.page_size,
-                    kv_cache_dtype="auto" if (attn_metadata.kv_data_type == torch.float16) else "fp8",
-                    k_scale=1.0,
-                    v_scale=1.0,
-                )
+
 
     def build(self, common_prefix_len: int,
               common_attn_metadata: CommonAttentionMetadata):
@@ -702,29 +685,20 @@ class FlashInferImpl(AttentionImpl):
                                                            or 0.0)
                 assert decode_wrapper._sm_scale == self.scale
                 decode_wrapper.run(
-                    decode_query,
-                    kv_cache.permute(*stride_order),
-                    k_scale=layer._k_scale_float,
-                    v_scale=layer._v_scale_float,
-                    out=output[:num_decode_tokens],
+                   decode_query,
+                   kv_cache.permute(*stride_order),
+                   k_scale=layer._k_scale_float,
+                   v_scale=layer._v_scale_float,
+                   out=output[:num_decode_tokens],
                 )
             else:
                 # This path needs to be enabled with 
                 # VLLM_USE_TRTLLM_DECODE_ATTENTION = 1 and VLLM_KV_CACHE_LAYOUT = HND
                 max_seq_len = (attn_metadata.seq_lens[:num_decode_tokens].max())
-                print(f"decode_query.shape: {decode_query.shape}")
-                print(f"kv_cache.shape: {kv_cache.shape}")
-                # print(f"decode_query: {decode_query}")
-                # print(f"kv_cache: {kv_cache}")
-                print(f"attn_metadata.block_table_tensor.shape: {attn_metadata.block_table_tensor.shape}")
-                print(f"attn_metadata.seq_lens: {attn_metadata.seq_lens}")
-                print(f"attn_metadata.max_seq_len: {max_seq_len}")
-                # print(f"self.num_heads: {self.num_heads}, self.num_kv_heads: {self.num_kv_heads}")
-                print(f"num_decode_tokens: {num_decode_tokens}")
                 if num_decode_tokens > 0:
                     output[:num_decode_tokens] = trtllm_batch_decode_with_kv_cache(
-                        query=decode_query.contiguous().half(),
-                        kv_cache=kv_cache.half(),
+                        query=decode_query,
+                        kv_cache=kv_cache,
                         workspace_buffer=attn_metadata.workspace_buffer,
                         num_heads=self.num_heads,
                         num_kv_heads=self.num_kv_heads,
@@ -737,7 +711,4 @@ class FlashInferImpl(AttentionImpl):
                         k_scale=layer._k_scale_float,
                         v_scale=layer._v_scale_float,
                     )
-                    print(f"output[:num_decode_tokens]: {output[:num_decode_tokens].shape}")
-                print(f"-----------------------------------------------")
-        import time; time.sleep(0.001)
         return output_padded
