@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Helper functions for 3D sparse pattern
 # These function are not optimized and very inefficient.
@@ -8,7 +9,8 @@ from functools import lru_cache
 
 import numpy as np
 import torch
-import triton
+
+from vllm.triton_utils import triton
 
 
 class csr_matrix:

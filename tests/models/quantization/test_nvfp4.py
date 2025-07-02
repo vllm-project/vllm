@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # flake8: noqa
 """Tests Model Optimizer nvfp4 models against ground truth generation
 Note: these tests will only pass on B200
@@ -41,8 +42,8 @@ EXPECTED_STRS_MAP = {
     reason=
     "Prevent unstable test based on golden strings from breaking the build "
     " and test input model being too large and hanging the system.")
-@pytest.mark.skipif(not is_quant_method_supported("nvfp4"),
-                    reason="nvfp4 is not supported on this GPU type.")
+@pytest.mark.skipif(not is_quant_method_supported("modelopt_fp4"),
+                    reason="modelopt_fp4 is not supported on this GPU type.")
 @pytest.mark.parametrize("model_name", MODELS)
 def test_models(example_prompts, model_name) -> None:
     model = LLM(
@@ -50,7 +51,7 @@ def test_models(example_prompts, model_name) -> None:
         max_model_len=MAX_MODEL_LEN,
         trust_remote_code=True,
         enforce_eager=True,
-        quantization="nvfp4",
+        quantization="modelopt_fp4",
     )
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)

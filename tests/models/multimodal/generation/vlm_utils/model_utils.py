@@ -1,20 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Common utility functions relating to different models that are useful
 for manipulating the input / output of HF & vLLM test runners, which are
 typically specific to a small subset of models.
 """
-import re
 import types
 from pathlib import PosixPath
 from typing import Optional, Union
 
+import numpy as np
+import numpy.typing as npt
+import pytest
+import regex as re
 import torch
 from PIL.Image import Image
 from transformers import (AutoConfig, AutoTokenizer, BatchFeature,
-                          GenerationConfig)
+                          GenerationConfig, GenerationMixin)
+from transformers.video_utils import VideoMetadata
 
 from vllm.sequence import SampleLogprobs
 from vllm.transformers_utils.tokenizer import patch_padding_side
+from vllm.utils import is_list_of
 
 from .....conftest import HfRunner, ImageAsset, ImageTestAssets
 from .types import RunnerOutput
@@ -237,6 +243,18 @@ def minimax_vl_01_hf_output(hf_output: RunnerOutput,
     return output_ids, output_str, out_logprobs
 
 
+def ultravox_trunc_hf_output(hf_output: RunnerOutput,
+                             model: str) -> RunnerOutput:
+    output_ids, output_str, out_logprobs = hf_output
+
+    tokenizer = AutoTokenizer.from_pretrained(model)
+    eos_token_id = tokenizer.eos_token_id
+    eos_token = tokenizer.decode(eos_token_id)
+    if output_str.endswith(eos_token):
+        output_str = output_str.split(eos_token)[0]
+    return output_ids, output_str, out_logprobs
+
+
 ####### Functions for converting image assets to embeddings
 def get_llava_embeddings(image_assets: ImageTestAssets):
     return [asset.image_embeds for asset in image_assets]
@@ -309,6 +327,16 @@ def gemma3_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
 
     hf_model.processor = processor
 
+    orig_generate = hf_model.model.generate
+
+    def _generate(self, *args, **kwargs):
+        # FIXME: https://github.com/huggingface/transformers/issues/38333
+        kwargs["disable_compile"] = True
+
+        return orig_generate(*args, **kwargs)
+
+    hf_model.model.generate = types.MethodType(_generate, hf_model.model)
+
     return hf_model
 
 
@@ -344,6 +372,28 @@ def glm4v_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     hf_model.processor = processor
     hf_model.model.get_output_embeddings = lambda: \
         hf_model.model.transformer.output_layer
+    return hf_model
+
+
+def glm4_1v_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
+    """Patches and returns an instance of the HfRunner to use for GLM4.1V."""
+    hf_processor = hf_model.processor
+
+    def processor(*args, videos=None, **kwargs):
+        if videos is not None and is_list_of(videos, tuple):
+            # If videos is a list of tuples, we assume each tuple contains
+            # (video_array, metadata) as in the case of GLM4.1V.
+            video_metadata = [[VideoMetadata(**video[1])] for video in videos]
+            videos = [[video[0]] for video in videos]
+        else:
+            video_metadata = None
+
+        return hf_processor(*args,
+                            videos=videos,
+                            video_metadata=video_metadata,
+                            **kwargs)
+
+    hf_model.processor = processor
     return hf_model
 
 
@@ -483,30 +533,74 @@ def internvl_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
             self.max_num = self.config.max_dynamic_patch
             self.image_size = self.vision_config.image_size
 
-        def __call__(self, text: str, images: Union[Image, list[Image]],
-                     **kwargs):
+        def __call__(
+            self,
+            text: str,
+            images: Union[Image, list[Image]] = None,
+            videos: Union[npt.NDArray, list[npt.NDArray]] = None,
+            **kwargs,
+        ):
             from vllm.model_executor.models.internvl import (
                 IMG_CONTEXT, IMG_END, IMG_START,
-                image_to_pixel_values_internvl)
+                image_to_pixel_values_internvl, video_to_pixel_values_internvl)
             images = [images] if isinstance(images, Image) else images
-            pixel_values = [
-                image_to_pixel_values_internvl(
-                    image,
-                    input_size=self.image_size,
-                    min_num=self.min_num,
-                    max_num=self.max_num,
-                    use_thumbnail=self.use_thumbnail,
-                ) for image in images
-            ]
-            num_patches_list = [
-                pixel_value.shape[0] for pixel_value in pixel_values
-            ]
+            videos = [videos] if isinstance(videos, np.ndarray) else videos
+            if images is not None:
+                pixel_values_images = [
+                    image_to_pixel_values_internvl(
+                        image,
+                        input_size=self.image_size,
+                        min_num=self.min_num,
+                        max_num=self.max_num,
+                        use_thumbnail=self.use_thumbnail,
+                    ) for image in images
+                ]
+                num_patches_images = [
+                    pixel_value.shape[0] for pixel_value in pixel_values_images
+                ]
+            else:
+                pixel_values_images, num_patches_images = [], []
+
+            if videos is not None:
+                pixel_values_videos = [
+                    video_to_pixel_values_internvl(
+                        video,
+                        input_size=self.image_size,
+                        min_num=1,
+                        max_num=1,
+                        use_thumbnail=False,
+                    ) for video in videos
+                ]
+                num_patches_videos = [
+                    pixel_value.shape[0] for pixel_value in pixel_values_videos
+                ]
+            else:
+                pixel_values_videos, num_patches_videos = [], []
+
+            pixel_values = []
+            while ("<image>" in text) or ("<video>" in text):
+                image_index = text.find("<image>")
+                video_index = text.find("<video>")
+                if image_index == -1 or (video_index > -1
+                                         and video_index < image_index):
+                    num_patches = num_patches_videos.pop(0)
+                    pixel_values.append(pixel_values_videos.pop(0))
+                    context_tokens = IMG_START + \
+                        IMG_CONTEXT * self.num_image_token + IMG_END
+                    video_tokens = ''.join([
+                        f'Frame{i+1}: {context_tokens}'
+                        for i in range(num_patches)
+                    ])
+                    text = text.replace('<video>', video_tokens, 1)
+                else:
+                    num_patches = num_patches_images.pop(0)
+                    pixel_values.append(pixel_values_images.pop(0))
+                    context_tokens = IMG_CONTEXT * self.num_image_token \
+                        * num_patches
+                    image_tokens = IMG_START + context_tokens + IMG_END
+                    text = text.replace('<image>', image_tokens, 1)
             pixel_values = torch.cat(pixel_values, dim=0)
-            for num_patches in num_patches_list:
-                context_tokens = IMG_CONTEXT * self.num_image_token \
-                    * num_patches
-                image_tokens = IMG_START + context_tokens + IMG_END
-                text = text.replace('<image>', image_tokens, 1)
+
             prompt = self.tokenizer(text, return_tensors="pt")
             prompt.update({"pixel_values": pixel_values})
             return prompt
@@ -551,6 +645,11 @@ def _internvl_generate(
     if getattr(self, "use_visual_token_mask", False):
         visual_token_mask = selected.reshape(B, N, 1).to(input_embeds.dtype)
         forward_kwargs["visual_token_mask"] = visual_token_mask
+
+    # e.g. InternVL2-2B
+    if not isinstance(self.language_model, GenerationMixin):
+        pytest.skip("HF impl is not compatible with current transformers")
+
     outputs = self.language_model.generate(
         **forward_kwargs,
         **generate_kwargs,
@@ -678,12 +777,8 @@ def molmo_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     return hf_model
 
 
-def ovis2_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
+def ovis_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     """Patches and returns an instance of the HfRunner to use for Ovis2."""
-    hf_model.model.visual_tokenizer.to(hf_model.dtype)
-    hf_model.model.vte.to(hf_model.dtype)
-    hf_model.model.llm.to(hf_model.dtype)
-
     hf_model.model.get_output_embeddings = lambda: \
         hf_model.model.llm.get_output_embeddings()
 
@@ -691,7 +786,16 @@ def ovis2_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
         text_tokenizer = hf_model.model.get_text_tokenizer()
         images = [images] if isinstance(images, Image) else images
 
-        text = text.split("<|im_start|>user\n")[1].split("<|im_end|>\n")[0]
+        prompt_start_and_end = {
+            "qwen2": ("<|im_start|>user\n", "<|im_end|>\n"),
+            "llama":
+            ("<|start_header_id|>user<|end_header_id|>\n\n", "<|eot_id|>"),
+            "gemma2": ("<start_of_turn>user\n", "<end_of_turn>\n"),
+        }
+        for start, end in prompt_start_and_end.values():
+            if start in text and end in text:
+                text = text.split(start)[1].split(end)[0]
+                break
 
         prompt, input_ids, pixel_values = hf_model.model.preprocess_inputs(
             text_or_conversations=text, images=images)

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Compare the with and without prefix caching.
 
 Run `pytest tests/prefix_caching/test_prefix_caching.py`.

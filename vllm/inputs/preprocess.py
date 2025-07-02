@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
 from collections.abc import Mapping
@@ -67,11 +68,11 @@ class InputPreprocessor:
         return self.tokenizer.get_lora_tokenizer(lora_request).eos_token_id
 
     def get_decoder_start_token_id(self) -> Optional[int]:
-        '''
+        """
         Obtain the decoder start token id employed by an encoder/decoder
         model. Returns None for non-encoder/decoder models or if the
         model config is unavailable.
-        '''
+        """
 
         if not self.model_config.is_encoder_decoder:
             logger.warning_once(
@@ -79,14 +80,14 @@ class InputPreprocessor:
                 "this is not an encoder/decoder model.")
             return None
 
-        if (self.model_config is None or self.model_config.hf_config is None):
+        if self.model_config is None or self.model_config.hf_config is None:
             logger.warning_once(
                 "Using None for decoder start token id because "
                 "model config is not available.")
             return None
 
         dec_start_token_id = getattr(self.model_config.hf_config,
-                                     'decoder_start_token_id', None)
+                                     "decoder_start_token_id", None)
         if dec_start_token_id is None:
             logger.warning_once(
                 "Falling back on <BOS> for decoder start token "
@@ -97,7 +98,7 @@ class InputPreprocessor:
         return dec_start_token_id
 
     def _get_default_enc_dec_decoder_prompt(self) -> list[int]:
-        '''
+        """
         Specifically for encoder/decoder models:
         generate a default decoder prompt for when
         the user specifies only the encoder prompt.
@@ -126,7 +127,7 @@ class InputPreprocessor:
         Returns:
 
         * prompt_token_ids
-        '''
+        """
 
         bos_token_id = self.get_bos_token_id()
         assert bos_token_id is not None
@@ -224,7 +225,10 @@ class InputPreprocessor:
         lora_request: Optional[LoRARequest],
         tokenization_kwargs: Optional[dict[str, Any]] = None,
     ) -> list[int]:
-        """Async version of {meth}`_tokenize_prompt`."""
+        """
+        Async version of
+        [`_tokenize_prompt`][vllm.inputs.preprocess.InputPreprocessor._tokenize_prompt].
+        """
         tokenizer = self.get_tokenizer_group()
         tokenization_kwargs = self._get_tokenization_kw(tokenization_kwargs)
 
@@ -261,7 +265,8 @@ class InputPreprocessor:
         prompt: Union[str, list[int]],
         mm_data: MultiModalDataDict,
         mm_processor_kwargs: Optional[Mapping[str, object]],
-        lora_request: Optional[LoRARequest],
+        tokenization_kwargs: Optional[dict[str, Any]] = None,
+        lora_request: Optional[LoRARequest] = None,
         return_mm_hashes: bool = False,
     ) -> MultiModalInputs:
         """
@@ -276,18 +281,25 @@ class InputPreprocessor:
         if mm_processor_kwargs is None:
             mm_processor_kwargs = {}
 
-        return mm_processor.apply(prompt, mm_data, mm_processor_kwargs,
-                                  return_mm_hashes)
+        return mm_processor.apply(prompt,
+                                  mm_data,
+                                  hf_processor_mm_kwargs=mm_processor_kwargs,
+                                  tokenization_kwargs=tokenization_kwargs,
+                                  return_mm_hashes=return_mm_hashes)
 
     async def _process_multimodal_async(
         self,
         prompt: Union[str, list[int]],
         mm_data: MultiModalDataDict,
         mm_processor_kwargs: Optional[Mapping[str, object]],
-        lora_request: Optional[LoRARequest],
+        tokenization_kwargs: Optional[dict[str, Any]] = None,
+        lora_request: Optional[LoRARequest] = None,
         return_mm_hashes: bool = False,
     ) -> MultiModalInputs:
-        """Async version of {meth}`_process_multimodal`."""
+        """
+        Async version of
+        [`_process_multimodal`][vllm.inputs.preprocess.InputPreprocessor._process_multimodal].
+        """
         tokenizer = await self._get_mm_tokenizer_async(lora_request)
 
         mm_processor = self.mm_registry.create_processor(self.model_config,
@@ -295,8 +307,11 @@ class InputPreprocessor:
         if mm_processor_kwargs is None:
             mm_processor_kwargs = {}
 
-        return mm_processor.apply(prompt, mm_data, mm_processor_kwargs,
-                                  return_mm_hashes)
+        return mm_processor.apply(prompt,
+                                  mm_data,
+                                  hf_processor_mm_kwargs=mm_processor_kwargs,
+                                  tokenization_kwargs=tokenization_kwargs,
+                                  return_mm_hashes=return_mm_hashes)
 
     def _process_embeds(
         self,
@@ -331,6 +346,7 @@ class InputPreprocessor:
     def _process_tokens(
         self,
         parsed_content: TokensPrompt,
+        tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[LoRARequest] = None,
         return_mm_hashes: bool = False,
     ) -> Union[TokenInputs, MultiModalInputs]:
@@ -343,6 +359,7 @@ class InputPreprocessor:
                 prompt_token_ids,
                 multi_modal_data,
                 parsed_content.get("mm_processor_kwargs"),
+                tokenization_kwargs=tokenization_kwargs,
                 lora_request=lora_request,
                 return_mm_hashes=return_mm_hashes,
             )
@@ -360,6 +377,7 @@ class InputPreprocessor:
     async def _process_tokens_async(
         self,
         parsed_content: TokensPrompt,
+        tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[LoRARequest] = None,
         return_mm_hashes: bool = False,
     ) -> Union[TokenInputs, MultiModalInputs]:
@@ -372,6 +390,7 @@ class InputPreprocessor:
                 prompt_token_ids,
                 multi_modal_data,
                 parsed_content.get("mm_processor_kwargs"),
+                tokenization_kwargs=tokenization_kwargs,
                 lora_request=lora_request,
                 return_mm_hashes=return_mm_hashes,
             )
@@ -401,6 +420,7 @@ class InputPreprocessor:
                 prompt_text,
                 multi_modal_data,
                 parsed_content.get("mm_processor_kwargs"),
+                tokenization_kwargs=tokenization_kwargs,
                 lora_request=lora_request,
                 return_mm_hashes=return_mm_hashes,
             )
@@ -435,6 +455,7 @@ class InputPreprocessor:
                 prompt_text,
                 multi_modal_data,
                 parsed_content.get("mm_processor_kwargs"),
+                tokenization_kwargs=tokenization_kwargs,
                 lora_request=lora_request,
                 return_mm_hashes=return_mm_hashes,
             )
@@ -472,7 +493,7 @@ class InputPreprocessor:
 
         Returns:
 
-        * {class}`SingletonInputs` instance
+        * [`SingletonInputs`][vllm.inputs.data.SingletonInputs] instance
         """
         parsed = parse_singleton_prompt(prompt)
 
@@ -508,7 +529,10 @@ class InputPreprocessor:
         lora_request: Optional[LoRARequest] = None,
         return_mm_hashes: bool = False,
     ) -> SingletonInputs:
-        """Async version of {meth}`_prompt_to_llm_inputs`."""
+        """
+        Async version of
+        [`_prompt_to_llm_inputs`][vllm.inputs.preprocess.InputPreprocessor._prompt_to_llm_inputs].
+        """
         parsed = parse_singleton_prompt(prompt)
 
         if parsed["type"] == "embeds":
@@ -644,7 +668,9 @@ class InputPreprocessor:
     ) -> EncoderDecoderInputs:
         """
         For encoder/decoder models only:
-        Process an input prompt into an {class}`EncoderDecoderInputs` instance.
+        Process an input prompt into an
+        [`EncoderDecoderInputs`][vllm.inputs.data.EncoderDecoderInputs]
+        instance.
 
         There are two types of input prompts:
         singleton prompts which carry only the
@@ -670,7 +696,8 @@ class InputPreprocessor:
 
         Returns:
 
-        * {class}`EncoderDecoderInputs` instance
+        * [`EncoderDecoderInputs`][vllm.inputs.data.EncoderDecoderInputs]
+          instance
         """
         encoder_inputs: SingletonInputs
         decoder_inputs: Optional[SingletonInputs]
@@ -710,7 +737,10 @@ class InputPreprocessor:
         prompt: PromptType,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
     ) -> EncoderDecoderInputs:
-        """Async version of {meth}`_process_encoder_decoder_prompt`."""
+        """
+        Async version of
+        [`_process_encoder_decoder_prompt`][vllm.inputs.preprocess.InputPreprocessor._process_encoder_decoder_prompt].
+        """
         encoder_inputs: SingletonInputs
         decoder_inputs: Optional[SingletonInputs]
 
@@ -778,7 +808,8 @@ class InputPreprocessor:
     ) -> DecoderOnlyInputs:
         """
         For decoder-only models:
-        Process an input prompt into an {class}`DecoderOnlyInputs` instance.
+        Process an input prompt into a
+        [`DecoderOnlyInputs`][vllm.inputs.data.DecoderOnlyInputs] instance.
 
         Arguments:
 
@@ -789,7 +820,7 @@ class InputPreprocessor:
 
         Returns:
 
-        * {class}`DecoderOnlyInputs` instance
+        * [`DecoderOnlyInputs`][vllm.inputs.data.DecoderOnlyInputs] instance
         """
 
         prompt_comps = self._prompt_to_llm_inputs(
@@ -812,7 +843,10 @@ class InputPreprocessor:
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         return_mm_hashes: bool = False,
     ) -> DecoderOnlyInputs:
-        """Async version of {meth}`_process_decoder_only_prompt`."""
+        """
+        Async version of
+        [`_process_decoder_only_prompt`][vllm.inputs.preprocess.InputPreprocessor._process_decoder_only_prompt].
+        """
         prompt_comps = await self._prompt_to_llm_inputs_async(
             prompt,
             tokenization_kwargs=tokenization_kwargs,
@@ -840,7 +874,8 @@ class InputPreprocessor:
                 "returned until they are supported on vLLM V1.")
             # Encoder-decoder model requires special mapping of
             # input prompts to encoder & decoder
-            return self._process_encoder_decoder_prompt(prompt)
+            return self._process_encoder_decoder_prompt(
+                prompt, tokenization_kwargs)
 
         if is_explicit_encoder_decoder_prompt(prompt):
             raise ValueError("Cannot pass encoder-decoder prompt "
@@ -863,7 +898,10 @@ class InputPreprocessor:
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         return_mm_hashes: bool = False,
     ) -> ProcessorInputs:
-        """Async version of {meth}`preprocess`."""
+        """
+        Async version of
+        [`preprocess`][vllm.inputs.preprocess.InputPreprocessor.preprocess].
+        """
         if self.model_config.is_encoder_decoder:
             assert not return_mm_hashes, (
                 "Multimodal hashes for encoder-decoder models should not be ",

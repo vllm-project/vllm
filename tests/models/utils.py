@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import warnings
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any, NamedTuple, Optional, Union
+from typing import Any, NamedTuple, Optional, Union
 
 import torch
 import torch.nn.functional as F
@@ -12,9 +13,6 @@ from vllm.inputs import InputContext
 from vllm.sequence import Logprob, PromptLogprobs, SampleLogprobs
 
 from .registry import HF_EXAMPLE_MODELS
-
-if TYPE_CHECKING:
-    from ..conftest import HfRunner
 
 TokensText = tuple[list[int], str]
 
@@ -317,6 +315,7 @@ def check_embeddings_close(
                                   dim=0)
 
         fail_msg = (f"Test{prompt_idx}:"
+                    f"\nCosine similarity: \t{sim:.4f}"
                     f"\n{name_0}:\t{embeddings_0[:16]!r}"
                     f"\n{name_1}:\t{embeddings_1[:16]!r}")
 
@@ -332,26 +331,15 @@ def matryoshka_fy(tensor: torch.Tensor, dimensions: int):
 
 class EmbedModelInfo(NamedTuple):
     name: str
-    is_matryoshka: bool
+    is_matryoshka: bool = False
     matryoshka_dimensions: Optional[list[int]] = None
     architecture: str = ""
+    dtype: str = "auto"
     enable_test: bool = True
 
 
-def run_embedding_correctness_test(
-    hf_model: "HfRunner",
-    inputs: list[str],
-    vllm_outputs: Sequence[list[float]],
-    dimensions: Optional[int] = None,
-):
-    hf_outputs = hf_model.encode(inputs)
-    if dimensions:
-        hf_outputs = matryoshka_fy(hf_outputs, dimensions)
-
-    check_embeddings_close(
-        embeddings_0_lst=hf_outputs,
-        embeddings_1_lst=vllm_outputs,
-        name_0="hf",
-        name_1="vllm",
-        tol=1e-2,
-    )
+class RerankModelInfo(NamedTuple):
+    name: str
+    architecture: str = ""
+    dtype: str = "auto"
+    enable_test: bool = True

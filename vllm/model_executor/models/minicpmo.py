@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Adapted from
 # https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/llama/modeling_llama.py
@@ -23,8 +24,7 @@
 # limitations under the License.
 """Inference-only MiniCPM-O model compatible with HuggingFace weights."""
 from collections.abc import Iterable, Mapping, Sequence
-from typing import (Any, Callable, Literal, Optional, Set, Tuple, TypedDict,
-                    Union)
+from typing import Any, Callable, Literal, Optional, TypedDict, Union
 
 import torch
 from torch import nn
@@ -260,6 +260,7 @@ class MiniCPMOMultiModalProcessor(
         self,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
     ) -> Mapping[str, NestedTensors]:
         if (audios := mm_data.get("audios")) is None:
             return {}
@@ -276,9 +277,9 @@ class MiniCPMOMultiModalProcessor(
                 prompts=[self.info.audio_pattern] * len(parsed_audios),
                 mm_data={"audios": [[audio] for audio in parsed_audios]},
                 mm_kwargs={
-                    **mm_kwargs,
-                    "chunk_input": True,
+                    **mm_kwargs, "chunk_input": True
                 },
+                tok_kwargs=tok_kwargs,
                 out_keys={"audio_features", "audio_feature_lens"},
             )
 
@@ -302,10 +303,11 @@ class MiniCPMOMultiModalProcessor(
         self,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
     ) -> Mapping[str, NestedTensors]:
         return {
-            **super().process_mm_inputs(mm_data, mm_kwargs),
-            **self.process_audios(mm_data, mm_kwargs),
+            **super().process_mm_inputs(mm_data, mm_kwargs, tok_kwargs),
+            **self.process_audios(mm_data, mm_kwargs, tok_kwargs),
         }
 
     def _get_prompt_updates(
@@ -559,8 +561,8 @@ class MiniCPMO(MiniCPMV2_6):
         self.audio_encoder_layer = -1
         return model
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self, skip_prefixes=["tts"])
         return loader.load_weights(weights)
 

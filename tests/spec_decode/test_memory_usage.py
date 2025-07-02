@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """This docstring details important information on the testing methodology.
 
 This test verifies that memory usage remains constant (or never grows) when 
@@ -42,12 +43,12 @@ we can ensure we go through the _no_spec codepath for most of our engine steps.
 
 def test_memory_usage_no_spec():
     previous_memory_allocated = None
-    llm = vllm.LLM(
-        model=MAIN_MODEL,
-        speculative_model=SPEC_MODEL,
-        num_speculative_tokens=3,
-        speculative_disable_by_batch_size=SPEC_DISABLE_BATCH_SIZE,
-    )
+    llm = vllm.LLM(model=MAIN_MODEL,
+                   speculative_config={
+                       "model": SPEC_MODEL,
+                       "num_speculative_tokens": 3,
+                       "disable_by_batch_size": SPEC_DISABLE_BATCH_SIZE,
+                   })
 
     batch_sequences = set()
     engine = llm.llm_engine

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 WARNING: This test runs in both single-node (4 GPUs) and multi-node
  (2 node with 2 GPUs each) modes. If the test only uses 2 GPUs, it is
@@ -26,7 +27,8 @@ VLLM_MULTI_NODE = os.getenv("VLLM_MULTI_NODE", "0") == "1"
 
 class ParallelSetup(NamedTuple):
     tp_size: int
-    sp_enabled: bool
+    pp_size: int
+    enable_fusion: bool
     eager_mode: bool
     chunked_prefill: bool
 
@@ -60,29 +62,23 @@ class SPTestSettings:
     def detailed(
         *,
         tp_base: int = 2,
+        pp_base: int = 1,
         multi_node_only: bool = False,
         task: TaskOption = "auto",
         load_format: Optional[str] = None,
     ):
+        parallel_setups = []
+        for eager_mode_val in [False, True]:
+            for pp_multiplier in [1, 2]:
+                for chunked_prefill_val in [False, True]:
+                    parallel_setups.append(
+                        ParallelSetup(tp_size=tp_base,
+                                      pp_size=pp_multiplier * pp_base,
+                                      enable_fusion=False,
+                                      eager_mode=eager_mode_val,
+                                      chunked_prefill=chunked_prefill_val))
         return SPTestSettings(
-            parallel_setups=[
-                ParallelSetup(tp_size=tp_base,
-                              sp_enabled=True,
-                              eager_mode=False,
-                              chunked_prefill=False),
-                ParallelSetup(tp_size=tp_base,
-                              sp_enabled=True,
-                              eager_mode=False,
-                              chunked_prefill=True),
-                ParallelSetup(tp_size=tp_base,
-                              sp_enabled=True,
-                              eager_mode=True,
-                              chunked_prefill=False),
-                ParallelSetup(tp_size=tp_base,
-                              sp_enabled=True,
-                              eager_mode=True,
-                              chunked_prefill=True)
-            ],
+            parallel_setups=parallel_setups,
             distributed_backends=["mp", "ray"],
             vllm_major_versions=["1", "1"],
             task=task,
@@ -94,17 +90,49 @@ class SPTestSettings:
     def fast(
         *,
         tp_base: int = 2,
+        pp_base: int = 1,
         task: TaskOption = "auto",
         multi_node_only: bool = False,
         load_format: Optional[str] = None,
     ):
+        parallel_setups = []
+        for eager_mode_val in [False, True]:
+            for pp_multiplier in [1, 2]:
+                for chunked_prefill_val in [False, True]:
+                    parallel_setups.append(
+                        ParallelSetup(tp_size=tp_base,
+                                      pp_size=pp_multiplier * pp_base,
+                                      enable_fusion=False,
+                                      eager_mode=eager_mode_val,
+                                      chunked_prefill=chunked_prefill_val))
         return SPTestSettings(
-            parallel_setups=[
+            parallel_setups=parallel_setups,
+            distributed_backends=["mp", "ray"],
+            vllm_major_versions=["1", "1"],
+            task=task,
+            test_options=SPTestOptions(multi_node_only=multi_node_only,
+                                       load_format=load_format),
+        )
+
+    @staticmethod
+    def fp8_quant(
+        *,
+        tp_base: int = 2,
+        pp_base: int = 1,
+        task: TaskOption = "auto",
+        multi_node_only: bool = False,
+        load_format: Optional[str] = None,
+    ):
+        parallel_setups = []
+        for fusion_val in [False, True]:
+            parallel_setups.append(
                 ParallelSetup(tp_size=tp_base,
-                              sp_enabled=True,
-                              eager_mode=False,
-                              chunked_prefill=False),
-            ],
+                              pp_size=pp_base,
+                              enable_fusion=fusion_val,
+                              eager_mode=True,
+                              chunked_prefill=False))
+        return SPTestSettings(
+            parallel_setups=parallel_setups,
             distributed_backends=["mp", "ray"],
             vllm_major_versions=["1", "1"],
             task=task,
@@ -136,7 +164,8 @@ def _compare_sp(
 ):
     (
         tp_size,
-        sp_enabled,
+        pp_size,
+        enable_fusion,
         eager_mode,
         chunked_prefill,
     ) = parallel_setup
@@ -167,7 +196,6 @@ def _compare_sp(
     else:
         model_info.check_available_online(on_fail="skip")
 
-    pp_size = 1
     if num_gpus_available < tp_size * pp_size:
         pytest.skip(f"Need at least {tp_size} x {pp_size} GPUs")
     if VLLM_MULTI_NODE and distributed_backend == "mp":
@@ -206,9 +234,9 @@ def _compare_sp(
         'compile_sizes': [4, 8],
         'splitting_ops': [],
         'pass_config': {
-            'enable_sequence_parallism': sp_enabled,
+            'enable_sequence_parallelism': True,
+            'enable_fusion': enable_fusion,
             'enable_noop': True,
-            'enable_fusion': True,
         },
     }
 
@@ -223,7 +251,7 @@ def _compare_sp(
         "--distributed-executor-backend",
         distributed_backend,
         "--compilation_config",
-        str(compilation_config),
+        json.dumps(compilation_config),
     ]
 
     tp_env = {
@@ -256,13 +284,15 @@ def _compare_sp(
 
 SP_TEXT_GENERATION_MODELS = {
     # [Decoder-only]
-    "meta-llama/Llama-3.2-1B-Instruct": SPTestSettings.detailed(),
+    "meta-llama/Llama-3.2-1B-Instruct": SPTestSettings.fast(),
+    "RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8": SPTestSettings.fp8_quant(),
 }
 
 SP_TEST_MODELS = [
     # TODO support other models
     # [LANGUAGE GENERATION]
     "meta-llama/Llama-3.2-1B-Instruct",
+    "RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8"
 ]
 
 
