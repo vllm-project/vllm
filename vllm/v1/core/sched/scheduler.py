@@ -144,14 +144,15 @@ class Scheduler(SchedulerInterface):
         )
 
         # NOTE(woosuk): Here, "encoder" includes the vision encoder (and
-        # projector if needed). Currently, we assume that the encoder also
-        # has the Transformer architecture (e.g., ViT).
+        # projector if needed) for MM models as well as encoder-decoder
+        # transformers.
         self.max_num_encoder_input_tokens = encoder_compute_budget
         # NOTE: For the models without encoder (e.g., text-only models),
         # the encoder cache will not be initialized because cache size is 0
         # for these models.
         self.encoder_cache_manager = EncoderCacheManager(
-            cache_size=encoder_cache_size)
+            cache_size=encoder_cache_size,
+            is_encoder_decoder=self.is_encoder_decoder)
 
         speculative_config = vllm_config.speculative_config
         self.use_eagle = False

@@ -42,6 +42,7 @@ class EncoderCacheManager:
     Args:
         cache_size: Limit the size of the cache, measured by the number of
                     tokens from the input sequence.
+        is_encoder_decoder: Whether the model is an encoder-decoder model.
 
     Attributes:
         cache_size: Total cache capacity in encoder tokens.
@@ -59,7 +60,7 @@ class EncoderCacheManager:
             last call to get_freed_mm_hashes(). This list is cleared on return.
     """
 
-    def __init__(self, cache_size: int):
+    def __init__(self, cache_size: int, is_encoder_decoder: bool = False):
         self.cache_size = cache_size
         self.num_free_slots = cache_size
         self.num_freeable_slots = cache_size
@@ -70,6 +71,12 @@ class EncoderCacheManager:
         # mm_hash of mm_data => num_encoder_tokens of the mm_data
         self.freeable: OrderedDict[str, int] = OrderedDict()
         self.freed: list[str] = []
+
+        # Whether the model is an encoder-decoder model.
+        # If so, we don't need to cache encoder inputs.
+        # We handle it here instead of in the scheduler to keep
+        # the scheduler logic simpler.
+        self.is_encoder_decoder = is_encoder_decoder
 
     def check_and_update_cache(self, request: Request, input_id: int) -> bool:
         """Check if encoder output for a specific multimodal input is cached.
@@ -130,6 +137,9 @@ class EncoderCacheManager:
         Note: This method does not allocate physical memory for the encoder 
         output but only the state of EncoderCacheManager.
         """
+        if self.is_encoder_decoder:
+            return True
+
         num_tokens = request.get_num_encoder_tokens(input_id)
 
         # Not enough compute budget
@@ -166,6 +176,8 @@ class EncoderCacheManager:
         Note:
             This method assumes can_allocate() returned True for the same input.
         """
+        if self.is_encoder_decoder:
+            return
 
         mm_hash = request.mm_hashes[input_id]
         request_id = request.request_id

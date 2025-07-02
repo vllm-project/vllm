@@ -19,6 +19,7 @@ from tqdm import tqdm
 import vllm.envs as envs
 from vllm.attention import Attention, AttentionType
 from vllm.attention.backends.abstract import AttentionBackend
+from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.attention.layers.chunked_local_attention import ChunkedLocalAttention
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphWrapper
@@ -61,12 +62,17 @@ from vllm.v1.attention.backends.utils import (
     create_fast_prefill_custom_backend,
     reorder_batch_to_split_decodes_and_prefills)
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
+# yapf conflicts with isort for this block
+# yapf: disable
 from vllm.v1.kv_cache_interface import (AttentionSpec,
                                         ChunkedLocalAttentionSpec,
+                                        CrossAttentionSpec,
+                                        EncoderAttentionSpec,
                                         EncoderOnlyAttentionSpec,
                                         FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec, KVCacheSpec,
                                         MambaSpec, SlidingWindowSpec)
+# yapf: enable
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput,
                              DraftTokenIds, LogprobsLists, LogprobsTensors,
                              ModelRunnerOutput, SamplerOutput)
@@ -208,6 +214,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.supports_mm_inputs = self.mm_registry.supports_multimodal_inputs(
             model_config)
 
+        if self.model_config.is_encoder_decoder:
+            # Maximum length of the encoder input, only for encoder-decoder
+            # models.
+            self.max_encoder_len = self.mm_registry.\
+                get_encdec_max_encoder_len(model_config)
+        else:
+            self.max_encoder_len = 0
+
         # Sampler
         self.sampler = Sampler(logprobs_mode=self.model_config.logprobs_mode)
 
@@ -265,7 +279,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # the block_sizes in the kv cache config.
         self.input_batch = InputBatch(
             max_num_reqs=self.max_num_reqs,
-            max_model_len=self.max_model_len,
+            # We need to use the encoder length for encoder-decoer
+            # because of KV cache for cross-attention.
+            max_model_len=max(self.max_model_len, self.max_encoder_len),
             max_num_batched_tokens=self.max_num_tokens,
             device=self.device,
             pin_memory=self.pin_memory,
@@ -933,26 +949,125 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs])
         spec_decode_common_attn_metadata = None
 
+        def _dummy_blk_table_and_slot_mapping():
+            blk_table_tensor = torch.zeros(
+                (num_reqs, 1),
+                dtype=torch.int32,
+                device=self.device,
+            )
+            slot_mapping = torch.zeros(
+                (total_num_scheduled_tokens, ),
+                dtype=torch.int64,
+                device=self.device,
+            )
+            return blk_table_tensor, slot_mapping
+
         # Prepare the attention metadata for each KV cache group and make layers
         # in the same group share the same metadata.
         for kv_cache_group_id, kv_cache_group_spec in enumerate(
                 self.kv_cache_config.kv_cache_groups):
+            query_start_loc_arg = query_start_loc
+            query_start_loc_cpu_arg = query_start_loc_cpu
+            seq_lens_arg = seq_lens
+            seq_lens_cpu_arg = seq_lens_cpu
+            num_computed_tokens_cpu_arg = num_computed_tokens_cpu
+            num_reqs_arg = num_reqs
+            total_num_scheduled_tokens_arg = total_num_scheduled_tokens
+            max_num_scheduled_tokens_arg = max_num_scheduled_tokens
+            max_seq_len_arg = max_seq_len
+            causal_arg = True
 
             if isinstance(kv_cache_group_spec.kv_cache_spec,
                           EncoderOnlyAttentionSpec):
                 # Encoder-only layers do not have KV cache, so we need to
                 # create a dummy block table and slot mapping for them.
-                blk_table_tensor = torch.zeros(
-                    (num_reqs, 1),
+                blk_table_tensor, slot_mapping = (
+                    _dummy_blk_table_and_slot_mapping())
+                num_common_prefix_blocks = 0
+                causal_arg = False
+            elif isinstance(kv_cache_group_spec.kv_cache_spec,
+                            EncoderAttentionSpec):
+                # Encoder layers do not have KV cache, so we need to
+                # create a dummy block table and slot mapping for them.
+                blk_table_tensor, slot_mapping = (
+                    _dummy_blk_table_and_slot_mapping())
+                num_common_prefix_blocks = 0
+                causal_arg = False
+
+                # For ENCODER attention using Whisper (an encoder-decoder
+                # model), we need to look at the encoder inputs (audio), which
+                # are different than the decoder inputs (prompt for
+                # transcription).
+
+                scheduled_encoder_inputs =\
+                    scheduler_output.scheduled_encoder_inputs
+                encoder_seq_lens = []
+                num_encoder_tokens = 0
+
+                for _ in scheduled_encoder_inputs:
+                    # NOTE using the max encoder len is whisper specific
+                    encoder_seq_len = self.max_encoder_len
+                    encoder_seq_lens.append(encoder_seq_len)
+                    num_encoder_tokens += encoder_seq_len
+
+                # Create encoder sequence start locations
+                encoder_seq_start_loc = [0]
+                for seq_len in encoder_seq_lens:
+                    encoder_seq_start_loc.append(encoder_seq_start_loc[-1] +
+                                                 seq_len)
+
+                seq_lens_arg = torch.tensor(encoder_seq_lens,
+                                            dtype=torch.int32,
+                                            device=self.device)
+                seq_lens_cpu_arg = seq_lens_arg.cpu()
+                query_start_loc_arg = torch.tensor(encoder_seq_start_loc,
+                                                   dtype=torch.int32,
+                                                   device=self.device)
+                query_start_loc_cpu_arg = query_start_loc_arg.cpu()
+                num_reqs_arg = len(encoder_seq_lens)
+                num_computed_tokens_cpu_arg = torch.zeros((num_reqs_arg, ),
+                                                          dtype=torch.int32,
+                                                          device="cpu")
+                # NOTE - using max_encoder_len is whisper specific
+                total_num_scheduled_tokens_arg = self.max_encoder_len
+                max_num_scheduled_tokens_arg = self.max_encoder_len
+                max_seq_len_arg = self.max_encoder_len
+            elif isinstance(kv_cache_group_spec.kv_cache_spec,
+                            CrossAttentionSpec):
+                causal_arg = False
+                num_common_prefix_blocks = 0
+                blk_table = self.input_batch.block_table[kv_cache_group_id]
+                blk_table_tensor = blk_table.get_device_tensor()[:num_reqs]
+                # TODO - look into slot_mapping for cross-attention
+                # directly from the block table like other attention types
+                cross_slot_mapping = []
+                for req_id in scheduler_output.scheduled_encoder_inputs:
+                    encoder_seq_len = self.max_encoder_len
+                    cross_slot_mapping.extend(
+                        self._get_cross_slot_mapping(req_id,
+                                                     self.max_encoder_len))
+
+                # Create cross-attention metadata using decoder queries and
+                # encoder keys/values
+                slot_mapping = torch.tensor(cross_slot_mapping,
+                                            dtype=torch.int64,
+                                            device=self.device)
+
+                # NOTE - using max_encoder_len is whisper specific
+                max_seq_len_arg = self.max_encoder_len
+
+                seq_lens_arg = torch.full(
+                    (num_reqs, ),
+                    self.max_encoder_len,
                     dtype=torch.int32,
                     device=self.device,
                 )
-                slot_mapping = torch.zeros(
-                    (total_num_scheduled_tokens, ),
-                    dtype=torch.int64,
-                    device=self.device,
+                seq_lens_cpu_arg = torch.full(
+                    (num_reqs, ),
+                    self.max_encoder_len,
+                    dtype=torch.int32,
+                    device="cpu",
                 )
-                num_common_prefix_blocks = 0
             else:
                 blk_table = self.input_batch.block_table[kv_cache_group_id]
                 blk_table_tensor = blk_table.get_device_tensor()[:num_reqs]
@@ -967,20 +1082,20 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     num_common_prefix_blocks[kv_cache_group_id])
 
             common_attn_metadata = CommonAttentionMetadata(
-                query_start_loc=query_start_loc,
-                query_start_loc_cpu=query_start_loc_cpu,
-                seq_lens=seq_lens,
-                seq_lens_cpu=seq_lens_cpu,
-                num_computed_tokens_cpu=num_computed_tokens_cpu,
-                num_reqs=num_reqs,
-                num_actual_tokens=total_num_scheduled_tokens,
-                max_query_len=max_num_scheduled_tokens,
-                max_seq_len=max_seq_len,
+                query_start_loc=query_start_loc_arg,
+                query_start_loc_cpu=query_start_loc_cpu_arg,
+                seq_lens=seq_lens_arg,
+                seq_lens_cpu=seq_lens_cpu_arg,
+                num_computed_tokens_cpu=num_computed_tokens_cpu_arg,
+                num_reqs=num_reqs_arg,
+                num_actual_tokens=total_num_scheduled_tokens_arg,
+                max_query_len=max_num_scheduled_tokens_arg,
+                max_seq_len=max_seq_len_arg,
                 block_table_tensor=blk_table_tensor,
                 slot_mapping=slot_mapping,
                 logits_indices_padded=logits_indices_padded,
                 num_logits_indices=logits_indices.size(0),
-                causal=True,
+                causal=causal_arg,
             )
 
             if self.speculative_config and \
@@ -1014,6 +1129,40 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         return (attn_metadata, logits_indices, spec_decode_metadata,
                 num_scheduled_tokens, spec_decode_common_attn_metadata,
                 max_num_scheduled_tokens)
+
+    def _get_cross_slot_mapping(self, req_id: str,
+                                encoder_seq_len: int) -> list[int]:
+        """Get cross-attention slot mapping for a request."""
+        req_state = self.requests.get(req_id)
+        if req_state is None:
+            # During memory profiling or if request not found
+            return [PAD_SLOT_ID] * encoder_seq_len
+
+        # Find the KV cache group that uses CrossAttentionSpec
+        cross_attn_group_idx = None
+        for i, kv_cache_group in enumerate(
+                self.kv_cache_config.kv_cache_groups):
+            if isinstance(kv_cache_group.kv_cache_spec, CrossAttentionSpec):
+                cross_attn_group_idx = i
+                break
+
+        if (cross_attn_group_idx is None
+                or cross_attn_group_idx >= len(req_state.block_ids)):
+            return [PAD_SLOT_ID] * encoder_seq_len
+
+        # Get cross attention block IDs and calculate slot mapping
+        cross_block_ids = req_state.block_ids[cross_attn_group_idx]
+        block_size = self.kv_cache_config.kv_cache_groups[
+            cross_attn_group_idx].kv_cache_spec.block_size
+
+        slot_mapping = []
+        for i in range(encoder_seq_len):
+            block_number = cross_block_ids[i // block_size]
+            block_offset = i % block_size
+            slot = block_number * block_size + block_offset
+            slot_mapping.append(slot)
+
+        return slot_mapping
 
     def _compute_cascade_attn_prefix_len(
         self,
@@ -1253,10 +1402,27 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.kv_sharing_fast_prefill_logits_indices[:num_logits_padded])
         return logits_indices_padded
 
-    def _execute_mm_encoder(self, scheduler_output: "SchedulerOutput"):
+    def _batch_mm_kwargs_from_scheduler(
+        self,
+        scheduler_output: "SchedulerOutput",
+    ) -> tuple[list[MultiModalKwargsItem], list[tuple[str, PlaceholderRange]]]:
+        """Batch multimodal kwargs from scheduled encoder inputs.
+
+        Args:
+            scheduler_output: The scheduler output containing scheduled encoder
+              inputs.
+
+            include_positions: Whether to also return position information for
+              each item.
+
+        Returns:
+            A tuple of (mm_kwargs, req_ids_pos) where:
+            - mm_kwargs: List of multimodal kwargs items to be batched
+            - req_ids_pos: List of (req_id, input_id, position_info) tuples if
+              include_positions=True, else None """
         scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
         if not scheduled_encoder_inputs:
-            return
+            return [], []
         # Batch the multi-modal inputs.
         mm_kwargs = list[MultiModalKwargsItem]()
         # list of tuple (mm_hash, position_info)
@@ -1269,6 +1435,16 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 mm_kwargs.append(req_state.mm_kwargs[mm_input_id])
                 mm_hashes_pos.append(
                     (mm_hash, req_state.mm_positions[mm_input_id]))
+
+        return mm_kwargs, mm_hashes_pos
+
+    def _execute_mm_encoder(self, scheduler_output: "SchedulerOutput"):
+        # Batch the multi-modal inputs using the helper method.
+        mm_kwargs, mm_hashes_pos = self._batch_mm_kwargs_from_scheduler(
+            scheduler_output)
+
+        if not mm_kwargs:
+            return
 
         # Batch mm inputs as much as we can: if a request in the batch has
         # multiple modalities or a different modality than the previous one,
@@ -1359,6 +1535,35 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 )
                 mm_embeds.append(mm_embeds_item)
         return mm_embeds
+
+    def _extract_encoder_inputs(
+        self,
+        scheduler_output: "SchedulerOutput",
+    ) -> dict[str, torch.Tensor]:
+        """Extract encoder inputs for encoder-decoder models.
+
+        This method extracts multimodal input features from scheduled encoder
+        inputs and formats them for the encoder-decoder model forward pass.
+        """
+        # Batch the multi-modal inputs using the helper method.
+        mm_kwargs, _ = self._batch_mm_kwargs_from_scheduler(scheduler_output)
+
+        if not mm_kwargs:
+            return {}
+
+        # Group MM kwargs by modality and extract features
+        encoder_features = {}
+        for _, _, mm_kwargs_group in group_mm_kwargs_by_modality(
+                mm_kwargs,
+                device=self.device,
+                pin_memory=self.pin_memory,
+        ):
+            # Add the grouped features to encoder_features dict
+            # This allows the model to receive them as kwargs (e.g.,
+            # input_features=...)
+            encoder_features.update(mm_kwargs_group)
+
+        return encoder_features
 
     def get_model(self) -> nn.Module:
         # get raw model out of the cudagraph wrapper.
@@ -1631,7 +1836,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # _prepare_inputs may reorder the batch, so we must gather multi
         # modal outputs after that to ensure the correct order
-        if self.supports_mm_inputs and get_pp_group().is_first_rank:
+        if (self.supports_mm_inputs and get_pp_group().is_first_rank
+                and not self.model_config.is_encoder_decoder):
             # Run the multimodal encoder if any.
             self._execute_mm_encoder(scheduler_output)
             mm_embeds = self._gather_mm_embeddings(scheduler_output)
@@ -1672,6 +1878,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         else:
             intermediate_tensors = self.sync_and_slice_intermediate_tensors(
                 num_input_tokens, intermediate_tensors, True)
+
+        if (self.model_config.is_encoder_decoder
+                and scheduler_output.scheduled_encoder_inputs):
+            encoder_inputs = self._extract_encoder_inputs(scheduler_output)
+            model_kwargs.update(encoder_inputs)
 
         return (
             num_scheduled_tokens,
@@ -2591,17 +2802,18 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         with self.maybe_dummy_run_with_lora(self.lora_config,
                                             num_scheduled_tokens, remove_lora):
-            if self.supports_mm_inputs:
+            model_kwargs = self._init_model_kwargs(num_tokens)
+            if (self.supports_mm_inputs
+                    and not self.model_config.is_encoder_decoder):
                 input_ids = None
                 inputs_embeds = self.inputs_embeds.gpu[:num_tokens]
                 model_kwargs = {
-                    **self._init_model_kwargs(num_tokens),
+                    **model_kwargs,
                     **self._dummy_mm_kwargs(num_reqs),
                 }
             else:
                 input_ids = self.input_ids.gpu[:num_tokens]
                 inputs_embeds = None
-                model_kwargs = self._init_model_kwargs(num_tokens)
 
             if self.uses_mrope:
                 positions = self.mrope_positions.gpu[:, :num_tokens]
@@ -2814,7 +3026,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
     def profile_run(self) -> None:
         # Profile with multimodal encoder & encoder cache.
-        if self.supports_mm_inputs:
+        if self.supports_mm_inputs and not self.model_config.is_encoder_decoder:
             if self.model_config.multimodal_config.skip_mm_profiling:
                 logger.info(
                     "Skipping memory profiling for multimodal encoder and "
@@ -3170,7 +3382,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 "for more details.")
             self.input_batch = InputBatch(
                 max_num_reqs=self.max_num_reqs,
-                max_model_len=self.max_model_len,
+                max_model_len=max(self.max_model_len, self.max_encoder_len),
                 max_num_batched_tokens=self.max_num_tokens,
                 device=self.device,
                 pin_memory=self.pin_memory,
@@ -3434,7 +3646,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
     def may_add_encoder_only_layers_to_kv_cache_config(self) -> None:
         """
-        Add encoder-only layers to the KV cache config.
+        Add encoder-only and encoder layers to the KV cache config.
+        
+        This handles:
+        - ENCODER_ONLY layers (standalone encoder models)
+        - ENCODER layers (encoder self-attention in encoder-decoder models)
         """
         block_size = self.vllm_config.cache_config.block_size
         use_mla = self.vllm_config.model_config.use_mla
@@ -3443,7 +3659,16 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         attn_layers = get_layers_from_vllm_config(self.vllm_config, Attention)
         for layer_name, attn_module in attn_layers.items():
             if attn_module.attn_type == AttentionType.ENCODER_ONLY:
-                attn_spec = EncoderOnlyAttentionSpec(
+                attn_spec: AttentionSpec = EncoderOnlyAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=attn_module.num_kv_heads,
+                    head_size=attn_module.head_size,
+                    dtype=self.kv_cache_dtype,
+                    use_mla=use_mla)
+                encoder_only_attn_specs[attn_spec].append(layer_name)
+                self.runner_only_attn_layers.add(layer_name)
+            elif attn_module.attn_type == AttentionType.ENCODER:
+                attn_spec = EncoderAttentionSpec(
                     block_size=block_size,
                     num_kv_heads=attn_module.num_kv_heads,
                     head_size=attn_module.head_size,
@@ -3485,9 +3710,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 self.shared_kv_cache_layers[layer_name] = kv_tgt_layer
                 continue
 
-            # TODO: Support other attention modules, e.g., cross-attention
-            # TODO(lucas): move the attention specs into the model layers like
-            # the attention backends
             if attn_module.attn_type == AttentionType.DECODER:
                 if attn_module.sliding_window is not None:
                     kv_cache_spec[layer_name] = SlidingWindowSpec(
@@ -3513,12 +3735,17 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         head_size=attn_module.head_size,
                         dtype=self.kv_cache_dtype,
                         use_mla=use_mla)
+            elif attn_module.attn_type == AttentionType.ENCODER_DECODER:
+                kv_cache_spec[layer_name] = CrossAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=attn_module.num_kv_heads,
+                    head_size=attn_module.head_size,
+                    dtype=self.kv_cache_dtype,
+                    use_mla=use_mla)
             elif attn_module.attn_type in (AttentionType.ENCODER,
                                            AttentionType.ENCODER_ONLY):
                 # encoder-only attention does not need KV cache.
                 continue
-            elif attn_module.attn_type == AttentionType.ENCODER_DECODER:
-                raise NotImplementedError
             else:
                 raise ValueError(
                     f"Unknown attention type: {attn_module.attn_type}")
