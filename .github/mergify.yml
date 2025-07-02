@@ -27,6 +27,22 @@ pull_request_rules:
       add:
         - ci/build
 
+- name: label-deepseek
+  description: Automatically apply deepseek label
+  conditions:
+    - or:
+      - files~=^examples/.*deepseek.*\.py
+      - files~=^tests/.*deepseek.*\.py
+      - files~=^vllm/entrypoints/openai/tool_parsers/.*deepseek.*\.py
+      - files~=^vllm/model_executor/models/.*deepseek.*\.py
+      - files~=^vllm/reasoning/.*deepseek.*\.py
+      - files~=^vllm/transformers_utils/.*deepseek.*\.py
+      - title~=(?i)DeepSeek
+  actions:
+    label:
+      add:
+        - deepseek
+
 - name: label-frontend
   description: Automatically apply frontend label
   conditions:
