@@ -529,8 +529,11 @@ class AsyncMicrobatchTokenizer:
         self.batch_wait_timeout_s = batch_wait_timeout_s
 
         self._loop = asyncio.get_running_loop()
-        self._queues: dict[tuple, asyncio.Queue[tuple[str, object, dict,
-                                                      asyncio.Future]]] = {}
+        self._queues: dict[tuple,
+                           asyncio.Queue[Union[tuple[str, dict,
+                                                     asyncio.Future],
+                                               tuple[list[int],
+                                                     asyncio.Future]]]] = {}
         self._batcher_tasks: list[asyncio.Task] = []
 
         # Single worker that owns the blocking tokenizer.
@@ -543,20 +546,23 @@ class AsyncMicrobatchTokenizer:
         fut: asyncio.Future = self._loop.create_future()
         key = self._queue_key("encode", kwargs)
         queue = self._get_queue(self._loop, key)
-        await queue.put(("encode", prompt, kwargs, fut))
+        await queue.put((prompt, kwargs, fut))
         return await fut
 
     async def decode(self, token_ids, **kwargs):
         fut: asyncio.Future = self._loop.create_future()
         key = self._queue_key("decode", kwargs)
         queue = self._get_queue(self._loop, key)
-        await queue.put(("decode", token_ids, kwargs, fut))
+        await queue.put((token_ids, fut))
         return await fut
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
-    def _get_queue(self, loop: asyncio.AbstractEventLoop, key: tuple):
+    def _get_queue(
+        self, loop: asyncio.AbstractEventLoop, key: tuple
+    ) -> asyncio.Queue[Union[tuple[str, dict, asyncio.Future], tuple[
+            list[int], asyncio.Future]]]:
         """Return the queue for key, creating queue 
         and batcher task if needed."""
         queue = self._queues.get(key)
@@ -564,33 +570,33 @@ class AsyncMicrobatchTokenizer:
             self._queues[key] = queue = asyncio.Queue()
             if key[0] == "encode":
                 can_batch = key[1] != "other"
-                self._batcher_tasks.append(
-                    loop.create_task(self._batch_encode_loop(queue,
-                                                             can_batch)))
+                coro = self._batch_encode_loop(queue, can_batch)
             else:
                 assert key[0] == "decode", \
                     f"Unknown operation type: {key[0]}."
-                self._batcher_tasks.append(
-                    loop.create_task(self._batch_decode_loop(queue)))
+                coro = self._batch_decode_loop(queue)
+            self._batcher_tasks.append(loop.create_task(coro))
         return queue
 
     async def _batch_encode_loop(self, queue: asyncio.Queue, can_batch: bool):
         while True:
-            first_item = await queue.get()
-            batch = [first_item]
-            prompts = [first_item[1]]
-            kwargs_list = [first_item[2]]
+            prompt, kwargs, future = await queue.get()
+            prompts = [prompt]
+            kwargs_list = [kwargs]
+            futures = [future]
             deadline = self._loop.time() + self.batch_wait_timeout_s
 
-            while len(batch) < self.max_batch_size:
+            while len(prompts) < self.max_batch_size:
                 timeout = deadline - self._loop.time()
                 if timeout <= 0:
                     break
                 try:
-                    item = await asyncio.wait_for(queue.get(), timeout)
-                    batch.append(item)
-                    prompts.append(item[1])
-                    kwargs_list.append(item[2])
+                    prompt, kwargs, future = await asyncio.wait_for(
+                        queue.get(), timeout)
+                    prompts.append(prompt)
+                    futures.append(future)
+                    if not can_batch:
+                        kwargs_list.append(kwargs)
                 except asyncio.TimeoutError:
                     break
 
@@ -598,12 +604,11 @@ class AsyncMicrobatchTokenizer:
                 # If every request uses identical kwargs we can run a single
                 # batched tokenizer call for a big speed-up.
                 if can_batch and len(prompts) > 1:
-                    encode_fn = lambda prompts=prompts, kwargs=kwargs_list[
-                        0]: self.tokenizer(prompts, **kwargs)
+                    encode_fn = partial(self.tokenizer, prompts, **kwargs)
                     results = await self._loop.run_in_executor(
                         self._executor, encode_fn)
 
-                    for i, (_, _, _, fut) in enumerate(batch):
+                    for i, fut in enumerate(futures):
                         if not fut.done():
                             data = {k: v[i] for k, v in results.items()}
                             fut.set_result(BatchEncoding(data))
@@ -615,46 +620,43 @@ class AsyncMicrobatchTokenizer:
                     results = await self._loop.run_in_executor(
                         self._executor, encode_fn)
 
-                    for (_, _, _, fut), res in zip(batch, results):
+                    for fut, res in zip(futures, results):
                         if not fut.done():
                             fut.set_result(res)
 
             except Exception as e:
-                for (_, _, _, fut) in batch:
+                for fut in futures:
                     if not fut.done():
                         fut.set_exception(e)
 
     async def _batch_decode_loop(self, queue: asyncio.Queue):
         while True:
-            first_item = await queue.get()
-            batch = [first_item]
-            token_ids_list = [first_item[1]]
+            token_ids, future = await queue.get()
+            token_ids_list = [token_ids]
+            futures = [future]
             deadline = self._loop.time() + self.batch_wait_timeout_s
 
-            while len(batch) < self.max_batch_size:
+            while len(token_ids_list) < self.max_batch_size:
                 timeout = deadline - self._loop.time()
                 if timeout <= 0:
                     break
                 try:
-                    item = await asyncio.wait_for(queue.get(), timeout)
-                    batch.append(item)
-                    token_ids_list.append(item[1])
+                    token_ids, future = await asyncio.wait_for(
+                        queue.get(), timeout)
+                    token_ids_list.append(token_ids)
+                    futures.append(future)
                 except asyncio.TimeoutError:
                     break
 
-            def _decode_batch(token_ids_list=token_ids_list,
-                              decode_kwargs=batch[0][2]):
-                return self.tokenizer.batch_decode(token_ids_list,
-                                                   **decode_kwargs)
-
             try:
                 results = await self._loop.run_in_executor(
-                    self._executor, _decode_batch)
-                for (_, _, _, fut), res in zip(batch, results):
+                    self._executor, self.tokenizer.batch_decode,
+                    token_ids_list)
+                for fut, res in zip(futures, results):
                     if not fut.done():
                         fut.set_result(res)
             except Exception as e:
-                for (_, _, _, fut) in batch:
+                for fut in futures:
                     if not fut.done():
                         fut.set_exception(e)
 
