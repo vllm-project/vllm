@@ -855,6 +855,12 @@ class CompletionRequest(OpenAIBaseModel):
             " as strings of the form 'token_id:{token_id}' so that tokens "
             "that are not JSON-encodable can be identified."))
 
+    accumulate: Optional[bool] = Field(
+        default=None,
+        description=(
+            "Special kind of echo where in the response instead of delta we return the accumulated text"
+        )
+    )
     # doc: end-completion-extra-params
 
     # Default sampling parameters for completion requests
