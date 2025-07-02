@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from contextlib import contextmanager
 from typing import Optional, Union
 
 import torch
@@ -9,8 +8,6 @@ import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
 import vllm.envs as envs
-from vllm import _custom_ops as ops
-from vllm.distributed.parallel_state import in_the_same_node_as
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils import cuda_device_count_stateless
@@ -22,6 +19,7 @@ except ImportError:
     nvshmem_ar = False
 
 logger = init_logger(__name__)
+
 
 class NVSHMEMAllreduce:
 
@@ -110,7 +108,7 @@ class NVSHMEMAllreduce:
             return
 
         self.disabled = False
-        
+
         self.max_size = max_size
         self.rank = rank
         self.world_size = world_size
@@ -129,7 +127,7 @@ class NVSHMEMAllreduce:
     # @contextmanager
     # def capture(self):
     #     """
-    #     The main responsibility of this context manager is the 
+    #     The main responsibility of this context manager is the
     #     `register_graph_buffers` call at the end of the context.
     #     It records all the buffer addresses used in the CUDA graph.
     #     """
@@ -157,10 +155,7 @@ class NVSHMEMAllreduce:
             return False
         return True
 
-    def all_reduce(self,
-                   inp: torch.Tensor,
-                   *,
-                   out: torch.Tensor = None):
+    def all_reduce(self, inp: torch.Tensor, *, out: torch.Tensor = None):
         """Performs an out-of-place all reduce.
         
         """
@@ -169,7 +164,8 @@ class NVSHMEMAllreduce:
         self.nvshmem_allreduce.all_reduce(inp, out)
         return out
 
-    def nvshmem_all_reduce(self, input: torch.Tensor) -> Optional[torch.Tensor]:
+    def nvshmem_all_reduce(self,
+                           input: torch.Tensor) -> Optional[torch.Tensor]:
         """The main allreduce API that provides support for cuda graph."""
         # TODO(asamani): check if this works with nvshmem
         # TODO(asamani): check if we can add output too!
