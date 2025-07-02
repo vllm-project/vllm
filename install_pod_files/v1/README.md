@@ -18,3 +18,10 @@ pip install .
 
 7- Once everything has been installed, we can run the command:
 startup_time_logs -f models.txt --in-page-cache YES --model-loader safetensors --no-sleep-wake --no-chat   --debug
+
+
+NOTE:
+actually, to generate the results for the torch.compile, we have follow the instructions in docs/design/v1/torch_compile.md.
+So after log in into the pod, we have run:
+VLLM_USE_V1=1 VLLM_LOGGING_LEVEL=DEBUG vllm serve meta-llama/Llama-3.2-1B
+
