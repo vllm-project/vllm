@@ -1217,7 +1217,7 @@ class LLM:
                 token_type_ids = None
 
             engine_prompt = TokensPrompt(
-                prompt_token_ids=prompt_inputs["prompt_token_ids"],
+                prompt_token_ids=prompt_inputs["input_ids"],
                 token_type_ids=token_type_ids,
                 multi_modal_data=mm_data)
 
