@@ -14,7 +14,7 @@ Further update the model as follows:
 
     ??? Code
 
-        ```diff
+        ```python
             @classmethod
             def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
                 if modality.startswith("image"):
