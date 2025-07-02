@@ -170,9 +170,8 @@ class Scheduler(SchedulerInterface):
         # Code: https://github.com/gty111/gLLM
         
         # hyperparameters
-        # TODO: make them pass in config
-        iterp = 8
-        kv_thresh = 0.1
+        num_iterp = self.scheduler_config.num_iterp
+        kv_thresh = self.scheduler_config.kv_thresh
         
         # system states
         num_prefill_tokens = reduce(lambda num_acc, req: num_acc + req.num_prompt_tokens - req.num_computed_tokens, self.waiting, 0)
@@ -182,7 +181,7 @@ class Scheduler(SchedulerInterface):
         
         # prefill token budget
         prefill_ratio = max(0, (kv_free - kv_thresh) / (1 - kv_thresh))
-        prefill_token_budget = min(self.max_num_scheduled_tokens * prefill_ratio, num_prefill_tokens // iterp)
+        prefill_token_budget = min(self.max_num_scheduled_tokens * prefill_ratio, num_prefill_tokens // num_iterp)
         prefill_token_budget = int(prefill_token_budget)
         
         # decode token budget

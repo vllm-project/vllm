@@ -2176,6 +2176,14 @@ class SchedulerConfig:
     for all attention layers even if there are multiple type of attention layers
     like full attention and sliding window attention.
     """
+    
+    num_iterp: int = 8
+    """Number of iterations to process waiting prefill tokens (Token Throttling)
+    """
+    
+    kv_thresh: float = 0.1
+    """KV cache threshold for prefill operations (Token Throttling)
+    """
 
     def compute_hash(self) -> str:
         """
