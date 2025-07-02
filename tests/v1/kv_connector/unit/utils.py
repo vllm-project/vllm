@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Any, Optional
 
 import torch
@@ -31,11 +32,11 @@ def assert_scheduler_empty(scheduler: Scheduler):
     assert len(scheduler.encoder_cache_manager.cached) == 0
 
     # KVCache Manager.
-    assert len(
-        scheduler.kv_cache_manager.single_type_manager.req_to_blocks) == 0
+    assert len(scheduler.kv_cache_manager.coordinator.single_type_managers[0].
+               req_to_blocks) == 0
     assert len(scheduler.kv_cache_manager.req_to_block_hashes) == 0
-    assert len(
-        scheduler.kv_cache_manager.single_type_manager.num_cached_block) == 0
+    assert len(scheduler.kv_cache_manager.coordinator.single_type_managers[0].
+               num_cached_block) == 0
     num_free_blocks = (
         scheduler.kv_cache_manager.block_pool.free_block_queue.num_free_blocks)
     assert num_free_blocks == (
@@ -95,7 +96,7 @@ def create_scheduler(
     block_size = vllm_config.cache_config.block_size
     kv_cache_config = KVCacheConfig(
         num_blocks=num_blocks,  # A large number of blocks to hold all requests
-        tensors={},
+        kv_cache_tensors=[],
         kv_cache_groups=[
             KVCacheGroupSpec(['layer'],
                              FullAttentionSpec(block_size, 1, 1, torch.float32,
@@ -149,11 +150,11 @@ def create_request(
         request_id=f"id-{request_id}",
         prompt_token_ids=prompt_token_ids,
         sampling_params=sampling_params,
+        pooling_params=None,
         multi_modal_inputs=None,
         multi_modal_placeholders=None,
         multi_modal_hashes=None,
         eos_token_id=EOS_TOKEN_ID,
-        arrival_time=0,
     )
     req.kv_transfer_params = kv_transfer_params
     return req
@@ -183,6 +184,7 @@ def create_model_runner_output(
         spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
+        pooler_output=None,
         finished_sending=finished_sending,
         finished_recving=finished_recving,
     )

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # adapted from https://huggingface.co/OpenGVLab/InternVL2-4B/blob/main/modeling_intern_vit.py
 # --------------------------------------------------------
@@ -414,6 +415,10 @@ class InternVisionEncoder(nn.Module):
 
 
 class InternVisionModel(nn.Module):
+
+    packed_modules_mapping = {
+        "qkv": ["qkv"],
+    }
 
     def __init__(
         self,

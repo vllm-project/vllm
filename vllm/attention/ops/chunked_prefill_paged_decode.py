@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Authors:
 #  - Burkhard Ringlein <ngl@zurich.ibm.com>
@@ -264,8 +265,8 @@ def chunked_prefill_paged_decode(
     # Conversion of FP8 Tensor from uint8 storage to
     # appropriate torch.dtype for interpretation by Triton
     if "fp8" in kv_cache_dtype:
-        assert key_cache.dtype == torch.uint8
-        assert value_cache.dtype == torch.uint8
+        assert key_cache.dtype in [torch.uint8, current_platform.fp8_dtype()]
+        assert value_cache.dtype in [torch.uint8, current_platform.fp8_dtype()]
 
         if kv_cache_dtype in ("fp8", "fp8_e4m3"):
             target_dtype = current_platform.fp8_dtype()
@@ -283,7 +284,8 @@ def chunked_prefill_paged_decode(
     use_custom = use_rocm_custom_paged_attention(query.dtype, head_size,
                                                  block_size,
                                                  num_queries_per_kv,
-                                                 max_seq_len, sliding_window)
+                                                 max_seq_len, sliding_window,
+                                                 kv_cache_dtype, alibi_slopes)
     if use_custom:
         _PARTITION_SIZE_ROCM = 256
         max_num_partitions = ((max_seq_len + _PARTITION_SIZE_ROCM - 1) //

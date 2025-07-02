@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import pytest
 import torch
 
@@ -79,7 +80,10 @@ def test_cutlass_fp4_moe_no_graph(m: int, n: int, k: int, e: int, topk: int,
                 w2[expert], w2_gs[expert])
 
         score = torch.randn((m, e), device="cuda", dtype=dtype)
-        topk_weights, topk_ids = fused_topk(a, score, topk, renormalize=False)
+        topk_weights, topk_ids, _ = fused_topk(a,
+                                               score,
+                                               topk,
+                                               renormalize=False)
 
         a1_gs = torch.ones((e, ), device="cuda", dtype=torch.float32)
         a2_gs = torch.ones((e, ), device="cuda", dtype=torch.float32)
@@ -132,7 +136,7 @@ def test_cutlass_fp4_moe_no_graph(m: int, n: int, k: int, e: int, topk: int,
                                                   device=w2.device,
                                                   block_size=quant_blocksize)
 
-        torch_output = torch_moe(a_in_dtype, w1_d, w2_d, score, topk, None)
+        torch_output = torch_moe(a_in_dtype, w1_d, w2_d, score, topk)
 
         torch.testing.assert_close(torch_output,
                                    cutlass_output,

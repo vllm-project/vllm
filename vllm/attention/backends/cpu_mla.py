@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Type
@@ -177,7 +178,7 @@ class CPUMLAMetadataBuilder(AttentionMetadataBuilder[CPUMLAMetadata]):
             seq_lens_tensor=seq_lens_tensor,
             max_query_len=max_query_len,
             max_kv_len=max_kv_len,
-            query_start_loc=query_start_loc,
+            prefill_query_start_loc=query_start_loc,
             kv_start_loc=kv_start_loc,
             max_decode_seq_len=input_data.max_decode_seq_len,
             num_prefills=input_data.num_prefills,
@@ -205,12 +206,13 @@ class CPUMLAImpl(MLACommonImpl[CPUMLAMetadata]):
             blocksparse_params: Optional[Dict[str, Any]],
             logits_soft_cap: Optional[float],
             attn_type: str,
+            kv_sharing_target_layer_name: Optional[str],
             # MLA Specific Arguments
             **mla_args) -> None:
         super().__init__(num_heads, head_size, scale, num_kv_heads,
                          alibi_slopes, sliding_window, kv_cache_dtype,
                          blocksparse_params, logits_soft_cap, attn_type,
-                         **mla_args)
+                         kv_sharing_target_layer_name, **mla_args)
 
         unsupported_features = [
             alibi_slopes, sliding_window, blocksparse_params, logits_soft_cap
@@ -262,8 +264,8 @@ class CPUMLAImpl(MLACommonImpl[CPUMLAMetadata]):
             key=k,
             value=v_padded,
             out=output,
-            seqlen_q=prefill_metadata.query_start_loc,
-            seqlen_k=prefill_metadata.query_start_loc,
+            seqlen_q=prefill_metadata.prefill_query_start_loc,
+            seqlen_k=prefill_metadata.prefill_query_start_loc,
             max_seqlen_q=prefill_metadata.max_query_len,
             max_seqlen_k=prefill_metadata.max_query_len,
             pdropout=0.0,

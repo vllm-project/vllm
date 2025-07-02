@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 #
 # Copyright 2025 the LLAMA4, Meta Inc., vLLM, and HuggingFace Inc. team.
 # All rights reserved.
@@ -51,7 +52,7 @@ class Llama4MoE(nn.Module):
         renormalize: bool,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         router_scores, router_indices = fast_topk(gating_output, topk, dim=-1)
-        # psuedo-standard is that the router scores are floats
+        # pseudo-standard is that the router scores are floats
         router_scores = torch.sigmoid(router_scores.float())
         return (router_scores, router_indices.to(torch.int32))
 
@@ -147,9 +148,8 @@ class Llama4Attention(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
-        # TODO: attn_temperature_tuning should be a bool in huggingface
         self.attn_temperature_tuning = self.nope and \
-            config.attn_temperature_tuning > 0
+            config.attn_temperature_tuning
 
         self.floor_scale = getattr(config, "floor_scale", 8192.0)
         self.attn_scale = getattr(config, "attn_scale", 0.1)

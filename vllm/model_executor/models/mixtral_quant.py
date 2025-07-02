@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Adapted from
 # https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/llama/modeling_llama.py
@@ -113,9 +114,9 @@ class MixtralMoE(nn.Module):
                 f"Tensor parallel size {self.tp_size} is greater than "
                 f"the number of experts {self.num_total_experts}.")
         # Split experts equally between ranks
-        self.expert_indicies = np.array_split(range(
-            self.num_total_experts), self.tp_size)[self.rank].tolist()
-        if not self.expert_indicies:
+        self.expert_indices = np.array_split(range(self.num_total_experts),
+                                             self.tp_size)[self.rank].tolist()
+        if not self.expert_indices:
             raise ValueError(
                 f"Rank {self.rank} has no experts assigned to it.")
 
@@ -124,7 +125,7 @@ class MixtralMoE(nn.Module):
                        config.hidden_size,
                        config.intermediate_size,
                        quant_config=quant_config)
-            if idx in self.expert_indicies else None
+            if idx in self.expert_indices else None
             for idx in range(self.num_total_experts)
         ])
         self.gate = ReplicatedLinear(config.hidden_size,
@@ -145,7 +146,7 @@ class MixtralMoE(nn.Module):
         routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
 
         final_hidden_states = None
-        for expert_idx in self.expert_indicies:
+        for expert_idx in self.expert_indices:
             expert_layer = self.experts[expert_idx]
             expert_mask = (selected_experts == expert_idx)
             expert_weights = (routing_weights * expert_mask).sum(dim=-1,
@@ -193,8 +194,9 @@ class MixtralAttention(nn.Module):
             assert tp_size % self.total_num_kv_heads == 0
         self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
         # MixtralConfig has an optional head_dim argument
-        self.head_dim = getattr(config, "head_dim",
-                                self.hidden_size // self.total_num_heads)
+        self.head_dim = getattr(config, "head_dim", None)
+        if self.head_dim is None:
+            self.head_dim = self.hidden_size // self.total_num_heads
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5

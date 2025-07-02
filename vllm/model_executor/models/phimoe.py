@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Adapted from
 # https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/llama/modeling_llama.py
@@ -146,15 +147,15 @@ class mp(torch.autograd.Function):
 
         grad_at_output = grad_at_output * multiplier
 
-        grad_at_scores_expaned = masked_gates * grad_at_output.mul(-1)
-        grad_at_scores_expaned.scatter_add_(
+        grad_at_scores_expanded = masked_gates * grad_at_output.mul(-1)
+        grad_at_scores_expanded.scatter_add_(
             dim=-1,
             index=selected_experts,
             src=grad_at_output,
         )
 
         return (
-            grad_at_scores_expaned,
+            grad_at_scores_expanded,
             None,
             None,
             None,

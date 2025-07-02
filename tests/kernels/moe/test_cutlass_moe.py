@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import dataclasses
 from typing import Optional
 
@@ -28,6 +29,10 @@ MNK_FACTORS = [
     (224, 1024, 1536),
     (224, 3072, 1024),
     (224, 3072, 1536),
+    (32768, 1024, 1024),
+    # These sizes trigger wrong answers.
+    #(7232, 2048, 5120),
+    #(40000, 2048, 5120),
 ]
 
 vllm_config = VllmConfig(parallel_config=ParallelConfig(
@@ -192,14 +197,10 @@ def run_8_bit(moe_tensors: MOETensors8Bit,
 
     kwargs = {
         'a': moe_tensors.a,
-        'w1_q': moe_tensors.w1_q.transpose(1, 2),  # type: ignore[union-attr]
-        'w2_q': moe_tensors.w2_q.transpose(1, 2),  # type: ignore[union-attr]
+        'w1_q': moe_tensors.w1_q,  # type: ignore[union-attr]
+        'w2_q': moe_tensors.w2_q,  # type: ignore[union-attr]
         'topk_weights': topk_weights,
         'topk_ids': topk_ids,
-        'ab_strides1': moe_tensors.ab_strides1,
-        'c_strides1': moe_tensors.c_strides1,
-        'ab_strides2': moe_tensors.ab_strides2,
-        'c_strides2': moe_tensors.c_strides2,
         'w1_scale': moe_tensors.w1_scale,
         'w2_scale': moe_tensors.w2_scale,
         'a1_scale': moe_tensors.a_scale
@@ -234,8 +235,10 @@ def test_cutlass_moe_8_bit_no_graph(
     topk: int,
     per_act_token: bool,
     per_out_ch: bool,
+    monkeypatch,
 ):
     current_platform.seed_everything(7)
+    monkeypatch.setenv("VLLM_FUSED_MOE_CHUNK_SIZE", "8192")
     with set_current_vllm_config(vllm_config):
         mt = MOETensors8Bit.make_moe_tensors_8bit(m, k, n, e, per_act_token,
                                                   per_out_ch)
@@ -276,8 +279,10 @@ def test_cutlass_moe_8_bit_cuda_graph(
     topk: int,
     per_act_token: bool,
     per_out_ch: bool,
+    monkeypatch,
 ):
     current_platform.seed_everything(7)
+    monkeypatch.setenv("VLLM_FUSED_MOE_CHUNK_SIZE", "8192")
     with set_current_vllm_config(vllm_config):
         dtype = torch.half
 
@@ -331,8 +336,10 @@ def test_cutlass_moe_8_bit_EP(
     per_act_token: bool,
     per_out_channel: bool,
     ep_size: int,
+    monkeypatch,
 ):
     current_platform.seed_everything(7)
+    monkeypatch.setenv("VLLM_FUSED_MOE_CHUNK_SIZE", "8192")
     with set_current_vllm_config(vllm_config):
         mt = MOETensors8Bit.make_moe_tensors_8bit(m, k, n, e, per_act_token,
                                                   per_out_channel)

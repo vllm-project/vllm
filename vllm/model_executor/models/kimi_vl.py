@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # ruff: noqa: E501
 # Adapted from https://huggingface.co/moonshotai/Kimi-VL-A3B-Instruct/blob/main/modeling_kimi_vl.py
 # Copyright 2025 The Moonshot AI Team, DeepSeek-AI, and HuggingFace Inc. team. All rights reserved.
@@ -392,7 +393,8 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal):
         # model as one of the requirements of basic vLLM model implementation.
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
 
-        if multimodal_embeddings is not None:
+        if multimodal_embeddings is not None and len(
+                multimodal_embeddings) != 0:
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids=input_ids,
                 inputs_embeds=inputs_embeds,

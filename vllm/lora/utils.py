@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
-import re
 from typing import Optional, Union
 
 import huggingface_hub
+import regex as re
 from huggingface_hub.utils import (EntryNotFoundError, HfHubHTTPError,
                                    HFValidationError, RepositoryNotFoundError)
 from torch import nn
