@@ -1412,12 +1412,6 @@ class EngineArgs:
                                recommend_to_remove=False)
             return False
 
-        # No OTLP observability so far.
-        if (self.otlp_traces_endpoint or self.collect_detailed_traces):
-            _raise_or_fallback(feature_name="--otlp-traces-endpoint",
-                               recommend_to_remove=False)
-            return False
-
         # V1 supports N-gram, Medusa, and Eagle speculative decoding.
         is_ngram_enabled = False
         is_eagle_enabled = False

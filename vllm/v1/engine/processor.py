@@ -344,6 +344,7 @@ class Processor:
             cache_salt=decoder_inputs.get("cache_salt"),
             priority=priority,
             data_parallel_rank=data_parallel_rank,
+            trace_headers=trace_headers,
         )
 
     def _validate_model_inputs(self,
