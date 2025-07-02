@@ -277,15 +277,6 @@ class MediaConnector:
         return image_embedding_io.load_base64("", data)
 
 
-global_media_connector = MediaConnector()
-"""The global [`MediaConnector`][vllm.multimodal.utils.MediaConnector]
-instance used by vLLM."""
-
-fetch_audio = global_media_connector.fetch_audio
-fetch_image = global_media_connector.fetch_image
-fetch_video = global_media_connector.fetch_video
-
-
 def encode_audio_base64(
     audio: np.ndarray,
     sampling_rate: float,

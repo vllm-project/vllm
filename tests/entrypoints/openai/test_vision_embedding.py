@@ -9,12 +9,13 @@ from PIL import Image
 from transformers import AutoProcessor
 
 from vllm.entrypoints.openai.protocol import EmbeddingResponse
-from vllm.multimodal.utils import encode_image_base64, fetch_image
+from vllm.multimodal.utils import MediaConnector, encode_image_base64
 
 from ...utils import VLLM_PATH, RemoteOpenAIServer
 
 MODEL_NAME = "TIGER-Lab/VLM2Vec-Full"
 MAXIMUM_IMAGES = 2
+TEST_MEDIA_CONNECTOR = MediaConnector()
 
 vlm2vec_jinja_path = VLLM_PATH / "examples/template_vlm2vec.jinja"
 assert vlm2vec_jinja_path.exists()
@@ -52,7 +53,8 @@ def server():
 @pytest.fixture(scope="session")
 def base64_encoded_image() -> dict[str, str]:
     return {
-        image_url: encode_image_base64(fetch_image(image_url))
+        image_url:
+        encode_image_base64(TEST_MEDIA_CONNECTOR.fetch_image(image_url))
         for image_url in TEST_IMAGE_URLS
     }
 

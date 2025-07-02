@@ -15,8 +15,10 @@ from typing import Literal, NamedTuple, Optional, TypedDict, Union, get_args
 from PIL.Image import Image
 
 from vllm import LLM, EngineArgs
-from vllm.multimodal.utils import fetch_image
+from vllm.multimodal.utils import MediaConnector
 from vllm.utils import FlexibleArgumentParser
+
+OFFLINE_MEDIA_CONNECTOR = MediaConnector()
 
 
 class TextQuery(TypedDict):
@@ -114,7 +116,7 @@ def get_query(modality: QueryModality):
     if modality == "image":
         return ImageQuery(
             modality="image",
-            image=fetch_image(
+            image=OFFLINE_MEDIA_CONNECTOR.fetch_image(
                 "https://upload.wikimedia.org/wikipedia/commons/thumb/4/47/American_Eskimo_Dog.jpg/360px-American_Eskimo_Dog.jpg"  # noqa: E501
             ),
         )
@@ -123,7 +125,7 @@ def get_query(modality: QueryModality):
         return TextImageQuery(
             modality="text+image",
             text="A cat standing in the snow.",
-            image=fetch_image(
+            image=OFFLINE_MEDIA_CONNECTOR.fetch_image(
                 "https://upload.wikimedia.org/wikipedia/commons/thumb/b/b6/Felis_catus-cat_on_snow.jpg/179px-Felis_catus-cat_on_snow.jpg"  # noqa: E501
             ),
         )

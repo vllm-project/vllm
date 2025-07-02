@@ -5,11 +5,13 @@ import openai
 import pytest
 
 from vllm import envs
-from vllm.multimodal.utils import encode_image_base64, fetch_image
+from vllm.multimodal.utils import MediaConnector, encode_image_base64
 from vllm.platforms import current_platform
 
 from ...entrypoints.openai.test_vision import TEST_IMAGE_URLS
 from ...utils import RemoteOpenAIServer
+
+TEST_MEDIA_CONNECTOR = MediaConnector()
 
 if not envs.VLLM_USE_V1:
     pytest.skip(
@@ -21,7 +23,8 @@ if not envs.VLLM_USE_V1:
 @pytest.fixture(scope="session")
 def base64_encoded_image() -> dict[str, str]:
     return {
-        image_url: encode_image_base64(fetch_image(image_url))
+        image_url:
+        encode_image_base64(TEST_MEDIA_CONNECTOR.fetch_image(image_url))
         for image_url in TEST_IMAGE_URLS
     }
 

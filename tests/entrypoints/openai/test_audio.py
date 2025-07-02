@@ -8,7 +8,7 @@ import pytest
 import pytest_asyncio
 
 from vllm.assets.audio import AudioAsset
-from vllm.multimodal.utils import encode_audio_base64, fetch_audio
+from vllm.multimodal.utils import MediaConnector, encode_audio_base64
 
 from ...utils import RemoteOpenAIServer
 
@@ -18,6 +18,8 @@ TEST_AUDIO_URLS = [
     AudioAsset("mary_had_lamb").url,
 ]
 MAXIMUM_AUDIOS = 2
+
+TEST_MEDIA_CONNECTOR = MediaConnector()
 
 
 @pytest.fixture(scope="module")
@@ -46,7 +48,8 @@ async def client(server):
 @pytest.fixture(scope="session")
 def base64_encoded_audio() -> dict[str, str]:
     return {
-        audio_url: encode_audio_base64(*fetch_audio(audio_url))
+        audio_url:
+        encode_audio_base64(*TEST_MEDIA_CONNECTOR.fetch_audio(audio_url))
         for audio_url in TEST_AUDIO_URLS
     }
 

@@ -7,7 +7,7 @@ import openai
 import pytest
 import pytest_asyncio
 
-from vllm.multimodal.utils import encode_video_base64, fetch_video
+from vllm.multimodal.utils import MediaConnector, encode_video_base64
 
 from ...utils import RemoteOpenAIServer
 
@@ -20,6 +20,8 @@ TEST_VIDEO_URLS = [
     "http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4",
     "http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerFun.mp4",
 ]
+
+TEST_MEDIA_CONNECTOR = MediaConnector()
 
 
 @pytest.fixture(scope="module")
@@ -50,7 +52,8 @@ async def client(server):
 @pytest.fixture(scope="session")
 def base64_encoded_video() -> dict[str, str]:
     return {
-        video_url: encode_video_base64(fetch_video(video_url)[0])
+        video_url:
+        encode_video_base64(TEST_MEDIA_CONNECTOR.fetch_video(video_url)[0])
         for video_url in TEST_VIDEO_URLS
     }
 

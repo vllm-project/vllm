@@ -17,7 +17,7 @@ from transformers import AutoProcessor, AutoTokenizer
 
 from vllm import LLM, EngineArgs, SamplingParams
 from vllm.lora.request import LoRARequest
-from vllm.multimodal.utils import fetch_image
+from vllm.multimodal.utils import MediaConnector
 from vllm.utils import FlexibleArgumentParser
 
 QUESTION = "What is the content of each image?"
@@ -35,6 +35,7 @@ IMAGE_URLS = [
     "https://upload.wikimedia.org/wikipedia/commons/thumb/1/1f/Oryctolagus_cuniculus_Rcdo.jpg/1920px-Oryctolagus_cuniculus_Rcdo.jpg",
     "https://upload.wikimedia.org/wikipedia/commons/9/98/Horse-and-pony.jpg",
 ]
+OFFLINE_MEDIA_CONNECTOR = MediaConnector()
 
 
 class ModelRequestData(NamedTuple):
@@ -70,7 +71,7 @@ def load_aria(question: str, image_urls: list[str]) -> ModelRequestData:
         engine_args=engine_args,
         prompt=prompt,
         stop_token_ids=stop_token_ids,
-        image_data=[fetch_image(url) for url in image_urls],
+        image_data=[OFFLINE_MEDIA_CONNECTOR.fetch_image(url) for url in image_urls],
     )
 
 
@@ -103,7 +104,7 @@ def load_aya_vision(question: str, image_urls: list[str]) -> ModelRequestData:
     return ModelRequestData(
         engine_args=engine_args,
         prompt=prompt,
-        image_data=[fetch_image(url) for url in image_urls],
+        image_data=[OFFLINE_MEDIA_CONNECTOR.fetch_image(url) for url in image_urls],
     )
 
 
@@ -126,7 +127,7 @@ def load_deepseek_vl2(question: str, image_urls: list[str]) -> ModelRequestData:
     return ModelRequestData(
         engine_args=engine_args,
         prompt=prompt,
-        image_data=[fetch_image(url) for url in image_urls],
+        image_data=[OFFLINE_MEDIA_CONNECTOR.fetch_image(url) for url in image_urls],
     )
 
 
@@ -160,7 +161,7 @@ def load_gemma3(question: str, image_urls: list[str]) -> ModelRequestData:
     return ModelRequestData(
         engine_args=engine_args,
         prompt=prompt,
-        image_data=[fetch_image(url) for url in image_urls],
+        image_data=[OFFLINE_MEDIA_CONNECTOR.fetch_image(url) for url in image_urls],
     )
 
 
@@ -193,7 +194,7 @@ def load_h2ovl(question: str, image_urls: list[str]) -> ModelRequestData:
         engine_args=engine_args,
         prompt=prompt,
         stop_token_ids=stop_token_ids,
-        image_data=[fetch_image(url) for url in image_urls],
+        image_data=[OFFLINE_MEDIA_CONNECTOR.fetch_image(url) for url in image_urls],
     )
 
 
@@ -221,7 +222,7 @@ def load_idefics3(question: str, image_urls: list[str]) -> ModelRequestData:
     return ModelRequestData(
         engine_args=engine_args,
         prompt=prompt,
-        image_data=[fetch_image(url) for url in image_urls],
+        image_data=[OFFLINE_MEDIA_CONNECTOR.fetch_image(url) for url in image_urls],
     )
 
 
@@ -249,7 +250,7 @@ def load_smolvlm(question: str, image_urls: list[str]) -> ModelRequestData:
     return ModelRequestData(
         engine_args=engine_args,
         prompt=prompt,
-        image_data=[fetch_image(url) for url in image_urls],
+        image_data=[OFFLINE_MEDIA_CONNECTOR.fetch_image(url) for url in image_urls],
     )
 
 
@@ -285,7 +286,7 @@ def load_internvl(question: str, image_urls: list[str]) -> ModelRequestData:
         engine_args=engine_args,
         prompt=prompt,
         stop_token_ids=stop_token_ids,
-        image_data=[fetch_image(url) for url in image_urls],
+        image_data=[OFFLINE_MEDIA_CONNECTOR.fetch_image(url) for url in image_urls],
     )
 
 
@@ -319,7 +320,7 @@ def load_llava(question: str, image_urls: list[str]) -> ModelRequestData:
     return ModelRequestData(
         engine_args=engine_args,
         prompt=prompt,
-        image_data=[fetch_image(url) for url in image_urls],
+        image_data=[OFFLINE_MEDIA_CONNECTOR.fetch_image(url) for url in image_urls],
     )
 
 
@@ -352,7 +353,7 @@ def load_llava_next(question: str, image_urls: list[str]) -> ModelRequestData:
     return ModelRequestData(
         engine_args=engine_args,
         prompt=prompt,
-        image_data=[fetch_image(url) for url in image_urls],
+        image_data=[OFFLINE_MEDIA_CONNECTOR.fetch_image(url) for url in image_urls],
     )
 
 
@@ -385,7 +386,7 @@ def load_llava_onevision(question: str, image_urls: list[str]) -> ModelRequestDa
     return ModelRequestData(
         engine_args=engine_args,
         prompt=prompt,
-        image_data=[fetch_image(url) for url in image_urls],
+        image_data=[OFFLINE_MEDIA_CONNECTOR.fetch_image(url) for url in image_urls],
     )
 
 
@@ -419,7 +420,7 @@ def load_llama4(question: str, image_urls: list[str]) -> ModelRequestData:
     return ModelRequestData(
         engine_args=engine_args,
         prompt=prompt,
-        image_data=[fetch_image(url) for url in image_urls],
+        image_data=[OFFLINE_MEDIA_CONNECTOR.fetch_image(url) for url in image_urls],
     )
 
 
@@ -451,7 +452,7 @@ def load_keye_vl(question: str, image_urls: list[str]) -> ModelRequestData:
         messages, tokenize=False, add_generation_prompt=True
     )
 
-    image_data = [fetch_image(url) for url in image_urls]
+    image_data = [OFFLINE_MEDIA_CONNECTOR.fetch_image(url) for url in image_urls]
 
     return ModelRequestData(
         engine_args=engine_args,
@@ -491,7 +492,7 @@ def load_kimi_vl(question: str, image_urls: list[str]) -> ModelRequestData:
     return ModelRequestData(
         engine_args=engine_args,
         prompt=prompt,
-        image_data=[fetch_image(url) for url in image_urls],
+        image_data=[OFFLINE_MEDIA_CONNECTOR.fetch_image(url) for url in image_urls],
     )
 
 
@@ -513,7 +514,7 @@ def load_mistral3(question: str, image_urls: list[str]) -> ModelRequestData:
     return ModelRequestData(
         engine_args=engine_args,
         prompt=prompt,
-        image_data=[fetch_image(url) for url in image_urls],
+        image_data=[OFFLINE_MEDIA_CONNECTOR.fetch_image(url) for url in image_urls],
     )
 
 
@@ -533,7 +534,7 @@ def load_mllama(question: str, image_urls: list[str]) -> ModelRequestData:
     return ModelRequestData(
         engine_args=engine_args,
         prompt=prompt,
-        image_data=[fetch_image(url) for url in image_urls],
+        image_data=[OFFLINE_MEDIA_CONNECTOR.fetch_image(url) for url in image_urls],
     )
 
 
@@ -563,7 +564,7 @@ def load_nvlm_d(question: str, image_urls: list[str]) -> ModelRequestData:
     return ModelRequestData(
         engine_args=engine_args,
         prompt=prompt,
-        image_data=[fetch_image(url) for url in image_urls],
+        image_data=[OFFLINE_MEDIA_CONNECTOR.fetch_image(url) for url in image_urls],
     )
 
 
@@ -593,7 +594,7 @@ def load_ovis(question: str, image_urls: list[str]) -> ModelRequestData:
     return ModelRequestData(
         engine_args=engine_args,
         prompt=prompt,
-        image_data=[fetch_image(url) for url in image_urls],
+        image_data=[OFFLINE_MEDIA_CONNECTOR.fetch_image(url) for url in image_urls],
     )
 
 
@@ -615,7 +616,7 @@ def load_pixtral_hf(question: str, image_urls: list[str]) -> ModelRequestData:
     return ModelRequestData(
         engine_args=engine_args,
         prompt=prompt,
-        image_data=[fetch_image(url) for url in image_urls],
+        image_data=[OFFLINE_MEDIA_CONNECTOR.fetch_image(url) for url in image_urls],
     )
 
 
@@ -648,7 +649,7 @@ def load_phi3v(question: str, image_urls: list[str]) -> ModelRequestData:
     return ModelRequestData(
         engine_args=engine_args,
         prompt=prompt,
-        image_data=[fetch_image(url) for url in image_urls],
+        image_data=[OFFLINE_MEDIA_CONNECTOR.fetch_image(url) for url in image_urls],
     )
 
 
@@ -680,7 +681,7 @@ def load_phi4mm(question: str, image_urls: list[str]) -> ModelRequestData:
     return ModelRequestData(
         engine_args=engine_args,
         prompt=prompt,
-        image_data=[fetch_image(url) for url in image_urls],
+        image_data=[OFFLINE_MEDIA_CONNECTOR.fetch_image(url) for url in image_urls],
         lora_requests=[LoRARequest("vision", 1, vision_lora_path)],
     )
 
@@ -723,7 +724,7 @@ def load_qwen_vl_chat(question: str, image_urls: list[str]) -> ModelRequestData:
         engine_args=engine_args,
         prompt=prompt,
         stop_token_ids=stop_token_ids,
-        image_data=[fetch_image(url) for url in image_urls],
+        image_data=[OFFLINE_MEDIA_CONNECTOR.fetch_image(url) for url in image_urls],
         chat_template=chat_template,
     )
 
@@ -768,7 +769,7 @@ def load_qwen2_vl(question: str, image_urls: list[str]) -> ModelRequestData:
     )
 
     if smart_resize is None:
-        image_data = [fetch_image(url) for url in image_urls]
+        image_data = [OFFLINE_MEDIA_CONNECTOR.fetch_image(url) for url in image_urls]
     else:
 
         def post_process_image(image: Image) -> Image:
@@ -778,7 +779,10 @@ def load_qwen2_vl(question: str, image_urls: list[str]) -> ModelRequestData:
             )
             return image.resize((resized_width, resized_height))
 
-        image_data = [post_process_image(fetch_image(url)) for url in image_urls]
+        image_data = [
+            post_process_image(OFFLINE_MEDIA_CONNECTOR.fetch_image(url))
+            for url in image_urls
+        ]
 
     return ModelRequestData(
         engine_args=engine_args,
@@ -826,7 +830,7 @@ def load_qwen2_5_vl(question: str, image_urls: list[str]) -> ModelRequestData:
     )
 
     if smart_resize is None:
-        image_data = [fetch_image(url) for url in image_urls]
+        image_data = [OFFLINE_MEDIA_CONNECTOR.fetch_image(url) for url in image_urls]
     else:
 
         def post_process_image(image: Image) -> Image:
@@ -836,7 +840,10 @@ def load_qwen2_5_vl(question: str, image_urls: list[str]) -> ModelRequestData:
             )
             return image.resize((resized_width, resized_height))
 
-        image_data = [post_process_image(fetch_image(url)) for url in image_urls]
+        image_data = [
+            post_process_image(OFFLINE_MEDIA_CONNECTOR.fetch_image(url))
+            for url in image_urls
+        ]
 
     return ModelRequestData(
         engine_args=engine_args,
@@ -856,7 +863,7 @@ def load_tarsier(question: str, image_urls: list[str]) -> ModelRequestData:
     )
 
     prompt = f"USER: {'<image>' * len(image_urls)}\n{question}\n ASSISTANT:"
-    image_data = [fetch_image(url) for url in image_urls]
+    image_data = [OFFLINE_MEDIA_CONNECTOR.fetch_image(url) for url in image_urls]
 
     return ModelRequestData(
         engine_args=engine_args,
@@ -882,7 +889,7 @@ def load_tarsier2(question: str, image_urls: list[str]) -> ModelRequestData:
         f"<|vision_end|>{question}<|im_end|>\n"
         "<|im_start|>assistant\n"
     )
-    image_data = [fetch_image(url) for url in image_urls]
+    image_data = [OFFLINE_MEDIA_CONNECTOR.fetch_image(url) for url in image_urls]
 
     return ModelRequestData(
         engine_args=engine_args,
