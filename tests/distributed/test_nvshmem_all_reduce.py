@@ -6,21 +6,17 @@ import random
 import pytest
 import ray
 import torch
-import torch.distributed as dist
 
 from vllm.distributed.communication_op import (  # noqa
     tensor_model_parallel_all_reduce)
-from vllm.distributed.parallel_state import (get_tensor_model_parallel_group,
-                                             get_tp_group, graph_capture)
+from vllm.distributed.parallel_state import get_tp_group
 
-from ..utils import (ensure_model_parallel_initialized,
-                     init_test_distributed_environment, multi_process_parallel)
+from ..utils import init_test_distributed_environment, multi_process_parallel
 
 random.seed(42)
 test_sizes = [random.randint(1024, 2048 * 1024) for _ in range(8)]
 for i, v in enumerate(test_sizes):
     test_sizes[i] -= v % 8
-
 
 # @ray.remote(num_gpus=1, max_calls=1)
 # def graph_allreduce(
@@ -122,15 +118,14 @@ def eager_nvshmem_allreduce(
         fa = get_tp_group().device_communicator.nvshmem_ar_comm
         sz = 1024
         tensor_dtype = torch.float16
-        inp = torch.full(
-            [sz], rank, dtype=tensor_dtype, device=device
-        )
+        inp = torch.full([sz], rank, dtype=tensor_dtype, device=device)
         inp_ref = inp.clone()
         out = fa.all_reduce(inp)
         torch.distributed.all_reduce(inp_ref)
         torch.cuda.synchronize()
         torch.testing.assert_close(out, inp_ref)
         torch.distributed.barrier()
+
 
 # TODO(asamani): add graph_allreduce test
 @pytest.mark.parametrize("tp_size", [8])

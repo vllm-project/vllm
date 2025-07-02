@@ -47,12 +47,12 @@ class CudaCommunicator(DeviceCommunicatorBase):
         # lazy import to avoid documentation build error
         from vllm.distributed.device_communicators.custom_all_reduce import (
             CustomAllreduce)
+        from vllm.distributed.device_communicators.nvshmem_all_reduce import (
+            NVSHMEMAllreduce)
         from vllm.distributed.device_communicators.pynccl import (
             PyNcclCommunicator)
         from vllm.distributed.device_communicators.quick_all_reduce import (
             QuickAllReduce)
-        from vllm.distributed.device_communicators.nvshmem_all_reduce import (
-            NVSHMEMAllreduce)
 
         self.pynccl_comm: Optional[PyNcclCommunicator] = None
         if use_pynccl and self.world_size > 1:
