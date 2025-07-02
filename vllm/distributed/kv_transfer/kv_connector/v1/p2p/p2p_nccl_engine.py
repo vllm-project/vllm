@@ -286,8 +286,7 @@ class P2pNcclEngine:
 
         with torch.cuda.stream(self.recv_stream):
             tensor = torch.empty(data["shape"],
-                                 dtype=getattr(
-                                     torch, data["dtype"]),
+                                 dtype=getattr(torch, data["dtype"]),
                                  device=self.device)
 
         return self.recv(comm, tensor, rank ^ 1, self.recv_stream)
