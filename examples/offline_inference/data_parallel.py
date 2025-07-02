@@ -96,6 +96,7 @@ def main(
     trust_remote_code,
     max_num_seqs,
     gpu_memory_utilization,
+    enable_microbatching,
 ):
     os.environ["VLLM_DP_RANK"] = str(global_dp_rank)
     os.environ["VLLM_DP_RANK_LOCAL"] = str(local_dp_rank)
@@ -140,7 +141,7 @@ def main(
     # sampling params. here we set different max_tokens for different
     # ranks for demonstration.
     sampling_params = SamplingParams(
-        temperature=0.8, top_p=0.95, max_tokens=[16, 20][global_dp_rank % 2]
+        temperature=0.8, top_p=0.95, max_tokens=[40, 64][global_dp_rank % 2]
     )
 
     # Create an LLM.
@@ -152,6 +153,7 @@ def main(
         trust_remote_code=trust_remote_code,
         max_num_seqs=max_num_seqs,
         gpu_memory_utilization=gpu_memory_utilization,
+        enable_microbatching=enable_microbatching,
     )
     outputs = llm.generate(prompts, sampling_params)
     # Print the outputs.
@@ -208,6 +210,7 @@ if __name__ == "__main__":
                 args.trust_remote_code,
                 args.max_num_seqs,
                 args.gpu_memory_utilization,
+                args.enable_microbatching,
             ),
         )
         proc.start()

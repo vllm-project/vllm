@@ -98,13 +98,7 @@ PerLayerAttnMetadata: TypeAlias = Union[list[AttnMetadataDict],
 UbatchSlice: TypeAlias = tuple[slice, slice]
 UBatchSlices: TypeAlias = list[UbatchSlice]
 
-
 import dataclasses
-@dataclasses.dataclass
-class CUDAGraphMetaData:
-    cudagraph: torch.cuda.CUDAGraph
-    using_ubatching: bool
-    outputs: Optional[Any] = None
 
 class GPUModelRunner(LoRAModelRunnerMixin):
 
@@ -148,7 +142,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.max_num_tokens = scheduler_config.max_num_batched_tokens
         self.max_num_reqs = scheduler_config.max_num_seqs
 
-        self.cudagraphs = {}
         # Model-related.
         self.num_query_heads = model_config.get_num_attention_heads(
             parallel_config)
@@ -1402,9 +1395,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         return num_dp_pad_tokens + num_pad_tokens, num_tokens_after_padding
 
-    def get_dp_padding_ubatch(self,
-                       ubatch_slices: UBatchSlices,
-                       include_cudagraphs: bool = True) -> tuple[int, Optional[torch.Tensor]]:
+    def get_dp_padding_ubatch(self, 
+                              ubatch_slices: UBatchSlices) -> tuple[int, Optional[torch.Tensor]]:
         dp_size = self.vllm_config.parallel_config.data_parallel_size
 
         if dp_size == 1:
@@ -1424,18 +1416,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         num_tokens_unpadded =  first_ubatch_num_tokens + second_ubatch_num_tokens
         num_tokens_padded = round_up(num_tokens_unpadded, 2)
-        if (include_cudagraphs and self.use_cuda_graph
-                and num_tokens_unpadded <= self.cudagraph_batch_sizes[-1]):
-            # Add padding to the batch size.
-            num_tokens_padded = self.vllm_config.pad_for_cudagraph(num_tokens_unpadded)
-        else:
-            # Eager mode.
-            # Pad tokens to multiple of tensor_parallel_size when
-            # enabled collective fusion for SP
-            tp_size = self.vllm_config.parallel_config.tensor_parallel_size
-            if self.vllm_config.compilation_config.pass_config. \
-                enable_sequence_parallelism and tp_size > 1:
-                num_tokens_padded = round_up(num_tokens_unpadded, tp_size)
 
         num_tokens_per_ubatch = num_tokens_padded // 2
 
@@ -1602,8 +1582,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                    scheduler_output: Optional["SchedulerOutput"] = None,
                    is_dummy_run: bool = False,
                    num_tokens_across_dp: Optional[torch.Tensor] = None,
-                   skip_cuda_graphs: bool = False,
-                   build_cuda_graph: bool = False):
+                   skip_cuda_graphs: bool = False):
 
         @dataclasses.dataclass
         class UbatchMetadata:
@@ -2430,12 +2409,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def _dummy_run(
         self,
         num_tokens: int,
-        skip_attn: bool = True,
         # Maybe return a cudagraph here
         capture_attn_cudagraph: bool = False,
         skip_eplb: bool = False,
         is_profile: bool = False,
-        build_cuda_graph: bool = False
     ) -> tuple[torch.Tensor, torch.Tensor]:
 
         # if allow_microbatching:
@@ -2469,7 +2446,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         num_scheduled_tokens = np.array(num_scheduled_tokens_list,
                                         dtype=np.int32)
 
-        ubatch_slices = None
         # We currently only microbatch if the number of tokens is 
         # over a certain threshold. 
         # logger.info("PADDING DUMMY DONE")
@@ -2486,8 +2462,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             seq_lens = self.seq_lens[:num_reqs]
 
             max_query_len = num_tokens
-            if ubatch_slices is not None:
-                max_query_len = 1
             common_attn_metadata = CommonAttentionMetadata(
                 query_start_loc=query_start_loc,
                 seq_lens=seq_lens,
@@ -2510,10 +2484,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             outputs = self._run_model(
                 attn_metadata,
                 num_tokens,
-                ubatch_slices=ubatch_slices,
                 is_dummy_run=True,
                 num_tokens_across_dp=num_tokens_across_dp,
-                build_cuda_graph=build_cuda_graph
             )
             if self.use_aux_hidden_state_outputs:
                 hidden_states, _ = outputs
@@ -2754,13 +2726,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         start_time = time.perf_counter()
         start_free_gpu_memory = torch.cuda.mem_get_info()[0]
 
-        logger.info("CAPTURE MODEL START")
         # Trigger CUDA graph capture for specific shapes.
         # Capture the large shapes first so that the smaller shapes
         # can reuse the memory pool allocated for the large shapes.
         with graph_capture(device=self.device):
             full_cg = self.full_cuda_graph
-            allow_microbatching = False
             for num_tokens in tqdm(reversed(self.cudagraph_batch_sizes),
                                    desc="Capturing CUDA graphs",
                                    total=len(self.cudagraph_batch_sizes)):
@@ -2774,7 +2744,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                 capture_attn_cudagraph=full_cg,
                                 skip_eplb=True)
 
-        logger.info("CAPTURE MODEL END")
         end_time = time.perf_counter()
         end_free_gpu_memory = torch.cuda.mem_get_info()[0]
         elapsed_time = end_time - start_time
