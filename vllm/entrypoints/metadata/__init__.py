@@ -11,7 +11,7 @@ from .generate import GenerateMetadata
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
-TASK2METADATA_CLASS = {
+TASK2METADATA_CLASS: dict[str, type[Metadata]] = {
     "embed": EmbedMetadata,
     "classify": ClassifyMetadata,
     "generate": GenerateMetadata,
@@ -27,5 +27,4 @@ def get_metadata(vllm_config: "VllmConfig"):
         (f"Task {task} is not supported yet. "
          f"Please add it to TASK2METADATA_CLASS in __init__.py.")
 
-    return metadata_class.from_vllm_config(
-        vllm_config)  # type: ignore[attr-defined]
+    return metadata_class.from_vllm_config(vllm_config)

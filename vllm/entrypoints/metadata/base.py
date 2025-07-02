@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# mypy: disable-error-code="valid-type, name-defined, attr-defined"
+
 from dataclasses import asdict, dataclass, fields
 from typing import TYPE_CHECKING, Any
 
@@ -36,14 +38,12 @@ class BriefMetadata(ReadOnlyBaseModel):
     # Getting the corresponding typing from the dictionary returned
     # by get_attr_typing is not a valid mypy expression,
     # but it can make Swagger: API Documentation work.
-    # mypy: disable-error-code="valid-type, name-defined, attr-defined"
     task: model_config_typing["task"] = Field(
         ..., description=model_config_docs["task"])
     served_model_name: model_config_typing["served_model_name"] = Field(
         ..., description=model_config_docs["served_model_name"])
     max_model_len: model_config_typing["max_model_len"] = Field(
         ..., description=model_config_docs["max_model_len"])
-    # mypy: enable-error-code="valid-type, name-defined, attr-defined"
 
     @classmethod
     def from_vllm_config(cls, vllm_config: "VllmConfig") -> "BriefMetadata":
@@ -62,7 +62,6 @@ class HfConfigMetadata:
 
 
 class PoolerConfigMetadata(ReadOnlyBaseModel):
-    # mypy: disable-error-code="valid-type, name-defined, attr-defined"
     pooling_type: pooler_config_typing["pooling_type"] = Field(
         ..., description=pooler_config_docs["pooling_type"])
     normalize: pooler_config_typing["normalize"] = Field(
@@ -73,7 +72,6 @@ class PoolerConfigMetadata(ReadOnlyBaseModel):
         ..., description=pooler_config_docs["step_tag_id"])
     returned_token_ids: pooler_config_typing["returned_token_ids"] = Field(
         ..., description=pooler_config_docs["returned_token_ids"])
-    # mypy: enable-error-code="valid-type, name-defined, attr-defined"
 
     @classmethod
     def from_vllm_config(cls,
