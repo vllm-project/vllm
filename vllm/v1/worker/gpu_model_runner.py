@@ -28,6 +28,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
 from vllm.distributed.parallel_state import (
     get_pp_group, get_tp_group, graph_capture, is_global_first_rank,
     prepare_communication_buffer_for_model)
+from vllm.distributed.utils import sched_yield
 from vllm.forward_context import (DPMetadata, get_forward_context,
                                   set_forward_context)
 from vllm.logger import init_logger
@@ -1496,6 +1497,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Get the valid generated tokens.
         sampled_token_ids = sampler_output.sampled_token_ids
         max_gen_len = sampled_token_ids.shape[-1]
+
+        gpu_event = torch.cuda.Event()
+        gpu_event.record()
+        while not gpu_event.query():
+            sched_yield()
+
         if max_gen_len == 1:
             # No spec decode tokens.
             valid_sampled_token_ids = sampled_token_ids.tolist()
