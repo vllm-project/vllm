@@ -150,7 +150,9 @@ def main(
         max_num_seqs=max_num_seqs,
         gpu_memory_utilization=gpu_memory_utilization,
     )
+    print("BEFORE GENERATE") 
     outputs = llm.generate(prompts, sampling_params)
+    print("AFTER GENERATE")
     # Print the outputs.
     for i, output in enumerate(outputs):
         if i >= 5:
