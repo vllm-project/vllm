@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# ruff: noqa: E501
 
 import json
 
@@ -163,9 +164,10 @@ def test_preprocess_model_output_with_thinking_tags(minimax_tool_parser):
 I'll help you with that. <tool_calls>
 {"name": "get_current_weather", "arguments": {"city": "Seattle", "state": "WA"}}
 </tool_calls>"""
-    
-    processed_output = minimax_tool_parser.preprocess_model_output(model_output)
-    
+
+    processed_output = minimax_tool_parser.preprocess_model_output(
+        model_output)
+
     # The tool call within thinking tags should be removed
     assert "fake_tool" not in processed_output
     # But the thinking tag itself should remain
@@ -184,14 +186,15 @@ def test_extract_tool_calls_with_thinking_tags(minimax_tool_parser):
 Let me help you with the weather. <tool_calls>
 {"name": "get_current_weather", "arguments": {"city": "Miami", "state": "FL", "unit": "fahrenheit"}}
 </tool_calls>"""
-    
+
     extracted_tool_calls = minimax_tool_parser.extract_tool_calls(
         model_output, request=None)  # type: ignore[arg-type]
-    
+
     assert extracted_tool_calls.tools_called
     assert len(extracted_tool_calls.tool_calls) == 1
-    assert extracted_tool_calls.tool_calls[0].function.name == "get_current_weather"
-    
+    assert extracted_tool_calls.tool_calls[
+        0].function.name == "get_current_weather"
+
     # Content extraction is based on the position of the first <tool_calls> in the original model_output
     # Since preprocessing removes tool calls within thinking tags, the actual first <tool_calls> is the external one
     expected_content = """<think>I should use a tool. <tool_calls>
@@ -209,15 +212,16 @@ def test_extract_tool_calls_invalid_json(minimax_tool_parser):
 {invalid json here}
 {"name": "another_valid_tool", "arguments": {"param": "value"}}
 </tool_calls>"""
-    
+
     extracted_tool_calls = minimax_tool_parser.extract_tool_calls(
         model_output, request=None)  # type: ignore[arg-type]
-    
+
     assert extracted_tool_calls.tools_called
     # Should extract only the valid JSON tool calls
     assert len(extracted_tool_calls.tool_calls) == 2
     assert extracted_tool_calls.tool_calls[0].function.name == "valid_tool"
-    assert extracted_tool_calls.tool_calls[1].function.name == "another_valid_tool"
+    assert extracted_tool_calls.tool_calls[
+        1].function.name == "another_valid_tool"
 
 
 def test_extract_tool_calls_missing_name_or_arguments(minimax_tool_parser):
@@ -228,15 +232,16 @@ def test_extract_tool_calls_missing_name_or_arguments(minimax_tool_parser):
 {"arguments": {"city": "Portland"}}
 {"name": "another_valid_tool", "arguments": {"param": "value"}}
 </tool_calls>"""
-    
+
     extracted_tool_calls = minimax_tool_parser.extract_tool_calls(
         model_output, request=None)  # type: ignore[arg-type]
-    
+
     assert extracted_tool_calls.tools_called
     # Should extract only the valid tool calls with both name and arguments
     assert len(extracted_tool_calls.tool_calls) == 2
     assert extracted_tool_calls.tool_calls[0].function.name == "valid_tool"
-    assert extracted_tool_calls.tool_calls[1].function.name == "another_valid_tool"
+    assert extracted_tool_calls.tool_calls[
+        1].function.name == "another_valid_tool"
 
 
 def test_streaming_basic_functionality(minimax_tool_parser):
@@ -265,7 +270,8 @@ def test_streaming_basic_functionality(minimax_tool_parser):
 
     # The result might be None or contain tool call information
     # This depends on the internal state management
-    if result is not None and hasattr(result, 'tool_calls') and result.tool_calls:
+    if result is not None and hasattr(result,
+                                      'tool_calls') and result.tool_calls:
         assert len(result.tool_calls) >= 0
 
 
@@ -278,7 +284,7 @@ def test_streaming_with_content_before_tool_calls(minimax_tool_parser):
     minimax_tool_parser.streamed_args_for_tool = []
 
     current_text = "I'll help you with that. <tool_calls>"
-    
+
     # When there's content before tool calls, it should be returned as content
     result = minimax_tool_parser.extract_tool_calls_streaming(
         previous_text="I'll help you",
@@ -298,7 +304,7 @@ def test_streaming_with_content_before_tool_calls(minimax_tool_parser):
 def test_streaming_no_tool_calls(minimax_tool_parser):
     """Test streaming when there are no tool calls."""
     current_text = "This is just regular text without any tool calls."
-    
+
     result = minimax_tool_parser.extract_tool_calls_streaming(
         previous_text="This is just regular text",
         current_text=current_text,
@@ -324,7 +330,7 @@ def test_streaming_with_thinking_tags(minimax_tool_parser):
     minimax_tool_parser.streamed_args_for_tool = []
 
     current_text = """<think><tool_calls>{"name": "ignored", "arguments": {}}</tool_calls></think><tool_calls>{"name": "real_tool", "arguments": {"param": "value"}}</tool_calls>"""
-    
+
     result = minimax_tool_parser.extract_tool_calls_streaming(
         previous_text="",
         current_text=current_text,
@@ -337,11 +343,10 @@ def test_streaming_with_thinking_tags(minimax_tool_parser):
 
     # The preprocessing should remove tool calls from thinking tags
     # and only process the real tool call
-    if result is not None:
-        # Should not process the ignored tool within thinking tags
-        if hasattr(result, 'tool_calls') and result.tool_calls:
-            for tool_call in result.tool_calls:
-                assert tool_call.function.name != "ignored"
+    if result is not None and hasattr(result,
+                                      'tool_calls') and result.tool_calls:
+        for tool_call in result.tool_calls:
+            assert tool_call.function.name != "ignored"
 
 
 def test_extract_tool_calls_multiline_json_not_supported(minimax_tool_parser):
@@ -356,11 +361,11 @@ def test_extract_tool_calls_multiline_json_not_supported(minimax_tool_parser):
   }
 }
 </tool_calls>"""
-    
+
     extracted_tool_calls = minimax_tool_parser.extract_tool_calls(
         model_output, request=None)  # type: ignore[arg-type]
-    
+
     # Multiline JSON is currently not supported, should return no tools called
     assert not extracted_tool_calls.tools_called
     assert extracted_tool_calls.tool_calls == []
-    assert extracted_tool_calls.content is None 
+    assert extracted_tool_calls.content is None
