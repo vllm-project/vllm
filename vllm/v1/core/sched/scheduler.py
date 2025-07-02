@@ -39,6 +39,89 @@ from vllm.v1.structured_output import StructuredOutputManager
 
 logger = init_logger(__name__)
 
+class TokenBudget():
+    def __init__(self, scheduler: Scheduler):
+        self.scheduler = scheduler
+        
+        self.use_pp = scheduler.use_pp
+        self.pp_size = scheduler.parallel_config.pipeline_parallel_size
+
+        self.max_num_scheduled_tokens = scheduler.max_num_scheduled_tokens
+        
+        self.num_iterp = scheduler.scheduler_config.num_iterp
+        self.kv_thresh = scheduler.scheduler_config.kv_thresh
+        
+    def update(self) -> Tuple:
+        if not self.scheduler.use_pp:
+            self.token_budget = self.max_num_scheduled_tokens
+        else:
+            # NOTE(guoty) Token Throttling
+            # Reference: https://arxiv.org/abs/2504.14775 
+            # Code: https://github.com/gty111/gLLM
+            
+            # system states
+            num_prefill_tokens = reduce(lambda num_acc, req: num_acc + req.num_prompt_tokens - req.num_computed_tokens, self.scheduler.waiting, 0)
+            num_decode_tokens = 0
+            for request in self.scheduler.running:
+                if request.computed_prompt:
+                    num_decode_tokens += 1
+                else:
+                    num_prefill_tokens += request.num_prompt_tokens - request.num_computed_tokens
+            kv_free = 1 - self.scheduler.kv_cache_manager.usage
+            
+            
+            # prefill token budget
+            prefill_ratio = max(0, (kv_free - self.kv_thresh) / (1 - self.kv_thresh))
+            prefill_token_budget = max(num_prefill_tokens // self.num_iterp, 32)
+            prefill_token_budget = min(self.max_num_scheduled_tokens * prefill_ratio, prefill_token_budget)
+            
+            # decode token budget
+            if num_decode_tokens < self.pp_size:
+                decode_token_budget = 1
+            else:
+                decode_token_budget = (num_decode_tokens + random.randint(0, self.pp_size-1)) // self.pp_size
+            
+            # print(f'P:{prefill_token_budget} D:{decode_token_budget} WP:{num_prefill_tokens} RD:{num_decode_tokens} KV:{kv_free}')
+            self.prefill_token_budget = int(prefill_token_budget)
+            self.decode_token_budget = int(decode_token_budget)
+    
+    def has_running(self):
+        if not self.use_pp:
+            return self.token_budget > 0
+        else:
+            return self.prefill_token_budget > 0 or self.decode_token_budget > 0
+    
+    def has_waiting(self):
+        if not self.use_pp:
+            return self.token_budget > 0
+        else:
+            return self.prefill_token_budget > 0
+        
+    def get(self, computed_prompt: bool):
+        if not self.use_pp:
+            return self.token_budget
+        else:
+            if computed_prompt:
+                return self.decode_token_budget
+            else:
+                return self.prefill_token_budget
+    
+    def consume(self, num_new_tokens: int, computed_prompt: bool):
+        if not self.use_pp:
+            self.token_budget -= num_new_tokens
+        else:
+            if computed_prompt:
+                self.decode_token_budget -= num_new_tokens
+            else:
+                self.prefill_token_budget -= num_new_tokens
+                
+    def verify(self):
+        if not self.use_pp:
+            assert self.token_budget >= 0
+        else:
+            assert self.prefill_token_budget >= 0 and self.decode_token_budget >= 0
+        
+
 
 class Scheduler(SchedulerInterface):
 
@@ -164,35 +247,7 @@ class Scheduler(SchedulerInterface):
         )
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
         
-    def get_throttling_token_budget(self) -> Tuple:
-        # NOTE(guoty) Token Throttling
-        # Reference: https://arxiv.org/abs/2504.14775 
-        # Code: https://github.com/gty111/gLLM
-        
-        # hyperparameters
-        num_iterp = self.scheduler_config.num_iterp
-        kv_thresh = self.scheduler_config.kv_thresh
-        
-        # system states
-        num_prefill_tokens = reduce(lambda num_acc, req: num_acc + req.num_prompt_tokens - req.num_computed_tokens, self.waiting, 0)
-        kv_free = 1 - self.kv_cache_manager.usage
-        num_decode_tokens = len(self.running)
-        pp_size = self.parallel_config.pipeline_parallel_size
-        
-        # prefill token budget
-        prefill_ratio = max(0, (kv_free - kv_thresh) / (1 - kv_thresh))
-        prefill_token_budget = min(self.max_num_scheduled_tokens * prefill_ratio, num_prefill_tokens // num_iterp)
-        prefill_token_budget = int(prefill_token_budget)
-        
-        # decode token budget
-        if num_decode_tokens < pp_size:
-            decode_token_budget = 1
-        else:
-            decode_token_budget = (num_decode_tokens + random.randint(0, pp_size-1)) // pp_size
-        decode_token_budget = int(decode_token_budget)
-        
-        # print(f'P:{prefill_token_budget} D:{decode_token_budget} WP:{num_prefill_tokens} RD:{num_decode_tokens} KV:{kv_free}')
-        return prefill_token_budget, decode_token_budget
+        self.token_budget = TokenBudget(self)
 
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
@@ -221,7 +276,6 @@ class Scheduler(SchedulerInterface):
 
         req_to_new_block_ids: dict[str, tuple[list[int], ...]] = {}
         num_scheduled_tokens: dict[str, int] = {}
-        token_budget = self.max_num_scheduled_tokens
         # Encoder-related.
         scheduled_encoder_inputs: dict[str, list[int]] = {}
         encoder_budget = self.max_num_encoder_input_tokens
@@ -231,14 +285,12 @@ class Scheduler(SchedulerInterface):
         # For logging.
         scheduled_timestamp = time.monotonic()
 
-        # Token Throttling 
-        if self.use_pp:
-            prefill_token_budget, decode_token_budget = self.get_throttling_token_budget()
-
+        token_budget = self.token_budget
+        token_budget.update()
+        
         # First, schedule the RUNNING requests.
         req_index = 0
-        token_budget = decode_token_budget if self.use_pp else token_budget
-        while req_index < len(self.running) and token_budget > 0:
+        while req_index < len(self.running) and token_budget.has_running():
             request = self.running[req_index]
 
             num_new_tokens = (request.num_tokens_with_spec -
@@ -247,7 +299,7 @@ class Scheduler(SchedulerInterface):
                     num_new_tokens):
                 num_new_tokens = (
                     self.scheduler_config.long_prefill_token_threshold)
-            num_new_tokens = min(num_new_tokens, token_budget)
+            num_new_tokens = min(num_new_tokens, token_budget.get(request.computed_prompt))
 
             # Make sure the input position does not exceed the max model len.
             # This is necessary when using spec decoding.
@@ -332,7 +384,7 @@ class Scheduler(SchedulerInterface):
             req_to_new_block_ids[request.request_id] = (
                 new_blocks.get_block_ids())
             num_scheduled_tokens[request.request_id] = num_new_tokens
-            token_budget -= num_new_tokens
+            token_budget.consume(num_new_tokens, request.computed_prompt)
             req_index += 1
 
             # Speculative decode related.
@@ -368,9 +420,8 @@ class Scheduler(SchedulerInterface):
         skipped_waiting_requests = create_request_queue(self.policy)
 
         # Next, schedule the WAITING requests.
-        token_budget = prefill_token_budget if self.use_pp else token_budget
         if not preempted_reqs:
-            while self.waiting and token_budget > 0:
+            while self.waiting and token_budget.has_waiting():
                 if len(self.running) == self.max_num_running_reqs:
                     break
 
@@ -458,12 +509,12 @@ class Scheduler(SchedulerInterface):
                     # chunked prefill has to be enabled explicitly to allow
                     # pooling requests to be chunked
                     if not self.scheduler_config.chunked_prefill_enabled and \
-                        num_new_tokens > token_budget:
+                        num_new_tokens > token_budget.get(False):
                         self.waiting.pop_request()
                         skipped_waiting_requests.prepend_request(request)
                         continue
 
-                    num_new_tokens = min(num_new_tokens, token_budget)
+                    num_new_tokens = min(num_new_tokens, token_budget.get(False))
                     assert num_new_tokens > 0
 
                     # Schedule encoder inputs.
@@ -531,7 +582,7 @@ class Scheduler(SchedulerInterface):
                 req_to_new_block_ids[request.request_id] = (
                     self.kv_cache_manager.get_block_ids(request.request_id))
                 num_scheduled_tokens[request.request_id] = num_new_tokens
-                token_budget -= num_new_tokens
+                token_budget.consume(num_new_tokens, False)
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
                 # Count the number of prefix cached tokens.
@@ -553,7 +604,7 @@ class Scheduler(SchedulerInterface):
         # Check if the scheduling constraints are satisfied.
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
         assert total_num_scheduled_tokens <= self.max_num_scheduled_tokens
-        assert token_budget >= 0
+        token_budget.verify()
         assert len(self.running) <= self.max_num_running_reqs
         # Since some requests in the RUNNING queue may not be scheduled in
         # this step, the total number of scheduled requests can be smaller than
