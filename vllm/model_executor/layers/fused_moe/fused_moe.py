@@ -12,6 +12,10 @@ import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
+# yapf: disable
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEQuantConfig, get_config_quant_dtype)
+# yapf: enable
 from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
     _valid_deep_gemm, deep_gemm_moe_fp8)
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
@@ -980,20 +984,6 @@ def get_config_dtype_str(
     return None
 
 
-# TODO (bnell): use scalar_type instead of bools?
-def get_config_qtype(
-    use_fp8_w8a8: bool,
-    use_int8_w8a8: bool,
-    use_int8_w8a16: bool,
-    use_int4_w4a16: bool,
-) -> Optional[torch.dtype]:
-    if use_fp8_w8a8:
-        return torch.float8_e4m3fn
-    elif use_int8_w8a8:
-        return torch.int8
-    return None
-
-
 def inplace_fused_experts(hidden_states: torch.Tensor,
                           w1: torch.Tensor,
                           w2: torch.Tensor,
@@ -1262,10 +1252,10 @@ def fused_experts_impl(
                                         use_int4_w4a16=use_int4_w4a16,
                                         dtype=hidden_states.dtype)
 
-    qtype = get_config_qtype(use_fp8_w8a8=use_fp8_w8a8,
-                             use_int8_w8a8=use_int8_w8a8,
-                             use_int8_w8a16=use_int8_w8a16,
-                             use_int4_w4a16=use_int4_w4a16)
+    qtype = get_config_quant_dtype(use_fp8_w8a8=use_fp8_w8a8,
+                                   use_int8_w8a8=use_int8_w8a8,
+                                   use_int8_w8a16=use_int8_w8a16,
+                                   use_int4_w4a16=use_int4_w4a16)
 
     get_config_func = functools.partial(
         try_get_optimal_moe_config,
@@ -1332,8 +1322,8 @@ def fused_experts_impl(
         qcurr_hidden_states, a1q_scale = moe_kernel_quantize_input(
             A=curr_hidden_states,
             A_scale=a1_scale,
-            qtype=qtype,
-            per_channel_quant=per_channel_quant,
+            quant_dtype=qtype,
+            per_act_token_quant=per_channel_quant,
             block_shape=block_shape)
 
         sorted_token_ids, expert_ids, num_tokens_post_padded = (
@@ -1373,8 +1363,8 @@ def fused_experts_impl(
         qintermediate_cache2, a2q_scale = moe_kernel_quantize_input(
             A=intermediate_cache2,
             A_scale=a2_scale,
-            qtype=qtype,
-            per_channel_quant=per_channel_quant,
+            quant_dtype=qtype,
+            per_act_token_quant=per_channel_quant,
             block_shape=block_shape)
 
         invoke_fused_moe_kernel(qintermediate_cache2,
@@ -1521,28 +1511,39 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def __init__(
         self,
-        use_fp8_w8a8: bool,
-        use_int8_w8a8: bool,
-        use_int8_w8a16: bool,
-        use_int4_w4a16: bool,
-        per_channel_quant: bool,
+        use_fp8_w8a8: bool = False,
+        use_int8_w8a8: bool = False,
+        use_int8_w8a16: bool = False,
+        use_int4_w4a16: bool = False,
+        per_act_token_quant: bool = False,
         block_shape: Optional[list[int]] = None,
-        block_m: Optional[int] = None,
     ):
-        super().__init__()
+        super().__init__(
+            FusedMoEQuantConfig.make(
+                use_fp8_w8a8=use_fp8_w8a8,
+                use_int8_w8a8=use_int8_w8a8,
+                use_int8_w8a16=use_int8_w8a16,
+                use_int4_w4a16=use_int4_w4a16,
+                per_act_token_quant=per_act_token_quant,
+                block_shape=block_shape,
+            ))
+
         self.use_fp8_w8a8 = use_fp8_w8a8
         self.use_int4_w4a16 = use_int4_w4a16
         self.use_int8_w8a8 = use_int8_w8a8
         self.use_int8_w8a16 = use_int8_w8a16
-        self.block_shape = block_shape
-        self.block_m = block_m
-        self.qtype = get_config_qtype(use_fp8_w8a8=use_fp8_w8a8,
-                                      use_int8_w8a8=use_int8_w8a8,
-                                      use_int8_w8a16=use_int8_w8a16,
-                                      use_int4_w4a16=use_int4_w4a16)
-        self.per_channel_quant = per_channel_quant
+
+    @property
+    def activation_formats(
+        self
+    ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
+        return (mk.FusedMoEActivationFormat.Standard,
+                mk.FusedMoEActivationFormat.Standard)
 
     def supports_chunking(self) -> bool:
+        return True
+
+    def supports_expert_map(self) -> bool:
         return True
 
     def workspace_shapes(
@@ -1660,7 +1661,7 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
                                 use_int8_w8a8=self.use_int8_w8a8,
                                 use_int8_w8a16=self.use_int8_w8a16,
                                 use_int4_w4a16=self.use_int4_w4a16,
-                                per_channel_quant=self.per_channel_quant,
+                                per_channel_quant=self.per_act_token_quant,
                                 block_shape=self.block_shape)
 
         self.activation(activation, intermediate_cache2,
@@ -1669,8 +1670,8 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         a2q_scale: Optional[torch.Tensor] = None
 
         qintermediate_cache2, a2q_scale = moe_kernel_quantize_input(
-            intermediate_cache2, a2_scale, self.qtype, self.per_channel_quant,
-            self.block_shape)
+            intermediate_cache2, a2_scale, self.quant_dtype,
+            self.per_act_token_quant, self.block_shape)
 
         invoke_fused_moe_kernel(qintermediate_cache2,
                                 w2,
@@ -1690,7 +1691,7 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
                                 use_int8_w8a8=self.use_int8_w8a8,
                                 use_int8_w8a16=self.use_int8_w8a16,
                                 use_int4_w4a16=self.use_int4_w4a16,
-                                per_channel_quant=self.per_channel_quant,
+                                per_channel_quant=self.per_act_token_quant,
                                 block_shape=self.block_shape)
 
 
@@ -1699,27 +1700,17 @@ def modular_triton_fused_moe(
     use_int8_w8a8: bool,
     use_int8_w8a16: bool,
     use_int4_w4a16: bool,
-    per_channel_quant: bool,
+    per_act_token_quant: bool,
     block_shape: Optional[list[int]] = None,
 ) -> mk.FusedMoEModularKernel:
-    qtype = get_config_qtype(
-        use_fp8_w8a8=use_fp8_w8a8,
-        use_int8_w8a8=use_int8_w8a8,
-        use_int8_w8a16=use_int8_w8a16,
-        use_int4_w4a16=use_int4_w4a16,
-    )
     return mk.FusedMoEModularKernel(
-        MoEPrepareAndFinalizeNoEP(
-            quant_dtype=qtype,
-            per_channel_quant=per_channel_quant,
-            block_shape=block_shape,
-        ),
+        MoEPrepareAndFinalizeNoEP(),
         TritonExperts(
             use_fp8_w8a8=use_fp8_w8a8,
             use_int8_w8a8=use_int8_w8a8,
             use_int8_w8a16=use_int8_w8a16,
             use_int4_w4a16=use_int4_w4a16,
-            per_channel_quant=per_channel_quant,
+            per_act_token_quant=per_act_token_quant,
             block_shape=block_shape,
         ),
     )
