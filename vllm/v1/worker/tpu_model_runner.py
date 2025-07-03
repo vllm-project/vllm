@@ -759,7 +759,8 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             num_kv_update_slices=torch.tensor([num_kv_update_slices],
                                               dtype=torch.int32,
                                               device=self.device),
-            num_slices_per_kv_cache_update_block=self._num_slices_per_kv_cache_update_block,
+            num_slices_per_kv_cache_update_block=self.
+            _num_slices_per_kv_cache_update_block,
         )
         # NOTE(woosuk): Due to chunked prefills, there can be at most 1 partial
         # request in the batch. While we should not sample any token from this
@@ -1210,7 +1211,8 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             query_start_loc=query_start_loc,
             num_seqs=num_seqs,
             num_kv_update_slices=num_kv_update_slices,
-            num_slices_per_kv_cache_update_block=self._num_slices_per_kv_cache_update_block,
+            num_slices_per_kv_cache_update_block=self.
+            _num_slices_per_kv_cache_update_block,
         )
 
         if self.is_multimodal_model:
@@ -1816,9 +1818,8 @@ def _get_padded_token_len(paddings: list[int], x: int) -> int:
 
 
 def _get_padded_num_kv_cache_update_slices(
-    num_tokens: int, max_num_reqs: int,
-    page_size: int, num_slices_per_kv_cache_update_block: int
-) -> int:
+        num_tokens: int, max_num_reqs: int, page_size: int,
+        num_slices_per_kv_cache_update_block: int) -> int:
     """Calculates the padded number of KV cache update slices to avoid
     recompilation."""
     padded_num_slices = 2 * max_num_reqs + num_tokens // page_size
@@ -1831,24 +1832,24 @@ def _get_padded_num_kv_cache_update_slices(
 
 
 def _get_num_slices_per_kv_cache_update_block(page_size_bytes: int) -> int:
-  """Find the optimum number of slices to copy per Pallas program instance.
+    """Find the optimum number of slices to copy per Pallas program instance.
 
-  Increasing the number of slices copied in one instance of the kernel program
-  will increase HBM bandwidth utilization via more in-flight DMAs.
+    Increasing the number of slices copied in one instance of the kernel program
+    will increase HBM bandwidth utilization via more in-flight DMAs.
 
-  However, it will also use more VMEM, and experimentally, we observed
-  performance regression at 128 slices on v6e, likely due to running
-  out of scalar registers. Thus this function will limit the number of
-  slices to 64.
-  """
-  # Conservative VMEM usage limit: 32 MiB
-  vmem_limit = 32 * 1024 * 1024
-  num_slices_per_block = vmem_limit // page_size_bytes
-  assert num_slices_per_block > 0, "Number of slices should be positive"
-  num_slices_per_block = next_power_of_2(num_slices_per_block)
-  if num_slices_per_block > 64:
-    num_slices_per_block = 64
-  return num_slices_per_block
+    However, it will also use more VMEM, and experimentally, we observed
+    performance regression at 128 slices on v6e, likely due to running
+    out of scalar registers. Thus this function will limit the number of
+    slices to 64.
+    """
+    # Conservative VMEM usage limit: 32 MiB
+    vmem_limit = 32 * 1024 * 1024
+    num_slices_per_block = vmem_limit // page_size_bytes
+    assert num_slices_per_block > 0, "Number of slices should be positive"
+    num_slices_per_block = next_power_of_2(num_slices_per_block)
+    if num_slices_per_block > 64:
+        num_slices_per_block = 64
+    return num_slices_per_block
 
 
 def replace_set_lora(model):
