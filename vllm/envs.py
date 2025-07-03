@@ -139,7 +139,6 @@ if TYPE_CHECKING:
     VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16: bool = True
     VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB: Optional[int] = None
     VLLM_NIXL_ABORT_REQUEST_TIMEOUT: int = 120
-    VLLM_V1_KV_SHARING_SKIP_PREFILL: bool = False
 
 
 def get_default_cache_root():
@@ -966,8 +965,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_TRTLLM_DECODE_ATTENTION":
     lambda: os.getenv("VLLM_USE_TRTLLM_DECODE_ATTENTION", None),
 
-    "VLLM_V1_KV_SHARING_SKIP_PREFILL":
-    lambda: os.environ.get("VLLM_V1_KV_SHARING_SKIP_PREFILL", "0") == "1",
 }
 
 # --8<-- [end:env-vars-definition]

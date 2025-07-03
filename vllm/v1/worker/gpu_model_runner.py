@@ -583,6 +583,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         """
         Pads logits_indices to align with CUDA graph capture sizes
         """
+        if not self.cache_config.kv_sharing_skip_prefill:
+            return None
         num_decodes = logits_indices.shape[0]
         # TODO(sarckk): With chunked prefills, logits_indices contains
         # indices for partial requests though we do not sample any token
@@ -602,8 +604,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def _prepare_inputs(
         self,
         scheduler_output: "SchedulerOutput",
-    ) -> tuple[dict[str, Any], bool, torch.Tensor,
-               Optional[SpecDecodeMetadata], np.ndarray, torch.Tensor]:
+    ) -> tuple[dict[str,
+                    Any], bool, torch.Tensor, Optional[SpecDecodeMetadata],
+               np.ndarray, Optional[torch.Tensor]]:
         """
         :return: tuple[
             attn_metadata: layer-to-attention_metadata mapping,

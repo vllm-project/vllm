@@ -194,6 +194,7 @@ class Qwen2ModelWithKVSharing(Qwen2Model):
         if decode_indices is None:
             decode_indices = torch.arange(positions.size(0),
                                           device=positions.device)
+
         num_decodes = decode_indices.shape[0]
         assert num_decodes >= 1
         assert first_residual is not None
@@ -270,12 +271,14 @@ class TestQwen2ForCausalLM(nn.Module):
 
 
 @fork_new_process_for_each_test
-@pytest.mark.parametrize("enforce_eager", [False, True])
-def test_kv_sharing_skip_prefill(monkeypatch, enforce_eager):
-    prompt = "What is the capital of France?"
+@pytest.mark.parametrize("enforce_eager", [True, False])
+def test_kv_sharing_skip_prefill(
+    monkeypatch: pytest.MonkeyPatch,
+    enforce_eager: bool,
+):
     ModelRegistry.register_model("Qwen2ForCausalLM", TestQwen2ForCausalLM)
     sampling_params = SamplingParams(temperature=0.0, max_tokens=100)
-    single_prompt = [prompt]
+    prompts = ["What is the capital of France?"]
     compilation_config = CompilationConfig(
         level=CompilationLevel.PIECEWISE
         if not enforce_eager else CompilationLevel.NO_COMPILATION,
@@ -284,21 +287,22 @@ def test_kv_sharing_skip_prefill(monkeypatch, enforce_eager):
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
 
-        llm = LLM(model="Qwen/Qwen2-1.5B-Instruct",
-                  enforce_eager=enforce_eager,
-                  compilation_config=compilation_config)
-        responses = llm.generate(single_prompt, sampling_params)
+        llm = LLM(
+            model="Qwen/Qwen2-1.5B-Instruct",
+            enforce_eager=enforce_eager,
+            compilation_config=compilation_config,
+        )
+        responses = llm.generate(prompts, sampling_params)
         ref_output = responses[0].outputs[0].text
 
         del llm
         gc.collect()
         torch.cuda.empty_cache()
 
-        m.setenv("VLLM_V1_KV_SHARING_SKIP_PREFILL", "1")
-
         llm = LLM(model="Qwen/Qwen2-1.5B-Instruct",
                   enforce_eager=enforce_eager,
-                  compilation_config=compilation_config)
-        responses = llm.generate(single_prompt, sampling_params)
+                  compilation_config=compilation_config,
+                  kv_sharing_skip_prefill=True)
+        responses = llm.generate(prompts, sampling_params)
         output = responses[0].outputs[0].text
         assert output == ref_output

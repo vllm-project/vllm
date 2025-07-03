@@ -1564,6 +1564,10 @@ class CacheConfig:
     checkpoint if available. Otherwise, the scales will default to 1.0."""
     cpu_kvcache_space_bytes: Optional[int] = None
     """(CPU backend only) CPU key-value cache space."""
+    kv_sharing_skip_prefill: bool = False
+    """Skip prefill for tokens where applicable in KV cache sharing
+    scenarios where required key/value tensors have been populated
+    in earlier KV sharing target layers."""
 
     # Will be set after profiling.
     num_gpu_blocks: Optional[int] = field(default=None, init=False)
@@ -4115,7 +4119,10 @@ class CompilationConfig:
     - None (default): capture sizes are inferred from vllm config.
     - list[int]: capture sizes are specified as given."""
     cudagraph_share_memory_pool: bool = True
-    """Whether to share a single global memory pool for each graph capture"""
+    """Whether to share a single global memory pool for each graph capture
+    When CUDA graphs are not replayed in the same order they are captured,
+    e.g. when compiling multiple modules in a model and modules take different
+    input shapes, it is unsafe to share memory across graph captures."""
     cudagraph_copy_inputs: bool = False
     """Whether to copy input tensors for
     cudagraph. If the caller can guarantee that the same input buffers

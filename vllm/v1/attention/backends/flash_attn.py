@@ -267,6 +267,16 @@ class FlashAttentionMetadataBuilder(
         common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
     ) -> FlashAttentionMetadata:
+        prefill_skipped_attn_metadata = None
+        if common_attn_metadata.decode_indices is not None:
+            # NOTE(sarckk): attention metadata for partial prefill skip case
+            # needs to be built first, otherwise the line below
+            # block_table.slot_mapping[num_actual_tokens:].fill_(-1)
+            # will override the correct slot mapping
+            prefill_skipped_attn_metadata = self.build_skip_prefill(
+                common_prefix_len=0,  # disable cascade attention
+                common_attn_metadata=common_attn_metadata)
+
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len
@@ -414,12 +424,6 @@ class FlashAttentionMetadataBuilder(
             # num_heads, num_tokens, head_size] are allocated. Therefore,
             # we only set num_splits when using cuda graphs.
             max_num_splits = self.max_num_splits
-
-        prefill_skipped_attn_metadata = None
-        if common_attn_metadata.decode_indices is not None:
-            prefill_skipped_attn_metadata = self.build_skip_prefill(
-                common_prefix_len=0,  # disable cascade attention
-                common_attn_metadata=common_attn_metadata)
 
         attn_metadata = FlashAttentionMetadata(
             num_actual_tokens=num_actual_tokens,
