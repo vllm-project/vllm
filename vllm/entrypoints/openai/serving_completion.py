@@ -313,6 +313,7 @@ class OpenAIServingCompletion(OpenAIServing):
         else:
             include_usage, include_continuous_usage = False, False
 
+        chunk = None
         try:
             async for prompt_idx, res in result_generator:
                 prompt_token_ids = res.prompt_token_ids
@@ -441,6 +442,12 @@ class OpenAIServingCompletion(OpenAIServing):
                     choices=[],
                     usage=final_usage_info,
                 )
+
+                # if accumulate, send the usage info attached to last chunk instead
+                if request.accumulate and chunk is not None:
+                    chunk.usage = final_usage_info
+                    final_usage_chunk = chunk
+
                 final_usage_data = (final_usage_chunk.model_dump_json(
                     exclude_unset=False, exclude_none=True))
                 yield f"data: {final_usage_data}\n\n"
