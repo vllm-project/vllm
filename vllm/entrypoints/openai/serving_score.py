@@ -469,7 +469,7 @@ class ServingScores(OpenAIServing):
 
     def request_output_to_rerank_response(
             self, final_res_batch: list[PoolingRequestOutput], request_id: str,
-            model_name: str, documents: list[str],
+            model_name: str, documents: Union[list[str], ScoreMultiModalParam],
             top_n: int) -> RerankResponse:
         """
         Convert the output of do_rank to a RerankResponse
@@ -481,7 +481,8 @@ class ServingScores(OpenAIServing):
 
             result = RerankResult(
                 index=idx,
-                document=RerankDocument(text=documents[idx]),
+                document=RerankDocument(data=documents[idx] if isinstance(
+                    documents, list) else documents["content"][idx]),
                 relevance_score=classify_res.outputs.score,
             )
             results.append(result)
