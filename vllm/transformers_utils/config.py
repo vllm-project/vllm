@@ -655,33 +655,34 @@ def maybe_register_config_serialize_by_value() -> None:
     """ # noqa
     try:
         import transformers_modules
+        transformers_modules_available = True
     except ImportError:
-        # the config does not need trust_remote_code
-        return
+        transformers_modules_available = False
 
     try:
-        import cloudpickle
-        cloudpickle.register_pickle_by_value(transformers_modules)
-
-        # ray vendors its own version of cloudpickle
-        from vllm.executor.ray_utils import ray
-        if ray:
-            ray.cloudpickle.register_pickle_by_value(transformers_modules)
-
-        # multiprocessing uses pickle to serialize arguments when using spawn
-        # Here we get pickle to use cloudpickle to serialize config objects
-        # that contain instances of the custom config class to avoid
-        # serialization problems if the generated module (and model) has a `.`
-        # in its name
         import multiprocessing
         import pickle
 
+        import cloudpickle
+
         from vllm.config import VllmConfig
 
+        # Register multiprocessing reducers to handle cross-process
+        # serialization of VllmConfig objects that may contain custom configs
+        # from transformers_modules
         def _reduce_config(config: VllmConfig):
             return (pickle.loads, (cloudpickle.dumps(config), ))
 
         multiprocessing.reducer.register(VllmConfig, _reduce_config)
+
+        # Register transformers_modules with cloudpickle if available
+        if transformers_modules_available:
+            cloudpickle.register_pickle_by_value(transformers_modules)
+
+            # ray vendors its own version of cloudpickle
+            from vllm.executor.ray_utils import ray
+            if ray:
+                ray.cloudpickle.register_pickle_by_value(transformers_modules)
 
     except Exception as e:
         logger.warning(
