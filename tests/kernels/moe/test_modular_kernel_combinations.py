@@ -327,7 +327,7 @@ class Config:
             return "pplx"
         if self.prepare_finalize_type == DeepEPHTPrepareAndFinalize:
             return "deepep_high_throughput"
-        if self.prepare_finalize_type == DeepEPHTPrepareAndFinalize:
+        if self.prepare_finalize_type == DeepEPLLPrepareAndFinalize:
             return "deepep_low_latency"
         return "naive"
 
@@ -350,6 +350,10 @@ class Config:
         if is_block_quatized and not is_fp8:
             return False
         if is_block_quatized and not self.is_fe_block_fp8_supported():
+            return False
+
+        # deep_gemm only works with block-quantized
+        if self.needs_deep_gemm() and not is_block_quatized:
             return False
 
         # Check dependencies
@@ -455,22 +459,22 @@ class RankTensors:
         if config.quant_dtype is None:
             return a
 
-        a_q, a_scales = (None, None)
-        if not config.is_fp8_block_quantized():
-            a_q, a_scales = ops.scaled_fp8_quant(
-                a, use_per_token_if_dynamic=config.is_per_act_token_quant)
-        else:
-            assert config.quant_block_shape is not None
-            block_k = config.quant_block_shape[1]
-            a_q, a_scales = per_token_cast_to_fp8(a, block_size=block_k)
-
-        # We do this so the tests are stable.
+        # We dequant and use that as hidden_states so the tests are stable.
         # quantizing and dequantizing yield slightly different results
         # depending on the hardware. Here we, quantize and dequantize
         # first - so further quantize and dequantize will yeild the same
         # values.
-        a = a_q.float().mul(a_scales).to(dtype)
-        return a
+        a_q, a_scales = (None, None)
+        if not config.is_fp8_block_quantized():
+            a_q, a_scales = ops.scaled_fp8_quant(
+                a, use_per_token_if_dynamic=config.is_per_act_token_quant)
+            return a_q.float().mul(a_scales).to(dtype)
+
+        assert config.quant_block_shape is not None
+        block_k = config.quant_block_shape[1]
+        a_q, a_scales = per_token_cast_to_fp8(a, block_size=block_k)
+        return a_q.float().view(
+            (-1, block_k)).mul(a_scales.view(-1, 1)).view(m, k).to(dtype)
 
     @staticmethod
     def make(config: Config, pgi: ProcessGroupInfo):
@@ -612,23 +616,15 @@ def make_fused_experts(
     return experts
 
 
-def rank_worker(
+def do_modular_kernel(
     pgi: ProcessGroupInfo,
     vllm_config: VllmConfig,
-    cpu_group,
     config: Config,
     weights: WeightTensors,
+    rank_tensors: RankTensors,
 ):
-    current_platform.seed_everything(pgi.rank)
-
-    from vllm import envs
-
-    # sanity check
-    if config.fused_moe_chunk_size is not None:
-        assert (config.fused_moe_chunk_size == envs.VLLM_FUSED_MOE_CHUNK_SIZE)
-
-    # get weights to this device
-    weights.to_current_device()
+    assert isinstance(config.Ms, int)
+    assert isinstance(config.topks, int)
 
     # make moe config
     moe_parallel_config: FusedMoEParallelConfig = FusedMoEParallelConfig.make(
@@ -648,6 +644,9 @@ def rank_worker(
         max_num_tokens=config.M,
     )
 
+    import vllm.envs as envs
+    print(f"all2all backend {envs.VLLM_ALL2ALL_BACKEND} ...")
+
     # make modular kernel
     prepare_finalize = FusedMoEMethodBase.maybe_make_prepare_finalize(moe)
     assert prepare_finalize is not None
@@ -655,6 +654,38 @@ def rank_worker(
 
     modular_kernel = mk.FusedMoEModularKernel(
         prepare_finalize=prepare_finalize, fused_experts=fused_experts)
+
+    modular_kernel.forward(
+        hidden_states=rank_tensors.hidden_states,
+        w1=weights.w1,
+        w2=weights.w2,
+        topk_weights=rank_tensors.topk_weights,
+        topk_ids=rank_tensors.topk_ids,
+        expert_map=rank_tensors.expert_map,
+        w1_scale=weights.w1_scale,
+        w2_scale=weights.w2_scale,
+        global_num_experts=config.E,
+        # TODO (varun) : support this case
+        apply_router_weight_on_input=False,
+    )
+
+
+def rank_worker(
+    pgi: ProcessGroupInfo,
+    vllm_config: VllmConfig,
+    cpu_group,
+    config: Config,
+    weights: WeightTensors,
+):
+    current_platform.seed_everything(pgi.rank)
+
+    # sanity check
+    from vllm import envs
+    if config.fused_moe_chunk_size is not None:
+        assert (config.fused_moe_chunk_size == envs.VLLM_FUSED_MOE_CHUNK_SIZE)
+
+    # get weights to this device
+    weights.to_current_device()
 
     Ms = config.Ms
     assert isinstance(Ms, list)
@@ -672,20 +703,29 @@ def rank_worker(
         # weights for rank
         wr = weights.slice_weights(pgi.rank, cfgx.num_local_experts)
 
-        modular_kernel.forward(
-            hidden_states=ir.hidden_states,
-            w1=wr.w1,
-            w2=wr.w2,
-            topk_weights=ir.topk_weights,
-            topk_ids=ir.topk_ids,
-            expert_map=ir.expert_map,
-            w1_scale=wr.w1_scale,
-            w2_scale=wr.w2_scale,
-            global_num_experts=cfgx.E,
-            # TODO (varun) : support this case
-            apply_router_weight_on_input=False,
-        )
+        do_modular_kernel(pgi, vllm_config, cfgx, wr, ir)
 
+
+#PREPARE_FINALIZE_TYPES = [
+#    PplxPrepareAndFinalize,
+#    DeepEPLLPrepareAndFinalize,
+#    DeepEPHTPrepareAndFinalize,
+#]
+#FUSED_EXPERT_TYPES = [
+#    BatchedDeepGemmExperts,
+#    BatchedTritonExperts,
+#    NaiveBatchedExperts,
+#    BatchedTritonOrDeepGemmExperts,
+#    CutlassExpertsFp8,
+#    DeepGemmExperts,
+#    TritonOrDeepGemmExperts,
+#    TritonExperts,
+#]
+
+#Ms = [1, 8, 16]
+#Ks = [1024, 4096, 7168]  # hidden sizes
+#Ns = [1024]
+#TOPKs = [1, 4, 8]
 
 PREPARE_FINALIZE_TYPES = [
     PplxPrepareAndFinalize,
@@ -694,22 +734,11 @@ PREPARE_FINALIZE_TYPES = [
 ]
 FUSED_EXPERT_TYPES = [
     BatchedDeepGemmExperts,
-    BatchedTritonExperts,
-    NaiveBatchedExperts,
-    BatchedTritonOrDeepGemmExperts,
-    CutlassExpertsFp8,
     DeepGemmExperts,
-    TritonOrDeepGemmExperts,
-    TritonExperts,
 ]
 
-#Ms = [1, 8, 16]
-#Ks = [1024, 4096, 7168]  # hidden sizes
-#Ns = [1024]
-#TOPKs = [1, 4, 8]
-
 Ms = [64]
-Ks = [1024]  # hidden sizes
+Ks = [7168]  # hidden sizes
 Ns = [2048]
 TOPKs = [4]
 
@@ -728,7 +757,7 @@ QUANTCONFIGs = [
                         block_shape=None),
     FusedMoEQuantConfig(quant_dtype=torch.float8_e4m3fn,
                         per_out_ch_quant=False,
-                        per_act_token_quant=True,
+                        per_act_token_quant=False,
                         block_shape=[128, 128])
 ]
 COMBINATIONs = product(PREPARE_FINALIZE_TYPES, FUSED_EXPERT_TYPES)
