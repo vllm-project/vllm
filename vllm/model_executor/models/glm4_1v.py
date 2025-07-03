@@ -410,6 +410,7 @@ class Glm4vVisionBlock(nn.Module):
             mlp_hidden_dim,
             bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}.mlp",
         )
 
     def forward(
