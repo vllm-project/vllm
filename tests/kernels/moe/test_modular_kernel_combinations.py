@@ -14,8 +14,7 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
 from vllm.config import VllmConfig, current_platform
-from vllm.distributed import (get_dp_group, get_ep_group,
-                              get_tensor_model_parallel_world_size)
+from vllm.distributed import get_dp_group, get_tensor_model_parallel_world_size
 # Fused experts imports
 from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
     BatchedDeepGemmExperts)
@@ -25,7 +24,6 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig, FusedMoEParallelConfig, FusedMoEQuantConfig)
 from vllm.model_executor.layers.fused_moe.cutlass_moe import CutlassExpertsFp8
 from vllm.model_executor.layers.fused_moe.deep_gemm_moe import DeepGemmExperts
-# PrepareFinalize imports
 from vllm.model_executor.layers.fused_moe.deepep_ht_prepare_finalize import (
     DeepEPHTPrepareAndFinalize)
 from vllm.model_executor.layers.fused_moe.deepep_ll_prepare_finalize import (
@@ -37,11 +35,20 @@ from vllm.model_executor.layers.fused_moe.layer import (FusedMoEMethodBase,
                                                         TritonExperts)
 from vllm.model_executor.layers.fused_moe.pplx_prepare_finalize import (
     PplxPrepareAndFinalize)
+# PrepareFinalize imports
+from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+    MoEPrepareAndFinalizeNoEP)
 from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
     TritonOrDeepGemmExperts)
 from vllm.utils import has_deep_ep, has_deep_gemm, has_pplx
 
 from .parallel_utils import ProcessGroupInfo, parallel_launch_with_config
+
+# TODO (varun): These requirements are very strict and could be relaxed.
+meets_package_requirements = pytest.mark.skipif(
+    not (has_deep_ep() and has_pplx() and has_deep_gemm()),
+    reason="Requires deep_ep & deep_gemm & pplx packages",
+)
 
 
 def per_token_cast_to_fp8(
@@ -253,11 +260,9 @@ class Config:
         topk_ids_dtype = None
         if self.prepare_finalize_type == PplxPrepareAndFinalize:
             topk_ids_dtype = torch.uint32
-        else:
-            assert self.prepare_finalize_type in [
-                DeepEPHTPrepareAndFinalize,
-                DeepEPLLPrepareAndFinalize,
-            ]
+        elif self.prepare_finalize_type in [
+                DeepEPHTPrepareAndFinalize, DeepEPLLPrepareAndFinalize
+        ]:
             topk_ids_dtype = torch.int64
         return topk_ids_dtype
 
@@ -335,6 +340,12 @@ class Config:
         if self.prepare_finalize_type == DeepEPLLPrepareAndFinalize:
             return "deepep_low_latency"
         return "naive"
+
+    def needs_all2all(self):
+        return self.prepare_finalize_type in [
+            PplxPrepareAndFinalize, DeepEPHTPrepareAndFinalize,
+            DeepEPLLPrepareAndFinalize
+        ]
 
     def is_valid(self):
         # Check prepare-finalize and fused-experts compatibility
@@ -458,9 +469,11 @@ class RankTensors:
     quant_config: FusedMoEQuantConfig
 
     def apply_topk_weights_to_input(self) -> torch.Tensor:
-        assert self.topk == 1
+        num_topk = self.topk_ids.size(1)
+        orig_dtype = self.hidden_states.dtype
+        assert num_topk == 1
         a = self.hidden_states.clone()
-        return a.mul(self.topk_weights.view(-1, 1))
+        return a.float().mul(self.topk_weights.view(-1, 1)).to(orig_dtype)
 
     @staticmethod
     def make_hidden_states(config: Config) -> torch.Tensor:
@@ -533,13 +546,11 @@ class RankTensors:
 def make_fused_experts(
         config: Config,
         moe: FusedMoEConfig) -> mk.FusedMoEPermuteExpertsUnpermute:
-    all2all_manager = get_ep_group().device_communicator.all2all_manager
-    assert all2all_manager is not None
 
     use_fp8 = config.quant_dtype == torch.float8_e4m3fn
     batch_kwargs = {
         "max_num_tokens": moe.max_num_tokens,
-        "world_size": all2all_manager.world_size,
+        "world_size": config.world_size,
         "dp_size": moe.dp_size,
     }
     quant_kwargs = {
@@ -628,8 +639,13 @@ def do_modular_kernel(
     )
 
     # make modular kernel
-    prepare_finalize = FusedMoEMethodBase.maybe_make_prepare_finalize(moe)
-    assert prepare_finalize is not None
+    prepare_finalize = None
+    if config.needs_all2all():
+        prepare_finalize = FusedMoEMethodBase.maybe_make_prepare_finalize(moe)
+        assert prepare_finalize is not None
+    else:
+        prepare_finalize = MoEPrepareAndFinalizeNoEP()
+
     fused_experts = make_fused_experts(config, moe)
 
     modular_kernel = mk.FusedMoEModularKernel(
@@ -676,6 +692,7 @@ def rank_worker(
     assert isinstance(TOPKs, list)
 
     for m, topk in product(Ms, TOPKs):
+        print(f"Running m={m}, topk={topk} ...")
         # override m and topk
         cfgx = copy.deepcopy(config)
         cfgx.Ms = m
@@ -737,6 +754,7 @@ PREPARE_FINALIZE_TYPES = [
     DeepEPLLPrepareAndFinalize,
     DeepEPHTPrepareAndFinalize,
 ]
+
 FUSED_EXPERT_TYPES = [
     BatchedDeepGemmExperts,
     BatchedTritonExperts,
@@ -786,7 +804,6 @@ QUANTCONFIGs = [
     # block-quantized weights and per-token activations
     # block-quantized weights and per-tensor activations
 ]
-COMBINATIONs = product(PREPARE_FINALIZE_TYPES, FUSED_EXPERT_TYPES)
 FUSED_MOE_CHUNK_SIZEs = [None, 64]
 
 
@@ -795,10 +812,12 @@ FUSED_MOE_CHUNK_SIZEs = [None, 64]
 @pytest.mark.parametrize("e", Es)
 @pytest.mark.parametrize("dtype", DTYPEs)
 @pytest.mark.parametrize("quant_config", QUANTCONFIGs)
-@pytest.mark.parametrize("combination", COMBINATIONs)
+@pytest.mark.parametrize("combination",
+                         product(PREPARE_FINALIZE_TYPES, FUSED_EXPERT_TYPES))
 @pytest.mark.parametrize("fused_moe_chunk_size", FUSED_MOE_CHUNK_SIZEs)
 @pytest.mark.parametrize("world_size", [2])
-def test_modular_kernel_combinations(
+@meets_package_requirements
+def test_modular_kernel_combinations_multigpu(
         k: int, n: int, e: int, dtype: torch.dtype,
         quant_config: FusedMoEQuantConfig,
         combination: tuple[mk.FusedMoEPrepareAndFinalize,
@@ -808,11 +827,38 @@ def test_modular_kernel_combinations(
         fused_moe_chunk_size, world_size)
 
 
+SINGLE_GPU_PREPARE_FINALIZE_TYPES = [MoEPrepareAndFinalizeNoEP]
+
+
+@pytest.mark.parametrize("k", Ks)
+@pytest.mark.parametrize("n", Ns)
+@pytest.mark.parametrize("e", Es)
+@pytest.mark.parametrize("dtype", DTYPEs)
+@pytest.mark.parametrize("quant_config", QUANTCONFIGs)
+@pytest.mark.parametrize(
+    "combination",
+    product(SINGLE_GPU_PREPARE_FINALIZE_TYPES, FUSED_EXPERT_TYPES))
+@pytest.mark.parametrize("fused_moe_chunk_size", FUSED_MOE_CHUNK_SIZEs)
+@pytest.mark.parametrize("world_size", [1])
+@meets_package_requirements
+def test_modular_kernel_combinations_singlegpu(
+        k: int, n: int, e: int, dtype: torch.dtype,
+        quant_config: FusedMoEQuantConfig,
+        combination: tuple[mk.FusedMoEPrepareAndFinalize,
+                           mk.FusedMoEPermuteExpertsUnpermute],
+        fused_moe_chunk_size: Optional[int], world_size: int):
+    run(Ms, k, n, e, TOPKs, dtype, quant_config, combination,
+        fused_moe_chunk_size, world_size)
+
+
+ALL_PREPARE_FINALIZE_TYPES = (PREPARE_FINALIZE_TYPES +
+                              SINGLE_GPU_PREPARE_FINALIZE_TYPES)
+
 if __name__ == '__main__':
     import argparse
 
     def to_pf_class_type(s: str) -> mk.FusedMoEPrepareAndFinalize:
-        for pf in PREPARE_FINALIZE_TYPES:
+        for pf in ALL_PREPARE_FINALIZE_TYPES:
             if pf.__name__ == s:
                 return pf
         raise ValueError(
@@ -841,7 +887,7 @@ if __name__ == '__main__':
         type=to_pf_class_type,
         required=True,
         help=("Choose a PrepareFinalize Type : "
-              f"{[x.__name__ for x in PREPARE_FINALIZE_TYPES]}"),
+              f"{[x.__name__ for x in ALL_PREPARE_FINALIZE_TYPES]}"),
     )
     parser.add_argument(
         "--experts-type",
