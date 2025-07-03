@@ -1365,7 +1365,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_tokens_across_dp=num_tokens_across_dp,
                 skip_cuda_graphs=skip_cuda_graphs,
         ):
-            self.maybe_setup_kv_connector(scheduler_output)
+            self.maybe_setup_kv_connector(scheduler_output, gpu_model_runner=self)
 
             model_output = self.model(
                 input_ids=input_ids,
@@ -1686,7 +1686,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self, scheduler_output: "SchedulerOutput") -> ModelRunnerOutput:
         # KV send/recv even if no work to do.
         with set_forward_context(None, self.vllm_config):
-            self.maybe_setup_kv_connector(scheduler_output)
+            self.maybe_setup_kv_connector(scheduler_output, gpu_model_runner=self)
             finished_sending, finished_recving = (
                 self.get_finished_kv_transfers(scheduler_output))
 
@@ -1699,7 +1699,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         return output
 
     @staticmethod
-    def maybe_setup_kv_connector(scheduler_output: "SchedulerOutput"):
+    def maybe_setup_kv_connector(scheduler_output: "SchedulerOutput", **kwargs):
         # Update KVConnector with the KVConnector metadata forward().
         if has_kv_transfer_group():
             kv_connector = get_kv_transfer_group()
@@ -1712,7 +1712,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # These transfers are designed to be async and the requests
             # involved may be disjoint from the running requests.
             # Do this here to save a collective_rpc.
-            kv_connector.start_load_kv(get_forward_context())
+            kv_connector.start_load_kv(get_forward_context(), **kwargs)
 
     @staticmethod
     def maybe_wait_for_kv_save() -> None:
