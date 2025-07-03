@@ -4,10 +4,7 @@
 
 Run `pytest tests/kernels/test_pplx_moe.py`.
 """
-import dataclasses
-import os
-import traceback
-from typing import Callable, Optional
+from typing import Optional
 
 import pytest
 import torch
@@ -21,20 +18,25 @@ try:
 except ImportError:
     has_pplx = False
 
-from torch.multiprocessing import (
-    spawn)  # pyright: ignore[reportPrivateImportUsage]
-from typing_extensions import Concatenate, ParamSpec
-
+from tests.kernels.moe.utils import make_test_weights, naive_batched_moe
+from tests.kernels.utils import torch_experts
 from vllm.config import VllmConfig, set_current_vllm_config
-from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.fused_moe import override_config
+from vllm.model_executor.layers.fused_moe import fused_topk, override_config
+from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
-    BatchedExperts, BatchedPrepareAndFinalize, BatchedTritonExperts)
-from vllm.model_executor.layers.fused_moe.fused_moe import (fused_topk,
-                                                            get_default_config)
+    BatchedPrepareAndFinalize, BatchedTritonExperts, NaiveBatchedExperts)
+from vllm.model_executor.layers.fused_moe.fused_moe import get_default_config
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEModularKernel)
 from vllm.platforms import current_platform
+from vllm.utils import round_up
+
+from .parallel_utils import ProcessGroupInfo, parallel_launch
+
+requires_pplx = pytest.mark.skipif(
+    not has_pplx,
+    reason="Requires PPLX kernels",
+)
 
 PPLX_PREPARE_COMBOS = [(4, 128, 128), (32, 1024, 512), (64, 1024, 512),
                        (222, 2048, 1024)]
@@ -56,122 +58,6 @@ TOP_KS = [1, 2, 6]
 vllm_config = VllmConfig()
 vllm_config.scheduler_config.max_num_seqs = 128
 vllm_config.scheduler_config.max_model_len = 8192
-
-P = ParamSpec("P")
-
-requires_pplx = pytest.mark.skipif(
-    not has_pplx,
-    reason="Requires PPLX kernels",
-)
-
-
-@dataclasses.dataclass
-class ProcessGroupInfo:
-    world_size: int
-    world_local_size: int
-    rank: int
-    node_rank: int
-    local_rank: int
-    device: torch.device
-
-
-def _worker_parallel_launch(
-    local_rank: int,
-    world_size: int,
-    world_local_size: int,
-    node_rank: int,
-    init_method: str,
-    worker: Callable[Concatenate[ProcessGroupInfo, P], None],
-    *args: P.args,
-    **kwargs: P.kwargs,
-) -> None:
-    rank = node_rank * world_local_size + local_rank
-    torch.cuda.set_device(local_rank)
-    device = torch.device("cuda", local_rank)
-    torch.distributed.init_process_group(
-        backend="cpu:gloo,cuda:nccl",
-        init_method=init_method,
-        rank=rank,
-        world_size=world_size,
-        device_id=device,
-    )
-    barrier = torch.tensor([rank], device=device)
-    torch.distributed.all_reduce(barrier)
-
-    try:
-        worker(
-            ProcessGroupInfo(
-                world_size=world_size,
-                world_local_size=world_local_size,
-                rank=rank,
-                node_rank=node_rank,
-                local_rank=local_rank,
-                device=device,
-            ),
-            *args,
-            **kwargs,
-        )
-    except Exception as ex:
-        print(ex)
-        traceback.print_exc()
-        raise
-    finally:
-        torch.distributed.destroy_process_group()
-
-
-def parallel_launch(
-    world_size: int,
-    worker: Callable[Concatenate[ProcessGroupInfo, P], None],
-    *args: P.args,
-    **kwargs: P.kwargs,
-) -> None:
-    assert not kwargs
-    spawn(
-        _worker_parallel_launch,
-        args=(
-            world_size,
-            world_size,
-            0,
-            "tcp://localhost:29500",
-            worker,
-        ) + args,
-        nprocs=world_size,
-        join=True,
-    )
-
-
-def parallel_launch_from_env(
-    worker: Callable[Concatenate[ProcessGroupInfo, P], None],
-    *args: P.args,
-    **kwargs: P.kwargs,
-) -> None:
-    """
-    Launches a worker function in parallel across all processes in the current
-    environment. The environment must have the following variables set:
-    - WORLD_SIZE: The total number of processes.
-    - WORLD_LOCAL_SIZE: The number of processes on the current node.
-    - NODE_RANK: The rank of the current
-    - MASTER_ADDR: The address of the master process.
-    - MASTER_PORT: The port of the master process.
-    """
-    assert not kwargs
-    world_size = int(os.environ["WORLD_SIZE"])
-    world_local_size = int(os.environ["WORLD_LOCAL_SIZE"])
-    node_rank = int(os.environ["NODE_RANK"])
-    assert "MASTER_ADDR" in os.environ
-    assert "MASTER_PORT" in os.environ
-    spawn(
-        _worker_parallel_launch,
-        args=(
-            world_size,
-            world_local_size,
-            node_rank,
-            "env://",
-            worker,
-        ) + args,
-        nprocs=world_local_size,
-        join=True,
-    )
 
 
 def torch_prepare(
@@ -260,45 +146,6 @@ def torch_batched_moe(
     return torch_finalize(out, topk_weight, topk_ids)
 
 
-def batched_moe(
-    a: torch.Tensor,
-    w1: torch.Tensor,
-    w2: torch.Tensor,
-    topk_weight: torch.Tensor,
-    topk_ids: torch.Tensor,
-) -> torch.Tensor:
-    num_experts = w1.shape[0]
-
-    fused_experts = FusedMoEModularKernel(
-        BatchedPrepareAndFinalize(a.shape[0], world_size=1, dp_size=1, rank=0),
-        BatchedExperts(max_num_tokens=a.shape[0], dp_size=1, world_size=1))
-
-    return fused_experts(a, w1, w2, topk_weight, topk_ids, num_experts)
-
-
-# Note: same as torch_moe but with fused_topk factored out.
-def torch_moe2(
-    a: torch.Tensor,
-    w1: torch.Tensor,
-    w2: torch.Tensor,
-    topk_weight: torch.Tensor,
-    topk_ids: torch.Tensor,
-) -> torch.Tensor:
-    M, K = a.shape
-    topk = topk_ids.shape[1]
-    a = a.view(M, -1, K).repeat(1, topk, 1).reshape(-1, K)
-    out = torch.zeros(M * topk, w2.shape[1], dtype=a.dtype, device=a.device)
-    num_experts = w1.shape[0]
-    for i in range(num_experts):
-        mask = (topk_ids == i).view(-1)
-        if mask.sum():
-            out[mask] = SiluAndMul()(
-                a[mask] @ w1[i].transpose(0, 1)) @ w2[i].transpose(0, 1)
-
-    return (out.view(M, -1, w2.shape[1]) *
-            topk_weight.view(M, -1, 1).to(out.dtype)).sum(dim=1)
-
-
 @pytest.mark.parametrize("m", [1, 33, 64, 222])
 @pytest.mark.parametrize("n", [128, 1024, 2048])
 @pytest.mark.parametrize("k", [128, 512, 1024])
@@ -322,9 +169,9 @@ def test_fused_moe_batched_experts(
 
     with set_current_vllm_config(vllm_config):
         topk_weight, topk_ids, _ = fused_topk(a, score, topk, False)
-        baseline_output = torch_moe2(a, w1, w2, topk_weight, topk_ids)
+        baseline_output = torch_experts(a, w1, w2, topk_weight, topk_ids)
         torch_output = torch_batched_moe(a, w1, w2, topk_weight, topk_ids)
-        batched_output = batched_moe(a, w1, w2, topk_weight, topk_ids)
+        batched_output = naive_batched_moe(a, w1, w2, topk_weight, topk_ids)
 
     torch.testing.assert_close(baseline_output,
                                torch_output,
@@ -346,9 +193,15 @@ def chunk_by_rank(t: torch.Tensor, r: int, w: int) -> torch.Tensor:
     return t[(r * chunk):(r + 1) * chunk]
 
 
-def pplx_prepare_finalize(pgi: ProcessGroupInfo, dp_size: int, a: torch.Tensor,
-                          topk_weight: torch.Tensor, topk_ids: torch.Tensor,
-                          num_experts: int) -> torch.Tensor:
+def pplx_prepare_finalize(
+    pgi: ProcessGroupInfo,
+    dp_size: int,
+    a: torch.Tensor,
+    topk_weight: torch.Tensor,
+    topk_ids: torch.Tensor,
+    num_experts: int,
+    group_name: Optional[str],
+) -> torch.Tensor:
     from vllm.model_executor.layers.fused_moe.pplx_prepare_finalize import (
         PplxPrepareAndFinalize)
 
@@ -356,13 +209,12 @@ def pplx_prepare_finalize(pgi: ProcessGroupInfo, dp_size: int, a: torch.Tensor,
 
     topk = topk_ids.shape[1]
     num_tokens, hidden_dim = a.shape
-    block_size = 128
     device = pgi.device
     rank = pgi.rank
     world_size = pgi.world_size
     max_num_tokens = rank_chunk(num_tokens, 0, world_size)
 
-    ata = AllToAll.internode(
+    args = dict(
         max_num_tokens=max_num_tokens,
         num_experts=num_experts,
         experts_per_token=topk,
@@ -371,10 +223,14 @@ def pplx_prepare_finalize(pgi: ProcessGroupInfo, dp_size: int, a: torch.Tensor,
         dp_size=dp_size,
         hidden_dim=hidden_dim,
         hidden_dim_bytes=hidden_dim * a.dtype.itemsize,
-        hidden_dim_scale_bytes=(0 if a.dtype.itemsize != 1 else
-                                ((hidden_dim + block_size - 1) // block_size *
-                                 torch.float32.itemsize)),
+        hidden_dim_scale_bytes=0,
     )
+
+    if group_name is None:
+        ata = AllToAll.internode(**args)
+    else:
+        args["group_name"] = group_name
+        ata = AllToAll.intranode(**args)
 
     topk_ids = topk_ids.to(dtype=torch.uint32)
 
@@ -384,14 +240,13 @@ def pplx_prepare_finalize(pgi: ProcessGroupInfo, dp_size: int, a: torch.Tensor,
         world_size,
         rank,
         dp_size,
-        a.dtype,
     )
 
     a_chunk = chunk_by_rank(a, rank, world_size).to(device)
     chunk_topk_weight = chunk_by_rank(topk_weight, rank, world_size).to(device)
     chunk_topk_ids = chunk_by_rank(topk_ids, rank, world_size).to(device)
 
-    b_a, b_a_scale, expert_num_tokens = prepare_finalize.prepare(
+    b_a, b_a_scale, expert_num_tokens, _, _ = prepare_finalize.prepare(
         a_chunk,
         None,
         None,
@@ -400,6 +255,7 @@ def pplx_prepare_finalize(pgi: ProcessGroupInfo, dp_size: int, a: torch.Tensor,
         num_experts,
         None,
         False,
+        FusedMoEQuantConfig(),
     )
 
     b_a = b_a * 1.5
@@ -435,11 +291,19 @@ def _pplx_prepare_finalize(
     score: torch.Tensor,
     topk: torch.Tensor,
     num_experts: int,
+    use_internode: bool,
 ):
-    uid = nvshmem_get_unique_id(
-    ) if pgi.rank == 0 else nvshmem_alloc_empty_unique_id()
-    torch.distributed.broadcast(uid, src=0)
-    nvshmem_init(uid, pgi.rank, pgi.world_size)
+    if use_internode:
+        uid = nvshmem_get_unique_id(
+        ) if pgi.rank == 0 else nvshmem_alloc_empty_unique_id()
+        torch.distributed.broadcast(uid, src=0)
+        nvshmem_init(uid, pgi.rank, pgi.world_size)
+        group_name = None
+    else:
+        group_ranks = list(range(pgi.world_size))
+        cpu_group = torch.distributed.new_group(group_ranks, backend="gloo")
+        group_name = cpu_group.group_name
+
     device = pgi.device
 
     topk_weight, topk_ids, _ = fused_topk(a, score, topk, False)
@@ -452,24 +316,27 @@ def _pplx_prepare_finalize(
                         a.dtype)
 
     pplx_output = pplx_prepare_finalize(pgi, dp_size, a, topk_weight, topk_ids,
-                                        num_experts)
+                                        num_experts, group_name)
 
     torch_output = chunk_by_rank(torch_output, pgi.rank,
                                  pgi.world_size).to(pplx_output.device)
 
     torch.testing.assert_close(pplx_output, torch_output, atol=2e-2, rtol=0)
 
-    nvshmem_finalize()
+    if use_internode:
+        nvshmem_finalize()
 
 
 # TODO (bnell): this test point does not work for odd M due to how the test is
 # written, not due to limitations of the pplx kernels.  The pplx_moe
 # test below is able to deal with odd M.
+# TODO (bnell) add fp8 tests
 @pytest.mark.parametrize("mnk", PPLX_PREPARE_COMBOS)
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("world_dp_size", [[2, 1]])
+@pytest.mark.parametrize("use_internode", [False])
 @requires_pplx
 def test_pplx_prepare_finalize(
     mnk: tuple[int, int, int],
@@ -477,6 +344,7 @@ def test_pplx_prepare_finalize(
     topk: int,
     dtype: torch.dtype,
     world_dp_size: tuple[int, int],
+    use_internode: bool,
 ):
     current_platform.seed_everything(7)
     m, n, k = mnk
@@ -486,10 +354,11 @@ def test_pplx_prepare_finalize(
     score = torch.randn((m, e), device=device, dtype=dtype)
 
     parallel_launch(world_size, _pplx_prepare_finalize, dp_size, a, score,
-                    topk, e)
+                    topk, e, use_internode)
 
 
 def pplx_moe(
+    group_name: Optional[str],
     rank: int,
     world_size: int,
     dp_size: int,
@@ -498,20 +367,33 @@ def pplx_moe(
     w2: torch.Tensor,
     topk_weight: torch.Tensor,
     topk_ids: torch.Tensor,
-    use_compile: bool = True,
+    w1_scale: Optional[torch.Tensor] = None,
+    w2_scale: Optional[torch.Tensor] = None,
+    qtype: Optional[torch.dtype] = None,
+    per_act_token_quant=False,
+    block_shape: Optional[list[int]] = None,
+    use_compile: bool = False,
     use_cudagraphs: bool = True,
 ) -> torch.Tensor:
     from vllm.model_executor.layers.fused_moe.pplx_prepare_finalize import (
-        PplxPrepareAndFinalize)
+        PplxPrepareAndFinalize, pplx_hidden_dim_scale_bytes)
 
     device = torch.device("cuda", rank)
     hidden_dim = a.shape[1]
     num_experts = w1.shape[0]
-    block_size = 128
     topk = topk_ids.shape[1]
-    max_num_tokens = rank_chunk(a.shape[0], 0, world_size)
+    max_num_tokens = round_up(rank_chunk(a.shape[0], 0, world_size), 64)
 
-    ata = AllToAll.internode(
+    hidden_dim_bytes, scale_bytes = pplx_hidden_dim_scale_bytes(
+        max_num_tokens,
+        hidden_dim,
+        a.dtype,
+        qtype,
+        per_act_token_quant=per_act_token_quant,
+        block_shape=block_shape,
+    )
+
+    args = dict(
         max_num_tokens=max_num_tokens,
         num_experts=num_experts,
         experts_per_token=topk,
@@ -519,11 +401,15 @@ def pplx_moe(
         world_size=world_size,
         dp_size=dp_size,
         hidden_dim=hidden_dim,
-        hidden_dim_bytes=hidden_dim * a.dtype.itemsize,
-        hidden_dim_scale_bytes=(0 if a.dtype.itemsize != 1 else
-                                ((hidden_dim + block_size - 1) // block_size *
-                                 torch.float32.itemsize)),
+        hidden_dim_bytes=hidden_dim_bytes,
+        hidden_dim_scale_bytes=scale_bytes,
     )
+
+    if group_name is None:
+        ata = AllToAll.internode(**args)
+    else:
+        args["group_name"] = group_name
+        ata = AllToAll.intranode(**args)
 
     topk_ids = topk_ids.to(dtype=torch.uint32)
 
@@ -535,9 +421,11 @@ def pplx_moe(
         dp_size,
     )
 
-    experts = BatchedTritonExperts(max_num_tokens=a.shape[0],
+    experts = BatchedTritonExperts(max_num_tokens=max_num_tokens,
                                    world_size=world_size,
-                                   dp_size=dp_size)
+                                   dp_size=dp_size,
+                                   use_fp8_w8a8=qtype == torch.float8_e4m3fn,
+                                   block_shape=block_shape)
 
     fused_experts = FusedMoEModularKernel(
         prepare_finalize,
@@ -553,10 +441,23 @@ def pplx_moe(
     w1_chunk = chunk_by_rank(w1, rank, world_size).to(device)
     w2_chunk = chunk_by_rank(w2, rank, world_size).to(device)
 
+    if w1_scale is not None:
+        w1_scale_chunk = chunk_by_rank(w1_scale, rank, world_size).to(device)
+        w2_scale_chunk = chunk_by_rank(w2_scale, rank, world_size).to(device)
+    else:
+        w1_scale_chunk = None
+        w2_scale_chunk = None
+
+    # Note: for now use_compile will error out if the problem size is
+    # large enough to trigger chunking. I'm leaving the flag and
+    # setup code in case we are able to revisit this later.
     if use_compile:
         _fused_experts = torch.compile(fused_experts,
                                        backend='inductor',
                                        fullgraph=True)
+        torch._dynamo.mark_dynamic(a_chunk, 0)
+        torch._dynamo.mark_dynamic(chunk_topk_weight, 0)
+        torch._dynamo.mark_dynamic(chunk_topk_ids, 0)
     else:
         _fused_experts = fused_experts
 
@@ -565,6 +466,8 @@ def pplx_moe(
                          w2_chunk,
                          chunk_topk_weight,
                          chunk_topk_ids,
+                         w1_scale=w1_scale_chunk,
+                         w2_scale=w2_scale_chunk,
                          global_num_experts=num_experts)
 
     if use_cudagraphs:
@@ -577,6 +480,8 @@ def pplx_moe(
                                  w2_chunk,
                                  chunk_topk_weight,
                                  chunk_topk_ids,
+                                 w1_scale=w1_scale_chunk,
+                                 w2_scale=w2_scale_chunk,
                                  global_num_experts=num_experts)
 
         torch.cuda.synchronize()
@@ -605,9 +510,9 @@ def _batched_moe(pgi, dp_size, a, w1, w2, topk_weight, topk_ids):
         rank=rank,
     )
 
-    experts = BatchedExperts(max_num_tokens=a.shape[0],
-                             world_size=1,
-                             dp_size=1)
+    experts = NaiveBatchedExperts(max_num_tokens=a.shape[0],
+                                  world_size=1,
+                                  dp_size=1)
 
     fused_experts = FusedMoEModularKernel(
         prepare_finalize,
@@ -639,22 +544,51 @@ def _pplx_moe(
     w2: torch.Tensor,
     score: torch.Tensor,
     topk: int,
+    w1_s: Optional[torch.Tensor] = None,
+    w2_s: Optional[torch.Tensor] = None,
+    qtype: Optional[torch.dtype] = None,
+    per_act_token_quant: bool = False,
+    block_shape: Optional[list[int]] = None,
+    use_internode: bool = False,
 ):
-    uid = nvshmem_get_unique_id(
-    ) if pgi.rank == 0 else nvshmem_alloc_empty_unique_id()
-    torch.distributed.broadcast(uid, src=0)
-    nvshmem_init(uid, pgi.rank, pgi.world_size)
+    if use_internode:
+        uid = nvshmem_get_unique_id(
+        ) if pgi.rank == 0 else nvshmem_alloc_empty_unique_id()
+        torch.distributed.broadcast(uid, src=0)
+        nvshmem_init(uid, pgi.rank, pgi.world_size)
+        group_name = None
+    else:
+        group_ranks = list(range(pgi.world_size))
+        cpu_group = torch.distributed.new_group(group_ranks, backend="gloo")
+        group_name = cpu_group.group_name
 
     m, k = a.shape
     e, _, n = w2.shape
 
     moe_config = get_default_config(m, e, n, k, topk, a.dtype, False)
 
+    device = torch.device("cuda", pgi.rank)
+    a = a.to(device)
+    w1 = w1.to(device)
+    w2 = w2.to(device)
+    w1_s = w1_s.to(device) if w1_s is not None else None
+    w2_s = w2_s.to(device) if w2_s is not None else None
+
     with set_current_vllm_config(vllm_config), override_config(moe_config):
         topk_weight, topk_ids, _ = fused_topk(a, score, topk, False)
-        torch_output = torch_moe2(a, w1, w2, topk_weight, topk_ids)
-        pplx_output = pplx_moe(pgi.rank, pgi.world_size, dp_size, a, w1, w2,
-                               topk_weight, topk_ids)
+        torch_output = torch_experts(a,
+                                     w1,
+                                     w2,
+                                     topk_weight,
+                                     topk_ids,
+                                     w1_scale=w1_s,
+                                     w2_scale=w2_s,
+                                     quant_dtype=qtype,
+                                     per_act_token_quant=per_act_token_quant,
+                                     block_shape=block_shape)
+        pplx_output = pplx_moe(group_name, pgi.rank, pgi.world_size, dp_size,
+                               a, w1, w2, topk_weight, topk_ids, w1_s, w2_s,
+                               qtype, per_act_token_quant, block_shape)
         # TODO (bnell): fix + re-enable
         #batched_output = _batched_moe(pgi, dp_size, a, w1, w2, topk_weight,
         #                              topk_ids)
@@ -665,7 +599,8 @@ def _pplx_moe(
     torch.testing.assert_close(pplx_output, torch_output, atol=2e-2, rtol=0)
     #torch.testing.assert_close(batched_output, torch_output, atol=2e-2, rtol=0)
 
-    nvshmem_finalize()
+    if use_internode:
+        nvshmem_finalize()
 
 
 @pytest.mark.parametrize("mnk", PPLX_MOE_COMBOS)
@@ -673,6 +608,9 @@ def _pplx_moe(
 @pytest.mark.parametrize("topk", TOP_KS)
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("world_dp_size", [[2, 1]])
+@pytest.mark.parametrize("per_act_token_quant", [False, True])
+@pytest.mark.parametrize("block_shape", [None, [128, 128]])
+@pytest.mark.parametrize("use_internode", [False])
 @requires_pplx
 def test_pplx_moe(
     mnk: tuple[int, int, int],
@@ -680,13 +618,33 @@ def test_pplx_moe(
     topk: int,
     dtype: torch.dtype,
     world_dp_size: tuple[int, int],
+    per_act_token_quant: bool,
+    block_shape: Optional[list[int]],
+    use_internode: bool,
 ):
     current_platform.seed_everything(7)
     m, n, k = mnk
     world_size, dp_size = world_dp_size
-    a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
-    w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10
-    w2 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 10
-    score = torch.randn((m, e), device="cuda", dtype=dtype)
 
-    parallel_launch(world_size, _pplx_moe, dp_size, a, w1, w2, score, topk)
+    if dtype == torch.float8_e4m3fn:
+        use_fp8_w8a8 = True
+        quant_dtype = dtype
+    else:
+        use_fp8_w8a8 = False
+        quant_dtype = None
+
+    if not use_fp8_w8a8 and per_act_token_quant and block_shape is not None:
+        pytest.skip("Skip quantization test for non-quantized type")
+
+    a = torch.randn((m, k), device="cuda", dtype=torch.bfloat16) / 10
+    score = torch.randn((m, e), device="cuda", dtype=torch.bfloat16)
+
+    _, w1, w1_s, _, w2, w2_s = make_test_weights(e,
+                                                 n,
+                                                 k,
+                                                 quant_dtype=quant_dtype,
+                                                 block_shape=block_shape)
+
+    parallel_launch(world_size, _pplx_moe, dp_size, a, w1, w2, score, topk,
+                    w1_s, w2_s, quant_dtype, per_act_token_quant, block_shape,
+                    use_internode)

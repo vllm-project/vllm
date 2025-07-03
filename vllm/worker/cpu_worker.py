@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """A CPU worker class."""
 import os
-from typing import Dict, List, Optional, Set, Tuple, Type
+from importlib import util
+from typing import List, Optional, Set, Tuple, Type
 
 import torch
 import torch.distributed
@@ -17,7 +18,7 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
 from vllm.sequence import ExecuteModelRequest
-from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, bind_kv_cache
+from vllm.utils import bind_kv_cache
 from vllm.worker.cpu_enc_dec_model_runner import CPUEncoderDecoderModelRunner
 from vllm.worker.cpu_model_runner import CPUModelRunner, CPUModelRunnerBase
 from vllm.worker.cpu_pooling_model_runner import CPUPoolingModelRunner
@@ -53,13 +54,8 @@ class CPUCacheEngine:
         # in the scheduler.
         self.num_cpu_blocks = cache_config.num_gpu_blocks
 
-        if cache_config.cache_dtype == "auto":
-            self.dtype = model_config.dtype
-        elif cache_config.cache_dtype in ["fp8", "fp8_e5m2"]:
-            self.dtype = torch.float8_e5m2
-        else:
-            raise NotImplementedError(f"Unsupported KV cache type "
-                                      f"{cache_config.cache_dtype}.")
+        self.dtype = CPUCacheEngine.get_kv_cache_dtype(cache_config,
+                                                       model_config)
 
         # Get attention backend.
         self.attn_backend = get_attn_backend(
@@ -87,19 +83,29 @@ class CPUCacheEngine:
                 torch.empty(kv_cache_shape, dtype=self.dtype, device="cpu"))
         return kv_cache
 
-    def swap_in(self, src_to_dst: Dict[int, int]) -> None:
+    def swap_in(self, src_to_dst: torch.Tensor) -> None:
         raise NotImplementedError("Swap is not supported in CPUCacheEngine.")
 
-    def swap_out(self, src_to_dst: Dict[int, int]) -> None:
+    def swap_out(self, src_to_dst: torch.Tensor) -> None:
         raise NotImplementedError("Swap is not supported in CPUCacheEngine.")
 
-    def copy(self, src_to_dsts: Dict[int, List[int]]) -> None:
+    def copy(self, src_to_dsts: torch.Tensor) -> None:
         self.attn_backend.copy_blocks(self.cpu_cache, src_to_dsts)
 
     @staticmethod
+    def get_kv_cache_dtype(cache_config: CacheConfig,
+                           model_config: ModelConfig):
+        if cache_config.cache_dtype == "auto":
+            return model_config.dtype
+        elif cache_config.cache_dtype in ["fp8", "fp8_e5m2"]:
+            return torch.float8_e5m2
+        else:
+            raise NotImplementedError(f"Unsupported KV cache type "
+                                      f"{cache_config.cache_dtype}.")
+
+    @staticmethod
     def get_cache_block_size(
-        block_size: int,
-        cache_dtype: str,
+        cache_config: CacheConfig,
         model_config: ModelConfig,
         parallel_config: ParallelConfig,
     ) -> int:
@@ -107,13 +113,10 @@ class CPUCacheEngine:
         num_heads = model_config.get_num_kv_heads(parallel_config)
         num_layers = model_config.get_num_layers(parallel_config)
 
-        key_cache_block = block_size * num_heads * head_size
+        key_cache_block = cache_config.block_size * num_heads * head_size
         value_cache_block = key_cache_block if not model_config.use_mla else 0
         total = num_layers * (key_cache_block + value_cache_block)
-        if cache_dtype == "auto":
-            dtype = model_config.dtype
-        else:
-            dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_dtype]
+        dtype = CPUCacheEngine.get_kv_cache_dtype(cache_config, model_config)
         dtype_size = torch.tensor([], dtype=dtype).element_size()
         return dtype_size * total
 
@@ -156,8 +159,10 @@ class CPUWorker(LocalOrDistributedWorkerBase):
 
         # Setup OpenMP threads affinity.
         omp_cpuids = envs.VLLM_CPU_OMP_THREADS_BIND
-        if omp_cpuids == "all":
-            self.local_omp_cpuid = "all"
+        self.local_omp_cpuid = "all"
+        if omp_cpuids == "auto":
+            self.local_omp_cpuid = self.get_cpus_id_binding_based_on_numa_nodes(
+            )
         else:
             self.local_omp_cpuid = omp_cpuids.split("|")[rank]
 
@@ -396,6 +401,52 @@ class CPUWorker(LocalOrDistributedWorkerBase):
     def get_cache_block_size_bytes(self) -> int:
         """Return the size in bytes of a single KV cache block.
         """
-        return CPUCacheEngine.get_cache_block_size(
-            self.cache_config.block_size, self.cache_config.cache_dtype,
-            self.model_config, self.parallel_config)
+        return CPUCacheEngine.get_cache_block_size(self.cache_config,
+                                                   self.model_config,
+                                                   self.parallel_config)
+
+    def get_cpus_id_binding_based_on_numa_nodes(self) -> str:
+        """Return CPUs id binding based on NUMA nodes.
+        """
+        rank_to_cpus = self.local_omp_cpuid
+        # Setup OpenMP thread affinity based on NUMA nodes automatically
+        world_size = self.vllm_config.parallel_config.world_size
+        libnuma_found = util.find_spec("numa") is not None
+        psutil_found = util.find_spec("psutil") is not None
+        if libnuma_found and psutil_found:
+            import psutil
+            from numa import info
+            cpu_count = psutil.cpu_count(logical=False)
+            cpus_allow_list = psutil.Process().cpu_affinity()
+            numa_size = info.get_num_configured_nodes()
+            cpu_count_per_numa = cpu_count // numa_size
+            num_of_reserved_cpu = min(envs.VLLM_CPU_NUM_OF_RESERVED_CPU,
+                                      cpu_count_per_numa // 2)
+
+            # check allow node_to_cpus list
+            node_to_cpus = []
+            for i in range(numa_size):
+                node_intersect = set(
+                    info.node_to_cpus(i)).intersection(cpus_allow_list)
+                if bool(node_intersect):
+                    node_to_cpus.append(list(node_intersect))
+
+            if world_size > len(node_to_cpus):
+                logger.error(
+                    "Auto thread-binding failed due to "
+                    "world size: %d is larger than "
+                    "allowed NUMA nodes number: %d."
+                    "Please try to bind threads manually.", world_size,
+                    len(node_to_cpus))
+            else:
+                end = cpu_count_per_numa - num_of_reserved_cpu
+                rank_to_cpus_list = node_to_cpus[self.rank][:end]
+                rank_to_cpus = ','.join(str(x) for x in rank_to_cpus_list)
+                logger.info("auto thread-binding list: %s", rank_to_cpus)
+        else:
+            logger.warning(
+                "Auto thread-binding is not supported due to "
+                "the lack of package numa and psutil,"
+                "fallback to no thread-binding. To get better performance,"
+                "please try to manually bind threads.")
+        return rank_to_cpus

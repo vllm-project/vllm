@@ -9,7 +9,7 @@ from urllib.parse import ParseResult, urlparse
 import numpy as np
 import numpy.typing as npt
 import torch
-from PIL import Image
+from PIL import Image, UnidentifiedImageError
 
 import vllm.envs as envs
 from vllm.connections import HTTPConnection, global_http_connection
@@ -38,12 +38,15 @@ class MediaConnector:
 
     def __init__(
         self,
+        media_io_kwargs: Optional[dict[str, dict[str, Any]]] = None,
         connection: HTTPConnection = global_http_connection,
         *,
         allowed_local_media_path: str = "",
     ) -> None:
         super().__init__()
 
+        self.media_io_kwargs: dict[str, dict[
+            str, Any]] = media_io_kwargs if media_io_kwargs else {}
         self.connection = connection
 
         if allowed_local_media_path:
@@ -149,7 +152,7 @@ class MediaConnector:
         """
         Load audio from a URL.
         """
-        audio_io = AudioMediaIO()
+        audio_io = AudioMediaIO(**self.media_io_kwargs.get("audio", {}))
 
         return self.load_from_url(
             audio_url,
@@ -164,7 +167,7 @@ class MediaConnector:
         """
         Asynchronously fetch audio from a URL.
         """
-        audio_io = AudioMediaIO()
+        audio_io = AudioMediaIO(**self.media_io_kwargs.get("audio", {}))
 
         return await self.load_from_url_async(
             audio_url,
@@ -183,13 +186,18 @@ class MediaConnector:
 
         By default, the image is converted into RGB format.
         """
-        image_io = ImageMediaIO(image_mode=image_mode)
+        image_io = ImageMediaIO(image_mode=image_mode,
+                                **self.media_io_kwargs.get("image", {}))
 
-        return self.load_from_url(
-            image_url,
-            image_io,
-            fetch_timeout=envs.VLLM_IMAGE_FETCH_TIMEOUT,
-        )
+        try:
+            return self.load_from_url(
+                image_url,
+                image_io,
+                fetch_timeout=envs.VLLM_IMAGE_FETCH_TIMEOUT,
+            )
+        except UnidentifiedImageError as e:
+            # convert to ValueError to be properly caught upstream
+            raise ValueError(str(e)) from e
 
     async def fetch_image_async(
         self,
@@ -202,26 +210,32 @@ class MediaConnector:
 
         By default, the image is converted into RGB format.
         """
-        image_io = ImageMediaIO(image_mode=image_mode)
+        image_io = ImageMediaIO(image_mode=image_mode,
+                                **self.media_io_kwargs.get("image", {}))
 
-        return await self.load_from_url_async(
-            image_url,
-            image_io,
-            fetch_timeout=envs.VLLM_IMAGE_FETCH_TIMEOUT,
-        )
+        try:
+            return await self.load_from_url_async(
+                image_url,
+                image_io,
+                fetch_timeout=envs.VLLM_IMAGE_FETCH_TIMEOUT,
+            )
+        except UnidentifiedImageError as e:
+            # convert to ValueError to be properly caught upstream
+            raise ValueError(str(e)) from e
 
     def fetch_video(
         self,
         video_url: str,
         *,
         image_mode: str = "RGB",
-        num_frames: int = 32,
-    ) -> npt.NDArray:
+    ) -> tuple[npt.NDArray, dict[str, Any]]:
         """
         Load video from a HTTP or base64 data URL.
         """
-        image_io = ImageMediaIO(image_mode=image_mode)
-        video_io = VideoMediaIO(image_io, num_frames=num_frames)
+        image_io = ImageMediaIO(image_mode=image_mode,
+                                **self.media_io_kwargs.get("image", {}))
+        video_io = VideoMediaIO(image_io,
+                                **self.media_io_kwargs.get("video", {}))
 
         return self.load_from_url(
             video_url,
@@ -234,15 +248,16 @@ class MediaConnector:
         video_url: str,
         *,
         image_mode: str = "RGB",
-        num_frames: int = 32,
-    ) -> npt.NDArray:
+    ) -> tuple[npt.NDArray, dict[str, Any]]:
         """
         Asynchronously load video from a HTTP or base64 data URL.
 
         By default, the image is converted into RGB format.
         """
-        image_io = ImageMediaIO(image_mode=image_mode)
-        video_io = VideoMediaIO(image_io, num_frames=num_frames)
+        image_io = ImageMediaIO(image_mode=image_mode,
+                                **self.media_io_kwargs.get("image", {}))
+        video_io = VideoMediaIO(image_io,
+                                **self.media_io_kwargs.get("video", {}))
 
         return await self.load_from_url_async(
             video_url,
@@ -316,7 +331,7 @@ def merge_and_sort_multimodal_metadata(
     Returns:
         list[str]: List of item modalities in order of their positions in the
         input sequence.
-        list[PlaceholderRange]: Sorted list of all PlaceholdeRanges from
+        list[PlaceholderRange]: Sorted list of all PlaceholderRanges from
         mm_positions.
         Optional[list[str]]: Sorted list of all hashes from mm_hashes if given,
         None otherwise.

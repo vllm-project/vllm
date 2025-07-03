@@ -3,6 +3,7 @@
 
 import copy
 from dataclasses import dataclass
+from math import prod
 from typing import Optional
 
 import torch
@@ -155,13 +156,35 @@ class SlidingWindowSpec(AttentionSpec):
 
 
 @dataclass
+class MambaSpec(KVCacheSpec):
+    shapes: tuple[tuple[int, ...], ...]
+    dtype: torch.dtype
+
+    def __post_init__(self):
+        self.num_elements = sum(prod(shape) for shape in self.shapes)
+
+    @property
+    def type_id(self) -> str:
+        return f"mamba_{self.shapes}_{self.dtype}"
+
+    @property
+    def page_size_bytes(self) -> int:
+        return self.num_elements * get_dtype_size(self.dtype)
+
+    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
+        # We allocate 1 block for each request now, so max_memory_usage_bytes is
+        # the same as page_size_bytes.
+        # Need to update this when supporting prefix caching.
+        return self.page_size_bytes
+
+
+@dataclass
 class KVCacheTensor:
     """
-    A dataclass for specifying how the workers should initialize the KV cache
-    for a layer. Only contains the size of KV cache for that layer for now. Will
-    be extended to support multiple layers sharing the same memory pool.
+    A class for specifying how the workers should initialize the KV cache.
     """
-    size: int  # The size of KV cache Tensor in bytes
+    size: int  # size of the KV cache tensor in bytes
+    shared_by: list[str]  # layer names that share the same KV cache tensor
 
 
 @dataclass
@@ -183,27 +206,13 @@ class KVCacheConfig:
     """
     """The number of KV cache blocks"""
     num_blocks: int
-    """layer_name -> how to initialize KV cache for that layer"""
-    tensors: dict[str, KVCacheTensor]
+    """How should model runner initialize the KV cache tensors for each layer"""
+    kv_cache_tensors: list[KVCacheTensor]
     """
     The kv cache groups of the model.
-    The layers in the models are repeated with some patterns, e.g., a model
-    with 10 full attention layers and 20 sliding window attention layers can be
-    regarded as repeating the pattern (1 * full, 2 * sw) 10 times. 
-    The KVCacheManager allocates different block tables for each of the 3 layers
-    in the pattern, and repeats each of them 10 times to generate the 
-    block_table for the 30 layers in the model.
-    Therefore, we can group the layers in the model into 3 groups, each of which
-    contains 10 layers in the model.
-    The KVCacheManager allocates the block_table for each group based on its
-    kv_cache spec, and the model runner applies the block table to each layer 
-    in the group.
-    For example:
-    1. A model only uses full attention. The pattern is 
-    (num_hidden_layers * full), so there is only one group and the block table 
-    is shared by all layers.
-    2. (WIP) A model with 10 full attention layers and 20 sliding window 
-    attention layers. There are 3 layers in the pattern (1 * full, 2 * sw), so 
-    there are 3 groups, each of which represents 10 layers in the model.
+    For models with only one type of attention, there is only one group that
+    contains all layers.
+    For models with multiple types of attention, there will be multiple groups,
+    see `_get_kv_cache_config_uniform_page_size` for more details.
     """
     kv_cache_groups: list[KVCacheGroupSpec]

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import argparse
 import asyncio
 import functools
 import os
@@ -14,8 +15,9 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
-VLLM_SERVE_PARSER_EPILOG = (
-    "Tip: Use `vllm serve --help=<keyword>` to explore arguments from help.\n"
+VLLM_SUBCMD_PARSER_EPILOG = (
+    "Tip: Use `vllm [serve|run-batch|bench <bench_type>] "
+    "--help=<keyword>` to explore arguments from help.\n"
     "   - To view a argument group:     --help=ModelConfig\n"
     "   - To view a single argument:    --help=max-num-seqs\n"
     "   - To search by keyword:         --help=max\n"
@@ -170,11 +172,28 @@ def _validate_truncation_size(
             tokenization_kwargs["truncation"] = True
             tokenization_kwargs["max_length"] = truncate_prompt_tokens
 
+    else:
+        if tokenization_kwargs is not None:
+            tokenization_kwargs["truncation"] = False
+
     return truncate_prompt_tokens
 
 
-def show_filtered_argument_or_group_from_help(parser):
+def show_filtered_argument_or_group_from_help(parser: argparse.ArgumentParser,
+                                              subcommand_name: list[str]):
     import sys
+
+    # Only handle --help=<keyword> for the current subcommand.
+    # Since subparser_init() runs for all subcommands during CLI setup,
+    # we skip processing if the subcommand name is not in sys.argv.
+    # sys.argv[0] is the program name. The subcommand follows.
+    # e.g., for `vllm bench latency`,
+    # sys.argv is `['vllm', 'bench', 'latency', ...]`
+    # and subcommand_name is "bench latency".
+    if len(sys.argv) <= len(subcommand_name) or sys.argv[
+            1:1 + len(subcommand_name)] != subcommand_name:
+        return
+
     for arg in sys.argv:
         if arg.startswith('--help='):
             search_keyword = arg.split('=', 1)[1]

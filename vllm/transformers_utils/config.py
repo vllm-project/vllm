@@ -23,6 +23,7 @@ from transformers.models.auto.image_processing_auto import (
     get_image_processor_config)
 from transformers.models.auto.modeling_auto import (
     MODEL_FOR_CAUSAL_LM_MAPPING_NAMES)
+from transformers.models.auto.tokenization_auto import get_tokenizer_config
 from transformers.utils import CONFIG_NAME as HF_CONFIG_NAME
 
 from vllm import envs
@@ -55,6 +56,22 @@ else:
 MISTRAL_CONFIG_NAME = "params.json"
 
 logger = init_logger(__name__)
+
+
+def _get_hf_token() -> Optional[str]:
+    """
+    Get the HuggingFace token from environment variable.
+
+    Returns None if the token is not set, is an empty string, 
+    or contains only whitespace.
+    This follows the same pattern as huggingface_hub library which
+    treats empty string tokens as None to avoid authentication errors.
+    """
+    token = os.getenv('HF_TOKEN')
+    if token and token.strip():
+        return token
+    return None
+
 
 _CONFIG_REGISTRY_OVERRIDE_HF: dict[str, type[PretrainedConfig]] = {
     "mllama": MllamaConfig
@@ -144,7 +161,9 @@ def list_repo_files(
                     modelscope_list_repo_files)
                 return modelscope_list_repo_files(repo_id,
                                                   revision=revision,
-                                                  token=token)
+                                                  token=os.getenv(
+                                                      "MODELSCOPE_API_TOKEN",
+                                                      None))
             return hf_list_repo_files(repo_id,
                                       revision=revision,
                                       repo_type=repo_type,
@@ -194,7 +213,7 @@ def file_or_path_exists(model: Union[str, Path], config_name: str,
     return file_exists(str(model),
                        config_name,
                        revision=revision,
-                       token=os.getenv('HF_TOKEN', None))
+                       token=_get_hf_token())
 
 
 def patch_rope_scaling(config: PretrainedConfig) -> None:
@@ -321,7 +340,7 @@ def get_config(
             model,
             revision=revision,
             code_revision=code_revision,
-            token=os.getenv('HF_TOKEN', None),
+            token=_get_hf_token(),
             **kwargs,
         )
 
@@ -333,7 +352,7 @@ def get_config(
                 model,
                 revision=revision,
                 code_revision=code_revision,
-                token=os.getenv('HF_TOKEN', None),
+                token=_get_hf_token(),
                 **kwargs,
             )
         else:
@@ -343,7 +362,7 @@ def get_config(
                     trust_remote_code=trust_remote_code,
                     revision=revision,
                     code_revision=code_revision,
-                    token=os.getenv('HF_TOKEN', None),
+                    token=_get_hf_token(),
                     **kwargs,
                 )
             except ValueError as e:
@@ -570,7 +589,7 @@ def get_sentence_transformer_tokenizer_config(model: str,
             # If model is on HuggingfaceHub, get the repo files
             repo_files = list_repo_files(model,
                                          revision=revision,
-                                         token=os.getenv('HF_TOKEN', None))
+                                         token=_get_hf_token())
         except Exception:
             repo_files = []
 
@@ -861,11 +880,26 @@ def try_get_safetensors_metadata(
         get_safetensors_metadata,
         model,
         revision=revision,
-        token=os.getenv('HF_TOKEN', None),
+        token=_get_hf_token(),
     )
 
     try:
         return with_retry(get_safetensors_metadata_partial,
                           "Error retrieving safetensors")
+    except Exception:
+        return None
+
+
+def try_get_tokenizer_config(
+    pretrained_model_name_or_path: Union[str, os.PathLike],
+    trust_remote_code: bool,
+    revision: Optional[str] = None,
+) -> Optional[dict[str, Any]]:
+    try:
+        return get_tokenizer_config(
+            pretrained_model_name_or_path,
+            trust_remote_code=trust_remote_code,
+            revision=revision,
+        )
     except Exception:
         return None

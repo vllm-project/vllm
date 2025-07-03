@@ -1,15 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
-from typing import Optional
+from typing import Optional, Union
 
 import deep_ep
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.utils import (
-    moe_kernel_quantize_input)
+    maybe_fix_scales, moe_kernel_quantize_input)
 
 # DeepEP kernels quantize dispatch inputs in 128 element chunks.
 DEEPEP_QUANT_BLOCK_SIZE = 128
+DEEPEP_QUANT_BLOCK_SHAPE = [DEEPEP_QUANT_BLOCK_SIZE, DEEPEP_QUANT_BLOCK_SIZE]
 
 
 def dequant_fp8(expert_x_fp8: torch.Tensor,
@@ -25,7 +27,7 @@ def dequant_fp8(expert_x_fp8: torch.Tensor,
     expert_x_fp32 = expert_x_fp8.to(torch.float32).view(
         num_experts, -1, DEEPEP_QUANT_BLOCK_SIZE)
     expert_x_scales = expert_x_scales.view(num_experts, -1, 1)
-    return (expert_x_fp32 * expert_x_scales).view(expert_x_fp8.shape)
+    return (expert_x_fp32 * expert_x_scales).view(expert_x_fp8.size())
 
 
 class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
@@ -35,29 +37,29 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
     # DeepEP low-latency kernels are compiled only for certain
     # specific hidden sizes.
-    SUPPORTED_HIDDEN_SIZES = [2560, 4096, 5120, 7168]
+    SUPPORTED_HIDDEN_SIZES = [2048, 2560, 4096, 5120, 7168]
 
     def __init__(self,
                  buffer: deep_ep.Buffer,
+                 max_tokens_per_rank: int,
                  world_size: int,
                  dp_size: int,
-                 max_tokens_per_rank: int,
-                 quant_dtype: Optional[torch.dtype] = None,
-                 block_shape: Optional[list[int]] = None,
                  use_fp8_dispatch: bool = False):
         super().__init__()
 
         self.buffer = buffer
+        self.max_tokens_per_rank = max_tokens_per_rank
         self.world_size = world_size
         self.dp_size = dp_size
-        self.quant_dtype = quant_dtype
-        self.block_shape = block_shape
-        self.max_tokens_per_rank = max_tokens_per_rank
         self.use_fp8_dispatch = use_fp8_dispatch
         # The dispatch function returns a handle that the combine function
         # requires. We store the handle here so it is available to the
         # combine function.
         self.handle = None
+
+    @property
+    def activation_format(self) -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.BatchedExperts
 
     def max_num_tokens_per_rank(self) -> Optional[int]:
         return self.max_tokens_per_rank
@@ -65,16 +67,58 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     def topk_indices_dtype(self) -> Optional[torch.dtype]:
         return torch.int64
 
+    def _do_quant(
+        self,
+        x: Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]],
+        a1_scale: Optional[torch.Tensor],
+        a2_scale: Optional[torch.Tensor],
+        a1_dtype: torch.dtype,
+        quant_dtype: Optional[torch.dtype],
+        per_act_token_quant: bool,
+        block_shape: Optional[list[int]],
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+
+        block_k = block_shape[1] if block_shape is not None else None
+        if self.use_fp8_dispatch:
+            if block_k == DEEPEP_QUANT_BLOCK_SIZE:
+                # DeepEP kernels did the quantization for us.
+                x, x_scales = x
+                return x, x_scales
+
+            # Dequant to get back the tokens in the datatype we dispatched in.
+            x_fp8, x_scales = x
+            x = dequant_fp8(x_fp8, x_scales).to(dtype=a1_dtype)
+
+        assert isinstance(x, torch.Tensor)
+
+        assert not per_act_token_quant
+
+        num_experts, max_tokens, hidden_dim = x.size()
+
+        # TODO (varun): Optimization - Use a batched version of quant
+        x = x.view((-1, hidden_dim))
+        x, x_scales = moe_kernel_quantize_input(x, a1_scale, quant_dtype,
+                                                per_act_token_quant,
+                                                block_shape)
+        x = x.view((num_experts, -1, hidden_dim))
+
+        if quant_dtype is not None:
+            assert x_scales is not None
+            x_scales = maybe_fix_scales(x_scales, num_experts)
+
+        return x, x_scales
+
     def prepare(
         self,
         a1: torch.Tensor,
         a1_scale: Optional[torch.Tensor],
         a2_scale: Optional[torch.Tensor],
-        rank_topk_weights: torch.Tensor,
-        rank_topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
         num_experts: int,
         expert_map: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
+        quant_config: FusedMoEQuantConfig,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor],
                Optional[torch.Tensor], Optional[torch.Tensor]]:
 
@@ -87,45 +131,32 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             assert hidden_size % 128 == 0, \
             "DeepEP kernels quantize the inputs in blocks of shape 128"
 
-        # Quantize
-        per_act_token = a1_scale.numel() != 1 if a1_scale is not None else (
+        has_per_token_scales = a1_scale.numel(
+        ) != 1 if a1_scale is not None else (
             a2_scale.numel() != 1 if a2_scale is not None else False)
-        assert not per_act_token, (
-            "low_latency kernels don't support per-act-token quant")
+        assert not has_per_token_scales, (
+            "low_latency kernels doesn't support dispatching per-token scales")
 
         if apply_router_weight_on_input:
-            topk = rank_topk_ids.size(1)
+            topk = topk_ids.size(1)
             # TODO: this only works for topK=1, will need to update for topK>1
             assert topk == 1, (
                 "apply_router_weight_on_input is only implemented for topk=1")
-            a1 = a1 * rank_topk_weights.to(a1.dtype)
+            a1 = a1 * topk_weights.to(a1.dtype)
 
         # Dispatch
         expert_x, expert_num_tokens, self.handle, event, hook = \
                 self.buffer.low_latency_dispatch(a1,
-                                                rank_topk_ids,
+                                                topk_ids,
                                                 self.max_tokens_per_rank,
                                                 num_experts,
                                                 use_fp8=self.use_fp8_dispatch,
                                                 async_finish=False,
                                                 return_recv_hook=False)
 
-        if self.use_fp8_dispatch:
-            # TODO (varun) : In the case of dynamic quantization, we could
-            # probably skip the quant below and use the results directly.
-            # Although note that the deepep quant is per token 128 elements.
-            expert_x_fp8, expert_x_scales = expert_x
-            expert_x = dequant_fp8(expert_x_fp8,
-                                   expert_x_scales).to(dtype=a1.dtype)
-
-        num_experts = expert_x.size(0)
-        hidden_dim = expert_x.size(-1)
-
-        expert_x = expert_x.view((-1, expert_x.size(-1)))
-        expert_x, expert_x_scale = moe_kernel_quantize_input(
-            expert_x, a1_scale, self.quant_dtype, per_act_token,
-            self.block_shape)
-        expert_x = expert_x.view((num_experts, -1, hidden_dim))
+        expert_x, expert_x_scale = self._do_quant(
+            expert_x, a1_scale, a2_scale, a1.dtype, quant_config.quant_dtype,
+            quant_config.per_act_token_quant, quant_config.block_shape)
 
         return (expert_x, expert_x_scale, expert_num_tokens, None, None)
 
