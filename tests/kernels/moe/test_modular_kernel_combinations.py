@@ -681,75 +681,18 @@ def rank_worker(
         do_modular_kernel(pgi, vllm_config, cfgx, wr, ir)
 
 
-PREPARE_FINALIZE_TYPES = [
-    PplxPrepareAndFinalize,
-    DeepEPLLPrepareAndFinalize,
-    DeepEPHTPrepareAndFinalize,
-]
-FUSED_EXPERT_TYPES = [
-    BatchedDeepGemmExperts,
-    BatchedTritonExperts,
-    NaiveBatchedExperts,
-    BatchedTritonOrDeepGemmExperts,
-    CutlassExpertsFp8,
-    DeepGemmExperts,
-    TritonOrDeepGemmExperts,
-    TritonExperts,
-]
-
-#Ms = [1, 8, 16]
-#Ks = [1024, 4096, 7168]  # hidden sizes
-#Ns = [1024]
-#TOPKs = [1, 4, 8]
-
-Ms = [64]
-Ks = [7168]  # hidden sizes
-Ns = [2048]
-TOPKs = [4]
-
-Es = [32]
-DTYPEs = [torch.bfloat16]
-BLOCK_SIZEs = [None, [128, 128]]
-QUANTCONFIGs = [
-    None,
-    FusedMoEQuantConfig(quant_dtype=torch.float8_e4m3fn,
-                        per_out_ch_quant=True,
-                        per_act_token_quant=False,
-                        block_shape=None),
-    FusedMoEQuantConfig(quant_dtype=torch.float8_e4m3fn,
-                        per_out_ch_quant=False,
-                        per_act_token_quant=True,
-                        block_shape=None),
-    FusedMoEQuantConfig(quant_dtype=torch.float8_e4m3fn,
-                        per_out_ch_quant=False,
-                        per_act_token_quant=False,
-                        block_shape=[128, 128])
-]
-COMBINATIONs = product(PREPARE_FINALIZE_TYPES, FUSED_EXPERT_TYPES)
-FUSED_MOE_CHUNK_SIZEs = [None, 64]
-
-
-@pytest.mark.parametrize("k", Ks)
-@pytest.mark.parametrize("n", Ns)
-@pytest.mark.parametrize("e", Es)
-@pytest.mark.parametrize("dtype", DTYPEs)
-@pytest.mark.parametrize("quant_config", QUANTCONFIGs)
-@pytest.mark.parametrize("combination", COMBINATIONs)
-@pytest.mark.parametrize("fused_moe_chunk_size", FUSED_MOE_CHUNK_SIZEs)
-@pytest.mark.parametrize("world_size", [2])
-def test_modular_kernel_combinations(
-        k: int, n: int, e: int, dtype: torch.dtype,
-        quant_config: FusedMoEQuantConfig,
+def run(ms: list[int], k: int, n: int, e: int, topks: list[int],
+        dtype: torch.dtype, quant_config: Optional[FusedMoEQuantConfig],
         combination: tuple[mk.FusedMoEPrepareAndFinalize,
                            mk.FusedMoEPermuteExpertsUnpermute],
         fused_moe_chunk_size: Optional[int], world_size: int):
 
     config = Config(
-        Ms=Ms,
+        Ms=ms,
         K=k,
         N=n,
         E=e,
-        topks=TOPKs,
+        topks=topks,
         dtype=dtype,
         quant_config=quant_config,
         prepare_finalize_type=combination[0],
@@ -779,3 +722,194 @@ def test_modular_kernel_combinations(
 
     parallel_launch_with_config(world_size, rank_worker, vllm_config, env_dict,
                                 config, weights)
+
+
+PREPARE_FINALIZE_TYPES = [
+    PplxPrepareAndFinalize,
+    DeepEPLLPrepareAndFinalize,
+    DeepEPHTPrepareAndFinalize,
+]
+FUSED_EXPERT_TYPES = [
+    BatchedDeepGemmExperts,
+    BatchedTritonExperts,
+    NaiveBatchedExperts,
+    BatchedTritonOrDeepGemmExperts,
+    CutlassExpertsFp8,
+    DeepGemmExperts,
+    TritonOrDeepGemmExperts,
+    TritonExperts,
+]
+
+Ms = [64]
+Ks = [7168]  # hidden sizes
+Ns = [2048]
+TOPKs = [4]
+Es = [32]
+DTYPEs = [torch.bfloat16]
+BLOCK_SIZEs = [None, [128, 128]]
+QUANTCONFIGs = [
+    None,
+    # per-channel / per-column weights and per-tensor activations
+    FusedMoEQuantConfig(quant_dtype=torch.float8_e4m3fn,
+                        per_out_ch_quant=True,
+                        per_act_token_quant=False,
+                        block_shape=None),
+    # per-channel / per-column weights and per-token activations
+    FusedMoEQuantConfig(quant_dtype=torch.float8_e4m3fn,
+                        per_out_ch_quant=True,
+                        per_act_token_quant=True,
+                        block_shape=None),
+    # per-tensor weights and per-tensor activations
+    FusedMoEQuantConfig(quant_dtype=torch.float8_e4m3fn,
+                        per_out_ch_quant=False,
+                        per_act_token_quant=False,
+                        block_shape=None),
+    # per-tensor weights and per-token activations
+    FusedMoEQuantConfig(quant_dtype=torch.float8_e4m3fn,
+                        per_out_ch_quant=False,
+                        per_act_token_quant=True,
+                        block_shape=None),
+    # block-quantized weights and 128 block per-token activations
+    FusedMoEQuantConfig(quant_dtype=torch.float8_e4m3fn,
+                        per_out_ch_quant=False,
+                        per_act_token_quant=False,
+                        block_shape=[128, 128]),
+    # TODO (varun) : Should we test the following combinations ?
+    # block-quantized weights and per-token activations
+    # block-quantized weights and per-tensor activations
+]
+COMBINATIONs = product(PREPARE_FINALIZE_TYPES, FUSED_EXPERT_TYPES)
+FUSED_MOE_CHUNK_SIZEs = [None, 64]
+
+
+@pytest.mark.parametrize("k", Ks)
+@pytest.mark.parametrize("n", Ns)
+@pytest.mark.parametrize("e", Es)
+@pytest.mark.parametrize("dtype", DTYPEs)
+@pytest.mark.parametrize("quant_config", QUANTCONFIGs)
+@pytest.mark.parametrize("combination", COMBINATIONs)
+@pytest.mark.parametrize("fused_moe_chunk_size", FUSED_MOE_CHUNK_SIZEs)
+@pytest.mark.parametrize("world_size", [2])
+def test_modular_kernel_combinations(
+        k: int, n: int, e: int, dtype: torch.dtype,
+        quant_config: FusedMoEQuantConfig,
+        combination: tuple[mk.FusedMoEPrepareAndFinalize,
+                           mk.FusedMoEPermuteExpertsUnpermute],
+        fused_moe_chunk_size: Optional[int], world_size: int):
+    run(Ms, k, n, e, TOPKs, dtype, quant_config, combination,
+        fused_moe_chunk_size, world_size)
+
+
+if __name__ == '__main__':
+    import argparse
+
+    def to_pf_class_type(s: str) -> mk.FusedMoEPrepareAndFinalize:
+        for pf in PREPARE_FINALIZE_TYPES:
+            if pf.__name__ == s:
+                return pf
+        raise ValueError(
+            f"Cannot find a PrepareFinalize type that matches {s}")
+
+    def to_experts_class_type(s: str) -> mk.FusedMoEPermuteExpertsUnpermute:
+        for fe in FUSED_EXPERT_TYPES:
+            if fe.__name__ == s:
+                return fe
+        raise ValueError(f"Cannot find a FusedExperts type that matches {s}")
+
+    parser = argparse.ArgumentParser(
+        description="Run a single modular kernel combination")
+    parser.add_argument(
+        "--world-size",
+        type=int,
+        default=2,
+        help="Number of ranks that participate in all2all",
+    )
+    parser.add_argument(
+        "--pf-type",
+        type=to_pf_class_type,
+        required=True,
+        help=("Choose a PrepareFinalize Type : "
+              f"{[x.__name__ for x in PREPARE_FINALIZE_TYPES]}"),
+    )
+    parser.add_argument(
+        "--experts-type",
+        type=to_experts_class_type,
+        required=True,
+        help=(f"Choose a FusedExpert type : "
+         f"{[x.__name__ for x in FUSED_EXPERT_TYPES]}"),
+    )
+    parser.add_argument(
+        "-m",
+        nargs="+",
+        type=int,
+        default=[64],
+        help="num tokens per rank",
+    )
+    parser.add_argument(
+        "-k",
+        type=int,
+        default=7168,
+        help="hidden-size",
+    )
+    parser.add_argument(
+        "-n",
+        type=int,
+        default=1024,
+        help="N dimension of the first fused-moe matmul",
+    )
+    parser.add_argument("--num-experts",
+                        type=int,
+                        default=32,
+                        help="Global num experts")
+    parser.add_argument("--topk",
+                        nargs="+",
+                        type=int,
+                        default=[4],
+                        help="num topk")
+    parser.add_argument(
+        "--fused-moe-chunk-size",
+        nargs="+",
+        type=int,
+        help="Fused moe chunk size used for the non-batched fused experts impl."
+    )
+
+    # Quant args
+    parser.add_argument("--quant-dtype",
+                        type=torch.dtype,
+                        help="Quant datatype")
+    parser.add_argument("--per-act-token-quant",
+                        action='store_true',
+                        help="Use per token act quant")
+    parser.add_argument("--per-out-ch-quant",
+                        action="store_true",
+                        help="Per out channel quant for weight quantization.")
+    parser.add_argument("--block-shape",
+                        nargs="+",
+                        type=int,
+                        help="Quantization block shape")
+
+    args = parser.parse_args()
+
+    quant_config = None
+    if args.quant_dtype is not None:
+        assert args.quant_dtype == torch.float8_e4m3fn
+        if args.block_shape is not None:
+            assert len(args.block_shape) == 2, (
+                f"block shape must have 2 elements. got {args.block_shape}")
+        quant_config = QuantConfig(
+            quant_dtype=args.quant_dtype,
+            per_act_token_quant=args.per_act_token_quant,
+            per_out_ch_quant=args.per_out_ch_quant,
+            block_shape=args.block_shape)
+
+    run(
+        ms=args.m,
+        k=args.k,
+        n=args.n,
+        e=args.num_experts,
+        topks=args.topk,
+        dtype=torch.bfloat16,  # hard-code
+        quant_config=quant_config,
+        combination=(args.pf_type, args.experts_type),
+        fused_moe_chunk_size=None,
+        world_size=args.world_size)
