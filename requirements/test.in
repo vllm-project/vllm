@@ -39,7 +39,7 @@ tokenizers==0.21.1
 huggingface-hub[hf_xet]>=0.33.0  # Required for Xet downloads.
 schemathesis>=3.39.15 # Required for openai schema test.
 # quantization
-bitsandbytes>=0.45.3
+bitsandbytes==0.46.1
 buildkite-test-collector==0.1.9
 
 
