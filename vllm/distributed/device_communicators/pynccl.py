@@ -150,7 +150,6 @@ class PyNcclCommunicator:
             stream = current_stream()
         if sizes is not None:
             assert output_tensor.shape[0] == sum(sizes)
-            numel_base = int(np.prod(output_tensor.shape[1:]))
             split_offset = 0
             self.nccl.ncclGroupStart()
             for root, split_size in enumerate(sizes):
@@ -159,7 +158,7 @@ class PyNcclCommunicator:
                 self.nccl.ncclBroadcast(
                     buffer_type(input_tensor.data_ptr()),
                     buffer_type(dst_slice.data_ptr()),
-                    split_size * numel_base,
+                    dst_slice.numel(),
                     ncclDataTypeEnum.from_torch(input_tensor.dtype),
                     root,
                     self.comm,
@@ -192,7 +191,6 @@ class PyNcclCommunicator:
             stream = current_stream()
         
         if sizes is not None:
-            numel_base = int(np.prod(input_tensor.shape[1:]))
             split_offset = 0
             self.nccl.ncclGroupStart()
             for root, split_size in enumerate(sizes):
@@ -201,7 +199,7 @@ class PyNcclCommunicator:
                 self.nccl.ncclReduce(
                     buffer_type(chunk.data_ptr()),
                     buffer_type(output_tensor.data_ptr()),
-                    split_size * numel_base,
+                    chunk.numel(),
                     ncclDataTypeEnum.from_torch(input_tensor.dtype),
                     ncclRedOpTypeEnum.from_torch(op),
                     root,

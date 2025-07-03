@@ -99,7 +99,31 @@ class CudaCommunicator(DeviceCommunicatorBase):
             torch.distributed.all_reduce(out, group=self.device_group)
         return out
 
-    def reduce_scatter(self, input_: torch.Tensor, dim: int = -1, sizes: Optional[List[int]] = None):
+    def reduce_scatter(self, input_: torch.Tensor, dim: int = -1):
+        world_size = self.world_size
+        pynccl_comm = self.pynccl_comm
+        assert pynccl_comm is not None
+        if dim < 0:
+            # Convert negative dim to positive.
+            dim += input_.dim()
+
+        # Note: This will produce an incorrect answer if we don't make
+        # the input_tensor contiguous. Possible bug in reduce_scatter_tensor?
+        input_tensor = input_.movedim(0, dim).contiguous()
+
+        assert input_tensor.shape[0] % world_size == 0
+        chunk_size = input_tensor.shape[0] // world_size
+
+        output = torch.empty(output_shape,
+                             dtype=input_tensor.dtype,
+                             device=input_tensor.device)
+
+        pynccl_comm.reduce_scatter(output, input_)
+
+        # Reshape before returning
+        return output.movedim(0, dim).contiguous()
+
+    def reduce_scatterv(self, input_: torch.Tensor, dim: int = -1, sizes: Optional[List[int]] = None):
         world_size = self.world_size
         pynccl_comm = self.pynccl_comm
         assert pynccl_comm is not None
@@ -168,7 +192,8 @@ class CudaCommunicator(DeviceCommunicatorBase):
             self.all2all_manager = None
 
     def all_gatherv(self, input_: Union[torch.Tensor, List[torch.Tensor]], dim: int = 0, sizes: Optional[List[int]] = None):
-        assert dim == 0, "only dim 0 all-gatherv is supported"
+        if dim != 0:
+            raise NotImplementedError("only dim 0 all-gatherv is supported")
         world_size = self.world_size
         pynccl_comm = self.pynccl_comm
         assert pynccl_comm is not None and not pynccl_comm.disabled
