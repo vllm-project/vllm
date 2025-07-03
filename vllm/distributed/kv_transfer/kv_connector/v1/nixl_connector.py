@@ -331,12 +331,10 @@ class NixlConnectorScheduler:
         # If prompt < block_size, no xfer so free blocks immediately.
         delay_free_blocks = len(computed_block_ids) > 0
 
-        if delay_free_blocks and params.get("do_remote_decode"):
-            now = time.monotonic()
+        if delay_free_blocks:
             # Prefill request on remote. It will be read from D upon completion
-            self._reqs_need_send[
-                request.
-                request_id] = now + envs.VLLM_NIXL_ABORT_REQUEST_TIMEOUT
+            self._reqs_need_send[request.request_id] = time.perf_counter(
+            ) + envs.VLLM_NIXL_ABORT_REQUEST_TIMEOUT
 
         return delay_free_blocks, dict(
             do_remote_prefill=True,
@@ -842,7 +840,7 @@ class NixlConnectorWorker:
                 len(done_sending), len(done_recving))
 
         # Handle timeout to avoid stranding blocks on remote.
-        now = time.monotonic()
+        now = time.perf_counter()
         while self._reqs_to_send:
             req_id, expires = next(iter(self._reqs_to_send.items()))
             # Sorted dict, oldest requests are put first so we can exit early.
@@ -1076,7 +1074,8 @@ class NixlConnectorWorker:
 
         # Use handle to check completion in future step().
         # TODO (NickLucche) surface xfer elapsed time
-        self._recving_transfers[request_id].append((handle, time.monotonic()))
+        self._recving_transfers[request_id].append(
+            (handle, time.perf_counter()))
 
     def _get_block_descs_ids(self,
                              engine_id: str,
