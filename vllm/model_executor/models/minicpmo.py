@@ -511,6 +511,17 @@ class MiniCPMO(MiniCPMV2_6):
         ],
     }
 
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+        if modality.startswith("image"):
+            return "(<image>./</image>)"
+        if modality.startswith("video"):
+            return "(<video>./</video>)"
+        if modality.startswith("audio"):
+            return "(<audio>./</audio>)"
+
+        raise ValueError("Only image, video or audio modality is supported")
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         self.apm = self.init_audio_module(vllm_config=vllm_config,

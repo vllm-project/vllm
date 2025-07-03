@@ -46,6 +46,13 @@ class SupportsMultiModal(Protocol):
         MRO of your model class.
     """
 
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+        """
+        Get the placeholder text for the `i`th `modality` item in the prompt.
+        """
+        ...
+
     def get_multimodal_embeddings(self,
                                   **kwargs: object) -> MultiModalEmbeddings:
         """

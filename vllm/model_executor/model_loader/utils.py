@@ -253,6 +253,10 @@ def get_model_architecture(
     return model_cls, arch
 
 
+def get_model_cls(model_config: ModelConfig) -> type[nn.Module]:
+    return get_model_architecture(model_config)[0]
+
+
 def get_architecture_class_name(model_config: ModelConfig) -> str:
     return get_model_architecture(model_config)[1]
 
