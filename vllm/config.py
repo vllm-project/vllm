@@ -4584,11 +4584,6 @@ class VllmConfig:
                 "Piecewise compilation is not supported with "
                 "microbatching. Disabling piecewiseching compilation.")
             self.compilation_config.level = CompilationLevel.NO_COMPILATION
-            if not self.model_config.enforce_eager:
-                self.compilation_config.full_cuda_graph = True
-                logger.warning_once(
-                    "Enabling fullcudagraphs for microbatching"
-                )
         disable_chunked_prefill_reasons: list[str] = []
 
         if self.model_config and self.model_config.pooler_config:
