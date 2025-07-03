@@ -100,7 +100,9 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         hidden_dim = a1.size(-1)  # K
 
         assert topk_ids.size(0) == num_tokens
-        # assert expert_map is None, "NYI"
+        assert expert_map is None, """with expert map, -1 id is used for
+            non-local token; this causes error when casting ids to the
+            topk_indices_dtype() uint32"""
 
         # Is this always going to be a1.device?
         device = a1.device
