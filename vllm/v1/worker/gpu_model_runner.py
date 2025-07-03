@@ -1553,6 +1553,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         def model_inputs(tokens_slice: slice, use_dummy_input: bool) -> tuple:
             if use_dummy_input:
+                logger.info(f"NUM DUMMY TOKENS: {num_dummy_tokens} token slize: {tokens_slice}")
+                assert num_dummy_tokens == tokens_slice.stop - tokens_slice.start
                 return self._get_dummy_model_inputs(num_dummy_tokens)
             else:
                 assert scheduler_output is not None
