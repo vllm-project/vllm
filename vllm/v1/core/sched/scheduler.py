@@ -72,6 +72,7 @@ class TokenBudget:
                                      req.num_computed_tokens
                                      for req in self.scheduler.waiting)
             num_decode_tokens = 0
+            # running requests include both prefill and decode requests
             for request in self.scheduler.running:
                 if request.computed_prompt:
                     num_decode_tokens += 1
