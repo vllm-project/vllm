@@ -43,7 +43,7 @@ from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
-                        GiB_bytes, LazyLoader, async_tensor_h2d, cdiv,
+                        GiB_bytes, LazyLoader, async_tensor_h2d,
                         check_use_alibi, get_dtype_size,
                         is_pin_memory_available, round_up)
 from vllm.v1.attention.backends.mamba_attn import Mamba2AttentionBackend
@@ -2214,7 +2214,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             encoder_budget = min(self.max_num_encoder_input_tokens,
                                  self.encoder_cache_size)
 
-            max_num_mm_items_encoder_budget = encoder_budget // max_tokens_per_mm_item
+            max_num_mm_items_encoder_budget = encoder_budget // \
+                max_tokens_per_mm_item
 
             # Check how many items of this modality can be supported by
             # the decoder budget.
