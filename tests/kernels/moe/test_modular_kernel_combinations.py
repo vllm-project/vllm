@@ -286,6 +286,11 @@ class Config:
             TritonExperts
         ]
 
+    def is_fe_16bit_supported(self):
+        return self.fused_experts_type in [
+            BatchedTritonExperts, NaiveBatchedExperts, TritonExperts
+        ]
+
     def is_fe_fp8_supported(self):
         return self.fused_experts_type in [
             BatchedDeepGemmExperts, BatchedTritonExperts,
@@ -339,6 +344,11 @@ class Config:
         else:
             if not self.is_standard_fused_experts():
                 return False
+
+        # check bf16 / fp16 support
+        is_16bit = (self.dtype.itemsize == 2 and self.quant_dtype is None)
+        if is_16bit and not self.is_fe_16bit_supported():
+            return False
 
         # Check fp8 support
         is_fp8 = self.quant_dtype == torch.float8_e4m3fn
@@ -522,80 +532,48 @@ def make_fused_experts(
     assert all2all_manager is not None
 
     use_fp8 = config.quant_dtype == torch.float8_e4m3fn
+    batch_kwargs = {
+        "max_num_tokens": moe.max_num_tokens,
+        "world_size": all2all_manager.world_size,
+        "dp_size": moe.dp_size,
+    }
+    quant_kwargs = {
+        "use_fp8_w8a8": use_fp8,
+        "use_int8_w8a8": False,
+        "use_int8_w8a16": False,
+        "use_int4_w4a16": False,
+        "block_shape": config.quant_block_shape,
+        "per_act_token_quant": config.is_per_act_token_quant,
+    }
+    deepgemm_kwargs = {"allow_deep_gemm": has_deep_gemm()}
 
     if config.fused_experts_type == BatchedDeepGemmExperts:
-        kwargs = {
-            "max_num_tokens": moe.max_num_tokens,
-            "world_size": all2all_manager.world_size,
-            "dp_size": moe.dp_size,
+        kwargs = batch_kwargs | {
             "block_shape": config.quant_block_shape,
         }
         print(f"Making BatchedDeepGemmExperts {kwargs} ...")
         experts = BatchedDeepGemmExperts(**kwargs)
     elif config.fused_experts_type == BatchedTritonExperts:
-        # TODO update args when BatchedTritonExperts supports fp8 block quant
-        kwargs = {
-            "max_num_tokens": moe.max_num_tokens,
-            "world_size": all2all_manager.world_size,
-            "dp_size": all2all_manager.tp_group.world_size,
-            "use_fp8_w8a8": use_fp8,
-            "use_int8_w8a8": False,
-            "use_int8_w8a16": False,
-            "use_int4_w4a16": False,
-            "block_shape": config.quant_block_shape,
-            "per_channel_quant": config.is_per_act_token_quant,
-        }
+        kwargs = batch_kwargs | quant_kwargs
         print(f"Making BatchedTritonExperts {kwargs} ...")
         experts = BatchedTritonExperts(**kwargs)
     elif config.fused_experts_type == BatchedTritonOrDeepGemmExperts:
-        kwargs = {
-            "max_num_tokens": moe.max_num_tokens,
-            "world_size": all2all_manager.world_size,
-            "dp_size": moe.moe_parallel_config.dp_size,
-            "use_fp8_w8a8": use_fp8,
-            "use_int8_w8a8": False,
-            "use_int8_w8a16": False,
-            "use_int4_w4a16": False,
-            "per_channel_quant": config.is_per_act_token_quant,
-            "block_shape": config.quant_block_shape,
-            "allow_deep_gemm": has_deep_gemm(),
-        }
+        kwargs = batch_kwargs | quant_kwargs | deepgemm_kwargs
         print(f"Making BatchedTritonOrDeepGemmExperts {kwargs} ...")
         experts = BatchedTritonOrDeepGemmExperts(**kwargs)
     elif config.fused_experts_type == DeepGemmExperts:
         print("Making DeepGemmExperts () ...")
         experts = DeepGemmExperts()
     elif config.fused_experts_type == TritonExperts:
-        kwargs = {
-            "use_fp8_w8a8": use_fp8,
-            "use_int8_w8a8": False,
-            "use_int8_w8a16": False,
-            "use_int4_w4a16": False,
-            "block_shape": config.quant_block_shape,
-            "per_channel_quant": config.is_per_act_token_quant,
-        }
+        kwargs = quant_kwargs
         print(f"Making TritonExperts {kwargs} ...")
         experts = TritonExperts(**kwargs)
     elif config.fused_experts_type == TritonOrDeepGemmExperts:
-        kwargs = {
-            "use_fp8_w8a8": use_fp8,
-            "block_shape": config.quant_block_shape,
-            "allow_deep_gemm": has_deep_gemm(),
-        }
+        kwargs = quant_kwargs | deepgemm_kwargs
         print(f"Making TritonOrDeepGemmExperts {kwargs} ...")
         experts = TritonOrDeepGemmExperts(**kwargs)
     elif config.fused_experts_type == NaiveBatchedExperts:
-        kwargs = {
-            "max_num_tokens": moe.max_num_tokens,
-            "world_size": all2all_manager.world_size,
-            "dp_size": all2all_manager.tp_group.world_size,
-            "use_fp8_w8a8": use_fp8,
-            "use_int8_w8a8": False,
-            "use_int8_w8a16": False,
-            "use_int4_w4a16": False,
-            "block_shape": config.quant_block_shape,
-            "per_channel_quant": config.is_per_act_token_quant,
-        }
+        kwargs = batch_kwargs | quant_kwargs
         print(f"Making NaiveBatchedExperts {kwargs} ...")
         experts = NaiveBatchedExperts(**kwargs)
     elif config.fused_experts_type == CutlassExpertsFp8:
@@ -643,9 +621,6 @@ def do_modular_kernel(
         quant_config=config.quant_config,
         max_num_tokens=config.M,
     )
-
-    import vllm.envs as envs
-    print(f"all2all backend {envs.VLLM_ALL2ALL_BACKEND} ...")
 
     # make modular kernel
     prepare_finalize = FusedMoEMethodBase.maybe_make_prepare_finalize(moe)
@@ -706,27 +681,6 @@ def rank_worker(
         do_modular_kernel(pgi, vllm_config, cfgx, wr, ir)
 
 
-#PREPARE_FINALIZE_TYPES = [
-#    PplxPrepareAndFinalize,
-#    DeepEPLLPrepareAndFinalize,
-#    DeepEPHTPrepareAndFinalize,
-#]
-#FUSED_EXPERT_TYPES = [
-#    BatchedDeepGemmExperts,
-#    BatchedTritonExperts,
-#    NaiveBatchedExperts,
-#    BatchedTritonOrDeepGemmExperts,
-#    CutlassExpertsFp8,
-#    DeepGemmExperts,
-#    TritonOrDeepGemmExperts,
-#    TritonExperts,
-#]
-
-#Ms = [1, 8, 16]
-#Ks = [1024, 4096, 7168]  # hidden sizes
-#Ns = [1024]
-#TOPKs = [1, 4, 8]
-
 PREPARE_FINALIZE_TYPES = [
     PplxPrepareAndFinalize,
     DeepEPLLPrepareAndFinalize,
@@ -734,8 +688,19 @@ PREPARE_FINALIZE_TYPES = [
 ]
 FUSED_EXPERT_TYPES = [
     BatchedDeepGemmExperts,
+    BatchedTritonExperts,
+    NaiveBatchedExperts,
+    BatchedTritonOrDeepGemmExperts,
+    CutlassExpertsFp8,
     DeepGemmExperts,
+    TritonOrDeepGemmExperts,
+    TritonExperts,
 ]
+
+#Ms = [1, 8, 16]
+#Ks = [1024, 4096, 7168]  # hidden sizes
+#Ns = [1024]
+#TOPKs = [1, 4, 8]
 
 Ms = [64]
 Ks = [7168]  # hidden sizes
