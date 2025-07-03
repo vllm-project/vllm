@@ -851,7 +851,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                 max_query_len=max(tokens[req_slice]),
                                 common_prefix_len=common_prefix_len,
                                 common_attn_metadata=common_attn_metadata,
-                                ubatch_id=ubid
                             ))
                     for layer_name in kv_cache_group_spec.layer_names:
                         assert type(attn_metadata) is list
