@@ -498,8 +498,9 @@ class EngineArgs:
     enable_multimodal_encoder_data_parallel: bool = \
         ParallelConfig.enable_multimodal_encoder_data_parallel
 
-    logits_processors_qualnames: Optional[list[str]]
-    logits_processors_entrypoints: Optional[list[LogitsProcessorEntrypoint]]
+    logits_processors_qualnames: Optional[list[str]] = None
+    logits_processors_entrypoints: Optional[
+        list[LogitsProcessorEntrypoint]] = None
 
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`

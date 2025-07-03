@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Callable, TypedDict, Union
+from typing import Callable, Union
 
 import torch
+from typing_extensions import TypedDict
 
 from vllm.plugins import load_plugins_by_group
 from vllm.v1.sample.logits_processor.impls import (LogitBiasLogitsProcessor,

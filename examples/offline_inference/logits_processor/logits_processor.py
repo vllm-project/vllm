@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from vllm import LLM, SamplingParams
+from vllm.v1.sample.logits_processor import LogitsProcessorEntrypoint
 
 # Sample prompts.
 prompts = [
@@ -16,7 +17,13 @@ sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
 def main():
     # Create an LLM.
-    llm = LLM(model="facebook/opt-125m")
+    llm = LLM(
+        model="facebook/opt-125m",
+        logits_processors_entrypoints=[
+            LogitsProcessorEntrypoint(package_name="qsdf", entrypoint_name="bsdf")
+        ],
+        logits_processors_qualnames=["asdf"],
+    )
     # Generate texts from the prompts.
     # The output is a list of RequestOutput objects
     # that contain the prompt, generated text, and other information.
