@@ -116,7 +116,8 @@ def _parse_score_content(
 
     mm_placeholder_counts = mm_parser.mm_placeholder_counts()
 
-    if len(mm_placeholder_counts) != 1 or next(iter(mm_placeholder_counts.values())) != 1:
+    if len(mm_placeholder_counts) != 1 or next(
+            iter(mm_placeholder_counts.values())) != 1:
         raise ValueError("Only one multi-modal item is supported")
 
     return next(iter(mm_placeholder_counts))
