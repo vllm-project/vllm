@@ -39,7 +39,7 @@ AITER_MODEL_LIST = [
     [
         pytest.param(
             "bigscience/bloom-560m",  # bloom - testing alibi slopes
-            marks=[pytest.mark.core_model, pytest.mark.cpu_model],
+            marks=[pytest.mark.core_model],
         ),
         pytest.param(
             "openai-community/gpt2",  # gpt2
@@ -87,7 +87,11 @@ AITER_MODEL_LIST = [
         pytest.param("bigcode/starcoder2-3b"),  # starcoder2
         pytest.param(
             "TitanML/tiny-mixtral",  # mixtral
-            marks=[pytest.mark.core_model, pytest.mark.cpu_model],
+            marks=[pytest.mark.core_model],
+        ),
+        pytest.param(
+            "Qwen/Qwen1.5-MoE-A2.7B-Chat",
+            marks=[pytest.mark.cpu_model],
         )
     ])
 @pytest.mark.parametrize("max_tokens", [32])
