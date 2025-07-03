@@ -964,7 +964,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # If set to 1, use the TRTLLM Decode Attention backend in flashinfer.
     "VLLM_USE_TRTLLM_DECODE_ATTENTION":
     lambda: os.getenv("VLLM_USE_TRTLLM_DECODE_ATTENTION", None),
-
 }
 
 # --8<-- [end:env-vars-definition]
