@@ -201,12 +201,13 @@ def apply_w8a8_block_fp8_linear_fake(
     return torch.empty(output_shape, dtype=input.dtype, device=input.device)
 
 
-direct_register_custom_op(
-    op_name="apply_w8a8_block_fp8_linear",
-    op_func=apply_w8a8_block_fp8_linear,
-    mutates_args=[],
-    fake_impl=apply_w8a8_block_fp8_linear_fake,
-)
+if not current_platform.is_cpu():
+    direct_register_custom_op(
+        op_name="apply_w8a8_block_fp8_linear",
+        op_func=apply_w8a8_block_fp8_linear,
+        mutates_args=[],
+        fake_impl=apply_w8a8_block_fp8_linear_fake,
+    )
 
 
 def input_to_float8(
