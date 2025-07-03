@@ -11,7 +11,7 @@
 void moe_permute(
     const torch::Tensor& input,                      // [n_token, hidden]
     const torch::Tensor& topk_ids,                   // [n_token, topk]
-    const torch::Tensor& token_expert_indicies,      // [n_token, topk]
+    const torch::Tensor& token_expert_indices,       // [n_token, topk]
     const std::optional<torch::Tensor>& expert_map,  // [n_expert]
     int64_t n_expert, int64_t n_local_expert, int64_t topk,
     const std::optional<int64_t>& align_block_size,
@@ -24,14 +24,14 @@ void moe_permute(
               "expert_first_token_offset must be int64");
   TORCH_CHECK(topk_ids.scalar_type() == at::ScalarType::Int,
               "topk_ids must be int32");
-  TORCH_CHECK(token_expert_indicies.scalar_type() == at::ScalarType::Int,
-              "token_expert_indicies must be int32");
+  TORCH_CHECK(token_expert_indices.scalar_type() == at::ScalarType::Int,
+              "token_expert_indices must be int32");
   TORCH_CHECK(inv_permuted_idx.scalar_type() == at::ScalarType::Int,
               "inv_permuted_idx must be int32");
   TORCH_CHECK(expert_first_token_offset.size(0) == n_local_expert + 1,
               "expert_first_token_offset shape != n_local_expert+1")
-  TORCH_CHECK(inv_permuted_idx.sizes() == token_expert_indicies.sizes(),
-              "token_expert_indicies shape must be same as inv_permuted_idx");
+  TORCH_CHECK(inv_permuted_idx.sizes() == token_expert_indices.sizes(),
+              "token_expert_indices shape must be same as inv_permuted_idx");
   auto n_token = input.sizes()[0];
   auto n_hidden = input.sizes()[1];
   auto align_block_size_value =
@@ -69,7 +69,7 @@ void moe_permute(
   }
   // expert sort topk expert id and scan expert id get expert_first_token_offset
   sortAndScanExpert(
-      get_ptr<int>(copy_topk_ids), get_ptr<int>(token_expert_indicies),
+      get_ptr<int>(copy_topk_ids), get_ptr<int>(token_expert_indices),
       get_ptr<int>(permuted_experts_id), get_ptr<int>(sorted_row_idx),
       get_ptr<int64_t>(expert_first_token_offset), n_token, n_expert,
       n_local_expert, topk, sorter, get_ptr<int>(sort_workspace), stream);
