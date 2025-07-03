@@ -432,3 +432,27 @@ def run_dp_sharded_vision_model(image_input: torch.Tensor,
                                                          dim=0)
     vision_embeddings = vision_embeddings[:num_chunks, ...]
     return vision_embeddings
+
+
+def fetch_audio(
+    audio_url: str,
+    media_io_kwargs: Optional[dict[str, dict[str, Any]]] = None,
+) -> tuple[np.ndarray, Union[int, float]]:
+    media_connector = MediaConnector(media_io_kwargs=media_io_kwargs)
+    return media_connector.fetch_audio(audio_url)
+
+
+def fetch_image(
+    image_url: str,
+    media_io_kwargs: Optional[dict[str, dict[str, Any]]] = None,
+) -> Image.Image:
+    media_connector = MediaConnector(media_io_kwargs=media_io_kwargs)
+    return media_connector.fetch_image(image_url)
+
+
+def fetch_video(
+    video_url: str,
+    media_io_kwargs: Optional[dict[str, dict[str, Any]]] = None,
+) -> tuple[npt.NDArray, dict[str, Any]]:
+    media_connector = MediaConnector(media_io_kwargs=media_io_kwargs)
+    return media_connector.fetch_video(video_url)
