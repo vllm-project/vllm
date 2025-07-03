@@ -97,10 +97,10 @@ def get_kv_connector_cache_layout():
     # used for faster transfer.
     vllm_config = get_current_vllm_config()
     kv_config = vllm_config.kv_transfer_config
-    if vllm_config.model_config is None or kv_config is None:
+    if kv_config is not None and vllm_config.model_config is None:
         logger.warning_once("Unable to detect current VLLM config. " \
         "Defaulting to NHD kv cache layout.")
-    else:
+    elif kv_config is not None:
         use_mla = vllm_config.model_config.use_mla
         if not use_mla and kv_config.kv_connector == "NixlConnector":
             logger.info_once("NixlConnector detected. Setting KV cache " \
