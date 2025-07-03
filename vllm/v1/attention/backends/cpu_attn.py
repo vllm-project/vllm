@@ -13,7 +13,6 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               is_quantized_kv_cache)
 from vllm.attention.backends.utils import CommonAttentionState
 from vllm.logger import init_logger
-from vllm.multimodal import MultiModalPlaceholderMap
 from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
                                               CommonAttentionMetadata)
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -97,32 +96,6 @@ class TorchSDPABackend(AttentionBackend):
 
 @dataclass
 class TorchSDPAMetadata(AttentionMetadata):
-    """Attention metadata for prefill and decode batched together."""
-    # Total number of prefill requests.
-    num_prefills: int
-    # Number of prefill tokens.
-    num_prefill_tokens: int
-    # Number of decode tokens. Note that it is equivalent to the number of
-    # decode requests.
-    num_decode_tokens: int
-    # (num_tokens,). The indices of the token slots that input tokens will be
-    # stored into. E.g., if `slot_mapping` is [35, 2, 17] and the block size
-    # is 16, the three tokens are stored in the 3rd slot in block 2, 2nd slot
-    # in block 0, and 1st slot in block 1, respectively.
-    slot_mapping: torch.Tensor
-
-    # The index maps that relate multi-modal embeddings to the corresponding
-    # placeholders.
-    #
-    # N.B. These aren't really related to attention and don't belong on this
-    # type -- this is just a temporary solution to make them available to
-    # `model_executable`.
-    multi_modal_placeholder_index_maps: Optional[dict[
-        str, MultiModalPlaceholderMap.IndexMap]]
-
-    # Enable/disable KV scales calculation. This is so that we can disable the
-    # calculation until after prefill and cuda graph capture.
-    enable_kv_scales_calculation: bool
     """Metadata for PagedAttention."""
     # (batch_size,). The length of sequences (entire tokens seen so far) per
     # sequence.
