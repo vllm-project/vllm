@@ -7,7 +7,7 @@ import torch
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
-from vllm.config import VllmConfig, get_current_vllm_config, KVTransferConfig
+from vllm.config import KVTransferConfig, VllmConfig, get_current_vllm_config
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
