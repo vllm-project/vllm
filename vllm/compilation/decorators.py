@@ -25,8 +25,6 @@ _T = TypeVar("_T", bound=type[nn.Module])
 
 def skip_torch_compile(cls: _T) -> _T:
     cls._skip_compile_vllm = True
-    for base in cls.__bases__:
-        setattr(base,"_skip_compile_vllm",True)
     return cls
 
 
