@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """A CPU worker class."""
 import os
+from importlib import util
 from typing import Dict, List, Optional, Set, Tuple, Type
 
 import torch
@@ -155,8 +157,10 @@ class CPUWorker(LocalOrDistributedWorkerBase):
 
         # Setup OpenMP threads affinity.
         omp_cpuids = envs.VLLM_CPU_OMP_THREADS_BIND
-        if omp_cpuids == "all":
-            self.local_omp_cpuid = "all"
+        self.local_omp_cpuid = "all"
+        if omp_cpuids == "auto":
+            self.local_omp_cpuid = self.get_cpus_id_binding_based_on_numa_nodes(
+            )
         else:
             self.local_omp_cpuid = omp_cpuids.split("|")[rank]
 
@@ -398,3 +402,49 @@ class CPUWorker(LocalOrDistributedWorkerBase):
         return CPUCacheEngine.get_cache_block_size(
             self.cache_config.block_size, self.cache_config.cache_dtype,
             self.model_config, self.parallel_config)
+
+    def get_cpus_id_binding_based_on_numa_nodes(self) -> str:
+        """Return CPUs id binding based on NUMA nodes.
+        """
+        rank_to_cpus = self.local_omp_cpuid
+        # Setup OpenMP thread affinity based on NUMA nodes automatically
+        world_size = self.vllm_config.parallel_config.world_size
+        libnuma_found = util.find_spec("numa") is not None
+        psutil_found = util.find_spec("psutil") is not None
+        if libnuma_found and psutil_found:
+            import psutil
+            from numa import info
+            cpu_count = psutil.cpu_count(logical=False)
+            cpus_allow_list = psutil.Process().cpu_affinity()
+            numa_size = info.get_num_configured_nodes()
+            cpu_count_per_numa = cpu_count // numa_size
+            num_of_reserved_cpu = min(envs.VLLM_CPU_NUM_OF_RESERVED_CPU,
+                                      cpu_count_per_numa // 2)
+
+            # check allow node_to_cpus list
+            node_to_cpus = []
+            for i in range(numa_size):
+                node_intersect = set(
+                    info.node_to_cpus(i)).intersection(cpus_allow_list)
+                if bool(node_intersect):
+                    node_to_cpus.append(list(node_intersect))
+
+            if world_size > len(node_to_cpus):
+                logger.error(
+                    "Auto thread-binding failed due to "
+                    "world size: %d is larger than "
+                    "allowed NUMA nodes number: %d."
+                    "Please try to bind threads manually.", world_size,
+                    len(node_to_cpus))
+            else:
+                end = cpu_count_per_numa - num_of_reserved_cpu
+                rank_to_cpus_list = node_to_cpus[self.rank][:end]
+                rank_to_cpus = ','.join(str(x) for x in rank_to_cpus_list)
+                logger.info("auto thread-binding list: %s", rank_to_cpus)
+        else:
+            logger.warning(
+                "Auto thread-binding is not supported due to "
+                "the lack of package numa and psutil,"
+                "fallback to no thread-binding. To get better performance,"
+                "please try to manually bind threads.")
+        return rank_to_cpus

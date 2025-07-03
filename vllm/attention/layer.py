@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer."""
 from typing import Any, Dict, List, Optional
 
@@ -20,6 +21,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.platforms import _Backend, current_platform
 from vllm.utils import direct_register_custom_op
+from vllm.v1.attention.backends.utils import validate_kv_sharing_target
 
 
 class Attention(nn.Module):
@@ -49,6 +51,7 @@ class Attention(nn.Module):
         use_mla: bool = False,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
+        kv_sharing_target_layer_name: Optional[str] = None,
         **extra_impl_args,
     ) -> None:
         """
@@ -134,7 +137,7 @@ class Attention(nn.Module):
         self.impl = impl_cls(num_heads, head_size, scale, num_kv_heads,
                              alibi_slopes, sliding_window, kv_cache_dtype,
                              blocksparse_params, logits_soft_cap, attn_type,
-                             **extra_impl_args)
+                             kv_sharing_target_layer_name, **extra_impl_args)
         self.backend = backend_name_to_enum(attn_backend.get_name())
         self.dtype = dtype
 
@@ -152,6 +155,19 @@ class Attention(nn.Module):
         compilation_config.static_forward_context[prefix] = self
         self.layer_name = prefix
         self.attn_type = attn_type
+
+        if kv_sharing_target_layer_name is not None:
+            if not envs.VLLM_USE_V1:
+                raise NotImplementedError(
+                    "Cross-layer KV sharing is not supported in V0.")
+
+            validate_kv_sharing_target(
+                prefix,
+                kv_sharing_target_layer_name,
+                compilation_config.static_forward_context,
+            )
+        self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
+
         # use a placeholder kv cache tensor during init, which will be replaced
         # by bind_kv_cache
         # this variable will not be accessed if use_direct_call is True
@@ -210,6 +226,8 @@ class Attention(nn.Module):
             if self.use_direct_call:
                 forward_context: ForwardContext = get_forward_context()
                 attn_metadata = forward_context.attn_metadata
+                if isinstance(attn_metadata, dict):
+                    attn_metadata = attn_metadata[self.layer_name]
                 self_kv_cache = self.kv_cache[forward_context.virtual_engine]
                 self.impl.forward(self,
                                   query,
@@ -226,6 +244,8 @@ class Attention(nn.Module):
             if self.use_direct_call:
                 forward_context = get_forward_context()
                 attn_metadata = forward_context.attn_metadata
+                if isinstance(attn_metadata, dict):
+                    attn_metadata = attn_metadata[self.layer_name]
                 self_kv_cache = self.kv_cache[forward_context.virtual_engine]
                 return self.impl.forward(self, query, key, value,
                                          self_kv_cache, attn_metadata)
@@ -343,7 +363,7 @@ def wait_for_kv_layer_from_connector(layer_name: str):
     attn_metadata = forward_context.attn_metadata
     if attn_metadata is None:
         return
-
+    assert isinstance(attn_metadata, dict)
     connector.wait_for_layer_load(layer_name)
 
 
@@ -360,8 +380,9 @@ def maybe_save_kv_layer_to_connector(
     attn_metadata = forward_context.attn_metadata
     if attn_metadata is None:
         return
-
-    connector.save_kv_layer(layer_name, kv_cache_layer, attn_metadata)
+    assert isinstance(attn_metadata, dict)
+    connector.save_kv_layer(layer_name, kv_cache_layer,
+                            attn_metadata[layer_name])
 
 
 def unified_attention(
@@ -374,6 +395,8 @@ def unified_attention(
 
     forward_context: ForwardContext = get_forward_context()
     attn_metadata = forward_context.attn_metadata
+    if isinstance(attn_metadata, dict):
+        attn_metadata = attn_metadata[layer_name]
     self = forward_context.no_compile_layers[layer_name]
     kv_cache = self.kv_cache[forward_context.virtual_engine]
     output = self.impl.forward(self, query, key, value, kv_cache,
@@ -411,6 +434,8 @@ def unified_attention_with_output(
     wait_for_kv_layer_from_connector(layer_name)
     forward_context: ForwardContext = get_forward_context()
     attn_metadata = forward_context.attn_metadata
+    if isinstance(attn_metadata, dict):
+        attn_metadata = attn_metadata[layer_name]
     self = forward_context.no_compile_layers[layer_name]
     kv_cache = self.kv_cache[forward_context.virtual_engine]
     self.impl.forward(self,

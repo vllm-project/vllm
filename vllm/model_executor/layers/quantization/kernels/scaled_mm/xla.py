@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import warnings
-from typing import Optional, Tuple
+from typing import Optional
 
 import torch
 from functorch.experimental.control_flow import cond  # noqa: F401
@@ -25,7 +26,7 @@ class XLAScaledMMLinearKernel(ScaledMMLinearKernel):
 
     @classmethod
     def can_implement(
-            cls, c: ScaledMMLinearLayerConfig) -> Tuple[bool, Optional[str]]:
+            cls, c: ScaledMMLinearLayerConfig) -> tuple[bool, Optional[str]]:
 
         if not current_platform.is_tpu():
             return False, "ScaledMMXLA requires running on TPU."

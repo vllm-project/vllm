@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 ###############################################################################
 # Copyright (C) 2024 Habana Labs, Ltd. an Intel Company
@@ -57,16 +58,16 @@ class HPUAttentionBackend(AttentionBackend):
     def swap_blocks(
         src_kv_cache: torch.Tensor,
         dst_kv_cache: torch.Tensor,
-        src_to_dst: Dict[int, int],
+        src_to_dsts: torch.Tensor,
     ) -> None:
-        HPUPagedAttention.swap_blocks(src_kv_cache, dst_kv_cache, src_to_dst)
+        HPUPagedAttention.swap_blocks(src_kv_cache, dst_kv_cache, src_to_dsts)
 
     @staticmethod
     def copy_blocks(
         kv_caches: List[torch.Tensor],
-        src_to_dists: Dict[int, List[int]],
+        src_to_dsts: torch.Tensor,
     ) -> None:
-        HPUPagedAttention.copy_blocks(kv_caches, src_to_dists)
+        HPUPagedAttention.copy_blocks(kv_caches, src_to_dsts)
 
 
 @dataclass
@@ -77,6 +78,7 @@ class HPUAttentionMetadata(HPUPagedAttentionMetadata, AttentionMetadata):
     is_prompt: bool
     attn_bias: Optional[torch.Tensor]
     seq_lens_tensor: Optional[torch.Tensor]
+    context_lens_tensor: Optional[torch.Tensor]
 
 
 class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
@@ -108,9 +110,12 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         blocksparse_params: Optional[Dict[str, Any]] = None,
         max_seq_len: int = 4096,
         attn_type: str = AttentionType.DECODER,
+        kv_sharing_target_layer_name: Optional[str] = None,
         use_irope: bool = False,
     ) -> None:
         super(AttentionImpl, self).__init__()
+        if kv_sharing_target_layer_name is not None:
+            raise NotImplementedError("KV sharing is not supported in V0.")
         if use_irope:
             logger.warning_once(
                 "Using irope in HPU is not supported yet, it will fall back "
@@ -198,8 +203,7 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         key_cache = None
         value_cache = None
         if attn_metadata.is_prompt and self.attn_type \
-           is not AttentionType.ENCODER_ONLY \
-           and attn_metadata.block_list is None:
+           is not AttentionType.ENCODER_ONLY:
             key = key.unflatten(0, (block_indices.size(0), -1))
             value = value.unflatten(0, (block_indices.size(0), -1))
         if kv_cache is not None and isinstance(kv_cache, tuple):
@@ -229,6 +233,9 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                 attn_bias = attn_bias.tile((1, self.num_kv_heads, 1, 1))
                 attn_bias.add_(position_bias)
 
+            block_list = attn_metadata.block_list if attn_metadata \
+                and attn_metadata.block_list is not None else None
+
             out = ops.prompt_attention(
                 impl=self.prefill_impl,
                 query=query.view(query_shape),
@@ -237,23 +244,25 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                 is_causal=True,
                 attn_bias=attn_bias,
                 valid_seq_lengths=attn_metadata.seq_lens_tensor,
-                **self.common_attention_args())
+                **self.common_attention_args(block_list, key_cache,
+                                             value_cache))
             output = out.reshape(batch_size, seq_len, hidden_size)
         else:
             # Decoding run.
             output = HPUPagedAttention.forward_decode(
                 query=query,
-                key_cache=key_cache,
-                value_cache=value_cache,
-                block_list=attn_metadata.block_list,
                 block_mapping=attn_metadata.block_mapping,
                 block_bias=attn_metadata.attn_bias,
                 block_groups=attn_metadata.block_groups,
-                **self.common_attention_args())
+                **self.common_attention_args(attn_metadata.block_list,
+                                             key_cache, value_cache))
         # Reshape the output tensor.
         return output.view(batch_size, seq_len, hidden_size)
 
-    def common_attention_args(self):
+    def common_attention_args(self,
+                              block_list=None,
+                              key_cache=None,
+                              value_cache=None):
         fsdpa_op = self.fused_scaled_dot_product_attention.apply \
             if self.fused_scaled_dot_product_attention is not None else None
         return {
@@ -266,6 +275,9 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
             'keys_fetch_func': self.k_cache.fetch_from_cache,
             'values_fetch_func': self.v_cache.fetch_from_cache,
             'softmax_op': self.softmax,
+            'block_list': block_list,
+            'key_cache': key_cache,
+            'value_cache': value_cache,
         }
 
 

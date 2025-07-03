@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
 
 import pytest
@@ -17,7 +18,7 @@ class TestConfig:
 
 model_config = {
     "bigcode/starcoder2-3b": TestConfig(4096, (800, 1100)),
-    "google/gemma-2-2b-it": TestConfig(4096, (400, 800)),
+    "google/gemma-3-1b-it": TestConfig(4096, (400, 800)),
 }
 
 
@@ -25,7 +26,7 @@ model_config = {
     "model",
     [
         "bigcode/starcoder2-3b",  # sliding window only
-        "google/gemma-2-2b-it",  # sliding window + full attention
+        "google/gemma-3-1b-it",  # sliding window + full attention
     ])
 @pytest.mark.parametrize("batch_size", [5])
 @pytest.mark.parametrize("seed", [1])

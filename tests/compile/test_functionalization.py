@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
 import torch
@@ -11,7 +12,7 @@ from vllm.compilation.fusion import (FUSED_OPS, FusionPass, QuantKey,
                                      kFp8DynamicTokenSym, kFp8StaticTensorSym)
 from vllm.compilation.fx_utils import find_auto_fn, find_auto_fn_maybe, is_func
 from vllm.compilation.noop_elimination import NoOpEliminationPass
-from vllm.config import CompilationConfig, VllmConfig
+from vllm.config import CompilationConfig, PassConfig, VllmConfig
 
 from .backend import TestBackend
 
@@ -53,9 +54,8 @@ def test_fix_functionalization(model: str, quant_key: QuantKey,
     torch.set_default_device("cuda")
 
     vllm_config = VllmConfig()
-    vllm_config.compilation_config = CompilationConfig(pass_config= \
-        CompilationConfig.PassConfig(enable_fusion=do_fusion,
-                                          enable_noop=True))
+    vllm_config.compilation_config = CompilationConfig(
+        pass_config=PassConfig(enable_fusion=do_fusion, enable_noop=True))
     noop_pass = NoOpEliminationPass(vllm_config)
     fusion_pass = FusionPass.instance(vllm_config)
     act_quant_fusion_pass = ActivationQuantFusionPass(vllm_config)

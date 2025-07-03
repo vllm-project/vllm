@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-from typing import Optional, Tuple
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import Optional
 
 import torch
 import torch._inductor.pattern_matcher as pm
@@ -125,7 +126,7 @@ class MiddleAllReduceRMSNormPattern(AllReduceRMSNormPattern):
             residual: torch.Tensor,
             mm_1: torch.Tensor,
             rms_norm_weights: torch.Tensor,
-        ) -> Tuple[torch.Tensor, torch.Tensor]:
+        ) -> tuple[torch.Tensor, torch.Tensor]:
             all_reduce = tensor_model_parallel_all_reduce(mm_1)
 
             rmsnorm = torch.ops.higher_order.auto_functionalized(
@@ -142,7 +143,7 @@ class MiddleAllReduceRMSNormPattern(AllReduceRMSNormPattern):
             residual: torch.Tensor,
             mm_1: torch.Tensor,
             rms_norm_weights: torch.Tensor,
-        ) -> Tuple[torch.Tensor, torch.Tensor]:
+        ) -> tuple[torch.Tensor, torch.Tensor]:
             tp = get_tp_group()
             tp_size = get_tensor_model_parallel_world_size()
             reduce_scatter = torch.ops.vllm.reduce_scatter.default(
@@ -190,7 +191,7 @@ class LastAllReduceRMSNormPattern(AllReduceRMSNormPattern):
             residual: torch.Tensor,
             mm_1: torch.Tensor,
             rms_norm_weights: torch.Tensor,
-        ) -> Tuple[torch.Tensor, torch.Tensor]:
+        ) -> tuple[torch.Tensor, torch.Tensor]:
             all_reduce = tensor_model_parallel_all_reduce(mm_1)
 
             rmsnorm = torch.ops.higher_order.auto_functionalized(
@@ -207,7 +208,7 @@ class LastAllReduceRMSNormPattern(AllReduceRMSNormPattern):
             residual: torch.Tensor,
             mm_1: torch.Tensor,
             rms_norm_weights: torch.Tensor,
-        ) -> Tuple[torch.Tensor, torch.Tensor]:
+        ) -> tuple[torch.Tensor, torch.Tensor]:
             tp = get_tp_group()
             tp_size = get_tensor_model_parallel_world_size()
             reduce_scatter = torch.ops.vllm.reduce_scatter.default(
@@ -243,24 +244,25 @@ class SequenceParallelismPass(VllmInductorPass):
             pass_name="sequence_parallelism_pass")
         for epsilon in [1e-5, 1e-6]:
             EmbeddingAllReduceRMSNormPattern(
-                epsilon, self.dtype, self.device).register(self.patterns)
+                epsilon, self.model_dtype, self.device).register(self.patterns)
 
-            MiddleAllReduceRMSNormPattern(epsilon, self.dtype,
+            MiddleAllReduceRMSNormPattern(epsilon, self.model_dtype,
                                           self.device).register(self.patterns)
 
-            LastAllReduceRMSNormPattern(epsilon, self.dtype,
+            LastAllReduceRMSNormPattern(epsilon, self.model_dtype,
                                         self.device).register(self.patterns)
             # WARNING: This is a hack to clear the pattern matcher cache
             # and allow multiple values of epsilon.
             torch._inductor.pattern_matcher._seen_patterns.clear()
 
     def is_applicable_for_shape(self, shape: Optional[int]) -> bool:
-        # only do replace for specific shapes
         tp_size = get_tensor_model_parallel_world_size()
         return shape is not None and shape % tp_size == 0
 
     def __call__(self, graph: fx.Graph):
+        self.begin()
         self.dump_graph(graph, "before_sequence_parallelism_pass")
         count = self.patterns.apply(graph)
         logger.debug("Replaced %s patterns", count)
         self.dump_graph(graph, "after_sequence_parallelism_pass")
+        self.end_and_log()

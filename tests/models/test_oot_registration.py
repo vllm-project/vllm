@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
 
 from vllm import LLM, SamplingParams
 from vllm.assets.image import ImageAsset
+from vllm.multimodal.image import convert_image_mode
 
 from ..utils import create_new_process_for_each_test
 
@@ -58,7 +60,7 @@ def test_oot_registration_embedding(
             assert all(v == 0 for v in output.outputs.embedding)
 
 
-image = ImageAsset("cherry_blossom").pil_image.convert("RGB")
+image = convert_image_mode(ImageAsset("cherry_blossom").pil_image, "RGB")
 
 
 @create_new_process_for_each_test()

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for smolvlm's multimodal preprocessing kwargs."""
 import pytest
 from transformers import SmolVLMConfig

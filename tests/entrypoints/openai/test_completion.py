@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # imports for guided decoding tests
 import json
-import re
 import shutil
 from tempfile import TemporaryDirectory
 from typing import Optional
@@ -11,6 +10,7 @@ import jsonschema
 import openai  # use the official client for correctness check
 import pytest
 import pytest_asyncio
+import regex as re
 # downloading lora to test lora requests
 from huggingface_hub import snapshot_download
 from openai import BadRequestError

@@ -77,11 +77,6 @@ instance/
 # Scrapy stuff:
 .scrapy
 
-# Sphinx documentation
-docs/_build/
-docs/source/getting_started/examples/
-docs/source/api/vllm
-
 # PyBuilder
 .pybuilder/
 target/
@@ -151,6 +146,7 @@ venv.bak/
 
 # mkdocs documentation
 /site
+docs/examples
 
 # mypy
 .mypy_cache/

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
 import tempfile
@@ -21,7 +22,7 @@ from vllm.entrypoints.openai.protocol import (BatchRequestInput,
                                               BatchResponseData,
                                               ChatCompletionResponse,
                                               EmbeddingResponse, ErrorResponse,
-                                              ScoreResponse)
+                                              RerankResponse, ScoreResponse)
 # yapf: enable
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
@@ -33,9 +34,7 @@ from vllm.utils import FlexibleArgumentParser, random_uuid
 from vllm.version import __version__ as VLLM_VERSION
 
 
-def parse_args():
-    parser = FlexibleArgumentParser(
-        description="vLLM OpenAI-Compatible batch runner.")
+def make_arg_parser(parser: FlexibleArgumentParser):
     parser.add_argument(
         "-i",
         "--input-file",
@@ -98,7 +97,13 @@ def parse_args():
         default=False,
         help="If set to True, enable prompt_tokens_details in usage.")
 
-    return parser.parse_args()
+    return parser
+
+
+def parse_args():
+    parser = FlexibleArgumentParser(
+        description="vLLM OpenAI-Compatible batch runner.")
+    return make_arg_parser(parser).parse_args()
 
 
 # explicitly use pure text format, with a newline at the end
@@ -270,8 +275,11 @@ async def run_request(serving_engine_func: Callable,
                       tracker: BatchProgressTracker) -> BatchRequestOutput:
     response = await serving_engine_func(request.body)
 
-    if isinstance(response,
-                  (ChatCompletionResponse, EmbeddingResponse, ScoreResponse)):
+    if isinstance(
+            response,
+        (ChatCompletionResponse, EmbeddingResponse, ScoreResponse,
+         RerankResponse),
+    ):
         batch_output = BatchRequestOutput(
             id=f"vllm-{random_uuid()}",
             custom_id=request.custom_id,
@@ -365,8 +373,8 @@ async def main(args):
 
         # Determine the type of request and run it.
         if request.url == "/v1/chat/completions":
-            chat_handler_fn = (None if openai_serving_chat is None else
-                               openai_serving_chat.create_chat_completion)
+            chat_handler_fn = openai_serving_chat.create_chat_completion if \
+                openai_serving_chat is not None else None
             if chat_handler_fn is None:
                 response_futures.append(
                     make_async_error_request_output(
@@ -380,8 +388,8 @@ async def main(args):
                 run_request(chat_handler_fn, request, tracker))
             tracker.submitted()
         elif request.url == "/v1/embeddings":
-            embed_handler_fn = (None if openai_serving_embedding is None else
-                                openai_serving_embedding.create_embedding)
+            embed_handler_fn = openai_serving_embedding.create_embedding if \
+                openai_serving_embedding is not None else None
             if embed_handler_fn is None:
                 response_futures.append(
                     make_async_error_request_output(
@@ -393,9 +401,9 @@ async def main(args):
             response_futures.append(
                 run_request(embed_handler_fn, request, tracker))
             tracker.submitted()
-        elif request.url == "/v1/score":
-            score_handler_fn = (None if openai_serving_scores is None else
-                                openai_serving_scores.create_score)
+        elif request.url.endswith("/score"):
+            score_handler_fn = openai_serving_scores.create_score if \
+                openai_serving_scores is not None else None
             if score_handler_fn is None:
                 response_futures.append(
                     make_async_error_request_output(
@@ -407,13 +415,29 @@ async def main(args):
             response_futures.append(
                 run_request(score_handler_fn, request, tracker))
             tracker.submitted()
+        elif request.url.endswith("/rerank"):
+            rerank_handler_fn = openai_serving_scores.do_rerank if \
+                openai_serving_scores is not None else None
+            if rerank_handler_fn is None:
+                response_futures.append(
+                    make_async_error_request_output(
+                        request,
+                        error_msg="The model does not support Rerank API",
+                    ))
+                continue
+
+            response_futures.append(
+                run_request(rerank_handler_fn, request, tracker))
+            tracker.submitted()
         else:
             response_futures.append(
                 make_async_error_request_output(
                     request,
-                    error_msg=
-                    "Only /v1/chat/completions, /v1/embeddings, and /v1/score "
-                    "are supported in the batch endpoint.",
+                    error_msg=f"URL {request.url} was used. "
+                    "Supported endpoints: /v1/chat/completions, /v1/embeddings,"
+                    " /score, /rerank ."
+                    "See vllm/entrypoints/openai/api_server.py for supported "
+                    "score/rerank versions.",
                 ))
 
     with tracker.pbar():

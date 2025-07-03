@@ -1,29 +1,45 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import ast
 import dataclasses
 import os
 import pprint
 import time
-from contextlib import ExitStack
-from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
-from unittest.mock import patch
+from collections.abc import Sequence
+from typing import Any, Callable, Optional
 
 import torch
 import torch.fx as fx
+from torch._dispatch.python import enable_python_dispatcher
 
 import vllm.envs as envs
 from vllm.config import CompilationConfig, VllmConfig
 from vllm.logger import init_logger
-from vllm.utils import weak_ref_tensors
+from vllm.platforms import current_platform
+from vllm.utils import is_torch_equal_or_newer, resolve_obj_by_qualname
 
-from .compiler_interface import EagerAdaptor, InductorAdaptor
+from .compiler_interface import (CompilerInterface, EagerAdaptor,
+                                 InductorAdaptor, InductorStandaloneAdaptor)
 from .counter import compilation_counter
 from .inductor_pass import InductorPass
-from .monitor import end_monitoring_torch_compile
 from .pass_manager import PostGradPassManager
 
 logger = init_logger(__name__)
+
+
+def make_compiler(compilation_config: CompilationConfig) -> CompilerInterface:
+    if compilation_config.use_inductor:
+        if envs.VLLM_USE_STANDALONE_COMPILE and is_torch_equal_or_newer(
+                "2.8.0"):
+            logger.debug("Using InductorStandaloneAdaptor")
+            return InductorStandaloneAdaptor()
+        else:
+            logger.debug("Using InductorAdaptor")
+            return InductorAdaptor()
+    else:
+        logger.debug("Using EagerAdaptor")
+        return EagerAdaptor()
 
 
 class CompilerManager:
@@ -41,11 +57,11 @@ class CompilerManager:
     support int as key.
     """
 
-    def __init__(self, use_inductor: bool):
-        self.cache: Dict[Tuple[Optional[int], int, str], Any] = dict()
-        cls = InductorAdaptor if use_inductor else EagerAdaptor
-        self.compiler = cls()
+    def __init__(self, compilation_config: CompilationConfig):
+        self.cache: dict[tuple[Optional[int], int, str], Any] = dict()
         self.is_cache_updated = False
+        self.compilation_config = compilation_config
+        self.compiler = make_compiler(compilation_config)
 
     def compute_hash(self, vllm_config: VllmConfig) -> str:
         return self.compiler.compute_hash(vllm_config)
@@ -76,7 +92,7 @@ class CompilerManager:
 
     def load(self,
              graph: fx.GraphModule,
-             example_inputs: List[Any],
+             example_inputs: list[Any],
              graph_index: int,
              runtime_shape: Optional[int] = None) -> Optional[Callable]:
         if (runtime_shape, graph_index, self.compiler.name) not in self.cache:
@@ -123,8 +139,15 @@ class CompilerManager:
 
         # no compiler cached the graph, or the cache is disabled,
         # we need to compile it
+        if isinstance(self.compiler, InductorAdaptor):
+            # Let compile_fx generate a key for us
+            maybe_key = None
+        else:
+            maybe_key = \
+                f"artifact_shape_{runtime_shape}_subgraph_{graph_index}"
         compiled_graph, handle = self.compiler.compile(
-            graph, example_inputs, additional_inductor_config, runtime_shape)
+            graph, example_inputs, additional_inductor_config, runtime_shape,
+            maybe_key)
 
         assert compiled_graph is not None, "Failed to compile the graph"
 
@@ -165,7 +188,7 @@ class SplitItem:
 
 
 def split_graph(graph: fx.GraphModule,
-                ops: List[str]) -> Tuple[fx.GraphModule, List[SplitItem]]:
+                ops: list[str]) -> tuple[fx.GraphModule, list[SplitItem]]:
     # split graph by ops
     subgraph_id = 0
     node_to_subgraph_id = {}
@@ -231,7 +254,7 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
     """
 
     def __init__(self, module: torch.fx.GraphModule,
-                 compile_submod_names: List[str], vllm_config: VllmConfig,
+                 compile_submod_names: list[str], vllm_config: VllmConfig,
                  graph_pool, vllm_backend: "VllmBackend"):
         super().__init__(module)
         from torch._guards import detect_fake_mode
@@ -241,18 +264,20 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
         self.graph_pool = graph_pool
         self.vllm_config = vllm_config
         self.vllm_backend = vllm_backend
+        # When True, it annoyingly dumps the torch.fx.Graph on errors.
+        self.extra_traceback = False
 
     def run(self, *args):
         fake_args = [
             self.fake_mode.from_tensor(t) if isinstance(t, torch.Tensor) else t
             for t in args
         ]
-        with self.fake_mode:
+        with self.fake_mode, enable_python_dispatcher():
             return super().run(*fake_args)
 
     def call_module(self, target: torch.fx.node.Target,
-                    args: Tuple[torch.fx.node.Argument,
-                                ...], kwargs: Dict[str, Any]) -> Any:
+                    args: tuple[torch.fx.node.Argument,
+                                ...], kwargs: dict[str, Any]) -> Any:
         assert isinstance(target, str)
         output = super().call_module(target, args, kwargs)
 
@@ -273,7 +298,9 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
                 num_graphs=len(self.compile_submod_names),
                 runtime_shape=None)
 
-            self.module.__dict__[target] = PiecewiseBackend(
+            piecewise_backend = resolve_obj_by_qualname(
+                current_platform.get_piecewise_backend_cls())
+            self.module.__dict__[target] = piecewise_backend(
                 submod, self.vllm_config, self.graph_pool, index,
                 len(self.compile_submod_names), sym_shape_indices,
                 compiled_graph_for_general_shape, self.vllm_backend)
@@ -303,12 +330,12 @@ class VllmBackend:
     graph: fx.GraphModule
     # the stiching graph module for all the piecewise graphs
     split_gm: fx.GraphModule
-    piecewise_graphs: List[SplitItem]
+    piecewise_graphs: list[SplitItem]
     returned_callable: Callable
     # Inductor passes to run on the graph pre-defunctionalization
     post_grad_passes: Sequence[Callable]
-    sym_tensor_indices: List[int]
-    input_buffers: List[torch.Tensor]
+    sym_tensor_indices: list[int]
+    input_buffers: list[torch.Tensor]
     compiler_manager: CompilerManager
 
     def __init__(
@@ -317,7 +344,7 @@ class VllmBackend:
     ):
         global global_graph_pool
         if global_graph_pool is None:
-            global_graph_pool = torch.cuda.graph_pool_handle()
+            global_graph_pool = current_platform.graph_pool_handle()
 
         # TODO: in the future, if we want to use multiple
         # streams, it might not be safe to share a global pool.
@@ -334,7 +361,7 @@ class VllmBackend:
         self.compilation_config = vllm_config.compilation_config
 
         self.compiler_manager: CompilerManager = CompilerManager(
-            self.compilation_config.use_inductor)
+            self.compilation_config)
 
         # `torch.compile` is JIT compiled, so we don't need to
         # do anything here
@@ -534,197 +561,3 @@ class VllmBackend:
             return self.split_gm(*list_args)
 
         return copy_and_call
-
-
-@dataclasses.dataclass
-class ConcreteSizeEntry:
-    runtime_shape: int
-    need_to_compile: bool  # the size is in compile_sizes
-    use_cudagraph: bool  # the size is in cudagraph_capture_sizes
-
-    compiled: bool = False
-    runnable: Callable = None  # type: ignore
-    num_finished_warmup: int = 0
-    cudagraph: Optional[torch.cuda.CUDAGraph] = None
-    output: Optional[Any] = None
-
-    # for cudagraph debugging, track the input addresses
-    # during capture, and check if they are the same during replay
-    input_addresses: Optional[List[int]] = None
-
-
-class PiecewiseBackend:
-
-    def __init__(self, graph: fx.GraphModule, vllm_config: VllmConfig,
-                 graph_pool: Any, piecewise_compile_index: int,
-                 total_piecewise_compiles: int, sym_shape_indices: List[int],
-                 compiled_graph_for_general_shape: Callable,
-                 vllm_backend: VllmBackend):
-        """
-        The backend for piecewise compilation.
-        It mainly handles the compilation and cudagraph capturing.
-
-        We will compile `self.graph` once for the general shape,
-        and then compile for different shapes specified in
-        `compilation_config.compile_sizes`.
-
-        Independently, we will capture cudagraph for different shapes.
-
-        If a shape needs both compilation and cudagraph, we will
-        compile it first, and then capture cudagraph.
-        """
-        self.graph = graph
-        self.vllm_config = vllm_config
-        self.compilation_config = vllm_config.compilation_config
-        self.graph_pool = graph_pool
-        self.piecewise_compile_index = piecewise_compile_index
-        self.total_piecewise_compiles = total_piecewise_compiles
-        self.vllm_backend = vllm_backend
-
-        self.is_first_graph = piecewise_compile_index == 0
-        self.is_last_graph = (
-            piecewise_compile_index == total_piecewise_compiles - 1)
-
-        self.compile_sizes: Set[int] = set(
-            self.compilation_config.compile_sizes)
-        self.cudagraph_capture_sizes: Set[int] = set(
-            self.compilation_config.cudagraph_capture_sizes
-        ) if self.compilation_config.use_cudagraph else set()
-
-        self.first_run_finished = False
-
-        self.compiled_graph_for_general_shape = compiled_graph_for_general_shape  # noqa
-
-        self.sym_shape_indices = sym_shape_indices
-
-        self.is_debugging_mode = envs.VLLM_LOGGING_LEVEL == "DEBUG"
-
-        # the entries for different shapes that we need to either
-        # compile or capture cudagraph
-        self.concrete_size_entries: Dict[int, ConcreteSizeEntry] = {}
-
-        # to_be_compiled_sizes tracks the remaining sizes to compile,
-        # and updates during the compilation process, so we need to copy it
-        self.to_be_compiled_sizes: Set[int] = self.compile_sizes.copy()
-        for shape in self.compile_sizes.union(self.cudagraph_capture_sizes):
-            self.concrete_size_entries[shape] = ConcreteSizeEntry(
-                runtime_shape=shape,
-                need_to_compile=shape in self.compile_sizes,
-                use_cudagraph=shape in self.cudagraph_capture_sizes,
-            )
-
-    def check_for_ending_compilation(self):
-        if self.is_last_graph and not self.to_be_compiled_sizes:
-            # no specific sizes to compile
-            # save the hash of the inductor graph for the next run
-            self.vllm_backend.compiler_manager.save_to_file()
-            end_monitoring_torch_compile(self.vllm_config)
-
-    def __call__(self, *args) -> Any:
-        if not self.first_run_finished:
-            self.first_run_finished = True
-            self.check_for_ending_compilation()
-            return self.compiled_graph_for_general_shape(*args)
-
-        runtime_shape = args[self.sym_shape_indices[0]]
-        if runtime_shape not in self.concrete_size_entries:
-            # we don't need to do anything for this shape
-            return self.compiled_graph_for_general_shape(*args)
-
-        entry = self.concrete_size_entries[runtime_shape]
-
-        if entry.runnable is None:
-            entry.runnable = self.compiled_graph_for_general_shape
-
-        if entry.need_to_compile and not entry.compiled:
-            entry.compiled = True
-            self.to_be_compiled_sizes.remove(runtime_shape)
-            # args are real arguments
-            entry.runnable = self.vllm_backend.compiler_manager.compile(
-                self.graph,
-                args,
-                self.compilation_config.inductor_compile_config,
-                self.compilation_config,
-                graph_index=self.piecewise_compile_index,
-                num_graphs=self.total_piecewise_compiles,
-                runtime_shape=runtime_shape)
-
-            # finished compilations for all required shapes
-            if self.is_last_graph and not self.to_be_compiled_sizes:
-                self.check_for_ending_compilation()
-
-        if not entry.use_cudagraph:
-            return entry.runnable(*args)
-
-        if entry.cudagraph is None:
-            if entry.num_finished_warmup < self.compilation_config.cudagraph_num_of_warmups:  # noqa
-                entry.num_finished_warmup += 1
-                if self.is_first_graph:
-                    logger.debug(
-                        "Warming up %s/%s for shape %s",
-                        entry.num_finished_warmup,
-                        self.compilation_config.cudagraph_num_of_warmups,
-                        runtime_shape)
-                return entry.runnable(*args)
-
-            if self.is_first_graph:
-                # Since we capture cudagraph for many different shapes and
-                # capturing is fast, we don't need to log it for every shape.
-                # We only log it in the debug mode.
-                logger.debug("Capturing a cudagraph for shape %s",
-                             runtime_shape)
-
-            input_addresses = [
-                x.data_ptr() for x in args if isinstance(x, torch.Tensor)
-            ]
-            entry.input_addresses = input_addresses
-            cudagraph = torch.cuda.CUDAGraph()
-
-            with ExitStack() as stack:
-                if not self.is_first_graph:
-                    # during every model forward, we will capture
-                    # many pieces of cudagraphs (roughly one per layer).
-                    # running gc again and again across layers will
-                    # make the cudagraph capture very slow.
-                    # therefore, we only run gc for the first graph,
-                    # and disable gc for the rest of the graphs.
-                    stack.enter_context(patch("gc.collect", lambda: None))
-                    stack.enter_context(
-                        patch("torch.cuda.empty_cache", lambda: None))
-
-                # mind-exploding: carefully manage the reference and memory.
-                with torch.cuda.graph(cudagraph, pool=self.graph_pool):
-                    # `output` is managed by pytorch's cudagraph pool
-                    output = entry.runnable(*args)
-                    if self.is_last_graph:
-                        # by converting it to weak ref,
-                        # the original `output` will immediately be released
-                        # to save memory. It is only safe to do this for
-                        # the last graph, because the output of the last graph
-                        # will not be used by any other cuda graph.
-                        output = weak_ref_tensors(output)
-
-            # here we always use weak ref for the output
-            # to save memory
-            entry.output = weak_ref_tensors(output)
-            entry.cudagraph = cudagraph
-
-            compilation_counter.num_cudagraph_caputured += 1
-
-            # important: we need to return the output, rather than
-            # the weak ref of the output, so that pytorch can correctly
-            # manage the memory during cuda graph capture
-            return output
-
-        if self.is_debugging_mode:
-            # check if the input addresses are the same
-            new_input_addresses = [
-                x.data_ptr() for x in args if isinstance(x, torch.Tensor)
-            ]
-            assert new_input_addresses == entry.input_addresses, (
-                "Input addresses for cudagraphs are different during replay."
-                f" Expected {entry.input_addresses}, got {new_input_addresses}"
-            )
-
-        entry.cudagraph.replay()
-        return entry.output

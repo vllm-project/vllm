@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Adapted from https://github.com/fixie-ai/ultravox/blob/ecd58c4041030bae2ad15aa6bcf04ab43199ea02/ultravox/model/ultravox_model.py
 """PyTorch Ultravox model."""
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Any, Literal, Optional, Set, Tuple, TypedDict, Union
+from typing import Any, Literal, Optional, TypedDict, Union
 
 import torch
 from torch import nn
@@ -17,7 +18,7 @@ from vllm.config import VllmConfig
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.activation import MulAndSilu, get_act_fn
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.model_loader.loader import DefaultModelLoader
+from vllm.model_executor.model_loader import DefaultModelLoader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -619,8 +620,8 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
         return self.language_model.compute_logits(hidden_states,
                                                   sampling_metadata)
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
 
         loader = AutoWeightsLoader(self,
                                    ignore_unexpected_prefixes=["audio_tower."])

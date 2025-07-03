@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Adapted from
 # https://huggingface.co/Qwen/Qwen2.5-Math-RM-72B/blob/main/modeling_qwen2_rm.py
 # Copyright 2024 The Qwen team.
 # Copyright 2023 The vLLM team.
 """Inference-only Qwen2-RM model compatible with HuggingFace weights."""
-from typing import Iterable, Optional, Set, Tuple, Union
+from collections.abc import Iterable
+from typing import Optional, Union
 
 import torch
 from torch import nn
@@ -95,8 +97,8 @@ class Qwen2RewardBaseModel(nn.Module, SupportsLoRA, SupportsPP,
     ) -> Optional[PoolerOutput]:
         return self._pooler(hidden_states, pooling_metadata)
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self,
                                    ignore_unexpected_prefixes=["lm_head."])
         return loader.load_weights(weights)
