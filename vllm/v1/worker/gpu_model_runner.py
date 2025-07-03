@@ -823,8 +823,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                             ))
                     for layer_name in kv_cache_group_spec.layer_names:
                         assert type(attn_metadata) is list
-                        # assert attn_metadata_i is not None
-                        # What if it's None? Do we still add it to the list?
                         attn_metadata[ubid][layer_name] = attn_metadata_i
             else:
                 attn_metadata_i = (
@@ -1581,7 +1579,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         @torch.inference_mode()
         def _ubatch_thread(results, model, ubatch_metadata):
-            # print(f"Starting Request on ubatch: {ubatch_ctx.id}", flush=True)
             with ubatch_metadata.context:
                 model_output = model(
                     input_ids=ubatch_metadata.input_ids,
@@ -1590,7 +1587,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     inputs_embeds=ubatch_metadata.inputs_embeds,
                 )
             results.append((ubatch_metadata.context.id, model_output))
-            # print(f"Finishing Request on ubatch: {ubatch_ctx.id}", flush=True)
 
         def _run_ubatches(ubatch_metadata, model) -> torch.Tensor:
             results: list[tuple[int, torch.Tensor]] = []

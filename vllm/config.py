@@ -4578,7 +4578,7 @@ class VllmConfig:
             #  More specifically piecewise cuda-graphs
             logger.warning_once(
                 "Piecewise compilation is not supported with "
-                "microbatching. Disabling piecewiseching compilation.")
+                "microbatching. Disabling piecewise compilation.")
             self.compilation_config.level = CompilationLevel.NO_COMPILATION
         disable_chunked_prefill_reasons: list[str] = []
 
