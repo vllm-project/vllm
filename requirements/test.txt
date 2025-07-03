@@ -45,7 +45,7 @@ backoff==2.2.1
     # via
     #   -r requirements/test.in
     #   schemathesis
-bitsandbytes==0.45.3
+bitsandbytes==0.46.1
     # via -r requirements/test.in
 black==24.10.0
     # via datamodel-code-generator
