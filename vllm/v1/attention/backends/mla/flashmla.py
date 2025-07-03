@@ -76,7 +76,6 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
         )
 
         if self.runner.full_cuda_graph:
-            n = num_splits.size(0)
             # First time around (CUDAGraph capture), allocate the static buffer
             if self.cg_buf_tile_scheduler_metadata is None:
                 self.cg_buf_tile_scheduler_metadata = tile_scheduler_metadata
