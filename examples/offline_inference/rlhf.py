@@ -12,6 +12,12 @@ Note that this is a simple demonstration of one training instance and one
 inference instance. In practice, there could be multiple training instances
 and multiple inference instances. For the full implementation, please refer
 to the OpenRLHF framework.
+
+It is important to set `VLLM_HOST_IP` to an address on a secure network when
+using this example. Unsecured communications between components will be used
+over this IP address and should NOT be exposed to untrusted networks. For more
+information, see:
+https://docs.vllm.ai/en/latest/deployment/security.html
 """
 
 import os
