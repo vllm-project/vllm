@@ -52,7 +52,7 @@ def test_get_field():
         ("distilbert/distilgpt2", "generate", "generate"),
         ("intfloat/multilingual-e5-small", "pooling", "embed"),
         ("jason9693/Qwen2.5-1.5B-apeach", "pooling", "classify"),
-        ("cross-encoder/ms-marco-MiniLM-L-6-v2", "pooling", "score"),
+        ("cross-encoder/ms-marco-MiniLM-L-6-v2", "pooling", "classify"),
         ("Qwen/Qwen2.5-Math-RM-72B", "pooling", "reward"),
         ("openai/whisper-small", "transcription", "transcription"),
     ],
@@ -61,6 +61,32 @@ def test_auto_task(model_id, expected_runner_type, expected_task):
     config = ModelConfig(
         model_id,
         task="auto",
+        tokenizer=model_id,
+        tokenizer_mode="auto",
+        trust_remote_code=False,
+        seed=0,
+        dtype="float16",
+    )
+
+    assert config.runner_type == expected_runner_type
+    assert config.task == expected_task
+
+
+@pytest.mark.parametrize(
+    ("model_id", "expected_runner_type", "expected_task"),
+    [
+        ("distilbert/distilgpt2", "pooling", "embed"),
+        ("intfloat/multilingual-e5-small", "pooling", "embed"),
+        ("jason9693/Qwen2.5-1.5B-apeach", "pooling", "classify"),
+        ("cross-encoder/ms-marco-MiniLM-L-6-v2", "pooling", "classify"),
+        ("Qwen/Qwen2.5-Math-RM-72B", "pooling", "embed"),
+        ("openai/whisper-small", "pooling", "embed"),
+    ],
+)
+def test_score_task(model_id, expected_runner_type, expected_task):
+    config = ModelConfig(
+        model_id,
+        task="score",
         tokenizer=model_id,
         tokenizer_mode="auto",
         trust_remote_code=False,
