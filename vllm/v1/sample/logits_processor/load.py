@@ -23,7 +23,7 @@ class LogitsProcessorEntrypoint(TypedDict):
 
 
 # Specify logitproc by qualname (str) or package and entrypoint name
-LogitsProcessorSpec = Union[str, LogitsProcessorEntrypoint]
+LogitsProcessorsSpec = Union[str, LogitsProcessorEntrypoint]
 
 
 def load_logitsprocs(allowed_logitsprocs: list[str]) -> None:

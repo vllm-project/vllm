@@ -11,7 +11,6 @@ import textwrap
 import uuid
 import warnings
 from collections import Counter
-from collections.abc import Sequence
 from contextlib import contextmanager
 from dataclasses import (MISSING, Field, asdict, field, fields, is_dataclass,
                          replace)
@@ -52,6 +51,7 @@ from vllm.utils import (DEFAULT_MAX_NUM_BATCHED_TOKENS,
                         cuda_device_count_stateless, get_cpu_memory,
                         get_open_port, is_torch_equal_or_newer, random_uuid,
                         resolve_obj_by_qualname)
+from vllm.v1.sample.logits_processor import LogitsProcessorsSpec
 
 # yapf: enable
 
@@ -4353,8 +4353,8 @@ class VllmConfig:
     you are using. Contents must be hashable."""
     instance_id: str = ""
     """The ID of the vLLM instance."""
-    allowed_logitsprocs: Sequence[str] = ()
-    """Allowed logitsprocs plugin names"""
+    logits_processors: Optional[list[LogitsProcessorsSpec]] = None
+    """Specifications for which logits processors to load"""
 
     def compute_hash(self) -> str:
         """

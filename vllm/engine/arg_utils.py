@@ -44,7 +44,8 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.utils import (STR_DUAL_CHUNK_FLASH_ATTN_VAL, FlexibleArgumentParser,
                         GiB_bytes, get_ip, is_in_ray_actor)
 from vllm.v1.sample.logits_processor import logitsprocs_package_pattern
-from vllm.v1.sample.logits_processor.load import LogitsProcessorEntrypoint
+from vllm.v1.sample.logits_processor.load import (LogitsProcessorEntrypoint,
+                                                  LogitsProcessorsSpec)
 
 # yapf: enable
 
@@ -497,8 +498,8 @@ class EngineArgs:
     enable_multimodal_encoder_data_parallel: bool = \
         ParallelConfig.enable_multimodal_encoder_data_parallel
 
-    logitsprocs_qualnames: Optional[list[str]]
-    allowed_logitsprocs_plugins: Optional[list[LogitsProcessorEntrypoint]]
+    logits_processors_qualnames: Optional[list[str]]
+    logits_processors_entrypoints: Optional[list[LogitsProcessorEntrypoint]]
 
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
@@ -938,16 +939,18 @@ class EngineArgs:
             description="Logits processors settings.",
         )
         logitsprocs_group.add_argument(
-            "--allowed-logitsprocs-plugins",
+            "--logits-processors-entrypoints",
             type=lambda x: comma_separated_list(x, logitsprocs_package_pattern
                                                 ),
             default=[],
-            help="Allowed logits processor plugins.")
+            help="Comma-separated list of allowed logits processor "
+            "entrypoints (acceptable entrypoint formats: "
+            "package.entrypoint | package.*).")
         logitsprocs_group.add_argument(
-            "--logitsprocs-qualnames",
+            "--logits-processors-qualnames",
             type=lambda x: comma_separated_list(x, None),
             default=[],
-            help="Logits processors qualified names.")
+            help="Comma-separated list of logits processor qualified names.")
 
         # vLLM arguments
         vllm_kwargs = get_kwargs(VllmConfig)
@@ -1330,6 +1333,10 @@ class EngineArgs:
             collect_detailed_traces=self.collect_detailed_traces,
         )
 
+        logits_processors: Optional[list[LogitsProcessorsSpec]] = (
+            ((self.logits_processors_qualnames or []) +
+             (self.logits_processors_entrypoints or [])) or None)
+
         config = VllmConfig(
             model_config=model_config,
             cache_config=cache_config,
@@ -1346,6 +1353,7 @@ class EngineArgs:
             kv_transfer_config=self.kv_transfer_config,
             kv_events_config=self.kv_events_config,
             additional_config=self.additional_config,
+            logits_processors=logits_processors,
         )
 
         return config
