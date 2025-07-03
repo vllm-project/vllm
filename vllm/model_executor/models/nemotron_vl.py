@@ -24,7 +24,7 @@ from vllm.config import VllmConfig
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.awq import AWQConfig
 from vllm.model_executor.models.module_mapping import MultiModelKeys
-from vllm.model_executor.models.nemotron_radio import RADIOModel
+#from vllm.model_executor.models.nemotron_radio import RADIOModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.image import convert_image_mode
@@ -759,11 +759,13 @@ class BaseInternVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
     ) -> Mapping[str, NestedTensors]:
         processed_outputs = super()._call_hf_processor(
             prompt=prompt,
             mm_data=mm_data,
             mm_kwargs=mm_kwargs,
+            tok_kwargs=tok_kwargs,
         )
         # Call the HF processor to process the image inputs
         hf_processor = self.info.get_hf_processor(**mm_kwargs)
@@ -942,9 +944,10 @@ class InternVLMultiModalProcessor(
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
     ) -> Mapping[str, NestedTensors]:
         processed_outputs = super()._call_hf_processor(prompt, mm_data,
-                                                       mm_kwargs)
+                                                       mm_kwargs, tok_kwargs)
 
         hf_processor = self.info.get_hf_processor(**mm_kwargs)
         if self.info.supports_video and (
@@ -1090,9 +1093,12 @@ class Llama_Nemotron_Nano_VL_Model(nn.Module, SupportsMultiModal, SupportsPP,
         *,
         prefix: str,
     ):
-        return RADIOModel(config.vision_config,
-                          quant_config=quant_config,
-                          prefix=prefix)
+        # return RADIOModel(config.vision_config,
+        #                   quant_config=quant_config,
+        #                   prefix=prefix)
+        from transformers import AutoModel
+        return AutoModel.from_config(config.vision_config,
+                                     trust_remote_code=True)
 
     def _init_mlp1(self, config: PretrainedConfig) -> nn.Sequential:
         #vit_hidden_size = config.vision_config.hidden_size

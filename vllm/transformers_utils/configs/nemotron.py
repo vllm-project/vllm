@@ -233,11 +233,10 @@ class Llama_Nemotron_Nano_VL_Config(PretrainedConfig):
         else:
             self.vision_config = PretrainedConfig()
 
+        # use text_config instead of llama_config
         if llm_config is None:
-            #self.llm_config = LlamaConfig()
             self.text_config = LlamaConfig()
         else:
-            #self.llm_config = LlamaConfig(**llm_config):
             self.text_config = LlamaConfig(**llm_config)
 
         # Assign configuration values
