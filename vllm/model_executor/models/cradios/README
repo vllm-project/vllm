@@ -1,5 +1,0 @@
-ll * | awk '{print "cp",$9,"cradios"}'
-
-1. Copied from https://huggingface.co/nvidia/C-RADIOv2-H/blob/main/
-
-2. without hf_model.py and radio_model.py

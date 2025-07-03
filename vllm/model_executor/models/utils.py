@@ -274,16 +274,8 @@ class AutoWeightsLoader:
         # filter out weights with first-prefix/substr to skip in name
         weights = ((name, weight) for name, weight in weights
                    if not self._can_skip(name))
-        # weights_list = []
-        # for name, weight in weights:
-        #     if self._can_skip(name):
-        #         logger.info("Skipping weight %s", name)
-        #     else:
-        #         weights_list.append((name, weight))
-        # weights = iter(weights_list)
+
         autoloaded_weights = set(self._load_module("", self.module, weights))
-        logger.info("Autoloaded %d weights into %s", len(autoloaded_weights),
-                    type(autoloaded_weights))
         return autoloaded_weights
 
 

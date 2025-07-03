@@ -24,8 +24,6 @@ from vllm.config import VllmConfig
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.awq import AWQConfig
 from vllm.model_executor.models.module_mapping import MultiModelKeys
-# from vllm.model_executor.models.intern_vit import (InternVisionModel,
-#                                                    InternVisionPatchModel)
 from vllm.model_executor.models.nemotron_radio import RADIOModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -48,8 +46,6 @@ from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
 
 IMG_START = '<img>'
 IMG_END = '</img>'
-# khuang use a different token
-#IMG_CONTEXT = '<IMG_CONTEXT>'
 IMG_CONTEXT = '<image>'
 
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
@@ -901,12 +897,6 @@ class InternVLProcessingInfo(BaseInternVLProcessingInfo):
             tokenizer=self.get_tokenizer(),
             **kwargs,
         )
-        # config = self.ctx.model_config
-        # return self.ctx.get_hf_processor(
-        #     BaseImageProcessorFast,
-        #     image_processor=cached_image_processor_from_config(config),
-        #     **kwargs,
-        # )
 
 
 class InternVLDummyInputsBuilder(
@@ -1051,7 +1041,6 @@ class Llama_Nemotron_Nano_VL_Model(nn.Module, SupportsMultiModal, SupportsPP,
         self.ps_version = config.ps_version
 
         self.llm_arch_name = config.text_config.architectures[0]
-        #self.is_mono = self.llm_arch_name == 'InternLM2VEForCausalLM'
         self.vision_model = self._init_vision_model(
             config,
             quant_config=quant_config,
@@ -1095,23 +1084,6 @@ class Llama_Nemotron_Nano_VL_Model(nn.Module, SupportsMultiModal, SupportsPP,
         return RADIOModel(config.vision_config,
                           quant_config=quant_config,
                           prefix=prefix)
-        # if not is_mono:
-
-        #     vision_feature_layer = config.select_layer
-        #     if vision_feature_layer < 0:
-        #         num_hidden_layers = config.vision_config.num_hidden_layers \
-        #             + vision_feature_layer + 1
-        #     else:
-        #         num_hidden_layers = vision_feature_layer + 1
-
-        #     return InternVisionModel(
-        #         config.vision_config,
-        #         quant_config=quant_config,
-        #         num_hidden_layers_override=num_hidden_layers,
-        #         prefix=prefix,
-        #     )
-        # else:
-        #     return InternVisionPatchModel(config.vision_config)
 
     def _init_mlp1(self, config: PretrainedConfig) -> nn.Sequential:
         #vit_hidden_size = config.vision_config.hidden_size
@@ -1144,8 +1116,6 @@ class Llama_Nemotron_Nano_VL_Model(nn.Module, SupportsMultiModal, SupportsPP,
         return x
 
     def extract_feature(self, pixel_values: torch.Tensor) -> torch.Tensor:
-        #kh vit_embeds = self.vision_model(pixel_values=pixel_values)
-        #kh vit_embeds = vit_embeds[:, 1:, :]
         # https://huggingface.co/nvidia/Llama-3.1-Nemotron-Nano-VL-8B-V1/blob/main/modeling.py#L177
         vit_embeds = self.vision_model(x=pixel_values).features
         vit_embeds = vit_embeds.to(dtype=torch.bfloat16)
@@ -1161,7 +1131,7 @@ class Llama_Nemotron_Nano_VL_Model(nn.Module, SupportsMultiModal, SupportsPP,
 
     def _validate_pixel_values(self, data: torch.Tensor) -> torch.Tensor:
 
-        #kh h = w = self.config.vision_config.image_size
+        #use force_image_size to get image_size
         h = w = self.config.force_image_size
         expected_dims = (3, h, w)
 
@@ -1315,11 +1285,6 @@ class Llama_Nemotron_Nano_VL_Model(nn.Module, SupportsMultiModal, SupportsPP,
         return modalities
 
     def _set_visual_token_mask(self, input_ids: torch.Tensor) -> None:
-        # if self.is_mono:
-        #     assert self.img_context_token_id is not None
-        #     self.visual_token_mask = (
-        #         input_ids == self.img_context_token_id).reshape(-1, 1)
-        # else:
         self.visual_token_mask = None
 
     def get_language_model(self) -> torch.nn.Module:
@@ -1419,7 +1384,7 @@ class Llama_Nemotron_Nano_VL_Model(nn.Module, SupportsMultiModal, SupportsPP,
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
-        ## khuang ignore these two, which are registered_buffer instead of submodules # noqa: E501
+        ## Ignore registered_buffers
         ## see https://huggingface.co/nvidia/C-RADIOv2-H/blob/main/input_conditioner.py#L28 # noqa: E501
         skip_substrs = ["norm_mean", "norm_std"]
         loader = AutoWeightsLoader(self, skip_substrs=skip_substrs)
