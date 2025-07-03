@@ -714,43 +714,43 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             return attn_out, lse
         return attn_out
     
-        def _cudnn_varlen_func_diff_headdims(
-            self,
-            q,
-            k,
-            v,
-            scale,
-            workspace,
-            max_q_seq_lens,
-            max_kv_seq_lens,
-            seq_lens_q,
-            seq_lens_kv,
-            is_cuda_graph_compatible=True,
-        ):
-            from flashinfer.prefill import cudnn_batch_prefill_with_kv_cache
+    def _cudnn_varlen_func_diff_headdims(
+        self,
+        q,
+        k,
+        v,
+        scale,
+        workspace,
+        max_q_seq_lens,
+        max_kv_seq_lens,
+        seq_lens_q,
+        seq_lens_kv,
+        is_cuda_graph_compatible=True,
+    ):
+        from flashinfer.prefill import cudnn_batch_prefill_with_kv_cache
 
-            maybe_padded_v = v
-            if self._pad_v:
-                maybe_padded_v = torch.nn.functional.pad(
-                    v, [0, q.shape[-1] - v.shape[-1]], value=0)
-            if not is_cuda_graph_compatible:
-                seq_lens_q = seq_lens_q.to("cpu")
-                seq_lens_kv = seq_lens_kv.to("cpu")
-            result = cudnn_batch_prefill_with_kv_cache(
-                q=q,
-                k_cache=k,
-                v_cache=maybe_padded_v,
-                scale=scale,
-                workspace_buffer=workspace.to(torch.int8),
-                max_token_per_sequence=max_q_seq_lens,
-                max_sequence_kv=max_kv_seq_lens,
-                actual_seq_lens_q=seq_lens_q.view(-1, 1, 1, 1),
-                actual_seq_lens_kv=seq_lens_kv.view(-1, 1, 1, 1),
-                causal=True,
-                return_lse=True,
-                is_cuda_graph_compatible=is_cuda_graph_compatible,
-            )
-            return result
+        maybe_padded_v = v
+        if self._pad_v:
+            maybe_padded_v = torch.nn.functional.pad(
+                v, [0, q.shape[-1] - v.shape[-1]], value=0)
+        if not is_cuda_graph_compatible:
+            seq_lens_q = seq_lens_q.to("cpu")
+            seq_lens_kv = seq_lens_kv.to("cpu")
+        result = cudnn_batch_prefill_with_kv_cache(
+            q=q,
+            k_cache=k,
+            v_cache=maybe_padded_v,
+            scale=scale,
+            workspace_buffer=workspace.to(torch.int8),
+            max_token_per_sequence=max_q_seq_lens,
+            max_sequence_kv=max_kv_seq_lens,
+            actual_seq_lens_q=seq_lens_q.view(-1, 1, 1, 1),
+            actual_seq_lens_kv=seq_lens_kv.view(-1, 1, 1, 1),
+            causal=True,
+            return_lse=True,
+            is_cuda_graph_compatible=is_cuda_graph_compatible,
+        )
+        return result
 
     def _v_up_proj(self, x):
         # Convert from (B, N, L) to (N, B, L)
@@ -863,9 +863,9 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                         max_q_seq_lens=prefill_metadata.max_query_len,
                         max_kv_seq_lens=prefill_metadata.chunked_context.
                         max_seq_lens[i],
-                        seq_lens_q=prefill_metadata.query_seq_lens.view(
+                        seq_lens_q=prefill_metadata.query_seq_lens[i].view(
                             -1, 1, 1, 1),
-                        seq_lens_kv=prefill_metadata.chunked_context.seq_lens.
+                        seq_lens_kv=prefill_metadata.chunked_context.seq_lens[i].
                         view(-1, 1, 1, 1),
                         is_cuda_graph_compatible=True,
                     ))
