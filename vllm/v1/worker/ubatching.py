@@ -65,26 +65,16 @@ class UBatchContext:
         self.current_stream = stream
         torch.cuda.set_stream(self.current_stream)
 
-    def ctx_valid_state(self):
-        assert forward_context._forward_context == self.forward_context
-        assert current_stream() == self.current_stream
-        assert not self.cpu_wait_event.is_set()
-        pass
-
     def _signal_comm_done(self):
-        self.ctx_valid_state()
         self.gpu_comm_done_event.record(self.comm_stream)
 
     def _signal_compute_done(self):
-        self.ctx_valid_state()
         self.gpu_compute_done_event.record(self.compute_stream)
 
     def _wait_compute_done(self):
-        self.ctx_valid_state()
         self.comm_stream.wait_event(self.gpu_compute_done_event)
 
     def _wait_comm_done(self):
-        self.ctx_valid_state()
         self.compute_stream.wait_event(self.gpu_comm_done_event)
 
     def stream_string(self):
@@ -96,29 +86,30 @@ class UBatchContext:
             return "COMM"
 
     def _cpu_yield(self):
-        self.ctx_valid_state()
+        # It is critical for correctness that only one thread is running
+        # at a time. These asserts just make sure that this is the only
+        # thread running before waking the other one up and going to sleep
+        assert forward_context._forward_context == self.forward_context
+        assert current_stream() == self.current_stream
+        assert not self.cpu_wait_event.is_set()
+
         self.cpu_signal_event.set()
         self.cpu_wait_event.wait()
         self.cpu_wait_event.clear()
         self._restore_context()
-        self.ctx_valid_state()
 
     def yield_and_switch_from_compute_to_comm(self):
         assert current_stream() == self.compute_stream
-        self.ctx_valid_state()
         self._signal_compute_done()
         self._cpu_yield()
-        self.ctx_valid_state()
         assert self.current_stream == self.compute_stream
         self.update_stream(self.comm_stream)
         self._wait_compute_done()
 
     def yield_and_switch_from_comm_to_compute(self):
         assert current_stream() == self.comm_stream
-        self.ctx_valid_state()
         self._signal_comm_done()
         self._cpu_yield()
-        self.ctx_valid_state()
         assert self.current_stream == self.comm_stream
         self.update_stream(self.compute_stream)
         self._wait_comm_done()

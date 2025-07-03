@@ -593,6 +593,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             total_num_scheduled_tokens >= \
             self.parallel_config.microbatching_token_threshold \
             and max_num_scheduled_tokens == 1
+
         # Don't microbatch unless every other DP worker is also microbatching
         should_ubatch = self.should_ubatch(should_attempt_ubatching)
         if not should_ubatch:
@@ -611,20 +612,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         ]
         num_pad_tokens = 0
         num_tokens_after_padding = None
-        ubatch_bailout = False
+        ubatch_abort = False
         num_pad_tokens, num_tokens_after_padding = self.get_dp_padding_ubatch(ubatch_slices)
         if num_pad_tokens > 0:
+            # Check if the padding would result in an empty second ubatch. 
+            # If so abort ubatching
             if num_pad_tokens < scheduler_output.total_num_scheduled_tokens:
                 self.pad_out_ubatch_first_stage(ubatch_slices, num_pad_tokens)
             else:
-                # We bail out of ubatching here. This accounts for the case where 
-                # the padding would result in an "empty" second ubatch.
-                # TODO: just make the second ubatch a dummy ubatch
-                ubatch_bailout = True
+                ubatch_abort = True
         
         # Note that if we are attempting to ubatch by this point then we know that no 
-        # DP ranks are doing dummy runs
-        should_ubatch = self.should_ubatch(False if ubatch_bailout else True)
+        # DP ranks are doing dummy runs. Meaning, we don't need a second call to 
+        # should_ubatch in _dummy_run
+        should_ubatch = self.should_ubatch(False if ubatch_abort else True)
         if not should_ubatch:
             return (None, 0, None)
         return (ubatch_slices, num_pad_tokens, num_tokens_after_padding)
