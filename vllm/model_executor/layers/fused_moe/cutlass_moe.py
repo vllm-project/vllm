@@ -175,7 +175,10 @@ def run_cutlass_moe_fp8(
         c2 = _resize_cache(workspace2, (M * topk, N))
         c3 = _resize_cache(workspace13, (M * topk, K))
 
-    if expert_map is not None and not per_act_token:
+    if not per_act_token and (expert_map is not None or use_batched_format):
+        # this is necessary to avoid imprecise scale calculation caused by
+        # random data in the unused workspace. The workspace is unused when
+        # this rank handles only partial tokens, or when it is batched .
         c1.fill_(0)
 
     c1.fill_(0)
