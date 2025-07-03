@@ -198,7 +198,12 @@ INFO 08-01 21:37:59 hpu_model_runner.py:504] Decode bucket config (min, step, ma
 INFO 08-01 21:37:59 hpu_model_runner.py:509] Generated 48 decode buckets: [(1, 128), (1, 256), (1, 384), (1, 512), (1, 640), (1, 768), (1, 896), (1, 1024), (1, 1152), (1, 1280), (1, 1408), (1, 1536), (1, 1664), (1, 1792), (1, 1920), (1, 2048), (2, 128), (2, 256), (2, 384), (2, 512), (2, 640), (2, 768), (2, 896), (2, 1024), (2, 1152), (2, 1280), (2, 1408), (2, 1536), (2, 1664), (2, 1792), (2, 1920), (2, 2048), (4, 128), (4, 256), (4, 384), (4, 512), (4, 640), (4, 768), (4, 896), (4, 1024), (4, 1152), (4, 1280), (4, 1408), (4, 1536), (4, 1664), (4, 1792), (4, 1920), (4, 2048)]
 ```
 
-`min` determines the lowest value of the bucket. `step` determines the interval between buckets, and `max` determines the upper bound of the bucket. Furthermore, interval between `min` and `step` has special handling -- `min` gets multiplied by consecutive powers of two, until `step` gets reached. We call this the ramp-up phase and it is used for handling lower batch sizes with minimum wastage, while allowing larger padding on larger batch sizes.
+| Parameter      | Description                                                                 |
+|----------------|-----------------------------------------------------------------------------|
+| `min`          | Determines the lowest value of the bucket.                                  |
+| `step`         | Determines the interval between buckets.                                     |
+| `max`          | Determines the upper bound of the bucket.                                    |
+| Ramp-up phase  | A special handling phase applied between `min` and `step`:<br/>- `min` is multiplied by consecutive powers of two until `step` is reached.<br/>- Minimizes resource wastage for small batch sizes.<br/>- Allows larger padding for larger batches. |
 
 Example (with ramp-up):
 
@@ -349,28 +354,28 @@ Each described step is logged by vLLM server, as follows (negative values corres
 
 - `VLLM_{phase}_{dim}_BUCKET_{param}` - collection of 12 environment variables configuring ranges of bucketing mechanism
 
-  * `{phase}` is either `PROMPT` or `DECODE`
+    * `{phase}` is either `PROMPT` or `DECODE`
 
-  * `{dim}` is either `BS`, `SEQ` or `BLOCK`
+    * `{dim}` is either `BS`, `SEQ` or `BLOCK`
 
-  * `{param}` is either `MIN`, `STEP` or `MAX`
+    * `{param}` is either `MIN`, `STEP` or `MAX`
 
-  * Default values:
+    * Default values:
 
-    - Prompt:
-      - batch size min (`VLLM_PROMPT_BS_BUCKET_MIN`): `1`
-      - batch size step (`VLLM_PROMPT_BS_BUCKET_STEP`): `min(max_num_seqs, 32)`
-      - batch size max (`VLLM_PROMPT_BS_BUCKET_MAX`): `min(max_num_seqs, 64)`
-      - sequence length min (`VLLM_PROMPT_SEQ_BUCKET_MIN`): `block_size`
-      - sequence length step (`VLLM_PROMPT_SEQ_BUCKET_STEP`): `block_size`
-      - sequence length max (`VLLM_PROMPT_SEQ_BUCKET_MAX`): `max_model_len`
-    - Decode:
-      - batch size min (`VLLM_DECODE_BS_BUCKET_MIN`): `1`
-      - batch size step (`VLLM_DECODE_BS_BUCKET_STEP`): `min(max_num_seqs, 32)`
-      - batch size max (`VLLM_DECODE_BS_BUCKET_MAX`): `max_num_seqs`
-      - sequence length min (`VLLM_DECODE_BLOCK_BUCKET_MIN`): `block_size`
-      - sequence length step (`VLLM_DECODE_BLOCK_BUCKET_STEP`): `block_size`
-      - sequence length max (`VLLM_DECODE_BLOCK_BUCKET_MAX`): `max(128, (max_num_seqs*max_model_len)/block_size)`
+| `{phase}` | Parameter | Env Variable | Value Expression |
+|-----------|-----------|--------------|------------------|
+| Prompt | Batch size min | `VLLM_PROMPT_BS_BUCKET_MIN` | `1` |
+| Prompt | Batch size step | `VLLM_PROMPT_BS_BUCKET_STEP` | `min(max_num_seqs, 32)` |
+| Prompt | Batch size max | `VLLM_PROMPT_BS_BUCKET_MAX` | `min(max_num_seqs, 64)` |
+| Prompt | Sequence length min | `VLLM_PROMPT_SEQ_BUCKET_MIN` | `block_size` |
+| Prompt | Sequence length step | `VLLM_PROMPT_SEQ_BUCKET_STEP` | `block_size` |
+| Prompt | Sequence length max | `VLLM_PROMPT_SEQ_BUCKET_MAX` | `max_model_len` |
+| Decode | Batch size min | `VLLM_DECODE_BS_BUCKET_MIN` | `1` |
+| Decode | Batch size step | `VLLM_DECODE_BS_BUCKET_STEP` | `min(max_num_seqs, 32)` |
+| Decode | Batch size max | `VLLM_DECODE_BS_BUCKET_MAX` | `max_num_seqs` |
+| Decode | Sequence length min | `VLLM_DECODE_BLOCK_BUCKET_MIN` | `block_size` |
+| Decode | Sequence length step | `VLLM_DECODE_BLOCK_BUCKET_STEP` | `block_size` |
+| Decode | Sequence length max | `VLLM_DECODE_BLOCK_BUCKET_MAX` | `max(128, (max_num_seqs*max_model_len)/block_size)` |
 
 Additionally, there are HPU PyTorch Bridge environment variables impacting vLLM execution:
 
