@@ -97,7 +97,7 @@ class ServeSubcommand(CLISubcommand):
             "https://docs.vllm.ai/en/latest/configuration/serve_args.html")
 
         serve_parser = make_arg_parser(serve_parser)
-        show_filtered_argument_or_group_from_help(serve_parser, "serve")
+        show_filtered_argument_or_group_from_help(serve_parser, ["serve"])
         serve_parser.epilog = VLLM_SUBCMD_PARSER_EPILOG
         return serve_parser
 
