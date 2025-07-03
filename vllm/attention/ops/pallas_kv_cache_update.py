@@ -25,7 +25,7 @@ def _kv_cache_update_kernel(
     # head_dim]
     sem,
 ):
-    async_copies_in = []
+    async_copies = []
     block_idx = pl.program_id(0)
     num_slices_per_block = scratch.shape[0]
 
@@ -40,23 +40,25 @@ def _kv_cache_update_kernel(
             sem,
         )
         async_copy.start()
-        async_copies_in.append(async_copy)
+        async_copies.append(async_copy)
+
+    for async_copy in async_copies:
+        async_copy.wait()
 
     # Copy from scratch to kv_cache_hbm_ref
-    async_copies_out = []
+    async_copies.clear()
     for i in range(num_slices_per_block):
         offset_i = i + block_idx * num_slices_per_block
         kv_cache_start = slices_ref[0, offset_i]
         length = slices_ref[2, offset_i]
-        async_copies_in[i].wait()
         async_copy = pltpu.make_async_copy(
             scratch.at[i, pl.ds(0, length), ...],
             kv_cache_hbm_ref.at[pl.ds(kv_cache_start, length), ...],
             sem,
         )
         async_copy.start()
-        async_copies_out.append(async_copy)
-    for async_copy in async_copies_out:
+        async_copies.append(async_copy)
+    for async_copy in async_copies:
         async_copy.wait()
 
 
