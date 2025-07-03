@@ -27,7 +27,7 @@
 - **Average QPS (query per second)**: 1, 4, 16 and inf. QPS = inf means all requests come at once. For other QPS values, the arrival time of each query is determined using a random Poisson process (with fixed random seed).
 - Models: llama-3.1 8B, llama-3 70B, mixtral 8x7B.
 - We also added a speculative decoding test for llama-3 70B, under QPS 2
-- Evaluation metrics: throughput, TTFT (time to the first token, with mean, median and p99), ITL (inter-token latency, with mean, median and p99).
+- Evaluation metrics: throughput, TTFT (time to the first token, with mean, median and p99), ITL (inter-token latency, with mean, median and p99), peak memory usage, memory per request.
 
 {serving_tests_markdown_table}
 

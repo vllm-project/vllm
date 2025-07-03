@@ -5,6 +5,7 @@ import argparse
 import json
 import math
 import os
+import resource
 from typing import Any
 
 
@@ -72,3 +73,21 @@ def write_to_json(filename: str, records: list) -> None:
             cls=InfEncoder,
             default=lambda o: f"<{type(o).__name__} object is not JSON serializable>",
         )
+
+
+def get_memory_usage() -> float:
+    """Get peak memory usage in GiB using resource.getrusage()."""
+    # Note: ru_maxrss is in kilobytes on Linux, bytes on macOS
+    import platform
+
+    if platform.system() == "Darwin":  # macOS - ru_maxrss in bytes
+        max_self_usage = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1 << 30)
+        max_children_usage = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss / (
+            1 << 30
+        )
+    else:  # Linux (including most CI systems) - ru_maxrss in kilobytes
+        max_self_usage = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1 << 20)
+        max_children_usage = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss / (
+            1 << 20
+        )
+    return max_self_usage + max_children_usage
