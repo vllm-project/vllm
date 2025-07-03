@@ -1,24 +1,30 @@
 # Needed for the proxy server
 vllm-directory := "/home/rshaw/vllm/" 
 
-PREFILL_GPU := "0"
-DECODE_GPU := "2"
+PREFILL_GPU := "0,1,2,3"
+DECODE_GPU := "4,5,6,7"
+
+PREFILL_TP := env("PREFILL_TP", "1")
+DECODE_TP := env("DECODE_TP", "1")
+
+BLOCK_SIZE := env("BLOCK_SIZE", "128")
+
 MODEL := "meta-llama/Llama-3.1-8B-Instruct"
 PROXY_PORT := "8192"
 PREFILL_PORT := "8100"
 DECODE_PORT := "8200"
 PREFILL_NIXL_SIDE_CHANNEL_PORT := "5557"
-DECODE_NIXL_SIDE_CHANNEL_PORT := "5558"
+DECODE_NIXL_SIDE_CHANNEL_PORT := "5568"
 
 prefill:
     VLLM_NIXL_SIDE_CHANNEL_PORT={{PREFILL_NIXL_SIDE_CHANNEL_PORT}} \
     CUDA_VISIBLE_DEVICES={{PREFILL_GPU}} \
     vllm serve {{MODEL}} \
       --port {{PREFILL_PORT}} \
-      --tensor-parallel-size 1 \
+      --tensor-parallel-size {{PREFILL_TP}} \
       --enforce-eager \
       --disable-log-requests \
-      --block-size 128 \
+      --block-size {{BLOCK_SIZE}} \
       --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
 
 decode:
@@ -26,10 +32,10 @@ decode:
     CUDA_VISIBLE_DEVICES={{DECODE_GPU}} \
     vllm serve {{MODEL}} \
       --port {{DECODE_PORT}} \
-      --tensor-parallel-size 1 \
+      --tensor-parallel-size {{DECODE_TP}} \
       --enforce-eager \
       --disable-log-requests \
-      --block-size 128 \
+      --block-size {{BLOCK_SIZE}} \
       --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
 
 proxy:
@@ -59,7 +65,7 @@ benchmark NUM_PROMPTS:
     --seed $(date +%s) \
 
 benchmark_one INPUT_LEN:
-  python {{vllm-directory}}benchmarks/benchmark_one_concurrent_req.py \
+  python {{vllm-directory}}benchmarks/benchmark_one_concurrent.py \
     --port {{PROXY_PORT}} \
     --model {{MODEL}} \
     --input-len {{INPUT_LEN}} \
