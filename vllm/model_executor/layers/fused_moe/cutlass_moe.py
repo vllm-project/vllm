@@ -476,7 +476,7 @@ def cutlass_moe_fp4(a: torch.Tensor,
         # TODO: this only works for topK=1, will need to update for topK>1
         assert num_topk == 1, \
             "apply_router_weight_on_input is only implemented for topk=1"
-        a.mul_(topk_weights.to(a.dtype))
+        a.mul_(topk_weights.to(out_dtype))
 
     # problem shapes should have [m, n, k]
     # Note that problem sizes are based on logical number of elements.
@@ -517,7 +517,7 @@ def cutlass_moe_fp4(a: torch.Tensor,
     c2 = ops.shuffle_rows(c2, c_map)
     if not apply_router_weight_on_input:
         out = (c2.view(m, num_topk, k) *
-               topk_weights.view(m, num_topk, 1).half()).sum(dim=1)
+               topk_weights.view(m, num_topk, 1).to(out_dtype)).sum(dim=1)
     else:
         out = c2.view(m, num_topk, k).sum(dim=1)
     return out.to(dtype=out_dtype)
