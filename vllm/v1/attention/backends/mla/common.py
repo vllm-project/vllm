@@ -193,6 +193,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Generic, Optional, TypeVar
 
 import torch
+import vllm.envs as envs
 
 from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionLayer,
@@ -227,6 +228,9 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 logger = init_logger(__name__)
+
+CUDNN_SUPPORTED_HEAD_DIMS = [192, 128]
+CUDNN_WORKSPACE_PER_SEQ = 12800
 
 
 class MLACommonBackend(AttentionBackend):
@@ -271,11 +275,14 @@ class MLACommonPrefillMetadata:
         starts: torch.Tensor
         seq_tot: list[int]
         max_seq_lens: list[int]
+        seq_lens: torch.Tensor
         workspace: torch.Tensor
 
     block_table: torch.Tensor
     query_start_loc: torch.Tensor
+    query_seq_lens: torch.Tensor
     max_query_len: int
+    workspace: torch.Tensor
     chunked_context: Optional[ChunkedContextMetadata] = None
 
 
@@ -384,6 +391,11 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 device=runner.device,
             )
         self.block_table = block_table
+        self.workspace = torch.empty(
+            CUDNN_WORKSPACE_PER_SEQ * scheduler_config.max_num_seqs,
+            dtype=torch.int8,
+            device=runner.device,
+        )
 
     def reorder_batch(self, input_batch: "InputBatch",
                       scheduler_output: "SchedulerOutput") -> bool:
@@ -559,6 +571,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                     starts=chunk_starts.to(device, non_blocking=True),
                     seq_tot=chunk_seq_lens.sum(dim=1).tolist(),
                     max_seq_lens=chunk_seq_lens.max(dim=1).values.tolist(),
+                    seq_lens=chunk_seq_lens,
                     workspace=self.chunked_prefill_workspace,
                 )
 
@@ -569,6 +582,9 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 block_table=block_table_tensor[reqs_start:, ...],
                 query_start_loc=prefill_query_start_loc,
                 max_query_len=max_query_len,
+                workspace=self.workspace,
+                query_seq_lens=prefill_query_start_loc[1:] -
+                prefill_query_start_loc[:-1],
                 chunked_context=chunked_context_metadata,
             )
 
@@ -697,6 +713,44 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         if return_softmax_lse:
             return attn_out, lse
         return attn_out
+    
+        def _cudnn_varlen_func_diff_headdims(
+            self,
+            q,
+            k,
+            v,
+            scale,
+            workspace,
+            max_q_seq_lens,
+            max_kv_seq_lens,
+            seq_lens_q,
+            seq_lens_kv,
+            is_cuda_graph_compatible=True,
+        ):
+            from flashinfer.prefill import cudnn_batch_prefill_with_kv_cache
+
+            maybe_padded_v = v
+            if self._pad_v:
+                maybe_padded_v = torch.nn.functional.pad(
+                    v, [0, q.shape[-1] - v.shape[-1]], value=0)
+            if not is_cuda_graph_compatible:
+                seq_lens_q = seq_lens_q.to("cpu")
+                seq_lens_kv = seq_lens_kv.to("cpu")
+            result = cudnn_batch_prefill_with_kv_cache(
+                q=q,
+                k_cache=k,
+                v_cache=maybe_padded_v,
+                scale=scale,
+                workspace_buffer=workspace.to(torch.int8),
+                max_token_per_sequence=max_q_seq_lens,
+                max_sequence_kv=max_kv_seq_lens,
+                actual_seq_lens_q=seq_lens_q.view(-1, 1, 1, 1),
+                actual_seq_lens_kv=seq_lens_kv.view(-1, 1, 1, 1),
+                causal=True,
+                return_lse=True,
+                is_cuda_graph_compatible=is_cuda_graph_compatible,
+            )
+            return result
 
     def _v_up_proj(self, x):
         # Convert from (B, N, L) to (N, B, L)
@@ -795,20 +849,40 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
 
             k = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))),
                           dim=-1)
-
-            attn_output, attn_softmax_lse = \
-                self._flash_attn_varlen_diff_headdims(
-                q=q,
-                k=k,
-                v=v,
-                cu_seqlens_q=prefill_metadata.query_start_loc,
-                cu_seqlens_k=prefill_metadata.chunked_context.cu_seq_lens[i],
-                max_seqlen_q=prefill_metadata.max_query_len,
-                max_seqlen_k=prefill_metadata.chunked_context.max_seq_lens[i],
-                softmax_scale=self.scale,
-                causal=False,  # Context is unmasked
-                return_softmax_lse=True,
-            )
+            
+            if envs.VLLM_USE_CUDNN_PREFILL and all(
+                    t.shape[-1] in CUDNN_SUPPORTED_HEAD_DIMS
+                    for t in (q, k, v)):
+                attn_output, attn_softmax_lse = (
+                    self._cudnn_varlen_func_diff_headdims(
+                        q,
+                        k,
+                        v,
+                        scale=self.scale,
+                        workspace=prefill_metadata.workspace,
+                        max_q_seq_lens=prefill_metadata.max_query_len,
+                        max_kv_seq_lens=prefill_metadata.chunked_context.
+                        max_seq_lens[i],
+                        seq_lens_q=prefill_metadata.query_seq_lens.view(
+                            -1, 1, 1, 1),
+                        seq_lens_kv=prefill_metadata.chunked_context.seq_lens.
+                        view(-1, 1, 1, 1),
+                        is_cuda_graph_compatible=True,
+                    ))
+            else:
+                attn_output, attn_softmax_lse = \
+                    self._flash_attn_varlen_diff_headdims(
+                    q=q,
+                    k=k,
+                    v=v,
+                    cu_seqlens_q=prefill_metadata.query_start_loc,
+                    cu_seqlens_k=prefill_metadata.chunked_context.cu_seq_lens[i],
+                    max_seqlen_q=prefill_metadata.max_query_len,
+                    max_seqlen_k=prefill_metadata.chunked_context.max_seq_lens[i],
+                    softmax_scale=self.scale,
+                    causal=False,  # Context is unmasked
+                    return_softmax_lse=True,
+                )
 
             if output is None:
                 output = attn_output
@@ -847,18 +921,37 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
 
         k = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))), dim=-1)
 
-        output = self._flash_attn_varlen_diff_headdims(
-            q=q,
-            k=k,
-            v=v,
-            cu_seqlens_q=attn_metadata.prefill.query_start_loc,
-            cu_seqlens_k=attn_metadata.prefill.query_start_loc,
-            max_seqlen_q=attn_metadata.prefill.max_query_len,
-            max_seqlen_k=attn_metadata.prefill.max_query_len,
-            softmax_scale=self.scale,
-            causal=True,
-            return_softmax_lse=has_context,
-        )
+        if envs.VLLM_USE_CUDNN_PREFILL and all(
+                t.shape[-1] in CUDNN_SUPPORTED_HEAD_DIMS for t in (q, k, v)):
+            output = self._cudnn_varlen_func_diff_headdims(
+                q,
+                k,
+                v,
+                scale=self.scale,
+                workspace=attn_metadata.prefill.workspace,
+                max_q_seq_lens=attn_metadata.prefill.max_query_len,
+                max_kv_seq_lens=attn_metadata.prefill.max_query_len,
+                seq_lens_q=attn_metadata.prefill.query_seq_lens.view(
+                    -1, 1, 1, 1),
+                seq_lens_kv=attn_metadata.prefill.query_seq_lens.view(
+                    -1, 1, 1, 1),
+                is_cuda_graph_compatible=True,
+            )
+            if not has_context:
+                output = output[0]
+        else:
+            output = self._flash_attn_varlen_diff_headdims(
+                q=q,
+                k=k,
+                v=v,
+                cu_seqlens_q=attn_metadata.prefill.query_start_loc,
+                cu_seqlens_k=attn_metadata.prefill.query_start_loc,
+                max_seqlen_q=attn_metadata.prefill.max_query_len,
+                max_seqlen_k=attn_metadata.prefill.max_query_len,
+                softmax_scale=self.scale,
+                causal=True,
+                return_softmax_lse=has_context,
+            )
 
         if has_context:
             suffix_output, suffix_lse = output
