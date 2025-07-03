@@ -37,9 +37,6 @@ class CommonAttentionMetadata:
     query_start_loc: torch.Tensor
     """(batch_size + 1,), the start location of each request in query Tensor"""
 
-    query_start_loc_np: np.ndarray
-    """(batch_size + 1,), numpy version of query_start_loc on the CPU"""
-
     seq_lens: torch.Tensor
     """(batch_size,), the length of each request including both computed tokens
     and newly scheduled tokens"""
@@ -54,6 +51,9 @@ class CommonAttentionMetadata:
     decode_indices: Optional[torch.Tensor] = None
     """indices used for decoding"""
 
+    query_start_loc_np: Optional[np.ndarray] = None
+    """(batch_size + 1,), numpy equivalent of query_start_loc on the CPU"""
+
 
 M = TypeVar("M")
 
@@ -63,13 +63,8 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
     full_cudagraph_supported: ClassVar[bool] = False
 
     @abstractmethod
-    def build(
-        self,
-        common_prefix_len: int,
-        common_attn_metadata: CommonAttentionMetadata,
-        decode_only_common_attn_metadata: Optional[
-            CommonAttentionMetadata] = None,
-    ) -> M:
+    def build(self, common_prefix_len: int,
+              common_attn_metadata: CommonAttentionMetadata) -> M:
         """
         Central method that builds attention metadata.
         Some builders (MLA) require reorder_batch to be called prior to build.

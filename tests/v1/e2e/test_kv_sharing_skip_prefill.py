@@ -317,6 +317,9 @@ class TestQwen2ForCausalLM(nn.Module):
 
 @pytest.fixture
 def test_prompts():
+    """
+    Adapted from tests/v1/e2e/test_spec_decode.py
+    """
     prompt_types = ["repeat", "sentence"]
     # Setting higher num prompts increases the chance of numerics mismatch
     # due to matrix multiplication numerics depending on batch dimension
@@ -326,8 +329,6 @@ def test_prompts():
     random.seed(0)
     random_prompt_type_choices = random.choices(prompt_types, k=num_prompts)
 
-    # Generate a mixed batch of prompts, some of which can be easily
-    # predicted by n-gram matching and some which likely cannot.
     for kind in random_prompt_type_choices:
         word_choices = ["test", "temp", "hello", "where"]
         word = random.choice(word_choices)

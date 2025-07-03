@@ -284,6 +284,8 @@ class FlashAttentionMetadataBuilder(
         max_seq_len = int(self.runner.seq_lens_np[:num_reqs].max())
         query_start_loc = common_attn_metadata.query_start_loc
         query_start_loc_np = common_attn_metadata.query_start_loc_np
+        if query_start_loc_np is None:
+            query_start_loc_np = self.runner.query_start_loc_np[:num_reqs + 1]
         seq_lens = common_attn_metadata.seq_lens
         block_table = self.block_table
         block_table_tensor = block_table.get_device_tensor()[:num_reqs]
