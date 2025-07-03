@@ -357,12 +357,16 @@ async def main(args):
         chat_template=None,
         chat_template_content_format="auto",
     ) if model_config.task == "embed" else None
+
+    enable_serving_reranking = (model_config.task == "classify" and getattr(
+        model_config.hf_config, "num_labels", 0) == 1)
+
     openai_serving_scores = (ServingScores(
         engine,
         model_config,
         openai_serving_models,
         request_logger=request_logger,
-    ) if model_config.task == "score" else None)
+    ) if (model_config.task == "embed" or enable_serving_reranking) else None)
 
     tracker = BatchProgressTracker()
     logger.info("Reading batch from %s...", args.input_file)

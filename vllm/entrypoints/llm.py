@@ -1289,9 +1289,13 @@ class LLM:
 
             raise ValueError(" ".join(messages))
 
-        if self.llm_engine.model_config.task not in ("embed", "score"):
-            raise ValueError(
-                "Score API is only enabled for `--task embed or --task score`")
+        if self.llm_engine.model_config.task not in ("embed", "classify"):
+            raise ValueError("Score API is only enabled for "
+                             "`--task embed or --task classify`.")
+
+        if (self.llm_engine.model_config.task == "classify"
+                and self.llm_engine.model_config.hf_config.num_labels != 1):
+            raise ValueError("Score API is only enabled for num_labels == 1.")
 
         # the tokenizer for models such as
         # "cross-encoder/ms-marco-MiniLM-L-6-v2" doesn't support passing
