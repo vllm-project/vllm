@@ -116,7 +116,7 @@ def _parse_score_content(
 
     mm_placeholder_counts = mm_parser.mm_placeholder_counts()
 
-    if len(mm_placeholder_counts) != 1 and mm_placeholder_counts[0] != 1:
+    if len(mm_placeholder_counts) != 1 or next(iter(mm_placeholder_counts.values())) != 1:
         raise ValueError("Only one multi-modal item is supported")
 
     return next(iter(mm_placeholder_counts))
@@ -140,13 +140,13 @@ def post_process_tokens_mm_data(
     mm_data: Optional[MultiModalDataDict],
 ):
     """
-    Manipulation tokens and mm_data for some model architecture such as `JinaVLForRanking`
+    Performs architecture-specific manipulations on the input tokens and multimodal data.
+    Currently handles special processing for 'JinaVLForRanking' models.
     """
     if 'JinaVLForRanking' in model_arch:
         prompt['prompt_token_ids'].append(100)  # add score target token
 
         if mm_data is not None:
             for key, value in mm_data.items():
-                print(value)
                 if isinstance(value, list):
-                    mm_data[key].reverse()
+                    value.reverse()
