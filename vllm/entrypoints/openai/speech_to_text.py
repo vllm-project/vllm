@@ -5,6 +5,7 @@ import io
 import math
 import time
 from collections.abc import AsyncGenerator
+from functools import cached_property
 from math import ceil
 from typing import Callable, Literal, Optional, TypeVar, Union, cast
 
@@ -24,6 +25,8 @@ from vllm.entrypoints.openai.serving_engine import (OpenAIServing,
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
+from vllm.model_executor.model_loader import get_model_cls
+from vllm.model_executor.models import SupportsTranscription
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.processor import cached_get_processor
 from vllm.utils import PlaceholderModule
@@ -38,118 +41,10 @@ T = TypeVar("T", bound=SpeechToTextResponse)
 
 logger = init_logger(__name__)
 
-# From https://platform.openai.com/docs/guides/speech-to-text/supported-languages
-# TODO these configs should live somewhere with the model so we can support
-# additional ones
-
-ISO639_1_SUPPORTED_LANGS = {
-    "af": "Afrikaans",
-    "ar": "Arabic",
-    "hy": "Armenian",
-    "az": "Azerbaijani",
-    "be": "Belarusian",
-    "bs": "Bosnian",
-    "bg": "Bulgarian",
-    "ca": "Catalan",
-    "zh": "Chinese",
-    "hr": "Croatian",
-    "cs": "Czech",
-    "da": "Danish",
-    "nl": "Dutch",
-    "en": "English",
-    "et": "Estonian",
-    "fi": "Finnish",
-    "fr": "French",
-    "gl": "Galician",
-    "de": "German",
-    "el": "Greek",
-    "he": "Hebrew",
-    "hi": "Hindi",
-    "hu": "Hungarian",
-    "is": "Icelandic",
-    "id": "Indonesian",
-    "it": "Italian",
-    "ja": "Japanese",
-    "kn": "Kannada",
-    "kk": "Kazakh",
-    "ko": "Korean",
-    "lv": "Latvian",
-    "lt": "Lithuanian",
-    "mk": "Macedonian",
-    "ms": "Malay",
-    "mr": "Marathi",
-    "mi": "Maori",
-    "ne": "Nepali",
-    "no": "Norwegian",
-    "fa": "Persian",
-    "pl": "Polish",
-    "pt": "Portuguese",
-    "ro": "Romanian",
-    "ru": "Russian",
-    "sr": "Serbian",
-    "sk": "Slovak",
-    "sl": "Slovenian",
-    "es": "Spanish",
-    "sw": "Swahili",
-    "sv": "Swedish",
-    "tl": "Tagalog",
-    "ta": "Tamil",
-    "th": "Thai",
-    "tr": "Turkish",
-    "uk": "Ukrainian",
-    "ur": "Urdu",
-    "vi": "Vietnamese",
-    "cy": "Welsh"
-}
-ISO639_1_OTHER_LANGS = {
-    "lo": "Lao",
-    "jw": "Javanese",
-    "tk": "Turkmen",
-    "yi": "Yiddish",
-    "so": "Somali",
-    "bn": "Bengali",
-    "nn": "Norwegian Nynorsk",
-    "si": "Sinhala",
-    "yo": "Yoruba",
-    "sa": "Sanskrit",
-    "mi": "Māori",
-    "fo": "Faroese",  # codespell:ignore
-    "mt": "Maltese",
-    "tg": "Tajik",
-    "mg": "Malagasy",
-    "haw": "Hawaiian",
-    "km": "Khmer",
-    "br": "Breton",
-    "ps": "Pashto",
-    "ln": "Lingala",
-    "la": "Latin",
-    "ml": "Malayalam",
-    "sq": "Albanian",
-    "su": "Sundanese",
-    "eu": "Basque",
-    "ka": "Georgian",
-    "uz": "Uzbek",
-    "sn": "Shona",
-    "ht": "Haitian",
-    "as": "Assamese",
-    "mn": "Mongolian",
-    "te": "Telugu",
-    "pa": "Panjabi",
-    "tt": "Tatar",
-    "gu": "Gujarati",
-    "oc": "Occitan",
-    "ha": "Hausa",
-    "ba": "Bashkir",
-    "my": "Burmese",
-    "sd": "Sindhi",
-    "am": "Amharic",
-    "lb": "Luxembourgish",
-    "bo": "Tibetan"
-}
-
 # As per https://platform.openai.com/docs/guides/speech-to-text#overview.
 # TODO configurable
 MAX_AUDIO_CLIP_FILESIZE_MB = 25
+MAX_AUDIO_CLIP_SECONDS = 30
 OVERLAP_CHUNK_SECOND = 1
 MIN_ENERGY_WINDOW_SIZE = 1600  # 1600 ~ 100ms for 16000 Hz audio
 
@@ -177,7 +72,9 @@ class OpenAISpeechToText(OpenAIServing):
         self.default_sampling_params = (
             self.model_config.get_diff_sampling_param())
         processor = cached_get_processor(model_config.model)
-        self.max_audio_clip_s = processor.feature_extractor.chunk_length
+        self.max_audio_clip_s = processor.feature_extractor.chunk_length \
+            if hasattr(processor.feature_extractor, 'chunk_length') \
+            else MAX_AUDIO_CLIP_SECONDS
         self.model_sr = processor.feature_extractor.sampling_rate
         self.hop_length = processor.feature_extractor.hop_length
         self.task_type = task_type
@@ -187,31 +84,23 @@ class OpenAISpeechToText(OpenAIServing):
                 "Overwriting default completion sampling param with: %s",
                 self.default_sampling_params)
 
+    @cached_property
+    def model_cls(self):
+        return get_model_cls(self.model_config)
+
     async def _preprocess_speech_to_text(
         self,
         request: SpeechToTextRequest,
         audio_data: bytes,
         previous_text :list[str],
     ) -> AsyncGenerator[tuple[PromptType, float]]:
+        model_cls = cast(SupportsTranscription, self.model_cls)
         # Validate request
         # TODO language should be optional and can be guessed.
         # For now we default to en. See
         # https://github.com/huggingface/transformers/blob/main/src/transformers/models/whisper/generation_whisper.py#L1520
-        lang_token = f"<|{request.language}|>" if request.language else "<|en|>"
-        if request.language:
-            if request.language in ISO639_1_SUPPORTED_LANGS:
-                pass
-            elif request.language in ISO639_1_OTHER_LANGS:
-                logger.warning(
-                    "The selected language %s has limited accuracy with"
-                    " reported WER>=0.5. Results may be less accurate "
-                    "for this choice.", request.language)
-            else:
-                raise ValueError(
-                    f"Unsupported language: {request.language}."
-                    "Language should be one of:" +
-                    f" {list(ISO639_1_SUPPORTED_LANGS.values())}" +
-                    f"or {list(ISO639_1_OTHER_LANGS.values())}")
+        lang = request.language or "en"
+        model_cls.validate_language(lang)
 
         if len(audio_data) / 1024**2 > MAX_AUDIO_CLIP_FILESIZE_MB:
             raise ValueError("Maximum file size exceeded.")
@@ -222,7 +111,9 @@ class OpenAISpeechToText(OpenAIServing):
             y, sr = librosa.load(bytes_, sr=self.model_sr)
 
         duration = librosa.get_duration(y=y, sr=sr)
-        chunks = [y] if duration < 30 else self._split_audio(y, int(sr))
+        chunks = [y
+                  ] if duration < self.max_audio_clip_s else self._split_audio(
+                      y, int(sr))
         for chunk in chunks:
             prompt = {
                 "encoder_prompt": {
@@ -233,9 +124,11 @@ class OpenAISpeechToText(OpenAIServing):
                 },
                 "decoder_prompt":
                 self._create_prompt_with_previous_context(
-                    request=request,
+                    system_prompt=model_cls.get_decoder_prompt
+                        (lang, self.task_type,
+                                request.prompt),
                     previous_text=previous_text,
-                    lang_token=lang_token
+                    lang_token=lang
                 )
             }
             yield (cast(PromptType, prompt), duration)
@@ -519,40 +412,43 @@ class OpenAISpeechToText(OpenAIServing):
         return quietest_idx
     
     def _create_prompt_with_previous_context(self, 
-            request: SpeechToTextRequest,
+            system_prompt: str,
             previous_text :list[str],
             lang_token : str
         ) -> str:
-        """According to Whisper prompt guide
+        """
+        According to the Whisper prompting guide:
         https://cookbook.openai.com/examples/whisper_prompting_guide
-        
-        whisper prompt is limited to 224 tokens. 
-        so some of previous_text, even decoder prompt
-        should be cut. 
-        
-        For now result 4 special token in decoder prompt.
-        So max length should be 220.
-        
-        And there's one more options for counting tokens
-         
-        English usually count single token more than 
-        a single letter. However for other languages.
-        even single letter could be counted as multiple tokens
-        
-        so we set TOKEN_PER_CHAR as 3 for any other languages
+
+        The decoder prompt in Whisper is limited to 224 tokens.
+        This means that both previous_text and the decoder prompt itself
+        may need to be truncated to fit within this limit.
+
+        Currently, the decoder prompt contains 4 special tokens,
+        so the maximum length available
+        for the rest of the prompt is 220 tokens.
+
+        Token counting can vary by language:
+        - In English, one token usually represents more than one letter.
+        - In other languages, a single character may be 
+        split into multiple tokens.
+
+        To account for this, we set TOKEN_PER_CHAR = 1 for English,
+        and TOKEN_PER_CHAR = 3 for other languages.
+
+        MAX_PROMPT_LENGTH = 220 // TOKEN_PER_CHAR
+
+        Additionally, to prevent hallucination,
+        the prompt should be truncated at word boundaries.
         """
 
-        TOKEN_PER_CHAR = 1 if lang_token == "<|en|>" else 3
+        TOKEN_PER_CHAR = 1 if lang_token == "en" else 3
         MAX_PROMPT_LENGTH = 220 // TOKEN_PER_CHAR
         
-        """
-        In order to prevent hallucination. prompt should be 
-        chopped into words.
-        """
-        ret_prompt = "" 
+        ret_prompt = ""
         ret_prompt_len = 0
         
-        request_prompt_list = request.prompt.split(' ')
+        request_prompt_list = system_prompt.split(' ')
         previous_text_list = previous_text[0].split(' ')
         for prompt in request_prompt_list:
             if len(prompt) + ret_prompt_len <= MAX_PROMPT_LENGTH:
