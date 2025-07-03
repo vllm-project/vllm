@@ -183,12 +183,12 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         try:
             import bitsandbytes
 
-            if bitsandbytes.__version__ < "0.45.3":
+            if bitsandbytes.__version__ < "0.46.1":
                 raise ImportError("bitsandbytes version is wrong. Please "
-                                  "install bitsandbytes>=0.45.3.")
+                                  "install bitsandbytes>=0.46.1.")
         except ImportError as err:
-            raise ImportError("Please install bitsandbytes>=0.45.3 via "
-                              "`pip install bitsandbytes>=0.45.3` to use "
+            raise ImportError("Please install bitsandbytes>=0.46.1 via "
+                              "`pip install bitsandbytes>=0.46.1` to use "
                               "bitsandbytes quantizer.") from err
 
         hf_weights_files, use_safetensors = self._prepare_weights(
@@ -600,7 +600,7 @@ def dequantize_dq(quant_states: dict) -> None:
     """
     from bitsandbytes.functional import QuantState, dequantize_blockwise
     for _, quant_state in quant_states.items():
-        # Copied from: https://github.com/bitsandbytes-foundation/bitsandbytes/blob/0.45.3/bitsandbytes/functional.py#L1352-#L1356
+        # Copied from: https://github.com/bitsandbytes-foundation/bitsandbytes/blob/0.46.1/bitsandbytes/functional.py#L1352-#L1356
         if isinstance(quant_state, QuantState) and quant_state.nested:
             absmax = dequantize_blockwise(quant_state.absmax,
                                           quant_state.state2)
