@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import functools
-from typing import Any, Callable, Optional, Union
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
 import torch
 import torch.nn.functional as F
@@ -13,8 +13,10 @@ import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEMethodBase,
-                                                  FusedMoeWeightScaleSupported)
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoE, FusedMoEActivationFormat, FusedMoEConfig, FusedMoEMethodBase,
+    FusedMoEPermuteExpertsUnpermute, FusedMoEPrepareAndFinalize,
+    FusedMoeWeightScaleSupported)
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -38,6 +40,9 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.utils import has_deep_gemm
+
+if TYPE_CHECKING:
+    from vllm.model_executor.models.utils import WeightsMapper
 
 ACTIVATION_SCHEMES = ["static", "dynamic"]
 
@@ -99,6 +104,11 @@ class Fp8Config(QuantizationConfig):
     @classmethod
     def get_config_filenames(cls) -> list[str]:
         return []
+
+    def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
+        if self.ignored_layers is not None:
+            self.ignored_layers = hf_to_vllm_mapper.apply_list(
+                self.ignored_layers)
 
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> "Fp8Config":
@@ -434,6 +444,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
     """
 
     def __init__(self, quant_config: Fp8Config):
+
         from vllm.model_executor.layers.fused_moe import fused_experts
         self.quant_config = quant_config
         self.block_quant = self.quant_config.weight_block_size is not None
@@ -768,43 +779,48 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             del layer.w13_input_scale
             del layer.w2_input_scale
 
-    def select_gemm_impl(self, prepare_finalize, moe):
-
-        from vllm.model_executor.layers.fused_moe.batched_triton_or_deep_gemm_moe import (  # noqa: E501
-            BatchedTritonOrDeepGemmExperts)
-        from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
-            TritonOrDeepGemmExperts)
+    def select_gemm_impl(
+        self,
+        prepare_finalize: FusedMoEPrepareAndFinalize,
+        moe: FusedMoEConfig,
+    ) -> FusedMoEPermuteExpertsUnpermute:
+        from vllm.model_executor.layers.fused_moe import (
+            BatchedTritonOrDeepGemmExperts, TritonOrDeepGemmExperts)
 
         assert not self.use_marlin and not self.rocm_aiter_moe_enabled, (
             "Marlin and ROCm AITER are not supported with all2all yet.")
 
-        experts: Optional[Union[BatchedTritonOrDeepGemmExperts,
-                                TritonOrDeepGemmExperts]] = None
-        max_num_tokens_per_rank = prepare_finalize.max_num_tokens_per_rank()
-        use_batched_experts = max_num_tokens_per_rank is not None
-
-        if use_batched_experts:
-            experts = BatchedTritonOrDeepGemmExperts(
+        if (prepare_finalize.activation_format ==
+                FusedMoEActivationFormat.BatchedExperts):
+            max_num_tokens_per_rank = (
+                prepare_finalize.max_num_tokens_per_rank())
+            assert max_num_tokens_per_rank is not None
+            logger.debug(
+                "BatchedTritonOrDeepGemmExperts(%s): "
+                "max_tokens_per_rank=%s, block_size=%s, per_act_token=%s",
+                self.__class__.__name__, max_num_tokens_per_rank,
+                self.quant_config.weight_block_size, False)
+            return BatchedTritonOrDeepGemmExperts(
                 max_num_tokens=max_num_tokens_per_rank,
-                world_size=prepare_finalize.world_size,
-                dp_size=prepare_finalize.dp_size,
+                world_size=prepare_finalize.
+                world_size,  # type: ignore [attr-defined]
+                dp_size=prepare_finalize.
+                dp_size,  # type: ignore [attr-defined]
                 use_fp8_w8a8=True,
-                use_int8_w8a8=False,
-                use_int8_w8a16=False,
-                use_int4_w4a16=False,
-                per_channel_quant=False,
                 block_shape=self.quant_config.weight_block_size,
+                per_act_token_quant=False,
                 allow_deep_gemm=self.allow_deep_gemm,
             )
         else:
-            experts = TritonOrDeepGemmExperts(
+            logger.debug(
+                "TritonOrDeepGemmExperts(%s): block_size=%s, per_act_token=%s",
+                self.__class__.__name__, self.quant_config.weight_block_size,
+                False)
+            return TritonOrDeepGemmExperts(
                 use_fp8_w8a8=True,
                 block_shape=self.quant_config.weight_block_size,
                 allow_deep_gemm=self.allow_deep_gemm,
             )
-
-        assert experts is not None
-        return experts
 
     def apply(
         self,
@@ -871,7 +887,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                           if self.block_quant else layer.w2_weight_scale),
                 a1_scale=layer.w13_input_scale,
                 a2_scale=layer.w2_input_scale,
-                block_shape=self.quant_config.weight_block_size)
+                block_shape=self.quant_config.weight_block_size,
+                expert_map=expert_map)
         elif self.use_marlin:
             assert activation == "silu", (
                 f"{activation} not supported for Marlin MoE.")

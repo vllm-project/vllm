@@ -53,7 +53,7 @@ Next, make a request to the model that should result in it using the available t
     tool_call = response.choices[0].message.tool_calls[0].function
     print(f"Function called: {tool_call.name}")
     print(f"Arguments: {tool_call.arguments}")
-    print(f"Result: {get_weather(**json.loads(tool_call.arguments))}")
+    print(f"Result: {tool_functions[tool_call.name](**json.loads(tool_call.arguments))}")
     ```
 
 Example output:
@@ -98,6 +98,14 @@ specify the `name` of one of the tools in the `tool_choice` parameter of the cha
 vLLM supports the `tool_choice='required'` option in the chat completion API. Similar to the named function calling, it also uses guided decoding, so this is enabled by default and will work with any supported model. The required guided decoding features (JSON schema with `anyOf`) are currently only supported in the V0 engine with the guided decoding backend `outlines`. However, support for alternative decoding backends are on the [roadmap](https://docs.vllm.ai/en/latest/usage/v1_guide.html#feature-model) for the V1 engine.
 
 When tool_choice='required' is set, the model is guaranteed to generate one or more tool calls based on the specified tool list in the `tools` parameter. The number of tool calls depends on the user's query. The output format strictly follows the schema defined in the `tools` parameter.
+
+## None Function Calling
+
+vLLM supports the `tool_choice='none'` option in the chat completion API. When this option is set, the model will not generate any tool calls and will respond with regular text content only, even if tools are defined in the request.
+
+By default, when `tool_choice='none'` is specified, vLLM excludes tool definitions from the prompt to optimize context usage. To include tool definitions even with `tool_choice='none'`, use the `--expand-tools-even-if-tool-choice-none` option.
+
+Note: This behavior will change in v0.10.0, where tool definitions will be included by default even with `tool_choice='none'`.
 
 ## Automatic Function Calling
 
@@ -255,6 +263,15 @@ For Qwen2.5, the chat template in tokenizer_config.json has already included sup
 * `Qwen/QwQ-32B`
 
 Flags: `--tool-call-parser hermes`
+
+### MiniMax Models (`minimax_m1`)
+
+Supported models:
+
+* `MiniMaxAi/MiniMax-M1-40k` (use with <gh-file:examples/tool_chat_template_minimax.jinja>)
+* `MiniMaxAi/MiniMax-M1-80k` (use with <gh-file:examples/tool_chat_template_minimax.jinja>)
+
+Flags: `--tool-call-parser minimax --chat-template examples/tool_chat_template_minimax.jinja`
 
 ### DeepSeek-V3 Models (`deepseek_v3`)
 
