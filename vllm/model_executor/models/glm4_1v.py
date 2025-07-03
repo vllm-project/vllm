@@ -179,6 +179,7 @@ class Glm4vVisionMLP(nn.Module):
         hidden_features: int,
         bias: bool = False,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.gate_up_proj = MergedColumnParallelLinear(
@@ -186,12 +187,14 @@ class Glm4vVisionMLP(nn.Module):
             output_sizes=[hidden_features] * 2,
             bias=bias,
             quant_config=quant_config,
+            prefix=f"{prefix}.gate_up_proj"
         )
         self.down_proj = RowParallelLinear(
             hidden_features,
             in_features,
             bias=bias,
             quant_config=quant_config,
+            prefix=f"{prefix}.down_proj"
         )
         self.act_fn = SiluAndMul()
 
