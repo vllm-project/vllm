@@ -46,7 +46,7 @@ from dataclasses import dataclass, field
 from functools import cache, lru_cache, partial, wraps
 from types import MappingProxyType
 from typing import (TYPE_CHECKING, Any, Callable, Generic, Literal, NamedTuple,
-                    Optional, TypeVar, Union, cast, overload)
+                    Optional, Tuple, TypeVar, Union, cast, overload)
 from urllib.parse import urlparse
 from uuid import uuid4
 
@@ -628,14 +628,34 @@ def is_valid_ipv6_address(address: str) -> bool:
         return False
 
 
+def split_host_port(host_port: str) -> Tuple[str, int]:
+    # ipv6
+    if host_port.startswith('['):
+        host, port = host_port.rsplit(']', 1)
+        host = host[1:]
+        port = port.split(':')[1]
+        return host, int(port)
+    else:
+        host, port = host_port.split(':')
+        return host, int(port)
+
+
+def join_host_port(host: str, port: int) -> str:
+    if is_valid_ipv6_address(host):
+        return f"[{host}]:{port}"
+    else:
+        return f"{host}:{port}"
+
+
 def get_distributed_init_method(ip: str, port: int) -> str:
     return get_tcp_uri(ip, port)
 
 
 def get_tcp_uri(ip: str, port: int) -> str:
-    # Brackets are not permitted in ipv4 addresses,
-    # see https://github.com/python/cpython/issues/103848
-    return f"tcp://[{ip}]:{port}" if ":" in ip else f"tcp://{ip}:{port}"
+    if is_valid_ipv6_address(ip):
+        return f"tcp://[{ip}]:{port}"
+    else:
+        return f"tcp://{ip}:{port}"
 
 
 def get_open_zmq_ipc_path() -> str:
