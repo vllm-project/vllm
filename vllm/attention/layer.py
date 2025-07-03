@@ -310,16 +310,12 @@ class MultiHeadAttention(nn.Module):
             # currently, only torch_sdpa is supported on rocm
             self.attn_backend = _Backend.TORCH_SDPA
         else:
-            # if backend in {_Backend.FLASH_ATTN, _Backend.FLASH_ATTN_VLLM_V1}:
-            #     backend = _Backend.XFORMERS
+            if backend in {_Backend.FLASH_ATTN, _Backend.FLASH_ATTN_VLLM_V1}:
+                backend = _Backend.XFORMERS
 
-            # self.attn_backend = backend if backend in {
-            #     _Backend.TORCH_SDPA, _Backend.XFORMERS, _Backend.PALLAS_VLLM_V1
-            # } else _Backend.TORCH_SDPA
-
-            # Force TORCH_SDPA to avoid xformers-triton compatibility issues
-            # TODO: Remove this workaround once xformers-triton compatibility is fixed
-            self.attn_backend = _Backend.TORCH_SDPA
+            self.attn_backend = backend if backend in {
+                _Backend.TORCH_SDPA, _Backend.XFORMERS, _Backend.PALLAS_VLLM_V1
+            } else _Backend.TORCH_SDPA
 
     def forward(
         self,
