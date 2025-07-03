@@ -496,7 +496,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
 
     @cached_property
     def model_cls(self):
-        return cast(SupportsMultiModal, get_model_cls(self.model_config))
+        return get_model_cls(self.model_config)
 
     @property
     def allowed_local_media_path(self):
@@ -513,7 +513,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         """
         mm_registry = self.mm_registry
         model_config = self.model_config
-        model_cls = self.model_cls
+        model_cls = cast(SupportsMultiModal, self.model_cls)
 
         input_modality = modality.replace("_embeds", "")
 
