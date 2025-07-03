@@ -406,7 +406,9 @@ class ServingScores(OpenAIServing):
 
         request_id = f"rerank-{self._base_request_id(raw_request)}"
         documents = request.documents
-        top_n = request.top_n if request.top_n > 0 else len(documents)
+        top_n = request.top_n if request.top_n > 0 else (
+            len(documents)
+            if isinstance(documents, list) else len(documents["content"]))
 
         try:
             final_res_batch = await self._run_scoring(
