@@ -10,6 +10,7 @@ import torch
 
 from tests.kernels.utils import baseline_scaled_mm
 from vllm import _custom_ops as ops
+from vllm.platforms import current_platform
 
 
 def cdiv(a, b):
@@ -54,6 +55,10 @@ def per_block_cast_to_fp8(
     (32, 1024, 2048, 7168),
 ])
 @pytest.mark.parametrize("out_dtype", [torch.float16])
+@pytest.mark.skipif(
+    (lambda x: x is None or x.to_int() != 100)(
+        current_platform.get_device_capability()),
+    reason="Block Scaled Grouped GEMM is only supported on SM100.")
 def test_cutlass_grouped_gemm(
     num_groups: int,
     expected_m_per_group: int,
