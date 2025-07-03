@@ -114,6 +114,10 @@ def calc_diff(x: torch.Tensor, y: torch.Tensor):
     return 1 - sim
 
 
+def is_new_deep_gemm_api():
+    return _per_token_cast_impl is not None
+
+
 __all__ = [
     "calc_diff",
     "fp8_gemm_nt",
@@ -121,4 +125,5 @@ __all__ = [
     "fp8_m_grouped_gemm_nt_masked",
     "per_token_cast_to_fp8",
     "per_block_cast_to_fp8",
+    "is_new_deep_gemm_api",
 ]
