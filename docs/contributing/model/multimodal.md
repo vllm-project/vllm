@@ -10,6 +10,22 @@ This document walks you through the steps to extend a basic model so that it acc
 It is assumed that you have already implemented the model in vLLM according to [these steps][new-model-basic].
 Further update the model as follows:
 
+- Implement [get_placeholder_str][vllm.model_executor.models.interfaces.SupportsMultiModal.get_placeholder_str] to define the placeholder string which is used to represent the multi-modal item in the text prompt. This should be consistent with the chat template of the model.
+
+    ??? Code
+
+        ```python
+        class YourModelForImage2Seq(nn.Module):
+            ...
+
+            @classmethod
+            def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+                if modality.startswith("image"):
+                    return "<image>"
+
+                raise ValueError("Only image modality is supported")
+        ```
+
 - Reserve a keyword parameter in [forward][torch.nn.Module.forward] for each input tensor that corresponds to a multi-modal input, as shown in the following example:
 
   ```diff
@@ -538,11 +554,13 @@ return a schema of the tensors outputted by the HF processor that are related to
             prompt: str,
             mm_data: Mapping[str, object],
             mm_kwargs: Mapping[str, object],
+            tok_kwargs: Mapping[str, object],
         ) -> BatchFeature:
             processed_outputs = super()._call_hf_processor(
                 prompt=prompt,
                 mm_data=mm_data,
                 mm_kwargs=mm_kwargs,
+                tok_kwargs=tok_kwargs,
             )
 
             image_patches = processed_outputs.get("image_patches")
@@ -565,6 +583,11 @@ return a schema of the tensors outputted by the HF processor that are related to
     !!! note
         Our [actual code](gh-file:vllm/model_executor/models/fuyu.py) has special handling
         for text-only inputs to prevent unnecessary warnings from HF processor.
+
+    !!! note
+        The `_call_hf_processor` method specifies both `mm_kwargs` and `tok_kwargs` for
+        processing. `mm_kwargs` is used to both initialize and call the huggingface
+        processor, whereas `tok_kwargs` is only used to call the huggingface processor.
 
     This lets us override [_get_mm_fields_config][vllm.multimodal.processing.BaseMultiModalProcessor._get_mm_fields_config] as follows:
 
