@@ -181,8 +181,6 @@ def run_cutlass_moe_fp8(
         # this rank handles only partial tokens, or when it is batched .
         c1.fill_(0)
 
-    c1.fill_(0)
-
     ops.cutlass_moe_mm(c1, a1q, w1, a1q_scale, w1_scale, expert_offsets,
                        problem_sizes1, ab_strides1, ab_strides1, c_strides1,
                        per_act_token, per_out_ch)
