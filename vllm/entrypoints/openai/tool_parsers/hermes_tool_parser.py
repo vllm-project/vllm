@@ -42,6 +42,7 @@ class Hermes2ProToolParser(ToolParser):
 
         self.tool_call_start_token: str = "<tool_call>"
         self.tool_call_end_token: str = "</tool_call>"
+        self.right_brace_processed = set()
 
         self.tool_call_regex = re.compile(
             r"<tool_call>(.*?)</tool_call>|<tool_call>(.*)", re.DOTALL)
@@ -343,7 +344,9 @@ class Hermes2ProToolParser(ToolParser):
             elif cur_arguments and prev_arguments:
                 if isinstance(delta_text, str) and len(delta_text.rstrip(
                 )) >= 1 and delta_text.rstrip()[-1] == '}':
-                    delta_text = delta_text.rstrip()[:-1]
+                    if self.current_tool_id not in self.right_brace_processed:
+                        delta_text = delta_text.rstrip()[:-1]
+                        self.right_brace_processed.add(self.current_tool_id)
 
                 logger.debug("got diff %s", delta_text)
 
