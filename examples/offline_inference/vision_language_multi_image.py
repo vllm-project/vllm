@@ -423,6 +423,43 @@ def load_llama4(question: str, image_urls: list[str]) -> ModelRequestData:
     )
 
 
+def load_keye_vl(question: str, image_urls: list[str]) -> ModelRequestData:
+    model_name = "Kwai-Keye/Keye-VL-8B-Preview"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        trust_remote_code=True,
+        max_model_len=8192,
+        max_num_seqs=5,
+        limit_mm_per_prompt={"image": len(image_urls)},
+    )
+
+    placeholders = [{"type": "image", "image": url} for url in image_urls]
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                *placeholders,
+                {"type": "text", "text": question},
+            ],
+        },
+    ]
+
+    processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
+
+    prompt = processor.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+
+    image_data = [fetch_image(url) for url in image_urls]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+        image_data=image_data,
+    )
+
+
 def load_kimi_vl(question: str, image_urls: list[str]) -> ModelRequestData:
     model_name = "moonshotai/Kimi-VL-A3B-Instruct"
 
@@ -862,6 +899,7 @@ model_example_map = {
     "h2ovl_chat": load_h2ovl,
     "idefics3": load_idefics3,
     "internvl_chat": load_internvl,
+    "keye_vl": load_keye_vl,
     "kimi_vl": load_kimi_vl,
     "llava": load_llava,
     "llava-next": load_llava_next,
