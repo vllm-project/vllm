@@ -396,7 +396,7 @@ class OpenAIServingCompletion(OpenAIServing):
                 )
 
                 # if accumulate, send the usage info attached to last chunk instead
-                if request.accumulate:
+                if request.accumulate and chunk is not None:
                     chunk.usage = final_usage_info
                     final_usage_chunk = chunk
 
