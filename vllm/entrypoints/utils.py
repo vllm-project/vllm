@@ -185,7 +185,6 @@ def _validate_truncation_size(
 
 def show_filtered_argument_or_group_from_help(parser: argparse.ArgumentParser,
                                               subcommand_name: list[str]):
-    import sys
 
     # Only handle --help=<keyword> for the current subcommand.
     # Since subparser_init() runs for all subcommands during CLI setup,
