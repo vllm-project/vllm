@@ -14,6 +14,7 @@ import torch.distributed
 import torch.nn as nn
 from tqdm import tqdm
 
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVTransferAggregatedStats
 import vllm.envs as envs
 from vllm.attention import AttentionType, get_attn_backend
 from vllm.attention.backends.abstract import AttentionBackend
@@ -1375,7 +1376,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
 
             self.maybe_wait_for_kv_save()
-            finished_sending, finished_recving = (
+            finished_sending, finished_recving, kv_transfer_stats = (
                 self.get_finished_kv_transfers(scheduler_output))
 
         if self.use_aux_hidden_state_outputs:
@@ -1559,6 +1560,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             finished_sending=finished_sending,
             finished_recving=finished_recving,
             num_nans_in_logits=num_nans_in_logits,
+            kv_transfer_stats=kv_transfer_stats
         )
 
     def propose_draft_token_ids(
@@ -1687,7 +1689,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # KV send/recv even if no work to do.
         with set_forward_context(None, self.vllm_config):
             self.maybe_setup_kv_connector(scheduler_output)
-            finished_sending, finished_recving = (
+            finished_sending, finished_recving, kv_transfer_stats = (
                 self.get_finished_kv_transfers(scheduler_output))
 
         if not finished_sending and not finished_recving:
@@ -1722,11 +1724,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     @staticmethod
     def get_finished_kv_transfers(
         scheduler_output: "SchedulerOutput",
-    ) -> tuple[Optional[set[str]], Optional[set[str]]]:
+    ) -> tuple[Optional[set[str]], Optional[set[str]], Optional[KVTransferAggregatedStats]]:
         if has_kv_transfer_group():
             return get_kv_transfer_group().get_finished(
                 scheduler_output.finished_req_ids)
-        return None, None
+        return None, None, None
 
     def propose_ngram_draft_token_ids(
         self,

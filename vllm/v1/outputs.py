@@ -6,6 +6,8 @@ from typing import NamedTuple, Optional
 
 import torch
 
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVTransferAggregatedStats
+
 
 class LogprobsLists(NamedTuple):
 
@@ -110,6 +112,8 @@ class ModelRunnerOutput:
 
     # req_id -> num_nans_in_logits
     num_nans_in_logits: Optional[dict[str, int]] = None
+
+    kv_transfer_stats: Optional[KVTransferAggregatedStats] = None
 
 
 EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(req_ids=[],

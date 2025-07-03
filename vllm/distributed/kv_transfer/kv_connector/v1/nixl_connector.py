@@ -21,6 +21,7 @@ from vllm.attention.selector import backend_name_to_enum, get_attn_backend
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVTransferAggregatedStats, KVTransferStats
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size,
     get_tp_group)
@@ -37,7 +38,7 @@ if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.request import Request
 
-Transfer = tuple[int, float]  # (xfer_handle, start_time)
+Transfer = tuple[int, float, int]  # (xfer_handle, start_time, num_blocks)
 EngineId = str
 ReqId = str
 GET_META_MSG = b"get_meta_msg"
@@ -178,6 +179,11 @@ class NixlConnector(KVConnectorBase_V1):
     def wait_for_save(self):
         """NixlConnector does not save explicitly."""
         pass
+
+    
+    def get_transfer_stats(self) -> Optional[KVTransferAggregatedStats]:
+        assert self.connector_worker is not None
+        return self.connector_worker.xfer_stats_aggregated
 
 
 class NixlConnectorScheduler:
@@ -441,6 +447,10 @@ class NixlConnectorWorker:
         # With heterogeneous TP, P must wait for all assigned D TP workers to
         # finish reading before safely freeing the blocks.
         self.consumer_notification_counts_by_req = defaultdict[ReqId, int](int)
+        
+        # Transfer metrics tracking.
+        self.xfer_stats = KVTransferStats()
+        self.xfer_stats_aggregated = KVTransferAggregatedStats()
 
     def __del__(self):
         """Cleanup background threads on destruction."""
@@ -825,9 +835,12 @@ class NixlConnectorWorker:
                 "Rank %s, get_finished: %s requests done sending "
                 "and %s requests done recving", self.tp_rank,
                 len(done_sending), len(done_recving))
-
+                
+        # Aggregate transfer stats for this rank.
+        xfer_stats = self.xfer_stats.reduce_and_reset()
+        self.xfer_stats_aggregated.aggregate(xfer_stats)
         if self.world_size == 1:
-            return done_sending, done_recving
+            return done_sending, done_recving, self.xfer_stats_aggregated
 
         # Rank 0: get finished from all other ranks.
         if self.tp_rank == 0:
@@ -839,8 +852,12 @@ class NixlConnectorWorker:
             # Keep track of how many other ranks have finished.
             other_ranks_finished_ids: list[str] = []
             for i in range(1, self.world_size):
-                other_ranks_finished_ids.extend(
-                    self.tp_group.recv_object(src=i))
+                finished_req_ids, xfer_stats = self.tp_group.recv_object(src=i)
+                other_ranks_finished_ids.extend(finished_req_ids)
+                # Aggregate transfer stats from all ranks.
+                self.xfer_stats_aggregated.aggregate(xfer_stats)
+                # TODO reset after logging or keep global?
+            
             for req_id in other_ranks_finished_ids:
                 if (req_id in self._done_recving_count
                         or req_id in self._recving_transfers):
@@ -861,15 +878,15 @@ class NixlConnectorWorker:
                     del self._done_sending_count[req_id]
                     all_done_sending.add(req_id)
 
-            return all_done_sending, all_done_recving
+            return all_done_sending, all_done_recving, self.xfer_stats_aggregated
 
         # Ranks 1 to N-1: send finished ids to Rank 0.
         else:
             finished_req_ids = list(done_recving.union(done_sending))
-            self.tp_group.send_object(finished_req_ids, dst=0)
+            self.tp_group.send_object((finished_req_ids, xfer_stats), dst=0)
 
             # Unused as only Rank 0 results are sent to scheduler.
-            return done_sending, done_recving
+            return done_sending, done_recving, self.xfer_stats_aggregated
 
     def _get_new_notifs(self) -> set[str]:
         """
@@ -890,7 +907,7 @@ class NixlConnectorWorker:
         return notified_req_ids
 
     def _pop_done_transfers(
-            self, transfers: dict[str, list[tuple[int, float]]]) -> set[str]:
+            self, transfers: dict[str, list[Transfer]]) -> set[str]:
         """
         Pop completed xfers by checking for DONE state.
         Args:
@@ -899,11 +916,28 @@ class NixlConnectorWorker:
             set of req_ids that have all done xfers
         """
         done_req_ids: set[str] = set()
+        current_time = time.perf_counter()
+        
         for req_id, handles in list(transfers.items()):
             in_progress = False
-            for handle, _xfer_stime in handles:
+            for handle, xfer_stime, num_blocks in handles:
                 xfer_state = self.nixl_wrapper.check_xfer_state(handle)
                 if xfer_state == "DONE":
+                    # Calculate transfer metrics
+                    transfer_duration = current_time - xfer_stime
+                    
+                    # Calculate bytes transferred based on actual block count
+                    bytes_transferred = self.block_len * num_blocks
+                    
+                    # Record the completed transfer metrics
+                    # self.transfer_stats.record_transfer(
+                    #     duration=transfer_duration,
+                    #     bytes_count=bytes_transferred,
+                    #     num_blocks=num_blocks
+                    # )
+                    # TODO actual observe
+                    self.xfer_stats.observe()
+                    
                     self.nixl_wrapper.release_xfer_handle(handle)
                 elif xfer_state == "PROC":
                     in_progress = True
@@ -911,10 +945,13 @@ class NixlConnectorWorker:
                 else:
                     raise RuntimeError("Transfer failed with state %s",
                                        xfer_state)
+            
+            
             if not in_progress:
                 done_req_ids.add(req_id)
                 del transfers[req_id]
         return done_req_ids
+
 
     def start_load_kv(self, metadata: NixlConnectorMetadata):
         """
@@ -1046,9 +1083,9 @@ class NixlConnectorWorker:
         self.nixl_wrapper.transfer(handle)
 
         # Use handle to check completion in future step().
-        # TODO (NickLucche) surface xfer elapsed time
-        self._recving_transfers[request_id].append(
-            (handle, time.perf_counter()))
+        # Store handle, start_time, and block count for metrics tracking
+        transfer_info = (handle, time.perf_counter(), len(local_block_ids))
+        self._recving_transfers[request_id].append(transfer_info)
 
     def _get_block_descs_ids(self,
                              engine_id: str,

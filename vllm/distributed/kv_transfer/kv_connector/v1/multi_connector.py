@@ -11,6 +11,7 @@ from vllm.distributed.kv_transfer.kv_connector.factory import (
     KVConnectorFactory)
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVTransferAggregatedStats
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -104,11 +105,14 @@ class MultiConnector(KVConnectorBase_V1):
 
     def get_finished(
         self, finished_req_ids: set[str]
-    ) -> tuple[Optional[set[str]], Optional[set[str]]]:
+    ) -> tuple[Optional[set[str]], Optional[set[str]], Optional[KVTransferAggregatedStats]]:
         finished_sending: set[str] = set()
         finished_recving: set[str] = set()
+        base_xfer_stats = KVTransferAggregatedStats()
         for c in self._connectors:
-            sending, recving = c.get_finished(finished_req_ids)
+            sending, recving, xfer_stats = c.get_finished(finished_req_ids)
+            if xfer_stats is not None:
+                base_xfer_stats.aggregate(xfer_stats)
             if not recving and not sending:
                 continue
             # Aggregate finished recving request ids.
@@ -127,7 +131,8 @@ class MultiConnector(KVConnectorBase_V1):
                 else:
                     self._extra_async_saves[req_id] = extra_pending - 1
 
-        return finished_sending or None, finished_recving or None
+        base_xfer_stats = None if base_xfer_stats.is_empty() else base_xfer_stats
+        return finished_sending or None, finished_recving or None, base_xfer_stats
 
     # ==============================
     # Scheduler-side methods
