@@ -231,6 +231,38 @@ def test_limit_mm_per_prompt_parser(arg, expected):
     assert args.limit_mm_per_prompt == expected
 
 
+@pytest.mark.parametrize(
+    ("arg", "expected"),
+    [
+        (None, dict()),
+        ('{"video": {"num_frames": 123} }', {
+            "video": {
+                "num_frames": 123
+            }
+        }),
+        (
+            '{"video": {"num_frames": 123, "fps": 1.0, "foo": "bar"}, "image": {"foo": "bar"} }',  # noqa
+            {
+                "video": {
+                    "num_frames": 123,
+                    "fps": 1.0,
+                    "foo": "bar"
+                },
+                "image": {
+                    "foo": "bar"
+                }
+            }),
+    ])
+def test_media_io_kwargs_parser(arg, expected):
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    if arg is None:
+        args = parser.parse_args([])
+    else:
+        args = parser.parse_args(["--media-io-kwargs", arg])
+
+    assert args.media_io_kwargs == expected
+
+
 def test_compilation_config():
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
 
@@ -239,32 +271,40 @@ def test_compilation_config():
     assert args.compilation_config == CompilationConfig()
 
     # set to O3
-    args = parser.parse_args(["-O3"])
-    assert args.compilation_config.level == 3
+    args = parser.parse_args(["-O0"])
+    assert args.compilation_config.level == 0
 
     # set to O 3 (space)
-    args = parser.parse_args(["-O", "3"])
-    assert args.compilation_config.level == 3
+    args = parser.parse_args(["-O", "1"])
+    assert args.compilation_config.level == 1
 
     # set to O 3 (equals)
-    args = parser.parse_args(["-O=3"])
+    args = parser.parse_args(["-O=2"])
+    assert args.compilation_config.level == 2
+
+    # set to O.level 3
+    args = parser.parse_args(["-O.level", "3"])
     assert args.compilation_config.level == 3
 
     # set to string form of a dict
     args = parser.parse_args([
-        "--compilation-config",
-        '{"level": 3, "cudagraph_capture_sizes": [1, 2, 4, 8]}',
+        "-O",
+        '{"level": 3, "cudagraph_capture_sizes": [1, 2, 4, 8], '
+        '"use_inductor": false}',
     ])
     assert (args.compilation_config.level == 3 and
-            args.compilation_config.cudagraph_capture_sizes == [1, 2, 4, 8])
+            args.compilation_config.cudagraph_capture_sizes == [1, 2, 4, 8]
+            and not args.compilation_config.use_inductor)
 
     # set to string form of a dict
     args = parser.parse_args([
         "--compilation-config="
-        '{"level": 3, "cudagraph_capture_sizes": [1, 2, 4, 8]}',
+        '{"level": 3, "cudagraph_capture_sizes": [1, 2, 4, 8], '
+        '"use_inductor": true}',
     ])
     assert (args.compilation_config.level == 3 and
-            args.compilation_config.cudagraph_capture_sizes == [1, 2, 4, 8])
+            args.compilation_config.cudagraph_capture_sizes == [1, 2, 4, 8]
+            and args.compilation_config.use_inductor)
 
 
 def test_prefix_cache_default():
