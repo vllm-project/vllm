@@ -119,15 +119,15 @@ def run_headless(args: argparse.Namespace):
     if not envs.VLLM_USE_V1:
         raise ValueError("Headless mode is only supported for V1")
 
+    if engine_args.data_parallel_rank is not None:
+        raise ValueError("data_parallel_rank is not applicable in "
+                         "headless mode")
+
     parallel_config = vllm_config.parallel_config
     local_engine_count = parallel_config.data_parallel_size_local
 
     if local_engine_count <= 0:
         raise ValueError("data_parallel_size_local must be > 0 in "
-                         "headless mode")
-
-    if parallel_config.data_parallel_rank is not None:
-        raise ValueError("data_parallel_rank is not applicable in "
                          "headless mode")
 
     host = parallel_config.data_parallel_master_ip
