@@ -21,10 +21,11 @@ struct sm90_fp8_config_default {
       cutlass::epilogue::PtrArrayTmaWarpSpecializedPingpong;
   using TileShape = cute::Shape<cute::_64, cute::_256, cute::_128>;
   using ClusterShape = cute::Shape<cute::_1, cute::_2, cute::_1>;
+  using ArchTag = cutlass::arch::Sm90;
 
   using Cutlass3xGemm =
-      cutlass_3x_group_gemm<InType, OutType, Epilogue, TileShape, ClusterShape,
-                            KernelSchedule, EpilogueSchedule>;
+      cutlass_3x_group_gemm<InType, OutType, ArchTag, Epilogue, TileShape,
+                            ClusterShape, KernelSchedule, EpilogueSchedule>;
 };
 
 template <typename InType, typename OutType,
@@ -38,10 +39,11 @@ struct sm90_fp8_config_M16 {
       cutlass::epilogue::PtrArrayTmaWarpSpecializedPingpong;
   using TileShape = cute::Shape<cute::_64, cute::_64, cute::_128>;
   using ClusterShape = cute::Shape<cute::_1, cute::_4, cute::_1>;
+  using ArchTag = cutlass::arch::Sm90;
 
   using Cutlass3xGemm =
-      cutlass_3x_group_gemm<InType, OutType, Epilogue, TileShape, ClusterShape,
-                            KernelSchedule, EpilogueSchedule>;
+      cutlass_3x_group_gemm<InType, OutType, ArchTag, Epilogue, TileShape,
+                            ClusterShape, KernelSchedule, EpilogueSchedule>;
 };
 
 template <typename InType, typename OutType,
@@ -55,10 +57,11 @@ struct sm90_fp8_config_K8192 {
       cutlass::epilogue::PtrArrayTmaWarpSpecializedPingpong;
   using TileShape = cute::Shape<cute::_128, cute::_128, cute::_128>;
   using ClusterShape = cute::Shape<cute::_1, cute::_8, cute::_1>;
+  using ArchTag = cutlass::arch::Sm90;
 
   using Cutlass3xGemm =
-      cutlass_3x_group_gemm<InType, OutType, Epilogue, TileShape, ClusterShape,
-                            KernelSchedule, EpilogueSchedule>;
+      cutlass_3x_group_gemm<InType, OutType, ArchTag, Epilogue, TileShape,
+                            ClusterShape, KernelSchedule, EpilogueSchedule>;
 };
 
 template <typename InType, typename OutType,
@@ -72,10 +75,11 @@ struct sm90_fp8_config_N8192 {
       cutlass::epilogue::PtrArrayTmaWarpSpecializedPingpong;
   using TileShape = cute::Shape<cute::_64, cute::_128, cute::_256>;
   using ClusterShape = cute::Shape<cute::_1, cute::_8, cute::_1>;
+  using ArchTag = cutlass::arch::Sm90;
 
   using Cutlass3xGemm =
-      cutlass_3x_group_gemm<InType, OutType, Epilogue, TileShape, ClusterShape,
-                            KernelSchedule, EpilogueSchedule>;
+      cutlass_3x_group_gemm<InType, OutType, ArchTag, Epilogue, TileShape,
+                            ClusterShape, KernelSchedule, EpilogueSchedule>;
 };
 
 template <typename InType, typename OutType>
