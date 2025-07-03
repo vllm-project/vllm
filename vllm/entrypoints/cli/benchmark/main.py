@@ -8,6 +8,8 @@ import typing
 
 from vllm.entrypoints.cli.benchmark.base import BenchmarkSubcommandBase
 from vllm.entrypoints.cli.types import CLISubcommand
+from vllm.entrypoints.utils import (VLLM_SUBCMD_PARSER_EPILOG,
+                                    show_filtered_argument_or_group_from_help)
 
 if typing.TYPE_CHECKING:
     from vllm.utils import FlexibleArgumentParser
@@ -45,6 +47,9 @@ class BenchmarkSubcommand(CLISubcommand):
             )
             cmd_subparser.set_defaults(dispatch_function=cmd_cls.cmd)
             cmd_cls.add_cli_args(cmd_subparser)
+            show_filtered_argument_or_group_from_help(cmd_subparser,
+                                                      ["bench", cmd_cls.name])
+            cmd_subparser.epilog = VLLM_SUBCMD_PARSER_EPILOG
         return bench_parser
 
 
