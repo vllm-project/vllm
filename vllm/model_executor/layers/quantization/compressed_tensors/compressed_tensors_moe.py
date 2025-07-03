@@ -885,19 +885,25 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias)
 
+        a1_scale = layer.w13_input_scale
+        a2_scale = layer.w2_input_scale
+        per_act_token = a1_scale.numel() != 1 if a1_scale is not None else (
+            a2_scale.numel() != 1 if a2_scale is not None else False)
+
         return self.fused_experts(
             x,
             layer.w13_weight,
             layer.w2_weight,
             topk_weights,
             topk_ids,
+            per_act_token=per_act_token,
             activation=activation,
             global_num_experts=global_num_experts,
             expert_map=None if self.disable_expert_map else expert_map,
             w1_scale=layer.w13_weight_scale,
             w2_scale=layer.w2_weight_scale,
-            a1_scale=layer.w13_input_scale,
-            a2_scale=layer.w2_input_scale,
+            a1_scale=a1_scale,
+            a2_scale=a2_scale,
         )
 
 
