@@ -264,6 +264,15 @@ For Qwen2.5, the chat template in tokenizer_config.json has already included sup
 
 Flags: `--tool-call-parser hermes`
 
+### MiniMax Models (`minimax_m1`)
+
+Supported models:
+
+* `MiniMaxAi/MiniMax-M1-40k` (use with <gh-file:examples/tool_chat_template_minimax.jinja>)
+* `MiniMaxAi/MiniMax-M1-80k` (use with <gh-file:examples/tool_chat_template_minimax.jinja>)
+
+Flags: `--tool-call-parser minimax --chat-template examples/tool_chat_template_minimax.jinja`
+
 ### DeepSeek-V3 Models (`deepseek_v3`)
 
 Supported models:
