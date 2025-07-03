@@ -3,12 +3,9 @@ import threading
 from typing import Optional
 
 import torch
-import torch._dynamo
-from torch.library import custom_op
 
 from vllm import forward_context
 from vllm.utils import current_stream
-from vllm.distributed.parallel_state import get_dp_group
 
 
 class UBatchContext:
@@ -75,31 +72,26 @@ class UBatchContext:
         pass
 
     def _signal_comm_done(self):
-        # assert False
         self.ctx_valid_state()
         self.gpu_comm_done_event.record(self.comm_stream)
 
     def _signal_compute_done(self):
-        # assert False
         self.ctx_valid_state()
         self.gpu_compute_done_event.record(self.compute_stream)
 
     def _wait_compute_done(self):
-        # assert False
         # print(f"{self.id} Waiting on COMPUTE stream", flush=True)
         self.ctx_valid_state()
         self.comm_stream.wait_event(self.gpu_compute_done_event)
         # print("Compute stream done", flush=True)
 
     def _wait_comm_done(self):
-        # assert False
         # print(f"{self.id} Waiting on COMM stream", flush=True)
         self.ctx_valid_state()
         self.compute_stream.wait_event(self.gpu_comm_done_event)
         # print("Comm stream done", flush=True)
 
     def stream_string(self):
-        # assert False
         if current_stream() == self.compute_stream:
             assert self.current_stream == self.compute_stream
             return "COMPUTE"
@@ -118,7 +110,6 @@ class UBatchContext:
         # print(f"UBatchContext: {self.id} resuming CPU", flush=True)
 
     def yield_and_switch_from_compute_to_comm(self):
-        # assert False
         assert current_stream() == self.compute_stream
         # dp_rank = get_dp_group().rank_in_group
         # print(f"DP: {dp_rank} UB: {self.id} "
@@ -134,7 +125,6 @@ class UBatchContext:
         self._wait_compute_done()
 
     def yield_and_switch_from_comm_to_compute(self):
-        # assert False
         assert current_stream() == self.comm_stream
         # dp_rank = get_dp_group().rank_in_group
         # print(f"DP: {dp_rank} UB: {self.id} "
@@ -161,7 +151,7 @@ def get_current_ubatch_context() -> Optional[UBatchContext]:
     return _CURRENT_CONTEXT.get(threading.get_ident(), None)
 
 
-def yield_and_switch_from_compute_to_comm_impl(schedule="default"):
+def yield_and_switch_from_compute_to_comm(schedule="default"):
     # Perform the barrier if a context exists for this thread
     ctx = get_current_ubatch_context()
     #print("you are in yield_impl", ctx)
@@ -169,49 +159,11 @@ def yield_and_switch_from_compute_to_comm_impl(schedule="default"):
         ctx.yield_and_switch_from_compute_to_comm()
 
 
-def yield_and_switch_from_comm_to_compute_impl(schedule="default"):
+def yield_and_switch_from_comm_to_compute(schedule="default"):
     # Perform the barrier if a context exists for this thread
     ctx = get_current_ubatch_context()
     if ctx is not None and ctx.schedule == schedule:
         ctx.yield_and_switch_from_comm_to_compute()
-
-
-# 2) Register kernel for CUDA, mark as mutating to prevent the compiler from
-#    optimizing it away (TODO: see if this is actually needed)
-@custom_op("vllm::yield_and_switch_from_compute_to_comm", mutates_args=("x", ))
-def yield_and_switch_from_compute_to_comm(x: torch.Tensor,
-                                          schedule: str = "default") -> None:
-    yield_and_switch_from_compute_to_comm_impl(schedule)
-
-
-# 3) Fake implementation for shape prop and FX tracing
-@yield_and_switch_from_compute_to_comm.register_fake
-def yield_and_switch_from_compute_to_comm_fake(x: torch.Tensor,
-                                               schedule: str = "default"
-                                               ) -> None:
-    pass
-
-
-@custom_op("vllm::yield_and_switch_from_comm_to_compute", mutates_args=("x", ))
-def yield_and_switch_from_comm_to_compute(x: torch.Tensor,
-                                          schedule: str = "default") -> None:
-    yield_and_switch_from_comm_to_compute_impl(schedule)
-
-
-@yield_and_switch_from_comm_to_compute.register_fake
-def yield_and_switch_from_comm_to_compute_fake(x: torch.Tensor,
-                                               schedule: str = "default"
-                                               ) -> None:
-    pass
-
-
-def dump_ubatching_state():
-    pass
-
-
-"""
-"""
-
 
 def make_ubatch_contexts(
     num_micro_batches: int,

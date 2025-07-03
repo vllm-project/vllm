@@ -8,8 +8,8 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.utils import (
     moe_kernel_quantize_input)
 from vllm.v1.worker.ubatching import (
-    get_current_ubatch_context, yield_and_switch_from_comm_to_compute_impl,
-    yield_and_switch_from_compute_to_comm_impl)
+    get_current_ubatch_context, yield_and_switch_from_comm_to_compute,
+    yield_and_switch_from_compute_to_comm)
 
 # DeepEP kernels quantize dispatch inputs in 128 element chunks.
 DEEPEP_QUANT_BLOCK_SIZE = 128
@@ -154,7 +154,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             a1 = a1 * rank_topk_weights.to(a1.dtype)
 
         # Dispatch
-        yield_and_switch_from_compute_to_comm_impl(schedule="default")
+        yield_and_switch_from_compute_to_comm(schedule="default")
         expert_x, expert_num_tokens, handle, _, _= \
                 self.buffers[a2a_idx].low_latency_dispatch(a1,
                                                 rank_topk_ids,
@@ -164,7 +164,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                                                 async_finish=False,
                                                 return_recv_hook=False)
         self.handles[a2a_idx] = handle
-        yield_and_switch_from_comm_to_compute_impl(schedule="default")
+        yield_and_switch_from_comm_to_compute(schedule="default")
 
         expert_x, expert_x_scale = self._do_quant(expert_x, a1_scale, a2_scale,
                                                   a1.dtype)
@@ -186,7 +186,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             combine_topk_weights = torch.ones_like(topk_weights)
 
         # TODO (varun) : Enable zero copy mode
-        yield_and_switch_from_compute_to_comm_impl(schedule="default")
+        yield_and_switch_from_compute_to_comm(schedule="default")
         _ = self.buffers[a2a_idx].low_latency_combine(
             fused_expert_output,
             topk_ids,
@@ -196,5 +196,5 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             zero_copy=False,
             return_recv_hook=False,
             out=output)
-        yield_and_switch_from_comm_to_compute_impl(schedule="default")
+        yield_and_switch_from_comm_to_compute(schedule="default")
 
