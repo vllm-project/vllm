@@ -172,6 +172,8 @@ def check_moe_marlin_supports_layer(layer: LinearBase, group_size: int) \
                                     -> bool:
     hidden_size = layer.hidden_size
     intermediate_size_per_partition = layer.intermediate_size_per_partition
+    # apply_router_weight_on_input is not supported for moe marlin
+    supports_router_weight = not layer.apply_router_weight_on_input
     # moe marlin requires the activation to be silu
     supports_activation = layer.activation == "silu"
 
@@ -182,7 +184,7 @@ def check_moe_marlin_supports_layer(layer: LinearBase, group_size: int) \
         intermediate_size_per_partition % max(64, group_size) == 0
     supports_group_size = group_size in [-1, 32, 64, 128]
     return supports_shape and supports_group_size and \
-        supports_activation
+        supports_router_weight and supports_activation
 
 
 def marlin_make_workspace(output_size_per_partition: int,
