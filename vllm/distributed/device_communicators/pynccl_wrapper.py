@@ -316,8 +316,8 @@ class NCCLLibrary:
                                                      stream))
 
     def ncclReduce(self, sendbuff: buffer_type, recvbuff: buffer_type,
-                      count: int, datatype: int, op: int, root: int, comm: ncclComm_t,
-                      stream: cudaStream_t) -> None:
+                   count: int, datatype: int, op: int, root: int,
+                   comm: ncclComm_t, stream: cudaStream_t) -> None:
         # `datatype` actually should be `ncclDataType_t`
         # and `op` should be `ncclRedOp_t`
         # both are aliases of `ctypes.c_int`

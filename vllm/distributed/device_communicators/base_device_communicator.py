@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import threading
-from typing import List, Optional, Union
+from typing import Optional, Union
 from weakref import WeakValueDictionary
 
 import torch
@@ -137,15 +137,18 @@ class DeviceCommunicatorBase:
                                                input_size[dim], ) +
                                               input_size[dim + 1:])
         return output_tensor
-    
-    def all_gatherv(self, input_: Union[torch.Tensor, List[torch.Tensor]], dim: int = 0, sizes: Optional[List[int]] = None):
+
+    def all_gatherv(
+        self,
+        input_: Union[torch.Tensor, list[torch.Tensor]],
+        dim: int = 0,
+        sizes: Optional[list[int]] = None
+    ) -> Union[torch.Tensor, list[torch.Tensor]]:
         raise NotImplementedError
 
     def reduce_scatter(self,
                        input_: torch.Tensor,
-                       dim: int = -1,
-                       sizes: Optional[List[int]] = None) -> torch.Tensor:
-        assert sizes is None, "Varying size reduce scatter not supported with base device communicator"
+                       dim: int = -1) -> torch.Tensor:
         world_size = self.world_size
         # Bypass the function if we are using only 1 GPU.
         if world_size == 1:
@@ -176,6 +179,12 @@ class DeviceCommunicatorBase:
 
         # Reshape before returning
         return output_tensor.movedim(0, dim).contiguous()
+
+    def reduce_scatterv(self,
+                        input_: torch.Tensor,
+                        dim: int = -1,
+                        sizes: Optional[list[int]] = None) -> torch.Tensor:
+        raise NotImplementedError
 
     def gather(self,
                input_: torch.Tensor,

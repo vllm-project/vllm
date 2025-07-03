@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import List, Optional, Union
+from typing import Optional, Union
 
 # ===================== import region =====================
-import numpy as np
 import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup, ReduceOp
@@ -137,7 +136,7 @@ class PyNcclCommunicator:
                    output_tensor: torch.Tensor,
                    input_tensor: torch.Tensor,
                    stream=None,
-                   sizes: Optional[List[int]] = None):
+                   sizes: Optional[list[int]] = None):
         if self.disabled:
             return
         # nccl communicator created on a specific device
@@ -178,7 +177,7 @@ class PyNcclCommunicator:
                        input_tensor: torch.Tensor,
                        op: ReduceOp = ReduceOp.SUM,
                        stream=None,
-                       sizes: Optional[List[int]] = None):
+                       sizes: Optional[list[int]] = None):
         if self.disabled:
             return
         # nccl communicator created on a specific device
@@ -189,23 +188,20 @@ class PyNcclCommunicator:
             f"but the input tensor is on {input_tensor.device}")
         if stream is None:
             stream = current_stream()
-        
+
         if sizes is not None:
             split_offset = 0
             self.nccl.ncclGroupStart()
             for root, split_size in enumerate(sizes):
-                chunk = input_tensor[split_offset:split_offset + split_size, ...]
+                chunk = input_tensor[split_offset:split_offset + split_size,
+                                     ...]
 
                 self.nccl.ncclReduce(
                     buffer_type(chunk.data_ptr()),
-                    buffer_type(output_tensor.data_ptr()),
-                    chunk.numel(),
+                    buffer_type(output_tensor.data_ptr()), chunk.numel(),
                     ncclDataTypeEnum.from_torch(input_tensor.dtype),
-                    ncclRedOpTypeEnum.from_torch(op),
-                    root,
-                    self.comm,
-                    cudaStream_t(stream.cuda_stream)
-                )
+                    ncclRedOpTypeEnum.from_torch(op), root, self.comm,
+                    cudaStream_t(stream.cuda_stream))
                 split_offset += split_size
             self.nccl.ncclGroupEnd()
         else:

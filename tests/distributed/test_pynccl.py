@@ -187,14 +187,12 @@ def all_gatherv_worker_fn():
     world_size = pynccl_comm.world_size
     device = f'cuda:{pynccl_comm.rank}'
 
-    assert world_size <= 8, "Make sizes list longer if you wish to run this test with more than 8 devices"
+    assert world_size <= 8
     sizes = [81, 20, 57, 52, 81, 5, 49, 49][:world_size]
     num_elems = sizes[rank]
     tensor = torch.arange(num_elems, dtype=torch.float32,
                           device=device) + rank * 100
-    result = torch.zeros(sum(sizes),
-                         dtype=torch.float32,
-                         device=device)
+    result = torch.zeros(sum(sizes), dtype=torch.float32, device=device)
 
     expected = torch.cat([
         torch.arange(sizes[r], dtype=torch.float32) + r * 100
@@ -258,14 +256,12 @@ def reduce_scatterv_worker_fn():
     world_size = pynccl_comm.world_size
     device = f'cuda:{pynccl_comm.rank}'
 
-    assert world_size <= 8, "Make sizes list longer if you wish to run this test with more than 8 devices"
+    assert world_size <= 8
     sizes = [81, 20, 57, 52, 81, 5, 49, 49][:world_size]
     num_elems = sum(sizes)
     tensor = torch.arange(num_elems, dtype=torch.float32,
                           device=device) + rank * 100
-    result = torch.zeros(sizes[rank],
-                         dtype=torch.float32,
-                         device=device)
+    result = torch.zeros(sizes[rank], dtype=torch.float32, device=device)
 
     # Calculate expected result for this rank's chunk
     all_tensors = [
@@ -275,8 +271,7 @@ def reduce_scatterv_worker_fn():
     sizes_cumsum = np.cumsum(sizes)
     start = 0 if rank == 0 else sizes_cumsum[rank - 1]
     end = sizes_cumsum[rank]
-    expected = sum(tensor[start:end]
-                   for tensor in all_tensors).to(device)
+    expected = sum(tensor[start:end] for tensor in all_tensors).to(device)
 
     pynccl_comm.reduce_scatter(result, tensor, sizes=sizes)
     torch.cuda.synchronize()

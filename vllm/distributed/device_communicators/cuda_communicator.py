@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import List, Optional, Union
+from typing import Optional, Union
 
 import torch
 from torch.distributed import ProcessGroup
@@ -113,6 +113,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
 
         assert input_tensor.shape[0] % world_size == 0
         chunk_size = input_tensor.shape[0] // world_size
+        output_shape = (chunk_size, ) + input_tensor.shape[1:]
 
         output = torch.empty(output_shape,
                              dtype=input_tensor.dtype,
@@ -123,7 +124,10 @@ class CudaCommunicator(DeviceCommunicatorBase):
         # Reshape before returning
         return output.movedim(0, dim).contiguous()
 
-    def reduce_scatterv(self, input_: torch.Tensor, dim: int = -1, sizes: Optional[List[int]] = None):
+    def reduce_scatterv(self,
+                        input_: torch.Tensor,
+                        dim: int = -1,
+                        sizes: Optional[list[int]] = None):
         world_size = self.world_size
         pynccl_comm = self.pynccl_comm
         assert pynccl_comm is not None
@@ -191,28 +195,33 @@ class CudaCommunicator(DeviceCommunicatorBase):
             self.all2all_manager.destroy()
             self.all2all_manager = None
 
-    def all_gatherv(self, input_: Union[torch.Tensor, List[torch.Tensor]], dim: int = 0, sizes: Optional[List[int]] = None):
+    def all_gatherv(self,
+                    input_: Union[torch.Tensor, list[torch.Tensor]],
+                    dim: int = 0,
+                    sizes: Optional[list[int]] = None):
         if dim != 0:
             raise NotImplementedError("only dim 0 all-gatherv is supported")
         world_size = self.world_size
         pynccl_comm = self.pynccl_comm
         assert pynccl_comm is not None and not pynccl_comm.disabled
 
-        def _all_gather_single(input_: torch.Tensor, sizes: Optional[List[int]] = None):
+        def _all_gather_single(input_: torch.Tensor,
+                               sizes: Optional[list[int]] = None):
             input_size = input_.size()
             if sizes is not None:
                 assert len(sizes) == world_size
                 assert input_.shape[dim] == sizes[self.rank_in_group]
                 output_size = (sum(sizes), ) + input_size[1:]
-                # 'sizes' is not needed if all inputs in the same group have the same shape
+                # 'sizes' is not needed if all inputs in the same group have the
+                # same shape
                 if all(s == sizes[0] for s in sizes):
                     sizes = None
             else:
                 output_size = (input_size[0] * world_size, ) + input_size[1:]
             # Allocate output tensor.
-            output_tensor = torch.empty(
-                output_size, dtype=input_.dtype, device=input_.device
-            )
+            output_tensor = torch.empty(output_size,
+                                        dtype=input_.dtype,
+                                        device=input_.device)
             pynccl_comm.all_gather(output_tensor, input_, sizes=sizes)
             return output_tensor
 
@@ -224,7 +233,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         for inp in input_:
             output_list.append(_all_gather_single(inp, sizes=sizes))
         pynccl_comm.group_end()
-        
+
         return output_list
 
     def dispatch(
