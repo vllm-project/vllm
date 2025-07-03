@@ -1127,6 +1127,8 @@ def dispatch_fused_experts_func(inplace: bool) -> Callable[..., torch.Tensor]:
     return torch_vllm_outplace_fused_experts
 
 
+# TODO (bnell): replace this with modular op.  Can get rid of inplace/outplace
+# torch ops.
 def fused_experts(hidden_states: torch.Tensor,
                   w1: torch.Tensor,
                   w2: torch.Tensor,
