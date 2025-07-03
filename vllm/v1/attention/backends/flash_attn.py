@@ -14,10 +14,16 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
 from vllm.attention.layer import Attention
 from vllm.attention.ops.merge_attn_states import merge_attn_states
 from vllm.attention.utils.fa_utils import (flash_attn_supports_fp8,
-                                           get_flash_attn_version)
+                                           get_flash_attn_version,
+                                           is_flash_attn_varlen_func_available)
+
+if is_flash_attn_varlen_func_available():
+    from vllm.attention.utils.fa_utils import (flash_attn_varlen_func,
+                                               get_scheduler_metadata,
+                                               reshape_and_cache_flash)
+
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
 from vllm.utils import cdiv
 from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder, CommonAttentionMetadata, get_kv_cache_layout,
@@ -28,11 +34,10 @@ from vllm.v1.worker.block_table import BlockTable
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
-if current_platform.is_cuda():
-    from vllm.vllm_flash_attn import (flash_attn_varlen_func,
-                                      get_scheduler_metadata)
-
 logger = init_logger(__name__)
+
+# NOTE(woosuk): This is an arbitrary number. Tune it if needed.
+_DEFAULT_MAX_NUM_SPLITS_FOR_CUDA_GRAPH = 16
 
 
 class FlashAttentionBackend(AttentionBackend):
@@ -112,6 +117,7 @@ class FlashAttentionMetadata:
     # Optional aot scheduling
     scheduler_metadata: Optional[torch.Tensor] = None
     prefix_scheduler_metadata: Optional[torch.Tensor] = None
+    max_num_splits: int = 0
 
     # for local attention
     @dataclass
@@ -156,14 +162,35 @@ class FlashAttentionMetadataBuilder(
         self.kv_cache_spec = kv_cache_spec
         self.block_table = block_table
 
+        self.max_num_splits = 0  # No upper bound on the number of splits.
         self.aot_schedule = (get_flash_attn_version() == 3)
         self.use_full_cuda_graph = compilation_config.full_cuda_graph
-        if self.use_full_cuda_graph and not self.aot_schedule:
-            raise ValueError("Full CUDA graph mode requires AOT scheduling, "
-                             "which requires FlashAttention 3.")
-        self.scheduler_metadata = torch.zeros(self.runner.max_num_reqs + 1,
-                                              dtype=torch.int32,
-                                              device=self.runner.device)
+        if self.use_full_cuda_graph:
+            if not self.aot_schedule:
+                raise ValueError(
+                    "AoT scheduling is required for full cuda graph.")
+            capture_sizes = compilation_config.cudagraph_capture_sizes
+            if not capture_sizes:
+                raise ValueError(
+                    "cudagraph_capture_sizes should not be None when "
+                    "full_cuda_graph is True.")
+            self.max_cudagraph_size = max(capture_sizes)
+            if self.max_cudagraph_size > 992:
+                # This condition derives from FA3's internal heuristic.
+                # TODO(woosuk): Support larger cudagraph sizes.
+                raise ValueError(
+                    "Capture size larger than 992 is not supported for "
+                    "full cuda graph.")
+
+            self.scheduler_metadata = torch.zeros(
+                self.runner.max_num_reqs + 1,
+                dtype=torch.int32,
+                device=self.runner.device,
+            )
+            # When using cuda graph, we need to set the upper bound of the
+            # number of splits so that large enough intermediate buffers are
+            # pre-allocated during capture.
+            self.max_num_splits = _DEFAULT_MAX_NUM_SPLITS_FOR_CUDA_GRAPH
 
         # Sliding window size to be used with the AOT scheduler will be
         # populated on first build() call.
@@ -223,6 +250,7 @@ class FlashAttentionMetadataBuilder(
                     cu_seqlens_q=cu_query_lens,
                     causal=causal,
                     window_size=self.aot_sliding_window,
+                    num_splits=self.max_num_splits,
                 )
             return None
 
@@ -302,14 +330,22 @@ class FlashAttentionMetadataBuilder(
         if self.use_full_cuda_graph:
             assert scheduler_metadata is not None
             n = scheduler_metadata.shape[0]
-            self.scheduler_metadata[:n].copy_(scheduler_metadata,
-                                              non_blocking=True)
+            self.scheduler_metadata[:n] = scheduler_metadata
             # NOTE(woosuk): We should zero out the rest of the scheduler
             # metadata to guarantee the correctness. Otherwise, some thread
             # blocks may use the invalid scheduler metadata and overwrite the
             # output buffer.
             self.scheduler_metadata[n:] = 0
             scheduler_metadata = self.scheduler_metadata[:n]
+
+        max_num_splits = 0
+        if (self.use_full_cuda_graph
+                and num_actual_tokens <= self.max_cudagraph_size):
+            # NOTE(woosuk): Setting num_splits > 1 may increase the memory
+            # usage, because the intermediate buffers of size [num_splits,
+            # num_heads, num_tokens, head_size] are allocated. Therefore,
+            # we only set num_splits when using cuda graphs.
+            max_num_splits = self.max_num_splits
 
         attn_metadata = FlashAttentionMetadata(
             num_actual_tokens=num_actual_tokens,
@@ -327,6 +363,7 @@ class FlashAttentionMetadataBuilder(
             suffix_kv_lens=suffix_kv_lens,
             local_attn_metadata=local_attn_metadata,
             prefix_scheduler_metadata=prefix_scheduler_metadata,
+            max_num_splits=max_num_splits,
         )
         return attn_metadata
 
@@ -454,7 +491,7 @@ class FlashAttentionImpl(AttentionImpl):
             # and value[:num_actual_tokens] because the reshape_and_cache_flash
             # op uses the slot_mapping's shape to determine the number of
             # actual tokens.
-            torch.ops._C_cache_ops.reshape_and_cache_flash(
+            reshape_and_cache_flash(
                 key,
                 value,
                 key_cache,
@@ -519,6 +556,7 @@ class FlashAttentionImpl(AttentionImpl):
                 q_descale=layer._q_scale.expand(descale_shape),
                 k_descale=layer._k_scale.expand(descale_shape),
                 v_descale=layer._v_scale.expand(descale_shape),
+                num_splits=attn_metadata.max_num_splits,
             )
             return output
 

@@ -202,7 +202,10 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, Any]:
         passed individually. For example, the following sets of arguments are
         equivalent:\n\n
         - `--json-arg '{"key1": "value1", "key2": {"key3": "value2"}}'`\n
-        - `--json-arg.key1 value1 --json-arg.key2.key3 value2`\n\n"""
+        - `--json-arg.key1 value1 --json-arg.key2.key3 value2`\n
+        Additionally, list elements can be passed individually using '+':
+        - `--json-arg '{"key4": ["value3", "value4", "value5"]}'`\n
+        - `--json-arg.key4+ value3 --json-arg.key4+='value4,value5'`\n\n"""
         if dataclass_cls is not None:
 
             def parse_dataclass(val: str, cls=dataclass_cls) -> Any:
@@ -315,11 +318,17 @@ class EngineArgs:
     pipeline_parallel_size: int = ParallelConfig.pipeline_parallel_size
     tensor_parallel_size: int = ParallelConfig.tensor_parallel_size
     data_parallel_size: int = ParallelConfig.data_parallel_size
+    data_parallel_rank: Optional[int] = None
     data_parallel_size_local: Optional[int] = None
     data_parallel_address: Optional[str] = None
     data_parallel_rpc_port: Optional[int] = None
     data_parallel_backend: str = ParallelConfig.data_parallel_backend
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
+    enable_eplb: bool = ParallelConfig.enable_eplb
+    num_redundant_experts: int = ParallelConfig.num_redundant_experts
+    eplb_window_size: int = ParallelConfig.eplb_window_size
+    eplb_step_interval: int = ParallelConfig.eplb_step_interval
+    eplb_log_balancedness: bool = ParallelConfig.eplb_log_balancedness
     max_parallel_loading_workers: Optional[
         int] = ParallelConfig.max_parallel_loading_workers
     block_size: Optional[BlockSize] = CacheConfig.block_size
@@ -361,6 +370,9 @@ class EngineArgs:
         get_field(TokenizerPoolConfig, "extra_config")
     limit_mm_per_prompt: dict[str, int] = \
         get_field(MultiModalConfig, "limit_per_prompt")
+    media_io_kwargs: dict[str, dict[str,
+                                    Any]] = get_field(MultiModalConfig,
+                                                      "media_io_kwargs")
     mm_processor_kwargs: Optional[Dict[str, Any]] = \
         MultiModalConfig.mm_processor_kwargs
     disable_mm_preprocessor_cache: bool = \
@@ -642,6 +654,12 @@ class EngineArgs:
                                     **parallel_kwargs["tensor_parallel_size"])
         parallel_group.add_argument("--data-parallel-size", "-dp",
                                     **parallel_kwargs["data_parallel_size"])
+        parallel_group.add_argument(
+            '--data-parallel-rank',
+            '-dpn',
+            type=int,
+            help='Data parallel rank of this instance. '
+            'When set, enables external load balancer mode.')
         parallel_group.add_argument('--data-parallel-size-local',
                                     '-dpl',
                                     type=int,
@@ -666,6 +684,16 @@ class EngineArgs:
         parallel_group.add_argument(
             "--enable-expert-parallel",
             **parallel_kwargs["enable_expert_parallel"])
+        parallel_group.add_argument("--enable-eplb",
+                                    **parallel_kwargs["enable_eplb"])
+        parallel_group.add_argument("--num-redundant-experts",
+                                    **parallel_kwargs["num_redundant_experts"])
+        parallel_group.add_argument("--eplb-window-size",
+                                    **parallel_kwargs["eplb_window_size"])
+        parallel_group.add_argument("--eplb-step-interval",
+                                    **parallel_kwargs["eplb_step_interval"])
+        parallel_group.add_argument("--eplb-log-balancedness",
+                                    **parallel_kwargs["eplb_log_balancedness"])
         parallel_group.add_argument(
             "--max-parallel-loading-workers",
             **parallel_kwargs["max_parallel_loading_workers"])
@@ -727,6 +755,8 @@ class EngineArgs:
         )
         multimodal_group.add_argument("--limit-mm-per-prompt",
                                       **multimodal_kwargs["limit_per_prompt"])
+        multimodal_group.add_argument("--media-io-kwargs",
+                                      **multimodal_kwargs["media_io_kwargs"])
         multimodal_group.add_argument(
             "--mm-processor-kwargs",
             **multimodal_kwargs["mm_processor_kwargs"])
@@ -951,6 +981,7 @@ class EngineArgs:
             enable_prompt_embeds=self.enable_prompt_embeds,
             served_model_name=self.served_model_name,
             limit_mm_per_prompt=self.limit_mm_per_prompt,
+            media_io_kwargs=self.media_io_kwargs,
             use_async_output_proc=not self.disable_async_output_proc,
             config_format=self.config_format,
             mm_processor_kwargs=self.mm_processor_kwargs,
@@ -1096,10 +1127,17 @@ class EngineArgs:
             # but we should not do this here.
             placement_group = ray.util.get_current_placement_group()
 
-        # Local DP size defaults to global DP size if not set.
-        data_parallel_size_local = self.data_parallel_size if (
-            self.data_parallel_size_local
-            is None) else self.data_parallel_size_local
+        data_parallel_external_lb = self.data_parallel_rank is not None
+        if data_parallel_external_lb:
+            assert self.data_parallel_size_local in (1, None), (
+                "data_parallel_size_local must be 1 when data_parallel_rank "
+                "is set")
+            data_parallel_size_local = 1
+        elif self.data_parallel_size_local is not None:
+            data_parallel_size_local = self.data_parallel_size_local
+        else:
+            # Local DP size defaults to global DP size if not set.
+            data_parallel_size_local = self.data_parallel_size
 
         # DP address, used in multi-node case for torch distributed group
         # and ZMQ sockets.
@@ -1124,17 +1162,22 @@ class EngineArgs:
             self.data_parallel_rpc_port
             is not None) else ParallelConfig.data_parallel_rpc_port
 
-        data_parallel_backend = self.data_parallel_backend
-
         parallel_config = ParallelConfig(
             pipeline_parallel_size=self.pipeline_parallel_size,
             tensor_parallel_size=self.tensor_parallel_size,
             data_parallel_size=self.data_parallel_size,
+            data_parallel_rank=self.data_parallel_rank or 0,
+            data_parallel_external_lb=data_parallel_external_lb,
             data_parallel_size_local=data_parallel_size_local,
             data_parallel_master_ip=data_parallel_address,
             data_parallel_rpc_port=data_parallel_rpc_port,
-            data_parallel_backend=data_parallel_backend,
+            data_parallel_backend=self.data_parallel_backend,
             enable_expert_parallel=self.enable_expert_parallel,
+            enable_eplb=self.enable_eplb,
+            num_redundant_experts=self.num_redundant_experts,
+            eplb_window_size=self.eplb_window_size,
+            eplb_step_interval=self.eplb_step_interval,
+            eplb_log_balancedness=self.eplb_log_balancedness,
             max_parallel_loading_workers=self.max_parallel_loading_workers,
             disable_custom_all_reduce=self.disable_custom_all_reduce,
             ray_workers_use_nsight=self.ray_workers_use_nsight,
@@ -1287,11 +1330,6 @@ class EngineArgs:
                 != EngineArgs.disable_async_output_proc):
             _raise_or_fallback(feature_name="--disable-async-output-proc",
                                recommend_to_remove=True)
-            return False
-
-        if self.scheduling_policy != SchedulerConfig.policy:
-            _raise_or_fallback(feature_name="--scheduling-policy",
-                               recommend_to_remove=False)
             return False
 
         if self.num_scheduler_steps != SchedulerConfig.num_scheduler_steps:
