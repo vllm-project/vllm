@@ -14,9 +14,9 @@ import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
-    CutlassExpertsFp8, FusedMoE, FusedMoEActivationFormat, FusedMoEConfig,
-    FusedMoEMethodBase, FusedMoEPermuteExpertsUnpermute,
-    FusedMoEPrepareAndFinalize, FusedMoeWeightScaleSupported, fused_experts)
+    FusedMoE, FusedMoEActivationFormat, FusedMoEConfig, FusedMoEMethodBase,
+    FusedMoEPermuteExpertsUnpermute, FusedMoEPrepareAndFinalize,
+    FusedMoeWeightScaleSupported)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compressed_tensors_wNa16 import (  # noqa
     WNA16_SUPPORTED_BITS, WNA16_SUPPORTED_TYPES_MAP)
 from vllm.model_executor.layers.quantization.utils import replace_parameter
@@ -570,6 +570,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             del layer.w2_input_scale
             self.fused_experts_func = None
         else:
+            from vllm.model_executor.layers.fused_moe import fused_experts
             self.fused_experts_func = fused_experts
 
     def apply(
@@ -826,6 +827,7 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
         prepare_finalize: FusedMoEPrepareAndFinalize,
         moe: FusedMoEConfig,
     ) -> FusedMoEPermuteExpertsUnpermute:
+        from vllm.model_executor.layers.fused_moe import CutlassExpertsFp8
 
         use_batched_format = (prepare_finalize.activation_format ==
                               FusedMoEActivationFormat.BatchedExperts)
