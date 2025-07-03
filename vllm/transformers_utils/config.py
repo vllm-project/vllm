@@ -40,9 +40,11 @@ from vllm.transformers_utils.configs import (ChatGLMConfig, Cohere2Config,
                                              NemotronConfig, NVLM_D_Config,
                                              OvisConfig, RWConfig,
                                              SkyworkR1VChatConfig, SolarConfig,
+                                             SpeculatorsEagleConfig,
                                              Telechat2Config, UltravoxConfig)
 # yapf: enable
 from vllm.transformers_utils.configs.mistral import adapt_config_dict
+from vllm.transformers_utils.configs.speculators_eagle import is_speculators_eagle_config
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.utils import resolve_obj_by_qualname
 
@@ -350,6 +352,17 @@ def get_config(
             raise ValueError(error_message) from e
 
     if config_format == ConfigFormat.HF:
+        # Check if this is a speculators Eagle model
+        if is_speculators_eagle_config(model):
+            config = SpeculatorsEagleConfig.from_pretrained(
+                model,
+                revision=revision,
+                code_revision=code_revision,
+                token=_get_hf_token(),
+                **kwargs,
+            )
+            return config
+        
         config_dict, _ = PretrainedConfig.get_config_dict(
             model,
             revision=revision,
