@@ -228,7 +228,7 @@ class MediaConnector:
         video_url: str,
         *,
         image_mode: str = "RGB",
-    ) -> npt.NDArray:
+    ) -> tuple[npt.NDArray, dict[str, Any]]:
         """
         Load video from a HTTP or base64 data URL.
         """
@@ -248,7 +248,7 @@ class MediaConnector:
         video_url: str,
         *,
         image_mode: str = "RGB",
-    ) -> npt.NDArray:
+    ) -> tuple[npt.NDArray, dict[str, Any]]:
         """
         Asynchronously load video from a HTTP or base64 data URL.
 
