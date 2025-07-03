@@ -741,7 +741,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             k_cache=k,
             v_cache=maybe_padded_v,
             scale=scale,
-            workspace_buffer=workspace.to(torch.int8),
+            workspace_buffer=workspace,
             max_token_per_sequence=max_q_seq_lens,
             max_sequence_kv=max_kv_seq_lens,
             actual_seq_lens_q=seq_lens_q.view(-1, 1, 1, 1),
