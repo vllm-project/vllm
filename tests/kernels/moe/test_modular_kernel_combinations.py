@@ -836,7 +836,7 @@ if __name__ == '__main__':
         type=to_experts_class_type,
         required=True,
         help=(f"Choose a FusedExpert type : "
-         f"{[x.__name__ for x in FUSED_EXPERT_TYPES]}"),
+              f"{[x.__name__ for x in FUSED_EXPERT_TYPES]}"),
     )
     parser.add_argument(
         "-m",
