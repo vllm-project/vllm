@@ -240,7 +240,8 @@ def get_max_tokens(max_model_len: int, request: Union[ChatCompletionRequest,
                                                       CompletionRequest],
                    input_length: int, default_sampling_params: dict) -> int:
 
-    max_tokens = getattr(request, "max_completion_tokens", request.max_tokens)
+    max_tokens = getattr(request, "max_completion_tokens",
+                         None) or request.max_tokens
     default_max_tokens = max_model_len - input_length
     max_output_tokens = current_platform.get_max_output_tokens(input_length)
 
