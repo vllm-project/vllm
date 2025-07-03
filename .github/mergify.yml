@@ -74,13 +74,24 @@ pull_request_rules:
       - files~=^vllm/multimodal/
       - files~=^tests/multimodal/
       - files~=^tests/models/multimodal/
-      - files~=^tests/models/*/audio_language/
-      - files~=^tests/models/*/vision_language/
       - files=tests/models/test_vision.py
   actions:
     label:
       add:
         - multi-modality
+
+- name: label-new-model
+  description: Automatically apply new-model label
+  conditions:
+    - and:
+      - files~=^vllm/model_executor/models/
+      - files=vllm/model_executor/models/registry.py
+      - files=tests/models/registry.py
+      - files=docs/models/supported_models.md
+  actions:
+    label:
+      add:
+        - new-model
 
 - name: label-performance
   description: Automatically apply performance label
