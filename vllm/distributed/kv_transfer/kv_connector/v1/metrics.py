@@ -1,5 +1,4 @@
-from dataclasses import dataclass
-import time
+from dataclasses import dataclass, field
 
 from vllm.logger import init_logger
 
@@ -26,10 +25,9 @@ class KVTransferAggregatedStats:
 @dataclass 
 class KVTransferStats:
     """Container for transfer performance metrics"""
-    transfer_durations: list[float]  # Transfer durations in seconds
-    bytes_transferred: list[int]     # Bytes transferred per transfer
-    num_blocks_transferred: list[int] # Number of blocks per transfer
-    last_log_time: float             # Last time we logged metrics
+    transfer_durations: list[float]=field(default_factory=list)  # Transfer durations in seconds
+    bytes_transferred: list[int]=field(default_factory=list)     # Bytes transferred per transfer
+    num_blocks_transferred: list[int]=field(default_factory=list) # Number of blocks per transfer
     num_transfers: int = 0
     
     def reset(self):
