@@ -138,7 +138,7 @@ def get_kv_cache_layout():
     if cache_layout is None:
         cache_layout = get_kv_connector_cache_layout()
     else:
-        logger.info_once("`FLASHINFER_KV_CACHE_LAYOUT` environment variable " \
+        logger.info_once("`VLLM_KV_CACHE_LAYOUT` environment variable " \
         "detected. Setting KV cache layout to %s.", cache_layout)
 
     return cache_layout
