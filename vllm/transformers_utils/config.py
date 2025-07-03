@@ -357,6 +357,9 @@ def get_config(
                     revision=revision,
                     code_revision=code_revision,
                     token=os.getenv('HF_TOKEN', None),
+                    # some old custom model's config needs
+                    # `has_no_defaults_at_init=True` to work.
+                    has_no_defaults_at_init=trust_remote_code,
                     **kwargs,
                 )
             except ValueError as e:
