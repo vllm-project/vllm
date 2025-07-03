@@ -138,7 +138,6 @@ if TYPE_CHECKING:
     VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: str = "NONE"
     VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16: bool = True
     VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB: Optional[int] = None
-    VLLM_V1_KV_SHARING_SKIP_PREFILL: bool = False
 
 
 def get_default_cache_root():
@@ -955,8 +954,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # models
     "VLLM_USE_NVFP4_CT_EMULATIONS":
     lambda: bool(int(os.getenv("VLLM_USE_NVFP4_CT_EMULATIONS", "0"))),
-    "VLLM_V1_KV_SHARING_SKIP_PREFILL":
-    lambda: os.environ.get("VLLM_V1_KV_SHARING_SKIP_PREFILL", "0") == "1",
 }
 
 # --8<-- [end:env-vars-definition]
