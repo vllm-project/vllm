@@ -225,7 +225,7 @@ class Llama_Nemotron_Nano_VL_Config(PretrainedConfig):
         super().__init__(**kwargs)
 
         if vision_config is not None:
-            assert "auto_map" in vision_config and "AutoConfig" in vision_config[
+            assert "auto_map" in vision_config and "AutoConfig" in vision_config[  # noqa: E501
                 "auto_map"]
             vision_auto_config = get_class_from_dynamic_module(
                 *vision_config["auto_map"]["AutoConfig"].split("--")[::-1])
@@ -249,5 +249,5 @@ class Llama_Nemotron_Nano_VL_Config(PretrainedConfig):
         self.vit_hidden_size = vit_hidden_size
 
         self._attn_implementation = attn_implementation
-        self.vision_config.use_flash_attn = "flash_attention" in self._attn_implementation
+        self.vision_config.use_flash_attn = "flash_attention" in self._attn_implementation  # noqa: E501
         self.text_config._attn_implementation = self._attn_implementation
