@@ -483,8 +483,8 @@ class Llama4Model(LlamaModel):
                                 # Try to inspect the weight_loader signature
                                 import inspect
                                 sig = inspect.signature(weight_loader)
-                                if ('expert_id' in sig.parameters and
-                                    'shard_id' in sig.parameters):
+                                if ('expert_id' in sig.parameters
+                                        and 'shard_id' in sig.parameters):
                                     # This is a MoE weight loader
                                     if "w13_" in name:
                                         shard_id = "w1"
