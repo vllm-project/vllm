@@ -817,7 +817,11 @@ if __name__ == '__main__':
         raise ValueError(f"Cannot find a FusedExperts type that matches {s}")
 
     parser = argparse.ArgumentParser(
-        description="Run a single modular kernel combination")
+        description="Run a single modular kernel combination",
+        help=(
+            'Example : python3 -m tests.kernels.moe.test_modular_kernel_combinations --pf-type PplxPrepareAndFinalize --experts-type BatchedTritonExperts'  # noqa :E501
+        ))
+
     parser.add_argument(
         "--world-size",
         type=int,
@@ -896,7 +900,7 @@ if __name__ == '__main__':
         if args.block_shape is not None:
             assert len(args.block_shape) == 2, (
                 f"block shape must have 2 elements. got {args.block_shape}")
-        quant_config = QuantConfig(
+        quant_config = FusedMoEQuantConfig(
             quant_dtype=args.quant_dtype,
             per_act_token_quant=args.per_act_token_quant,
             per_out_ch_quant=args.per_out_ch_quant,
