@@ -263,26 +263,6 @@ def test_media_io_kwargs_parser(arg, expected):
     assert args.media_io_kwargs == expected
 
 
-@pytest.mark.parametrize(("arg", "expected"), [
-    (None, dict()),
-    ('{"video":"<|video_placeholder|>"}', {
-        "video": "<|video_placeholder|>"
-    }),
-    ('{"video":"<|video_placeholder|>", "image": "<|image_placeholder|>"}', {
-        "video": "<|video_placeholder|>",
-        "image": "<|image_placeholder|>"
-    }),
-])
-def test_mm_placeholder_str_override_parser(arg, expected):
-    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
-    if arg is None:
-        args = parser.parse_args([])
-    else:
-        args = parser.parse_args(["--mm-placeholder-str-override", arg])
-
-    assert args.mm_placeholder_str_override == expected
-
-
 def test_compilation_config():
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
 

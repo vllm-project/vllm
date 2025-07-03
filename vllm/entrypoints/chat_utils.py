@@ -6,7 +6,7 @@ import json
 from abc import ABC, abstractmethod
 from collections import defaultdict, deque
 from collections.abc import Awaitable, Iterable
-from functools import cache, lru_cache, partial
+from functools import cached_property, lru_cache, partial
 from pathlib import Path
 from typing import (Any, Callable, Generic, Literal, Optional, TypeVar, Union,
                     cast)
@@ -37,6 +37,8 @@ from typing_extensions import Required, TypeAlias, TypedDict
 
 from vllm.config import ModelConfig
 from vllm.logger import init_logger
+from vllm.model_executor.model_loader import get_model_cls
+from vllm.model_executor.models import SupportsMultiModal
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalDataDict
 from vllm.multimodal.utils import MediaConnector
 # yapf: disable
@@ -492,6 +494,10 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
     def model_config(self) -> ModelConfig:
         return self._model_config
 
+    @cached_property
+    def model_cls(self):
+        return get_model_cls(self.model_config)
+
     @property
     def allowed_local_media_path(self):
         return self._model_config.allowed_local_media_path
@@ -500,89 +506,6 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
     def mm_registry(self):
         return MULTIMODAL_REGISTRY
 
-    @staticmethod
-    @cache
-    def _cached_token_str(tokenizer: AnyTokenizer, token_index: int) -> str:
-        return tokenizer.decode(token_index)
-
-    def _placeholder_str(self, modality: ModalityStr,
-                         current_count: int) -> Optional[str]:
-        if modality in self._model_config.mm_placeholder_str_override:
-            return self._model_config.mm_placeholder_str_override[modality]
-
-        # TODO: Let user specify how to insert image tokens into prompt
-        # (similar to chat template)
-        hf_config = self._model_config.hf_config
-        model_type = hf_config.model_type
-
-        if modality in ("image", "image_embeds"):
-            if model_type == "chatglm":
-                return "<|begin_of_image|><|endoftext|><|end_of_image|>"
-            if model_type == "glm4v":
-                return "<|begin_of_image|><|image|><|end_of_image|>"
-            if model_type in ("phi3_v", "phi4mm"):
-                return f"<|image_{current_count}|>"
-            if model_type in ("minicpmo", "minicpmv"):
-                return "(<image>./</image>)"
-            if model_type in ("blip-2", "florence2", "fuyu", "paligemma",
-                              "pixtral", "mistral3"):
-                # These models do not use image tokens in the prompt
-                return None
-            if model_type == "qwen":
-                return f"Picture {current_count}: <img></img>"
-            if model_type.startswith("llava"):
-                return self._cached_token_str(self._tokenizer,
-                                              hf_config.image_token_index)
-
-            if model_type in ("aya_vision", "chameleon", "deepseek_vl_v2",
-                              "internvl_chat", "ovis", "skywork_chat",
-                              "NVLM_D", "h2ovl_chat", "idefics3", "smolvlm"):
-                return "<image>"
-            if model_type in ("mllama", "llama4"):
-                return "<|image|>"
-            if model_type in ("qwen2_vl", "qwen2_5_vl", "keye", "Keye"):
-                return "<|vision_start|><|image_pad|><|vision_end|>"
-            if model_type == "qwen2_5_omni":
-                return "<|vision_start|><|IMAGE|><|vision_end|>"
-            if model_type == "molmo":
-                return ""
-            if model_type == "aria":
-                return "<|fim_prefix|><|img|><|fim_suffix|>"
-            if model_type == "gemma3":
-                return "<start_of_image>"
-            if model_type == "kimi_vl":
-                return "<|media_start|>image<|media_content|><|media_pad|><|media_end|>" # noqa: E501
-
-            raise TypeError(f"Unknown {modality} model type: {model_type}")
-        elif modality == "audio":
-            if model_type in ("ultravox", "granite_speech"):
-                return "<|audio|>"
-            if model_type == "phi4mm":
-                return f"<|audio_{current_count}|>"
-            if model_type in ("qwen2_audio", "qwen2_5_omni"):
-                return (f"Audio {current_count}: "
-                        f"<|audio_bos|><|AUDIO|><|audio_eos|>")
-            if model_type == "minicpmo":
-                return "(<audio>./</audio>)"
-            raise TypeError(f"Unknown model type: {model_type}")
-        elif modality == "video":
-            if model_type == "internvl_chat":
-                return "<video>"
-            if model_type == "glm4v":
-                return "<|begin_of_video|><|video|><|end_of_video|>"
-            if model_type in ("qwen2_vl", "qwen2_5_vl", "keye", "Keye"):
-                return "<|vision_start|><|video_pad|><|vision_end|>"
-            if model_type == "qwen2_5_omni":
-                return "<|vision_start|><|VIDEO|><|vision_end|>"
-            if model_type in ("minicpmo", "minicpmv"):
-                return "(<video>./</video>)"
-            if model_type.startswith("llava"):
-                return self._cached_token_str(self._tokenizer,
-                                              hf_config.video_token_index)
-            raise TypeError(f"Unknown {modality} model type: {model_type}")
-        else:
-            raise TypeError(f"Unknown modality: {modality}")
-
     def add(self, modality: ModalityStr, item: _T) -> Optional[str]:
         """
         Add a multi-modal item to the current prompt and returns the
@@ -590,6 +513,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         """
         mm_registry = self.mm_registry
         model_config = self.model_config
+        model_cls = cast(SupportsMultiModal, self.model_cls)
 
         input_modality = modality.replace("_embeds", "")
 
@@ -614,7 +538,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
 
         self._items_by_modality[modality].append(item)
 
-        return self._placeholder_str(modality, current_count)
+        return model_cls.get_placeholder_str(modality, current_count)
 
     @abstractmethod
     def create_parser(self) -> "BaseMultiModalContentParser":
