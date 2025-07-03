@@ -1019,6 +1019,6 @@ if __name__ == '__main__':
         dtype=torch.bfloat16,  # hard-code
         quant_config=quant_config,
         combination=(args.pf_type, args.experts_type),
-        fused_moe_chunk_size=None,
+        fused_moe_chunk_size=args.fused_moe_chunk_size,
         world_size=args.world_size,
         torch_trace_dir_path=args.torch_trace_dir_path)
