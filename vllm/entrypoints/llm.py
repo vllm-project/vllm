@@ -49,6 +49,7 @@ from vllm.transformers_utils.tokenizer import (AnyTokenizer, MistralTokenizer,
                                                get_cached_tokenizer)
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Counter, Device, deprecate_kwargs, is_list_of
+from vllm.v1.sample.logits_processor import LogitsProcessorSpec
 
 if TYPE_CHECKING:
     from vllm.v1.metrics.reader import Metric
@@ -163,36 +164,36 @@ class LLM:
         cls.DEPRECATE_LEGACY = False
 
     def __init__(
-            self,
-            model: str,
-            *,
-            task: TaskOption = "auto",
-            tokenizer: Optional[str] = None,
-            tokenizer_mode: TokenizerMode = "auto",
-            skip_tokenizer_init: bool = False,
-            trust_remote_code: bool = False,
-            allowed_local_media_path: str = "",
-            tensor_parallel_size: int = 1,
-            dtype: ModelDType = "auto",
-            quantization: Optional[QuantizationMethods] = None,
-            revision: Optional[str] = None,
-            tokenizer_revision: Optional[str] = None,
-            seed: Optional[int] = None,
-            gpu_memory_utilization: float = 0.9,
-            swap_space: float = 4,
-            cpu_offload_gb: float = 0,
-            enforce_eager: bool = False,
-            max_seq_len_to_capture: int = 8192,
-            disable_custom_all_reduce: bool = False,
-            disable_async_output_proc: bool = False,
-            hf_token: Optional[Union[bool, str]] = None,
-            hf_overrides: Optional[HfOverrides] = None,
-            mm_processor_kwargs: Optional[dict[str, Any]] = None,
-            override_pooler_config: Optional[PoolerConfig] = None,
-            compilation_config: Optional[Union[int, dict[str, Any],
-                                               CompilationConfig]] = None,
-            allowed_logitsprocs: Sequence[str] = (),
-            **kwargs,
+        self,
+        model: str,
+        *,
+        task: TaskOption = "auto",
+        tokenizer: Optional[str] = None,
+        tokenizer_mode: TokenizerMode = "auto",
+        skip_tokenizer_init: bool = False,
+        trust_remote_code: bool = False,
+        allowed_local_media_path: str = "",
+        tensor_parallel_size: int = 1,
+        dtype: ModelDType = "auto",
+        quantization: Optional[QuantizationMethods] = None,
+        revision: Optional[str] = None,
+        tokenizer_revision: Optional[str] = None,
+        seed: Optional[int] = None,
+        gpu_memory_utilization: float = 0.9,
+        swap_space: float = 4,
+        cpu_offload_gb: float = 0,
+        enforce_eager: bool = False,
+        max_seq_len_to_capture: int = 8192,
+        disable_custom_all_reduce: bool = False,
+        disable_async_output_proc: bool = False,
+        hf_token: Optional[Union[bool, str]] = None,
+        hf_overrides: Optional[HfOverrides] = None,
+        mm_processor_kwargs: Optional[dict[str, Any]] = None,
+        override_pooler_config: Optional[PoolerConfig] = None,
+        compilation_config: Optional[Union[int, dict[str, Any],
+                                           CompilationConfig]] = None,
+        logits_processors: Optional[list[LogitsProcessorSpec]] = None,
+        **kwargs,
     ) -> None:
         """LLM constructor."""
 
@@ -265,7 +266,7 @@ class LLM:
             mm_processor_kwargs=mm_processor_kwargs,
             override_pooler_config=override_pooler_config,
             compilation_config=compilation_config_instance,
-            allowed_logitsprocs=allowed_logitsprocs,
+            logitsprocs_qualnames=logits_processors,
             **kwargs,
         )
 

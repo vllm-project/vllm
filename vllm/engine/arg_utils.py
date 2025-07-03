@@ -13,7 +13,7 @@ import warnings
 from dataclasses import MISSING, dataclass, fields, is_dataclass
 from itertools import permutations
 from typing import (Annotated, Any, Callable, Dict, List, Literal, Optional,
-                    Sequence, Type, TypeVar, Union, cast, get_args, get_origin)
+                    Type, TypeVar, Union, cast, get_args, get_origin)
 
 import regex as re
 import torch
@@ -43,6 +43,8 @@ from vllm.transformers_utils.utils import check_gguf_file
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import (STR_DUAL_CHUNK_FLASH_ATTN_VAL, FlexibleArgumentParser,
                         GiB_bytes, get_ip, is_in_ray_actor)
+from vllm.v1.sample.logits_processor import logitsprocs_package_pattern
+from vllm.v1.sample.logits_processor.load import LogitsProcessorEntrypoint
 
 # yapf: enable
 
@@ -285,6 +287,32 @@ def get_kwargs(cls: ConfigType) -> dict[str, Any]:
     return copy.deepcopy(_compute_kwargs(cls))
 
 
+def comma_separated_list(
+    value: str,
+    pattern: Optional[re.Pattern],
+) -> list[str]:
+    """Argparse-compatible comma-separated list arg type.
+    
+    Expected format: "<val0>,<val1>,<val2>" or just "<val>".
+    Optionally validate that each value satisifies the `pattern` regex.
+
+    Args:
+      value: string comma-separate list representation
+      pattern: optional regex
+
+    Returns:
+      Parsed list of string values
+    """
+    items = value.split(',')
+    if pattern:
+        for item in items:
+            if not pattern.fullmatch(item):
+                raise argparse.ArgumentTypeError(
+                    f"Invalid item '{item}'. Each item must match the "
+                    f"pattern: {pattern.pattern}")
+    return items
+
+
 @dataclass
 class EngineArgs:
     """Arguments for vLLM engine."""
@@ -469,7 +497,8 @@ class EngineArgs:
     enable_multimodal_encoder_data_parallel: bool = \
         ParallelConfig.enable_multimodal_encoder_data_parallel
 
-    allowed_logitsprocs: Sequence[str] = ()
+    logitsprocs_qualnames: Optional[list[str]]
+    allowed_logitsprocs_plugins: Optional[list[LogitsProcessorEntrypoint]]
 
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
@@ -904,19 +933,21 @@ class EngineArgs:
             "--disable-hybrid-kv-cache-manager",
             **scheduler_kwargs["disable_hybrid_kv_cache_manager"])
 
-        # Logits processor arguments
-        def comma_separated_list(value: str) -> list[str]:
-            return value.split(',')
-
         logitsprocs_group = parser.add_argument_group(
             title="Logits processors",
             description="Logits processors settings.",
         )
         logitsprocs_group.add_argument(
-            "--allowed-logitsprocs",
-            type=comma_separated_list,
+            "--allowed-logitsprocs-plugins",
+            type=lambda x: comma_separated_list(x, logitsprocs_package_pattern
+                                                ),
             default=[],
             help="Allowed logits processor plugins.")
+        logitsprocs_group.add_argument(
+            "--logitsprocs-qualnames",
+            type=lambda x: comma_separated_list(x, None),
+            default=[],
+            help="Logits processors qualified names.")
 
         # vLLM arguments
         vllm_kwargs = get_kwargs(VllmConfig)

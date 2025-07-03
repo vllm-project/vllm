@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Callable
+from typing import Callable, TypedDict, Union
 
 import torch
 
@@ -15,6 +15,15 @@ LogitprocCtor = Callable[[], None]
 logitsprocs_ctors: list[LogitprocCtor] = []
 # make sure one process only loads logitsprocs once
 logitsprocs_loaded = False
+
+
+class LogitsProcessorEntrypoint(TypedDict):
+    package_name: str
+    entrypoint_name: str
+
+
+# Specify logitproc by qualname (str) or package and entrypoint name
+LogitsProcessorSpec = Union[str, LogitsProcessorEntrypoint]
 
 
 def load_logitsprocs(allowed_logitsprocs: list[str]) -> None:
