@@ -156,8 +156,14 @@ pull_request_rules:
   conditions:
     - or:
       - files~=^vllm/spec_decode/
+      - files~=^vllm/v1/spec_decode/
       - files=vllm/model_executor/layers/spec_decode_base_sampler.py
       - files~=^tests/spec_decode/
+      - files~=^tests/v1/spec_decode/
+      - files~=^examples/.*(spec_decode|mlpspeculator|eagle|speculation).*\.py
+      - files~=^vllm/model_executor/models/.*eagle.*\.py
+      - files=vllm/model_executor/models/mlp_speculator.py
+      - files~=^vllm/transformers_utils/configs/(eagle|medusa|mlp_speculator)\.py
   actions:
     label:
       add:
