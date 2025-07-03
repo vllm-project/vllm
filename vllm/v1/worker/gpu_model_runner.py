@@ -573,6 +573,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             max_num_scheduled_tokens: int,
             scheduler_output: "SchedulerOutput"
         ) -> tuple[Optional[UBatchSlices], int, Optional[torch.Tensor]]:
+        # Don't bother with the should_ubatch handshaking unless microbatching
+        # is enabled
+        if not self.parallel_config.enable_microbatching:
+            return (None, 0, None)
+
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         num_reqs = self.input_batch.num_reqs
         should_attempt_ubatching = \
@@ -2380,21 +2385,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         is_profile: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
 
-        # if allow_microbatching:
-        #     logger.info("ATTEMPTING TO UBATCH THE DUMMY RUN")
-
-
-        # TODO(Sage) We need some more code to properly handle 
-        # mixing normal and dummy runs. The DP padding needs to
-        # be properly setup. Since we only support microbatching 
-        # in cuda graph capture it's fine to ignore the DP padding
-        # for now.
         # _dummy_run doesn't go through _prepare_inputs so 
-        # we synchronize with other DP ranks here
-        # logger.info(f"NUM TOKENS {num_tokens} SHOULD UBATCH {should_ubatch}")
-        _ = self.should_ubatch(False)
-        # Padding for DP
-        # logger.info("PADDING DUMMY")
+        # we synchronize with other DP groups that may be
+        # attempting to microbatch here.
+        if self.parallel_config.enable_microbatching:
+            _ = self.should_ubatch(False)
+
         num_pad, num_tokens_across_dp = self.get_dp_padding(num_tokens)
         num_tokens += num_pad
         # Set num_scheduled_tokens based on num_tokens and max_num_seqs
