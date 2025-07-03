@@ -2,8 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import gc
+import random
 from collections.abc import Iterable
-from typing import Any, Optional, Union
+from typing import Optional, Union
 
 import pytest
 import torch
@@ -105,7 +106,7 @@ class Qwen2DecoderLayerWithKVSharing(nn.Module):
 
 
 @support_torch_compile
-class DecoderLayerGroup(nn.Module):
+class FirstLayerGroup(nn.Module):
 
     def __init__(
         self,
@@ -121,7 +122,35 @@ class DecoderLayerGroup(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        residual: Optional[torch.Tensor] = None,
+    ):
+        residual = None
+        for layer in self.layers:
+            hidden_states, residual = layer(
+                positions,
+                hidden_states,
+                residual,
+            )
+        return hidden_states, residual
+
+
+@support_torch_compile
+class SecondLayerGroup(nn.Module):
+
+    def __init__(
+        self,
+        *,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+        layers: list[nn.Module],
+    ):
+        super().__init__()
+        self.layers = layers
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor,
     ):
         for layer in self.layers:
             hidden_states, residual = layer(
@@ -147,15 +176,17 @@ class Qwen2ModelWithKVSharing(Qwen2Model):
             decoder_layer_type=decoder_layer_type,
         )
 
+        self.vllm_config = vllm_config
+
         with set_model_tag("first_layer_group"):
-            self.first_layer_group = DecoderLayerGroup(
+            self.first_layer_group = FirstLayerGroup(
                 vllm_config=vllm_config,
                 prefix=f"{prefix}.first_layer_group",
                 layers=self.layers[self.start_layer:START_KV_SHARING_LAYER],
             )
 
         with set_model_tag("second_layer_group"):
-            self.second_layer_group = DecoderLayerGroup(
+            self.second_layer_group = SecondLayerGroup(
                 vllm_config=vllm_config,
                 prefix=f"{prefix}.second_layer_group",
                 layers=self.layers[START_KV_SHARING_LAYER:self.end_layer],
@@ -170,6 +201,10 @@ class Qwen2ModelWithKVSharing(Qwen2Model):
         self.residual = torch.zeros((self.max_num_tokens, self.hidden_size),
                                     dtype=self.dtype,
                                     device=self.device)
+        self.hidden_states = torch.zeros(
+            (self.max_num_tokens, self.hidden_size),
+            dtype=self.dtype,
+            device=self.device)
 
     def forward(
         self,
@@ -183,11 +218,12 @@ class Qwen2ModelWithKVSharing(Qwen2Model):
         else:
             hidden_states = self.get_input_embeddings(input_ids)
 
-        residual = None
+        num_input_tokens = input_ids.size(0)
+        self.hidden_states[:num_input_tokens].copy_(hidden_states)
+
         first_hidden_states, first_residual = self.first_layer_group(
             positions,
-            hidden_states,
-            residual,  # no residual, assume no pipeline parallel
+            self.hidden_states[:num_input_tokens],
         )
 
         decode_indices = get_forward_context().decode_indices
@@ -202,14 +238,23 @@ class Qwen2ModelWithKVSharing(Qwen2Model):
         # CUDA graph expects static tensor addresses
         # Copy output of first layer group to second layer group
         self.residual[:num_decodes].copy_(first_residual[decode_indices])
-        hidden_states[:num_decodes].copy_(first_hidden_states[decode_indices])
+        self.hidden_states[:num_decodes].copy_(
+            first_hidden_states[decode_indices])
         positions[:num_decodes].copy_(positions[decode_indices])
 
         second_hidden_states, second_residual = self.second_layer_group(
             positions[:num_decodes],
-            hidden_states[:num_decodes],
+            self.hidden_states[:num_decodes],
             self.residual[:num_decodes],
         )
+
+        # NOTE(sarckk): Due to cudagraph padding, decode_indices may have
+        # trailing repeated indices. Attention output is only valid at the
+        # last index in this case.
+        last_index_mask = decode_indices == decode_indices[-1]
+        second_hidden_states[last_index_mask] = second_hidden_states[-1].clone(
+        )
+        second_residual[last_index_mask] = second_residual[-1].clone()
 
         # Merge results back
         first_hidden_states[decode_indices] = second_hidden_states
@@ -270,16 +315,43 @@ class TestQwen2ForCausalLM(nn.Module):
         return loader.load_weights(weights)
 
 
+@pytest.fixture
+def test_prompts():
+    prompt_types = ["repeat", "sentence"]
+    # Setting higher num prompts increases the chance of numerics mismatch
+    # due to matrix multiplication numerics depending on batch dimension
+    num_prompts = 10
+    prompts = []
+
+    random.seed(0)
+    random_prompt_type_choices = random.choices(prompt_types, k=num_prompts)
+
+    # Generate a mixed batch of prompts, some of which can be easily
+    # predicted by n-gram matching and some which likely cannot.
+    for kind in random_prompt_type_choices:
+        word_choices = ["test", "temp", "hello", "where"]
+        word = random.choice(word_choices)
+        if kind == "repeat":
+            prompt = f"""please repeat the word '{word}' 10 times."""
+        elif kind == "sentence":
+            prompt = f"""please give a ten-word sentence that
+            uses the word {word} at least once."""
+        else:
+            raise ValueError(f"Unknown prompt type: {kind}")
+        prompts.append(prompt)
+
+    return prompts
+
+
 @fork_new_process_for_each_test
 @pytest.mark.parametrize("enforce_eager", [True, False])
 def test_kv_sharing_skip_prefill(
     monkeypatch: pytest.MonkeyPatch,
     enforce_eager: bool,
-    test_prompts: list[list[dict[str, Any]]],
+    test_prompts: list[str],
 ):
     ModelRegistry.register_model("Qwen2ForCausalLM", TestQwen2ForCausalLM)
     sampling_params = SamplingParams(temperature=0.0, max_tokens=100)
-    prompts = [prompt[0]['content'] for prompt in test_prompts]
     compilation_config = CompilationConfig(
         level=CompilationLevel.PIECEWISE
         if not enforce_eager else CompilationLevel.NO_COMPILATION,
@@ -293,8 +365,7 @@ def test_kv_sharing_skip_prefill(
             enforce_eager=enforce_eager,
             compilation_config=compilation_config,
         )
-        responses = llm.generate(prompts, sampling_params)
-        ref_output = responses[0].outputs[0].text
+        ref_responses = llm.generate(test_prompts, sampling_params)
 
         del llm
         gc.collect()
@@ -304,6 +375,14 @@ def test_kv_sharing_skip_prefill(
                   enforce_eager=enforce_eager,
                   compilation_config=compilation_config,
                   kv_sharing_skip_prefill=True)
-        responses = llm.generate(prompts, sampling_params)
-        output = responses[0].outputs[0].text
-        assert output == ref_output
+        optimized_responses = llm.generate(test_prompts, sampling_params)
+
+        misses = 0
+
+        for ref_response, optimized_response in zip(ref_responses,
+                                                    optimized_responses):
+            if ref_response.outputs[0].text != optimized_response.outputs[
+                    0].text:
+                misses += 1
+
+        assert misses == 0
