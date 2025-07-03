@@ -6,7 +6,7 @@ from typing import Optional
 
 import torch
 
-from vllm.v1.sample.logits_processor.state import LogitsProcessorManager
+from vllm.v1.sample.logits_processor import LogitsProcessorManager
 
 
 @dataclass

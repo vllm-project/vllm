@@ -9,7 +9,7 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.utils import is_pin_memory_available, make_tensor_with_pad
-from vllm.v1.sample.logits_processor.state import LogitsProcessorManager
+from vllm.v1.sample.logits_processor import LogitsProcessorManager
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.sampler import Sampler
 

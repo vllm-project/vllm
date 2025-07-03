@@ -15,10 +15,10 @@ from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.utils import swap_dict_values
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.pool.metadata import PoolingMetadata
-from vllm.v1.sample.logits_processor.load import (init_builtin_logitsprocs,
-                                                  logitsprocs_ctors)
-from vllm.v1.sample.logits_processor.state import (BatchUpdateBuilder,
-                                                   MoveDirectionality)
+from vllm.v1.sample.logits_processor import (BatchUpdateBuilder,
+                                             MoveDirectionality,
+                                             init_builtin_logitsprocs,
+                                             logitsprocs_ctors)
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.utils import is_spec_decode_unsupported
 from vllm.v1.utils import copy_slice
