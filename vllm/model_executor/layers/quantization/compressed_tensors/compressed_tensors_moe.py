@@ -83,8 +83,8 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
                 return CompressedTensorsWNA16MarlinMoEMethod(quant_config)
         elif quant_config._is_fp4a4_nvfp4(weight_quant, input_quant):
             return CompressedTensorsW4A4MoeMethod()
-        elif quant_config._is_fp8_w8a8_sm90_or_sm100(weight_quant,
-                                                     input_quant):
+        elif (quant_config._is_fp8_w8a8_sm90(weight_quant, input_quant)
+              or quant_config._is_fp8_w8a8_sm100(weight_quant, input_quant)):
             return CompressedTensorsW8A8Fp8MoECutlassMethod(quant_config)
         elif quant_config._is_fp8_w8a8(weight_quant, input_quant):
             return CompressedTensorsW8A8Fp8MoEMethod(quant_config)

@@ -327,12 +327,16 @@ class CompressedTensorsConfig(QuantizationConfig):
             input_quant.strategy == QuantizationStrategy.TENSOR)
         return is_symmetric_activation and is_per_tensor_activation
 
-    def _is_fp8_w8a8_sm90_or_sm100(self, weight_quant: BaseModel,
-                                   input_quant: BaseModel) -> bool:
-        return (
-            self._check_scheme_supported(90, error=False, match_exact=True)
-            or self._check_scheme_supported(100, error=False, match_exact=True)
-            and self._is_fp8_w8a8(weight_quant, input_quant))
+    def _is_fp8_w8a8_sm90(self, weight_quant: BaseModel,
+                          input_quant: BaseModel) -> bool:
+        return (self._check_scheme_supported(90, error=False, match_exact=True)
+                and self._is_fp8_w8a8(weight_quant, input_quant))
+
+    def _is_fp8_w8a8_sm100(self, weight_quant: BaseModel,
+                           input_quant: BaseModel) -> bool:
+        return (self._check_scheme_supported(
+            100, error=False, match_exact=True)
+                and self._is_fp8_w8a8(weight_quant, input_quant))
 
     def _is_fp8_w8a16(self, weight_quant: BaseModel,
                       input_quant: BaseModel) -> bool:
