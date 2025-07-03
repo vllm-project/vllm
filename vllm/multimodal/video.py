@@ -6,6 +6,7 @@ from abc import abstractmethod
 from functools import partial
 from io import BytesIO
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import numpy.typing as npt
@@ -57,7 +58,7 @@ class VideoLoader:
     def load_bytes(cls,
                    data: bytes,
                    num_frames: int = -1,
-                   **kwargs) -> npt.NDArray:
+                   **kwargs) -> tuple[npt.NDArray, dict[str, Any]]:
         raise NotImplementedError
 
 
@@ -106,7 +107,7 @@ class OpenCVVideoBackend(VideoLoader):
     def load_bytes(cls,
                    data: bytes,
                    num_frames: int = -1,
-                   **kwargs) -> npt.NDArray:
+                   **kwargs) -> tuple[npt.NDArray, dict[str, Any]]:
         import cv2
 
         backend = cls().get_cv2_video_api()
@@ -179,12 +180,13 @@ class VideoMediaIO(MediaIO[npt.NDArray]):
         video_loader_backend = envs.VLLM_VIDEO_LOADER_BACKEND
         self.video_loader = VIDEO_LOADER_REGISTRY.load(video_loader_backend)
 
-    def load_bytes(self, data: bytes) -> npt.NDArray:
+    def load_bytes(self, data: bytes) -> tuple[npt.NDArray, dict[str, Any]]:
         return self.video_loader.load_bytes(data,
                                             num_frames=self.num_frames,
                                             **self.kwargs)
 
-    def load_base64(self, media_type: str, data: str) -> npt.NDArray:
+    def load_base64(self, media_type: str,
+                    data: str) -> tuple[npt.NDArray, dict[str, Any]]:
         if media_type.lower() == "video/jpeg":
             load_frame = partial(
                 self.image_io.load_base64,
@@ -194,11 +196,11 @@ class VideoMediaIO(MediaIO[npt.NDArray]):
             return np.stack([
                 np.asarray(load_frame(frame_data))
                 for frame_data in data.split(",")
-            ])
+            ]), {}
 
         return self.load_bytes(base64.b64decode(data))
 
-    def load_file(self, filepath: Path) -> npt.NDArray:
+    def load_file(self, filepath: Path) -> tuple[npt.NDArray, dict[str, Any]]:
         with filepath.open("rb") as f:
             data = f.read()
 
