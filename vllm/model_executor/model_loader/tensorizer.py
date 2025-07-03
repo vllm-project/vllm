@@ -13,7 +13,7 @@ import time
 from collections.abc import Generator
 from dataclasses import dataclass
 from functools import partial
-from typing import Any, BinaryIO, Optional, Union
+from typing import TYPE_CHECKING, Any, BinaryIO, Optional, Union
 
 import regex as re
 import torch
@@ -24,11 +24,13 @@ from transformers import PretrainedConfig
 import vllm.envs as envs
 from vllm.config import (ModelConfig, ParallelConfig, VllmConfig,
                          set_current_vllm_config)
-from vllm.engine.arg_utils import EngineArgs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.utils import FlexibleArgumentParser, PlaceholderModule
+
+if TYPE_CHECKING:
+    from vllm.engine.arg_utils import EngineArgs
 
 try:
     from tensorizer import (DecryptionParams, EncryptionParams,
@@ -503,7 +505,7 @@ def serialize_vllm_model(
     return model
 
 
-def tensorize_vllm_model(engine_args: EngineArgs,
+def tensorize_vllm_model(engine_args: "EngineArgs",
                          tensorizer_config: TensorizerConfig,
                          generate_keyfile: bool = True):
     """Utility to load a model and then serialize it with Tensorizer

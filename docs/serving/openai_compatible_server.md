@@ -1,7 +1,7 @@
 ---
 title: OpenAI-Compatible Server
 ---
-[](){ #openai-compatible-server }
+[](){ #serving-openai-compatible-server }
 
 vLLM provides an HTTP server that implements OpenAI's [Completions API](https://platform.openai.com/docs/api-reference/completions), [Chat API](https://platform.openai.com/docs/api-reference/chat), and more! This functionality lets you serve models and interact with them using an HTTP client.
 
@@ -145,11 +145,6 @@ completion = client.chat.completions.create(
 
 Only `X-Request-Id` HTTP request header is supported for now. It can be enabled
 with `--enable-request-id-headers`.
-
-> Note that enablement of the headers can impact performance significantly at high QPS
-> rates. We recommend implementing HTTP headers at the router level (e.g. via Istio),
-> rather than within the vLLM layer for this reason.
-> See [this PR](https://github.com/vllm-project/vllm/pull/11529) for more details.
 
 ??? Code
 
@@ -431,7 +426,7 @@ Code example: <gh-file:examples/online_serving/openai_pooling_client.py>
 
 Our Classification API directly supports Hugging Face sequence-classification models such as [ai21labs/Jamba-tiny-reward-dev](https://huggingface.co/ai21labs/Jamba-tiny-reward-dev) and [jason9693/Qwen2.5-1.5B-apeach](https://huggingface.co/jason9693/Qwen2.5-1.5B-apeach).
 
-We automatically wrap any other transformer via `as_classification_model()`, which pools on the last token, attaches a `RowParallelLinear` head, and applies a softmax to produce per-class probabilities.
+We automatically wrap any other transformer via `as_seq_cls_model()`, which pools on the last token, attaches a `RowParallelLinear` head, and applies a softmax to produce per-class probabilities.
 
 Code example: <gh-file:examples/online_serving/openai_classification_client.py>
 

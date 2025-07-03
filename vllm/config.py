@@ -18,7 +18,7 @@ from functools import cached_property
 from importlib.util import find_spec
 from pathlib import Path
 from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Literal, Optional,
-                    Protocol, TypeVar, Union, cast, get_args, get_origin)
+                    Protocol, TypeVar, Union, cast, get_args)
 
 import regex as re
 import torch
@@ -93,14 +93,14 @@ ConfigT = TypeVar("ConfigT", bound=ConfigType)
 TaskOption = Literal["auto", "generate", "embedding", "embed", "classify",
                      "score", "reward", "transcription"]
 
-_ResolvedTask = Literal["generate", "embed", "classify", "score", "reward",
-                        "draft", "transcription"]
+_ResolvedTask = Literal["generate", "embed", "classify", "reward", "draft",
+                        "transcription"]
 
 RunnerType = Literal["generate", "pooling", "draft", "transcription"]
 
 _RUNNER_TASKS: dict[RunnerType, list[_ResolvedTask]] = {
     "generate": ["generate"],
-    "pooling": ["embed", "classify", "score", "reward"],
+    "pooling": ["embed", "classify", "reward"],
     "draft": ["draft"],
     "transcription": ["transcription"],
 }
@@ -193,28 +193,10 @@ def config(cls: ConfigT) -> ConfigT:
     (i.e. `ConfigT(**json.loads(cli_arg))`). However, if a particular `ConfigT`
     requires custom construction from CLI (i.e. `CompilationConfig`), it can
     have a `from_cli` method, which will be called instead.
+
+    Config validation is performed by the tools/validate_config.py
+    script, which is invoked during the pre-commit checks.
     """
-    if not is_dataclass(cls):
-        raise TypeError("The decorated class must be a dataclass.")
-    attr_docs = get_attr_docs(cls)
-    for f in fields(cls):
-        if f.init and f.default is MISSING and f.default_factory is MISSING:
-            raise ValueError(
-                f"Field '{f.name}' in {cls.__name__} must have a default value."
-            )
-
-        if f.name not in attr_docs:
-            raise ValueError(
-                f"Field '{f.name}' in {cls.__name__} must have a docstring.")
-
-        if get_origin(f.type) is Union:
-            args = get_args(f.type)
-            literal_args = [arg for arg in args if get_origin(arg) is Literal]
-            if len(literal_args) > 1:
-                raise ValueError(
-                    f"Field '{f.name}' in {cls.__name__} must use a single "
-                    "Literal type. Please use 'Literal[Literal1, Literal2]' "
-                    "instead of 'Union[Literal1, Literal2]'.")
     return cls
 
 
@@ -364,6 +346,10 @@ class ModelConfig:
     limit_mm_per_prompt: dict[str, int] = field(default_factory=dict)
     """Maximum number of data items per modality per prompt. Only applicable
     for multimodal models."""
+    media_io_kwargs: dict[str, dict[str, Any]] = field(default_factory=dict)
+    """Additional args passed to process media inputs, keyed by modalities. 
+    For example, to set num_frames for video, set 
+    `--media-io-kwargs '{"video": {"num_frames": 40} }'` """
     use_async_output_proc: bool = True
     """Whether to use async output processor."""
     config_format: Union[str, ConfigFormat] = ConfigFormat.AUTO.value
@@ -569,6 +555,10 @@ class ModelConfig:
         else:
             self.truncation_side = "right"
 
+        model_info, arch = self.registry.inspect_model_cls(self.architectures)
+        self._model_info = model_info
+        self._architecture = arch
+
         self.pooler_config = self._init_pooler_config()
 
         self.dtype = _get_and_verify_dtype(
@@ -660,7 +650,17 @@ class ModelConfig:
 
     @property
     def architectures(self) -> list[str]:
+        # architectures in the model config.
         return getattr(self.hf_config, "architectures", [])
+
+    @property
+    def architecture(self) -> str:
+        # The architecture vllm actually used.
+        return self._architecture
+
+    @property
+    def model_info(self):
+        return self._model_info
 
     def maybe_pull_model_tokenizer_for_s3(self, model: str,
                                           tokenizer: str) -> None:
@@ -698,6 +698,7 @@ class ModelConfig:
         if self.registry.is_multimodal_model(self.architectures):
             return MultiModalConfig(
                 limit_per_prompt=self.limit_mm_per_prompt,
+                media_io_kwargs=self.media_io_kwargs,
                 mm_processor_kwargs=self.mm_processor_kwargs,
                 disable_mm_preprocessor_cache=self.
                 disable_mm_preprocessor_cache)
@@ -776,7 +777,7 @@ class ModelConfig:
         if get_pooling_config(model_id, self.revision):
             return "embed"
         if self.registry.is_cross_encoder_model(architectures):
-            return "score"
+            return "classify"
         if self.registry.is_transcription_model(architectures):
             return "transcription"
 
@@ -840,14 +841,24 @@ class ModelConfig:
                     "This model supports multiple tasks: %s. "
                     "Defaulting to '%s'.", supported_tasks, selected_task)
         else:
-            # Aliases
-            if task_option == "embedding":
-                msg = ("The 'embedding' task has been renamed to "
-                       "'embed', please use the new name. The old name "
-                       "will be removed in v1.0.")
-                warnings.warn(msg, DeprecationWarning, stacklevel=2)
+            if task_option == "score":
+                if not runner_support["pooling"]:
+                    msg = (f"This model does not support the '{task_option}' "
+                           f"task. Supported tasks: {supported_tasks}")
+                    raise ValueError(msg)
+                if self.registry.is_cross_encoder_model(architectures):
+                    task_option = "classify"
+                else:
+                    task_option = "embed"
+            else:
+                # Aliases
+                if task_option == "embedding":
+                    msg = ("The 'embedding' task has been renamed to "
+                           "'embed', please use the new name. The old name "
+                           "will be removed in v1.0.")
+                    warnings.warn(msg, DeprecationWarning, stacklevel=2)
 
-                task_option = "embed"
+                    task_option = "embed"
 
             if task_option not in supported_tasks:
                 msg = (
@@ -968,7 +979,7 @@ class ModelConfig:
 
     def _verify_bnb_config(self) -> None:
         """
-        The current version of bitsandbytes (0.45.3) with 8-bit models does not
+        The current version of bitsandbytes (0.46.1) with 8-bit models does not
         yet support CUDA graph.
         # TODO Remove this when bitsandbytes supports.
         """
@@ -1438,10 +1449,17 @@ class ModelConfig:
         return getattr(self.hf_config, "matryoshka_dimensions", None)
 
     def get_and_verify_max_len(self, max_model_len: int):
-        tokenizer_config = try_get_tokenizer_config(
-            self.tokenizer,
-            trust_remote_code=self.trust_remote_code,
-            revision=self.tokenizer_revision)
+        # For pooling models, the tokenizer's `model_max_length` is often a
+        # reliable source for the maximum sequence length. However, for
+        # generative models, this can be incorrect and unduly limit the
+        # context window (e.g., DeepSeek-R1). Therefore, we only consider
+        # tokenizer_config for pooling models.
+        tokenizer_config = None
+        if self.runner_type == "pooling":
+            tokenizer_config = try_get_tokenizer_config(
+                self.tokenizer,
+                trust_remote_code=self.trust_remote_code,
+                revision=self.tokenizer_revision)
         max_model_len = _get_and_verify_max_len(
             hf_config=self.hf_text_config,
             tokenizer_config=tokenizer_config,
@@ -1470,7 +1488,7 @@ class CacheConfig:
     sizes up to 32 are supported. On HPU devices, block size defaults to 128.
 
     This config has no static default. If left unspecified by the user, it will
-    be set in `Platform.check_and_update_configs()` based on the current
+    be set in `Platform.check_and_update_config()` based on the current
     platform."""
     gpu_memory_utilization: float = 0.9
     """The fraction of GPU memory to be used for the model executor, which can
@@ -1773,8 +1791,31 @@ class ParallelConfig:
     """Port of the data parallel master."""
     data_parallel_backend: str = "mp"
     """Backend to use for data parallel, either "mp" or "ray"."""
+    data_parallel_external_lb: bool = False
+    """Whether to use "external" DP LB mode. Applies only to online serving
+    and when data_parallel_size > 0. Set implicitly when
+    data_parallel_rank is provided explicitly to vllm serve."""
     enable_expert_parallel: bool = False
     """Use expert parallelism instead of tensor parallelism for MoE layers."""
+    enable_eplb: bool = False
+    """Enable expert parallelism load balancing for MoE layers."""
+    num_redundant_experts: int = 0
+    """Number of redundant experts to use for expert parallelism."""
+    eplb_window_size: int = 1000
+    """Window size for expert load recording."""
+    eplb_step_interval: int = 3000
+    """
+    Interval for rearranging experts in expert parallelism.
+
+    Note that if this is greater than the EPLB window size, only the metrics
+    of the last `eplb_window_size` steps will be used for rearranging experts.
+    """
+    eplb_log_balancedness: bool = False
+    """
+    Log the balancedness each step of expert parallelism.
+    This is turned off by default since it will cause communication overhead.
+    """
+
     max_parallel_loading_workers: Optional[int] = None
     """Maximum number of parallel loading workers when loading model
     sequentially in multiple batches. To avoid RAM OOM when using tensor
@@ -1845,18 +1886,41 @@ class ParallelConfig:
         return answer
 
     def stateless_init_dp_group(self) -> "ProcessGroup":
+        # NOTE: In high-concurrency scenarios multiple processes
+        # can pick the same (currently free) port through a race
+        # condition when calling `get_open_port()`. When the first
+        # process binds the port the others will subsequently fail
+        # with `torch.distributed.DistNetworkError: EADDRINUSE`.
+        # To make the initialization more robust we retry a few times
+        # with a fresh port whenever this specific error is observed.
+        from torch.distributed import DistNetworkError
+
         from vllm.distributed.utils import (
             stateless_init_torch_distributed_process_group)
 
-        # use gloo since the engine process might not have cuda device
-        dp_group = stateless_init_torch_distributed_process_group(
-            self.data_parallel_master_ip,
-            self.get_next_dp_init_port(),
-            self.data_parallel_rank,
-            self.data_parallel_size,
-            backend="gloo")
+        max_retries = 5
+        last_exc: Optional[Exception] = None
+        for _ in range(max_retries):
+            try:
+                # use gloo since the engine process might not have cuda device
+                return stateless_init_torch_distributed_process_group(
+                    self.data_parallel_master_ip,
+                    self.get_next_dp_init_port(),
+                    self.data_parallel_rank,
+                    self.data_parallel_size,
+                    backend="gloo")
+            except DistNetworkError as e:
+                # We only want to retry when the root cause is EADDRINUSE.
+                if "EADDRINUSE" in str(e):
+                    logger.warning(
+                        "Address already in use. Retrying with a new port.")
+                    last_exc = e
+                    continue  # try again with a new port
+                raise e
 
-        return dp_group
+        # If we get here all retries have failed.
+        assert last_exc is not None
+        raise last_exc
 
     @staticmethod
     def has_unfinished_dp(dp_group: "ProcessGroup",
@@ -1900,6 +1964,11 @@ class ParallelConfig:
         if self.data_parallel_size > 1 or self.data_parallel_size_local == 0:
             # Data parallel was specified in the engine args.
             self.data_parallel_master_port = get_open_port()
+
+            if not (0 <= self.data_parallel_rank < self.data_parallel_size):
+                raise ValueError(
+                    f"data_parallel_rank ({self.data_parallel_rank})"
+                    f" must be in the range [0, {self.data_parallel_size})")
         else:
             # Otherwise fall back to env vars (e.g. for offline SPMD case).
             self.data_parallel_size = envs.VLLM_DP_SIZE
@@ -1908,11 +1977,29 @@ class ParallelConfig:
             self.data_parallel_master_ip = envs.VLLM_DP_MASTER_IP
             self.data_parallel_master_port = envs.VLLM_DP_MASTER_PORT
 
+            if self.data_parallel_external_lb:
+                raise ValueError("data_parallel_external_lb can only "
+                                 "be set when data_parallel_size > 1")
+
         if self.distributed_executor_backend == "external_launcher":
             import os
             os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
             logger.info("Disabling V1 multiprocessing for external launcher.")
 
+        if self.enable_eplb:
+            if not current_platform.is_cuda():
+                raise ValueError(
+                    "Expert parallelism load balancing is only supported on "
+                    "CUDA devices now.")
+            if self.num_redundant_experts < 0:
+                raise ValueError(
+                    "num_redundant_experts must be non-negative, but got "
+                    f"{self.num_redundant_experts}.")
+        else:
+            if self.num_redundant_experts != 0:
+                raise ValueError(
+                    "num_redundant_experts should be used with EPLB."
+                    f"{self.num_redundant_experts}.")
         if self.distributed_executor_backend is None and self.world_size > 1:
             # We use multiprocessing by default if world_size fits on the
             # current node and we aren't in a ray placement group.
@@ -3011,6 +3098,11 @@ class MultiModalConfig:
     `{"images": 16, "videos": 2}`
     """
 
+    media_io_kwargs: dict[str, dict[str, Any]] = field(default_factory=dict)
+    """Additional args passed to process media inputs, keyed by modalities. 
+    For example, to set num_frames for video, set 
+    `--media-io-kwargs '{"video": {"num_frames": 40} }'` """
+
     mm_processor_kwargs: Optional[dict[str, object]] = None
     """
     Overrides for the multi-modal processor obtained from
@@ -3924,7 +4016,8 @@ class CompilationConfig:
     - 'none,+op1,+op2' to enable only op1 and op2
 
     By default, all custom ops are enabled when running without Inductor and
-    disabled when running with Inductor (compile_level >= Inductor)."""
+    disabled when running with Inductor: level>=PIECEWISE and use_inductor=True.
+    Inductor generates (fused) Triton kernels for disabled custom ops."""
     splitting_ops: list[str] = field(default_factory=list)
     """A list of ops to split the full graph into subgraphs, used in piecewise
     compilation."""
@@ -3933,10 +4026,13 @@ class CompilationConfig:
     use_inductor: bool = True
     """Whether to use inductor compilation:
 
-    - False: inductor compilation is not used. graph runs in eager.
-    - True: inductor compilation is used. one graph for symbolic shape
-        is compiled. In addition, compile for compile_sizes,
-        using configurations in inductor_compile_config."""
+    - False: inductor compilation is not used. graph runs in eager
+        (custom_ops enabled by default).
+    - True: inductor compilation is used (custom_ops disabled by default).
+        One graph for symbolic shape and one graph per size in compile_sizes
+        are compiled using configurations in inductor_compile_config.
+        
+    This setting is ignored if level<PIECEWISE."""
     compile_sizes: Optional[list[Union[int, str]]] = None
     """Sizes to compile for inductor. In addition
     to integers, it also supports "cudagraph_capture_sizes" to
@@ -4066,9 +4162,9 @@ class CompilationConfig:
 
     @classmethod
     def from_cli(cls, cli_value: str) -> "CompilationConfig":
-        """Parse the CLI value for the compilation config."""
-        if cli_value in ["0", "1", "2", "3"]:
-            return cls(level=int(cli_value))
+        """Parse the CLI value for the compilation config.
+        -O1, -O2, -O3, etc. is handled in FlexibleArgumentParser.
+        """
         return TypeAdapter(CompilationConfig).validate_json(cli_value)
 
     def __post_init__(self) -> None:
@@ -4229,17 +4325,16 @@ class VllmConfig:
     """Quantization configuration."""
     compilation_config: CompilationConfig = field(
         default_factory=CompilationConfig)
-    """`torch.compile` configuration for the model.
+    """`torch.compile` and cudagraph capture configuration for the model.
 
-    When it is a number (0, 1, 2, 3), it will be interpreted as the
-    optimization level.
+    As a shorthand, `-O<n>` can be used to directly specify the compilation
+    level `n`: `-O3` is equivalent to `-O.level=3` (same as `-O='{"level":3}'`).
+    Currently, -O <n> and -O=<n> are supported as well but this will likely be 
+    removed in favor of clearer -O<n> syntax in the future.
 
     NOTE: level 0 is the default level without any optimization. level 1 and 2
     are for internal testing only. level 3 is the recommended level for
-    production.
-
-    Following the convention of traditional compilers, using `-O` without space
-    is also supported. `-O3` is equivalent to `-O 3`.
+    production, also default in V1.
 
     You can specify the full compilation config like so:
     `{"level": 3, "cudagraph_capture_sizes": [1, 2, 4, 8]}`
@@ -4417,6 +4512,9 @@ class VllmConfig:
     def __post_init__(self):
         """Verify configs are valid & consistent with each other.
         """
+
+        self.try_verify_and_update_config()
+
         if self.model_config is not None:
             self.model_config.verify_async_output_proc(self.parallel_config,
                                                        self.speculative_config,
@@ -4463,19 +4561,6 @@ class VllmConfig:
             self.compilation_config.cudagraph_num_of_warmups = 1
             self.compilation_config.level = CompilationLevel.PIECEWISE
             self.compilation_config.set_splitting_ops_for_v1()
-
-            # The behavior of custom ops with inductor depends on the config:
-            # - If use_inductor=True and custom_ops is empty:
-            #   Inductor generates Triton kernels for all registered custom ops
-            #   (default behavior)
-            # - If use_inductor=True and custom_ops is non-empty:
-            #   Custom CUDA kernels are used for specified ops while inductor
-            #   generates Triton kernels for remaining ops, including misc torch
-            #   ops in the model.
-            if (not self.compilation_config.custom_ops
-                    and self.compilation_config.use_inductor):
-                # Let inductor generate Triton kernels for the custom ops.
-                self.compilation_config.custom_ops = ["none"]
 
         self._set_cudagraph_sizes()
 
@@ -4661,11 +4746,21 @@ class VllmConfig:
             batch_size_capture_list)
 
     def recalculate_max_model_len(self, max_model_len: int):
+        # Can only be called in try_verify_and_update_config
         model_config = self.model_config
         max_model_len = model_config.get_and_verify_max_len(max_model_len)
         self.model_config.max_model_len = max_model_len
         self.scheduler_config.max_model_len = max_model_len
-        self.compute_hash()
+
+    def try_verify_and_update_config(self):
+        architecture = getattr(self.model_config, "architecture", None)
+        if architecture is None:
+            return
+
+        from vllm.model_executor.models.config import MODELS_CONFIG_MAP
+        cls = MODELS_CONFIG_MAP.get(architecture, None)
+        if cls is not None:
+            cls.verify_and_update_config(self)
 
     def __str__(self):
         return (
