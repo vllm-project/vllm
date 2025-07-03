@@ -963,7 +963,8 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
                             renamed = renamed.replace(
                                 "gate_up_proj_weight_scale",
                                 "w13_weight_scale")
-                                        # Handle attention scale parameters
+
+                    # Handle attention scale parameters
                     elif "self_attn." in name and (
                             ".k_scale" in name or ".v_scale" in name):
                         # Map attention scale parameters for ModelOpt checkpoints
@@ -1008,118 +1009,47 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
                 else:
                     other_weights.append((renamed, weight))
 
-            # Print debugging information for scale parameters
-            print(f"\n=== SCALE PARAMETER LOADING DEBUG INFO ===")
-            print(f"Scale parameters found in checkpoint ({len(checkpoint_scales)}):")
-
-            # Group scale parameters by type for better readability
-            moe_scales = [s for s in checkpoint_scales if "experts." in s]
-            attn_scales = [s for s in checkpoint_scales if "self_attn." in s and "scale" in s]
-            other_scales = [s for s in checkpoint_scales if s not in moe_scales and s not in attn_scales]
-
-            # Further categorize attention scales
-            kv_cache_scales = [s for s in attn_scales if ".k_scale" in s or ".v_scale" in s]
-            linear_scales = [s for s in attn_scales if s not in kv_cache_scales]
-
-            if moe_scales:
-                print(f"\n  MoE Expert Scales ({len(moe_scales)}):")
-                for scale_name in sorted(moe_scales):
-                    print(f"    {scale_name}")
-
-            if attn_scales:
-                print(f"\n  Attention Scales ({len(attn_scales)}):")
-                if kv_cache_scales:
-                    print(f"    KV Cache Scales ({len(kv_cache_scales)}):")
-                    for scale_name in sorted(kv_cache_scales):
-                        print(f"      {scale_name}")
-                if linear_scales:
-                    print(f"    Linear Projection Scales ({len(linear_scales)}):")
-                    for scale_name in sorted(linear_scales):
-                        print(f"      {scale_name}")
-
-                # Note about missing q_scale and prob_scale
-                print(f"    📝 Note: q_scale and prob_scale not found in checkpoint")
-                print(f"             These will use default values (1.0) as expected")
-
-            if other_scales:
-                print(f"\n  Other Scales ({len(other_scales)}):")
-                for scale_name in sorted(other_scales):
-                    print(f"    {scale_name}")
-
-            print(f"\nScale parameter name mappings ({len(scale_mapping)}):")
-
-            # Group mappings by type for clarity
-            moe_mappings = {k: v for k, v in scale_mapping.items() if "experts." in k}
-            attn_mappings = {k: v for k, v in scale_mapping.items() if "self_attn." in k}
-            other_mappings = {k: v for k, v in scale_mapping.items() if k not in moe_mappings and k not in attn_mappings}
-
-            if moe_mappings:
-                print(f"\n  MoE Scale Mappings ({len(moe_mappings)}):")
-                for orig_name, renamed_name in sorted(moe_mappings.items()):
-                    print(f"    {orig_name} → {renamed_name}")
-
-            if attn_mappings:
-                print(f"\n  Attention Scale Mappings ({len(attn_mappings)}):")
-                for orig_name, renamed_name in sorted(attn_mappings.items()):
-                    print(f"    {orig_name} → {renamed_name}")
-
-            if other_mappings:
-                print(f"\n  Other Scale Mappings ({len(other_mappings)}):")
-                for orig_name, renamed_name in sorted(other_mappings.items()):
-                    print(f"    {orig_name} → {renamed_name}")
-
-            print(f"\nRenamed scale parameters ({len(renamed_scales)}):")
-            for scale_name in sorted(renamed_scales):
-                print(f"  {scale_name}")
-
-            # Get expected scale parameters from model
-            model_scale_params = []
-            for param_name in params_dict.keys():
-                if "scale" in param_name:
-                    model_scale_params.append(param_name)
-
-            print(f"\nExpected scale parameters in model ({len(model_scale_params)}):")
-            for param_name in sorted(model_scale_params):
-                print(f"  {param_name}")
-
-                        # Check for missing scale parameters
-            missing_scales = set(model_scale_params) - set(renamed_scales)
-            extra_scales = set(renamed_scales) - set(model_scale_params)
-
-            # Filter out q_scale and prob_scale as they're expected to use defaults
-            expected_defaults = {p for p in missing_scales if ".attn.q_scale" in p or ".attn.prob_scale" in p}
-            truly_missing = missing_scales - expected_defaults
-
-            if truly_missing:
-                print(f"\n⚠️  MISSING scale parameters ({len(truly_missing)}):")
-                for param_name in sorted(truly_missing):
-                    print(f"  {param_name}")
-            else:
-                print(f"\n✅ All required scale parameters found in checkpoint!")
-
-            if expected_defaults:
-                print(f"\n📋 Scale parameters using defaults ({len(expected_defaults)}):")
-                for param_name in sorted(expected_defaults):
-                    print(f"  {param_name} (will use default value 1.0)")
-
-
-            if extra_scales:
-                print(f"\n⚠️  EXTRA scale parameters in checkpoint ({len(extra_scales)}):")
-                for param_name in sorted(extra_scales):
-                    print(f"  {param_name}")
-
-            print(f"=== END SCALE PARAMETER DEBUG INFO ===\n")
 
             return language_model_weights, other_weights
 
         language_model_weights, other_weights = process_and_separate_weights()
 
-        # Load language model weights
+        # Handle expert scale parameters separately to avoid FusedMoE weight loader issues
+        expert_scale_weights = []
+        regular_language_model_weights = []
+
+        for name, weight in language_model_weights:
+            # Check if this is an expert scale parameter that needs broadcasting
+            if ("feed_forward.experts." in name and "scale" in name and
+                ".shared_expert" not in name):
+
+                if name in params_dict:
+                    param = params_dict[name]
+                    if (hasattr(param, 'data') and param.data.numel() > 1 and
+                        weight.numel() == 1):
+                        # This needs broadcasting - handle it directly
+                        # print(f"Broadcasting single scale value {weight.item()} to shape {param.data.shape} for {name}")
+                        param.data.fill_(weight.item())
+                        updated_params.add(name)
+                        continue
+
+                # Regular expert scale loading - add to separate list
+                expert_scale_weights.append((name, weight))
+            else:
+                regular_language_model_weights.append((name, weight))
+
+        # Load regular language model weights (excluding expert scales that need broadcasting)
         loader = AutoWeightsLoader(self)
         loaded_language_model_params = loader.load_weights(
-            language_model_weights)
+            regular_language_model_weights)
         assert loaded_language_model_params is not None
         updated_params.update(loaded_language_model_params)
+
+        # Load expert scale weights that didn't need broadcasting through normal mechanism
+        if expert_scale_weights:
+            loaded_expert_scale_params = loader.load_weights(expert_scale_weights)
+            if loaded_expert_scale_params:
+                updated_params.update(loaded_expert_scale_params)
 
         if self.use_data_parallel:
             other_weights = self._consolidate_qkv_weights(other_weights)
@@ -1191,50 +1121,5 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
         print(f"  Loaded from checkpoint: {len(loaded_scale_params)}")
         print(f"  Using default values: {len(not_loaded_scale_params)}")
         print(f"  Total scale parameters: {total_scale_params}")
-
-        # Fix missing attention scale parameters using proper defaults
-        attention_params_fixed = 0
-        layer_k_scales = {}  # Store k_scale values for each layer
-
-        # First pass: collect k_scale values
-        for param_name, param in params_dict.items():
-            if ".attn.k_scale" in param_name and hasattr(param, 'data'):
-                layer_prefix = param_name.replace(".attn.k_scale", "")
-                if param.data.numel() == 1:
-                    layer_k_scales[layer_prefix] = float(param.data.item())
-                    print(f"📊 Found k_scale for {layer_prefix}: {layer_k_scales[layer_prefix]}")
-
-        # Second pass: fix missing scales with proper defaults
-        for param_name, param in params_dict.items():
-            if hasattr(param, 'data') and param.data.numel() == 1:
-                current_value = float(param.data.item())
-
-                # Fix q_scale: use k_scale from same layer if available
-                if ".attn.q_scale" in param_name and current_value == 1.0:
-                    layer_prefix = param_name.replace(".attn.q_scale", "")
-                    if layer_prefix in layer_k_scales:
-                        k_scale_value = layer_k_scales[layer_prefix]
-                        print(f"🔧 Setting {param_name}: {current_value} -> {k_scale_value} (using k_scale)")
-                        param.data.fill_(k_scale_value)
-                        attention_params_fixed += 1
-                    else:
-                        print(f"⚠️  No k_scale found for {param_name}, keeping default 1.0")
-
-                # Fix prob_scale: use standard default of 1.0/448.0 for missing values
-                elif ".attn.prob_scale" in param_name and current_value == 1.0:
-                    prob_scale_default = 1.0 / 448.0
-                    print(f"🔧 Setting {param_name}: {current_value} -> {prob_scale_default} (attention prob default)")
-                    param.data.fill_(prob_scale_default)
-                    attention_params_fixed += 1
-
-        if attention_params_fixed > 0:
-            print(f"Fixed {attention_params_fixed} attention scale parameters with proper defaults")
-
-        if not_loaded_scale_params and not any(".attn.q_scale" in p or ".attn.prob_scale" in p for p in not_loaded_scale_params):
-            print(f"\n⚠️  Warning: Expected q_scale and prob_scale to be using defaults, but they weren't found")
-        elif any(".attn.q_scale" in p or ".attn.prob_scale" in p for p in not_loaded_scale_params):
-            print(f"\n✅ q_scale and prob_scale are correctly using default values!")
-
-        print(f"=== END SCALE PARAMETER VERIFICATION ===\n")
 
         return updated_params
