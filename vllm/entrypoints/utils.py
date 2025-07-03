@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import argparse
 import asyncio
 import functools
 import os
@@ -178,18 +179,19 @@ def _validate_truncation_size(
     return truncate_prompt_tokens
 
 
-def show_filtered_argument_or_group_from_help(parser, subcommand_name):
+def show_filtered_argument_or_group_from_help(parser: argparse.ArgumentParser,
+                                              subcommand_name: list[str]):
     import sys
 
     # Only handle --help=<keyword> for the current subcommand.
     # Since subparser_init() runs for all subcommands during CLI setup,
     # we skip processing if the subcommand name is not in sys.argv.
-    parts = subcommand_name.split()
     # sys.argv[0] is the program name. The subcommand follows.
     # e.g., for `vllm bench latency`,
     # sys.argv is `['vllm', 'bench', 'latency', ...]`
     # and subcommand_name is "bench latency".
-    if len(sys.argv) <= len(parts) or sys.argv[1:1 + len(parts)] != parts:
+    if len(sys.argv) <= len(subcommand_name) or sys.argv[
+            1:1 + len(subcommand_name)] != subcommand_name:
         return
 
     for arg in sys.argv:

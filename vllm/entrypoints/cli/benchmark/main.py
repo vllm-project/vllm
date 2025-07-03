@@ -48,7 +48,7 @@ class BenchmarkSubcommand(CLISubcommand):
             cmd_subparser.set_defaults(dispatch_function=cmd_cls.cmd)
             cmd_cls.add_cli_args(cmd_subparser)
             show_filtered_argument_or_group_from_help(cmd_subparser,
-                                                      f"bench {cmd_cls.name}")
+                                                      ["bench", cmd_cls.name])
             cmd_subparser.epilog = VLLM_SUBCMD_PARSER_EPILOG
         return bench_parser
 
