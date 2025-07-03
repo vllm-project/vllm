@@ -307,4 +307,17 @@ stages:
         pytest -v -s -vvv --log-cli-level=INFO tests/v1/core -k "not kv_connector" && 
         pytest -v -s -vvv --log-cli-level=INFO tests/v1/engine && 
         pytest -v -s -vvv --log-cli-level=INFO tests/v1/worker 
-    
+  - name: tests_embedding
+    steps:
+      - name: embedding_small_lazy_g3_tp1
+        flavor: g3
+        command: cd .jenkins/embedding && PT_HPU_LAZY_MODE=1 bash run-tests.sh -c configs/models-small.txt -t 1
+      - name: embedding_roberta_lazy_g3_tp1
+        flavor: g3
+        command: cd .jenkins/embedding && PT_HPU_LAZY_MODE=1 PT_HPUGRAPH_DISABLE_TENSOR_CACHE=false bash run-tests.sh -c configs/models-roberta.txt -t 1
+      - name: embedding_small_torch_compile_g3_tp1
+        flavor: g3
+        command: cd .jenkins/embedding && PT_HPU_LAZY_MODE=0 bash run-tests.sh -c configs/models-small.txt -t 1
+      - name: embedding_roberta_torch_compile_g3_tp1
+        flavor: g3
+        command: cd .jenkins/embedding && PT_HPU_LAZY_MODE=0 PT_HPUGRAPH_DISABLE_TENSOR_CACHE=false bash run-tests.sh -c configs/models-roberta.txt -t 1

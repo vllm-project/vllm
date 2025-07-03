@@ -1,0 +1,2 @@
+model_name: "/git_lfs/data/huggingface-models/sentence-transformers/all-roberta-large-v1"
+dtype: "bfloat16"

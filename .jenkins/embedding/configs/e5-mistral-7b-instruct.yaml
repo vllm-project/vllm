@@ -1,0 +1,2 @@
+model_name: "/git_lfs/data/huggingface-models/intfloat/e5-mistral-7b-instruct"
+dtype: "bfloat16"
