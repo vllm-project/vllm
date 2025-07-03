@@ -41,10 +41,7 @@ def run_cutlass_moe_fp8(
     assert w2_scale is not None
     assert w1.dtype == torch.float8_e4m3fn
     assert w2.dtype == torch.float8_e4m3fn
-    if expert_num_tokens is None:
-        assert a1q.size(1) == w1.size(2), "Hidden size mismatch w1"
-    else:
-        assert a1q.size(2) == w1.size(2), "Hidden size mismatch w1"
+    assert a1q.size(-1) == w1.size(2), "Hidden size mismatch w1"
     assert w1.size(1) == w2.size(2) * 2, "Hidden size mismatch w2"
     assert w1_scale.dim() == 1 or w1_scale.size(
         1) == 1 or w1_scale.shape[1] == w1.size(1), "W1 scale shape mismatch"

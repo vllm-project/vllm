@@ -577,6 +577,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         prepare_finalize: FusedMoEPrepareAndFinalize,
         moe: FusedMoEConfig,
     ) -> FusedMoEPermuteExpertsUnpermute:
+        from vllm.model_executor.layers.fused_moe import TritonExperts
         from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
             BatchedTritonExperts)
 
@@ -584,20 +585,27 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
 
         logger.debug("BatchedTritonExperts(%s)", self.__class__.__name__)
 
-        assert (prepare_finalize.activation_format ==
-                FusedMoEActivationFormat.BatchedExperts)
+        if (prepare_finalize.activation_format ==
+                FusedMoEActivationFormat.BatchedExperts):
+            max_num_tokens_per_rank = prepare_finalize.max_num_tokens_per_rank(
+            )
+            assert max_num_tokens_per_rank is not None
 
-        max_num_tokens_per_rank = prepare_finalize.max_num_tokens_per_rank()
-        assert max_num_tokens_per_rank is not None
-
-        return BatchedTritonExperts(
-            max_num_tokens=max_num_tokens_per_rank,
-            num_dispatchers=prepare_finalize.num_dispatchers(),
-            use_fp8_w8a8=True,
-            block_shape=self.quant_config.weight_block_size,
-            per_act_token_quant=(
-                self.input_quant.strategy == QuantizationStrategy.TOKEN),
-        )
+            return BatchedTritonExperts(
+                max_num_tokens=max_num_tokens_per_rank,
+                num_dispatchers=prepare_finalize.num_dispatchers(),
+                use_fp8_w8a8=True,
+                block_shape=self.quant_config.weight_block_size,
+                per_act_token_quant=(
+                    self.input_quant.strategy == QuantizationStrategy.TOKEN),
+            )
+        else:
+            return TritonExperts(
+                use_fp8_w8a8=True,
+                block_shape=self.quant_config.weight_block_size,
+                per_act_token_quant=(
+                    self.input_quant.strategy == QuantizationStrategy.TOKEN),
+            )
 
     def apply(
         self,
@@ -859,6 +867,8 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
         use_batched_format = (prepare_finalize.activation_format ==
                               FusedMoEActivationFormat.BatchedExperts)
 
+        num_dispatchers = prepare_finalize.num_dispatchers()
+
         num_experts = (moe.num_local_experts
                        if use_batched_format else moe.num_experts)
 
@@ -869,11 +879,13 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
             moe.in_dtype,
             self.input_quant.strategy == QuantizationStrategy.TOKEN,
             self.weight_quant.strategy == QuantizationStrategy.CHANNEL,
-            num_dispatchers=prepare_finalize.num_dispatchers(),
+            num_dispatchers=num_dispatchers,
             use_batched_format=use_batched_format,
         )
 
-        self.disable_expert_map = not experts.supports_expert_map()
+        self.disable_expert_map = (num_dispatchers > 1
+                                   or not experts.supports_expert_map())
+
         return experts
 
     def apply(
