@@ -233,7 +233,35 @@ class Worker(WorkerBase):
                     GiB(available_kv_cache_memory))
         gc.collect()
 
-        return int(available_kv_cache_memory)
+        available_kv_cache_memory = int(available_kv_cache_memory)
+        logger.info(
+            "Determined amount of memory available to KV cache: %d bytes",
+            available_kv_cache_memory)
+
+        vllm_avail_kv_cache_override = os.getenv(
+            "VLLM_AVAIL_KV_CACHE_OVERRIDE", None)
+        if vllm_avail_kv_cache_override:
+            try:
+                overridden_value = int(vllm_avail_kv_cache_override)
+                if overridden_value < 0:
+                    # It's generally not expected for available memory to be
+                    # negative. Raise an error to make misconfiguration clear.
+                    raise ValueError(
+                        f"VLLM_AVAIL_KV_CACHE_OVERRIDE cannot be negative. "
+                        f"Received value: {vllm_avail_kv_cache_override}")
+
+                available_kv_cache_memory = overridden_value
+                logger.warning(
+                    "Overriding amount of memory available to KV cache to "
+                    "%d bytes due to VLLM_AVAIL_KV_CACHE_OVERRIDE=%s.",
+                    available_kv_cache_memory, vllm_avail_kv_cache_override)
+            except ValueError as e:
+                logger.error(
+                    "Failed to apply VLLM_AVAIL_KV_CACHE_OVERRIDE='%s'. "
+                    "Error: %s. Please ensure it's a valid non-negative "
+                    "integer.", vllm_avail_kv_cache_override, e)
+
+        return available_kv_cache_memory
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         return self.model_runner.get_kv_cache_spec()
