@@ -13,14 +13,9 @@ from vllm.config import VllmConfig
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8, w8a8_block_fp8_matmul)
 from vllm.platforms import current_platform
-from vllm.utils.deep_gemm import fp8_gemm_nt
-
-dg_available = False
-try:
-    import deep_gemm
-    dg_available = True
-except ImportError:
-    pass
+from vllm.utils import has_deep_gemm
+from vllm.utils.deep_gemm import (fp8_gemm_nt, per_block_cast_to_fp8,
+                                  per_token_cast_to_fp8)
 
 if current_platform.get_device_capability() < (9, 0):
     pytest.skip("FP8 Triton requires CUDA 9.0 or higher",
@@ -106,7 +101,8 @@ def test_w8a8_block_fp8_matmul(M, N, K, block_size, out_dtype, seed):
 @pytest.mark.parametrize(
     "M,N,K,block_size,out_dtype,seed",
     itertools.product(M, N, K, BLOCK_SIZE, OUT_DTYPES, SEEDS))
-@pytest.mark.skipif(not dg_available, reason="DeepGemm kernels not available.")
+@pytest.mark.skipif(not has_deep_gemm(),
+                    reason="DeepGemm kernels not available.")
 @torch.inference_mode()
 def test_w8a8_block_fp8_deep_gemm_matmul(M, N, K, block_size, out_dtype, seed):
     # only aligned sizes
@@ -120,8 +116,8 @@ def test_w8a8_block_fp8_deep_gemm_matmul(M, N, K, block_size, out_dtype, seed):
     A_fp32 = (torch.rand(M, K, dtype=torch.float32) - 0.5) * 2 * fp8_max
     B_fp32 = (torch.rand(N, K, dtype=torch.float32) - 0.5) * 2 * fp8_max
 
-    A_fp8, As_fp8 = deep_gemm.utils.math.per_token_cast_to_fp8(A_fp32)
-    B_fp8, Bs_fp8 = deep_gemm.utils.math.per_block_cast_to_fp8(B_fp32)
+    A_fp8, As_fp8 = per_token_cast_to_fp8(A_fp32)
+    B_fp8, Bs_fp8 = per_block_cast_to_fp8(B_fp32)
 
     As = As_fp8.to(torch.float32)
     Bs = Bs_fp8.to(torch.float32)

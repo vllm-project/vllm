@@ -10,9 +10,11 @@ import math
 import pytest
 import torch
 
+import vllm.model_executor.layers.fused_moe.utils as _moe_utils
 # vLLM fused-expert reference (Triton fallback + DeepGEMM option)
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
 from vllm.utils import has_deep_gemm
+from vllm.utils.deep_gemm import per_token_cast_to_fp8
 
 if has_deep_gemm():
     import deep_gemm
@@ -82,8 +84,7 @@ def run_single_case(m, n, k, topk, num_experts, block_size):
     """
     tokens_bf16 = torch.randn(
         m, k, device="cuda", dtype=torch.bfloat16).clamp_min_(-1).clamp_max_(1)
-    _, a1_scale = deep_gemm.utils.math.per_token_cast_to_fp8(tokens_bf16)
-    # import pdb; pdb.set_trace()
+    _, a1_scale = per_token_cast_to_fp8(tokens_bf16)
 
     # expert weight tensors
     w1, w2, w1_s, w2_s = make_block_quant_fp8_weights(num_experts, n, k,
@@ -168,6 +169,18 @@ def test_deepgemm_vs_triton(mnk, topk, num_experts, monkeypatch):
 
         monkeypatch.setattr(_fused_moe_mod, "deep_gemm_moe_fp8",
                             _spy_deep_gemm_moe_fp8)
+
+        # Patch per_token_group_quant_fp8 so that _fp8_quantize indirectly
+        # uses per_token_cast_to_fp8 for this test only.
+        _orig_ptgg = _moe_utils.per_token_group_quant_fp8
+
+        def _patched_ptgg(x, *args, **kwargs):
+            return per_token_cast_to_fp8(x)
+
+        m.setattr(_moe_utils,
+                  "per_token_group_quant_fp8",
+                  _patched_ptgg,
+                  raising=True)
 
         m, n, k = mnk
 
