@@ -92,8 +92,6 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         assert isinstance(x, torch.Tensor)
 
-        assert not per_act_token_quant
-
         num_experts, max_tokens, hidden_dim = x.size()
 
         # TODO (varun): Optimization - Use a batched version of quant
