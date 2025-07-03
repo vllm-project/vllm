@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Copyright (c) 2018 The Chromium Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
