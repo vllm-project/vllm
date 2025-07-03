@@ -457,6 +457,11 @@ class RankTensors:
 
     quant_config: FusedMoEQuantConfig
 
+    def apply_topk_weights_to_input(self) -> torch.Tensor:
+        assert self.topk == 1
+        a = self.hidden_states.clone()
+        return a.mul(self.topk_weights.view(-1, 1))
+
     @staticmethod
     def make_hidden_states(config: Config) -> torch.Tensor:
         """
@@ -630,8 +635,12 @@ def do_modular_kernel(
     modular_kernel = mk.FusedMoEModularKernel(
         prepare_finalize=prepare_finalize, fused_experts=fused_experts)
 
+    apply_router_weight_on_input = config.topk == 1
+    hidden_states = (rank_tensors.apply_topk_weights_to_input()
+                     if apply_router_weight_on_input else
+                     rank_tensors.hidden_states)
     modular_kernel.forward(
-        hidden_states=rank_tensors.hidden_states,
+        hidden_states=hidden_states,
         w1=weights.w1,
         w2=weights.w2,
         topk_weights=rank_tensors.topk_weights,
@@ -640,8 +649,7 @@ def do_modular_kernel(
         w1_scale=weights.w1_scale,
         w2_scale=weights.w2_scale,
         global_num_experts=config.E,
-        # TODO (varun) : support this case
-        apply_router_weight_on_input=False,
+        apply_router_weight_on_input=apply_router_weight_on_input,
     )
 
 
@@ -743,7 +751,7 @@ FUSED_EXPERT_TYPES = [
 Ms = [64]
 Ks = [7168]  # hidden sizes
 Ns = [2048]
-TOPKs = [4]
+TOPKs = [4, 1]
 Es = [32]
 DTYPEs = [torch.bfloat16]
 BLOCK_SIZEs = [None, [128, 128]]
