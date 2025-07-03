@@ -99,9 +99,11 @@ class ReqMeta:
     remote_port: int
     remote_engine_id: str
     tp_size: int
-    # NOTE: needed when host_xfer_buffer is used.
-    do_save_to_host: bool = False
-    do_load_to_device: bool = False
+    # load kv cache from remote engine / agent
+    load_remote_cache: bool = True
+    # NOTE: save kv cache from accelerator to local
+    # host buffer; needed when kv_cache_device is cpu.
+    save_to_host: bool = False
 
 
 class NixlConnectorMetadata(KVConnectorMetadata):
@@ -114,8 +116,8 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         request_id: ReqId,
         local_block_ids: list[int],
         kv_transfer_params: dict[str, Any],
-        do_save_to_host: bool = False,
-        do_load_to_device: bool = False,
+        load_remote_cache: bool = True,
+        save_to_host: bool = False,
     ):
         self.requests[request_id] = ReqMeta(
             local_block_ids=local_block_ids,
@@ -125,8 +127,8 @@ class NixlConnectorMetadata(KVConnectorMetadata):
             remote_port=kv_transfer_params["remote_port"],
             # P workers don't need to receive tp_size from proxy here.
             tp_size=kv_transfer_params.get("tp_size", 1),
-            do_save_to_host=do_save_to_host,
-            do_load_to_device=do_load_to_device,
+            load_remote_cache=load_remote_cache,
+            save_to_host=save_to_host,
         )
 
 
@@ -289,7 +291,7 @@ class NixlConnectorScheduler:
         if not params:
             return
         if self.use_host_buffer and params.get("do_remote_decode"):
-            # NOTE: when kv_buffer_device (e.) is not supported by Nixl,
+            # NOTE: when accelerator is not directly supported by Nixl,
             # prefilled blocks need to be saved to host memory before transfer.
 
             # figure out full computed blocks to save
@@ -339,17 +341,16 @@ class NixlConnectorScheduler:
                 request_id=req_id,
                 local_block_ids=block_ids,
                 kv_transfer_params=req.kv_transfer_params,
-                do_load_to_device=self.use_host_buffer,
             )
 
-        # NOTE: only needed when use_host_buffer is true.
         for req_id, (req, block_ids) in self._reqs_need_save.items():
             assert req.kv_transfer_params is not None
             meta.add_new_req(
                 request_id=req_id,
                 local_block_ids=block_ids,
                 kv_transfer_params=req.kv_transfer_params,
-                do_save_to_host=True,
+                load_remote_cache=False,
+                save_to_host=True,
             )
 
         # Clear the list once workers start the transfers
@@ -989,8 +990,7 @@ class NixlConnectorWorker:
         """copy recved kv from host buffer to device."""
         assert self.use_host_buffer
         assert self.copy_blocks is not None
-        assert req_id not in self._recving_transfers
-        if not meta.do_load_to_device:
+        if not meta.load_remote_cache:
             return
 
         local_block_ids = meta.local_block_ids
@@ -1008,8 +1008,7 @@ class NixlConnectorWorker:
         assert self.copy_blocks is not None
 
         for req_id, meta in metadata.requests.items():
-            # local prefill requests only
-            if not meta.do_save_to_host:
+            if not meta.save_to_host:
                 continue
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug(
@@ -1142,9 +1141,7 @@ class NixlConnectorWorker:
         We check for these trnxs to complete in each step().
         """
         for req_id, meta in metadata.requests.items():
-            # NOTE: when host xfer buffer is used, only load kv
-            # for requests with do_load_to_device = True.
-            if self.use_host_buffer and not meta.do_load_to_device:
+            if not meta.load_remote_cache:
                 continue
             remote_engine_id = meta.remote_engine_id
             logger.debug(
