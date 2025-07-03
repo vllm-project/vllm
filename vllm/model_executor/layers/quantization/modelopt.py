@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any, Callable, List, Optional, Union
+from typing import Any, Callable, Optional, Union
 
 import torch
 from torch.nn import Module
@@ -43,7 +43,7 @@ class ModelOptFp8Config(QuantizationConfig):
         self,
         is_checkpoint_fp8_serialized: bool = False,
         kv_cache_quant_method: Optional[str] = None,
-        exclude_modules: Optional[List[str]] = None,
+        exclude_modules: Optional[list[str]] = None,
     ) -> None:
         super().__init__()
         self.is_checkpoint_fp8_serialized = is_checkpoint_fp8_serialized
@@ -101,9 +101,9 @@ class ModelOptFp8Config(QuantizationConfig):
 
         # Check if any excluded module matches the prefix
         for module in self.exclude_modules:
-            if (module in prefix or
-                (prefix.startswith("language_model.") and
-                 module in prefix.removeprefix("language_model."))):
+            if (module in prefix
+                    or (prefix.startswith("language_model.")
+                        and module in prefix.removeprefix("language_model."))):
                 return True
         return False
 
@@ -206,7 +206,8 @@ class ModelOptFp8LinearMethod(LinearMethodBase):
 
 class ModelOptFp8MoEMethod:
     """MoE method for ModelOpt FP8.
-    Supports loading FP8 checkpoints with static weight scale and activation scale.
+    Supports loading FP8 checkpoints with static weight scale and
+    activation scale.
     Args:
         quant_config: The ModelOpt quantization config.
     """
@@ -214,8 +215,8 @@ class ModelOptFp8MoEMethod:
     def __new__(cls, *args, **kwargs):
         """
         Dynamic class composition pattern.
-        This allows us to effectively "inject" FusedMoEMethodBase as a parent class
-        at runtime while avoiding circular import issues.
+        This allows us to effectively "inject" FusedMoEMethodBase as a parent
+        class at runtime while avoiding circular import issues.
         """
 
         if not hasattr(cls, "_initialized"):
@@ -252,7 +253,7 @@ class ModelOptFp8MoEMethod:
         **extra_weight_attrs,
     ):
 
-        # Use FP8 dtype if checkpoint is serialized, otherwise use the default dtype
+        # Use FP8 dtype if checkpoint is serialized
         weight_dtype = (torch.float8_e4m3fn
                         if self.quant_config.is_checkpoint_fp8_serialized else
                         params_dtype)
@@ -293,12 +294,7 @@ class ModelOptFp8MoEMethod:
                 weight_loader=weight_loader,
             )
             w2_weight_scale = PerTensorScaleParameter(
-                data=torch.full(
-                    (num_experts, ),
-                    1.0,
-                    dtype=torch.
-                    float32
-                ),
+                data=torch.full((num_experts, ), 1.0, dtype=torch.float32),
                 weight_loader=weight_loader,
             )
             layer.register_parameter("w13_weight_scale", w13_weight_scale)

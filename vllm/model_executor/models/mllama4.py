@@ -904,24 +904,31 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
             yield key, qkv_weight
 
     def _rename_weight_for_checkpoint(self, name: str) -> str:
-        """Rename weights from ModelOpt llama4 fp8 checkpoints to vLLM format."""
+        """Rename weights from ModelOpt llama4 fp8 checkpoints to vLLM
+        format."""
         if name.startswith("model."):
             # Handle expert scale parameters with flat naming
-            if "feed_forward.experts." in name and ("_input_scale" in name or "_weight_scale" in name):
+            if "feed_forward.experts." in name and ("_input_scale" in name or
+                                                    "_weight_scale" in name):
                 renamed = name.replace("model.", "language_model.model.", 1)
                 # Map checkpoint naming to vLLM's expected naming
                 if "down_proj_input_scale" in renamed:
-                    return renamed.replace("down_proj_input_scale", "w2_input_scale")
+                    return renamed.replace("down_proj_input_scale",
+                                           "w2_input_scale")
                 elif "down_proj_weight_scale" in renamed:
-                    return renamed.replace("down_proj_weight_scale", "w2_weight_scale")
+                    return renamed.replace("down_proj_weight_scale",
+                                           "w2_weight_scale")
                 elif "gate_up_proj_input_scale" in renamed:
-                    return renamed.replace("gate_up_proj_input_scale", "w13_input_scale")
+                    return renamed.replace("gate_up_proj_input_scale",
+                                           "w13_input_scale")
                 elif "gate_up_proj_weight_scale" in renamed:
-                    return renamed.replace("gate_up_proj_weight_scale", "w13_weight_scale")
+                    return renamed.replace("gate_up_proj_weight_scale",
+                                           "w13_weight_scale")
                 return renamed
 
             # Handle attention scale parameters
-            elif "self_attn." in name and (".k_scale" in name or ".v_scale" in name):
+            elif "self_attn." in name and (".k_scale" in name
+                                           or ".v_scale" in name):
                 renamed = name.replace("model.", "language_model.model.", 1)
                 if ".k_proj.k_scale" in renamed:
                     return renamed.replace(".k_proj.k_scale", ".attn.k_scale")
@@ -933,12 +940,16 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
             return name.replace("model.", "language_model.model.", 1)
 
         elif name.startswith("lm_head.weight"):
-            return name.replace("lm_head.weight", "language_model.lm_head.weight")
+            return name.replace("lm_head.weight",
+                                "language_model.lm_head.weight")
 
         return name
 
-    def _separate_and_rename_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> tuple[list[tuple[str, torch.Tensor]], list[tuple[str, torch.Tensor]]]:
-        """Rename weights and separate them into language_model and other weights."""
+    def _separate_and_rename_weights(
+        self, weights: Iterable[tuple[str, torch.Tensor]]
+    ) -> tuple[list[tuple[str, torch.Tensor]], list[tuple[str, torch.Tensor]]]:
+        """Rename weights and separate them into language_model and other
+        weights."""
         language_model_weights = []
         other_weights = []
 
@@ -952,7 +963,9 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         return language_model_weights, other_weights
 
-    def _handle_expert_scale_broadcasting(self, weights: list[tuple[str, torch.Tensor]], params_dict: dict) -> tuple[list[tuple[str, torch.Tensor]], set[str]]:
+    def _handle_expert_scale_broadcasting(
+            self, weights: list[tuple[str, torch.Tensor]], params_dict: dict
+    ) -> tuple[list[tuple[str, torch.Tensor]], set[str]]:
         """Handle expert scale parameters that need broadcasting."""
         regular_weights = []
         expert_scale_weights = []
@@ -960,10 +973,12 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         for name, weight in weights:
             # Check if this is an expert scale parameter that needs broadcasting
-            if ("feed_forward.experts." in name and "scale" in name and ".shared_expert" not in name):
+            if ("feed_forward.experts." in name and "scale" in name
+                    and ".shared_expert" not in name):
                 if name in params_dict:
                     param = params_dict[name]
-                    if (hasattr(param, 'data') and param.data.numel() > 1 and weight.numel() == 1):
+                    if (hasattr(param, 'data') and param.data.numel() > 1
+                            and weight.numel() == 1):
                         # Broadcast single value to all experts
                         param.data.fill_(weight.item())
                         updated_params.add(name)
@@ -975,7 +990,10 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         return regular_weights, expert_scale_weights, updated_params
 
-    def _load_other_weights(self, other_weights: Iterable[tuple[str, torch.Tensor]], params_dict: dict, stacked_params_mapping: list) -> set[str]:
+    def _load_other_weights(self, other_weights: Iterable[tuple[str,
+                                                                torch.Tensor]],
+                            params_dict: dict,
+                            stacked_params_mapping: list) -> set[str]:
         """Load non-language-model weights with stacking support."""
         updated_params = set()
 
@@ -999,7 +1017,8 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
             if not mapped:
                 # Use regular weight loading
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
                 weight_loader(param, loaded_weight)
                 updated_params.add(name)
 
@@ -1024,10 +1043,13 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
         updated_params: set[str] = set()
 
         # Separate and rename weights
-        language_model_weights, other_weights = self._separate_and_rename_weights(weights)
+        language_model_weights, other_weights = (
+            self._separate_and_rename_weights(weights))
 
         # Handle expert scale parameters
-        regular_weights, expert_scale_weights, updated_params_from_experts = self._handle_expert_scale_broadcasting(language_model_weights, params_dict)
+        regular_weights, expert_scale_weights, updated_params_from_experts = (
+            self._handle_expert_scale_broadcasting(language_model_weights,
+                                                   params_dict))
         updated_params.update(updated_params_from_experts)
 
         loader = AutoWeightsLoader(self)
@@ -1036,10 +1058,13 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
         updated_params.update(loaded_language_model_params)
 
         if expert_scale_weights:
-            loaded_expert_scale_params = loader.load_weights(expert_scale_weights)
+            loaded_expert_scale_params = loader.load_weights(
+                expert_scale_weights)
             if loaded_expert_scale_params:
                 updated_params.update(loaded_expert_scale_params)
 
-        updated_params.update(self._load_other_weights(other_weights, params_dict, stacked_params_mapping))
+        updated_params.update(
+            self._load_other_weights(other_weights, params_dict,
+                                     stacked_params_mapping))
 
         return updated_params
