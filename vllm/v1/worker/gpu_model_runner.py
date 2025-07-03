@@ -585,6 +585,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         """
         if not self.cache_config.kv_sharing_skip_prefill:
             return None
+
+        num_decode_reqs = 0
+        for req_index in range(self.input_batch.num_reqs):
+            if self.input_batch.num_computed_tokens_cpu[
+                    req_index] >= self.input_batch.num_prompt_tokens[
+                        req_index]:
+                num_decode_reqs += 1
+
+        if self.input_batch.num_reqs == num_decode_reqs:
+            # All requests are on decode, skip calculate decode only indices
+            return None
+
         num_decodes = logits_indices.shape[0]
         # TODO(sarckk): With chunked prefills, logits_indices contains
         # indices for partial requests though we do not sample any token

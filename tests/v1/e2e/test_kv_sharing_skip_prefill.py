@@ -278,7 +278,7 @@ def test_kv_sharing_skip_prefill(
     test_prompts: list[list[dict[str, Any]]],
 ):
     ModelRegistry.register_model("Qwen2ForCausalLM", TestQwen2ForCausalLM)
-    sampling_params = SamplingParams(temperature=0.0, max_tokens=42)
+    sampling_params = SamplingParams(temperature=0.0, max_tokens=100)
     prompts = [prompt[0]['content'] for prompt in test_prompts]
     compilation_config = CompilationConfig(
         level=CompilationLevel.PIECEWISE
