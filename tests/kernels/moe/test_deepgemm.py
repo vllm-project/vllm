@@ -128,7 +128,7 @@ def run_single_case(m, n, k, topk, num_experts, block_size):
         allow_deep_gemm=True,
     )
     diff = calc_diff(out_deepgemm, out_triton)
-    assert diff < 0.01, f"Diff exceeded 1%: {diff}"
+    assert diff < 0.001, f"Diff exceeded 1%: {diff}"
 
 
 # Note: W1 has shape (E, 2N, K), so N = 512

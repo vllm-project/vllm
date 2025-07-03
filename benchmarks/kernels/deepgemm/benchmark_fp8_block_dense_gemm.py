@@ -3,7 +3,6 @@
 import time
 
 import torch
-from deep_gemm import fp8_gemm_nt
 from deep_gemm.testing.numeric import calc_diff
 from deep_gemm.utils.math import ceil_div, per_block_cast_to_fp8, per_token_cast_to_fp8
 
@@ -14,6 +13,7 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     w8a8_block_fp8_matmul,
 )
 from vllm.triton_utils import triton
+from vllm.utils.deep_gemm import fp8_gemm_nt
 
 
 # Copied from

@@ -13,6 +13,7 @@ from vllm.config import VllmConfig
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8, w8a8_block_fp8_matmul)
 from vllm.platforms import current_platform
+from vllm.utils.deep_gemm import fp8_gemm_nt
 
 dg_available = False
 try:
@@ -133,7 +134,7 @@ def test_w8a8_block_fp8_deep_gemm_matmul(M, N, K, block_size, out_dtype, seed):
     assert As_fp8.shape == (M, (K + 127) //
                             128), f"{As_fp8.shape} != {(M, (K + 127) // 128)}"
 
-    deep_gemm.fp8_gemm_nt((A_fp8, As_fp8), (B_fp8, Bs_fp8), out)
+    fp8_gemm_nt((A_fp8, As_fp8), (B_fp8, Bs_fp8), out)
 
     rel_diff = (torch.mean(
         torch.abs(out.to(torch.float32) - ref_out.to(torch.float32))) /
