@@ -976,14 +976,16 @@ def grouped_topk(hidden_states: torch.Tensor,
                  scoring_func: str = "softmax",
                  e_score_correction_bias: Optional[torch.Tensor] = None):
 
+    gating_output = gating_output.float()
+    if e_score_correction_bias is not None:
+        e_score_correction_bias = e_score_correction_bias.float()
+
     if scoring_func == "softmax":
         scores = torch.softmax(gating_output, dim=-1)
     elif scoring_func == "sigmoid":
         scores = gating_output.sigmoid()
     else:
         raise ValueError(f"Unsupported scoring function: {scoring_func}")
-    if current_platform.is_hpu():
-        htorch.core.mark_step()
 
     num_token = scores.shape[0]
     if e_score_correction_bias is not None:
@@ -991,20 +993,32 @@ def grouped_topk(hidden_states: torch.Tensor,
         # scores for expert selection but original scores for routing weights
         original_scores = scores
         scores = scores + e_score_correction_bias.unsqueeze(0)
-        group_scores = (scores.view(num_token, num_expert_group,
-                                    -1).topk(2, dim=-1)[0].sum(dim=-1))
+        
+        scores_tmp = scores.clone().reshape(num_token, num_expert_group, -1)
+        top1_val, top1_idx = torch.max(scores_tmp, dim=-1)
+        scores_tmp.scatter_(-1, top1_idx.unsqueeze(-1), torch.finfo(scores.dtype).min)
+        group_scores, top2_idx = torch.max(scores_tmp, dim=-1)
+        group_scores.add_(top1_val)
     else:
         group_scores = scores.view(num_token, num_expert_group,
                                    -1).max(dim=-1).values  # [n, n_group]
-    group_idx = torch.topk(group_scores, k=topk_group, dim=-1,
-                           sorted=False)[1]  # [n, top_k_group]
-    group_mask = torch.zeros_like(group_scores)  # [n, n_group]
-    group_mask.scatter_(1, group_idx, 1)  # [n, n_group]
-    score_mask = group_mask.unsqueeze(-1).expand(
-        num_token, num_expert_group,
-        scores.shape[-1] // num_expert_group).reshape(num_token, -1)  # [n, e]
-    tmp_scores = scores.masked_fill(~score_mask.bool(),
-                                    float("-inf"))  # [n, e]
+
+    if num_token > 1024:
+        group_mask = torch.zeros_like(group_scores)
+        for i in range(topk_group):
+            _, group_idx = torch.max(group_scores, dim=-1)
+            group_mask.scatter_(1, group_idx.unsqueeze(-1), 1)
+            if i < topk_group - 1:
+                group_scores.scatter_(1, group_idx.unsqueeze(-1), torch.finfo(scores.dtype).min)
+    else:
+        group_idx = torch.topk(group_scores, k=topk_group, dim=-1,
+                               sorted=False)[1]  # [n, top_k_group]
+        group_mask = torch.zeros_like(group_scores)  # [n, n_group]
+        group_mask.scatter_(1, group_idx, 1)  # [n, n_group]
+
+    tmp_scores = scores.reshape(num_token, num_expert_group, -1) + \
+                     ((1 - group_mask) * torch.finfo(scores.dtype).min).unsqueeze(-1)
+    tmp_scores = tmp_scores.reshape(num_token, -1)
 
     if e_score_correction_bias is not None:
         topk_ids = torch.topk(tmp_scores, k=topk, dim=-1, sorted=False)[1]
