@@ -201,6 +201,7 @@ an [EAGLE (Extrapolation Algorithm for Greater Language-model Efficiency)](https
         speculative_config={
             "model": "yuhuili/EAGLE-LLaMA3-Instruct-8B",
             "draft_tensor_parallel_size": 1,
+            "num_speculative_tokens": 2,
         },
     )
 
