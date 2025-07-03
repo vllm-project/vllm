@@ -43,6 +43,7 @@ class CommonAttentionMetadata:
     max_query_len: int
     """Longest query in batch"""
 
+
 M = TypeVar("M")
 
 
