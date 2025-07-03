@@ -105,7 +105,7 @@ class BlockTable:
                                                      device=device,
                                                      extra_hash=extra_hash)
         self.update(blocks)
-        self._num_full_slots = len(token_ids)
+        self._num_full_slots += len(token_ids)
 
     def update(self, blocks: List[Block]) -> None:
         """Resets the table to the newly provided blocks 
