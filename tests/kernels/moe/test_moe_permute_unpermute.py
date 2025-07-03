@@ -222,6 +222,7 @@ def test_moe_permute_unpermute(n_token: int, n_hidden: int, topk: int,
                               a1q_scale=None,
                               topk_ids=topk_ids,
                               n_expert=n_expert,
+                              n_local_expert=n_local_expert,
                               expert_map=expert_map,
                               align_block_size=align_block_size,
                               fill_invalid_expert=fill_invalid_expert)
@@ -232,7 +233,7 @@ def test_moe_permute_unpermute(n_token: int, n_hidden: int, topk: int,
                                atol=0,
                                rtol=0)
     # check src_row_id2dst_row_id_map
-    torch.testing.assert_close(gold_inv_permuted_idx,
+    torch.testing.assert_close(gold_inv_permuted_idx.flatten(),
                                inv_permuted_idx,
                                atol=0,
                                rtol=0)

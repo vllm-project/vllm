@@ -132,9 +132,10 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
         assert w2.size(1) == K
         fill_invalid_expert = 0
+        local_num_experts = w1.size(0)
         a1q, a1q_scale, _, inv_perm, expert_ids = moe_permute(
-            a1q, a1q_scale, topk_ids, global_num_experts, expert_map,
-            self.block_shape[0], fill_invalid_expert)
+            a1q, a1q_scale, topk_ids, global_num_experts, local_num_experts,
+            expert_map, self.block_shape[0], fill_invalid_expert)
 
         if expert_map is not None:
             # DeepGemm (Grouped Contiguous) kernel needs a valid B index

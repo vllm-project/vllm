@@ -79,6 +79,7 @@ def moe_permute(
     a1q_scale: Optional[torch.Tensor],
     topk_ids: torch.Tensor,
     n_expert: int,
+    n_local_expert: int = -1,
     expert_map: Optional[torch.Tensor] = None,
     align_block_size: Optional[int] = None,
     fill_invalid_expert: int = -1
@@ -92,6 +93,7 @@ def moe_permute(
     - a1q_scale (Optional[torch.Tensor]): quant scale for hidden_states
     - topk_ids (torch.Tensor): topk expert route id for each token.
     - n_expert (int): The number of expert.
+    - n_local_expert (int): The number of expert in current EP rank.
     - expert_map (Optional[torch.Tensor]):  A tensor mapping expert indices
         from the global expert space to the local expert space of the expert 
         parallel shard.
@@ -118,10 +120,8 @@ def moe_permute(
         permuted_row_size = (permuted_row_size + n_expert *
                              (align_block_size - 1) + align_block_size -
                              1) // align_block_size * align_block_size
-    n_local_expert = n_expert
-    if expert_map is not None:
-        n_local_expert = torch.sum(expert_map != -1).item()
-
+    if n_local_expert == -1:
+        n_local_expert = n_expert
     permuted_hidden_states = torch.empty(
         (permuted_row_size, n_hidden),
         dtype=hidden_states.dtype,
@@ -147,6 +147,7 @@ def moe_permute(
     inv_permuted_idx = torch.empty((n_token, topk),
                                    dtype=torch.int32,
                                    device=hidden_states.device)
+    topk_ids = topk_ids.to(torch.int32)
     torch.ops._moe_C.moe_permute(hidden_states, topk_ids, token_expert_indices,
                                  expert_map, n_expert, n_local_expert, topk,
                                  align_block_size, permuted_hidden_states,
