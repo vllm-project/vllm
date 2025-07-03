@@ -1028,7 +1028,6 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
                     if (hasattr(param, 'data') and param.data.numel() > 1 and
                         weight.numel() == 1):
                         # This needs broadcasting - handle it directly
-                        # print(f"Broadcasting single scale value {weight.item()} to shape {param.data.shape} for {name}")
                         param.data.fill_(weight.item())
                         updated_params.add(name)
                         continue
@@ -1071,55 +1070,5 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
 
                 weight_loader(param, loaded_weight)
                 updated_params.add(name)
-
-        # Print final verification of loaded scale parameters
-        print(f"\n=== SCALE PARAMETER LOADING VERIFICATION ===")
-
-        # Show parameters that were loaded from checkpoint
-        loaded_scale_params = {}
-        for param_name, param in params_dict.items():
-            if "scale" in param_name and param_name in updated_params:
-                if hasattr(param, 'data'):
-                    param_value = param.data
-                    if param_value.numel() == 1:
-                        loaded_scale_params[param_name] = float(param_value.item())
-                    else:
-                        loaded_scale_params[param_name] = f"tensor{list(param_value.shape)} (first few values: {param_value.flatten()[:5].tolist()})"
-                else:
-                    loaded_scale_params[param_name] = "No .data attribute"
-
-        if loaded_scale_params:
-            print(f"Scale parameters loaded from checkpoint ({len(loaded_scale_params)}):")
-            for param_name, value in sorted(loaded_scale_params.items()):
-                print(f"  {param_name}: {value}")
-
-        # Show parameters that weren't loaded but exist in model (including defaults)
-        not_loaded_scale_params = {}
-        for param_name, param in params_dict.items():
-            if "scale" in param_name and param_name not in updated_params:
-                if hasattr(param, 'data'):
-                    param_value = param.data
-                    if param_value.numel() == 1:
-                        not_loaded_scale_params[param_name] = float(param_value.item())
-                    else:
-                        not_loaded_scale_params[param_name] = f"tensor{list(param_value.shape)} (first few values: {param_value.flatten()[:5].tolist()})"
-                else:
-                    not_loaded_scale_params[param_name] = "No .data attribute"
-
-        if not_loaded_scale_params:
-            print(f"\nScale parameters using default values ({len(not_loaded_scale_params)}):")
-            for param_name, value in sorted(not_loaded_scale_params.items()):
-                # Highlight q_scale and prob_scale specifically
-                if ".attn.q_scale" in param_name or ".attn.prob_scale" in param_name:
-                    print(f"  {param_name}: {value} ⭐ (expected default)")
-                else:
-                    print(f"  {param_name}: {value}")
-
-        # Summary
-        total_scale_params = len(loaded_scale_params) + len(not_loaded_scale_params)
-        print(f"\nScale parameter summary:")
-        print(f"  Loaded from checkpoint: {len(loaded_scale_params)}")
-        print(f"  Using default values: {len(not_loaded_scale_params)}")
-        print(f"  Total scale parameters: {total_scale_params}")
 
         return updated_params
