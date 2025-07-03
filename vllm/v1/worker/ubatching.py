@@ -5,6 +5,7 @@ from typing import Optional
 import torch
 
 from vllm import forward_context
+from vllm.forward_context import ForwardContext
 from vllm.utils import current_stream
 
 
@@ -18,7 +19,7 @@ class UBatchContext:
             id: int,
             comm_stream: torch.cuda.Stream,
             compute_stream: torch.cuda.Stream,
-            #fwd_ctx: forward_context.ForwardContext,
+            forward_context: ForwardContext,
             cpu_wait_event: threading.Event,
             cpu_signal_event: threading.Event,
             gpu_comm_done_event: torch.cuda.Event,
@@ -27,7 +28,7 @@ class UBatchContext:
         self.id = id
         self.comm_stream = comm_stream
         self.compute_stream = compute_stream
-        self.forward_context = None  #fwd_ctx
+        self.forward_context = forward_context
         self.cpu_wait_event = cpu_wait_event
         self.cpu_signal_event = cpu_signal_event
         self.current_stream = compute_stream
@@ -150,6 +151,7 @@ def yield_and_switch_from_comm_to_compute(schedule="default"):
 def make_ubatch_contexts(
     num_micro_batches: int,
     compute_stream: torch.cuda.Stream,
+    forward_contexts: list[ForwardContext],
     device: Optional[torch.device] = None,
     schedule: str = "default",
 ) -> list[UBatchContext]:
@@ -167,11 +169,14 @@ def make_ubatch_contexts(
     device = device or torch.cuda.current_device()
     comm_stream = torch.cuda.Stream(device)
 
+    assert len(forward_contexts) == 2
+
     ctxs = []
     for i in range(num_micro_batches):
         ctx = UBatchContext(id=i,
                             compute_stream=compute_stream,
                             comm_stream=comm_stream,
+                            forward_context=forward_contexts[i],
                             cpu_wait_event=cpu_events[i],
                             cpu_signal_event=cpu_events[(i + 1) %
                                                         num_micro_batches],
