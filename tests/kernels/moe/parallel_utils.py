@@ -137,8 +137,7 @@ def make_deepep_ht_a2a(pg: ProcessGroup,
                             low_latency_mode=low_latency_mode,
                             num_qps_per_rank=num_qps_per_rank)
     return DeepEPHTPrepareAndFinalize(buffer=buffer,
-                                      world_size=pgi.world_size,
-                                      rank=pgi.rank,
+                                      num_dispatchers=pgi.world_size,
                                       dp_size=dp_size,
                                       rank_expert_offset=pgi.rank *
                                       ht_args.num_local_experts)
@@ -146,7 +145,6 @@ def make_deepep_ht_a2a(pg: ProcessGroup,
 
 def make_deepep_ll_a2a(pg: ProcessGroup,
                        pgi: ProcessGroupInfo,
-                       dp_size: int,
                        deepep_ll_args: DeepEPLLArgs,
                        q_dtype: Optional[torch.dtype] = None,
                        block_shape: Optional[list[int]] = None):
@@ -166,8 +164,7 @@ def make_deepep_ll_a2a(pg: ProcessGroup,
 
     return DeepEPLLPrepareAndFinalize(
         buffer=buffer,
-        world_size=pgi.world_size,
-        dp_size=dp_size,
+        num_dispatchers=pgi.world_size,
         max_tokens_per_rank=deepep_ll_args.max_tokens_per_rank,
         use_fp8_dispatch=deepep_ll_args.use_fp8_dispatch,
     )
@@ -186,5 +183,4 @@ def make_deepep_a2a(pg: ProcessGroup,
                                   block_shape)
 
     assert deepep_ll_args is not None
-    return make_deepep_ll_a2a(pg, pgi, dp_size, deepep_ll_args, q_dtype,
-                              block_shape)
+    return make_deepep_ll_a2a(pg, pgi, deepep_ll_args, q_dtype, block_shape)
