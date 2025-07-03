@@ -145,6 +145,18 @@ class EntrypointMain:
             sys.exit(1)
 
     def run(self):
+
+        if self.mode == "test":
+            print("[INFO] Test mode: keeping container active. "
+                  "Press Ctrl+C to exit.")
+            try:
+                while True:
+                    import time
+                    time.sleep(60)
+            except KeyboardInterrupt:
+                print("Exiting test mode.")
+                sys.exit(0)
+
         model_conf = {}
         if self.config_file and self.config_name:
             model_conf = self._load_env_from_config_file()
@@ -189,16 +201,6 @@ class EntrypointMain:
                 variables=self.config_envs,
                 log_dir="logs",
             ).create_and_run()
-        elif self.mode == "test":
-            print("[INFO] Test mode: keeping container active. "
-                  "Press Ctrl+C to exit.")
-            try:
-                while True:
-                    import time
-                    time.sleep(60)
-            except KeyboardInterrupt:
-                print("Exiting test mode.")
-                sys.exit(0)
         else:
             print(f"[ERROR] Unknown mode '{self.mode}'. Use 'server', "
                   "'benchmark' or 'test'.")
