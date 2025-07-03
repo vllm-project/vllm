@@ -10,11 +10,9 @@ import os
 import tempfile
 import threading
 import time
-
-from typing import TYPE_CHECKING
 from collections.abc import Generator, MutableMapping
 from dataclasses import asdict, dataclass, field, fields
-from typing import Any, ClassVar, Optional, Union
+from typing import TYPE_CHECKING, Any, ClassVar, Optional, Union
 
 import regex as re
 import torch
