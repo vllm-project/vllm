@@ -162,16 +162,9 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
 
     REMOTE_ENGINE_ID = "remote_engine"
 
-    def __init__(self,
-                 *args,
-                 hand_shake_latency: float = 1.8,
-                 remote_agent_time_offset: float = 0.0,
-                 **kwargs):
+    def __init__(self, *args, hand_shake_latency: float = 1.8, **kwargs):
         super().__init__(*args, **kwargs)
         self._hand_shake_latency = hand_shake_latency
-        self._remote_agent_time_offsets = {
-            self.REMOTE_ENGINE_ID: remote_agent_time_offset
-        }
 
     def _nixl_handshake(self, host: str, port: int,
                         remote_tp_size: int) -> dict[int, str]:
@@ -381,125 +374,6 @@ class TestNixlHandshake:
                 if cnt_finished_reqs == total_reqs:
                     return
         raise TimeoutError("Took too long to complete async handshake.")
-
-    @patch(
-        "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",
-        FakeNixlWrapper)
-    def test_ttl_expiration_on_decoder(self, dist_init):
-        """
-        Test that decoder-side TTL expiration works correctly.
-        
-        This test verifies that:
-        1. Requests with expired TTL are not processed for KV transfer (no _read_blocks called)
-        2. Expired requests are automatically marked as finished
-        3. Clock synchronization offset is properly handled (remote is N seconds ahead)
-        """ #noqa: E501
-        # Remote is 100 seconds ahead.
-        remote_agent_time_offset = 100.0
-        vllm_config = create_vllm_config()
-
-        # Test worker role in decode server
-        connector = NixlConnector(vllm_config, KVConnectorRole.WORKER)
-
-        class TTLTestNixlConnectorWorker(FakeNixlConnectorWorker):
-
-            def __init__(self, *args, **kwargs):
-                super().__init__(*args, **kwargs)
-                self._read_blocks_called = set()
-
-            def _read_blocks(self, local_block_ids, remote_block_ids,
-                             dst_engine_id, request_id):
-                # Override to track if _read_blocks was called but don't
-                # actually read blocks
-                self._read_blocks_called.add(request_id)
-
-        connector.connector_worker = TTLTestNixlConnectorWorker(
-            vllm_config,
-            connector.engine_id,
-            remote_agent_time_offset=remote_agent_time_offset)
-
-        # Ensure the remote agent is already registered (skip handshake)
-        connector.connector_worker._remote_agents[
-            FakeNixlConnectorWorker.REMOTE_ENGINE_ID] = {
-                0: "test_agent"
-            }
-
-        current_time = time.perf_counter()
-
-        # Test Case 1: Request with expired TTL
-        expired_request_id = "expired_req"
-        expired_ttl = current_time  # TTL expired (remote is ahead)
-
-        metadata_expired = NixlConnectorMetadata()
-        metadata_expired.add_new_req(
-            request_id=expired_request_id,
-            local_block_ids=[1, 2, 3],
-            kv_transfer_params={
-                "remote_block_ids": [4, 5, 6],
-                "remote_engine_id": FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
-                "remote_host": "localhost",
-                "remote_port": 1234,
-                "tp_size": 1,
-                "request_ttl": expired_ttl,
-            })
-
-        # Test Case 2: Request with valid TTL
-        valid_request_id = "valid_req"
-        # 200 seconds from now
-        valid_ttl = current_time + remote_agent_time_offset + 200
-
-        metadata_valid = NixlConnectorMetadata()
-        metadata_valid.add_new_req(
-            request_id=valid_request_id,
-            local_block_ids=[7, 8, 9],
-            kv_transfer_params={
-                "remote_block_ids": [10, 11, 12],
-                "remote_engine_id": FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
-                "remote_host": "localhost",
-                "remote_port": 1234,
-                "tp_size": 1,
-                "request_ttl": valid_ttl,
-            })
-
-        # Process expired request
-        connector.bind_connector_metadata(metadata_expired)
-        connector.start_load_kv(
-            ForwardContext(
-                no_compile_layers={},
-                attn_metadata={},
-                virtual_engine=0,
-            ))
-
-        # Check that expired request was added to _reqs_expired_ttl
-        assert expired_request_id in \
-            connector.connector_worker._reqs_expired_ttl
-
-        # Check that _read_blocks was NOT called for expired request
-        assert expired_request_id not in \
-            connector.connector_worker._read_blocks_called
-
-        # Check that expired request is marked as finished
-        _, done_recving = connector.get_finished(finished_req_ids=set())
-        assert expired_request_id in done_recving
-        assert expired_request_id not in \
-            connector.connector_worker._reqs_expired_ttl  # Should be removed
-
-        # Process valid request
-        connector.bind_connector_metadata(metadata_valid)
-        connector.start_load_kv(
-            ForwardContext(
-                no_compile_layers={},
-                attn_metadata={},
-                virtual_engine=0,
-            ))
-
-        # Check that valid request was NOT added to _reqs_expired_ttl
-        assert valid_request_id not in \
-            connector.connector_worker._reqs_expired_ttl
-
-        # Check that _read_blocks WAS called for valid request
-        assert valid_request_id in \
-            connector.connector_worker._read_blocks_called
 
 
 def test_abort_timeout_on_prefiller(monkeypatch):
