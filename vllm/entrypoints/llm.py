@@ -1245,8 +1245,6 @@ class LLM:
 
                 parsed_prompts.append(engine_prompt)
 
-                print(parsed_prompts)
-
         else:
 
             for q, t in input_pairs:
