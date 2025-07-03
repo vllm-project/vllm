@@ -9,6 +9,8 @@ from __future__ import annotations
 import importlib
 from typing import Any, Callable, NoReturn
 
+import torch
+
 from vllm.utils import has_deep_gemm
 
 
@@ -105,7 +107,15 @@ def per_block_cast_to_fp8(x, *args, **kwargs):
     return _pbcf(x, *args, **kwargs)
 
 
+def calc_diff(x: torch.Tensor, y: torch.Tensor):
+    x, y = x.double(), y.double()
+    denominator = (x * x + y * y).sum()
+    sim = 2 * (x * y).sum() / denominator
+    return 1 - sim
+
+
 __all__ = [
+    "calc_diff",
     "fp8_gemm_nt",
     "m_grouped_fp8_gemm_nt_contiguous",
     "fp8_m_grouped_gemm_nt_masked",

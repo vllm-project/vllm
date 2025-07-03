@@ -14,13 +14,10 @@ import vllm.model_executor.layers.fused_moe.utils as _moe_utils
 # vLLM fused-expert reference (Triton fallback + DeepGEMM option)
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
 from vllm.utils import has_deep_gemm
-from vllm.utils.deep_gemm import per_token_cast_to_fp8
+from vllm.utils.deep_gemm import (calc_diff, per_block_cast_to_fp8,
+                                  per_token_cast_to_fp8)
 
-if has_deep_gemm():
-    import deep_gemm
-    from deep_gemm.testing.numeric import calc_diff
-    BLOCK_M = deep_gemm.get_m_alignment_for_contiguous_layout()
-    BLOCK_SIZE = [BLOCK_M, BLOCK_M]
+BLOCK_SIZE = [128, 128]
 
 requires_deep_gemm = pytest.mark.skipif(
     not has_deep_gemm(),
@@ -71,8 +68,8 @@ def make_block_quant_fp8_weights(
                        dtype=torch.float32)
 
     for i in range(e):
-        w1[i], w1_s[i] = deep_gemm.utils.math.per_block_cast_to_fp8(w1_bf16[i])
-        w2[i], w2_s[i] = deep_gemm.utils.math.per_block_cast_to_fp8(w2_bf16[i])
+        w1[i], w1_s[i] = per_block_cast_to_fp8(w1_bf16[i])
+        w2[i], w2_s[i] = per_block_cast_to_fp8(w2_bf16[i])
 
     return w1, w2, w1_s, w2_s
 

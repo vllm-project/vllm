@@ -112,10 +112,6 @@ def should_use_deepgemm(output_dtype: torch.dtype, weight: torch.Tensor):
             and weight.shape[0] % 128 == 0 and weight.shape[1] % 128 == 0)
 
 
-def ceil_div(x: int, y: int) -> int:
-    return (x + y - 1) // y
-
-
 # TODO fix ROCm->Triton custom path:
 #  https://github.com/vllm-project/vllm/issues/14397
 def apply_w8a8_block_fp8_linear(
@@ -675,7 +671,7 @@ def get_tma_aligned_size(x: int, element_size: int) -> int:
     tma_alignment_bytes = 16
     assert tma_alignment_bytes % element_size == 0
     alignment = tma_alignment_bytes // element_size
-    return ceil_div(x, alignment) * alignment
+    return cdiv(x, alignment) * alignment
 
 
 # Taken from https://github.com/deepseek-ai/DeepGEMM/blob/0c88cd01392c1073c7049a97d6328c7bba9b3947
