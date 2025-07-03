@@ -16,12 +16,11 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     Prepare/Finalize using DeepEP High-Throughput kernels.
     """
 
-    def __init__(self, buffer: deep_ep.Buffer, world_size: int, rank: int,
+    def __init__(self, buffer: deep_ep.Buffer, num_dispatchers: int,
                  dp_size: int, rank_expert_offset: int):
         super().__init__()
         self.buffer = buffer
-        self.world_size = world_size
-        self.rank = rank
+        self.num_dispatchers_ = num_dispatchers
         self.dp_size = dp_size
         self.rank_expert_offset = rank_expert_offset
         # The dispatch function returns a handle that the combine function
@@ -31,6 +30,9 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         # From https://github.com/deepseek-ai/DeepEP/blob/9fe9021f29c9083cd1808ab36b740208524d9f63/deep_ep/buffer.py#L164
         self.available_rank_configs = [2, 4, 8, 16, 24, 32, 64, 128, 144, 160]
+
+    def num_dispatchers(self) -> int:
+        return self.num_dispatchers_
 
     @property
     def activation_format(self) -> mk.FusedMoEActivationFormat:
@@ -136,20 +138,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 "apply_router_weight_on_input is only implemented for topk=1")
             a1 = a1 * topk_weights.to(a1.dtype)
 
-        # Check if there is a block_shape / or if we can infer the quantization
-        # schemes from the scales.
-        per_token_quant = None
-        if all([
-                x is None
-                for x in [quant_config.block_shape, a1_scale, a2_scale]
-        ]) and quant_config.quant_dtype is not None:
-            # Quantization required despite none of the inputs suggesting
-            # quantization. Fallback to per_token_dynamic quant.
-            per_token_quant = True
-        else:
-            per_token_quant = False
-
-        if per_token_quant:
+        if quant_config.per_act_token_quant:
             a1q, a1q_scale = moe_kernel_quantize_input(
                 a1,
                 a1_scale,

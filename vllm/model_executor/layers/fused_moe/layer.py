@@ -14,7 +14,6 @@ import vllm.envs as envs
 from vllm.config import get_current_vllm_config
 from vllm.distributed import (get_dp_group, get_ep_group,
                               get_tensor_model_parallel_world_size,
-                              get_world_group,
                               tensor_model_parallel_all_reduce)
 from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.forward_context import ForwardContext, get_forward_context
@@ -114,6 +113,9 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                 hidden_dim_scale_bytes=hidden_scale_bytes,
             )
 
+            num_dispatchers = (all2all_manager.world_size //
+                               all2all_manager.tp_group.world_size)
+
             # Intranode pplx a2a takes a group name while internode does not.
             if not all2all_manager.internode:
                 all_to_all_args[
@@ -124,10 +126,8 @@ class FusedMoEMethodBase(QuantizeMethodBase):
             prepare_finalize = PplxPrepareAndFinalize(
                 handle,
                 max_num_tokens=moe.max_num_tokens,
-                world_size=all2all_manager.world_size,
-                rank=all2all_manager.rank,
-                # dp_size actually means tp_size, bug in pplx kernels
-                dp_size=all2all_manager.tp_group.world_size,
+                num_local_experts=moe.num_local_experts,
+                num_dispatchers=num_dispatchers,
             )
         elif moe.use_deepep_ht_kernels:
             assert moe.dp_size == all2all_manager.dp_world_size
@@ -136,16 +136,13 @@ class FusedMoEMethodBase(QuantizeMethodBase):
             handle = all2all_manager.get_handle(all_to_all_args)
             prepare_finalize = DeepEPHTPrepareAndFinalize(
                 handle,
-                world_size=all2all_manager.world_size,
-                rank=all2all_manager.rank,
+                num_dispatchers=all2all_manager.world_size,
                 dp_size=all2all_manager.dp_world_size,
                 rank_expert_offset=all2all_manager.rank *
                 moe.num_local_experts,
             )
 
         elif moe.use_deepep_ll_kernels:
-            assert moe.dp_size == all2all_manager.dp_world_size
-
             all_to_all_args = dict(
                 max_num_tokens_per_dp_rank=moe.max_num_tokens,
                 token_hidden_size=moe.hidden_dim,
@@ -168,8 +165,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
             prepare_finalize = DeepEPLLPrepareAndFinalize(
                 handle,
                 max_tokens_per_rank=moe.max_num_tokens,
-                world_size=all2all_manager.world_size,
-                dp_size=all2all_manager.dp_world_size,
+                num_dispatchers=all2all_manager.world_size,
                 use_fp8_dispatch=use_fp8_dispatch,
             )
 
@@ -245,18 +241,12 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
         assert self.fused_experts == fused_experts
 
-        all2all_manager = get_ep_group().device_communicator.all2all_manager
-        assert all2all_manager is not None
-
         if (prepare_finalize.activation_format ==
                 FusedMoEActivationFormat.BatchedExperts):
             logger.debug("BatchedTritonExperts %s", self.moe)
-            assert self.moe.dp_size == all2all_manager.dp_world_size
             return BatchedTritonExperts(
                 max_num_tokens=self.moe.max_num_tokens,
-                world_size=all2all_manager.world_size,
-                # dp_size actually means tp_size, bug in pplx kernels
-                dp_size=all2all_manager.tp_group.world_size,
+                num_dispatchers=prepare_finalize.num_dispatchers(),
             )
         else:
             logger.debug("TritonExperts %s", self.moe)
@@ -652,14 +642,12 @@ class FusedMoE(torch.nn.Module):
                     get_tensor_model_parallel_world_size())
         dp_size_ = (dp_size
                     if dp_size is not None else get_dp_group().world_size)
-        world_size_ = get_world_group().world_size
 
         vllm_config = get_current_vllm_config()
         self.moe_parallel_config: FusedMoEParallelConfig = (
             FusedMoEParallelConfig.make(
                 tp_size_=tp_size_,
                 dp_size_=dp_size_,
-                world_size_=world_size_,
                 vllm_parallel_config=vllm_config.parallel_config))
 
         self.global_num_experts = num_experts + num_redundant_experts
@@ -1186,9 +1174,9 @@ class FusedMoE(torch.nn.Module):
         logical_replica_count: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
-        Route the input hidden states to the top-k experts based on the 
+        Route the input hidden states to the top-k experts based on the
         router logits.
-        
+
         Returns:
             (topk_weights, topk_ids) (tuple[torch.Tensor, torch.Tensor]):
             The weights and *global physical* expert ids of the top-k experts.
@@ -1298,6 +1286,8 @@ class FusedMoE(torch.nn.Module):
                                           src=src.to(expert_load_view))
 
             topk_ids = topk_ids.to(dtype=indices_type)
+
+        assert topk_ids.dtype == indices_type or indices_type is None
 
         return topk_weights, topk_ids
 
