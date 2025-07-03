@@ -164,8 +164,6 @@ _EMBEDDING_MODELS = {
     "LlavaNextForConditionalGeneration": ("llava_next", "LlavaNextForConditionalGeneration"),  # noqa: E501
     "Phi3VForCausalLM": ("phi3v", "Phi3VForCausalLM"),
     "Qwen2VLForConditionalGeneration": ("qwen2_vl", "Qwen2VLForConditionalGeneration"),  # noqa: E501
-    # [Auto-converted (see adapters.py)]
-    "Qwen2ForSequenceClassification": ("qwen2", "Qwen2ForCausalLM"),
     # Technically PrithviGeoSpatialMAE is a model that works on images, both in
     # input and output. I am adding it here because it piggy-backs on embedding
     # models for the time being.
@@ -180,7 +178,9 @@ _CROSS_ENCODER_MODELS = {
                                             "RobertaForSequenceClassification"),
     "ModernBertForSequenceClassification": ("modernbert",
                                             "ModernBertForSequenceClassification"),
-    "Qwen3ForSequenceClassification": ("qwen3", "Qwen3ForSequenceClassification"), # noqa: E501
+    # [Auto-converted (see adapters.py)]
+    "Qwen2ForSequenceClassification": ("qwen2", "Qwen2ForSequenceClassification"), # noqa: E501
+    "Qwen3ForSequenceClassification": ("qwen3", "Qwen3ForSequenceClassification"),  # noqa: E501
 }
 
 _MULTIMODAL_MODELS = {
