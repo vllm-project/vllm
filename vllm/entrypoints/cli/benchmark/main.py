@@ -44,6 +44,7 @@ class BenchmarkSubcommand(CLISubcommand):
                 cmd_cls.name,
                 help=cmd_cls.help,
                 description=cmd_cls.help,
+                usage=f"vllm bench {cmd_cls.name} [options]",
             )
             cmd_subparser.set_defaults(dispatch_function=cmd_cls.cmd)
             cmd_cls.add_cli_args(cmd_subparser)
