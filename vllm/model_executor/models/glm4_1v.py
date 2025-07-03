@@ -1278,7 +1278,7 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.visual = Glm4vVisionTransformer(
             config.vision_config,
             norm_eps=getattr(config, "rms_norm_eps", 1e-5),
-            quant_config=self._maybe_ignore_quant_config(quant_config),
+            quant_config=quant_config,
             prefix=maybe_prefix(prefix, "visual"),
         )
 
@@ -1290,13 +1290,6 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
-
-    def _maybe_ignore_quant_config(self, quant_config: QuantizationConfig):
-        # GPTQ configs do not have a list of ignored modules, however AutoGPTQ
-        # seems to avoid vision encoder sections for some models.
-        if isinstance(quant_config, (GPTQConfig, GPTQMarlinConfig)):
-            return None
-        return quant_config
 
     def _validate_and_reshape_mm_tensor(self, mm_input: object,
                                         name: str) -> torch.Tensor:
