@@ -10,6 +10,8 @@ from transformers import PretrainedConfig
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               RowParallelLinear)
 from vllm.model_executor.layers.pooler import Pooler, PoolingType
 from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -34,13 +36,17 @@ class JinaVLScorer(nn.Module):
 
     def __init__(self, config: PretrainedConfig):
         super().__init__()
-        self.dense = nn.Linear(config.hidden_size, config.hidden_size)
-        self.out_proj = nn.Linear(config.hidden_size, config.num_labels)
+        self.dense = ColumnParallelLinear(config.hidden_size,
+                                          config.hidden_size,
+                                          bias=True)
+        self.out_proj = RowParallelLinear(config.hidden_size,
+                                          config.num_labels,
+                                          bias=True)
 
     def forward(self, x, **kwargs):
-        x = self.dense(x)
+        x, _ = self.dense(x)
         x = torch.relu(x)
-        x = self.out_proj(x)
+        x, _ = self.out_proj(x)
         return x
 
     def load_weights(self, weights: Iterable[tuple[str,
@@ -78,10 +84,8 @@ class JinaVLForSequenceClassification(nn.Module, SupportsCrossEncoding,
     def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
         if modality.startswith("image"):
             return "<|vision_start|><|image_pad|><|vision_end|>"
-        if modality.startswith("video"):
-            return "<|vision_start|><|video_pad|><|vision_end|>"
 
-        raise ValueError("Only image or video modality is supported")
+        raise ValueError("Only image modality is supported")
 
     def forward(
         self,
