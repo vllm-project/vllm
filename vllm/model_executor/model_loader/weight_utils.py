@@ -771,7 +771,7 @@ def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> Optional[str]:
                     f".self_attn.attn{scale_name}")
             elif any(qkv_scale_name in name
                      for qkv_scale_name in qkv_proj_scale_names):
-                # Handle qkv_proj scale parameters: .self_attn.qkv_proj.k_scale -> .self_attn.attn.k_scale
+                # Handle qkv_proj scale parameters
                 remapped_name = name.replace(
                     f".self_attn.qkv_proj{scale_name}",
                     f".self_attn.attn{scale_name}")

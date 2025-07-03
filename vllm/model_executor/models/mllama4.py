@@ -926,25 +926,13 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
             language_model_weights = []
             other_weights = []
 
-            # Track scale parameters for debugging
-            checkpoint_scales = []
-            renamed_scales = []
-            scale_mapping = {}
-
             for name, weight in weights:
-                # Track scale parameters from checkpoint
-                if "scale" in name:
-                    checkpoint_scales.append(name)
 
-                # Apply renaming logic
+                # Apply renaming logic for ModelOpt llama4 fp8 checkpoints
                 if name.startswith("model."):
                     # Handle expert scale parameters with flat naming
                     if "feed_forward.experts." in name and (
                             "_input_scale" in name or "_weight_scale" in name):
-                        # Expert scales in checkpoint are single values for all
-                        # experts e.g., "model.layers.0.feed_forward.experts.
-                        # down_proj_input_scale" should map to "language_model.
-                        # model.layers.0.feed_forward.experts.w2_input_scale"
 
                         renamed = name.replace("model.",
                                                "language_model.model.", 1)
@@ -967,41 +955,22 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
                     # Handle attention scale parameters
                     elif "self_attn." in name and (
                             ".k_scale" in name or ".v_scale" in name):
-                        # Map attention scale parameters for ModelOpt checkpoints
-                        # e.g., "model.layers.0.self_attn.k_proj.k_scale"
-                        # should map to "language_model.model.layers.0.self_attn.attn.k_scale"
 
                         renamed = name.replace("model.",
                                                "language_model.model.", 1)
 
-                        # Map checkpoint attention scale naming to vLLM's expected naming
                         if ".k_proj.k_scale" in renamed:
                             renamed = renamed.replace(".k_proj.k_scale", ".attn.k_scale")
                         elif ".v_proj.v_scale" in renamed:
                             renamed = renamed.replace(".v_proj.v_scale", ".attn.v_scale")
                     else:
-                        # Standard model.* to language_model.model.* renaming
                         renamed = name.replace("model.",
                                                "language_model.model.", 1)
-
-                    # Track renamed scale parameters and mapping
-                    if "scale" in renamed:
-                        renamed_scales.append(renamed)
-                        if "scale" in name:  # Only add to mapping if original was also a scale
-                            scale_mapping[name] = renamed
                 elif name.startswith("lm_head.weight"):
-                    # Rename lm_head.weight to language_model.lm_head.weight
                     renamed = name.replace("lm_head.weight",
                                            "language_model.lm_head.weight")
                 else:
-                    # Keep other weights as is
                     renamed = name
-
-                # Track renamed scale parameters and mapping
-                if "scale" in renamed:
-                    renamed_scales.append(renamed)
-                    if "scale" in name and name not in scale_mapping:  # Avoid duplicates
-                        scale_mapping[name] = renamed
 
                 # Separate into language_model and other weights
                 if renamed.startswith("language_model."):
@@ -1014,7 +983,6 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         language_model_weights, other_weights = process_and_separate_weights()
 
-        # Handle expert scale parameters separately to avoid FusedMoE weight loader issues
         expert_scale_weights = []
         regular_language_model_weights = []
 
@@ -1032,19 +1000,16 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
                         updated_params.add(name)
                         continue
 
-                # Regular expert scale loading - add to separate list
                 expert_scale_weights.append((name, weight))
             else:
                 regular_language_model_weights.append((name, weight))
 
-        # Load regular language model weights (excluding expert scales that need broadcasting)
         loader = AutoWeightsLoader(self)
         loaded_language_model_params = loader.load_weights(
             regular_language_model_weights)
         assert loaded_language_model_params is not None
         updated_params.update(loaded_language_model_params)
 
-        # Load expert scale weights that didn't need broadcasting through normal mechanism
         if expert_scale_weights:
             loaded_expert_scale_params = loader.load_weights(expert_scale_weights)
             if loaded_expert_scale_params:

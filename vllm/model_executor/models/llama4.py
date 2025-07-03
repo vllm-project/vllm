@@ -433,9 +433,6 @@ class Llama4Model(LlamaModel):
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name or "experts" in name:
                     continue
-                # Don't transform k_scale/v_scale parameter names with
-                # stacked parameter mapping but allow other scale parameters
-                # (input_scale, weight_scale) to be processed
                 if not (name.endswith(
                     (".k_scale", ".v_scale")) and "self_attn" in name):
                     name = name.replace(weight_name, param_name)
@@ -445,15 +442,13 @@ class Llama4Model(LlamaModel):
                     # Remapping the name of FP8 kv-scale.
                     name = maybe_remap_kv_scale_name(name, params_dict)
                     if name is None:
-                        continue  # Skip this parameter if remapping failed
+                        continue
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 if weight_loader == default_weight_loader:
-                    # default_weight_loader doesn't support shard_id
                     weight_loader(param, loaded_weight)
                 else:
-                    # Custom weight loader that supports shard_id
                     weight_loader(param, loaded_weight, shard_id)
                 loaded_params.add(name)
                 break
@@ -490,20 +485,12 @@ class Llama4Model(LlamaModel):
                                 sig = inspect.signature(weight_loader)
                                 if ('expert_id' in sig.parameters and
                                     'shard_id' in sig.parameters):
-                                    # This is a MoE weight loader, provide the
-                                    # required arguments
-                                    # Determine the appropriate shard_id based
-                                    # on parameter name
+                                    # This is a MoE weight loader
                                     if "w13_" in name:
-                                        # w13 corresponds to gate_up_proj, which
-                                        # can be either w1 or w3
                                         shard_id = "w1"
                                     elif "w2_" in name:
-                                        # w2 corresponds to down_proj
                                         shard_id = "w2"
                                     else:
-                                        # Fallback - this shouldn't happen for
-                                        # scale parameters
                                         shard_id = "w1"
 
                                     weight_loader(param,

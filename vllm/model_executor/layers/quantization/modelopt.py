@@ -85,22 +85,34 @@ class ModelOptFp8Config(QuantizationConfig):
                              "quant configuration.")
         is_checkpoint_fp8_serialized = ("FP8" in quant_method)
 
-        # Convert exclude_modules to handle the language_model prefix for llama4
-        converted_exclude_modules = []
-        if exclude_modules:
-            for module in exclude_modules:
-                converted_exclude_modules.append(module)
-                if not module.startswith("language_model."):
-                    converted_exclude_modules.append(
-                        f"language_model.{module}")
-
         return cls(is_checkpoint_fp8_serialized, kv_cache_quant_method,
-                   converted_exclude_modules)
+                   exclude_modules)
+
+    def is_layer_excluded(self, prefix: str) -> bool:
+        """
+        Check if a layer should be excluded from quantization.
+
+        This method handles both regular models and multimodal models that use
+        the language_model prefix. For multimodal models, it checks if the
+        module name (without the language_model prefix) is in the exclude list.
+        """
+        if self.exclude_modules is None:
+            return False
+
+        # Check if any excluded module matches the prefix
+        for module in self.exclude_modules:
+            if (module in prefix or
+                (prefix.startswith("language_model.") and
+                 module in prefix.removeprefix("language_model."))):
+                return True
+        return False
 
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["QuantizeMethodBase"]:
         from vllm.attention.layer import Attention  # Avoid circular import
         if isinstance(layer, LinearBase):
+            if self.is_layer_excluded(prefix):
+                return UnquantizedLinearMethod()
             return ModelOptFp8LinearMethod(self)
         elif isinstance(layer, Attention):
             return ModelOptFp8KVCacheMethod(self)
@@ -275,7 +287,7 @@ class ModelOptFp8MoEMethod:
             w13_weight_scale = PerTensorScaleParameter(
                 data=torch.full(
                     (num_experts, 2),
-                    1.0,  # Initialize to reasonable default instead of -inf
+                    1.0,
                     dtype=torch.float32,
                 ),
                 weight_loader=weight_loader,
@@ -285,7 +297,7 @@ class ModelOptFp8MoEMethod:
                     (num_experts, ),
                     1.0,
                     dtype=torch.
-                    float32  # Initialize to reasonable default instead of -inf
+                    float32
                 ),
                 weight_loader=weight_loader,
             )
@@ -327,7 +339,7 @@ class ModelOptFp8MoEMethod:
             # Fp8 moe kernel needs single weight scale for w13 per expert.
             # We take the max of the w1 and w3 scales
             # then dequant and requant each expert.
-            if layer.w13_weight_scale.dim() == 2:  # Shape: (num_experts, 2)
+            if layer.w13_weight_scale.dim() == 2:
 
                 # Get the maximum scale across w1 and w3 for each expert
                 max_w13_scales = layer.w13_weight_scale.max(dim=1).values
@@ -431,7 +443,7 @@ class ModelOptFp8MoEMethod:
             inplace=inplace,
             activation=activation,
             use_fp8_w8a8=True,
-            per_channel_quant=False,  # ModelOpt uses per-tensor quantization
+            per_channel_quant=False,
             global_num_experts=global_num_experts,
             expert_map=expert_map,
             w1_scale=layer.w13_weight_scale,
