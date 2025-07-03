@@ -393,6 +393,13 @@ class TarsierForConditionalGeneration(nn.Module, SupportsMultiModal,
         "gate_up_proj": ["gate_proj", "up_proj"]
     }
 
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+        if modality.startswith("image"):
+            return "<image>"
+
+        raise ValueError("Only image modality is supported")
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         config: TarsierHfConfig = vllm_config.model_config.hf_config
