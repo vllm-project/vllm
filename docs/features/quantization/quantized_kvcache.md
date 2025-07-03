@@ -65,7 +65,7 @@ For optimal model quality when using FP8 KV Cache, we recommend using calibrated
 
 First, install the required dependencies:
 
-```console
+```bash
 pip install llmcompressor
 ```
 

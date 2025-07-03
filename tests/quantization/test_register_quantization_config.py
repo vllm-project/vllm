@@ -53,6 +53,7 @@ class CustomQuantConfig(QuantizationConfig):
 
     def __init__(self, num_bits: int = 8) -> None:
         """Initialize the quantization config."""
+        super().__init__()
         self.num_bits = num_bits
 
     def get_name(self) -> QuantizationMethods:

@@ -34,7 +34,7 @@ llm.apply_model(lambda model: print(type(model)))
 If it is `TransformersForCausalLM` then it means it's based on Transformers!
 
 !!! tip
-    You can force the use of `TransformersForCausalLM` by setting `model_impl="transformers"` for [offline-inference][offline-inference] or `--model-impl transformers` for the [openai-compatible-server][openai-compatible-server].
+    You can force the use of `TransformersForCausalLM` by setting `model_impl="transformers"` for [offline-inference][offline-inference] or `--model-impl transformers` for the [openai-compatible-server][serving-openai-compatible-server].
 
 !!! note
     vLLM may not fully optimise the Transformers implementation so you may see degraded performance if comparing a native model to a Transformers model in vLLM.
@@ -53,8 +53,8 @@ For a model to be compatible with the Transformers backend for vLLM it must:
 
 If the compatible model is:
 
-- on the Hugging Face Model Hub, simply set `trust_remote_code=True` for [offline-inference][offline-inference] or `--trust-remote-code` for the [openai-compatible-server][openai-compatible-server].
-- in a local directory, simply pass directory path to `model=<MODEL_DIR>` for [offline-inference][offline-inference] or `vllm serve <MODEL_DIR>` for the [openai-compatible-server][openai-compatible-server].
+- on the Hugging Face Model Hub, simply set `trust_remote_code=True` for [offline-inference][offline-inference] or `--trust-remote-code` for the [openai-compatible-server][serving-openai-compatible-server].
+- in a local directory, simply pass directory path to `model=<MODEL_DIR>` for [offline-inference][offline-inference] or `vllm serve <MODEL_DIR>` for the [openai-compatible-server][serving-openai-compatible-server].
 
 This means that, with the Transformers backend for vLLM, new models can be used before they are officially supported in Transformers or vLLM!
 
@@ -178,7 +178,7 @@ Alternatively, you can [open an issue on GitHub](https://github.com/vllm-project
 
 If you prefer, you can use the Hugging Face CLI to [download a model](https://huggingface.co/docs/huggingface_hub/guides/cli#huggingface-cli-download) or specific files from a model repository:
 
-```console
+```bash
 # Download a model
 huggingface-cli download HuggingFaceH4/zephyr-7b-beta
 
@@ -193,7 +193,7 @@ huggingface-cli download HuggingFaceH4/zephyr-7b-beta eval_results.json
 
 Use the Hugging Face CLI to [manage models](https://huggingface.co/docs/huggingface_hub/guides/manage-cache#scan-your-cache) stored in local cache:
 
-```console
+```bash
 # List cached models
 huggingface-cli scan-cache
 
@@ -329,6 +329,9 @@ Specified using `--task generate`.
 | `DeepseekForCausalLM`                             | DeepSeek                                            | `deepseek-ai/deepseek-llm-67b-base`, `deepseek-ai/deepseek-llm-7b-chat` etc.                                                                                                 |                        | ✅︎                          | ✅︎                     |
 | `DeepseekV2ForCausalLM`                           | DeepSeek-V2                                         | `deepseek-ai/DeepSeek-V2`, `deepseek-ai/DeepSeek-V2-Chat` etc.                                                                                                               |                        | ✅︎                          | ✅︎                     |
 | `DeepseekV3ForCausalLM`                           | DeepSeek-V3                                         | `deepseek-ai/DeepSeek-V3-Base`, `deepseek-ai/DeepSeek-V3` etc.                                                                                                               |                        | ✅︎                          | ✅︎                     |
+| `Dots1ForCausalLM`                                | dots.llm1                                           | `rednote-hilab/dots.llm1.base`, `rednote-hilab/dots.llm1.inst` etc.                                                                                                               |                        | ✅︎                          | ✅︎                     |
+| `Ernie4_5_ForCausalLM`                            | Ernie4.5                                            | `baidu/ERNIE-4.5-0.3B-PT`,etc.                                                                                                               |                        | ✅︎                          | ✅︎                     |
+| `Ernie4_5_MoeForCausalLM`                         | Ernie4.5MoE                                         | `baidu/ERNIE-4.5-21B-A3B-PT`,  `baidu/ERNIE-4.5-300B-A47B-PT`, etc.                                                                                                               |                        | ✅︎                          | ✅︎                     |
 | `ExaoneForCausalLM`                               | EXAONE-3                                            | `LGAI-EXAONE/EXAONE-3.0-7.8B-Instruct`, etc.                                                                                                                                 | ✅︎                     | ✅︎                          | ✅︎                     |
 | `FalconForCausalLM`                               | Falcon                                              | `tiiuae/falcon-7b`, `tiiuae/falcon-40b`, `tiiuae/falcon-rw-7b`, etc.                                                                                                         |                        | ✅︎                          | ✅︎                     |
 | `FalconMambaForCausalLM`                          | FalconMamba                                         | `tiiuae/falcon-mamba-7b`, `tiiuae/falcon-mamba-7b-instruct`, etc.                                                                                                            |                        | ✅︎                          | ✅︎                     |
@@ -336,6 +339,7 @@ Specified using `--task generate`.
 | `GemmaForCausalLM`                                | Gemma                                               | `google/gemma-2b`, `google/gemma-1.1-2b-it`, etc.                                                                                                                            | ✅︎                     | ✅︎                          | ✅︎                     |
 | `Gemma2ForCausalLM`                               | Gemma 2                                             | `google/gemma-2-9b`, `google/gemma-2-27b`, etc.                                                                                                                              | ✅︎                     | ✅︎                          | ✅︎                     |
 | `Gemma3ForCausalLM`                               | Gemma 3                                             | `google/gemma-3-1b-it`, etc.                                                                                                                                                 | ✅︎                     | ✅︎                          | ✅︎                     |
+| `Gemma3nForConditionalGeneration`                  | Gemma 3n                                             | `google/gemma-3n-E2B-it`, `google/gemma-3n-E4B-it`, etc.                                                                                                                                                 |                      |                           | ✅︎                     |
 | `GlmForCausalLM`                                  | GLM-4                                               | `THUDM/glm-4-9b-chat-hf`, etc.                                                                                                                                               | ✅︎                     | ✅︎                          | ✅︎                     |
 | `Glm4ForCausalLM`                                 | GLM-4-0414                                          | `THUDM/GLM-4-32B-0414`, etc.                                                                                                                                                 | ✅︎                     | ✅︎                          | ✅︎                     |
 | `GPT2LMHeadModel`                                 | GPT-2                                               | `gpt2`, `gpt2-xl`, etc.                                                                                                                                                      |                        | ✅︎                          | ✅︎                     |
@@ -348,6 +352,7 @@ Specified using `--task generate`.
 | `GraniteMoeSharedForCausalLM`                     | Granite MoE Shared                                  | `ibm-research/moe-7b-1b-active-shared-experts` (test model)                                                                                                                  | ✅︎                     | ✅︎                          | ✅︎                     |
 | `GritLM`                                          | GritLM                                              | `parasail-ai/GritLM-7B-vllm`.                                                                                                                                                | ✅︎                     | ✅︎                          |                       |
 | `Grok1ModelForCausalLM`                           | Grok1                                               | `hpcai-tech/grok-1`.                                                                                                                                                         | ✅︎                     | ✅︎                          | ✅︎                     |
+| `HunYuanMoEV1ForCausalLM`                         | Hunyuan-80B-A13B                                    | `tencent/Hunyuan-A13B-Instruct`,  `tencent/Hunyuan-A13B-Pretrain`, `tencent/Hunyuan-A13B-Instruct-FP8`etc.                                                                  |                        |                             | ✅︎                     |
 | `InternLMForCausalLM`                             | InternLM                                            | `internlm/internlm-7b`, `internlm/internlm-chat-7b`, etc.                                                                                                                    | ✅︎                     | ✅︎                          | ✅︎                     |
 | `InternLM2ForCausalLM`                            | InternLM2                                           | `internlm/internlm2-7b`, `internlm/internlm2-chat-7b`, etc.                                                                                                                  | ✅︎                     | ✅︎                          | ✅︎                     |
 | `InternLM3ForCausalLM`                            | InternLM3                                           | `internlm/internlm3-8b-instruct`, etc.                                                                                                                                       | ✅︎                     | ✅︎                          | ✅︎                     |
@@ -385,12 +390,15 @@ Specified using `--task generate`.
 | `TeleChat2ForCausalLM`                            | TeleChat2                                           | `Tele-AI/TeleChat2-3B`, `Tele-AI/TeleChat2-7B`, `Tele-AI/TeleChat2-35B`, etc.                                                                                                | ✅︎                     | ✅︎                          | ✅︎                     |
 | `TeleFLMForCausalLM`                              | TeleFLM                                             | `CofeAI/FLM-2-52B-Instruct-2407`, `CofeAI/Tele-FLM`, etc.                                                                                                                    | ✅︎                     | ✅︎                          | ✅︎                     |
 | `XverseForCausalLM`                               | XVERSE                                              | `xverse/XVERSE-7B-Chat`, `xverse/XVERSE-13B-Chat`, `xverse/XVERSE-65B-Chat`, etc.                                                                                            | ✅︎                     | ✅︎                          | ✅︎                     |
-| `MiniMaxM1ForCausalLM`                        | MiniMax-Text                                        | `MiniMaxAI/MiniMax-M1-40k`, `MiniMaxAI/MiniMax-M1-80k`etc.                                                                                                                                  |                        |                             |                       |
+| `MiniMaxM1ForCausalLM`                        | MiniMax-Text                                        | `MiniMaxAI/MiniMax-M1-40k`, `MiniMaxAI/MiniMax-M1-80k`etc.                                                                                                                       |                        |                             |                       |
 | `MiniMaxText01ForCausalLM`                        | MiniMax-Text                                        | `MiniMaxAI/MiniMax-Text-01`, etc.                                                                                                                                            |                        |                             |                       |
 | `Zamba2ForCausalLM`                               | Zamba2                                              | `Zyphra/Zamba2-7B-instruct`, `Zyphra/Zamba2-2.7B-instruct`, `Zyphra/Zamba2-1.2B-instruct`, etc.                                                                              |                        |                             |                       |
 
 !!! note
     Currently, the ROCm version of vLLM supports Mistral and Mixtral only for context lengths up to 4096.
+
+!!! note
+    Only text inputs are currently supported for `Gemma3nForConditionalGeneration`. To use this model, please upgrade Hugging Face Transformers to version 4.53.0.
 
 ### Pooling Models
 
@@ -407,15 +415,15 @@ Specified using `--task embed`.
 | Architecture                                           | Models              | Example HF Models                                                                                                   | [LoRA][lora-adapter] | [PP][distributed-serving] | [V1](gh-issue:8779)   |
 |--------------------------------------------------------|---------------------|---------------------------------------------------------------------------------------------------------------------|----------------------|---------------------------|-----------------------|
 | `BertModel`                                            | BERT-based          | `BAAI/bge-base-en-v1.5`, `Snowflake/snowflake-arctic-embed-xs`, etc.                                                |                      |                           |                       |
-| `Gemma2Model`                                          | Gemma 2-based       | `BAAI/bge-multilingual-gemma2`, etc.                                                                                | ✅︎                   |                           |                       |
+| `Gemma2Model`                                          | Gemma 2-based       | `BAAI/bge-multilingual-gemma2`, etc.                                                                                | ✅︎                   |                           | ✅︎                     |
 | `GritLM`                                               | GritLM              | `parasail-ai/GritLM-7B-vllm`.                                                                                       | ✅︎                   | ✅︎                        |                       |
 | `GteModel`                                             | Arctic-Embed-2.0-M  | `Snowflake/snowflake-arctic-embed-m-v2.0`.                                                                          | ︎                     |                           |                       |
 | `GteNewModel`                                          | mGTE-TRM (see note) | `Alibaba-NLP/gte-multilingual-base`, etc.                                                                           | ︎                     | ︎                         |                       |
 | `ModernBertModel`                                      | ModernBERT-based    | `Alibaba-NLP/gte-modernbert-base`, etc.                                                                             | ︎                     | ︎                         |                       |
 | `NomicBertModel`                                       | Nomic BERT          | `nomic-ai/nomic-embed-text-v1`, `nomic-ai/nomic-embed-text-v2-moe`, `Snowflake/snowflake-arctic-embed-m-long`, etc. | ︎                     | ︎                         |                       |
-| `LlamaModel`, `LlamaForCausalLM`, `MistralModel`, etc. | Llama-based         | `intfloat/e5-mistral-7b-instruct`, etc.                                                                             | ✅︎                   | ✅︎                        |                       |
-| `Qwen2Model`, `Qwen2ForCausalLM`                       | Qwen2-based         | `ssmits/Qwen2-7B-Instruct-embed-base` (see note), `Alibaba-NLP/gte-Qwen2-7B-instruct` (see note), etc.              | ✅︎                   | ✅︎                        |                       |
-| `Qwen3Model`, `Qwen3ForCausalLM`                       | Qwen3-based         | `Qwen/Qwen3-Embedding-0.6B`, etc.                                                                                   | ✅︎                   | ✅︎                        |                       |
+| `LlamaModel`, `LlamaForCausalLM`, `MistralModel`, etc. | Llama-based         | `intfloat/e5-mistral-7b-instruct`, etc.                                                                             | ✅︎                   | ✅︎                        | ✅︎                     |
+| `Qwen2Model`, `Qwen2ForCausalLM`                       | Qwen2-based         | `ssmits/Qwen2-7B-Instruct-embed-base` (see note), `Alibaba-NLP/gte-Qwen2-7B-instruct` (see note), etc.              | ✅︎                   | ✅︎                        | ✅︎                     |
+| `Qwen3Model`, `Qwen3ForCausalLM`                       | Qwen3-based         | `Qwen/Qwen3-Embedding-0.6B`, etc.                                                                                   | ✅︎                   | ✅︎                        | ✅︎                     |
 | `RobertaModel`, `RobertaForMaskedLM`                   | RoBERTa-based       | `sentence-transformers/all-roberta-large-v1`, etc.                                                                  |                      |                           |                       |
 
 !!! note
@@ -427,7 +435,7 @@ Specified using `--task embed`.
     See [relevant issue on HF Transformers](https://github.com/huggingface/transformers/issues/34882).
 
 !!! note
-    `jinaai/jina-embeddings-v3` supports multiple tasks through lora, while vllm temporarily only supports text-matching tasks by merging lora weights.
+    `jinaai/jina-embeddings-v3` supports multiple tasks through LoRA, while vllm temporarily only supports text-matching tasks by merging LoRA weights.
 
 !!! note
     The second-generation GTE model (mGTE-TRM) is named `NewModel`. The name `NewModel` is too generic, you should set `--hf-overrides '{"architectures": ["GteNewModel"]}'` to specify the use of the `GteNewModel` architecture.
@@ -442,9 +450,10 @@ Specified using `--task reward`.
 
 | Architecture              | Models          | Example HF Models                                                      | [LoRA][lora-adapter]   | [PP][distributed-serving]   | [V1](gh-issue:8779)   |
 |---------------------------|-----------------|------------------------------------------------------------------------|------------------------|-----------------------------|-----------------------|
-| `InternLM2ForRewardModel` | InternLM2-based | `internlm/internlm2-1_8b-reward`, `internlm/internlm2-7b-reward`, etc. | ✅︎                     | ✅︎                          |                       |
-| `LlamaForCausalLM`        | Llama-based     | `peiyi9979/math-shepherd-mistral-7b-prm`, etc.                         | ✅︎                     | ✅︎                          |                       |
-| `Qwen2ForRewardModel`     | Qwen2-based     | `Qwen/Qwen2.5-Math-RM-72B`, etc.                                       | ✅︎                     | ✅︎                          |                       |
+| `InternLM2ForRewardModel` | InternLM2-based | `internlm/internlm2-1_8b-reward`, `internlm/internlm2-7b-reward`, etc. | ✅︎                     | ✅︎                          | ✅︎                     |
+| `LlamaForCausalLM`        | Llama-based     | `peiyi9979/math-shepherd-mistral-7b-prm`, etc.                         | ✅︎                     | ✅︎                          | ✅︎                     |
+| `Qwen2ForRewardModel`     | Qwen2-based     | `Qwen/Qwen2.5-Math-RM-72B`, etc.                                       | ✅︎                     | ✅︎                          | ✅︎                     |
+| `Qwen2ForProcessRewardModel`     | Qwen2-based     | `Qwen/Qwen2.5-Math-PRM-7B`, etc.                                       | ✅︎                     | ✅︎                          | ✅︎                     |
 
 If your model is not in the above list, we will try to automatically convert the model using
 [as_reward_model][vllm.model_executor.models.adapters.as_reward_model]. By default, we return the hidden states of each token directly.
@@ -460,7 +469,7 @@ Specified using `--task classify`.
 | Architecture                     | Models   | Example HF Models                      | [LoRA][lora-adapter]   | [PP][distributed-serving]   | [V1](gh-issue:8779)   |
 |----------------------------------|----------|----------------------------------------|------------------------|-----------------------------|-----------------------|
 | `JambaForSequenceClassification` | Jamba    | `ai21labs/Jamba-tiny-reward-dev`, etc. | ✅︎                     | ✅︎                          |                       |
-| `GPT2ForSequenceClassification`  | GPT2     | `nie3e/sentiment-polish-gpt2-small`    |                        |                             |                       |
+| `GPT2ForSequenceClassification`  | GPT2     | `nie3e/sentiment-polish-gpt2-small`    |                        |                             | ✅︎                     |
 If your model is not in the above list, we will try to automatically convert the model using
 [as_classification_model][vllm.model_executor.models.adapters.as_classification_model]. By default, the class probabilities are extracted from the softmaxed hidden state corresponding to the last token.
 
@@ -471,7 +480,7 @@ Specified using `--task score`.
 | Architecture                          | Models            | Example HF Models                                                                    | [V1](gh-issue:8779)   |
 |---------------------------------------|-------------------|--------------------------------------------------------------------------------------|-----------------------|
 | `BertForSequenceClassification`       | BERT-based        | `cross-encoder/ms-marco-MiniLM-L-6-v2`, etc.                                         |                       |
-| `Qwen3ForSequenceClassification`      | Qwen3-based       | `tomaarsen/Qwen3-Reranker-0.6B-seq-cls`, `Qwen/Qwen3-Reranker-0.6B` (see note), etc. |                       |
+| `Qwen3ForSequenceClassification`      | Qwen3-based       | `tomaarsen/Qwen3-Reranker-0.6B-seq-cls`, `Qwen/Qwen3-Reranker-0.6B` (see note), etc. | ✅︎                     |
 | `RobertaForSequenceClassification`    | RoBERTa-based     | `cross-encoder/quora-roberta-base`, etc.                                             |                       |
 | `XLMRobertaForSequenceClassification` | XLM-RoBERTa-based | `BAAI/bge-reranker-v2-m3`, etc.                                                      |                       |
 
@@ -547,10 +556,12 @@ Specified using `--task generate`.
 | `FuyuForCausalLM`                            | Fuyu                                                                     | T + I                                                                 | `adept/fuyu-8b` etc.                                                                                                                                    |                        | ✅︎                          | ✅︎                    |
 | `Gemma3ForConditionalGeneration`             | Gemma 3                                                                  | T + I<sup>+</sup>                                                     | `google/gemma-3-4b-it`, `google/gemma-3-27b-it`, etc.                                                                                                   | ✅︎                     | ✅︎                          | ⚠️                    |
 | `GLM4VForCausalLM`<sup>^</sup>               | GLM-4V                                                                   | T + I                                                                 | `THUDM/glm-4v-9b`, `THUDM/cogagent-9b-20241220` etc.                                                                                                    | ✅︎                     | ✅︎                          | ✅︎                    |
+| `Glm4vForConditionalGeneration`              | GLM-4.1V-Thinking                                                        | T + I<sup>E+</sup> + V<sup>E+</sup>                                   | `THUDM/GLM-4.1V-9B-Thinkg`,  etc.                                                                                                                       | ✅︎                     | ✅︎                          | ✅︎                    |
 | `GraniteSpeechForConditionalGeneration`      | Granite Speech                                                           | T + A                                                                 | `ibm-granite/granite-speech-3.3-8b`                                                                                                                     | ✅︎                     | ✅︎                          | ✅︎                    |
 | `H2OVLChatModel`                             | H2OVL                                                                    | T + I<sup>E+</sup>                                                    | `h2oai/h2ovl-mississippi-800m`, `h2oai/h2ovl-mississippi-2b`, etc.                                                                                      |                        | ✅︎                          | ✅︎\*                  |
 | `Idefics3ForConditionalGeneration`           | Idefics3                                                                 | T + I                                                                 | `HuggingFaceM4/Idefics3-8B-Llama3` etc.                                                                                                                 | ✅︎                     |                             |  ✅︎                   |
 | `InternVLChatModel`                          | InternVL 3.0, InternVideo 2.5, InternVL 2.5, Mono-InternVL, InternVL 2.0 | T + I<sup>E+</sup> + (V<sup>E+</sup>)                                 | `OpenGVLab/InternVL3-9B`, `OpenGVLab/InternVideo2_5_Chat_8B`, `OpenGVLab/InternVL2_5-4B`, `OpenGVLab/Mono-InternVL-2B`, `OpenGVLab/InternVL2-4B`, etc.  | ✅︎                     | ✅︎                          | ✅︎                    |
+| `KeyeForConditionalGeneration`               | Keye-VL-8B-Preview                                                       | T + I<sup>E+</sup> + V<sup>E+</sup>                                   | `Kwai-Keye/Keye-VL-8B-Preview`                                                                                                                          |                        |                             | ✅︎                    |
 | `KimiVLForConditionalGeneration`             | Kimi-VL-A3B-Instruct, Kimi-VL-A3B-Thinking                               | T + I<sup>+</sup>                                                     | `moonshotai/Kimi-VL-A3B-Instruct`, `moonshotai/Kimi-VL-A3B-Thinking`                                                                                    |                        |                             | ✅︎                    |
 | `Llama4ForConditionalGeneration`             | Llama 4                                                                  | T + I<sup>+</sup>                                                     | `meta-llama/Llama-4-Scout-17B-16E-Instruct`, `meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8`, `meta-llama/Llama-4-Maverick-17B-128E-Instruct`, etc. |                        | ✅︎                          | ✅︎                    |
 | `LlavaForConditionalGeneration`              | LLaVA-1.5                                                                | T + I<sup>E+</sup>                                                    | `llava-hf/llava-1.5-7b-hf`, `TIGER-Lab/Mantis-8B-siglip-llama3` (see note), etc.                                                                        |                        | ✅︎                          | ✅︎                    |
@@ -577,7 +588,7 @@ Specified using `--task generate`.
 | `SkyworkR1VChatModel`                        | Skywork-R1V-38B                                                          | T + I                                                                 | `Skywork/Skywork-R1V-38B`                                                                                                                               |                        | ✅︎                          | ✅︎                    |
 | `SmolVLMForConditionalGeneration`            | SmolVLM2                                                                 | T + I                                                                 | `SmolVLM2-2.2B-Instruct`                                                                                                                                | ✅︎                     |                             | ✅︎                    |
 | `TarsierForConditionalGeneration`            | Tarsier                                                                  | T + I<sup>E+</sup>                                                    | `omni-search/Tarsier-7b`,`omni-search/Tarsier-34b`                                                                                                      |                        | ✅︎                          | ✅︎                    |
-| `Tarsier2ForConditionalGeneration`<sup>^</sup>            | Tarsier2                                                                  | T + I<sup>E+</sup> + V<sup>E+</sup>                                                    | `omni-research/Tarsier2-Recap-7b`,`omni-research/Tarsier2-7b-0115`                                                                                                      |                        | ✅︎                          | ✅︎                    |
+| `Tarsier2ForConditionalGeneration`<sup>^</sup> | Tarsier2                                                                 | T + I<sup>E+</sup> + V<sup>E+</sup>                                                | `omni-research/Tarsier2-Recap-7b`,`omni-research/Tarsier2-7b-0115`                                                                                      |                        | ✅︎                          | ✅︎                    |
 
 <sup>^</sup> You need to set the architecture name via `--hf-overrides` to match the one in vLLM.  
 &nbsp;&nbsp;&nbsp;&nbsp;• For example, to use DeepSeek-VL2 series models:  
