@@ -301,6 +301,9 @@ class OpenAIServingCompletion(OpenAIServing):
         has_echoed = [False] * num_choices * num_prompts
         num_prompt_tokens = [0] * num_prompts
         num_cached_tokens = [0] * num_prompts
+        accumulated_text = [""] * num_choices * num_prompts
+        accumulated_tokens = [[] * num_choices * num_prompts]
+        accumulated_logprobs = [[] * num_choices * num_prompts]
 
         stream_options = request.stream_options
         if stream_options:
@@ -352,6 +355,16 @@ class OpenAIServingCompletion(OpenAIServing):
                                 *(output.logprobs or []),
                             ]
                         has_echoed[i] = True
+                    elif request.accumulate:
+                        i = output.index + prompt_idx * num_choices
+                        # return the accumulated response
+                        accumulated_text[i] += output.text
+                        accumulated_tokens[i].extend(output.token_ids)
+                        accumulated_logprobs[i].extend(output.logprobs or [])
+
+                        delta_text = accumulated_text[i]
+                        delta_token_ids = accumulated_tokens[i]
+                        out_logprobs = accumulated_logprobs[i]
                     else:
                         # return just the delta
                         delta_text = output.text
