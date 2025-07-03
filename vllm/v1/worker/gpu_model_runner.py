@@ -1411,12 +1411,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         ubatch_slices[0] = (padded_first_ubatch_slice, padded_first_ubatch_slice)
         ubatch_slices[1] = (padded_second_ubatch_slice, padded_second_ubatch_slice)
 
-        # if (num_pad_tokens_first_ubatch > 0):
-        #     print(f"FIRST UBATCH PADDING {num_pad_tokens_first_ubatch} TOTAL: {max_tokens_across_dp_cpu} ORIGINAL{first_ubatch_num_tokens}")
-        # if (num_pad_tokens_second_ubatch > 0):
-        #     print(f"SECOND UBATCH PADDING {num_pad_tokens_second_ubatch} TOTAL: {max_tokens_across_dp_cpu} ORIGINAL{second_ubatch_num_tokens}")
-        # print(f"num padded tokens: {num_pad_tokens} num tokens tensor: {num_tokens_after_padding} first num_tokens: {first_ubatch_num_tokens} second num tokens {second_ubatch_num_tokens}")
-
     # This is where the second ubatch is adjusted to account for the padding.
     # Should be called after attention metadata creation. This just extends
     # the second ubatch slice out to the total number of tokens 
@@ -1426,15 +1420,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         padded_second_ubatch_slice = slice(ubatch_slices[1][1].start, num_total_tokens)
         ubatch_slices[1] = (padded_second_ubatch_slice, padded_second_ubatch_slice)
 
-
-    # Returns num_padded_tokens. This is just a number that should be added to the
-    # current number of tokens. It is a sum of the number of padded tokens from DP
-    # padding along with the number of padded tokens from cudagraph padding.
-    # The second tensor object is None when DP is disabled. When DP is enabled.
-    # it contains the number of tokens on each dp rank
-    def compute_padding(self,) -> tuple[int, Optional[torch.Tensor]]:
-        return (0, torch.Tensor())
-    
     def should_ubatch(self, should_ubatch: bool) -> bool:
         dp_size = self.vllm_config.parallel_config.data_parallel_size
         dp_rank = self.vllm_config.parallel_config.data_parallel_rank
@@ -1480,28 +1465,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # update this to a one token batch and return)
             tokens_slice = slice(tokens_slice.start, tokens_slice.start + 1)
             num_tokens = 1
-
-        # if (self.use_cuda_graph
-        #         and num_tokens <= self.cudagraph_batch_sizes[-1]):
-        #     # Use piecewise CUDA graphs.
-        #     # Add padding to the batch size.
-        #     tokens_slice = \
-        #      slice(tokens_slice.start, tokens_slice.start+
-        #            self.vllm_config.pad_for_cudagraph(num_tokens))
-        # else:
-        #     # Eager mode.
-        #     # Pad tokens to multiple of tensor_parallel_size when
-        #     # enabled collective fusion for SP
-        #     tp_size = self.vllm_config.parallel_config.tensor_parallel_size
-        #     if self.vllm_config.compilation_config.pass_config. \
-        #         enable_sequence_parallelism and tp_size > 1:
-        #         from vllm.utils import round_up
-        #         tokens_slice = slice(
-        #             tokens_slice.start,
-        #             tokens_slice.start + round_up(num_tokens, tp_size))
-
-        # update num tokens for padding
-        # num_tokens = tokens_slice.stop - tokens_slice.start
 
         # _prepare_inputs may reorder the batch, so we must gather multi
         # modal outputs after that to ensure the correct order
@@ -1590,8 +1553,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         def model_inputs(tokens_slice: slice, use_dummy_input: bool) -> tuple:
             if use_dummy_input:
-                # print("MAKING DUMMY BATCH")
-                # assert num_dummy_tokens == 1
                 return self._get_dummy_model_inputs(num_dummy_tokens)
             else:
                 assert scheduler_output is not None
@@ -1610,7 +1571,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_tokens_across_dp=num_tokens_across_dp,
                 skip_cuda_graphs=skip_cuda_graphs
             )
-            # First get some inputs
+
             ubatch_metadata: list[UbatchMetadata] = []
             for i, (_, tokens_slice) in enumerate(ubatch_slices):
                 input_ids, positions, inputs_embeds, intermediate_tensors = \
@@ -1683,9 +1644,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # run micro-batched
         if ubatch_slices is not None:
             assert len(ubatch_slices) == 2, "Only two ubatches has been tested"
-            # num_tokens = ubatch_slices[1][1].stop
             print(f"RUNNING UBATCH {ubatch_slices} is_dummy_run: {is_dummy_run} num_tokens_across_dp{num_tokens_across_dp}")
-            # assert not is_dummy_run
+
             compute_stream = torch.cuda.current_stream()
             ubatch_metadata = _make_ubatch_metadata(
                     ubatch_slices=ubatch_slices,
@@ -1696,7 +1656,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     skip_cuda_graphs=skip_cuda_graphs
                 )
             return _run_ubatches(ubatch_metadata)
-        # run single batch
+        # run normal batch
         else:
             input_ids, positions, inputs_embeds, intermediate_tensors = \
                 model_inputs(slice(0, num_scheduled_tokens), is_dummy_run)
@@ -2038,7 +1998,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if spec_decode_metadata is None:
                 # input_ids can be None for multimodal models.
                 target_token_ids = self.input_ids[:num_scheduled_tokens]
-                #TODO(sage) make sure this works with mrope
                 # TODO(woosuk): Support M-RoPE.
                 target_positions = self.positions[:num_scheduled_tokens]
                 if self.use_aux_hidden_state_outputs:
@@ -2068,7 +2027,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     num_tokens,
                 )
                 target_token_ids = self.input_ids[token_indices]
-                #TODO(sage) make sure this works with mrope
                 # TODO(woosuk): Support M-RoPE.
                 target_positions = self.positions[token_indices]
                 if self.use_aux_hidden_state_outputs:
