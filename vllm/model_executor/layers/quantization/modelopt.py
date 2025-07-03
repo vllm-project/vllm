@@ -204,38 +204,13 @@ class ModelOptFp8LinearMethod(LinearMethodBase):
                                      bias=bias)
 
 
-class ModelOptFp8MoEMethod:
+class ModelOptFp8MoEMethod(FusedMoEMethodBase):
     """MoE method for ModelOpt FP8.
     Supports loading FP8 checkpoints with static weight scale and
     activation scale.
     Args:
         quant_config: The ModelOpt quantization config.
     """
-
-    def __new__(cls, *args, **kwargs):
-        """
-        Dynamic class composition pattern.
-        This allows us to effectively "inject" FusedMoEMethodBase as a parent
-        class at runtime while avoiding circular import issues.
-        """
-
-        if not hasattr(cls, "_initialized"):
-            original_init = cls.__init__
-            new_cls = type(
-                cls.__name__,
-                (FusedMoEMethodBase, ),
-                {
-                    "__init__": original_init,
-                    **{
-                        k: v
-                        for k, v in cls.__dict__.items() if k != "__dict__"
-                    },
-                },
-            )
-            obj = super(new_cls, new_cls).__new__(new_cls)
-            obj.__init__(*args, **kwargs)
-            return obj
-        return super().__new__(cls)
 
     def __init__(self, quant_config: ModelOptFp8Config):
         self.quant_config = quant_config
