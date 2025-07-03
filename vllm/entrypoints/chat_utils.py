@@ -6,7 +6,7 @@ import json
 from abc import ABC, abstractmethod
 from collections import defaultdict, deque
 from collections.abc import Awaitable, Iterable
-from functools import lru_cache, partial
+from functools import cached_property, lru_cache, partial
 from pathlib import Path
 from typing import (Any, Callable, Generic, Literal, Optional, TypeVar, Union,
                     cast)
@@ -38,7 +38,7 @@ from typing_extensions import Required, TypeAlias, TypedDict
 from vllm.config import ModelConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model_cls
-from vllm.model_executor.models import supports_multimodal
+from vllm.model_executor.models import SupportsMultiModal
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalDataDict
 from vllm.multimodal.utils import MediaConnector
 # yapf: disable
@@ -488,15 +488,15 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         self._model_config = model_config
         self._tokenizer = tokenizer
 
-        model_cls = get_model_cls(model_config)
-        assert supports_multimodal(model_cls)
-        self._model_cls = model_cls
-
         self._items_by_modality = defaultdict[str, list[_T]](list)
 
     @property
     def model_config(self) -> ModelConfig:
         return self._model_config
+
+    @cached_property
+    def model_cls(self):
+        return cast(SupportsMultiModal, get_model_cls(self.model_config))
 
     @property
     def allowed_local_media_path(self):
@@ -513,7 +513,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         """
         mm_registry = self.mm_registry
         model_config = self.model_config
-        model_cls = self._model_cls
+        model_cls = self.model_cls
 
         input_modality = modality.replace("_embeds", "")
 

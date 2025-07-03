@@ -5,6 +5,7 @@ import io
 import math
 import time
 from collections.abc import AsyncGenerator
+from functools import cached_property
 from math import ceil
 from typing import Callable, Literal, Optional, TypeVar, Union, cast
 
@@ -25,7 +26,7 @@ from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model_cls
-from vllm.model_executor.models import supports_transcription
+from vllm.model_executor.models import SupportsTranscription
 from vllm.outputs import RequestOutput
 from vllm.transformers_utils.processor import cached_get_processor
 from vllm.utils import PlaceholderModule
@@ -78,14 +79,14 @@ class OpenAISpeechToText(OpenAIServing):
         self.hop_length = processor.feature_extractor.hop_length
         self.task_type = task_type
 
-        model_cls = get_model_cls(model_config)
-        assert supports_transcription(model_cls)
-        self.model_cls = model_cls
-
         if self.default_sampling_params:
             logger.info(
                 "Overwriting default completion sampling param with: %s",
                 self.default_sampling_params)
+
+    @cached_property
+    def model_cls(self):
+        return cast(SupportsTranscription, get_model_cls(self.model_config))
 
     async def _preprocess_speech_to_text(
         self,
