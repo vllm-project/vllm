@@ -512,10 +512,9 @@ def random_uuid() -> str:
 class AsyncMicrobatchTokenizer:
     """Asynchronous tokenizer with micro-batching.
 
-    A single background task pulls pending encode / decode requests from
-    an ``asyncio.Queue`` and groups them into micro-batches.  The actual
-    blocking tokenizer call is executed inside a ``ThreadPoolExecutor`` 
-    with a single worker, so the event-loop never blocks.
+    Pulls pending encode/decode requests from a queue and batches them 
+    up to reduce overhead. A single-thread ThreadPoolExecutor is used 
+    so the event loop stays responsive.
     """
 
     def __init__(
@@ -536,35 +535,31 @@ class AsyncMicrobatchTokenizer:
                                                      asyncio.Future]]]] = {}
         self._batcher_tasks: list[asyncio.Task] = []
 
-        # Single worker that owns the blocking tokenizer.
+        # Single-thread executor for blocking tokenizer calls.
         self._executor = ThreadPoolExecutor(max_workers=1)
 
-    # ------------------------------------------------------------------
-    # Public async API
-    # ------------------------------------------------------------------
+    # === Public async API ===
     async def __call__(self, prompt, **kwargs):
-        fut: asyncio.Future = self._loop.create_future()
+        result_future: asyncio.Future = self._loop.create_future()
         key = self._queue_key("encode", kwargs)
         queue = self._get_queue(self._loop, key)
-        await queue.put((prompt, kwargs, fut))
-        return await fut
+        await queue.put((prompt, kwargs, result_future))
+        return await result_future
 
     async def decode(self, token_ids, **kwargs):
-        fut: asyncio.Future = self._loop.create_future()
+        result_future: asyncio.Future = self._loop.create_future()
         key = self._queue_key("decode", kwargs)
         queue = self._get_queue(self._loop, key)
-        await queue.put((token_ids, fut))
-        return await fut
+        await queue.put((token_ids, result_future))
+        return await result_future
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
+    # === Internal helpers ===
     def _get_queue(
         self, loop: asyncio.AbstractEventLoop, key: tuple
     ) -> asyncio.Queue[Union[tuple[str, dict, asyncio.Future], tuple[
             list[int], asyncio.Future]]]:
-        """Return the queue for key, creating queue 
-        and batcher task if needed."""
+        """Get the request queue for the given operation key, creating a new
+        queue and batcher task if needed."""
         queue = self._queues.get(key)
         if queue is None:
             self._queues[key] = queue = asyncio.Queue()
@@ -579,11 +574,12 @@ class AsyncMicrobatchTokenizer:
         return queue
 
     async def _batch_encode_loop(self, queue: asyncio.Queue, can_batch: bool):
+        """Batch incoming encode requests for efficiency."""
         while True:
-            prompt, kwargs, future = await queue.get()
+            prompt, kwargs, result_future = await queue.get()
             prompts = [prompt]
             kwargs_list = [kwargs]
-            futures = [future]
+            result_futures = [result_future]
             deadline = self._loop.time() + self.batch_wait_timeout_s
 
             while len(prompts) < self.max_batch_size:
@@ -591,10 +587,10 @@ class AsyncMicrobatchTokenizer:
                 if timeout <= 0:
                     break
                 try:
-                    prompt, kwargs, future = await asyncio.wait_for(
+                    prompt, kwargs, result_future = await asyncio.wait_for(
                         queue.get(), timeout)
                     prompts.append(prompt)
-                    futures.append(future)
+                    result_futures.append(result_future)
                     if not can_batch:
                         kwargs_list.append(kwargs)
                 except asyncio.TimeoutError:
@@ -608,7 +604,7 @@ class AsyncMicrobatchTokenizer:
                     results = await self._loop.run_in_executor(
                         self._executor, encode_fn)
 
-                    for i, fut in enumerate(futures):
+                    for i, fut in enumerate(result_futures):
                         if not fut.done():
                             data = {k: v[i] for k, v in results.items()}
                             fut.set_result(BatchEncoding(data))
@@ -620,20 +616,20 @@ class AsyncMicrobatchTokenizer:
                     results = await self._loop.run_in_executor(
                         self._executor, encode_fn)
 
-                    for fut, res in zip(futures, results):
+                    for fut, res in zip(result_futures, results):
                         if not fut.done():
                             fut.set_result(res)
-
             except Exception as e:
-                for fut in futures:
+                for fut in result_futures:
                     if not fut.done():
                         fut.set_exception(e)
 
     async def _batch_decode_loop(self, queue: asyncio.Queue):
+        """Batch incoming decode requests for efficiency."""
         while True:
-            token_ids, future = await queue.get()
+            token_ids, result_future = await queue.get()
             token_ids_list = [token_ids]
-            futures = [future]
+            result_futures = [result_future]
             deadline = self._loop.time() + self.batch_wait_timeout_s
 
             while len(token_ids_list) < self.max_batch_size:
@@ -641,43 +637,43 @@ class AsyncMicrobatchTokenizer:
                 if timeout <= 0:
                     break
                 try:
-                    token_ids, future = await asyncio.wait_for(
+                    token_ids, result_future = await asyncio.wait_for(
                         queue.get(), timeout)
                     token_ids_list.append(token_ids)
-                    futures.append(future)
+                    result_futures.append(result_future)
                 except asyncio.TimeoutError:
                     break
 
             try:
+                # Perform a single batched decode call for all requests
                 results = await self._loop.run_in_executor(
                     self._executor, self.tokenizer.batch_decode,
                     token_ids_list)
-                for fut, res in zip(futures, results):
+                for fut, res in zip(result_futures, results):
                     if not fut.done():
                         fut.set_result(res)
             except Exception as e:
-                for fut in futures:
+                for fut in result_futures:
                     if not fut.done():
                         fut.set_exception(e)
 
-    def __del__(self):
-        for task in self._batcher_tasks:
-            if not task.done():
-                task.cancel()
-
     def _queue_key(self, op: str, kwargs: dict) -> tuple:
-        """Return a normalized key describing op + kwargs.
+        """
+        Return a normalized key describing operation + kwargs.
         
-        Decode -> ("decode", )
-
-        Encode, add_special_tokens {T/F}, truncation False -> 
-        ("encode", add_special_tokens, False, None)
-
-        Encode, truncation True and max_length 
-        equals tokenizer.model_max_length (or None) ->
-        ("encode", add_special_tokens, True, "model_max")
-
-        All other encode variants -> ("encode", "other")
+        - `add_special_tokens`: {True/False}
+        - `truncation`: {True/False}
+          - If `truncation` is False (`max_length` is None), 
+            returns a key for a can_batch queue.
+          - If `truncation` is True and `max_length` is None or equals
+            `tokenizer.model_max_length`, returns a key for a can_batch queue.
+          - Otherwise, returns a key for a cannot_batch queue.
+        
+        Examples:
+          - Decode: ("decode",)
+          - Encode typical: 
+            ("encode", add_special_tokens, bool_truncation, max_length_label)
+          - Fallback: ("encode", "other")
         """
 
         if op == "decode":
@@ -696,6 +692,11 @@ class AsyncMicrobatchTokenizer:
             return ("encode", add_special_tokens, True, "model_max")
 
         return ("encode", "other")
+
+    def __del__(self):
+        for task in self._batcher_tasks:
+            if not task.done():
+                task.cancel()
 
 
 def make_async(
