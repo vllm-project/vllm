@@ -16,6 +16,7 @@ from typing_extensions import assert_never
 from vllm.beam.beam import BeamScorer
 from vllm.beam.filtering import _CHUNK_SIZE, BeamValidator
 from vllm.beam.penalty import MEOW_CLASSI_IDX, PenaltyComputer
+from vllm.beam.tracing import trace_streaming_completion, trace_async_method
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.logger import RequestLogger
@@ -84,10 +85,8 @@ class OpenAIServingCompletion(OpenAIServing):
             
         self.beam_scorer = BeamScorer(classi_idx=MEOW_CLASSI_IDX)
         self.beam_validator = BeamValidator(classi_idx=MEOW_CLASSI_IDX, classifier_names=MEOW_CLASSI_IDX.keys())
-        self.tracer = init_tracer(
-                "vllm.entrypoints.openai.serving_completion",
-                "http://localhost:4317")
 
+    @trace_streaming_completion()
     async def create_completion_with_chunkwise_beam(
         self,
         request: CompletionRequest,
@@ -96,7 +95,7 @@ class OpenAIServingCompletion(OpenAIServing):
         """
     Chunkwise beam search hack
     """
-
+        @trace_async_method(span_name='_process_prefix')
         async def _process_prefix(request: CompletionRequest):
             og_max_tokens = request.max_tokens
             og_n = request.n
@@ -121,7 +120,7 @@ class OpenAIServingCompletion(OpenAIServing):
         input_str_len = len(res.choices[0].text)
 
         async def _should_stop(final):
-            return final.choices[0].finish_reason == "stop" or final.choices[0].is_filtered
+            return final.finish_reason == "stop" or final.is_filtered
         
         max_chunks = math.ceil(request.max_tokens / _CHUNK_SIZE)
         async def _chunk_generator():
@@ -138,12 +137,12 @@ class OpenAIServingCompletion(OpenAIServing):
                     break
             
                 final = await self.beam_scorer.pick_best_beam(beams)
-                request.prompt = final.choices[0].text
+                request.prompt = final.text
                 should_stop = await _should_stop(final)
-                final.choices[0].text = final.choices[0].text[input_str_len:]
-                output = final.choices[0].text
+                final.text = final.text[input_str_len:]
+                output = final.text
                 if self.request_logger:
-                    logger.info(f"yielding chunk {num_chunks} text: {final.choices[0].text}")
+                    logger.info(f"yielding chunk {num_chunks} text: {final.text}")
                 yield f"data: {final.model_dump_json()}\n\n"
             
                 if should_stop:
@@ -151,7 +150,7 @@ class OpenAIServingCompletion(OpenAIServing):
         
             yield "data: [DONE]\n\n"
 
-            report_metrics(request, output)
+            report_metrics(request, output, final)
     
         return _chunk_generator()
 

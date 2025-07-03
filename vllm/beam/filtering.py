@@ -6,6 +6,7 @@ from vllm.beam.debug import BeamDebugInfo
 import torch
 from starlette.datastructures import MutableHeaders
 
+from vllm.beam.tracing import trace_async_method
 from vllm.entrypoints.openai.protocol import CompletionRequest, CompletionResponse, \
     ErrorResponse
 from vllm.logger import init_logger
@@ -32,6 +33,7 @@ class BeamValidator:
         self.classi_idx = classi_idx
         self.classifier_names = classifier_names
 
+    @trace_async_method(span_name='get_n_valid_beams')
     async def get_n_valid_beams(self, create_completion: Callable,
                                 request: CompletionRequest,
                                 chunk_num: int,
