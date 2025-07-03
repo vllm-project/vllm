@@ -86,14 +86,14 @@ class OpenAISpeechToText(OpenAIServing):
 
     @cached_property
     def model_cls(self):
-        return cast(SupportsTranscription, get_model_cls(self.model_config))
+        return get_model_cls(self.model_config)
 
     async def _preprocess_speech_to_text(
         self,
         request: SpeechToTextRequest,
         audio_data: bytes,
     ) -> tuple[list[PromptType], float]:
-        model_cls = self.model_cls
+        model_cls = cast(SupportsTranscription, self.model_cls)
 
         # Validate request
         # TODO language should be optional and can be guessed.
