@@ -33,10 +33,8 @@ from vllm.logger import init_logger
 from vllm.transformers_utils.configs import (ChatGLMConfig, Cohere2Config,
                                              DbrxConfig, DeepseekVLV2Config,
                                              EAGLEConfig, ExaoneConfig,
-                                             H2OVLChatConfig,
-                                             InternVLChatConfig, JAISConfig,
-                                             KimiVLConfig, MedusaConfig,
-                                             MiniMaxText01Config,
+                                             JAISConfig, KimiVLConfig,
+                                             MedusaConfig, MiniMaxText01Config,
                                              MiniMaxVL01Config, MllamaConfig,
                                              MLPSpeculatorConfig, MPTConfig,
                                              NemotronConfig, NVLM_D_Config,
@@ -90,8 +88,6 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = {
     "medusa": MedusaConfig,
     "eagle": EAGLEConfig,
     "exaone": ExaoneConfig,
-    "h2ovl_chat": H2OVLChatConfig,
-    "internvl_chat": InternVLChatConfig,
     "minimax_text_01": MiniMaxText01Config,
     "minimax_vl_01": MiniMaxVL01Config,
     "nemotron": NemotronConfig,
@@ -102,6 +98,10 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = {
     "telechat": Telechat2Config,
     "ultravox": UltravoxConfig,
     **_CONFIG_REGISTRY_OVERRIDE_HF
+}
+
+_CONFIG_ATTRS_MAPPING: dict[str, str] = {
+    "llm_config": "text_config",
 }
 
 
@@ -286,6 +286,18 @@ def is_encoder_decoder(config: PretrainedConfig) -> bool:
     return getattr(config, "is_encoder_decoder", False)
 
 
+def _maybe_remap_hf_config_attrs(config: PretrainedConfig) -> PretrainedConfig:
+    """Remap config attributes to match the expected names."""
+    for old_attr, new_attr in _CONFIG_ATTRS_MAPPING.items():
+        if hasattr(config, old_attr):
+            if not hasattr(config, new_attr):
+                config.update({new_attr: getattr(config, old_attr)})
+            delattr(config, old_attr)
+            logger.debug("Remapped config attribute '%s' to '%s'", old_attr,
+                         new_attr)
+    return config
+
+
 def get_config(
     model: Union[str, Path],
     trust_remote_code: bool,
@@ -361,6 +373,9 @@ def get_config(
                     revision=revision,
                     code_revision=code_revision,
                     token=_get_hf_token(),
+                    # some old custom model's config needs
+                    # `has_no_defaults_at_init=True` to work.
+                    has_no_defaults_at_init=trust_remote_code,
                     **kwargs,
                 )
             except ValueError as e:
@@ -376,6 +391,7 @@ def get_config(
                     raise RuntimeError(err_msg) from e
                 else:
                     raise e
+        config = _maybe_remap_hf_config_attrs(config)
 
     elif config_format == ConfigFormat.MISTRAL:
         config = load_params_config(model, revision, **kwargs)
