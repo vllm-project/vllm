@@ -156,11 +156,10 @@ void cutlass_group_gemm_caller(
       static_cast<ElementD**>(out_ptrs.data_ptr()),
       static_cast<StrideC*>(c_strides.data_ptr())};
 
-  cutlass::KernelHardwareInfo hw_info;
-  hw_info.device_id = a_tensors.device().index();
-  hw_info.sm_count =
-      cutlass::KernelHardwareInfo::query_device_multiprocessor_count(
-          hw_info.device_id);
+  int device_id = a_tensors.device().index();
+  static const cutlass::KernelHardwareInfo hw_info{
+      device_id, cutlass::KernelHardwareInfo::query_device_multiprocessor_count(
+                     device_id)};
 
   typename GemmKernel::Arguments args{
       cutlass::gemm::GemmUniversalMode::kGrouped, prob_shape, mainloop_args,
