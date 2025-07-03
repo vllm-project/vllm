@@ -6,7 +6,7 @@ import dataclasses
 import math
 from dataclasses import dataclass
 from itertools import product
-from typing import Optional, Union
+from typing import Any, Callable, Optional, Union
 
 import pytest
 import torch
@@ -201,6 +201,8 @@ class Config:
 
     fused_moe_chunk_size: Optional[int]
     world_size: int
+
+    torch_trace_dir_path: Optional[str] = None
 
     def describe(self) -> str:
         s = ""
@@ -610,6 +612,31 @@ def make_fused_experts(
     return experts
 
 
+def do_profile(fn: Callable,
+               fn_kwargs: dict[Any, Any],
+               pgi: ProcessGroupInfo,
+               config: Config,
+               num_warmups: int = 5):
+
+    for _ in range(num_warmups):
+        fn(**fn_kwargs)
+
+    with torch.profiler.profile(
+            activities=[
+                torch.profiler.ProfilerActivity.CPU,
+                torch.profiler.ProfilerActivity.CUDA,
+            ],
+            with_stack=True,
+            record_shapes=True,
+    ) as tprof:
+        fn(**fn_kwargs)
+        torch.cuda.synchronize(torch.cuda.current_device())
+
+    # TODO (varun): Add a descriptive trace file name
+    tprof.export_chrome_trace(
+        f"{config.torch_trace_dir_path}/m{config.M}_{pgi.rank}_trace.json")
+
+
 def do_modular_kernel(
     pgi: ProcessGroupInfo,
     vllm_config: VllmConfig,
@@ -655,18 +682,23 @@ def do_modular_kernel(
     hidden_states = (rank_tensors.apply_topk_weights_to_input()
                      if apply_router_weight_on_input else
                      rank_tensors.hidden_states)
-    modular_kernel.forward(
-        hidden_states=hidden_states,
-        w1=weights.w1,
-        w2=weights.w2,
-        topk_weights=rank_tensors.topk_weights,
-        topk_ids=rank_tensors.topk_ids,
-        expert_map=rank_tensors.expert_map,
-        w1_scale=weights.w1_scale,
-        w2_scale=weights.w2_scale,
-        global_num_experts=config.E,
-        apply_router_weight_on_input=apply_router_weight_on_input,
-    )
+
+    mk_kwargs = {
+        "hidden_states": hidden_states,
+        "w1": weights.w1,
+        "w2": weights.w2,
+        "topk_weights": rank_tensors.topk_weights,
+        "topk_ids": rank_tensors.topk_ids,
+        "expert_map": rank_tensors.expert_map,
+        "w1_scale": weights.w1_scale,
+        "w2_scale": weights.w2_scale,
+        "global_num_experts": config.E,
+        "apply_router_weight_on_input": apply_router_weight_on_input,
+    }
+    modular_kernel.forward(**mk_kwargs)
+
+    if config.torch_trace_dir_path is not None:
+        do_profile(modular_kernel.forward, mk_kwargs, pgi, config)
 
 
 def rank_worker(
@@ -706,11 +738,18 @@ def rank_worker(
         do_modular_kernel(pgi, vllm_config, cfgx, wr, ir)
 
 
-def run(ms: list[int], k: int, n: int, e: int, topks: list[int],
-        dtype: torch.dtype, quant_config: Optional[FusedMoEQuantConfig],
+def run(ms: list[int],
+        k: int,
+        n: int,
+        e: int,
+        topks: list[int],
+        dtype: torch.dtype,
+        quant_config: Optional[FusedMoEQuantConfig],
         combination: tuple[mk.FusedMoEPrepareAndFinalize,
                            mk.FusedMoEPermuteExpertsUnpermute],
-        fused_moe_chunk_size: Optional[int], world_size: int):
+        fused_moe_chunk_size: Optional[int],
+        world_size: int,
+        torch_trace_dir_path: Optional[str] = None):
 
     config = Config(
         Ms=ms,
@@ -724,6 +763,7 @@ def run(ms: list[int], k: int, n: int, e: int, topks: list[int],
         fused_experts_type=combination[1],
         fused_moe_chunk_size=fused_moe_chunk_size,
         world_size=world_size,
+        torch_trace_dir_path=torch_trace_dir_path,
     )
 
     if not config.is_valid():
@@ -870,11 +910,10 @@ if __name__ == '__main__':
                 return fe
         raise ValueError(f"Cannot find a FusedExperts type that matches {s}")
 
-    parser = argparse.ArgumentParser(
-        description="Run a single modular kernel combination",
-        help=(
-            'Example : python3 -m tests.kernels.moe.test_modular_kernel_combinations --pf-type PplxPrepareAndFinalize --experts-type BatchedTritonExperts'  # noqa :E501
-        ))
+    parser = argparse.ArgumentParser(description=(
+        "Run a single modular kernel combination \n"
+        'Example : python3 -m tests.kernels.moe.test_modular_kernel_combinations --pf-type PplxPrepareAndFinalize --experts-type BatchedTritonExperts'  # noqa :E501
+    ))
 
     parser.add_argument(
         "--world-size",
@@ -946,6 +985,12 @@ if __name__ == '__main__':
                         type=int,
                         help="Quantization block shape")
 
+    # Torch trace profile generation args
+    parser.add_argument("--torch-trace-dir-path",
+                        type=str,
+                        default=None,
+                        help="Get torch trace for single execution")
+
     args = parser.parse_args()
 
     quant_config = None
@@ -960,6 +1005,11 @@ if __name__ == '__main__':
             per_out_ch_quant=args.per_out_ch_quant,
             block_shape=args.block_shape)
 
+    if args.torch_trace_dir_path is not None:
+        from pathlib import Path
+        assert Path(args.torch_trace_dir_path).is_dir(), (
+            f"Please create {args.torch_trace_dir_path}")
+
     run(
         ms=args.m,
         k=args.k,
@@ -970,4 +1020,5 @@ if __name__ == '__main__':
         quant_config=quant_config,
         combination=(args.pf_type, args.experts_type),
         fused_moe_chunk_size=None,
-        world_size=args.world_size)
+        world_size=args.world_size,
+        torch_trace_dir_path=args.torch_trace_dir_path)
