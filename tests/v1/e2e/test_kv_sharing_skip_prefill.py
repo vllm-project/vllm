@@ -3,7 +3,7 @@
 
 import gc
 from collections.abc import Iterable
-from typing import Optional, Union
+from typing import Any, Optional, Union
 
 import pytest
 import torch
@@ -275,10 +275,11 @@ class TestQwen2ForCausalLM(nn.Module):
 def test_kv_sharing_skip_prefill(
     monkeypatch: pytest.MonkeyPatch,
     enforce_eager: bool,
+    test_prompts: list[list[dict[str, Any]]],
 ):
     ModelRegistry.register_model("Qwen2ForCausalLM", TestQwen2ForCausalLM)
-    sampling_params = SamplingParams(temperature=0.0, max_tokens=100)
-    prompts = ["What is the capital of France?"]
+    sampling_params = SamplingParams(temperature=0.0, max_tokens=42)
+    prompts = [prompt[0]['content'] for prompt in test_prompts]
     compilation_config = CompilationConfig(
         level=CompilationLevel.PIECEWISE
         if not enforce_eager else CompilationLevel.NO_COMPILATION,
