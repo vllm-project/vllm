@@ -81,7 +81,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         return self.max_num_tokens
 
     def topk_indices_dtype(self) -> Optional[torch.dtype]:
-        return torch.uint32
+        return torch.int32
 
     def prepare(
         self,
