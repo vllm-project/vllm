@@ -5,6 +5,7 @@ import io
 import math
 import time
 from collections.abc import AsyncGenerator
+from functools import cached_property
 from math import ceil
 from typing import Callable, Literal, Optional, TypeVar, Union, cast
 
@@ -24,7 +25,8 @@ from vllm.entrypoints.openai.serving_engine import (OpenAIServing,
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
-from vllm.model_executor.model_loader.utils import get_model_architecture
+from vllm.model_executor.model_loader import get_model_cls
+from vllm.model_executor.models import SupportsTranscription
 from vllm.outputs import RequestOutput
 from vllm.transformers_utils.processor import cached_get_processor
 from vllm.utils import PlaceholderModule
@@ -76,24 +78,29 @@ class OpenAISpeechToText(OpenAIServing):
         self.model_sr = processor.feature_extractor.sampling_rate
         self.hop_length = processor.feature_extractor.hop_length
         self.task_type = task_type
-        self.model_cls, _ = get_model_architecture(model_config)
 
         if self.default_sampling_params:
             logger.info(
                 "Overwriting default completion sampling param with: %s",
                 self.default_sampling_params)
 
+    @cached_property
+    def model_cls(self):
+        return get_model_cls(self.model_config)
+
     async def _preprocess_speech_to_text(
         self,
         request: SpeechToTextRequest,
         audio_data: bytes,
     ) -> tuple[list[PromptType], float]:
+        model_cls = cast(SupportsTranscription, self.model_cls)
+
         # Validate request
         # TODO language should be optional and can be guessed.
         # For now we default to en. See
         # https://github.com/huggingface/transformers/blob/main/src/transformers/models/whisper/generation_whisper.py#L1520
         lang = request.language or "en"
-        self.model_cls.validate_language(lang)  # type: ignore[attr-defined]
+        model_cls.validate_language(lang)
 
         if len(audio_data) / 1024**2 > MAX_AUDIO_CLIP_FILESIZE_MB:
             raise ValueError("Maximum file size exceeded.")
@@ -117,9 +124,8 @@ class OpenAISpeechToText(OpenAIServing):
                     },
                 },
                 "decoder_prompt":
-                self.model_cls.
-                get_decoder_prompt(  # type: ignore[attr-defined]
-                    lang, self.task_type, request.prompt)
+                model_cls.get_decoder_prompt(lang, self.task_type,
+                                             request.prompt)
             }
             prompts.append(cast(PromptType, prompt))
         return prompts, duration

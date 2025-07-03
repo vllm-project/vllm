@@ -10,6 +10,22 @@ This document walks you through the steps to extend a basic model so that it acc
 It is assumed that you have already implemented the model in vLLM according to [these steps][new-model-basic].
 Further update the model as follows:
 
+- Implement [get_placeholder_str][vllm.model_executor.models.interfaces.SupportsMultiModal.get_placeholder_str] to define the placeholder string which is used to represent the multi-modal item in the text prompt. This should be consistent with the chat template of the model.
+
+    ??? Code
+
+        ```python
+        class YourModelForImage2Seq(nn.Module):
+            ...
+
+            @classmethod
+            def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+                if modality.startswith("image"):
+                    return "<image>"
+
+                raise ValueError("Only image modality is supported")
+        ```
+
 - Reserve a keyword parameter in [forward][torch.nn.Module.forward] for each input tensor that corresponds to a multi-modal input, as shown in the following example:
 
   ```diff

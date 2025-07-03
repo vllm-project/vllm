@@ -1257,6 +1257,15 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
             "model.visual.": "visual.",
         })
 
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+        if modality.startswith("image"):
+            return "<|begin_of_image|><|image|><|end_of_image|>"
+        if modality.startswith("video"):
+            return "<|begin_of_video|><|video|><|end_of_video|>"
+
+        raise ValueError("Only image or video modality is supported")
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config: Glm4vConfig = vllm_config.model_config.hf_config

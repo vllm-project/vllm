@@ -373,8 +373,6 @@ class EngineArgs:
     media_io_kwargs: dict[str, dict[str,
                                     Any]] = get_field(MultiModalConfig,
                                                       "media_io_kwargs")
-    mm_placeholder_str_override: dict[str, str] = \
-        get_field(MultiModalConfig, "mm_placeholder_str_override")
     mm_processor_kwargs: Optional[Dict[str, Any]] = \
         MultiModalConfig.mm_processor_kwargs
     disable_mm_preprocessor_cache: bool = \
@@ -760,9 +758,6 @@ class EngineArgs:
         multimodal_group.add_argument("--media-io-kwargs",
                                       **multimodal_kwargs["media_io_kwargs"])
         multimodal_group.add_argument(
-            "--mm-placeholder-str-override",
-            **multimodal_kwargs["mm_placeholder_str_override"])
-        multimodal_group.add_argument(
             "--mm-processor-kwargs",
             **multimodal_kwargs["mm_processor_kwargs"])
         multimodal_group.add_argument(
@@ -987,7 +982,6 @@ class EngineArgs:
             served_model_name=self.served_model_name,
             limit_mm_per_prompt=self.limit_mm_per_prompt,
             media_io_kwargs=self.media_io_kwargs,
-            mm_placeholder_str_override=self.mm_placeholder_str_override,
             use_async_output_proc=not self.disable_async_output_proc,
             config_format=self.config_format,
             mm_processor_kwargs=self.mm_processor_kwargs,

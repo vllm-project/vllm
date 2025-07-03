@@ -675,6 +675,13 @@ class QwenVLForConditionalGeneration(QWenBaseModel, SupportsPP, SupportsLoRA,
             connector="transformer.visual.attn_pool",
             tower_model="transformer.visual.transformer")
 
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+        if modality.startswith("image"):
+            return f"Picture {i}: <img></img>"
+
+        raise ValueError("Only image modality is supported")
+
     def __init__(
         self,
         *,
