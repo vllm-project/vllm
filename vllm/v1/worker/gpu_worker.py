@@ -328,7 +328,6 @@ class Worker(WorkerBase):
                 sort_by="self_cuda_time_total"))
 
     def execute_dummy_batch(self) -> None:
-        # TODO: adding allow_microbatching will break non-gpu backends
         self.model_runner._dummy_run(1)
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
