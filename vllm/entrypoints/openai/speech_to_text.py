@@ -10,6 +10,7 @@ from typing import Callable, Literal, Optional, TypeVar, Union, cast
 
 import numpy as np
 from fastapi import Request
+
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.logger import RequestLogger
@@ -23,9 +24,10 @@ from vllm.entrypoints.openai.serving_engine import (OpenAIServing,
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
+from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.processor import cached_get_processor
 from vllm.utils import PlaceholderModule
-from vllm.sampling_params import SamplingParams
+
 try:
     import librosa
 except ImportError:
@@ -190,7 +192,7 @@ class OpenAISpeechToText(OpenAIServing):
         request: SpeechToTextRequest,
         audio_data: bytes,
         previous_text :list[str],
-    ) -> AsyncGenerator[tuple[list[PromptType], float]]:
+    ) -> AsyncGenerator[tuple[PromptType, float]]:
         # Validate request
         # TODO language should be optional and can be guessed.
         # For now we default to en. See
@@ -230,8 +232,11 @@ class OpenAISpeechToText(OpenAIServing):
                     },
                 },
                 "decoder_prompt":
-                (f"<|prev|>{request.prompt}<|startoftranscript|>{lang_token}"
-                 f"<|{self.task_type}|><|notimestamps|>{previous_text}")
+                self._create_prompt_with_previous_context(
+                    request=request,
+                    previous_text=previous_text,
+                    lang_token=lang_token
+                )
             }
             yield (cast(PromptType, prompt), duration)
             
@@ -280,7 +285,7 @@ class OpenAISpeechToText(OpenAIServing):
                     f"Currently do not support PromptAdapter for "
                     f"{self.task_type.title()}.")
             previous_text = [""]
-            asyncPromptGenerator = self._preprocess_transcription(
+            asyncPromptGenerator = self._preprocess_speech_to_text(
                 request=request,
                 audio_data=audio_data,
                 previous_text=previous_text
@@ -324,10 +329,7 @@ class OpenAISpeechToText(OpenAIServing):
                 async for op in request_prompt:
                     partial_text += op.outputs[0].text
                     
-                previous_text[0] = ' '.join(
-                    partial_text.strip()
-                    .split(' ')[-5:]
-                )
+                previous_text[0] = partial_text.strip()
                 text += partial_text
 
         except asyncio.CancelledError:
@@ -341,7 +343,7 @@ class OpenAISpeechToText(OpenAIServing):
     async def _speech_to_text_stream_generator(
         self,
         request: SpeechToTextRequest,
-        async_result_generator: AsyncGenerator[tuple[list[PromptType], float]],
+        async_result_generator: AsyncGenerator[tuple[PromptType, float]],
         request_id: str,
         request_metadata: RequestResponseMetadata,
         sampling_params : SamplingParams,
@@ -432,10 +434,8 @@ class OpenAISpeechToText(OpenAIServing):
                     data = chunk.model_dump_json(exclude_unset=True)
                     yield f"data: {data}\n\n"
                     
-                previous_context[0] = ' '.join(
-                    partial_text.strip()
-                    .split(' ')[-5:]
-                )
+                previous_context[0] = partial_text.strip()
+
             # Once the final token is handled, if stream_options.include_usage
             # is sent, send the usage.
             if include_usage:
@@ -517,3 +517,62 @@ class OpenAISpeechToText(OpenAIServing):
                 quietest_idx = i + start_idx
                 min_energy = energy
         return quietest_idx
+    
+    def _create_prompt_with_previous_context(self, 
+            request: SpeechToTextRequest,
+            previous_text :list[str],
+            lang_token : str
+        ) -> str:
+        """According to Whisper prompt guide
+        https://cookbook.openai.com/examples/whisper_prompting_guide
+        
+        whisper prompt is limited to 224 tokens. 
+        so some of previous_text, even decoder prompt
+        should be cut. 
+        
+        For now result 4 special token in decoder prompt.
+        So max length should be 220.
+        
+        And there's one more options for counting tokens
+         
+        English usually count single token more than 
+        a single letter. However for other languages.
+        even single letter could be counted as multiple tokens
+        
+        so we set TOKEN_PER_CHAR as 3 for any other languages
+        """
+
+        TOKEN_PER_CHAR = 1 if lang_token == "<|en|>" else 3
+        MAX_PROMPT_LENGTH = 220 // TOKEN_PER_CHAR
+        
+        """
+        In order to prevent hallucination. prompt should be 
+        chopped into words.
+        """
+        ret_prompt = "" 
+        ret_prompt_len = 0
+        
+        request_prompt_list = request.prompt.split(' ')
+        previous_text_list = previous_text[0].split(' ')
+        for prompt in request_prompt_list:
+            if len(prompt) + ret_prompt_len <= MAX_PROMPT_LENGTH:
+                ret_prompt += prompt
+                ret_prompt += " "
+                ret_prompt_len += len(prompt)
+            else:
+                break
+        
+        previous_text_list_rev = []
+        for previous_index in range(len(previous_text_list) - 1, 0, -1):
+            prompt = previous_text_list[previous_index]
+            if len(prompt) + ret_prompt_len <= MAX_PROMPT_LENGTH:
+                previous_text_list_rev.append(prompt)
+                ret_prompt_len += len(prompt)
+            else: 
+                break
+            
+        ret_prompt += ' '.join(reversed(previous_text_list_rev))
+        return  (f"<|prev|>{ret_prompt}<|startoftranscript|>{lang_token}"
+                f"<|{self.task_type}|><|notimestamps|>")
+        
+        
