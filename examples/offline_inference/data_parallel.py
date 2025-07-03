@@ -113,11 +113,7 @@ def main(
         "The president of the United States is",
         "The capital of France is",
         "The future of AI is",
-    ] * 10
-    # import random
-    # import string
-    # prompts = [''.join(random.choices(string.ascii_letters, k=128)) for _ in range(2048)]
-
+    ] * 100
 
     # with DP, each rank should process different prompts.
     # usually all the DP ranks process a full dataset,
@@ -141,7 +137,7 @@ def main(
     # sampling params. here we set different max_tokens for different
     # ranks for demonstration.
     sampling_params = SamplingParams(
-        temperature=0.8, top_p=0.95, max_tokens=[40, 64][global_dp_rank % 2]
+        temperature=0.8, top_p=0.95, max_tokens=[16, 20][global_dp_rank % 2]
     )
 
     # Create an LLM.
