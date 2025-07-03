@@ -193,6 +193,10 @@ class FusedMoEPrepareAndFinalize(ABC):
         """
         raise NotImplementedError
 
+    @abstractmethod
+    def num_dispatchers(self) -> int:
+        raise NotImplementedError
+
 
 class FusedMoEPermuteExpertsUnpermute(ABC):
     """

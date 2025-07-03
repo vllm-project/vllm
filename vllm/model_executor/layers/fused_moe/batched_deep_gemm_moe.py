@@ -184,15 +184,14 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def __init__(self,
                  max_num_tokens: int,
-                 world_size: int,
-                 dp_size: int,
+                 num_dispatchers: int,
                  block_shape: list[int],
                  per_act_token_quant=False):
         """
         max_num_tokens: Maximum number of tokens from a DP Rank
-        world_size: Number of EP ranks
-        dp_size: Number of data-parallel ranks
-        block_shape: Block quantization block shape
+        num_dispatchers: The number of DP dispatchers.
+        block_shape: Block quantization block shape.
+        per_act_token_quant: Per activation token quantization flag.
         """
         super().__init__(
             FusedMoEQuantConfig(
@@ -202,8 +201,7 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
             ))
         assert self.block_shape == self.DEEPGEMM_BLOCK_SHAPE
         self.max_num_tokens = max_num_tokens
-        self.world_size = world_size
-        self.dp_size = dp_size
+        self.num_dispatchers = num_dispatchers
 
     @property
     def activation_formats(
@@ -233,7 +231,7 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         # FIXME (varun): We should be able to dispatch only from the leader
         # DP ranks in the case of TP > 1. At the moment, all the Ranks
         # end up sending their tokens. This needs to be fixed.
-        num_dispatchers = self.world_size
+        num_dispatchers = self.num_dispatchers
         num_experts = local_num_experts
         max_num_tokens = a.size(
             0) if self.max_num_tokens is None else self.max_num_tokens
