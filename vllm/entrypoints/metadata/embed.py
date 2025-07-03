@@ -16,8 +16,8 @@ if TYPE_CHECKING:
 class EmbedBrief(BriefMetadata):
     embedding_dim: int = Field(..., title="Embedding dimension")
     is_matryoshka: bool = Field(..., title="Is matryoshka model")
-    matryoshka_dimensions: Optional[int] = Field(...,
-                                                 title="Matryoshka dimensions")
+    matryoshka_dimensions: Optional[list[int]] = Field(
+        ..., title="Matryoshka dimensions")
     truncation_side: str = Field(..., title="Truncation side")
 
     @classmethod
