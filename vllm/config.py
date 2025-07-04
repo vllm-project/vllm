@@ -3556,8 +3556,11 @@ GuidedDecodingBackend = Literal[GuidedDecodingBackendV0,
 
 @config
 @dataclass
-class DecodingConfig:
-    """Dataclass which contains the decoding strategy of the engine."""
+class StructuredOutputConfig:
+    """
+    Dataclass which contains parameters for
+    structured output / guided decoding.
+    """
 
     @property
     @deprecated(
@@ -3627,7 +3630,7 @@ class DecodingConfig:
                 and self.backend not in ("xgrammar", "guidance")):
             raise ValueError("disable_any_whitespace is only supported for "
                              "xgrammar and guidance backends.")
-        if (self.disable_additional_properties and self.backend != "guidance"):
+        if self.disable_additional_properties and self.backend != "guidance":
             raise ValueError("disable_additional_properties is only supported "
                              "for the guidance backend.")
 
@@ -4315,8 +4318,9 @@ class VllmConfig:
     """LoRA configuration."""
     speculative_config: Optional[SpeculativeConfig] = None
     """Speculative decoding configuration."""
-    decoding_config: DecodingConfig = field(default_factory=DecodingConfig)
-    """Decoding configuration."""
+    structured_output_config: StructuredOutputConfig = field(
+        default_factory=StructuredOutputConfig)
+    """Structured output configuration."""
     observability_config: Optional[ObservabilityConfig] = None
     """Observability configuration."""
     prompt_adapter_config: Optional[PromptAdapterConfig] = None
@@ -4409,8 +4413,8 @@ class VllmConfig:
             vllm_factors.append(self.speculative_config.compute_hash())
         else:
             vllm_factors.append("None")
-        if self.decoding_config:
-            vllm_factors.append(self.decoding_config.compute_hash())
+        if self.structured_output_config:
+            vllm_factors.append(self.structured_output_config.compute_hash())
         else:
             vllm_factors.append("None")
         if self.observability_config:
@@ -4784,7 +4788,7 @@ class VllmConfig:
             f"enforce_eager={self.model_config.enforce_eager}, "
             f"kv_cache_dtype={self.cache_config.cache_dtype}, "
             f" device_config={self.device_config.device}, "
-            f"decoding_config={self.decoding_config!r}, "
+            f"structured_output_config={self.structured_output_config!r}, "
             f"observability_config={self.observability_config!r}, "
             f"seed={self.model_config.seed}, "
             f"served_model_name={self.model_config.served_model_name}, "

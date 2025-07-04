@@ -18,7 +18,7 @@ API documentation for vLLM's configuration classes.
 - [vllm.config.PromptAdapterConfig][]
 - [vllm.config.MultiModalConfig][]
 - [vllm.config.PoolerConfig][]
-- [vllm.config.DecodingConfig][]
+- [vllm.config.StructuredOutputConfig][]
 - [vllm.config.ObservabilityConfig][]
 - [vllm.config.KVTransferConfig][]
 - [vllm.config.CompilationConfig][]
