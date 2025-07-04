@@ -2663,9 +2663,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             attn_block_size = 16 * cdiv(mamba_page_size, 16 * attn_page_size_1)
 
             logger.info(
-                "Setting attention block size to %d tokens "
+                "Increasing attention block size from %d to %d tokens "
                 "to ensure that attention page size is >= mamba page size.",
-                attn_block_size)
+                self.vllm_config.cache_config.block_size, attn_block_size)
 
         mamba_page_size_padded = attn_block_size * attn_page_size_1
 
@@ -2683,7 +2683,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 mamba_page_size_padded=mamba_page_size_padded,
             )
 
-        assert new_attn_page_size == new_mamba_page_size
+        assert new_attn_page_size == new_mamba_page_size, (
+            f"Attention page size ({new_attn_page_size}) does not equal "
+            "mamba page size ({new_mamba_page_size}) after alignment.")
 
         return kv_cache_spec
 
