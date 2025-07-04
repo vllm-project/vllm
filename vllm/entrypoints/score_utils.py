@@ -12,6 +12,7 @@ from vllm.entrypoints.chat_utils import (
     ChatCompletionContentPartImageParam, ChatCompletionContentPartTextParam,
     MultiModalItemTracker, _parse_chat_message_content_part)
 from vllm.inputs import SingletonPrompt, TokensPrompt
+from vllm.model_executor.model_loader import get_model_cls
 from vllm.multimodal.inputs import MultiModalDataDict
 from vllm.outputs import PoolingRequestOutput
 from vllm.transformers_utils.tokenizer import (AnyTokenizer,
@@ -124,15 +125,17 @@ def _parse_score_content(
 
 
 def apply_score_template(
-    model_arch: str,
+    model_config: ModelConfig,
     prompt_1: SingletonPrompt,
     prompt_2: SingletonPrompt,
 ) -> SingletonPrompt:
 
-    if 'JinaVLForRanking' in model_arch:
-        return f"**Document**:\n{prompt_2}\n**Query**:\n{prompt_1}"
+    if 'JinaVLForRanking' in model_config.architectures:
+        return get_model_cls(model_config).get_score_template(
+            prompt_1, prompt_2)
 
-    raise ValueError(f"Unsupported model architecture: {model_arch}")
+    raise ValueError(
+        f"Unsupported model architecture: {model_config.architectures}")
 
 
 def post_process_tokens_mm_data(
