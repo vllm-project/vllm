@@ -67,7 +67,6 @@ class JinaVLForSequenceClassification(nn.Module, SupportsCrossEncoding,
         config = vllm_config.model_config.hf_config
         pooler_config = vllm_config.model_config.pooler_config
 
-        config.num_labels = 1
         self.LOGIT_BIAS = 2.65
 
         self.qwen2_vl = Qwen2VLForConditionalGeneration(
@@ -95,7 +94,7 @@ class JinaVLForSequenceClassification(nn.Module, SupportsCrossEncoding,
         inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
     ) -> torch.Tensor:
-        return self.qwen2_vl(
+        hidden_states = self.qwen2_vl(
             input_ids=input_ids,
             positions=positions,
             intermediate_tensors=intermediate_tensors,
@@ -103,22 +102,15 @@ class JinaVLForSequenceClassification(nn.Module, SupportsCrossEncoding,
             **kwargs,
         )
 
+        logits = self.score(hidden_states) - self.LOGIT_BIAS
+        return logits
+
     def pooler(
         self,
         hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
     ) -> Optional[PoolerOutput]:
-        hidden_states = self._pooler.extract_states(hidden_states,
-                                                    pooling_metadata)
-
-        logits = self.score(hidden_states) - self.LOGIT_BIAS
-
-        pooled_data = self._pooler.head(logits, pooling_metadata)
-
-        pooled_outputs = [
-            self._pooler.build_output(data.squeeze(-1)) for data in pooled_data
-        ]
-        return PoolerOutput(outputs=pooled_outputs)
+        return self._pooler(hidden_states, pooling_metadata)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
 

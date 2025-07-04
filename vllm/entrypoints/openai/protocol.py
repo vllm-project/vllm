@@ -24,8 +24,7 @@ from typing_extensions import TypeAlias
 from vllm import envs
 from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
                                          random_tool_call_id)
-from vllm.entrypoints.score_utils import (ScoreContentPartParam,
-                                          ScoreMultiModalParam)
+from vllm.entrypoints.score_utils import ScoreMultiModalParam
 from vllm.logger import init_logger
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import (BeamSearchParams, GuidedDecodingParams,
@@ -1327,7 +1326,8 @@ class RerankRequest(OpenAIBaseModel):
 
 
 class RerankDocument(BaseModel):
-    data: Union[str, ScoreContentPartParam]
+    text: Optional[str] = None
+    multi_data: Optional[ScoreMultiModalParam] = None
 
 
 class RerankResult(BaseModel):

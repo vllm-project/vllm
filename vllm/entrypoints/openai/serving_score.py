@@ -481,8 +481,9 @@ class ServingScores(OpenAIServing):
 
             result = RerankResult(
                 index=idx,
-                document=RerankDocument(data=documents[idx] if isinstance(
-                    documents, list) else documents["content"][idx]),
+                document=RerankDocument(text=documents[idx]) if isinstance(
+                    documents, list) else RerankDocument(
+                        multi_data=documents["content"][idx]),
                 relevance_score=classify_res.outputs.score,
             )
             results.append(result)
