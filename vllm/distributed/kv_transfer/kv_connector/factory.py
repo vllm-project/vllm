@@ -48,8 +48,8 @@ class KVConnectorFactory:
 
     @classmethod
     def get_connector_class(
-            cls,
-            kv_transfer_config: "KVTransferConfig") -> type[KVConnectorBase]:
+            cls, kv_transfer_config: "KVTransferConfig"
+    ) -> type[KVConnectorBaseType]:
         """Get the connector class by name."""
         connector_name = kv_transfer_config.kv_connector
         if connector_name in cls._registry:
