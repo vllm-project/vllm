@@ -92,7 +92,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         paged_kv_last_page_len = torch.where(paged_kv_last_page_len == 0,
                                              page_size, paged_kv_last_page_len)
         qo_indptr = torch.arange(0,
-                                 self._num_decodes + 1,
+                                 len(seq_lens) + 1,
                                  step=1,
                                  dtype=torch.int32,
                                  device=device)

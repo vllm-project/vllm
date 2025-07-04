@@ -11,7 +11,7 @@ from vllm.model_executor.layers.mamba.mamba2_metadata import (
     _query_start_loc_to_chunk_indices_offsets)
 from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
                                               CommonAttentionMetadata)
-from vllm.v1.kv_cache_interface import MambaSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
 from vllm.v1.worker.block_table import BlockTable
 
 if TYPE_CHECKING:
@@ -58,8 +58,9 @@ class Mamba2AttentionMetadata:
 class Mamba2AttentionMetadataBuilder(
         AttentionMetadataBuilder[Mamba2AttentionMetadata]):
 
-    def __init__(self, runner: "GPUModelRunner", kv_cache_spec: MambaSpec,
+    def __init__(self, runner: "GPUModelRunner", kv_cache_spec: AttentionSpec,
                  block_table: BlockTable):
+        assert isinstance(kv_cache_spec, MambaSpec)
         self.runner = runner
         self.kv_cache_spec = kv_cache_spec
         self.block_table = block_table
