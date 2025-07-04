@@ -334,6 +334,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # the same order of requests. We ensure this by only allowing the first
         # group to reorder the batch and asserting that all other groups do not
         # reorder the batch.
+        # TODO(tdoublep): make this more flexible so that any group can
+        # re-order the batch (not only the first).
+        # TODO(tdoublep): verify this during engine init instead of at runtime
         for i in range(1, len(self.kv_cache_config.kv_cache_groups)):
             batch_reordered = self.attn_metadata_builders[i].reorder_batch(
                 self.input_batch, scheduler_output)
@@ -2449,6 +2452,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             corresponding memory buffer for KV cache.
         """
         kv_caches: dict[str, torch.Tensor] = {}
+        has_attn, has_mamba = False, False
         for i, kv_cache_group_spec in enumerate(
                 kv_cache_config.kv_cache_groups):
             kv_cache_spec = kv_cache_group_spec.kv_cache_spec
@@ -2458,6 +2462,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_blocks = (raw_tensor.numel() //
                               kv_cache_spec.page_size_bytes)
                 if isinstance(kv_cache_spec, AttentionSpec):
+                    has_attn = True
                     kv_cache_shape = self.attn_backends[i].get_kv_cache_shape(
                         num_blocks, kv_cache_spec.block_size,
                         kv_cache_spec.num_kv_heads, kv_cache_spec.head_size)
@@ -2486,24 +2491,66 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         layer_name].view(dtype).view(kv_cache_shape).permute(
                             *inv_order)
                 elif isinstance(kv_cache_spec, MambaSpec):
+                    has_mamba = True
                     raw_tensor = kv_cache_raw_tensors[layer_name]
                     dtype = kv_cache_spec.dtype
+                    num_element_per_page = (kv_cache_spec.page_size_bytes //
+                                            get_dtype_size(dtype))
                     state_tensors = []
-                    start_pos = 0
+                    storage_offset = 0
                     for shape in kv_cache_spec.shapes:
                         target_shape = (num_blocks, *shape)
-                        size_in_bytes = np.prod(shape) * get_dtype_size(
-                            dtype) * num_blocks
-                        tensor = raw_tensor[start_pos:start_pos +
-                                            size_in_bytes]
-                        tensor = tensor.view(dtype).view(target_shape)
+                        stride = torch.empty(target_shape).stride()
+                        target_stride = (num_element_per_page, *stride[1:])
+                        tensor = torch.as_strided(
+                            raw_tensor.view(dtype),
+                            size=target_shape,
+                            stride=target_stride,
+                            storage_offset=storage_offset,
+                        )
                         state_tensors.append(tensor)
-                        start_pos += size_in_bytes
-                    assert start_pos == raw_tensor.numel()
-                    kv_caches[layer_name] = tuple(state_tensors)
+                        storage_offset += stride[0]
+
+                    kv_caches[layer_name] = state_tensors
                 else:
                     raise NotImplementedError
+
+        if has_attn and has_mamba:
+            self._verify_hybrid_attention_mamba_layout(kv_cache_config,
+                                                       kv_cache_raw_tensors)
+
         return kv_caches
+
+    def _verify_hybrid_attention_mamba_layout(
+            self, kv_cache_config: KVCacheConfig,
+            kv_cache_raw_tensors: dict[str, torch.Tensor]) -> None:
+        """
+        Verify that the KV cache memory layout is compatible for
+        models with both attention and mamba KV cache groups.
+
+        Args:
+            kv_cache_config: The KV cache config
+            kv_cache_raw_tensors: The KV cache buffer of each layer.
+        """
+
+        for i, kv_cache_group_spec in enumerate(
+                kv_cache_config.kv_cache_groups):
+            kv_cache_spec = kv_cache_group_spec.kv_cache_spec
+            for layer_name in kv_cache_group_spec.layer_names:
+                raw_tensor = kv_cache_raw_tensors[layer_name]
+                num_blocks = (raw_tensor.numel() //
+                              kv_cache_spec.page_size_bytes)
+                if isinstance(kv_cache_spec, AttentionSpec):
+                    kv_cache_shape = self.attn_backends[i].get_kv_cache_shape(
+                        num_blocks, kv_cache_spec.block_size,
+                        kv_cache_spec.num_kv_heads, kv_cache_spec.head_size)
+                    if kv_cache_shape[0] != num_blocks or kv_cache_shape[
+                            1] != 2:
+                        raise ValueError(
+                            "Hybrid models in V1 require an attention "
+                            "backend with kv_cache_shape="
+                            "(num_blocks, 2, ...). Please try setting "
+                            "VLLM_ATTENTION_BACKEND=FLASHINFER")
 
     def initialize_kv_cache_tensors(
             self, kv_cache_config: KVCacheConfig) -> dict[str, torch.Tensor]:
@@ -2623,11 +2670,69 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 raise NotImplementedError(
                     "Prefix caching is not supported for Mamba yet.")
             max_model_len = self.vllm_config.model_config.max_model_len
+
+            page_size_padded = self._maybe_pad_mamba_page_size(
+                attn_layers, mamba_layers, kv_cache_spec, max_model_len,
+                block_size)
+
             # Set block_size to max_model_len, so that mamba model will always
             # have only one block in the KV cache.
             for layer_name, mamba_module in mamba_layers.items():
                 kv_cache_spec[layer_name] = MambaSpec(
                     shapes=mamba_module.get_state_shape(),
                     dtype=self.kv_cache_dtype,
-                    block_size=max_model_len)
+                    block_size=max_model_len,
+                    page_size_padded=page_size_padded)
+
         return kv_cache_spec
+
+    def _maybe_pad_mamba_page_size(
+        self,
+        attn_layers: dict[str, Attention],
+        mamba_layers: dict[str, MambaMixer2],
+        kv_cache_spec: dict[str, KVCacheSpec],
+        max_model_len: int,
+        block_size: int,
+    ) -> Optional[int]:
+        """
+        Ensure that page size of attention KV cache groups is greater than or
+        equal to the mamba KV cache groups. If not, we suggest to the user
+        how to set the attention block size to ensure that it is.
+
+        If the attention page size is strictly greater than the mamba page size,
+        we pad the mamba page size to make them equal.
+
+        Args:
+            attn_layers: Attention layers
+            mamba_layers: Mamba layers
+            kv_cache_spec: KV cache spec (populated with attention layers)
+
+        Returns:
+            Optional[int]: Mamba page size with padding (None if no padding).
+        """
+
+        if len(attn_layers) == 0:
+            return None
+
+        attn_layer_name = next(iter(attn_layers))
+        attn_page_size = kv_cache_spec[attn_layer_name].page_size_bytes
+        mamba_layer_name = next(iter(mamba_layers))
+        mamba_page_size = MambaSpec(
+            shapes=mamba_layers[mamba_layer_name].get_state_shape(),
+            dtype=self.kv_cache_dtype,
+            block_size=max_model_len).page_size_bytes
+        if attn_page_size < mamba_page_size:
+            # attention page size (for 16 tokens)
+            attn_page_size_16 = 16 * attn_page_size // block_size
+            # some attention backends (e.g. FA) only support setting
+            # block size to multiple of 16, so let's suggest a value
+            # that would work (note: FA is currently not compatible
+            # with mamba layers, use FlashInfer instead).
+            suggest_attn_block_size = 16 * cdiv(mamba_page_size,
+                                                attn_page_size_16)
+            raise ValueError(
+                "Attention block size should be increased to at least "
+                f"{suggest_attn_block_size} in order to match "
+                "the mamba page size")
+
+        return attn_page_size
