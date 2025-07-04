@@ -473,12 +473,30 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 logger.warning_once(
                     "DeepGemm not supported on the current platform.")
 
+        # Check for CutlassBlockScaledGroupedGemm support.
+        self.allow_cutlass_block_scaled_grouped_gemm = False
+        if not self.block_quant:
+            logger.warning_once("Model is not block quantized. Not using "
+                                "CutlassBlockScaledGroupedGemm kernels")
+        elif (current_platform.is_cuda()
+              and current_platform.has_device_capability(100)):
+            logger.info_once(
+                "Using CutlassBlockScaledGroupedGemm kernels for Fp8MoEMethod."
+            )
+            self.allow_cutlass_block_scaled_grouped_gemm = True
+        else:
+            logger.warning_once(
+                "CutlassBlockScaledGroupedGemm not supported on the current "
+                "platform.")
+
         self.topk_indices_dtype = None
         self.fused_experts = functools.partial(  # type: ignore
             fused_experts,
             use_fp8_w8a8=True,
             block_shape=self.quant_config.weight_block_size,
-            allow_deep_gemm=self.allow_deep_gemm)
+            allow_deep_gemm=self.allow_deep_gemm,
+            allow_cutlass_block_scaled_grouped_gemm=(
+                self.allow_cutlass_block_scaled_grouped_gemm))
 
     def create_weights(self, layer: Module, num_experts: int, hidden_size: int,
                        intermediate_size_per_partition: int,
