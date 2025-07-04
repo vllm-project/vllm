@@ -93,14 +93,14 @@ ConfigT = TypeVar("ConfigT", bound=ConfigType)
 TaskOption = Literal["auto", "generate", "embedding", "embed", "classify",
                      "score", "reward", "transcription"]
 
-_ResolvedTask = Literal["generate", "embed", "classify", "score", "reward",
-                        "draft", "transcription"]
+_ResolvedTask = Literal["generate", "embed", "classify", "reward", "draft",
+                        "transcription"]
 
 RunnerType = Literal["generate", "pooling", "draft", "transcription"]
 
 _RUNNER_TASKS: dict[RunnerType, list[_ResolvedTask]] = {
     "generate": ["generate"],
-    "pooling": ["embed", "classify", "score", "reward"],
+    "pooling": ["embed", "classify", "reward"],
     "draft": ["draft"],
     "transcription": ["transcription"],
 }
@@ -346,6 +346,10 @@ class ModelConfig:
     limit_mm_per_prompt: dict[str, int] = field(default_factory=dict)
     """Maximum number of data items per modality per prompt. Only applicable
     for multimodal models."""
+    media_io_kwargs: dict[str, dict[str, Any]] = field(default_factory=dict)
+    """Additional args passed to process media inputs, keyed by modalities. 
+    For example, to set num_frames for video, set 
+    `--media-io-kwargs '{"video": {"num_frames": 40} }'` """
     use_async_output_proc: bool = True
     """Whether to use async output processor."""
     config_format: Union[str, ConfigFormat] = ConfigFormat.AUTO.value
@@ -462,6 +466,9 @@ class ModelConfig:
                     "affect the random state of the Python process that "
                     "launched vLLM.", self.seed)
 
+        # Keep set served_model_name before maybe_model_redirect(self.model)
+        self.served_model_name = get_served_model_name(self.model,
+                                                       self.served_model_name)
         self.model = maybe_model_redirect(self.model)
         # The tokenizer is consistent with the model by default.
         if self.tokenizer is None:
@@ -605,8 +612,6 @@ class ModelConfig:
 
         self.original_max_model_len = self.max_model_len
         self.max_model_len = self.get_and_verify_max_len(self.max_model_len)
-        self.served_model_name = get_served_model_name(self.model,
-                                                       self.served_model_name)
         self.multimodal_config = self._init_multimodal_config()
         if not self.skip_tokenizer_init:
             self._verify_tokenizer_mode()
@@ -655,7 +660,7 @@ class ModelConfig:
         return self._architecture
 
     @property
-    def model_info(self) -> dict[str, Any]:
+    def model_info(self):
         return self._model_info
 
     def maybe_pull_model_tokenizer_for_s3(self, model: str,
@@ -694,6 +699,7 @@ class ModelConfig:
         if self.registry.is_multimodal_model(self.architectures):
             return MultiModalConfig(
                 limit_per_prompt=self.limit_mm_per_prompt,
+                media_io_kwargs=self.media_io_kwargs,
                 mm_processor_kwargs=self.mm_processor_kwargs,
                 disable_mm_preprocessor_cache=self.
                 disable_mm_preprocessor_cache)
@@ -772,7 +778,7 @@ class ModelConfig:
         if get_pooling_config(model_id, self.revision):
             return "embed"
         if self.registry.is_cross_encoder_model(architectures):
-            return "score"
+            return "classify"
         if self.registry.is_transcription_model(architectures):
             return "transcription"
 
@@ -836,14 +842,24 @@ class ModelConfig:
                     "This model supports multiple tasks: %s. "
                     "Defaulting to '%s'.", supported_tasks, selected_task)
         else:
-            # Aliases
-            if task_option == "embedding":
-                msg = ("The 'embedding' task has been renamed to "
-                       "'embed', please use the new name. The old name "
-                       "will be removed in v1.0.")
-                warnings.warn(msg, DeprecationWarning, stacklevel=2)
+            if task_option == "score":
+                if not runner_support["pooling"]:
+                    msg = (f"This model does not support the '{task_option}' "
+                           f"task. Supported tasks: {supported_tasks}")
+                    raise ValueError(msg)
+                if self.registry.is_cross_encoder_model(architectures):
+                    task_option = "classify"
+                else:
+                    task_option = "embed"
+            else:
+                # Aliases
+                if task_option == "embedding":
+                    msg = ("The 'embedding' task has been renamed to "
+                           "'embed', please use the new name. The old name "
+                           "will be removed in v1.0.")
+                    warnings.warn(msg, DeprecationWarning, stacklevel=2)
 
-                task_option = "embed"
+                    task_option = "embed"
 
             if task_option not in supported_tasks:
                 msg = (
@@ -964,7 +980,7 @@ class ModelConfig:
 
     def _verify_bnb_config(self) -> None:
         """
-        The current version of bitsandbytes (0.45.3) with 8-bit models does not
+        The current version of bitsandbytes (0.46.1) with 8-bit models does not
         yet support CUDA graph.
         # TODO Remove this when bitsandbytes supports.
         """
@@ -1405,7 +1421,7 @@ class ModelConfig:
 
     @property
     def is_cross_encoder(self) -> bool:
-        return self.registry.is_cross_encoder_model(self.architectures)
+        return self.task == "classify"
 
     @property
     def use_mla(self) -> bool:
@@ -1434,10 +1450,17 @@ class ModelConfig:
         return getattr(self.hf_config, "matryoshka_dimensions", None)
 
     def get_and_verify_max_len(self, max_model_len: int):
-        tokenizer_config = try_get_tokenizer_config(
-            self.tokenizer,
-            trust_remote_code=self.trust_remote_code,
-            revision=self.tokenizer_revision)
+        # For pooling models, the tokenizer's `model_max_length` is often a
+        # reliable source for the maximum sequence length. However, for
+        # generative models, this can be incorrect and unduly limit the
+        # context window (e.g., DeepSeek-R1). Therefore, we only consider
+        # tokenizer_config for pooling models.
+        tokenizer_config = None
+        if self.runner_type == "pooling":
+            tokenizer_config = try_get_tokenizer_config(
+                self.tokenizer,
+                trust_remote_code=self.trust_remote_code,
+                revision=self.tokenizer_revision)
         max_model_len = _get_and_verify_max_len(
             hf_config=self.hf_text_config,
             tokenizer_config=tokenizer_config,
@@ -1769,6 +1792,10 @@ class ParallelConfig:
     """Port of the data parallel master."""
     data_parallel_backend: str = "mp"
     """Backend to use for data parallel, either "mp" or "ray"."""
+    data_parallel_external_lb: bool = False
+    """Whether to use "external" DP LB mode. Applies only to online serving
+    and when data_parallel_size > 0. Set implicitly when
+    data_parallel_rank is provided explicitly to vllm serve."""
     enable_expert_parallel: bool = False
     """Use expert parallelism instead of tensor parallelism for MoE layers."""
     enable_eplb: bool = False
@@ -1938,6 +1965,11 @@ class ParallelConfig:
         if self.data_parallel_size > 1 or self.data_parallel_size_local == 0:
             # Data parallel was specified in the engine args.
             self.data_parallel_master_port = get_open_port()
+
+            if not (0 <= self.data_parallel_rank < self.data_parallel_size):
+                raise ValueError(
+                    f"data_parallel_rank ({self.data_parallel_rank})"
+                    f" must be in the range [0, {self.data_parallel_size})")
         else:
             # Otherwise fall back to env vars (e.g. for offline SPMD case).
             self.data_parallel_size = envs.VLLM_DP_SIZE
@@ -1945,6 +1977,10 @@ class ParallelConfig:
             self.data_parallel_rank_local = envs.VLLM_DP_RANK_LOCAL
             self.data_parallel_master_ip = envs.VLLM_DP_MASTER_IP
             self.data_parallel_master_port = envs.VLLM_DP_MASTER_PORT
+
+            if self.data_parallel_external_lb:
+                raise ValueError("data_parallel_external_lb can only "
+                                 "be set when data_parallel_size > 1")
 
         if self.distributed_executor_backend == "external_launcher":
             import os
@@ -3062,6 +3098,11 @@ class MultiModalConfig:
     For example, to allow up to 16 images and 2 videos per prompt:
     `{"images": 16, "videos": 2}`
     """
+
+    media_io_kwargs: dict[str, dict[str, Any]] = field(default_factory=dict)
+    """Additional args passed to process media inputs, keyed by modalities. 
+    For example, to set num_frames for video, set 
+    `--media-io-kwargs '{"video": {"num_frames": 40} }'` """
 
     mm_processor_kwargs: Optional[dict[str, object]] = None
     """
@@ -4721,6 +4762,12 @@ class VllmConfig:
         cls = MODELS_CONFIG_MAP.get(architecture, None)
         if cls is not None:
             cls.verify_and_update_config(self)
+
+        if self.model_config.task == "classify":
+            # Maybe convert ForCausalLM into ForSequenceClassification model.
+            from vllm.model_executor.models.adapters import (
+                SequenceClassificationConfig)
+            SequenceClassificationConfig.verify_and_update_config(self)
 
     def __str__(self):
         return (

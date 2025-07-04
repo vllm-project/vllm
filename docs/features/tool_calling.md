@@ -53,7 +53,7 @@ Next, make a request to the model that should result in it using the available t
     tool_call = response.choices[0].message.tool_calls[0].function
     print(f"Function called: {tool_call.name}")
     print(f"Arguments: {tool_call.arguments}")
-    print(f"Result: {get_weather(**json.loads(tool_call.arguments))}")
+    print(f"Result: {tool_functions[tool_call.name](**json.loads(tool_call.arguments))}")
     ```
 
 Example output:
@@ -263,6 +263,15 @@ For Qwen2.5, the chat template in tokenizer_config.json has already included sup
 * `Qwen/QwQ-32B`
 
 Flags: `--tool-call-parser hermes`
+
+### MiniMax Models (`minimax_m1`)
+
+Supported models:
+
+* `MiniMaxAi/MiniMax-M1-40k` (use with <gh-file:examples/tool_chat_template_minimax.jinja>)
+* `MiniMaxAi/MiniMax-M1-80k` (use with <gh-file:examples/tool_chat_template_minimax.jinja>)
+
+Flags: `--tool-call-parser minimax --chat-template examples/tool_chat_template_minimax.jinja`
 
 ### DeepSeek-V3 Models (`deepseek_v3`)
 

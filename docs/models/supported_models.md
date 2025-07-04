@@ -34,7 +34,7 @@ llm.apply_model(lambda model: print(type(model)))
 If it is `TransformersForCausalLM` then it means it's based on Transformers!
 
 !!! tip
-    You can force the use of `TransformersForCausalLM` by setting `model_impl="transformers"` for [offline-inference][offline-inference] or `--model-impl transformers` for the [openai-compatible-server][openai-compatible-server].
+    You can force the use of `TransformersForCausalLM` by setting `model_impl="transformers"` for [offline-inference][offline-inference] or `--model-impl transformers` for the [openai-compatible-server][serving-openai-compatible-server].
 
 !!! note
     vLLM may not fully optimise the Transformers implementation so you may see degraded performance if comparing a native model to a Transformers model in vLLM.
@@ -53,8 +53,8 @@ For a model to be compatible with the Transformers backend for vLLM it must:
 
 If the compatible model is:
 
-- on the Hugging Face Model Hub, simply set `trust_remote_code=True` for [offline-inference][offline-inference] or `--trust-remote-code` for the [openai-compatible-server][openai-compatible-server].
-- in a local directory, simply pass directory path to `model=<MODEL_DIR>` for [offline-inference][offline-inference] or `vllm serve <MODEL_DIR>` for the [openai-compatible-server][openai-compatible-server].
+- on the Hugging Face Model Hub, simply set `trust_remote_code=True` for [offline-inference][offline-inference] or `--trust-remote-code` for the [openai-compatible-server][serving-openai-compatible-server].
+- in a local directory, simply pass directory path to `model=<MODEL_DIR>` for [offline-inference][offline-inference] or `vllm serve <MODEL_DIR>` for the [openai-compatible-server][serving-openai-compatible-server].
 
 This means that, with the Transformers backend for vLLM, new models can be used before they are officially supported in Transformers or vLLM!
 
@@ -330,6 +330,8 @@ Specified using `--task generate`.
 | `DeepseekV2ForCausalLM`                           | DeepSeek-V2                                         | `deepseek-ai/DeepSeek-V2`, `deepseek-ai/DeepSeek-V2-Chat` etc.                                                                                                               |                        | ✅︎                          | ✅︎                     |
 | `DeepseekV3ForCausalLM`                           | DeepSeek-V3                                         | `deepseek-ai/DeepSeek-V3-Base`, `deepseek-ai/DeepSeek-V3` etc.                                                                                                               |                        | ✅︎                          | ✅︎                     |
 | `Dots1ForCausalLM`                                | dots.llm1                                           | `rednote-hilab/dots.llm1.base`, `rednote-hilab/dots.llm1.inst` etc.                                                                                                               |                        | ✅︎                          | ✅︎                     |
+| `Ernie4_5_ForCausalLM`                            | Ernie4.5                                            | `baidu/ERNIE-4.5-0.3B-PT`,etc.                                                                                                               |                        | ✅︎                          | ✅︎                     |
+| `Ernie4_5_MoeForCausalLM`                         | Ernie4.5MoE                                         | `baidu/ERNIE-4.5-21B-A3B-PT`,  `baidu/ERNIE-4.5-300B-A47B-PT`, etc.                                                                                                               |                        | ✅︎                          | ✅︎                     |
 | `ExaoneForCausalLM`                               | EXAONE-3                                            | `LGAI-EXAONE/EXAONE-3.0-7.8B-Instruct`, etc.                                                                                                                                 | ✅︎                     | ✅︎                          | ✅︎                     |
 | `FalconForCausalLM`                               | Falcon                                              | `tiiuae/falcon-7b`, `tiiuae/falcon-40b`, `tiiuae/falcon-rw-7b`, etc.                                                                                                         |                        | ✅︎                          | ✅︎                     |
 | `FalconMambaForCausalLM`                          | FalconMamba                                         | `tiiuae/falcon-mamba-7b`, `tiiuae/falcon-mamba-7b-instruct`, etc.                                                                                                            |                        | ✅︎                          | ✅︎                     |
@@ -468,19 +470,28 @@ Specified using `--task classify`.
 |----------------------------------|----------|----------------------------------------|------------------------|-----------------------------|-----------------------|
 | `JambaForSequenceClassification` | Jamba    | `ai21labs/Jamba-tiny-reward-dev`, etc. | ✅︎                     | ✅︎                          |                       |
 | `GPT2ForSequenceClassification`  | GPT2     | `nie3e/sentiment-polish-gpt2-small`    |                        |                             | ✅︎                     |
+
 If your model is not in the above list, we will try to automatically convert the model using
-[as_classification_model][vllm.model_executor.models.adapters.as_classification_model]. By default, the class probabilities are extracted from the softmaxed hidden state corresponding to the last token.
+[as_seq_cls_model][vllm.model_executor.models.adapters.as_seq_cls_model]. By default, the class probabilities are extracted from the softmaxed hidden state corresponding to the last token.
 
 #### Sentence Pair Scoring
 
 Specified using `--task score`.
 
-| Architecture                          | Models            | Example HF Models                                                                    | [V1](gh-issue:8779)   |
-|---------------------------------------|-------------------|--------------------------------------------------------------------------------------|-----------------------|
-| `BertForSequenceClassification`       | BERT-based        | `cross-encoder/ms-marco-MiniLM-L-6-v2`, etc.                                         |                       |
-| `Qwen3ForSequenceClassification`      | Qwen3-based       | `tomaarsen/Qwen3-Reranker-0.6B-seq-cls`, `Qwen/Qwen3-Reranker-0.6B` (see note), etc. | ✅︎                     |
-| `RobertaForSequenceClassification`    | RoBERTa-based     | `cross-encoder/quora-roberta-base`, etc.                                             |                       |
-| `XLMRobertaForSequenceClassification` | XLM-RoBERTa-based | `BAAI/bge-reranker-v2-m3`, etc.                                                      |                       |
+| Architecture                          | Models            | Example HF Models                                                                    | [V1](gh-issue:8779) |
+|---------------------------------------|-------------------|--------------------------------------------------------------------------------------|---------------------|
+| `BertForSequenceClassification`       | BERT-based        | `cross-encoder/ms-marco-MiniLM-L-6-v2`, etc.                                         |                     |
+| `Qwen2ForSequenceClassification`      | Qwen2-based       | `mixedbread-ai/mxbai-rerank-base-v2` (see note), etc.                                | ✅︎                  |
+| `Qwen3ForSequenceClassification`      | Qwen3-based       | `tomaarsen/Qwen3-Reranker-0.6B-seq-cls`, `Qwen/Qwen3-Reranker-0.6B` (see note), etc. | ✅︎                  |
+| `RobertaForSequenceClassification`    | RoBERTa-based     | `cross-encoder/quora-roberta-base`, etc.                                             |                     |
+| `XLMRobertaForSequenceClassification` | XLM-RoBERTa-based | `BAAI/bge-reranker-v2-m3`, etc.                                                      |                     |
+
+!!! note
+    Load the official original `mxbai-rerank-v2` by using the following command.
+
+    ```bash
+    vllm serve mixedbread-ai/mxbai-rerank-base-v2 --hf_overrides '{"architectures": ["Qwen2ForSequenceClassification"],"classifier_from_token": ["0", "1"], "method": "from_2_way_softmax"}'
+    ```
 
 !!! note
     Load the official original `Qwen3 Reranker` by using the following command. More information can be found at: <gh-file:examples/offline_inference/qwen3_reranker.py>.
@@ -488,6 +499,7 @@ Specified using `--task score`.
     ```bash
     vllm serve Qwen/Qwen3-Reranker-0.6B --hf_overrides '{"architectures": ["Qwen3ForSequenceClassification"],"classifier_from_token": ["no", "yes"],"is_original_qwen3_reranker": true}'
     ```
+
 [](){ #supported-mm-models }
 
 ## List of Multimodal Language Models
@@ -559,6 +571,7 @@ Specified using `--task generate`.
 | `H2OVLChatModel`                             | H2OVL                                                                    | T + I<sup>E+</sup>                                                    | `h2oai/h2ovl-mississippi-800m`, `h2oai/h2ovl-mississippi-2b`, etc.                                                                                      |                        | ✅︎                          | ✅︎\*                  |
 | `Idefics3ForConditionalGeneration`           | Idefics3                                                                 | T + I                                                                 | `HuggingFaceM4/Idefics3-8B-Llama3` etc.                                                                                                                 | ✅︎                     |                             |  ✅︎                   |
 | `InternVLChatModel`                          | InternVL 3.0, InternVideo 2.5, InternVL 2.5, Mono-InternVL, InternVL 2.0 | T + I<sup>E+</sup> + (V<sup>E+</sup>)                                 | `OpenGVLab/InternVL3-9B`, `OpenGVLab/InternVideo2_5_Chat_8B`, `OpenGVLab/InternVL2_5-4B`, `OpenGVLab/Mono-InternVL-2B`, `OpenGVLab/InternVL2-4B`, etc.  | ✅︎                     | ✅︎                          | ✅︎                    |
+| `KeyeForConditionalGeneration`               | Keye-VL-8B-Preview                                                       | T + I<sup>E+</sup> + V<sup>E+</sup>                                   | `Kwai-Keye/Keye-VL-8B-Preview`                                                                                                                          |                        |                             | ✅︎                    |
 | `KimiVLForConditionalGeneration`             | Kimi-VL-A3B-Instruct, Kimi-VL-A3B-Thinking                               | T + I<sup>+</sup>                                                     | `moonshotai/Kimi-VL-A3B-Instruct`, `moonshotai/Kimi-VL-A3B-Thinking`                                                                                    |                        |                             | ✅︎                    |
 | `Llama4ForConditionalGeneration`             | Llama 4                                                                  | T + I<sup>+</sup>                                                     | `meta-llama/Llama-4-Scout-17B-16E-Instruct`, `meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8`, `meta-llama/Llama-4-Maverick-17B-128E-Instruct`, etc. |                        | ✅︎                          | ✅︎                    |
 | `LlavaForConditionalGeneration`              | LLaVA-1.5                                                                | T + I<sup>E+</sup>                                                    | `llava-hf/llava-1.5-7b-hf`, `TIGER-Lab/Mantis-8B-siglip-llama3` (see note), etc.                                                                        |                        | ✅︎                          | ✅︎                    |

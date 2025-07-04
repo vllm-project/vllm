@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Optional
 
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.utils import _resize_cache
 from vllm.triton_utils import tl, triton
 
@@ -179,26 +181,40 @@ def silu_mul_fp8_quant_deep_gemm(
 class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     # The Deep Gemm kernels only support block size of 128
-    DEEPGEMM_BLOCK_SHAPE = 128
+    DEEPGEMM_BLOCK_SHAPE: list[int] = [128, 128]
 
-    def __init__(self, max_num_tokens: int, world_size: int, dp_size: int,
-                 block_shape: list[int]):
+    def __init__(self,
+                 max_num_tokens: int,
+                 num_dispatchers: int,
+                 block_shape: list[int],
+                 per_act_token_quant=False):
         """
         max_num_tokens: Maximum number of tokens from a DP Rank
-        world_size: Number of EP ranks
-        dp_size: Number of data-parallel ranks
-        block_shape: Block quantization block shape
+        num_dispatchers: The number of DP dispatchers.
+        block_shape: Block quantization block shape.
+        per_act_token_quant: Per activation token quantization flag.
         """
-        super().__init__()
+        super().__init__(
+            FusedMoEQuantConfig(
+                quant_dtype=torch.float8_e4m3fn,
+                per_act_token_quant=per_act_token_quant,
+                block_shape=block_shape,
+            ))
+        assert self.block_shape == self.DEEPGEMM_BLOCK_SHAPE
         self.max_num_tokens = max_num_tokens
-        self.world_size = world_size
-        self.dp_size = dp_size
-        self.block_shape = block_shape
+        self.num_dispatchers = num_dispatchers
 
-        assert (len(self.block_shape) == 2 and all(
-            [v == self.DEEPGEMM_BLOCK_SHAPE for v in self.block_shape]))
+    @property
+    def activation_formats(
+        self
+    ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
+        return (mk.FusedMoEActivationFormat.BatchedExperts,
+                mk.FusedMoEActivationFormat.BatchedExperts)
 
     def supports_chunking(self) -> bool:
+        return False
+
+    def supports_expert_map(self) -> bool:
         return False
 
     def workspace_shapes(
@@ -216,7 +232,7 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         # FIXME (varun): We should be able to dispatch only from the leader
         # DP ranks in the case of TP > 1. At the moment, all the Ranks
         # end up sending their tokens. This needs to be fixed.
-        num_dispatchers = self.world_size
+        num_dispatchers = self.num_dispatchers
         num_experts = local_num_experts
         max_num_tokens = a.size(
             0) if self.max_num_tokens is None else self.max_num_tokens
@@ -248,6 +264,7 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
     ):
         import deep_gemm as dg
         assert hidden_states.ndim == 3
+        assert self.block_shape is not None
 
         a1q = hidden_states
         _, N, K = w1.size()
