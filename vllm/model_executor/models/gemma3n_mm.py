@@ -102,7 +102,8 @@ class Gemma3nDummyInputsBuilder(BaseDummyInputsBuilder[Gemma3nProcessingInfo]):
         num_audios = mm_counts.get("audio", 0)
         processor = self.info.get_hf_processor()
         feature_extractor: Gemma3nAudioFeatureExtractor = processor.feature_extractor  # noqa: E501
-        audio_len = feature_extractor.max_length
+        # audio_len = feature_extractor.max_length
+        audio_len = feature_extractor.fft_length
         image_processor: SiglipImageProcessorFast = processor.image_processor
         img_width = image_processor.size.get("width", 224)
         img_height = image_processor.size.get("width", 224)
@@ -351,10 +352,15 @@ class Gemma3nForConditionalGeneration(nn.Module, SupportsMultiModal):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             # mapping for new names in checkpoint saved after transformers v4.52
+            "model.embed_audio.": "embed_audio.",
+            "model.embed_vision.": "embed_vision.",
             "model.language_model.": "language_model.model.",
             "model.vision_tower.": "vision_tower.",
+            "model.audio_tower.": "audio_tower.",
             "model.multi_modal_projector.": "multi_modal_projector.",
             "lm_head.": "language_model.lm_head.",
+            "model": "language_model.model",
+
         })
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
