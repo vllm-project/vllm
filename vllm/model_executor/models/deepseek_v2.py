@@ -514,9 +514,13 @@ class DeepseekV2MLAAttention(nn.Module):
             [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
         kv_c_normed = self.kv_a_layernorm(kv_c.contiguous())
 
-        q = q.view(-1, self.num_local_heads, self.qk_head_dim)
         # Add head dim of 1 to k_pe
-        k_pe = k_pe.unsqueeze(1)
+        if is_hpu:
+            k_pe = k_pe.unsqueeze(2)
+            q = q.view(*q.shape[:2], self.num_local_heads, self.qk_head_dim)
+        else:
+            k_pe = k_pe.unsqueeze(1)
+            q = q.view(-1, self.num_local_heads, self.qk_head_dim)
 
         q[..., self.qk_nope_head_dim:], k_pe = self.rotary_emb(
             positions, q[..., self.qk_nope_head_dim:], k_pe)
