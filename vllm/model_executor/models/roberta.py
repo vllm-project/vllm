@@ -12,7 +12,7 @@ from transformers import RobertaConfig
 
 from vllm.config import VllmConfig
 from vllm.model_executor.custom_op import CustomOp
-from vllm.model_executor.layers.pooler import CrossEncodingPooler, ClassifierPooler
+from vllm.model_executor.layers.pooler import ClassifierPooler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
