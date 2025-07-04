@@ -174,6 +174,7 @@ def cpu_platform_plugin() -> Optional[str]:
 def neuron_platform_plugin() -> Optional[str]:
     tnx_installed = False
     nxd_installed = False
+    on_installed = False
     logger.debug("Checking if Neuron platform is available.")
     try:
         import transformers_neuronx  # noqa: F401
@@ -191,7 +192,15 @@ def neuron_platform_plugin() -> Optional[str]:
     except ImportError:
         pass
 
-    is_neuron = tnx_installed or nxd_installed
+    try:
+        import optimum.neuron  # noqa F401
+        on_installed = True
+        logger.debug("Confirmed Neuron platform is available because"
+                     " optimum-neuron has been found.")
+    except ImportError:
+        pass
+
+    is_neuron = tnx_installed or nxd_installed or on_installed
     return "vllm.platforms.neuron.NeuronPlatform" if is_neuron else None
 
 
