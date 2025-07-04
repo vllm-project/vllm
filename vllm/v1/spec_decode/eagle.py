@@ -92,7 +92,7 @@ class EagleProposer:
         # [batch_size, max_num_blocks_per_req]
         block_table: torch.Tensor,
         sampling_metadata: SamplingMetadata,
-    ) -> torch.Tensor:
+    ) -> tuple[list[list[int]], list[torch.Tensor]]:
         num_tokens = target_token_ids.shape[0]
         batch_size = next_token_ids.shape[0]
         last_token_indices = cu_num_tokens[1:] - 1
@@ -183,19 +183,26 @@ class EagleProposer:
                 last_hidden_states, hidden_states = ret_hidden_states
         sample_hidden_states = last_hidden_states[last_token_indices]
         logits = self.model.compute_logits(sample_hidden_states, None)
-        draft_token_ids = logits.argmax(dim=-1)
+        draft_token_ids, draft_probs = compute_probs_and_sample_next_token(
+            logits, sampling_metadata)
 
         # Early exit if there is only one draft token to be generated.
         if self.num_speculative_tokens == 1:
-            # [batch_size, 1]
-            return draft_token_ids.view(-1, 1)
+            # [batch_size, 1] and [batch_size, 1, vocab_size]
+            return (
+                draft_token_ids.view(-1, 1).tolist(),
+                draft_probs.unsqueeze(1).unbind(0),
+            )
 
         # TODO: Currently, MTP module released by deepseek only has
         # one layer. Adapt this code to support multiple layers once
         # there's a multi-layer MTP module.
 
         # Generate the remaining draft tokens.
-        draft_token_ids_list = [draft_token_ids]
+        # [num_speculative_tokens, batch_size]
+        draft_token_ids_list: list[torch.Tensor] = [draft_token_ids]
+        # [num_speculative_tokens, batch_size, vocab_size]
+        draft_probs_list: list[torch.Tensor] = [draft_probs]
 
         positions = target_positions[last_token_indices]
         hidden_states = hidden_states[last_token_indices]
@@ -268,12 +275,16 @@ class EagleProposer:
                                                None)
 
             # TODO(wenlong): get more than one token for tree attention
-            draft_token_ids = logits.argmax(dim=-1)
+            draft_token_ids, draft_probs = compute_probs_and_sample_next_token(
+                logits, sampling_metadata)
             draft_token_ids_list.append(draft_token_ids)
+            draft_probs_list.append(draft_probs)
 
         # [batch_size, num_speculative_tokens]
-        draft_token_ids = torch.stack(draft_token_ids_list, dim=1)
-        return draft_token_ids
+        draft_token_ids = torch.stack(draft_token_ids_list, dim=1).tolist()
+        # [batch_size, num_speculative_tokens, vocab_size]
+        draft_probs_list = torch.stack(draft_probs_list, dim=1).unbind(0)
+        return draft_token_ids, draft_probs_list
 
     @staticmethod
     def prepare_inputs(
@@ -398,10 +409,6 @@ class EagleProposer:
         ) == 1, "All eagle layers should belong to the same kv cache group"
 
 
-# NOTE(woosuk): Currently, the below code is not used and we always use argmax
-# to sample the draft tokens. We will use this after we find a way to manage
-# the draft prob tensor.
-# Refer to https://github.com/vllm-project/vllm/pull/16899 for the details.
 # FIXME(woosuk): The logic here is duplicated with the main sampling code.
 # We should refactor this to reuse the same sampling implementation.
 def compute_probs_and_sample_next_token(
