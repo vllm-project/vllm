@@ -336,6 +336,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # reorder the batch.
         # TODO(tdoublep): make this more flexible so that any group can
         # re-order the batch (not only the first).
+        # TODO(tdoublep): verify this during engine init instead of at runtime
         for i in range(1, len(self.kv_cache_config.kv_cache_groups)):
             batch_reordered = self.attn_metadata_builders[i].reorder_batch(
                 self.input_batch, scheduler_output)
