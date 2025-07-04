@@ -492,7 +492,7 @@ Specified using `--task score`.
     vllm serve Qwen/Qwen3-Reranker-0.6B --hf_overrides '{"architectures": ["Qwen3ForSequenceClassification"],"classifier_from_token": ["no", "yes"],"is_original_qwen3_reranker": true}'
     ```
 !!! note
-    Load the official original `mxbai-rerank-v2` by using the following command. 
+    Load the official original `mxbai-rerank-v2` by using the following command.
 
     ```bash
     vllm serve mixedbread-ai/mxbai-rerank-base-v2 --hf_overrides '{"architectures": ["Qwen2ForSequenceClassification"],"classifier_from_token": ["0", "1"], "method": "from_2_way_softmax"}'
