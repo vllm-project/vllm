@@ -8,7 +8,6 @@ import pytest
 from vllm.attention import Attention
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig, VllmConfig, set_current_vllm_config)
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.utils import GiB_bytes
