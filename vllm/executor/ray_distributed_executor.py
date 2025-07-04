@@ -552,8 +552,8 @@ class RayDistributedExecutor(DistributedExecutorBase):
         ray.get(parallel_worker_tasks)
 
     def _check_ray_cgraph_installation(self):
-        import pkg_resources  # type: ignore
         import importlib.metadata
+
         from packaging import version
 
         required_version = version.parse("2.43.0")
