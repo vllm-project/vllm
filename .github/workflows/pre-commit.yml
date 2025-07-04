@@ -4,6 +4,14 @@ on:
   pull_request:
   push:
     branches: [main]
+    paths-ignore:
+      - 'examples/offline_inference_medusaspeculator.py'
+      - 'examples/offline_inference_spec_decode.py'
+      - 'examples/online_serving/disaggregated_serving/disagg_proxy_demo.py'
+      - 'examples/offline_inference_fakehpu.py'
+      - 'examples/offline_inference_eaglespeculator.py'
+      - 'examples/lora_inference_hpu.py'
+      - 'benchmarks/benchmark_throughput.py'
 
 permissions:
   contents: read
