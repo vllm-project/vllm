@@ -780,8 +780,9 @@ class WhisperForConditionalGeneration(nn.Module, SupportsTranscription,
     @classmethod
     def get_decoder_prompt(cls, language: str, task_type: str,
                            prompt: str) -> str:
-        return (f"<|startoftranscript|><|{language}|><|{task_type}|>"
-                f"<|notimestamps|>{prompt}")
+        return ((f"<|prev|>{prompt}" if prompt else "") +
+                f"<|startoftranscript|><|{language}|>" +
+                f"<|{task_type}|><|notimestamps|>")
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
