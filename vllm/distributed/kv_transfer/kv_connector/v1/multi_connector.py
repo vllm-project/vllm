@@ -215,12 +215,17 @@ class MultiConnector(KVConnectorBase_V1):
         ktcs = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "connectors")
         assert ktcs is not None
-        layouts = {
-            KVConnectorFactory.get_connector_class(KVTransferConfig(
-                **ktc)).get_required_kvcache_layout(copy.copy(vllm_config))
-            for ktc in ktcs
-        }
-        layouts.discard(None)
+        layouts: set[str] = set()
+        for ktc in ktcs:
+            kv_transfer_config = KVTransferConfig(**ktc)
+            temp_vllm_config = copy.copy(vllm_config)
+            temp_vllm_config.kv_transfer_config = kv_transfer_config
+            required_kvcache_layout = KVConnectorFactory.get_connector_class(
+                kv_transfer_config).get_required_kvcache_layout(
+                    temp_vllm_config)
+            if required_kvcache_layout is not None:
+                layouts.add(required_kvcache_layout)
+
         if len(layouts) > 1:
             raise ValueError(
                 "Multiple connectors require different KV cache layouts: "
