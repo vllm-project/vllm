@@ -30,7 +30,7 @@ from collections import namedtuple
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from multiprocessing import shared_memory
-from typing import Any, Callable, Optional, Union
+from typing import Any, Callable, List, Optional, Union
 from unittest.mock import patch
 
 import torch
@@ -381,9 +381,16 @@ class GroupCoordinator:
                               dim: int) -> torch.Tensor:
         return self.device_communicator.all_gather(input_, dim)
 
+    def all_gatherv(self,
+                    input_: Union[torch.Tensor, List[torch.Tensor]],
+                    dim: int = 0,
+                    sizes: Optional[List[int]] = None):
+        return self.device_communicator.all_gatherv(input_, dim, sizes)
+
     def reduce_scatter(self,
                        input_: torch.Tensor,
-                       dim: int = -1) -> torch.Tensor:
+                       dim: int = -1,
+                       sizes: Optional[List[int]] = None) -> torch.Tensor:
         world_size = self.world_size
         # Bypass the function if we are using only 1 GPU.
         if world_size == 1:
@@ -392,16 +399,20 @@ class GroupCoordinator:
             f"Invalid dim ({dim}) for input tensor with shape {input_.size()}")
 
         if self.use_custom_op_call:
+            assert sizes is None, "Varying size reduce scatter not supported with vllm custom op"
             return torch.ops.vllm.reduce_scatter(input_,
                                                  dim,
                                                  world_size,
                                                  group_name=self.unique_name)
         else:
-            return self._reduce_scatter_out_place(input_, dim)
+            return self._reduce_scatter_out_place(input_, dim, sizes)
 
-    def _reduce_scatter_out_place(self, input_: torch.Tensor,
-                                  dim: int) -> torch.Tensor:
-        return self.device_communicator.reduce_scatter(input_, dim)
+    def _reduce_scatter_out_place(
+            self,
+            input_: torch.Tensor,
+            dim: int,
+            sizes: Optional[List[int]] = None) -> torch.Tensor:
+        return self.device_communicator.reduce_scatter(input_, dim, sizes)
 
     def gather(self,
                input_: torch.Tensor,
