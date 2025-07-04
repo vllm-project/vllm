@@ -7,6 +7,8 @@
 import datetime
 import locale
 import os
+import shlex
+import shutil
 import subprocess
 import sys
 # Unlike the rest of the PyTorch this file must be python2 compliant.
@@ -92,29 +94,58 @@ DEFAULT_PIP_PATTERNS = {
     "pynvml",
 }
 
+COMMAND_BLACKLIST = [
+    'rm',
+    'wget',
+    'curl',
+    'nc',
+    'bash',
+    'sh',
+    'mkfs',
+    'dd',
+    'scp',
+    'ftp',
+    'poweroff',
+    'reboot',
+    'init',
+]
+
+
+def is_dangerous_cmd(cmd):
+    cmd_base = os.path.basename(cmd)
+    return cmd_base in COMMAND_BLACKLIST
+
 
 def run(command):
     """Return (return-code, stdout, stderr)."""
-    shell = True if type(command) is str else False
-    p = subprocess.Popen(command,
-                         stdout=subprocess.PIPE,
-                         stderr=subprocess.PIPE,
-                         shell=shell)
-    raw_output, raw_err = p.communicate()
-    rc = p.returncode
-    if get_platform() == 'win32':
-        enc = 'oem'
-    else:
-        enc = locale.getpreferredencoding()
-    output = raw_output.decode(enc)
-    if command == 'nvidia-smi topo -m':
-        # don't remove the leading whitespace of `nvidia-smi topo -m`
-        #   because they are meaningful
-        output = output.rstrip()
-    else:
-        output = output.strip()
-    err = raw_err.decode(enc)
-    return rc, output, err.strip()
+    if isinstance(command, str):
+        command = shlex.split(command)
+
+    if is_dangerous_cmd(command[0]):
+        raise RuntimeError(f"Blocked dangerous command: {command[0]}")
+
+    try:
+        p = subprocess.Popen(command,
+                             stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE)
+        raw_output, raw_err = p.communicate()
+        rc = p.returncode
+        if get_platform() == 'win32':
+            enc = 'oem'
+        else:
+            enc = locale.getpreferredencoding()
+        output = raw_output.decode(enc)
+        if command == 'nvidia-smi topo -m':
+            # don't remove the leading whitespace of `nvidia-smi topo -m`
+            #   because they are meaningful
+            output = output.rstrip()
+        else:
+            output = output.strip()
+        err = raw_err.decode(enc)
+        return rc, output, err.strip()
+
+    except FileNotFoundError:
+        return 127, '', f"Command not found: {command[0]}"
 
 
 def run_and_read_all(run_lambda, command):
