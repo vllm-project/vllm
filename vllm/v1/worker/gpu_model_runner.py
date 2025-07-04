@@ -2613,10 +2613,105 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             format. Layers that do not need KV cache are not included.
         """
 
-        block_size = self.vllm_config.cache_config.block_size
+        attn_block_size = self.vllm_config.cache_config.block_size
+
+        kv_cache_spec, attn_page_size, mamba_page_size = \
+            self._get_kv_cache_spec_for_block_size(
+                attn_block_size=attn_block_size,
+            )
+
+        if (attn_page_size is not None and mamba_page_size is not None
+                and attn_page_size != mamba_page_size):
+
+            kv_cache_spec = self._align_hybrid_page_size(
+                attn_page_size,
+                mamba_page_size,
+                attn_block_size,
+            )
+
+        return kv_cache_spec
+
+    def _align_hybrid_page_size(
+            self, attn_page_size: int, mamba_page_size: int,
+            attn_block_size: int) -> dict[str, KVCacheSpec]:
+        """
+        Ensures that the page size for attention layers and mamba layers
+        are equal. This is achieved by (1) ensuring that the attention
+        block size is set such that the page size is greater than or
+        equal to the mamba page size and then (2) padding the mamba page
+        size to ensure they are precisely equal.
+
+        Args:
+            attn_page_size: Page size (bytes) for attention layers.
+            mamba_page_size: Page size (bytes) for mamba layers.
+            attn_block_size: Block size (tokens) for attention layers.
+        Returns:
+            KVCacheSpec: A dictionary mapping layer names to their KV cache
+            format. Layers that do not need KV cache are not included.
+        """
+
+        # check if we need to increase attention block size
+        if attn_page_size < mamba_page_size:
+
+            # attention page size (for 1 token)
+            attn_page_size_1 = attn_page_size // attn_block_size
+
+            # some attention backends (e.g. FA) only support setting
+            # block size to multiple of 16, so let's suggest a value
+            # that would work (note: FA is currently not compatible
+            # with mamba layers, use FlashInfer instead).
+            attn_block_size = 16 * cdiv(mamba_page_size, 16 * attn_page_size_1)
+
+            logger.info(
+                "Setting attention block size to %d tokens "
+                "to ensure that attention page size is >= mamba page size.",
+                attn_block_size)
+
+        mamba_page_size_padded = attn_block_size * attn_page_size_1
+
+        mamba_padding_pct = 100 * (mamba_page_size_padded -
+                                   mamba_page_size) / mamba_page_size
+
+        logger.info(
+            "Padding mamba page size by %.2f%% to ensure "
+            "that mamba page size and attention page size are "
+            "exactly equal.", mamba_padding_pct)
+
+        kv_cache_spec, new_attn_page_size, new_mamba_page_size = \
+            self._get_kv_cache_spec_for_block_size(
+                attn_block_size=attn_block_size,
+                mamba_page_size_padded=mamba_page_size_padded,
+            )
+
+        assert new_attn_page_size == new_mamba_page_size
+
+        return kv_cache_spec
+
+    def _get_kv_cache_spec_for_block_size(
+        self,
+        attn_block_size: int,
+        mamba_page_size_padded: Optional[int] = None,
+    ) -> tuple[dict[str, KVCacheSpec], Optional[int], Optional[int]]:
+        """
+        Generates the KVCacheSpec by parsing the kv cache format from each
+        Attention module in the static forward context, assuming a given
+        block size (in tokens) for attention layers.
+
+        Args:
+            attn_block_size: Block size (in tokens) for attention layers.
+            mamba_page_size_padded: Padded page size for mamba layers.
+        Returns:
+            KVCacheSpec: A dictionary mapping layer names to their KV cache
+            format. Layers that do not need KV cache are not included.
+            Optional[int]: Page size for attention layers.
+            Optional[int]: Page size for mamba layers.
+        """
+
         use_mla = self.vllm_config.model_config.use_mla
         kv_cache_spec: dict[str, KVCacheSpec] = {}
         attn_layers = get_layers_from_vllm_config(self.vllm_config, Attention)
+
+        attn_page_size = None
         for layer_name, attn_module in attn_layers.items():
             if (kv_tgt_layer :=
                     attn_module.kv_sharing_target_layer_name) is not None:
@@ -2634,7 +2729,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if attn_module.attn_type == AttentionType.DECODER:
                 if attn_module.sliding_window is not None:
                     kv_cache_spec[layer_name] = SlidingWindowSpec(
-                        block_size=block_size,
+                        block_size=attn_block_size,
                         num_kv_heads=attn_module.num_kv_heads,
                         head_size=attn_module.head_size,
                         dtype=self.kv_cache_dtype,
@@ -2642,11 +2737,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         use_mla=use_mla)
                 else:
                     kv_cache_spec[layer_name] = FullAttentionSpec(
-                        block_size=block_size,
+                        block_size=attn_block_size,
                         num_kv_heads=attn_module.num_kv_heads,
                         head_size=attn_module.head_size,
                         dtype=self.kv_cache_dtype,
                         use_mla=use_mla)
+                page_size = kv_cache_spec[layer_name].page_size_bytes
+                if attn_page_size is None:
+                    attn_page_size = page_size
+                else:
+                    assert page_size == attn_page_size
+
             elif attn_module.attn_type in (AttentionType.ENCODER,
                                            AttentionType.ENCODER_ONLY):
                 # encoder-only attention does not need KV cache.
@@ -2659,6 +2760,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         mamba_layers = get_layers_from_vllm_config(self.vllm_config,
                                                    MambaMixer2)
+        mamba_page_size = None
         if len(mamba_layers) > 0:
             if self.vllm_config.speculative_config is not None:
                 raise NotImplementedError(
@@ -2671,10 +2773,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     "Prefix caching is not supported for Mamba yet.")
             max_model_len = self.vllm_config.model_config.max_model_len
 
-            page_size_padded = self._maybe_pad_mamba_page_size(
-                attn_layers, mamba_layers, kv_cache_spec, max_model_len,
-                block_size)
-
             # Set block_size to max_model_len, so that mamba model will always
             # have only one block in the KV cache.
             for layer_name, mamba_module in mamba_layers.items():
@@ -2682,57 +2780,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     shapes=mamba_module.get_state_shape(),
                     dtype=self.kv_cache_dtype,
                     block_size=max_model_len,
-                    page_size_padded=page_size_padded)
+                    page_size_padded=mamba_page_size_padded)
 
-        return kv_cache_spec
+            page_size = kv_cache_spec[layer_name].page_size_bytes
+            if mamba_page_size is None:
+                mamba_page_size = page_size
+            else:
+                assert page_size == mamba_page_size
 
-    def _maybe_pad_mamba_page_size(
-        self,
-        attn_layers: dict[str, Attention],
-        mamba_layers: dict[str, MambaMixer2],
-        kv_cache_spec: dict[str, KVCacheSpec],
-        max_model_len: int,
-        block_size: int,
-    ) -> Optional[int]:
-        """
-        Ensure that page size of attention KV cache groups is greater than or
-        equal to the mamba KV cache groups. If not, we suggest to the user
-        how to set the attention block size to ensure that it is.
-
-        If the attention page size is strictly greater than the mamba page size,
-        we pad the mamba page size to make them equal.
-
-        Args:
-            attn_layers: Attention layers
-            mamba_layers: Mamba layers
-            kv_cache_spec: KV cache spec (populated with attention layers)
-
-        Returns:
-            Optional[int]: Mamba page size with padding (None if no padding).
-        """
-
-        if len(attn_layers) == 0:
-            return None
-
-        attn_layer_name = next(iter(attn_layers))
-        attn_page_size = kv_cache_spec[attn_layer_name].page_size_bytes
-        mamba_layer_name = next(iter(mamba_layers))
-        mamba_page_size = MambaSpec(
-            shapes=mamba_layers[mamba_layer_name].get_state_shape(),
-            dtype=self.kv_cache_dtype,
-            block_size=max_model_len).page_size_bytes
-        if attn_page_size < mamba_page_size:
-            # attention page size (for 16 tokens)
-            attn_page_size_16 = 16 * attn_page_size // block_size
-            # some attention backends (e.g. FA) only support setting
-            # block size to multiple of 16, so let's suggest a value
-            # that would work (note: FA is currently not compatible
-            # with mamba layers, use FlashInfer instead).
-            suggest_attn_block_size = 16 * cdiv(mamba_page_size,
-                                                attn_page_size_16)
-            raise ValueError(
-                "Attention block size should be increased to at least "
-                f"{suggest_attn_block_size} in order to match "
-                "the mamba page size")
-
-        return attn_page_size
+        return kv_cache_spec, attn_page_size, mamba_page_size

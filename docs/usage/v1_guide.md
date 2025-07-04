@@ -83,7 +83,8 @@ based on assigned priority, with FCFS as a tie-breaker), configurable via the
 | **Decoder-only Models**     | <nobr>🚀 Optimized</nobr>                                                          |
 | **Encoder-Decoder Models**  | <nobr>🟠 Delayed</nobr>                                                            |
 | **Embedding Models**        | <nobr>🟢 Functional</nobr>                                                         |
-| **Mamba Models**            | <nobr>🚧 WIP ([PR #19327](https://github.com/vllm-project/vllm/pull/19327))</nobr> |
+| **Mamba Models**            | <nobr>🟢 Functional</nobr>                                                         |
+| **Hybrid Models**           | <nobr>🟢 Functional</nobr>                                                         |
 | **Multimodal Models**       | <nobr>🟢 Functional</nobr>                                                         |
 
 vLLM V1 currently excludes model architectures with the `SupportsV0Only` protocol.
@@ -104,8 +105,16 @@ to enable simultaneous generation and embedding using the same engine instance i
 
 #### Mamba Models
 
-Models using selective state-space mechanisms instead of standard transformer attention (e.g., `MambaForCausalLM`, `JambaForCausalLM`)
-will be supported via [PR #19327](https://github.com/vllm-project/vllm/pull/19327).
+Models using selective state-space mechanisms instead of standard transformer attention are partially supported.
+Models that use Mamba-2 layers (e.g., `Mamba2ForCausalLM`) are supported, but models that use older Mamba-1 layers
+(e.g., `MambaForCausalLM`, `JambaForCausalLM`) are not yet suported. Please note that these models currently require
+enforcing eager mode and disabling prefix caching in V1.
+
+#### Hybrid Models
+
+Models that combined Mamba-2 layers with standard transformer attention layers are supported (e.g., `BambaForCausalLM`,
+`Zamba2ForCausalLM`, `NemotronHForCausalLM`, `FalconH1ForCausalLM` and `GraniteMoeHybridForCausalLM`). Please note that
+these models currently require enforcing eager mode and disabling prefix caching in V1.
 
 #### Encoder-Decoder Models
 
