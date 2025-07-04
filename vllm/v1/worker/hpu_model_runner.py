@@ -15,6 +15,7 @@ import numpy as np
 import torch
 import torch.distributed
 import vllm_hpu_extension.environment as environment
+from vllm_hpu_extension.bucketing.common import HPUBucketingManager
 from vllm_hpu_extension.profiler import HabanaMemoryProfiler, format_bytes
 from vllm_hpu_extension.runtime import get_config
 
@@ -45,8 +46,6 @@ from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
 if TYPE_CHECKING:
     from vllm.v1.core.scheduler import SchedulerOutput
-
-from vllm_hpu_extension.bucketing.common import get_bucketing_context
 
 logger = init_logger(__name__)
 
@@ -611,14 +610,15 @@ class HPUModelRunner:
         self.use_merged_prefill = get_config().merged_prefill
         self.use_prefix_caching = (
             self.vllm_config.cache_config.enable_prefix_caching)
+        self.bucketing_manager = HPUBucketingManager()
         if self.enable_bucketing:
             logger.info("Bucketing is ON.")
-            HPUBucketingContext = get_bucketing_context()
-            self.bucketing_ctx = HPUBucketingContext(
-                self.max_num_seqs, self.max_prefill_batch_size,
-                self.block_size, self.max_num_batched_tokens,
-                self.use_merged_prefill, self.use_prefix_caching,
-                self.max_model_len)
+            self.bucketing_manager.initialize(
+                max_num_seqs=self.max_num_seqs,
+                max_num_prefill_seqs=self.max_prefill_batch_size,
+                block_size=self.block_size,
+                max_num_batched_tokens=self.max_num_batched_tokens,
+                max_model_len=self.max_model_len)
             self.graphed_buckets: set[Any] = set()
         else:
             logger.info("Bucketing is OFF.")
@@ -899,8 +899,8 @@ class HPUModelRunner:
             req_id_output_token_ids_lst, skip_copy=not batch_changed)
         return sampling_metadata
 
-    def get_habana_paged_attn_buffers(self, block_tables, slot_mapping):
-
+    def get_habana_paged_attn_buffers(self, block_tables, slot_mapping,
+                                      batch_size):
         last_block_usage = [
             slot[0] % self.block_size + 1 for slot in slot_mapping
         ]
@@ -918,10 +918,9 @@ class HPUModelRunner:
         block_bucket_size: int
         if self.use_contiguous_pa:
             block_bucket_size = max(max(block_list) + 1, len(block_list))
-            if self.enable_bucketing:
-                block_bucket_size = \
-                    self.bucketing_ctx.get_padded_decode_num_blocks(
-                    block_bucket_size)
+            block_bucket_size = \
+                self.bucketing_manager.find_decode_bucket(batch_size,
+                                                          block_bucket_size)[2]
             indices: list[Any]
             indices = [None] * block_bucket_size
             for i, bid in enumerate(block_list):
@@ -929,12 +928,9 @@ class HPUModelRunner:
             padding_fn = lambda tensor, pad_value: gather_list(
                 tensor, indices, pad_value)
         else:
-            if self.enable_bucketing:
-                block_bucket_size = \
-                    self.bucketing_ctx.get_padded_decode_num_blocks(
-                        len(block_list))
-            else:
-                block_bucket_size = len(block_list)
+            block_bucket_size = \
+                self.bucketing_manager.find_decode_bucket(batch_size,
+                                                          len(block_list))[2]
             padding_fn = lambda tensor, pad_value: pad_list(
                 tensor, block_bucket_size, itertools.repeat(pad_value))
 
@@ -964,20 +960,17 @@ class HPUModelRunner:
     def _bucketize_merged_prompt(self, seq_lens, num_blocks):
         seq = sum(seq_lens)
         num_blocks = sum(num_blocks)
-        if self.enable_bucketing:
-            seq = self.bucketing_ctx.get_padded_prompt_seq_len(seq)
-            num_blocks = round_up(num_blocks, 32)
+        seq = self.bucketing_manager.find_prompt_bucket(1, seq, num_blocks)[1]
+        num_blocks = round_up(num_blocks, 32)
         return (1, seq, num_blocks)
 
     def _bucketize_2d_prompt(self, seq_lens, num_blocks):
         bs = len(seq_lens)
         seq = max(seq_lens)
         num_blocks = max(num_blocks) if len(num_blocks) > 0 else 0
-        if self.enable_bucketing:
-            if bs <= self.max_prefill_batch_size:
-                bs = self.bucketing_ctx.get_padded_batch_size(bs, True)
-            seq = self.bucketing_ctx.get_padded_prompt_seq_len(seq)
-            num_blocks = round_up(num_blocks, 32)
+        bs, seq, _ = self.bucketing_manager.find_prompt_bucket(
+            bs, seq, num_blocks)
+        num_blocks = round_up(num_blocks, 32)
         return (bs, seq, num_blocks)
 
     def _get_prompt_bucketing_fn(self):
@@ -1197,14 +1190,25 @@ class HPUModelRunner:
         block_table_cpu_tensor = self.input_batch.block_table.get_cpu_tensor()
         if num_decodes == 0:
             return DecodeInputData(num_decodes=0)
+        # BLOCK_TABLE [batch, max_num_blocks_per_req]
+        context_lens = self.input_batch.num_computed_tokens_cpu[:num_decodes]
+
+        # NOTE(kzawora): the +1 is what causes this entire thing to work,
+        # as in the paged attention, we don't fetch just the context from cache,
+        # but also kvs for the current token
+        num_blocks = np.ceil(
+            (context_lens + 1) / self.block_size).astype(np.int32).tolist()
 
         # PAD FOR STATIC SHAPES.
         padded_batch_size: int
-        if self.enable_bucketing:
-            padded_batch_size = self.bucketing_ctx.get_padded_batch_size(
-                num_decodes, False)
-        else:
-            padded_batch_size = num_decodes
+        padded_batch_size = self.bucketing_manager.find_decode_bucket(
+            num_decodes, sum(num_blocks))[0]
+
+        block_tables_list = []
+        for i, n in enumerate(num_blocks):
+            seq_block_table = block_table_cpu_tensor[i, :n].tolist()
+            assert len(seq_block_table) == n
+            block_tables_list.append(seq_block_table)
 
         # POSITIONS. [batch, 1]
         # We slice at the end, since we use the positions for gathering.
@@ -1243,24 +1247,11 @@ class HPUModelRunner:
         dummy_slots = itertools.cycle(
             range(self._PAD_SLOT_ID, self._PAD_SLOT_ID + self.block_size))
         slot_mapping[num_decodes:].apply_(lambda _, ds=dummy_slots: next(ds))
-        # BLOCK_TABLE [batch, max_num_blocks_per_req]
-        context_lens = self.input_batch.num_computed_tokens_cpu[:num_decodes]
-
-        # NOTE(kzawora): the +1 is what causes this entire thing to work,
-        # as in the paged attention, we don't fetch just the context from cache,
-        # but also kvs for the current token
-        num_blocks = np.ceil(
-            (context_lens + 1) / self.block_size).astype(np.int32).tolist()
-        block_tables_list = []
-        for i, n in enumerate(num_blocks):
-            seq_block_table = block_table_cpu_tensor[i, :n].tolist()
-            assert len(seq_block_table) == n
-            block_tables_list.append(seq_block_table)
 
         # CONTEXT_LENS [batch_size]
         block_list, block_groups, block_usage = \
             self.get_habana_paged_attn_buffers(
-            block_tables_list, slot_mapping.tolist())
+            block_tables_list, slot_mapping.tolist(), padded_batch_size)
 
         logits_indices = torch.zeros(padded_batch_size,
                                      dtype=torch.int32,
@@ -1765,16 +1756,9 @@ class HPUModelRunner:
         return not self.model_config.enforce_eager
 
     def log_graph_warmup_summary(self, buckets, is_prompt, total_mem):
-        num_candidates = len(buckets)
         phase = f'Graph/{"Prompt" if is_prompt else "Decode"}'
-        graphed = list(c[:3] for c in self.graphed_buckets
-                       if c[3] == is_prompt)
-        if num_candidates == 0:
-            num_candidates = 1
-        msg = (f'{phase} captured:{len(graphed)} '
-               f'({100 * len(graphed) / num_candidates:.1f}%) '
-               f'used_mem:{format_bytes(total_mem)} '
-               f'buckets:{sorted(list(graphed))}')
+        msg = (f'{phase} captured:{len(buckets)} '
+               f'used_mem:{format_bytes(total_mem)}')
         logger.info(msg)
 
     def warmup_scenario(self,
@@ -1847,7 +1831,8 @@ class HPUModelRunner:
                 block_list, block_groups, block_usage = \
                     self.get_habana_paged_attn_buffers(
                         slot_mapping=slot_mapping,
-                        block_tables=block_tables)
+                        block_tables=block_tables,
+                        batch_size=batch_size)
                 block_list_device = _async_h2d_tensor_copy(
                     block_list, self.device)
                 block_usage_device = _async_h2d_tensor_copy(
@@ -1936,7 +1921,7 @@ class HPUModelRunner:
         msg = (f"[Warmup][{phase}][{i+1}/{max_i}] "
                f"batch_size:{batch_size} "
                f"query_len:{seq_len} "
-               f"num_ctx_blocks:{num_blocks} "
+               f"num_blocks:{num_blocks} "
                f"free_mem:{free_mem}")
         logger.info(msg)
 
@@ -2121,17 +2106,16 @@ class HPUModelRunner:
             self._generate_profiling(prompt_profile_cfg, decode_profile_cfg)
             raise AssertionError("Finished profiling")
         kv_caches = self.kv_caches
-        max_blocks = int(kv_caches[0][0].size(0) // self.block_size)
-        self.bucketing_ctx.generate_prompt_buckets()
-        self.bucketing_ctx.generate_decode_buckets(max_blocks)
+        self.bucketing_manager.generate_prompt_buckets()
+        self.bucketing_manager.generate_decode_buckets()
 
         if not htorch.utils.internal.is_lazy(
         ) and not self.model_config.enforce_eager:
             multiplier = 3 if os.getenv('VLLM_REGIONAL_COMPILATION',
                                         'true').lower() in ('1', 'true') else 1
             cache_size_limit = 1 + multiplier * (
-                len(self.bucketing_ctx.prompt_buckets) +
-                len(self.bucketing_ctx.decode_buckets))
+                len(self.bucketing_manager.prompt_buckets) +
+                len(self.bucketing_manager.decode_buckets))
             torch._dynamo.config.cache_size_limit = max(
                 cache_size_limit, torch._dynamo.config.cache_size_limit)
             # Multiply by 8 to follow the original default ratio between
@@ -2162,7 +2146,6 @@ class HPUModelRunner:
                            'Please update Gaudi Software Suite.')
         with compile_only_mode_context(
         ) if can_use_compile_only_mode else contextlib.nullcontext():
-
             if not self.model_config.enforce_eager:
                 assert self.mem_margin is not None, \
                     ("HabanaWorker.determine_num_available_blocks needs "
@@ -2170,17 +2153,19 @@ class HPUModelRunner:
                 #TODO(kzawora): align_workers
                 mem_post_prompt, prompt_batch_seq, prompt_captured_all = \
                     self.warmup_graphs(
-                    self.bucketing_ctx.prompt_buckets,
+                    self.bucketing_manager.prompt_buckets,
                     True, kv_caches)
                 mem_post_decode, decode_batch_seq, decode_captured_all = \
                     self.warmup_graphs(
-                    self.bucketing_ctx.decode_buckets,
+                    self.bucketing_manager.decode_buckets,
                     False, kv_caches)
 
                 self.log_graph_warmup_summary(
-                    self.bucketing_ctx.prompt_buckets, True, mem_post_prompt)
+                    self.bucketing_manager.prompt_buckets, True,
+                    mem_post_prompt)
                 self.log_graph_warmup_summary(
-                    self.bucketing_ctx.decode_buckets, False, mem_post_decode)
+                    self.bucketing_manager.decode_buckets, False,
+                    mem_post_decode)
 
         end_time = time.perf_counter()
         end_mem = HabanaMemoryProfiler.current_device_memory_usage()
@@ -2286,7 +2271,7 @@ class HPUModelRunner:
             self.kv_caches)
 
         if self.enable_bucketing:
-            self.bucketing_ctx.num_hpu_blocks = num_blocks
+            self.bucketing_manager.num_hpu_blocks = num_blocks
         self._PAD_BLOCK_ID = num_blocks
         self._PAD_SLOT_ID = num_blocks * self.block_size
 
