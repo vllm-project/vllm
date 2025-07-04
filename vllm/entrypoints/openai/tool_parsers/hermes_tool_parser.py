@@ -44,7 +44,8 @@ class Hermes2ProToolParser(ToolParser):
         self.tool_call_end_token: str = "</tool_call>"
 
         self.tool_call_regex = re.compile(
-            r"<tool_call>(.*?)</tool_call>|<tool_call>(.*)", re.DOTALL)
+            r"<tool_call>\s*(.*?)\s*(?:<tool_call>\s*|</tool_call>\s*|$)",
+            re.DOTALL)
         self.scratch_pad_regex = re.compile(
             r"<scratch_pad>(.*?)</scratch_pad>", re.DOTALL)
 
@@ -80,15 +81,18 @@ class Hermes2ProToolParser(ToolParser):
                 # tag and end-of-string so the result of
                 # findall is an array of tuples where one is a function call and
                 # the other is None
-                function_call_tuples = (
-                    self.tool_call_regex.findall(model_output))
+                matches = self.tool_call_regex.findall(model_output)
+                raw_function_calls = []
+                for match in matches:
+                    if not match:
+                        continue
+                    try:
+                        parsed = json.loads(match.strip())
+                        raw_function_calls.append(parsed)
+                    except json.JSONDecodeError as e:
+                        logger.warning(
+                            "Skipping malformed tool_call block: %s", e)
 
-                # load the JSON, and then use it to build the Function and
-                # Tool Call
-                raw_function_calls = [
-                    json.loads(match[0] if match[0] else match[1])
-                    for match in function_call_tuples
-                ]
                 tool_calls = [
                     ToolCall(
                         type="function",
@@ -99,9 +103,9 @@ class Hermes2ProToolParser(ToolParser):
                                                  ensure_ascii=False)))
                     for function_call in raw_function_calls
                 ]
-
-                content = model_output[:model_output.
-                                       find(self.tool_call_start_token)]
+                tool_call_start = model_output.find(self.tool_call_start_token)
+                content = (model_output[:tool_call_start]
+                           if tool_call_start >= 0 else None)
                 return ExtractedToolCallInformation(
                     tools_called=True,
                     tool_calls=tool_calls,
