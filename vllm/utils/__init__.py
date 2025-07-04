@@ -2799,7 +2799,7 @@ def warn_for_unimplemented_methods(cls: type[T]) -> type[T]:
         if unimplemented_methods:
             method_names = ','.join(unimplemented_methods)
             msg = (f"Methods {method_names} not implemented in {self}")
-            logger.warning(msg)
+            logger.debug(msg)
 
     @wraps(original_init)
     def wrapped_init(self, *args, **kwargs) -> None:
