@@ -199,9 +199,9 @@ class EagleProposer:
         # there's a multi-layer MTP module.
 
         # Generate the remaining draft tokens.
-        # [num_speculative_tokens, batch_size]
+        # Each tensor in the list has shape [batch_size].
         draft_token_ids_list: list[torch.Tensor] = [draft_token_ids]
-        # [num_speculative_tokens, batch_size, vocab_size]
+        # Each tensor in the list has shape [batch_size, vocab_size].
         draft_probs_list: list[torch.Tensor] = [draft_probs]
 
         positions = target_positions[last_token_indices]
