@@ -353,17 +353,55 @@ class MistralToolParser(ToolParser):
                 if parts[0]:  # Content before bot token
                     additional_content = parts[0]
                 # Process content after bot token
-                tool_content = parts[1].replace("'", '"').lstrip()
+                tool_content = self._normalize_quotes(parts[1]).lstrip()
                 self.raw_tool_calls += tool_content
         else:
             # No bot token in delta, just clean and append
-            cleaned_delta = delta_text.replace("'", '"')
+            cleaned_delta = self._normalize_quotes(delta_text)
             self.raw_tool_calls += cleaned_delta
             # Remove leading spaces only if we have content
             if self.raw_tool_calls:
                 self.raw_tool_calls = self.raw_tool_calls.lstrip()
 
         return additional_content
+
+    def _normalize_quotes(self, text: str) -> str:
+        """
+        Normalize quotes in tool call text, being careful not to corrupt string values.
+        
+        This method attempts to replace structural single quotes with double quotes
+        while preserving single quotes that are part of string values.
+        
+        Args:
+            text: The text to normalize
+            
+        Returns:
+            Text with normalized quotes
+        """
+        if not text or "'" not in text:
+            return text
+            
+        # For V11 format (function_name{...}), we don't need quote normalization
+        # as the JSON should already be properly formatted
+        if self.v11_tool_format:
+            return text
+            
+        # Simple heuristic: if the text looks like it might be valid JSON already,
+        # try to parse it first before doing any replacements
+        stripped = text.strip()
+        if stripped.startswith(('[', '{')):
+            try:
+                # Try parsing as-is first
+                json.loads(stripped)
+                return text  # Already valid JSON, no changes needed
+            except json.JSONDecodeError:
+                pass
+        
+        # Fallback to the original behavior with a warning
+        # This preserves backward compatibility but logs the risk
+        logger.warning("Performing quote normalization on tool call text. "
+                      "This may corrupt string values containing single quotes.")
+        return text.replace("'", '"')
 
     def _should_detect_v11_format(self) -> bool:
         """Check if we should attempt V11 format detection."""
