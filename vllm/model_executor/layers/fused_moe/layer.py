@@ -1223,7 +1223,7 @@ class FusedMoE(torch.nn.Module):
         from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
 
         # Uniform random topk ids for performance experiments,
-        # expecially when using dummy weights.
+        # especially when using dummy weights.
         if envs.VLLM_UNIFORM_RANDOM_TOPK_IDS:
             return FusedMoE.uniform_random_select_experts(
                 hidden_states,
