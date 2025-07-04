@@ -32,9 +32,7 @@ from vllm.entrypoints.score_utils import (ScoreContentPartParam,
                                           ScoreMultiModalParam,
                                           _cosine_similarity,
                                           _validate_score_input_lens,
-                                          apply_score_template,
-                                          parse_score_data,
-                                          post_process_tokens_mm_data)
+                                          get_score_prompt)
 from vllm.entrypoints.utils import _validate_truncation_size
 from vllm.inputs import PromptType, SingletonPrompt, TextPrompt, TokensPrompt
 from vllm.inputs.parse import parse_and_batch_prompt
@@ -1219,28 +1217,15 @@ class LLM:
         if self.llm_engine.model_config.is_multimodal_model:
 
             model_config = self.llm_engine.model_config
-            model_arch = model_config.architectures
 
             for q, d in input_pairs:
-                prompt_1, prompt_2, mm_data = parse_score_data(
-                    q,
-                    d,
-                    model_config,
-                    tokenizer,
+                _, engine_prompt = get_score_prompt(
+                    model_config=model_config,
+                    data_1=q,
+                    data_2=d,
+                    tokenizer=tokenizer,
+                    tokenization_kwargs=tokenization_kwargs,
                 )
-
-                full_prompt = apply_score_template(model_config, prompt_1,
-                                                   prompt_2)
-
-                prompt_inputs = tokenizer(full_prompt, **tokenization_kwargs)
-
-                engine_prompt = TokensPrompt(
-                    prompt_token_ids=prompt_inputs["input_ids"])
-
-                post_process_tokens_mm_data(model_arch, engine_prompt, mm_data)
-
-                if mm_data is not None:
-                    engine_prompt["multi_modal_data"] = mm_data
 
                 parsed_prompts.append(engine_prompt)
 

@@ -21,9 +21,7 @@ from vllm.entrypoints.score_utils import (ScoreContentPartParam,
                                           ScoreMultiModalParam,
                                           _cosine_similarity,
                                           _validate_score_input_lens,
-                                          apply_score_template,
-                                          parse_score_data,
-                                          post_process_tokens_mm_data)
+                                          get_score_prompt)
 from vllm.entrypoints.utils import _validate_truncation_size
 from vllm.inputs.data import SingletonPrompt, TokensPrompt
 from vllm.logger import init_logger
@@ -152,26 +150,14 @@ class ServingScores(OpenAIServing):
     ) -> tuple[SingletonPrompt, TokensPrompt]:
 
         model_config = self.model_config
-        model_arch = model_config.architectures
 
-        prompt_1, prompt_2, mm_data = parse_score_data(
-            data_1,
-            data_2,
-            model_config,
-            tokenizer,
+        full_prompt, engine_prompt = get_score_prompt(
+            model_config=model_config,
+            data_1=data_1,
+            data_2=data_2,
+            tokenizer=tokenizer,
+            tokenization_kwargs=tokenization_kwargs,
         )
-
-        full_prompt = apply_score_template(model_config, prompt_1, prompt_2)
-
-        prompt_inputs = tokenizer(full_prompt, **tokenization_kwargs)
-
-        engine_prompt = TokensPrompt(
-            prompt_token_ids=prompt_inputs["input_ids"])
-
-        post_process_tokens_mm_data(model_arch, engine_prompt, mm_data)
-
-        if mm_data is not None:
-            engine_prompt["multi_modal_data"] = mm_data
         if request.mm_processor_kwargs is not None:
             engine_prompt["mm_processor_kwargs"] = request.mm_processor_kwargs
 
