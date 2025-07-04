@@ -89,11 +89,22 @@ class SupportsMultiModal(Protocol):
     ) -> Tensor:
         ...
 
+    # TODO: Remove this overload once v0 is deprecated
     @overload
     def get_input_embeddings(
         self,
         input_ids: Tensor,
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
+    ) -> Tensor:
+        ...
+
+    def get_input_embeddings(
+        self,
+        input_ids: Tensor,
+        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
+        # Only necessary so that the v0 overload is valid
+        # TODO: Remove attn_metadata once v0 is deprecated
+        attn_metadata: Optional["AttentionMetadata"] = None,
     ) -> Tensor:
         """
         Returns the input embeddings merged from the text embeddings from 
