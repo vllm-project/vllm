@@ -195,6 +195,17 @@ class TritonAttentionBackend(AttentionBackend):
         return [32, 64, 96, 128, 160, 192, 224, 256]
 
     @staticmethod
+    def validate_head_size(head_size: int) -> None:
+        supported_head_sizes = TritonAttentionBackend \
+            .get_supported_head_sizes()
+        if head_size not in supported_head_sizes:
+            raise ValueError(
+                f"Head size {head_size} is not supported by TritonAttention. "
+                f"Supported head sizes are: {supported_head_sizes}. "
+                "Set VLLM_ATTENTION_BACKEND=FLEX_ATTENTION to use "
+                "FlexAttention backend which supports all head sizes.")
+
+    @staticmethod
     def get_name() -> str:
         return "TRITON_ATTN_VLLM_V1"
 
@@ -268,11 +279,7 @@ class TritonAttentionImpl(AttentionImpl):
 
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
-        support_head_sizes = TritonAttentionBackend.get_supported_head_sizes()
-        if head_size not in support_head_sizes:
-            raise ValueError(
-                f"Head size {head_size} is not supported by TritonAttention. "
-                f"Supported head sizes are: {support_head_sizes}.")
+        TritonAttentionBackend.validate_head_size(head_size)
 
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError("Encoder self-attention and "

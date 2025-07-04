@@ -165,7 +165,11 @@ def load_gemma3(question: str, image_urls: list[str]) -> ModelRequestData:
 
 
 def load_h2ovl(question: str, image_urls: list[str]) -> ModelRequestData:
-    model_name = "h2oai/h2ovl-mississippi-800m"
+    model_name = "h2oai/h2ovl-mississippi-800m"  # or -2b
+
+    # As of this writing, head_size=80 is only supported by FlexAttention in V1
+    if model_name.endswith("-2b"):
+        os.environ["VLLM_ATTENTION_BACKEND"] = "FLEX_ATTENTION"
 
     engine_args = EngineArgs(
         model=model_name,

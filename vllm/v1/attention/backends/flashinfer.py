@@ -43,6 +43,18 @@ class FlashInferBackend(AttentionBackend):
         return [64, 128, 256]
 
     @staticmethod
+    def validate_head_size(head_size: int) -> None:
+        # Refer to
+        # https://github.com/flashinfer-ai/flashinfer/blob/3d55c71a62052c590c130897d3a3db49b14fcc34/include/flashinfer/utils.cuh#L157
+        supported_head_sizes = FlashInferBackend.get_supported_head_sizes()
+        if head_size not in supported_head_sizes:
+            raise ValueError(
+                f"Head size {head_size} is not supported by FlashInfer. "
+                f"Supported head sizes are: {supported_head_sizes}. "
+                "Set VLLM_ATTENTION_BACKEND=FLEX_ATTENTION to use "
+                "FlexAttention backend which supports all head sizes.")
+
+    @staticmethod
     def get_name() -> str:
         return "FLASHINFER_VLLM_V1"
 
@@ -207,14 +219,8 @@ class FlashInferMetadata:
         return self.qo_indptr
 
     def __post_init__(self):
-        # Refer to
-        # https://github.com/flashinfer-ai/flashinfer/blob/3d55c71a62052c590c130897d3a3db49b14fcc34/include/flashinfer/utils.cuh#L157
-        supported_head_sizes = FlashInferBackend.get_supported_head_sizes()
-        if self.head_dim is not None and self.head_dim \
-                not in supported_head_sizes:
-            raise ValueError(
-                f"Only {supported_head_sizes} are supported for head_dim,",
-                f" received {self.head_dim}.")
+        if self.head_dim is not None:
+            FlashInferBackend.validate_head_size(self.head_dim)
 
 
 class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):

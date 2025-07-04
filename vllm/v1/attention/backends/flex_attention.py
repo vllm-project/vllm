@@ -45,8 +45,8 @@ class FlexAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
 
     @staticmethod
-    def get_supported_head_sizes() -> list[int]:
-        return [16, 32, 64, 96, 128, 160, 192, 224, 256]
+    def validate_head_size(head_size: int) -> None:
+        return  # FlexAttention supports any head size
 
     @staticmethod
     def get_name() -> str:
@@ -383,12 +383,8 @@ class FlexAttentionImpl(AttentionImpl):
             raise NotImplementedError(
                 "FlexAttention does not support kv sharing yet.")
 
-        support_head_sizes = FlexAttentionBackend.get_supported_head_sizes()
-        if head_size not in support_head_sizes:
-            raise ValueError(
-                f"Head size {head_size} is not supported by FlashAttention. "
-                f"Supported head sizes are: {support_head_sizes}. "
-                "Set VLLM_USE_V1=0 to use another attention backend.")
+        FlexAttentionBackend.validate_head_size(head_size)
+
         if is_quantized_kv_cache(self.kv_cache_dtype):
             raise NotImplementedError(
                 "FlexAttention does not support quantized kv-cache. Yet")
