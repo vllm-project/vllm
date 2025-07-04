@@ -1,0 +1,5 @@
+llama32-11B-Vision-Instruct:
+  MODEL: meta-llama/Llama-3.2-11B-Vision-Instruct
+
+llama32-90B-Vision-Instruct:
+  MODEL: meta-llama/Llama-3.2-90B-Vision-Instruct
