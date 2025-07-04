@@ -1229,7 +1229,7 @@ class LLM:
                     tokenizer,
                 )
 
-                full_prompt = apply_score_template(model_arch, prompt_1,
+                full_prompt = apply_score_template(model_config, prompt_1,
                                                    prompt_2)
 
                 prompt_inputs = tokenizer(full_prompt, **tokenization_kwargs)
@@ -1391,9 +1391,13 @@ class LLM:
 
         if isinstance(data_1, dict) and "content" in data_1:
             data_1 = data_1.get("content")
+        elif isinstance(data_1, str):
+            data_1 = [data_1]
 
         if isinstance(data_2, dict) and "content" in data_2:
             data_2 = data_2.get("content")
+        elif isinstance(data_2, str):
+            data_2 = [data_2]
 
         _validate_score_input_lens(data_1, data_2)
 

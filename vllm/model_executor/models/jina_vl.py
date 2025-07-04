@@ -28,12 +28,6 @@ logger = init_logger(__name__)
 
 class JinaVLScorer(nn.Module):
 
-    # To ensure correct weight loading and mapping.
-    score_mapper = WeightsMapper(orig_to_new_prefix={
-        "score.0.": "dense.",
-        "score.2.": "out_proj."
-    })
-
     def __init__(self, config: PretrainedConfig):
         super().__init__()
         self.dense = ColumnParallelLinear(config.hidden_size,
@@ -49,18 +43,23 @@ class JinaVLScorer(nn.Module):
         x, _ = self.out_proj(x)
         return x
 
-    def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> set[str]:
-
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.score_mapper)
-
 
 @MULTIMODAL_REGISTRY.register_processor(Qwen2VLMultiModalProcessor,
                                         info=Qwen2VLProcessingInfo,
                                         dummy_inputs=Qwen2VLDummyInputsBuilder)
 class JinaVLForSequenceClassification(nn.Module, SupportsCrossEncoding,
                                       SupportsMultiModal):
+    weight_mapper = WeightsMapper(
+        orig_to_new_prefix={
+            "score.0.": "score.dense.",
+            "score.2.": "score.out_proj.",
+            # mapping for new names in checkpoint saved after transformers v4.52
+            "model.language_model.": "qwen2_vl.language_model.model.",
+            "visual.": "qwen2_vl.visual.",
+            # mapping for original checkpoint
+            "lm_head.": "qwen2_vl.language_model.lm_head.",
+            "model.": "qwen2_vl.language_model.model.",
+        })
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -85,6 +84,10 @@ class JinaVLForSequenceClassification(nn.Module, SupportsCrossEncoding,
             return "<|vision_start|><|image_pad|><|vision_end|>"
 
         raise ValueError("Only image modality is supported")
+
+    @classmethod
+    def get_score_template(cls, query: str, document: str) -> Optional[str]:
+        return f"**Document**:\n{document}\n**Query**:\n{query}"
 
     def forward(
         self,
@@ -114,11 +117,8 @@ class JinaVLForSequenceClassification(nn.Module, SupportsCrossEncoding,
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
 
-        qwen2vl_weights, score_weights = split_weights(weights)
-
-        self.qwen2_vl.load_weights(qwen2vl_weights)
-
-        self.score.load_weights(score_weights)
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.weight_mapper)
 
 
 def split_weights(

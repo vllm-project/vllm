@@ -1327,7 +1327,7 @@ class RerankRequest(OpenAIBaseModel):
 
 class RerankDocument(BaseModel):
     text: Optional[str] = None
-    multi_data: Optional[ScoreMultiModalParam] = None
+    multi_modal: Optional[ScoreMultiModalParam] = None
 
 
 class RerankResult(BaseModel):

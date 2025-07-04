@@ -161,7 +161,7 @@ class ServingScores(OpenAIServing):
             tokenizer,
         )
 
-        full_prompt = apply_score_template(model_arch, prompt_1, prompt_2)
+        full_prompt = apply_score_template(model_config, prompt_1, prompt_2)
 
         prompt_inputs = tokenizer(full_prompt, **tokenization_kwargs)
 
@@ -483,7 +483,7 @@ class ServingScores(OpenAIServing):
                 index=idx,
                 document=RerankDocument(text=documents[idx]) if isinstance(
                     documents, list) else RerankDocument(
-                        multi_data=documents["content"][idx]),
+                        multi_modal=documents["content"][idx]),
                 relevance_score=classify_res.outputs.score,
             )
             results.append(result)
