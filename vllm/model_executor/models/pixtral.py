@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import re
 import math
+import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, fields
 from functools import cached_property
@@ -26,6 +26,7 @@ from transformers.tokenization_utils_base import TextInput
 
 from vllm.config import VllmConfig
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
+from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_and_mul_fn
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
@@ -53,12 +54,7 @@ from .utils import (flatten_bn, init_vllm_registered_model, maybe_prefix,
                     merge_multimodal_embeddings)
 from .vision import VisionEncoderInfo, resolve_visual_encoder_outputs
 
-from vllm.logger import init_logger
-
 logger = init_logger(__name__)
-import os
-logger = logging.getLogger(__name__)
-logger.setLevel(os.getenv("VLLM_LOGGING_LEVEL", "INFO"))
 
 try:
     from xformers import ops as xops
@@ -90,7 +86,6 @@ class PixtralProcessorAdapter:
         super().__init__()
 
         self.tokenizer = tokenizer
-        self.logger: logging.Logger = logger
 
     @property
     def image_processor(self) -> ImageEncoder:
@@ -351,8 +346,6 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.config = config
         self.multimodal_config = multimodal_config
         
-        self.logger: logging.Logger = logger
-
         dataclass_fields = {field.name for field in fields(VisionEncoderArgs)}
         vision_args = {
             key: value
@@ -376,13 +369,11 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
                                                  eps=1e-5)
 
         if self.vision_args.mm_projector_id == PATCH_MERGE:
-            self.logger.debug("PatchMerger initalizing ...")
             self.patch_merger = PatchMerger(
                 vision_encoder_dim=self.vision_args.hidden_size,
                 spatial_merge_size=self.vision_args.spatial_merge_size,
                 use_mlp_bias=False,
             )
-            self.logger.debug("PatchMerger:\n\t%s", self.patch_merger)
 
         self.vision_language_adapter = VisionLanguageAdapter(
             self.vision_args, dim=config.text_config.hidden_size)
@@ -522,12 +513,11 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
 
     def maybe_remap_mistral3(self, name: str, tensor: torch.Tensor) -> tuple[str, torch.Tensor]:
         """Remap HF-style weight names back to original Pixtral format."""
-        self.logger.debug(f"Considering {name}")
 
         for pattern, replacement in self.MISTRAL3_REVERSE_MAPPING.items():
             new_name, n_replace = re.subn(pattern, replacement, name)
             if n_replace > 0:
-                self.logger.debug(f"Remapped {name} to {new_name}")
+                logger.debug(f"remapped %s to %s for Pixtral compat", name, new_name)
                 return new_name, tensor
         return name, tensor  # Return unchanged if no match
 
@@ -570,14 +560,14 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
                     # Load vision encoder weights directly
                     trimmed_name = '.'.join(name.split(".")[1:])
                     param = vision_encoder_dict[trimmed_name]
-                    if trimmed_name.startswith("ln_pre"):
-                        logger.debug("loading ln_pre weight now ...")
                     if "wq.weight" in trimmed_name or "wk.weight" in trimmed_name:
                         n_heads = self.vision_args.num_attention_heads
                         dim1 = param.shape[0]  # num_heads * head_dim
                         dim2 = param.shape[1]  # hidden_size
                         w = inverse_permute_for_rope(w, n_heads, dim1, dim2)
-                        logger.debug(f"Reversed permute_for_rope for {name}, sample: {w[:5, :5]}")
+                        logger.debug(
+                            "reversed permute_for_rope for %s", name
+                        )
                     with torch.no_grad():
                         default_weight_loader(param, w)
                 elif is_patch_merger((name, w)):
@@ -864,8 +854,6 @@ class VisionTransformer(nn.Module):
 
         # flatten to a single sequence
         patch_embeds = torch.cat(patch_embeds, dim=1)
-        # _ = self.ln_pre.weight.data.fill_(1.0)
-        # logger.debug("Skipping ln_pre for now ...")
         patch_embeds = self.ln_pre(patch_embeds)
 
         # positional embeddings
@@ -916,12 +904,10 @@ class PatchMerger(nn.Module):
         super().__init__()
 
         mlp_input_dim = vision_encoder_dim * (spatial_merge_size**2)
-
-        print("mlp_input_dim = {vision_encoder_dim} * ({spatial_merge_size}**2)")
-        print(f"mlp_input_dim = {vision_encoder_dim} * ({spatial_merge_size}**2)")
-
         self.spatial_merge_size = spatial_merge_size
         self.mlp_input_dim = mlp_input_dim
+        logger.debug("mlp_input_dim = %d (from %d * (%d ** 2))", mlp_input_dim,
+                     vision_encoder_dim, spatial_merge_size)
 
         self.merging_layer = nn.Linear(
             mlp_input_dim,
