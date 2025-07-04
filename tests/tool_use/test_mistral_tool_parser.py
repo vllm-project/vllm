@@ -14,7 +14,7 @@ from vllm.entrypoints.openai.tool_parsers import MistralToolParser
 from vllm.transformers_utils.detokenizer import detokenize_incrementally
 from vllm.transformers_utils.tokenizer import AnyTokenizer, get_tokenizer
 
-MODEL = "mistralai/Mistral-7B-Instruct-v0.3"
+MODEL = "jeffcookio/Mistral-Small-3.2-24B-Instruct-2506-awq-sym"
 
 
 @pytest.fixture(scope="module")
@@ -171,6 +171,14 @@ def test_extract_tool_calls(mistral_tool_parser, model_output,
         "argument_before_name",
         "argument_before_name_and_name_in_argument",
         "multiple_tools",
+        "v11_single_tool",
+        "v11_multiple_tools",
+        "v11_nested_json",
+        "v11_special_chars",
+        "v11_empty_args",
+        "v11_complex_nested",
+        "v11_with_comma_separator",
+        "v11_with_whitespace_separator",
     ],
     argnames=["model_output", "expected_tool_calls", "expected_content"],
     argvalues=[
@@ -246,6 +254,97 @@ def test_extract_tool_calls(mistral_tool_parser, model_output,
                                                    })))
             ],
             ''),
+        # V11 format tests
+        (
+            '''[TOOL_CALLS] add{"a": 3, "b": 4}''',
+            [
+                ToolCall(function=FunctionCall(name="add",
+                                               arguments=json.dumps({
+                                                   "a": 3,
+                                                   "b": 4
+                                               })))
+            ],
+            ""),
+        (
+            '''[TOOL_CALLS] add{"a": 3, "b": 4}, get_weather{"city": "Paris", "unit": "celsius"}''',  # noqa: E501
+            [
+                ToolCall(function=FunctionCall(name="add",
+                                               arguments=json.dumps({
+                                                   "a": 3,
+                                                   "b": 4
+                                               }))),
+                ToolCall(function=FunctionCall(name="get_weather",
+                                               arguments=json.dumps({
+                                                   "city": "Paris",
+                                                   "unit": "celsius"
+                                               })))
+            ],
+            ""),
+        (
+            '''[TOOL_CALLS] process_data{"input": {"nested": {"value": 42, "array": [1, 2, 3]}, "flag": true}}''',  # noqa: E501
+            [
+                ToolCall(function=FunctionCall(name="process_data",
+                                               arguments=json.dumps({
+                                                   "input": {
+                                                       "nested": {
+                                                           "value": 42,
+                                                           "array": [1, 2, 3]
+                                                       },
+                                                       "flag": True
+                                                   }
+                                               })))
+            ],
+            ""),
+        (
+            '''[TOOL_CALLS] send_message{"text": "Hello, it's a nice day!", "recipient": "user@example.com"}''',  # noqa: E501
+            [
+                ToolCall(function=FunctionCall(name="send_message",
+                                               arguments=json.dumps({
+                                                   "text": "Hello, it's a nice day!",
+                                                   "recipient": "user@example.com"
+                                               })))
+            ],
+            ""),
+        (
+            '''[TOOL_CALLS] empty_function{}''',
+            [
+                ToolCall(function=FunctionCall(name="empty_function",
+                                               arguments=json.dumps({})))
+            ],
+            ""),
+        (
+            '''[TOOL_CALLS] complex_tool{"data": {"items": [{"id": 1, "props": {"key": "value"}}, {"id": 2, "props": {"key": "other"}}], "meta": {"count": 2}}}''',  # noqa: E501
+            [
+                ToolCall(function=FunctionCall(name="complex_tool",
+                                               arguments=json.dumps({
+                                                   "data": {
+                                                       "items": [
+                                                           {"id": 1, "props": {"key": "value"}},
+                                                           {"id": 2, "props": {"key": "other"}}
+                                                       ],
+                                                       "meta": {"count": 2}
+                                                   }
+                                               })))
+            ],
+            ""),
+        (
+            '''[TOOL_CALLS] first_tool{"x": 1}, second_tool{"y": 2}''',
+            [
+                ToolCall(function=FunctionCall(name="first_tool",
+                                               arguments=json.dumps({"x": 1}))),
+                ToolCall(function=FunctionCall(name="second_tool",
+                                               arguments=json.dumps({"y": 2})))
+            ],
+            ""),
+        (
+            '''[TOOL_CALLS] tool_a{"param": "A"} tool_b{"param": "B"}''',
+            [
+                ToolCall(function=FunctionCall(name="tool_a",
+                                               arguments=json.dumps({"param": "A"}))),
+                ToolCall(function=FunctionCall(name="tool_b",
+                                               arguments=json.dumps({"param": "B"})))
+            ],
+            ""),
     ],
 )
 def test_extract_tool_calls_streaming(mistral_tool_parser, mistral_tokenizer,
@@ -309,3 +408,77 @@ def test_extract_tool_calls_streaming(mistral_tool_parser, mistral_tokenizer,
             tool_call_ids, function_names, function_args_strs)
     ]
     assert_tool_calls(actual_tool_calls, expected_tool_calls)
+
+
+@pytest.mark.parametrize(
+    ids=[
+        "v11_single_tool",
+        "v11_multiple_tools_comma",
+        "v11_nested_with_quotes",
+        "v11_escaped_chars",
+        "v11_mixed_content",
+    ],
+    argnames=["model_output", "expected_tool_calls", "expected_content"],
+    argvalues=[
+        (
+            '''[TOOL_CALLS] calculate_sum{"numbers": [1, 2, 3, 4, 5]}''',
+            [
+                ToolCall(function=FunctionCall(name="calculate_sum",
+                                               arguments=json.dumps({
+                                                   "numbers": [1, 2, 3, 4, 5]
+                                               })))
+            ],
+            None),
+        (
+            '''[TOOL_CALLS] get_user{"id": 123}, update_profile{"name": "John", "age": 30}''',  # noqa: E501
+            [
+                ToolCall(function=FunctionCall(name="get_user",
+                                               arguments=json.dumps({"id": 123}))),
+                ToolCall(function=FunctionCall(name="update_profile",
+                                               arguments=json.dumps({
+                                                   "name": "John",
+                                                   "age": 30
+                                               })))
+            ],
+            None),
+        (
+            '''[TOOL_CALLS] parse_json{"content": "{\\"key\\": \\"value\\", \\"nested\\": {\\"item\\": 1}}"}''',  # noqa: E501
+            [
+                ToolCall(function=FunctionCall(name="parse_json",
+                                               arguments=json.dumps({
+                                                   "content": "{\"key\": \"value\", \"nested\": {\"item\": 1}}"
+                                               })))
+            ],
+            None),
+        (
+            '''[TOOL_CALLS] format_text{"template": "Hello {name}\\nWelcome!", "vars": {"name": "User"}}''',  # noqa: E501
+            [
+                ToolCall(function=FunctionCall(name="format_text",
+                                               arguments=json.dumps({
+                                                   "template": "Hello {name}\nWelcome!",
+                                                   "vars": {"name": "User"}
+                                               })))
+            ],
+            None),
+        (
+            '''Some content before [TOOL_CALLS] analyze_data{"dataset": "sales_2024", "metrics": ["revenue", "growth"]}''',  # noqa: E501
+            [
+                ToolCall(function=FunctionCall(name="analyze_data",
+                                               arguments=json.dumps({
+                                                   "dataset": "sales_2024",
+                                                   "metrics": ["revenue", "growth"]
+                                               })))
+            ],
+            "Some content before "),
+    ],
+)
+def test_extract_tool_calls_v11_format(mistral_tool_parser, model_output,
+                                       expected_tool_calls, expected_content):
+    """Test extraction of tool calls in v11 format (non-streaming)"""
+    extracted_tool_calls = mistral_tool_parser.extract_tool_calls(
+        model_output, request=None)  # type: ignore[arg-type]
+    assert extracted_tool_calls.tools_called
+
+    assert_tool_calls(extracted_tool_calls.tool_calls, expected_tool_calls)
+
+    assert extracted_tool_calls.content == expected_content
