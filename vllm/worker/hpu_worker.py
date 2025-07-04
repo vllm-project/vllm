@@ -326,7 +326,8 @@ class HPUWorker(LocalOrDistributedWorkerBase):
             cache_block_size = self.get_cache_block_size_bytes()
             fake_hpu_cache_alloc = 4 * 2**30  # take 4 GiB flat on fake hpu
             num_fake_hpu_blocks = fake_hpu_cache_alloc // cache_block_size
-            self.model_runner.bucketing_ctx.num_hpu_blocks = num_fake_hpu_blocks
+            self.model_runner.bucketing_manager.num_hpu_blocks = \
+                    num_fake_hpu_blocks
             return num_fake_hpu_blocks, 0
         with HabanaMemoryProfiler() as m:
             self.model_runner.profile_run()
@@ -383,8 +384,11 @@ class HPUWorker(LocalOrDistributedWorkerBase):
 
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
-        self.model_runner.bucketing_ctx.num_hpu_blocks = (
+        self.model_runner.bucketing_manager.num_hpu_blocks = (
             num_gpu_blocks // self.parallel_config.pipeline_parallel_size)
+        self.model_runner.bucketing_manager.generate_prompt_buckets()
+        if not self.model_runner.is_pooler:
+            self.model_runner.bucketing_manager.generate_decode_buckets()
 
         with HabanaMemoryProfiler() as m:
             self._init_cache_engine()
