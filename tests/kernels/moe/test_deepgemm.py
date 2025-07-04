@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 Unit-test DeepGEMM FP8 kernels (no DeepEP).
 Compare DeepGEMM path against the Triton fallback inside vLLM's fused_experts.
