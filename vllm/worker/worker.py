@@ -134,6 +134,9 @@ class Worker(LocalOrDistributedWorkerBase):
 
     def sleep(self, level: int = 1) -> None:
         free_bytes_before_sleep = torch.cuda.mem_get_info()[0]
+        # should empty_cache before sleep since torch may allocate some other mem in cache segments
+        # after handling user completion requests
+        torch.cuda.empty_cache()
 
         # Save the buffers before level 2 sleep
         if level == 2:
