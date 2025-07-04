@@ -172,6 +172,7 @@ _EMBEDDING_MODELS = {
 
 _CROSS_ENCODER_MODELS = {
     "BertForSequenceClassification": ("bert", "BertForSequenceClassification"),
+    "DebertaV2ForSequenceClassification": ("deberta_v2", "DebertaV2ForSequenceClassification"),  # noqa: E501
     "RobertaForSequenceClassification": ("roberta",
                                          "RobertaForSequenceClassification"),
     "XLMRobertaForSequenceClassification": ("roberta",
