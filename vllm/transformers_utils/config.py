@@ -399,7 +399,7 @@ def get_config(
         # should be used when loading models in mistral format
         config_dict = _download_mistral_config_file(model, revision)
         if (max_position_embeddings := config_dict.get("max_position_embeddings")) is None:
-            max_position_embeddings = _maybe_retrieve_max_pos_from_hf(model, model, revision)
+            max_position_embeddings = _maybe_retrieve_max_pos_from_hf(model, revision, **kwargs)
             config_dict["max_position_embeddings"] = max_position_embeddings
 
             config = adapt_config_dict(config_dict)
@@ -828,7 +828,7 @@ def _download_mistral_config_file(model, revision) -> dict:
     assert isinstance(config_dict, dict)
     return config_dict
 
-def _maybe_retrieve_max_pos_from_hf(mode, revision, **kwargs) -> Optional[int]:
+def _maybe_retrieve_max_pos_from_hf(model, revision, **kwargs) -> Optional[int]:
     max_position_embeddings = 128_000
     try:
         trust_remote_code_val = kwargs.get("trust_remote_code", False)

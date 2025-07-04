@@ -14,9 +14,8 @@ import torch.nn as nn
 from mistral_common.protocol.instruct.messages import (AudioChunk, RawAudio,
                                                        TextChunk, UserMessage)
 from mistral_common.protocol.instruct.request import ChatCompletionRequest
-from mistral_common.tokens.tokenizers.audio import Audio
-from mistral_common.tokens.tokenizers.multimodal import (AudioEncoder,
-                                                         mel_filter_bank)
+from mistral_common.tokens.tokenizers.audio import Audio, AudioEncoder
+from mistral_common.audio import AudioFormat, mel_filter_bank
 from transformers import TensorType, WhisperConfig
 from transformers.tokenization_utils_base import TextInput
 
@@ -201,14 +200,15 @@ class VoxtralDummyInputsBuilder(BaseDummyInputsBuilder[VoxtralProcessingInfo]
         dummy_audios = dummy_mm_data.get("audio", [])
 
         audio_chunks: list[AudioChunk] = []
+        format = AudioFormat("WAV")
         for audio in dummy_audios:
             audio_item = Audio(
                 audio_array=audio,
                 sampling_rate=self.info.get_hf_processor().sampling_rate,
             )
             chunk = AudioChunk(input_audio=RawAudio(
-                format="wav",
-                data=audio_item.to_base64(format="wav"),
+                format=format,
+                data=audio_item.to_base64(format=format),
             ), )
             audio_chunks.append(chunk)
 
@@ -265,6 +265,7 @@ class VoxtralMultiModalProcessor(
         prompt: Union[str, list[int]],
         mm_data_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
+        tokenization_kwargs: Mapping[str, object],
         *,
         return_mm_hashes: bool,
     ) -> tuple[list[int], MultiModalKwargs, Optional[MultiModalHashes], bool]:
@@ -273,6 +274,7 @@ class VoxtralMultiModalProcessor(
             prompt=prompt,
             mm_data_items=mm_data_items,
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+            tokenization_kwargs=tokenization_kwargs,
             return_mm_hashes=return_mm_hashes,
         )
 

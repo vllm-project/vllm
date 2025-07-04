@@ -41,7 +41,7 @@ def adapt_config_dict(config_dict: dict[str, Any],
 
     config = PretrainedConfig.from_dict(config_dict)
 
-    logger.info("Initialized config", config=config)
+    logger.info(f"Initialized config {config}")
 
     return config
 
@@ -72,7 +72,7 @@ def _remap_mistral_audio_args(config: dict) -> dict:
     config = {
         "model_type":
         "whixtral",
-        "architectures": ["WhixtralForConditionalGeneration"],
+        "architectures": ["VoxtralForConditionalGeneration"],
         "text_config":
         PretrainedConfig.from_dict(config),
         "audio_config":
