@@ -43,6 +43,15 @@ class MediaConnector:
         *,
         allowed_local_media_path: str = "",
     ) -> None:
+        """
+        Args:
+            media_io_kwargs: Additional args passed to process media 
+                             inputs, keyed by modalities. For example, 
+                             to set num_frames for video, set 
+                             `--media-io-kwargs '{"video": {"num_frames": 40} }'`
+            connection: HTTP connection client to download media contents.
+            allowed_local_media_path: A local directory to load media files from.
+        """
         super().__init__()
 
         self.media_io_kwargs: dict[str, dict[
@@ -436,23 +445,47 @@ def run_dp_sharded_vision_model(image_input: torch.Tensor,
 
 def fetch_audio(
     audio_url: str,
-    media_io_kwargs: Optional[dict[str, dict[str, Any]]] = None,
+    audio_io_kwargs: Optional[dict[str, Any]] = None,
 ) -> tuple[np.ndarray, Union[int, float]]:
+    """
+    Args:
+        audio_url: URL of the audio file to fetch.
+        audio_io_kwargs: Additional kwargs passed to handle audio IO.
+    """
+    media_io_kwargs = None if not audio_io_kwargs else {
+        "audio": audio_io_kwargs
+    }
     media_connector = MediaConnector(media_io_kwargs=media_io_kwargs)
     return media_connector.fetch_audio(audio_url)
 
 
 def fetch_image(
     image_url: str,
-    media_io_kwargs: Optional[dict[str, dict[str, Any]]] = None,
+    image_io_kwargs: Optional[dict[str, Any]] = None,
 ) -> Image.Image:
+    """
+    Args:
+        image_url: URL of the image file to fetch.
+        image_io_kwargs: Additional kwargs passed to handle image IO.
+    """
+    media_io_kwargs = None if not image_io_kwargs else {
+        "image": image_io_kwargs
+    }
     media_connector = MediaConnector(media_io_kwargs=media_io_kwargs)
     return media_connector.fetch_image(image_url)
 
 
 def fetch_video(
     video_url: str,
-    media_io_kwargs: Optional[dict[str, dict[str, Any]]] = None,
+    video_io_kwargs: Optional[dict[str, Any]] = None,
 ) -> tuple[npt.NDArray, dict[str, Any]]:
+    """
+    Args:
+        video_url: URL of the video file to fetch.
+        video_io_kwargs: Additional kwargs passed to handle video IO.
+    """
+    media_io_kwargs = None if not video_io_kwargs else {
+        "video": video_io_kwargs
+    }
     media_connector = MediaConnector(media_io_kwargs=media_io_kwargs)
     return media_connector.fetch_video(video_url)
