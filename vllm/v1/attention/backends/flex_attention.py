@@ -459,6 +459,7 @@ class FlexAttentionImpl(AttentionImpl):
         query = query[:, :, :num_actual_tokens, :]
         # Doesn't work for now -> constraint violation
         # torch._dynamo.try_mark_dynamic(query, 2)
+
         out = flex_attention_compiled(
             query,
             key_cache,
@@ -467,7 +468,12 @@ class FlexAttentionImpl(AttentionImpl):
             attn_metadata.block_mask,
             self.scale,
             enable_gqa=enable_gqa,
-            kernel_options={"FORCE_USE_FLEX_ATTENTION": True},
+            kernel_options={
+                "FORCE_USE_FLEX_ATTENTION": True,
+                # Avoid running out of shared memory on some GPUs
+                "BLOCK_M": 64,
+                "BLOCK_N": 32,
+            },
         )
 
         # Flex doesn't have an out variant today, rely on epilogue fusion
