@@ -51,7 +51,7 @@ struct cutlass_3x_gemm {
   // These are the minimum alignments needed for the kernels to compile
   static constexpr int AlignmentAB =
       128 / cutlass::sizeof_bits<ElementAB>::value;
-  static constexpr int AlignmentCD = 4;
+  static constexpr int AlignmentCD = 8;
 
   using CollectiveEpilogue =
       typename cutlass::epilogue::collective::CollectiveBuilder<
