@@ -57,6 +57,7 @@ class HpuPlatform(Platform):
     def get_device_name(cls, device_id: int = 0) -> str:
         return cls.device_name
 
+    @classmethod
     def inference_mode(cls):
         return torch.no_grad()
 
