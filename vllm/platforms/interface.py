@@ -4,6 +4,7 @@ import enum
 import os
 import platform
 import random
+import sys
 from datetime import timedelta
 from platform import uname
 from typing import TYPE_CHECKING, NamedTuple, Optional, Union
@@ -163,6 +164,9 @@ class Platform:
 
     def is_out_of_tree(self) -> bool:
         return self._enum == PlatformEnum.OOT
+
+    def get_max_output_tokens(self, prompt_len: int) -> int:
+        return sys.maxsize
 
     def is_cuda_alike(self) -> bool:
         """Stateless version of [torch.cuda.is_available][]."""
