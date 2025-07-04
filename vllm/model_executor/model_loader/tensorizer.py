@@ -209,6 +209,11 @@ class TensorizerConfig:
         return open_stream(self.tensorizer_uri,
                            **tensorizer_args.stream_params)
 
+def load_with_tensorizer(tensorizer_config: TensorizerConfig,
+                         **extra_kwargs) -> nn.Module:
+    tensorizer = TensorizerAgent(tensorizer_config, **extra_kwargs)
+    return tensorizer.deserialize()
+
 
 @dataclass
 class TensorizerArgs:
