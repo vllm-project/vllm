@@ -484,6 +484,7 @@ Specified using `--task score`.
 | `Qwen3ForSequenceClassification`      | Qwen3-based       | `tomaarsen/Qwen3-Reranker-0.6B-seq-cls`, `Qwen/Qwen3-Reranker-0.6B` (see note), etc. (see important) | ✅︎                  |
 | `RobertaForSequenceClassification`    | RoBERTa-based     | `cross-encoder/quora-roberta-base`, etc.                                                             |                     |
 | `XLMRobertaForSequenceClassification` | XLM-RoBERTa-based | `BAAI/bge-reranker-v2-m3`, etc.                                                                      |                     |
+
 !!! important
     Please use the query_template and document_template to format the query and document for better reranker results. Without template, the results are almost as random.
 !!! note
