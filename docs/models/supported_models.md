@@ -477,12 +477,20 @@ If your model is not in the above list, we will try to automatically convert the
 
 Specified using `--task score`.
 
-| Architecture                          | Models            | Example HF Models                                                                    | [V1](gh-issue:8779)   |
-|---------------------------------------|-------------------|--------------------------------------------------------------------------------------|-----------------------|
-| `BertForSequenceClassification`       | BERT-based        | `cross-encoder/ms-marco-MiniLM-L-6-v2`, etc.                                         |                       |
-| `Qwen3ForSequenceClassification`      | Qwen3-based       | `tomaarsen/Qwen3-Reranker-0.6B-seq-cls`, `Qwen/Qwen3-Reranker-0.6B` (see note), etc. | ✅︎                     |
-| `RobertaForSequenceClassification`    | RoBERTa-based     | `cross-encoder/quora-roberta-base`, etc.                                             |                       |
-| `XLMRobertaForSequenceClassification` | XLM-RoBERTa-based | `BAAI/bge-reranker-v2-m3`, etc.                                                      |                       |
+| Architecture                          | Models            | Example HF Models                                                                    | [V1](gh-issue:8779) |
+|---------------------------------------|-------------------|--------------------------------------------------------------------------------------|---------------------|
+| `BertForSequenceClassification`       | BERT-based        | `cross-encoder/ms-marco-MiniLM-L-6-v2`, etc.                                         |                     |
+| `Qwen2ForSequenceClassification`      | Qwen2-based       | `mixedbread-ai/mxbai-rerank-base-v2` (see note), etc.                                | ✅︎                  |
+| `Qwen3ForSequenceClassification`      | Qwen3-based       | `tomaarsen/Qwen3-Reranker-0.6B-seq-cls`, `Qwen/Qwen3-Reranker-0.6B` (see note), etc. | ✅︎                  |
+| `RobertaForSequenceClassification`    | RoBERTa-based     | `cross-encoder/quora-roberta-base`, etc.                                             |                     |
+| `XLMRobertaForSequenceClassification` | XLM-RoBERTa-based | `BAAI/bge-reranker-v2-m3`, etc.                                                      |                     |
+
+!!! note
+    Load the official original `mxbai-rerank-v2` by using the following command.
+
+    ```bash
+    vllm serve mixedbread-ai/mxbai-rerank-base-v2 --hf_overrides '{"architectures": ["Qwen2ForSequenceClassification"],"classifier_from_token": ["0", "1"], "method": "from_2_way_softmax"}'
+    ```
 
 !!! note
     Load the official original `Qwen3 Reranker` by using the following command. More information can be found at: <gh-file:examples/offline_inference/qwen3_reranker.py>.
@@ -490,6 +498,7 @@ Specified using `--task score`.
     ```bash
     vllm serve Qwen/Qwen3-Reranker-0.6B --hf_overrides '{"architectures": ["Qwen3ForSequenceClassification"],"classifier_from_token": ["no", "yes"],"is_original_qwen3_reranker": true}'
     ```
+
 [](){ #supported-mm-models }
 
 ## List of Multimodal Language Models
