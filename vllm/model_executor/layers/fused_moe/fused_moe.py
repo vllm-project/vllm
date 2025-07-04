@@ -4,7 +4,7 @@
 import functools
 import json
 import os
-from typing import Any, Callable, List, Optional
+from typing import Any, Callable, List, Optional # noqa
 
 import torch
 
