@@ -229,7 +229,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
     logit_bias: Optional[dict[str, float]] = None
     logprobs: Optional[bool] = False
     top_logprobs: Optional[int] = 0
-    # TODO(#9845): remove max_tokens when field is removed from OpenAI API
     max_tokens: Optional[int] = Field(
         default=None,
         deprecated=
@@ -433,23 +432,10 @@ class ChatCompletionRequest(OpenAIBaseModel):
     }
 
     def to_beam_search_params(
-            self,
-            default_max_tokens: int,
-            default_sampling_params: Optional[dict] = None
-    ) -> BeamSearchParams:
-        # TODO(#9845): remove max_tokens when field is removed from OpenAI API
-        max_tokens = self.max_completion_tokens or self.max_tokens
+            self, max_tokens: int,
+            default_sampling_params: dict) -> BeamSearchParams:
 
-        if default_sampling_params is None:
-            default_sampling_params = {}
         n = self.n if self.n is not None else 1
-
-        # Use minimum of context window, user request & server limit.
-        max_tokens = min(
-            val for val in (default_max_tokens, max_tokens,
-                            default_sampling_params.get("max_tokens", None))
-            if val is not None)
-
         if (temperature := self.temperature) is None:
             temperature = default_sampling_params.get(
                 "temperature", self._DEFAULT_SAMPLING_PARAMS["temperature"])
@@ -465,21 +451,10 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
     def to_sampling_params(
         self,
-        default_max_tokens: int,
+        max_tokens: int,
         logits_processor_pattern: Optional[str],
-        default_sampling_params: Optional[dict] = None,
+        default_sampling_params: dict,
     ) -> SamplingParams:
-        # TODO(#9845): remove max_tokens when field is removed from OpenAI API
-        max_tokens = self.max_completion_tokens or self.max_tokens
-
-        if default_sampling_params is None:
-            default_sampling_params = {}
-
-        # Use minimum of context window, user request & server limit.
-        max_tokens = min(
-            val for val in (default_max_tokens, max_tokens,
-                            default_sampling_params.get("max_tokens", None))
-            if val is not None)
 
         # Default parameters
         if (repetition_penalty := self.repetition_penalty) is None:
@@ -898,21 +873,14 @@ class CompletionRequest(OpenAIBaseModel):
     }
 
     def to_beam_search_params(
-            self,
-            default_max_tokens: int,
-            default_sampling_params: Optional[dict] = None
+        self,
+        max_tokens: int,
+        default_sampling_params: Optional[dict] = None,
     ) -> BeamSearchParams:
-        max_tokens = self.max_tokens
 
         if default_sampling_params is None:
             default_sampling_params = {}
         n = self.n if self.n is not None else 1
-
-        # Use minimum of context window, user request & server limit.
-        max_tokens = min(
-            val for val in (default_max_tokens, max_tokens,
-                            default_sampling_params.get("max_tokens", None))
-            if val is not None)
 
         if (temperature := self.temperature) is None:
             temperature = default_sampling_params.get("temperature", 1.0)
@@ -928,20 +896,13 @@ class CompletionRequest(OpenAIBaseModel):
 
     def to_sampling_params(
         self,
-        default_max_tokens: int,
+        max_tokens: int,
         logits_processor_pattern: Optional[str],
         default_sampling_params: Optional[dict] = None,
     ) -> SamplingParams:
-        max_tokens = self.max_tokens
 
         if default_sampling_params is None:
             default_sampling_params = {}
-
-        # Use minimum of context window, user request & server limit.
-        max_tokens = min(
-            val for val in (default_max_tokens, max_tokens,
-                            default_sampling_params.get("max_tokens", None))
-            if val is not None)
 
         # Default parameters
         if (repetition_penalty := self.repetition_penalty) is None:
@@ -1813,7 +1774,7 @@ class TranscriptionRequest(OpenAIBaseModel):
             self,
             default_max_tokens: int,
             default_sampling_params: Optional[dict] = None) -> SamplingParams:
-        # TODO(#9845): remove max_tokens when field is removed from OpenAI API
+
         max_tokens = default_max_tokens
 
         if default_sampling_params is None:
@@ -2029,7 +1990,7 @@ class TranslationRequest(OpenAIBaseModel):
             self,
             default_max_tokens: int,
             default_sampling_params: Optional[dict] = None) -> SamplingParams:
-        # TODO(#9845): remove max_tokens when field is removed from OpenAI API
+
         max_tokens = default_max_tokens
 
         if default_sampling_params is None:
