@@ -136,14 +136,15 @@ class OpenAIServingCompletion(OpenAIServing):
                     yield f"data: {beams.model_dump_json()}\n\n"
                     break
             
-                final = await self.beam_scorer.pick_best_beam(beams)
+                final = await self.beam_scorer.pick_best_beam(beams.choices)
                 request.prompt = final.text
                 should_stop = await _should_stop(final)
                 final.text = final.text[input_str_len:]
                 output = final.text
+                beams.choices = [final]
                 if self.request_logger:
                     logger.info(f"yielding chunk {num_chunks} text: {final.text}")
-                yield f"data: {final.model_dump_json()}\n\n"
+                yield f"data: {beams.model_dump_json()}\n\n"
             
                 if should_stop:
                     break
