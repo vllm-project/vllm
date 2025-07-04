@@ -283,12 +283,12 @@ class KVConnectorBase_V1(ABC):
         return False, None
 
     @classmethod
-    def get_required_kvcache_layout(cls,
-                                    config: "VllmConfig") -> Optional[str]:
+    def get_required_kvcache_layout(
+            cls, vllm_config: "VllmConfig") -> Optional[str]:
         """
         Get the required KV cache layout for this connector.
         Args:
-            config (KVTransferConfig): the KV transfer config of this connector.
+            vllm_config (VllmConfig): the vllm config.
 
         Returns:
             str: the required KV cache layout. e.g. HND, or NHD.

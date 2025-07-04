@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-
-
 from vllm.config import (DeviceConfig, KVTransferConfig, ModelConfig,
                          VllmConfig, set_current_vllm_config)
 from vllm.distributed.kv_transfer.kv_connector.utils import (

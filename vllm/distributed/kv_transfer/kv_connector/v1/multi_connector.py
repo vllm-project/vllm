@@ -206,7 +206,7 @@ class MultiConnector(KVConnectorBase_V1):
         """
         Get the required KV cache layout for this connector.
         Args:
-            vllm_config (KVTransferConfig): the KV transfer config of this connector.
+            vllm_config (VllmConfig): the vllm config.
 
         Returns:
             str: the required KV cache layout. e.g. HND, or NHD.
@@ -223,6 +223,6 @@ class MultiConnector(KVConnectorBase_V1):
         layouts.discard(None)
         if len(layouts) > 1:
             raise ValueError(
-                f"Multiple connectors require different KV cache layouts: {layouts}"
-            )
+                "Multiple connectors require different KV cache layouts: "
+                f"{layouts}")
         return next(iter(layouts), None)
