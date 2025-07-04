@@ -482,7 +482,8 @@ class Llama4Model(LlamaModel):
                             # Check for MoE-specific loading support via
                             # attribute instead of expensive runtime reflection
                             supports_moe = getattr(weight_loader,
-                                                'supports_moe_loading', False)
+                                                   'supports_moe_loading',
+                                                   False)
 
                             if supports_moe:
                                 # This is a MoE weight loader
