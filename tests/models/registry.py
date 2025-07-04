@@ -330,8 +330,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "AriaForConditionalGeneration": _HfExamplesInfo("rhymes-ai/Aria"),
     "AyaVisionForConditionalGeneration": _HfExamplesInfo("CohereForAI/aya-vision-8b"), # noqa: E501
     "Blip2ForConditionalGeneration": _HfExamplesInfo("Salesforce/blip2-opt-2.7b",  # noqa: E501
-                                                     extras={"6b": "Salesforce/blip2-opt-6.7b"},  # noqa: E501
-                                                     v0_only=True),
+                                                     extras={"6b": "Salesforce/blip2-opt-6.7b"}),  # noqa: E501
     "ChameleonForConditionalGeneration": _HfExamplesInfo("facebook/chameleon-7b"),  # noqa: E501
     "DeepseekVLV2ForCausalLM": _HfExamplesInfo("deepseek-ai/deepseek-vl2-tiny",  # noqa: E501
                                                 extras={"fork": "Isotr0py/deepseek-vl2-tiny"},  # noqa: E501
@@ -359,8 +358,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                                     trust_remote_code=True),
     "KimiVLForConditionalGeneration": _HfExamplesInfo("moonshotai/Kimi-VL-A3B-Instruct",  # noqa: E501
                                                       extras={"thinking": "moonshotai/Kimi-VL-A3B-Thinking"},  # noqa: E501
-                                                      trust_remote_code=True,
-                                                      v0_only=True),
+                                                      trust_remote_code=True),
     "Llama4ForConditionalGeneration": _HfExamplesInfo("meta-llama/Llama-4-Scout-17B-16E-Instruct",   # noqa: E501
                                                       max_model_len=10240),
     "LlavaForConditionalGeneration": _HfExamplesInfo("llava-hf/llava-1.5-7b-hf",
