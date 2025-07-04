@@ -3,8 +3,8 @@
 
 import itertools
 import os
-from typing import Iterable, Optional, Tuple, Union
 from collections.abc import Iterable
+from typing import Optional, Tuple, Union
 
 import torch
 from torch import nn
