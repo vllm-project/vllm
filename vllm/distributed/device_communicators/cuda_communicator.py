@@ -152,7 +152,10 @@ class CudaCommunicator(DeviceCommunicatorBase):
                              dtype=input_tensor.dtype,
                              device=input_tensor.device)
 
-        pynccl_comm.reduce_scatter(output, input_, sizes=sizes)
+        if sizes is not None:
+            pynccl_comm.reduce_scatterv(output, input_, sizes=sizes)
+        else:
+            pynccl_comm.reduce_scatter(output, input_)
 
         # Reshape before returning
         return output.movedim(0, dim).contiguous()
@@ -222,7 +225,10 @@ class CudaCommunicator(DeviceCommunicatorBase):
             output_tensor = torch.empty(output_size,
                                         dtype=input_.dtype,
                                         device=input_.device)
-            pynccl_comm.all_gather(output_tensor, input_, sizes=sizes)
+            if sizes is not None:
+                pynccl_comm.all_gatherv(output_tensor, input_, sizes=sizes)
+            else:
+                pynccl_comm.all_gather(output_tensor, input_)
             return output_tensor
 
         if isinstance(input_, torch.Tensor):
