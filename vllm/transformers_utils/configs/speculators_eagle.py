@@ -28,17 +28,12 @@ class SpeculatorsEagleConfig(EAGLEConfig):
         """
         Load a speculators Eagle config and convert it to vLLM format.
         """
-        config_path = Path(pretrained_model_name_or_path) / "config.json"
-        
-        if not config_path.exists():
-            # Fall back to standard loading if not a local path
-            return super().from_pretrained(pretrained_model_name_or_path, **kwargs)
-        
-        with open(config_path, "r") as f:
-            config_dict = json.load(f)
+        # Use the parent class method to load config dict
+        # This handles both local paths and HuggingFace model IDs
+        config_dict, _ = cls.get_config_dict(pretrained_model_name_or_path, **kwargs)
         
         # Check if this is a speculators format config
-        if "speculators_model_type" not in config_dict:
+        if config_dict.get("speculators_model_type") != "eagle":
             # Not a speculators config, use standard loading
             return super().from_pretrained(pretrained_model_name_or_path, **kwargs)
         
@@ -111,13 +106,9 @@ def is_speculators_eagle_config(config_path: Union[str, os.PathLike]) -> bool:
     """
     Check if a config file is in speculators Eagle format.
     """
-    config_file = Path(config_path) / "config.json"
-    if not config_file.exists():
-        return False
-    
     try:
-        with open(config_file, "r") as f:
-            config = json.load(f)
-        return config.get("speculators_model_type") == "eagle"
+        # Use PretrainedConfig to load from both local and HF paths
+        config_dict, _ = PretrainedConfig.get_config_dict(config_path)
+        return config_dict.get("speculators_model_type") == "eagle"
     except:
         return False
