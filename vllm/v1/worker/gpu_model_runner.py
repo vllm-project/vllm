@@ -3,7 +3,6 @@
 
 import gc
 import time
-import weakref
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, Optional, Union
 
@@ -62,7 +61,6 @@ from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.medusa import MedusaProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
-from vllm.v1.worker.block_table import BlockTable
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
@@ -594,7 +592,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # OPTIMIZATION: Start copying the block table first.
         # This way, we can overlap the copy with the following CPU operations.
-        self.input_batch.block_table.commit(num_reqs)
+        self.input_batch.block_table.commit_block_table(num_reqs)
 
         # Get the number of scheduled tokens for each request.
         req_ids = self.input_batch.req_ids
@@ -638,29 +636,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                            torch.from_numpy(token_indices),
                            out=self.input_ids_cpu[:total_num_scheduled_tokens])
 
-        # Calculate the slot mapping for each KV cache group.
-        for kv_cache_group_id, kv_cache_group_spec in enumerate(
-                self.kv_cache_config.kv_cache_groups):
-            block_size = kv_cache_group_spec.kv_cache_spec.block_size
-            block_table: BlockTable = self.input_batch.block_table[
-                kv_cache_group_id]
-            # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
-            # -> [0, 0, K, K, K + 1, K + 1, K + 2, 2 * K, 2 * K, 2 * K + 1]
-            # where K is the max_num_blocks_per_req and the block size is 2.
-            # NOTE(woosuk): We can't simply use `token_indices // block_size`
-            # here because M (max_model_len) is not necessarily divisible by
-            # block_size.
-            block_table_indices = (
-                req_indices * block_table.max_num_blocks_per_req +
-                positions_np // block_size)
-            block_table_cpu = block_table.get_cpu_tensor()
-            block_numbers = block_table_cpu.flatten(
-            )[block_table_indices].numpy()
-            block_offsets = positions_np % block_size
-            np.add(
-                block_numbers * block_size,
-                block_offsets,
-                out=block_table.slot_mapping_np[:total_num_scheduled_tokens])
+        self.input_batch.block_table.compute_slot_mapping(
+            req_indices, positions_np)
+        self.input_batch.block_table.commit_slot_mapping(
+            total_num_scheduled_tokens)
 
         # Prepare the attention metadata.
         self.query_start_loc_np[0] = 0
@@ -706,12 +685,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         for kv_cache_group_id, kv_cache_group_spec in enumerate(
                 self.kv_cache_config.kv_cache_groups):
 
-            slot_mapping = self.input_batch.block_table[
-                kv_cache_group_id].slot_mapping[:num_reqs]
-            slot_mapping.copy_(self.input_batch.block_table[kv_cache_group_id].
-                               slot_mapping_np[:num_reqs],
-                               non_blocking=True)
-
             common_attn_metadata = CommonAttentionMetadata(
                 query_start_loc=self.query_start_loc[:num_reqs + 1],
                 query_start_loc_cpu=self.query_start_loc_cpu[:num_reqs + 1],
@@ -724,7 +697,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 max_query_len=max_num_scheduled_tokens,
                 block_table_tensor=self.input_batch.
                 block_table[kv_cache_group_id].get_device_tensor()[:num_reqs],
-                slot_mapping=slot_mapping,
+                slot_mapping=self.input_batch.block_table[kv_cache_group_id].
+                slot_mapping[:total_num_scheduled_tokens],
             )
 
             if self.speculative_config and \
@@ -1650,8 +1624,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     for i, n in enumerate(num_draft_tokens)
                 ]
                 num_rejected_tokens_cpu = torch.tensor(num_rejected_tokens,
-                                                       dtype=torch.int32,
-                                                       device=self.device)
+                                                       dtype=torch.int32)
                 num_tokens = (num_scheduled_tokens -
                               num_rejected_tokens_cpu.sum())
                 common_attn_metadata, token_indices =\
@@ -2348,11 +2321,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 raise ValueError(
                     f"Unknown KV cache spec type: {type(kv_cache_spec)}")
 
-            block_table_i = self.input_batch.block_table[i]
             attn_metadata_builder_i = attn_backend_i.get_builder_cls()(
-                weakref.proxy(self),
                 kv_cache_spec,
-                block_table_i,
+                self.vllm_config,
+                self.device,
             )
 
             if (self.full_cuda_graph
