@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -16,7 +17,6 @@ from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.spec_decode.utils import prepare_eagle_input_kernel
 
 logger = init_logger(__name__)
 
@@ -37,6 +37,8 @@ class EagleProposer:
         self.method = self.speculative_config.method
 
         self.runner = runner
+        self.arange_np = np.arange(vllm_config.scheduler_config.max_num_seqs +
+                                   1)
 
         self.dtype = vllm_config.model_config.dtype
         self.max_model_len = vllm_config.model_config.max_model_len
@@ -83,19 +85,14 @@ class EagleProposer:
         target_positions: torch.Tensor,
         # [num_tokens, hidden_size]
         target_hidden_states: torch.Tensor,
-        # [num_tokens]
-        target_slot_mapping: torch.Tensor,
         # [batch_size]
         next_token_ids: torch.Tensor,
-        # [batch_size + 1] starting with 0
-        cu_num_tokens: torch.Tensor,
-        # [batch_size, max_num_blocks_per_req]
-        block_table: torch.Tensor,
+        common_attn_metadata: CommonAttentionMetadata,
         sampling_metadata: SamplingMetadata,
     ) -> torch.Tensor:
         num_tokens = target_token_ids.shape[0]
         batch_size = next_token_ids.shape[0]
-        last_token_indices = cu_num_tokens[1:] - 1
+        last_token_indices = common_attn_metadata.query_start_loc[1:] - 1
 
         if self.method == "eagle3":
             assert isinstance(self.model, Eagle3LlamaForCausalLM)
@@ -110,50 +107,13 @@ class EagleProposer:
         # E.g., [b1, b2, c1, c2, c3, c3] -> [a2, b2, b3, c2, c3, c4]
         self.input_ids[last_token_indices] = next_token_ids
 
-        # FA requires seq_len to have dtype int32.
-        seq_lens = (target_positions[last_token_indices] + 1).int()
+        assert self.runner is not None
 
-        if self.method in ["eagle", "eagle3"]:
-            # FIXME(woosuk): The below two ops cause synchronization. Optimize.
-            max_seq_len = seq_lens.max().item()
-            max_num_tokens = (cu_num_tokens[1:] -
-                              cu_num_tokens[:-1]).max().item()
-            attn_metadata = FlashAttentionMetadata(
-                num_actual_tokens=num_tokens,
-                max_query_len=max_num_tokens,
-                query_start_loc=cu_num_tokens,
-                max_seq_len=max_seq_len,
-                seq_lens=seq_lens,
-                block_table=block_table,
-                slot_mapping=target_slot_mapping,
-                # TODO(woosuk): Support cascade attention.
-                use_cascade=False,
-                common_prefix_len=0,
-                cu_prefix_query_lens=None,
-                prefix_kv_lens=None,
-                suffix_kv_lens=None,
-            )
-        elif self.method == "deepseek_mtp":
-            query_lens = cu_num_tokens[1:] - cu_num_tokens[:-1]
-            max_query_len = query_lens.max().item()
-
-            common_attn_metadata = CommonAttentionMetadata(
-                query_start_loc=cu_num_tokens,
-                seq_lens=seq_lens,
-                num_reqs=batch_size,
-                num_actual_tokens=num_tokens,
-                max_query_len=max_query_len,
-            )
-
-            assert self.runner is not None
-
-            # FIXME: need to consider multiple kv_cache_groups
-            attn_metadata = self.runner.attn_metadata_builders[0].build(
-                common_prefix_len=0,
-                common_attn_metadata=common_attn_metadata,
-            )
-        else:
-            raise ValueError(f"Unsupported method: {self.method}")
+        # FIXME: need to consider multiple kv_cache_groups
+        attn_metadata = self.runner.attn_metadata_builders[0].build(
+            common_prefix_len=0,
+            common_attn_metadata=common_attn_metadata,
+        )
 
         # At this moment, we assume all eagle layers belong to the same KV
         # cache group, thus using the same attention metadata.
@@ -193,6 +153,11 @@ class EagleProposer:
         # TODO: Currently, MTP module released by deepseek only has
         # one layer. Adapt this code to support multiple layers once
         # there's a multi-layer MTP module.
+
+        # Currently FlashAttention is the only backend that supports
+        # multi-token eagle spec decode. This is because the code below
+        # makes assumptions about attn_metadata attributes available.
+        assert isinstance(attn_metadata, FlashAttentionMetadata)
 
         # Generate the remaining draft tokens.
         draft_token_ids_list = [draft_token_ids]
@@ -238,8 +203,8 @@ class EagleProposer:
 
             # Compute the slot mapping.
             block_numbers = clamped_positions // self.block_size
-            block_ids = block_table.gather(dim=1,
-                                           index=block_numbers.view(-1, 1))
+            block_ids = attn_metadata.block_table.gather(
+                dim=1, index=block_numbers.view(-1, 1))
             block_ids = block_ids.view(-1)
             attn_metadata.slot_mapping = (block_ids * self.block_size +
                                           clamped_positions % self.block_size)
@@ -275,15 +240,13 @@ class EagleProposer:
         draft_token_ids = torch.stack(draft_token_ids_list, dim=1)
         return draft_token_ids
 
-    @staticmethod
     def prepare_inputs(
-        # [batch_size + 1]
-        cu_target_query_lens: torch.Tensor,
-        # [batch_size]
-        num_rejected_tokens: torch.Tensor,
-        num_tokens: int,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        # cu_target_query_lens: [0, a, a + b, a + b + c]
+            self,
+            common_attn_metadata: CommonAttentionMetadata,
+            # [batch_size]
+            num_rejected_tokens: torch.Tensor,
+            num_tokens: int) -> tuple[CommonAttentionMetadata, torch.Tensor]:
+        # query_start_loc_cpu: [0, a, a + b, a + b + c]
         # num_rejected_tokens: [n1, n2, n3]
         # num_tokens_per_req: [a - n1, b - n2, c - n3]
         # cu_num_tokens: [0, a - n1, a + b - n1 - n2, a + b + c - n1 - n2 - n3]
@@ -291,30 +254,56 @@ class EagleProposer:
         #                 a, a + 1, ..., a + b - n2 - 1,
         #                 a + b, a + b + 1, ..., a + b + c - n3 - 1]
 
+        device = common_attn_metadata.query_start_loc.device
+        query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
+        spec_seq_lens_cpu =\
+            common_attn_metadata.seq_lens_cpu - num_rejected_tokens
+
         # [0, a, a + b, a + b + c] -> [a, b, c]
-        query_len_per_req = (cu_target_query_lens[1:] -
-                             cu_target_query_lens[:-1])
+        query_len_per_req = (query_start_loc_cpu[1:] -
+                             query_start_loc_cpu[:-1])
         # [a, b, c] -> [a - n1, b - n2, c - n3]
         num_tokens_per_req = query_len_per_req - num_rejected_tokens
 
         # [a - n1, b - n2, c - n3] ->
         # [0, a - n1, a + b - n1 - n2, a + b + c - n1 - n2 - n3]
-        cu_num_tokens = torch.zeros_like(cu_target_query_lens)
-        torch.cumsum(num_tokens_per_req, dim=0, out=cu_num_tokens[1:])
-        token_indices = torch.empty(
-            num_tokens,
-            dtype=torch.int32,
-            device=cu_target_query_lens.device,
+        spec_query_start_loc_cpu = torch.zeros_like(query_start_loc_cpu,
+                                                    pin_memory=True)
+        torch.cumsum(num_tokens_per_req,
+                     dim=0,
+                     out=spec_query_start_loc_cpu[1:])
+        """Get the cumulative sum and batched arange of the given array.
+        # E.g., [2, 5, 3] -> ([2, 7, 10], [0, 1, 0, 1, 2, 3, 4, 0, 1, 2])
+        # Equivalent to but faster than:
+        # np.concatenate([np.arange(n) for n in num_tokens])
+        """
+        # Step 1. [2, 5, 3] -> [2, 7, 10]
+        total_num_tokens = spec_query_start_loc_cpu[-1]
+        # Step 2. [2, 7, 10] -> [0, 0, 2, 2, 2, 2, 2, 7, 7, 7]
+        cumsums_offsets = np.repeat(
+            spec_query_start_loc_cpu[1:].numpy() - num_tokens_per_req.numpy(),
+            num_tokens_per_req.numpy())
+        # Step 3. [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
+        arange = self.arange_np[:total_num_tokens] - cumsums_offsets
+
+        tokens_indices = arange + query_start_loc_cpu[:-1]
+
+        spec_common_attn_metadata = CommonAttentionMetadata(
+            query_start_loc=spec_query_start_loc_cpu.to(device,
+                                                        non_blocking=True),
+            seq_lens=spec_seq_lens_cpu.to(device, non_blocking=True),
+            query_start_loc_cpu=spec_query_start_loc_cpu.cpu(),
+            seq_lens_cpu=spec_seq_lens_cpu.cpu(),
+            num_computed_tokens_cpu=(
+                common_attn_metadata.num_computed_tokens_cpu),
+            num_reqs=common_attn_metadata.num_reqs,
+            num_actual_tokens=num_tokens,
+            max_query_len=query_len_per_req.max().item(),
+            block_table_tensor=common_attn_metadata.block_table_tensor,
+            slot_mapping=common_attn_metadata.slot_mapping[tokens_indices],
         )
-        batch_size = num_rejected_tokens.shape[0]
-        BLOCK_SIZE = 1024
-        prepare_eagle_input_kernel[(batch_size, )](
-            token_indices,
-            cu_target_query_lens,
-            cu_num_tokens,
-            BLOCK_SIZE=BLOCK_SIZE,
-        )
-        return cu_num_tokens, token_indices
+
+        return spec_common_attn_metadata, tokens_indices
 
     def load_model(self, target_model: nn.Module) -> None:
         draft_model_config = \
