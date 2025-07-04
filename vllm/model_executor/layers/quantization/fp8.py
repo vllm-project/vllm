@@ -14,10 +14,9 @@ from vllm import _custom_ops as ops
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
-    BatchedTritonOrDeepGemmExperts, FusedMoE, FusedMoEActivationFormat,
-    FusedMoEConfig, FusedMoEMethodBase, FusedMoEPermuteExpertsUnpermute,
-    FusedMoEPrepareAndFinalize, FusedMoeWeightScaleSupported,
-    TritonOrDeepGemmExperts)
+    FusedMoE, FusedMoEActivationFormat, FusedMoEConfig, FusedMoEMethodBase,
+    FusedMoEPermuteExpertsUnpermute, FusedMoEPrepareAndFinalize,
+    FusedMoeWeightScaleSupported)
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -803,6 +802,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         prepare_finalize: FusedMoEPrepareAndFinalize,
         moe: FusedMoEConfig,
     ) -> FusedMoEPermuteExpertsUnpermute:
+        from vllm.model_executor.layers.fused_moe import (
+            BatchedTritonOrDeepGemmExperts, TritonOrDeepGemmExperts)
+
         assert not self.use_marlin and not self.rocm_aiter_moe_enabled, (
             "Marlin and ROCm AITER are not supported with all2all yet.")
 
@@ -818,10 +820,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 self.quant_config.weight_block_size, False)
             return BatchedTritonOrDeepGemmExperts(
                 max_num_tokens=max_num_tokens_per_rank,
-                world_size=prepare_finalize.
-                world_size,  # type: ignore [attr-defined]
-                dp_size=prepare_finalize.
-                dp_size,  # type: ignore [attr-defined]
+                num_dispatchers=prepare_finalize.num_dispatchers(),
                 use_fp8_w8a8=True,
                 block_shape=self.quant_config.weight_block_size,
                 per_act_token_quant=False,
