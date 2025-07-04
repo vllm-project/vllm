@@ -78,21 +78,23 @@ lora_tokenizer_cache: dict[int, AnyTokenizer] = {}
 
 
 def get_random_lora_request(
-        args: argparse.Namespace
+    args: argparse.Namespace,
 ) -> tuple[LoRARequest, Optional[AnyTokenizer]]:
     global lora_tokenizer_cache
     lora_id = random.randint(1, args.max_loras)
-    lora_request = LoRARequest(lora_name=str(lora_id),
-                               lora_int_id=lora_id,
-                               lora_path=lora_path_on_disk(args.lora_path))
+    lora_request = LoRARequest(
+        lora_name=str(lora_id),
+        lora_int_id=lora_id,
+        lora_path=lora_path_on_disk(args.lora_path),
+    )
     if lora_id not in lora_tokenizer_cache:
         lora_tokenizer_cache[lora_id] = get_lora_tokenizer(lora_request)
     return lora_request, lora_tokenizer_cache[lora_id]
 
 
-def sample_requests(tokenizer: PreTrainedTokenizerBase,
-                    args: argparse.Namespace) -> list[SampleRequest]:
-
+def sample_requests(
+    tokenizer: PreTrainedTokenizerBase, args: argparse.Namespace
+) -> list[SampleRequest]:
     dataset_path: str = args.dataset
     num_requests: int = args.num_prompts
     fixed_output_len: Optional[int] = args.output_len
@@ -110,9 +112,7 @@ def sample_requests(tokenizer: PreTrainedTokenizerBase,
 
     # Filter out sequences that are too long or too short
     filtered_dataset: list[SampleRequest] = []
-    for data in tqdm(dataset,
-                     total=len(filtered_dataset),
-                     desc="sampling requests"):
+    for data in tqdm(dataset, total=len(filtered_dataset), desc="sampling requests"):
         if len(filtered_dataset) == num_requests:
             break
 
@@ -125,11 +125,9 @@ def sample_requests(tokenizer: PreTrainedTokenizerBase,
             multi_modal_data = multi_modal_data or {}
             image_path = data["image"]
             # TODO(vllm-project/vllm/issues/9778): Support multiple images.
-            assert isinstance(image_path,
-                              str), "Only support single image input"
+            assert isinstance(image_path, str), "Only support single image input"
             try:
-                multi_modal_data["image"] = Image.open(image_path).convert(
-                    "RGB")
+                multi_modal_data["image"] = Image.open(image_path).convert("RGB")
             except FileNotFoundError:
                 # Ignore datapoint where asset is missing
                 continue
@@ -146,8 +144,9 @@ def sample_requests(tokenizer: PreTrainedTokenizerBase,
         prompt_token_ids = request_tokenizer(prompt).input_ids
         completion_token_ids = request_tokenizer(completion).input_ids
         prompt_len = len(prompt_token_ids)
-        output_len = len(completion_token_ids
-                         ) if fixed_output_len is None else fixed_output_len
+        output_len = (
+            len(completion_token_ids) if fixed_output_len is None else fixed_output_len
+        )
         if prompt_len < 4 or output_len < 4:
             # Prune too short sequences.
             continue
@@ -155,11 +154,14 @@ def sample_requests(tokenizer: PreTrainedTokenizerBase,
             # Prune too long sequences.
             continue
         filtered_dataset.append(
-            SampleRequest(prompt=prompt,
-                          prompt_len=prompt_len,
-                          expected_output_len=output_len,
-                          multi_modal_data=multi_modal_data,
-                          lora_request=lora_request))
+            SampleRequest(
+                prompt=prompt,
+                prompt_len=prompt_len,
+                expected_output_len=output_len,
+                multi_modal_data=multi_modal_data,
+                lora_request=lora_request,
+            )
+        )
 
     return filtered_dataset
 
@@ -282,22 +284,27 @@ def run_vllm_chat(
     return end - start, outputs
 
 
-async def run_vllm_async(requests: list[SampleRequest],
-                         n: int,
-                         engine_args: AsyncEngineArgs,
-                         disable_frontend_multiprocessing: bool = False,
-                         disable_detokenize: bool = False) -> float:
+async def run_vllm_async(
+    requests: list[SampleRequest],
+    n: int,
+    engine_args: AsyncEngineArgs,
+    disable_frontend_multiprocessing: bool = False,
+    disable_detokenize: bool = False,
+) -> float:
     from vllm import SamplingParams
 
     async with build_async_engine_client_from_engine_args(
-            engine_args, disable_frontend_multiprocessing) as llm:
+        engine_args, disable_frontend_multiprocessing
+    ) as llm:
         model_config = await llm.get_model_config()
         assert all(
-            model_config.max_model_len >= (request.prompt_len +
-                                           request.expected_output_len)
-            for request in requests), (
-                "Please ensure that max_model_len is greater than the sum of"
-                " prompt_len and expected_output_len for all requests.")
+            model_config.max_model_len
+            >= (request.prompt_len + request.expected_output_len)
+            for request in requests
+        ), (
+            "Please ensure that max_model_len is greater than the sum of"
+            " prompt_len and expected_output_len for all requests."
+        )
 
         # Add the requests to the engine.
         prompts: list[Union[TextPrompt, TokensPrompt]] = []
@@ -799,7 +806,7 @@ if __name__ == "__main__":
         type=str,
         default=None,
         help="Path to the LoRA adapters to use. This can be an absolute path, "
-        "a relative path, or a Hugging Face model identifier."
+        "a relative path, or a Hugging Face model identifier.",
     )
     parser.add_argument(
         "--prefix-len",
