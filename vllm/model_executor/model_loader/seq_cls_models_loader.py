@@ -1,5 +1,7 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import torch
 
@@ -45,7 +47,10 @@ def load_weights_using_from_2_way_softmax(
         ParallelLMHead)
 
     model_config = model.vllm_config.model_config
-    tokens = getattr(model.config, "classifier_from_token", None)
+    tokens = getattr(model.config, "classifier_from_token", [])
+    tokens = cast(list[int], tokens)
+    assert len(tokens) == 2
+
     device = model.score.weight.device
 
     if model.config.tie_word_embeddings:
@@ -64,10 +69,10 @@ def load_weights_using_from_2_way_softmax(
                               tokenizer_mode=model_config.tokenizer_mode,
                               trust_remote_code=model_config.trust_remote_code)
 
-    a = tokenizer.convert_tokens_to_ids(tokens[0])
-    b = tokenizer.convert_tokens_to_ids(tokens[1])
-    weight = model.lm_head.weight.data[b].to(device).to(
-        torch.float32) - model.lm_head.weight.data[a].to(device).to(
+    false_id = tokenizer.convert_tokens_to_ids(tokens[0])
+    true_id = tokenizer.convert_tokens_to_ids(tokens[1])
+    weight = model.lm_head.weight.data[true_id].to(device).to(
+        torch.float32) - model.lm_head.weight.data[false_id].to(device).to(
             torch.float32)
     model.score.weight.data.copy_(weight)
 

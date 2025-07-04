@@ -4764,8 +4764,7 @@ class VllmConfig:
             cls.verify_and_update_config(self)
 
         if self.model_config.task == "classify":
-            # Maybe using:
-            # Online convert ForCausalLM into ForSequenceClassification model.
+            # Maybe convert ForCausalLM into ForSequenceClassification model.
             from vllm.model_executor.model_loader.seq_cls_models_loader import (
                 SequenceClassificationConfig)
             SequenceClassificationConfig.verify_and_update_config(self)
