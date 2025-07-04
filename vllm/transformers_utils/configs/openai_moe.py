@@ -3,8 +3,8 @@
 from transformers import PretrainedConfig
 
 
-class OAIModelConfig(PretrainedConfig):
-    model_type = "oai"
+class OpenAIMoeConfig(PretrainedConfig):
+    model_type = "openai_moe"
 
     def __init__(self,
                  num_hidden_layers: int = 36,

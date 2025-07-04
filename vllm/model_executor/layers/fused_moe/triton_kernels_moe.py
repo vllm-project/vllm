@@ -103,8 +103,8 @@ def triton_kernel_fused_experts(
 
     M, K = hidden_states.shape
     E, _, N = w1.shape
-    n_expts_act = routing_data.n_expts_act
-    dtype = hidden_states.dtype
+    # n_expts_act = routing_data.n_expts_act
+    # dtype = hidden_states.dtype
 
     if global_num_experts == -1:
         global_num_experts = E

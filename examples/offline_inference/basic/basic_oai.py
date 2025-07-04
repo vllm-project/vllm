@@ -1,15 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-# 1. Setup flash-attention-os-mini
-# git clone git@github.com:vllm-project/flash-attention-os-mini.git
-# cd flash-attention-os-mini
-# git submodule update --init --recursive
-# 2. Build vLLM
-# cd vllm-oai
-# export VLLM_FLASH_ATTN_SRC_DIR=/data/lily/flash-attention-os-mini
-# pip install -e .
-
 from vllm import LLM, SamplingParams
 
 # Sample prompts.
