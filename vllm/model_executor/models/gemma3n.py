@@ -336,7 +336,7 @@ class Gemma3nAttention(nn.Module):
             # Last sliding attention layer is 2 before sharing
             offset = 2 if self.sliding_window is not None else 1
             kv_shared_layer_index = first_kv_shared_layer_idx - offset
-            kv_sharing_target_layer_name = f"model.language_model.layers.{kv_shared_layer_index}.self_attn.attn"  # noqa: E501
+            kv_sharing_target_layer_name = f"language_model.model.layers.{kv_shared_layer_index}.self_attn.attn"  # noqa: E501
         else:
             kv_sharing_target_layer_name = None
 
@@ -396,6 +396,7 @@ class Gemma3nDecoderLayer(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
+        assert isinstance(config, Gemma3nTextConfig)
         self.altup_active_idx = config.altup_active_idx
         assert config.altup_correct_scale
 
@@ -537,7 +538,7 @@ class Gemma3nTextModel(nn.Module, SupportsQuant):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        config = vllm_config.model_config.hf_config.text_config
+        config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         self.config = config
@@ -783,11 +784,11 @@ class Gemma3nForCausalLM(nn.Module):
         self.model = Gemma3nTextModel(vllm_config=vllm_config,
                                   prefix=maybe_prefix(prefix, "model"))
         self.logits_processor = LogitsProcessor(
-            config.text_config.vocab_size,
-            soft_cap=config.text_config.final_logit_softcapping)
+            config.vocab_size,
+            soft_cap=config.final_logit_softcapping)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.language_model.get_input_embeddings(input_ids)
+        return self.model.get_input_embeddings(input_ids)
 
     def forward(
         self,
@@ -806,7 +807,7 @@ class Gemma3nForCausalLM(nn.Module):
         hidden_states: torch.Tensor,
         sampling_metadata: Optional[SamplingMetadata],
     ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.model.language_model.embed_tokens,
+        logits = self.logits_processor(self.model.embed_tokens,
                                        hidden_states, sampling_metadata)
         return logits
 
