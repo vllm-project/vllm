@@ -6,7 +6,7 @@ from collections.abc import Sequence
 from enum import Enum
 from random import choices
 from string import ascii_letters, digits
-from typing import Literal
+from typing import Literal, Union
 
 import regex as re
 from pydantic import Field
@@ -98,8 +98,8 @@ class MistralToolParser(ToolParser):
         self.previous_attribute_end_index: int = 0
 
         # Legacy state tracking (kept for compatibility)
-        self.current_element_streaming: Literal["name",
-                                                "arguments"] | None = None
+        self.current_element_streaming: Union[Literal["name",
+                                                      "arguments"], None] = None
         self.current_tool_name_finished: bool = False
         self.current_tool_arguments_finished: bool = False
         self.tools_parsing_finished: bool = False
@@ -128,7 +128,7 @@ class MistralToolParser(ToolParser):
 
     def _extract_tool_calls_streaming_v11(
             self, additional_content: str,
-            delta_text: str) -> DeltaMessage | None:
+            delta_text: str) -> Union[DeltaMessage, None]:
         """
         Extract tool calls from a streaming response, specifically for the
         v11 MistralTokenizer format: ToolName{arguments}. This logic is a
@@ -278,7 +278,7 @@ class MistralToolParser(ToolParser):
         self.current_tool_name_sent = False
         self.prev_args_sent = ""
 
-    def _determine_next_parsing_element(self) -> Literal["name", "arguments"] | None:
+    def _determine_next_parsing_element(self) -> Union[Literal["name", "arguments"], None]:
         """
         Determine the next element to parse based on current state.
         
@@ -397,7 +397,7 @@ class MistralToolParser(ToolParser):
         return result
 
     def _extracted_complete_name(
-            self, current_attribute_start_index: int) -> tuple[str, int | None]:
+            self, current_attribute_start_index: int) -> tuple[str, Union[int, None]]:
         """
         Extract the complete function name from the current tool call.
 
@@ -478,7 +478,7 @@ class MistralToolParser(ToolParser):
             return -1
 
     def _none_or_additional_content(
-            self, additional_content: str) -> DeltaMessage | None:
+            self, additional_content: str) -> Union[DeltaMessage, None]:
         """
         Create a DeltaMessage with additional content if present,
         otherwise return None.
@@ -590,7 +590,7 @@ class MistralToolParser(ToolParser):
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
-    ) -> DeltaMessage | None:
+    ) -> Union[DeltaMessage, None]:
 
         # Early return if no tool call token present
         if self.bot_token not in current_text:
