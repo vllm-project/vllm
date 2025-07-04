@@ -169,6 +169,12 @@ class ConversationMessage(TypedDict, total=False):
     content: Union[Optional[str], list[dict[str, str]]]
     """The contents of the message"""
 
+    reasoning_content: Optional[str]
+    """Optional field to retain the reasoning_content.
+    Some chat templates might need to use the reasoning content from previous
+    turns
+    """
+
     tool_call_id: Optional[str]
     """Tool call that this message is responding to."""
 
