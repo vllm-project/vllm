@@ -40,8 +40,6 @@ def vllm_reranker(model_name,
     if doc_type == "image":
         documents = {"content": [create_image_param(url) for url in documents]}
 
-    print(query)
-    print(documents)
     outputs = model.score(query, documents)
 
     return [output.outputs.score for output in outputs]
