@@ -45,8 +45,8 @@ from vllm.model_executor.layers.linear import (LinearBase,
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase)
 from vllm.model_executor.model_loader.tensorizer import (
-    TensorizerConfig, is_vllm_tensorized, load_with_tensorizer,
-    serialize_vllm_model, tensorizer_weights_iterator)
+    TensorizerConfig, is_vllm_tensorized, serialize_vllm_model,
+    tensorizer_weights_iterator)
 from vllm.model_executor.model_loader.utils import (ParamMapping,
                                                     configure_quant_config,
                                                     get_model_architecture,
@@ -546,32 +546,6 @@ class TensorizerLoader(BaseModelLoader):
                 model = _initialize_model(vllm_config=vllm_config)
 
             model.load_weights(self._get_weights_iterator())
-        return model.eval()
-
-    def _load_model_serialized(
-        self,
-        vllm_config: VllmConfig,
-    ) -> nn.Module:
-        """Load a serialized model with tensorizer.
-
-        Expects a vLLM-tensorized model. See the
-        examples/other/tensorize_vllm_model.py example script
-        for serializing vLLM models."""
-
-        device_config = vllm_config.device_config
-        model_config = vllm_config.model_config
-
-        with set_default_torch_dtype(model_config.dtype):
-            with torch.device(device_config.device):
-                model_class = get_model_architecture(model_config)[0]
-
-                tensorizer_config = copy.copy(self.tensorizer_config)
-                tensorizer_config.model_class = model_class
-                tensorizer_config.hf_config = model_config.hf_config
-                tensorizer_config.dtype = model_config.dtype
-
-                model = load_with_tensorizer(tensorizer_config,
-                                             vllm_config=vllm_config)
         return model.eval()
 
     def download_model(self, model_config: ModelConfig) -> None:
