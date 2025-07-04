@@ -33,6 +33,7 @@ def test_models(
     example_prompts,
     model,
     monkeypatch,
+    dtype
 ) -> None:
 
     if model == "BAAI/bge-multilingual-gemma2" and current_platform.is_rocm():
