@@ -144,10 +144,9 @@ class MistralToolParser(ToolParser):
         if self.current_tool_name_finished and self.current_tool_arguments_finished:
             if self._should_advance_to_next_v11_tool():
                 # Remove the completed tool from raw_tool_calls before resetting state
-                pattern = r'([a-zA-Z0-9_-]+\{[^}]*\})\s*[,\s]*'
-                match = re.search(pattern, self.raw_tool_calls)
-                if match:
-                    self.raw_tool_calls = self.raw_tool_calls[match.end(1):]
+                completed_tool_end = self._find_completed_v11_tool_end()
+                if completed_tool_end > 0:
+                    self.raw_tool_calls = self.raw_tool_calls[completed_tool_end:]
                 self._reset_v11_tool_state()
                 logger.debug("v11 streaming: found next tool, resetting state")
 
@@ -243,10 +242,34 @@ class MistralToolParser(ToolParser):
 
     def _should_advance_to_next_v11_tool(self) -> bool:
         """Check if we should advance to the next tool in V11 format."""
-        # Find pattern: completed_tool, next_tool or completed_tool next_tool
-        pattern = r'([a-zA-Z0-9_-]+\{[^}]*\})\s*[,\s]*([a-zA-Z0-9_-]+.*)'
-        match = re.search(pattern, self.raw_tool_calls)
-        return match is not None and len(match.group(2).strip()) > 0
+        completed_tool_end = self._find_completed_v11_tool_end()
+        if completed_tool_end <= 0:
+            return False
+        
+        # Check if there's content after the completed tool that looks like another tool
+        remaining = self.raw_tool_calls[completed_tool_end:].strip()
+        if remaining.startswith(','):
+            remaining = remaining[1:].strip()
+        
+        # Look for next tool pattern: function_name{
+        return bool(re.match(r'[a-zA-Z0-9_-]+\s*\{', remaining))
+
+    def _find_completed_v11_tool_end(self) -> int:
+        """Find the end position of the first completed tool in V11 format using JSON parsing."""
+        # Look for function name pattern: name followed by {
+        brace_match = re.search(r'([a-zA-Z0-9_-]+)\s*(\{)', self.raw_tool_calls)
+        if not brace_match:
+            return -1
+        
+        # Try to parse the JSON starting from the opening brace
+        json_start = brace_match.start(2)
+        json_part = self.raw_tool_calls[json_start:]
+        
+        try:
+            _, end_idx = self.json_decoder.raw_decode(json_part)
+            return json_start + end_idx
+        except json.JSONDecodeError:
+            return -1
 
     def _reset_v11_tool_state(self) -> None:
         """Reset V11 tool parsing state for the next tool."""
