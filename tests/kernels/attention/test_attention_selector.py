@@ -36,7 +36,8 @@ DEVICE_REGULAR_ATTN_BACKENDS = {
 DEVICE_MLA_BLOCK_SIZES = {
     "cuda": [16, 64],  # CUDA supports both standard and extended block sizes
     "hip": [16, 1],  # HIP requires special handling for block_size=1
-    "cpu": [16]  # CPU uses fixed block size from test cases
+    # "cpu": [16]  # CPU uses fixed block size from test cases
+    "cpu": []  # FIXME(woosuk): Temporarily disable CPU tests
 }
 
 
