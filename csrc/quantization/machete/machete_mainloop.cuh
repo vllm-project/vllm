@@ -38,7 +38,6 @@
 #include "cute/atom/mma_atom.hpp"
 #include "cute/atom/copy_traits_sm90_tma.hpp"
 #include "cute/algorithm/gemm.hpp"
-#include "cute/tensor_predicate.hpp"
 #include "cute/numeric/arithmetic_tuple.hpp"
 #include "cutlass/pipeline/pipeline.hpp"
 #include "cutlass/transform/collective/sm90_wgmma_transpose.hpp"
