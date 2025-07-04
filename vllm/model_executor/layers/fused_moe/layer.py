@@ -1454,6 +1454,7 @@ class FusedMoE(torch.nn.Module):
             self.dp_size > 1
             and not self.moe_parallel_config.use_deepep_ht_kernels
             and not self.moe_parallel_config.use_flashinfer_cutlass_kernels)
+        # do_naive_dispatch_combine = True
         if do_naive_dispatch_combine:
             hidden_states, router_logits = get_ep_group().dispatch(
                 hidden_states, router_logits)
@@ -1483,8 +1484,9 @@ class FusedMoE(torch.nn.Module):
 
         if do_naive_dispatch_combine:
             final_hidden_states = get_ep_group().combine(final_hidden_states)
-
+        # print(f"reduce_results:{self.reduce_results}")
         if self.reduce_results and (self.tp_size > 1 or self.ep_size > 1):
+        # if True and (self.tp_size > 1 or self.ep_size > 1):
             # Default set to False. (May have to add shared expert outputs.
             final_hidden_states = self.maybe_all_reduce_tensor_model_parallel(
                 final_hidden_states)

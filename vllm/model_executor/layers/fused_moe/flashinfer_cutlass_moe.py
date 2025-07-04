@@ -18,12 +18,12 @@ from typing import TYPE_CHECKING
 
 try:
     from flashinfer import fp4_quantize as fp4_quantize
-    from flashinfer.fused_moe import cutlass_fused_moe as cutlass_fused_moe
+    from flashinfer.fused_moe import cutlass_fused_moe as flashinfer_cutlass_fused_moe
 except ImportError:
     if not TYPE_CHECKING:
         cutlass_fused_moe = None
 
-has_flashinfer_cutlass_fused_moe = cutlass_fused_moe is not None
+has_flashinfer_cutlass_fused_moe = flashinfer_cutlass_fused_moe is not None
 
 #TODO(shuw): use this check
 def _valid_flashinfer_fused_moe(hidden_states: torch.Tensor, w1: torch.Tensor,
@@ -157,8 +157,9 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
                 torch.min(a2_scale),
                 w2_scale.view(torch.int32),
                 g2_alphas,
-            ]            
-            output = cutlass_fused_moe(
+            ]
+            # print(self.ep_size, self.ep_rank, self.tp_rank, self.tp_size)
+            out = flashinfer_cutlass_fused_moe(
                 hidden_states,
                 topk_ids.to(torch.int),
                 topk_weights,
@@ -168,10 +169,11 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
                 output_dtype=out_dtype,
                 quant_scales=quant_scales,
                 input_sf=a1q_scale,
-                ep_size=self.ep_size,
-                ep_rank=self.ep_rank,
                 tp_size=self.tp_size,
                 tp_rank=self.tp_rank,
+                ep_size=self.ep_size,
+                ep_rank=self.ep_rank,
             )[0]
+            output.copy_(out)
         else:
             raise ValueError("Only nvfp4 quantization is currently supported.")

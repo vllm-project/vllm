@@ -529,11 +529,11 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             "use_nvfp4_w4a4": True,
             "use_dp": moe_parallel_config.dp_size > 1,
         }
-        if not moe_parallel_config.dp_size > 1 and moe_parallel_config.use_ep:
-            experts_kwargs["ep_rank"] = moe_parallel_config.ep_rank
-            experts_kwargs["ep_size"] = moe_parallel_config.ep_size
-            experts_kwargs["tp_rank"] = moe_parallel_config.tp_rank
-            experts_kwargs["tp_size"] = moe_parallel_config.tp_size
+        # if not moe_parallel_config.dp_size > 1 and moe_parallel_config.use_ep:
+        experts_kwargs["ep_rank"] = moe_parallel_config.ep_rank
+        experts_kwargs["ep_size"] = moe_parallel_config.ep_size
+        experts_kwargs["tp_rank"] = moe_parallel_config.tp_rank
+        experts_kwargs["tp_size"] = moe_parallel_config.tp_size
         experts = FlashInferExperts(**experts_kwargs)
         self.fused_experts = mk.FusedMoEModularKernel(
             FlashInferCutlassMoEPrepareAndFinalize(
@@ -847,6 +847,33 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             extra_prepare_args = {
                 'use_dp': layer.dp_size > 1,
             }
+            # from flashinfer import fp4_quantize as fp4_quantize
+            # from flashinfer.fused_moe import cutlass_fused_moe as flashinfer_cutlass_fused_moe
+            # quant_scales = [
+            #     torch.min(layer.w13_input_scale_quant),
+            #     layer.w13_blockscale_swizzled.view(torch.int32),
+            #     layer.g1_alphas,
+            #     torch.min(layer.w2_input_scale_quant),
+            #     layer.w2_blockscale_swizzled.view(torch.int32),
+            #     layer.g2_alphas,
+            # ]
+            # xq, input_sf = fp4_quantize(x, torch.min(layer.w13_input_scale_quant))  
+            # out = flashinfer_cutlass_fused_moe(
+            #     xq,
+            #     topk_ids,
+            #     topk_weights,
+            #     layer.w13_weight.view(torch.long),
+            #     layer.w2_weight.view(torch.long),
+            #     x.dtype,
+            #     quant_scales,
+            #     input_sf,
+            #     self.fused_experts.fused_experts.tp_size,
+            #     self.fused_experts.fused_experts.tp_rank,
+            #     self.fused_experts.fused_experts.ep_size,
+            #     self.fused_experts.fused_experts.ep_rank,
+            # )[0]
+
+            # print(f"usedp:{layer.dp_size > 1}")
             out = self.fused_experts(
                 hidden_states=x,
                 w1=layer.w13_weight,
@@ -856,6 +883,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 inplace=False,  # TODO(shuw): fix later, now output is high prec
                 activation=activation,
                 global_num_experts=global_num_experts,
+                expert_map=expert_map,
                 w1_scale=layer.w13_blockscale_swizzled,
                 w2_scale=layer.w2_blockscale_swizzled,
                 a1_scale=layer.w13_input_scale_quant,

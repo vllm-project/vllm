@@ -66,7 +66,7 @@ class FlashInferCutlassMoEPrepareAndFinalize(MoEPrepareAndFinalizeNoEP
 
         a1q, a1q_scale = moe_kernel_quantize_input(
             a1,
-            a1_scale,
+            torch.min(a1_scale), # special to nvfp4
             quant_config.quant_dtype,
             self.per_channel_quant,
             self.block_shape,
