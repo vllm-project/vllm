@@ -278,35 +278,30 @@ class MistralToolParser(ToolParser):
         self.current_tool_name_sent = False
         self.prev_args_sent = ""
 
-    def _determine_next_parsing_element(
-            self,
-            raw_current_tool_call: str) -> Literal["name", "arguments"] | None:
+    def _determine_next_parsing_element(self) -> Literal["name", "arguments"] | None:
         """
         Determine the next element to parse based on current state.
         
-        Args:
-            raw_current_tool_call: The current tool call text
-            
         Returns:
             The next element to parse, or None if nothing is ready
         """
         # Check for name attribute
         if not self.current_tool_name_finished:
             match_name = self.tool_call_first_attribute_name.match(
-                raw_current_tool_call)
+                self.raw_tool_calls, self.current_tool_start_index)
             if match_name and match_name.end(
-            ) > self.previous_attribute_end_index:
-                self.current_attribute_start_index = match_name.end()
+            ) > self.current_tool_start_index + self.previous_attribute_end_index:
+                self.current_attribute_start_index = match_name.end() - self.current_tool_start_index
                 return "name"
 
         # Check for arguments attribute
         if not self.current_tool_arguments_finished:
             match_arguments = self.tool_call_first_attribute_arguments.match(
-                raw_current_tool_call)
+                self.raw_tool_calls, self.current_tool_start_index)
             if match_arguments and match_arguments.end(
-            ) > self.previous_attribute_end_index:
+            ) > self.current_tool_start_index + self.previous_attribute_end_index:
                 # The `{` is the last character in the match - we want it as start index
-                self.current_attribute_start_index = match_arguments.end() - 1
+                self.current_attribute_start_index = match_arguments.end() - 1 - self.current_tool_start_index
                 return "arguments"
 
         return None
@@ -402,49 +397,44 @@ class MistralToolParser(ToolParser):
         return result
 
     def _extracted_complete_name(
-            self, raw_current_tool_call: str,
-            current_attribute_start_index: int) -> tuple[str, int | None]:
+            self, current_attribute_start_index: int) -> tuple[str, int | None]:
         """
         Extract the complete function name from the current tool call.
 
         Args:
-            raw_current_tool_call: The raw JSON string of the current tool call
             current_attribute_start_index: The starting index of the
-            name attribute in the raw_current_tool_call string
+            name attribute relative to the current tool start
 
         Returns:
             tuple:
             - The function name, or "" if extraction failed
-            - The end index of the name in raw_current_tool_call,
+            - The end index of the name relative to the current tool start,
             or None if extraction failed
         """
-        partial_name_value = raw_current_tool_call[
-            current_attribute_start_index:]
-        if match := self.string_value_pattern.match(partial_name_value):
-            return match.group(1), match.end() + current_attribute_start_index
+        absolute_start = self.current_tool_start_index + current_attribute_start_index
+        if match := self.string_value_pattern.match(self.raw_tool_calls, absolute_start):
+            return match.group(1), match.end() - self.current_tool_start_index
         return "", None
 
-    def _extract_argument_fragment(self, raw_current_tool_call: str,
-                                   current_attribute_start_index: int,
+    def _extract_argument_fragment(self, current_attribute_start_index: int,
                                    delta: str) -> tuple[str, int]:
         """
         Extract the relevant argument fragment from the current streaming delta.
 
         Args:
-            raw_current_tool_call: The raw JSON string of the current tool call
             current_attribute_start_index: The starting index
-            of the arguments attribute in the raw string
+            of the arguments attribute relative to the current tool start
             delta: The new text added in this streaming step
 
         Returns:
             tuple:
             - The extracted argument diff text
             to be sent in the streaming response
-            - The end index of the arguments in the raw string,
+            - The end index of the arguments relative to the current tool start,
             or -1 if not yet complete
         """
-        partial_arguments_value = raw_current_tool_call[
-            current_attribute_start_index:]
+        absolute_start = self.current_tool_start_index + current_attribute_start_index
+        partial_arguments_value = self.raw_tool_calls[absolute_start:]
         try:
             _, end_index = self.json_decoder.raw_decode(
                 partial_arguments_value)
@@ -472,11 +462,13 @@ class MistralToolParser(ToolParser):
             or -1 if no next tool is found yet
         """
         assert self.current_tool_start_index >= 0
-        current_tool_call = self.raw_tool_calls[self.current_tool_start_index:]
         try:
-            _, end_index = self.json_decoder.raw_decode(current_tool_call)
-            return (self.current_tool_start_index + end_index +
-                    current_tool_call[end_index:].find("{"))
+            _, end_index = self.json_decoder.raw_decode(
+                self.raw_tool_calls, self.current_tool_start_index)
+            # Look for the next opening brace after the current tool ends
+            search_start = self.current_tool_start_index + end_index
+            next_brace = self.raw_tool_calls.find("{", search_start)
+            return next_brace if next_brace != -1 else -1
         except json.decoder.JSONDecodeError:
             # The current tool object is not yet closed
             return -1
@@ -647,13 +639,10 @@ class MistralToolParser(ToolParser):
         if self.current_tool_start_index >= len(self.raw_tool_calls):
             # tool call has not started
             return self._none_or_additional_content(additional_content)
-        raw_current_tool_call = self.raw_tool_calls[self.
-                                                    current_tool_start_index:]
 
         # Determine what to parse next
         if self.current_element_streaming is None:
-            next_element = self._determine_next_parsing_element(
-                raw_current_tool_call)
+            next_element = self._determine_next_parsing_element()
             if next_element is None:
                 return self._none_or_additional_content(additional_content)
             self.current_element_streaming = next_element
@@ -661,7 +650,7 @@ class MistralToolParser(ToolParser):
         if self.current_element_streaming == "name":
             try:
                 function_name, name_end_index = self._extracted_complete_name(
-                    raw_current_tool_call, self.current_attribute_start_index)
+                    self.current_attribute_start_index)
             except IndexError:
                 # name value has not started being generated
                 return self._none_or_additional_content(additional_content)
@@ -692,7 +681,6 @@ class MistralToolParser(ToolParser):
         if self.current_element_streaming == "arguments":
             try:
                 diff, arguments_end_index = self._extract_argument_fragment(
-                    raw_current_tool_call,
                     self.current_attribute_start_index,
                     delta_text,
                 )
