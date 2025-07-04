@@ -323,7 +323,6 @@ _CROSS_ENCODER_EXAMPLE_MODELS = {
     "RobertaForSequenceClassification": _HfExamplesInfo("cross-encoder/quora-roberta-base", v0_only=True),  # noqa: E501
     "XLMRobertaForSequenceClassification": _HfExamplesInfo("BAAI/bge-reranker-v2-m3", v0_only=True),  # noqa: E501
     "ModernBertForSequenceClassification": _HfExamplesInfo("Alibaba-NLP/gte-reranker-modernbert-base", v0_only=True),  # noqa: E501
-    "JinaVLForSequenceClassification": _HfExamplesInfo("jinaai/jina-reranker-m0"),   # noqa: E501
 }
 
 _MULTIMODAL_EXAMPLE_MODELS = {
@@ -430,6 +429,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                                          trust_remote_code=True),  # noqa: E501
     "MllamaForConditionalGeneration": _HfExamplesInfo("meta-llama/Llama-3.2-11B-Vision-Instruct"),  # noqa: E501
     "WhisperForConditionalGeneration": _HfExamplesInfo("openai/whisper-large-v3"),  # noqa: E501
+    "JinaVLForSequenceClassification": _HfExamplesInfo("jinaai/jina-reranker-m0"),   # noqa: E501
 }
 
 _SPECULATIVE_DECODING_EXAMPLE_MODELS = {

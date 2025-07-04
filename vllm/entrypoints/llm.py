@@ -1192,8 +1192,8 @@ class LLM:
     def _cross_encoding_score(
         self,
         tokenizer: AnyTokenizer,
-        data_1: Union[Sequence[SingletonPrompt], list[ScoreContentPartParam]],
-        data_2: Union[Sequence[SingletonPrompt], list[ScoreContentPartParam]],
+        data_1: Union[list[str], list[ScoreContentPartParam]],
+        data_2: Union[list[str], list[ScoreContentPartParam]],
         truncate_prompt_tokens: Optional[int] = None,
         use_tqdm: Union[bool, Callable[..., tqdm]] = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,

@@ -483,7 +483,6 @@ Specified using `--task score`.
 | `Qwen3ForSequenceClassification`      | Qwen3-based       | `tomaarsen/Qwen3-Reranker-0.6B-seq-cls`, `Qwen/Qwen3-Reranker-0.6B` (see note), etc. | ✅︎                     |
 | `RobertaForSequenceClassification`    | RoBERTa-based     | `cross-encoder/quora-roberta-base`, etc.                                             |                       |
 | `XLMRobertaForSequenceClassification` | XLM-RoBERTa-based | `BAAI/bge-reranker-v2-m3`, etc.                                                      |                       |
-| `JinaVLForSequenceClassification`     | JinaVL-based       | `jinaai/jina-reranker-m0`, etc.                                                      |✅︎                      |
 
 !!! note
     Load the official original `Qwen3 Reranker` by using the following command. More information can be found at: <gh-file:examples/offline_inference/qwen3_reranker.py>.
@@ -703,6 +702,14 @@ The following table lists those that are tested in vLLM.
 | `Phi3VForCausalLM`                  | Phi-3-Vision-based | T + I    | `TIGER-Lab/VLM2Vec-Full` | 🚧                     | ✅︎                          |                       |
 
 ---
+
+#### Pair Scoring
+
+Specified using `--task score`.
+
+| Architecture                        | Models             | Inputs   | Example HF Models        | [LoRA][lora-adapter]   | [PP][distributed-serving]   | [V1](gh-issue:8779)   |
+|-------------------------------------|--------------------|----------|--------------------------|------------------------|-----------------------------|-----------------------|
+| `JinaVLForSequenceClassification`     | JinaVL-based       | T + I<sup>E+</sup> |   `jinaai/jina-reranker-m0`, etc.                                                      |                      |✅︎ |✅︎|
 
 ## Model Support Policy
 
