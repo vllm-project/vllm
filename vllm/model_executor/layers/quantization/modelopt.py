@@ -350,6 +350,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
                    "w2_weight_scale") and layer.w2_weight_scale is not None:
             layer.w2_weight_scale = Parameter(layer.w2_weight_scale.data,
                                               requires_grad=False)
+        # Input scales must be equal for each expert in fp8 MoE layers.
         if hasattr(layer,
                    "w13_input_scale") and layer.w13_input_scale is not None:
             layer.w13_input_scale = Parameter(layer.w13_input_scale.max(),
@@ -366,21 +367,16 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         router_logits: torch.Tensor,
         top_k: int,
         renormalize: bool,
-        use_grouped_topk: bool,
+        use_grouped_topk: bool = False,
         topk_group: Optional[int] = None,
         num_expert_group: Optional[int] = None,
         global_num_experts: int = -1,
         expert_map: Optional[torch.Tensor] = None,
-        num_fused_shared_experts: Optional[int] = None,
         custom_routing_function: Optional[Callable] = None,
-        correction_bias: Optional[torch.Tensor] = None,
         scoring_func: str = "softmax",
         e_score_correction_bias: Optional[torch.Tensor] = None,
-        activation: str = "silu",
         apply_router_weight_on_input: bool = False,
-        inplace: bool = True,
-        no_combine: bool = False,
-        routed_scaling_factor: Optional[float] = None,
+        activation: str = "silu",
         enable_eplb: bool = False,
         expert_load_view: Optional[torch.Tensor] = None,
         logical_to_physical_map: Optional[torch.Tensor] = None,
@@ -411,7 +407,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             layer.w2_weight,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
-            inplace=inplace,
+            inplace=True,
             activation=activation,
             use_fp8_w8a8=True,
             per_channel_quant=False,
@@ -724,6 +720,12 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 raise ValueError("Current platform does not support NVFP4"
                                  " quantization. Please use Blackwell and"
                                  " above.")
+
+    def uses_weight_scale_2_pattern(self) -> bool:
+        """
+        FP4 variants use 'weight_scale_2' pattern for per-tensor weight scales.
+        """
+        return True
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
                        hidden_size: int, intermediate_size_per_partition: int,
