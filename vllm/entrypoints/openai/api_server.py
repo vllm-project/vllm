@@ -1280,6 +1280,8 @@ async def init_app_state(
         chat_template_content_format=args.chat_template_content_format,
         return_tokens_as_token_ids=args.return_tokens_as_token_ids,
         enable_auto_tools=args.enable_auto_tool_choice,
+        expand_tools_even_if_tool_choice_none=args.
+        expand_tools_even_if_tool_choice_none,
         tool_parser=args.tool_call_parser,
         reasoning_parser=args.reasoning_parser,
         enable_prompt_tokens_details=args.enable_prompt_tokens_details,
@@ -1309,24 +1311,27 @@ async def init_app_state(
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
     ) if model_config.task == "embed" else None
-    state.openai_serving_scores = ServingScores(
-        engine_client,
-        model_config,
-        state.openai_serving_models,
-        request_logger=request_logger) if model_config.task in (
-            "score", "embed", "pooling") else None
     state.openai_serving_classification = ServingClassification(
         engine_client,
         model_config,
         state.openai_serving_models,
         request_logger=request_logger,
     ) if model_config.task == "classify" else None
+
+    enable_serving_reranking = (model_config.task == "classify" and getattr(
+        model_config.hf_config, "num_labels", 0) == 1)
     state.jinaai_serving_reranking = ServingScores(
         engine_client,
         model_config,
         state.openai_serving_models,
-        request_logger=request_logger
-    ) if model_config.task == "score" else None
+        request_logger=request_logger) if enable_serving_reranking else None
+    state.openai_serving_scores = ServingScores(
+        engine_client,
+        model_config,
+        state.openai_serving_models,
+        request_logger=request_logger) if (
+            model_config.task == "embed" or enable_serving_reranking) else None
+
     state.openai_serving_tokenization = OpenAIServingTokenization(
         engine_client,
         model_config,

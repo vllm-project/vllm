@@ -25,11 +25,15 @@ from vllm.entrypoints.openai.protocol import (CompletionLogProbs,
                                               ErrorResponse,
                                               RequestResponseMetadata,
                                               UsageInfo)
-# yapf: enable
+from vllm.entrypoints.openai.serving_engine import (
+    EmbedsPrompt as ServingEngineEmbedsPrompt)
 from vllm.entrypoints.openai.serving_engine import (OpenAIServing,
+                                                    TextTokensPrompt,
                                                     clamp_prompt_logprobs,
                                                     is_text_tokens_prompt)
+# yapf: enable
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
+from vllm.entrypoints.utils import get_max_tokens
 from vllm.inputs.data import (EmbedsPrompt, TokensPrompt, is_embeds_prompt,
                               is_tokens_prompt)
 from vllm.logger import init_logger
@@ -157,15 +161,22 @@ class OpenAIServingCompletion(OpenAIServing):
                     input_length = len(engine_prompt["prompt_token_ids"])
                 else:
                     assert_never(engine_prompt)
-                default_max_tokens = self.max_model_len - input_length
+
+                if self.default_sampling_params is None:
+                    self.default_sampling_params = {}
+
+                max_tokens = get_max_tokens(
+                    max_model_len=self.max_model_len,
+                    request=request,
+                    input_length=input_length,
+                    default_sampling_params=self.default_sampling_params)
 
                 if request.use_beam_search:
                     sampling_params = request.to_beam_search_params(
-                        default_max_tokens, self.default_sampling_params)
+                        max_tokens, self.default_sampling_params)
                 else:
                     sampling_params = request.to_sampling_params(
-                        default_max_tokens,
-                        self.model_config.logits_processor_pattern,
+                        max_tokens, self.model_config.logits_processor_pattern,
                         self.default_sampling_params)
 
                 request_id_item = f"{request_id}-{i}"
@@ -223,6 +234,7 @@ class OpenAIServingCompletion(OpenAIServing):
         if stream:
             return self.completion_stream_generator(
                 request,
+                request_prompts,
                 result_generator,
                 request_id,
                 created_time,
@@ -285,6 +297,8 @@ class OpenAIServingCompletion(OpenAIServing):
     async def completion_stream_generator(
         self,
         request: CompletionRequest,
+        request_prompts: list[Union[TextTokensPrompt,
+                                    ServingEngineEmbedsPrompt]],
         result_generator: AsyncIterator[tuple[int, RequestOutput]],
         request_id: str,
         created_time: int,
@@ -313,7 +327,15 @@ class OpenAIServingCompletion(OpenAIServing):
             async for prompt_idx, res in result_generator:
                 prompt_token_ids = res.prompt_token_ids
                 prompt_logprobs = res.prompt_logprobs
-                prompt_text = res.prompt
+
+                if res.prompt is not None:
+                    prompt_text = res.prompt
+                else:
+                    request_prompt = request_prompts[prompt_idx]
+                    if is_text_tokens_prompt(request_prompt):
+                        prompt_text = request_prompt["prompt"]
+                    else:
+                        prompt_text = None
 
                 # Prompt details are excluded from later streamed outputs
                 if prompt_token_ids is not None:
@@ -336,14 +358,13 @@ class OpenAIServingCompletion(OpenAIServing):
                             delta_token_ids = prompt_token_ids
                             out_logprobs = prompt_logprobs
                         else:
-                            assert prompt_logprobs is not None
                             # echo the prompt and first token
                             delta_text = prompt_text + output.text
                             delta_token_ids = [
                                 *prompt_token_ids, *output.token_ids
                             ]
                             out_logprobs = [
-                                *prompt_logprobs,
+                                *(prompt_logprobs or []),
                                 *(output.logprobs or []),
                             ]
                         has_echoed[i] = True
