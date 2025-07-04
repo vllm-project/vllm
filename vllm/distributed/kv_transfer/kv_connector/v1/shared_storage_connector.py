@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import hashlib
 import os
 from dataclasses import dataclass
@@ -17,6 +18,7 @@ from vllm.v1.core.sched.output import SchedulerOutput
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.forward_context import ForwardContext
+    from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
@@ -132,8 +134,7 @@ class SharedStorageConnector(KVConnectorBase_V1):
                 dst_kv_cache_layer.reshape(dst_kv_cache_layer_shape)
 
         # Get the metadata
-        metadata: KVConnectorMetadata = \
-            self._get_connector_metadata()
+        metadata: KVConnectorMetadata = self._get_connector_metadata()
         assert isinstance(metadata, SharedStorageConnectorMetadata)
 
         if metadata is None:
@@ -225,7 +226,7 @@ class SharedStorageConnector(KVConnectorBase_V1):
         self,
         request: "Request",
         num_computed_tokens: int,
-    ) -> int:
+    ) -> tuple[int, bool]:
         """
         Get number of new tokens that can be loaded from the
         external KV cache beyond the num_computed_tokens.
@@ -239,7 +240,6 @@ class SharedStorageConnector(KVConnectorBase_V1):
             the number of tokens that can be loaded from the 
             external KV cache beyond what is already computed.
         """
-
         # NOTE: in this debug implementation, we assume that the prompt is
         # cached_prompt + newly_generated_single_token
         # Therefore, we use prompt_token_ids[:-1] to determine the folder name
@@ -248,7 +248,7 @@ class SharedStorageConnector(KVConnectorBase_V1):
         # with the block granularity. And it expects the returned blocks and
         # num_computed_tokens to also be aligned with the block granularity.
         if not self._found_match_for_request(request):
-            return 0
+            return 0, False
 
         logger.info("External Cache Hit!")
 
@@ -257,9 +257,10 @@ class SharedStorageConnector(KVConnectorBase_V1):
         num_tokens_to_check = align_to_block_size(
             len(request.prompt_token_ids) - 1, self._block_size)
 
-        return num_tokens_to_check - num_computed_tokens
+        return num_tokens_to_check - num_computed_tokens, False
 
     def update_state_after_alloc(self, request: "Request",
+                                 blocks: "KVCacheBlocks",
                                  num_external_tokens: int):
         """
         Update KVConnector state after block allocation.
@@ -288,7 +289,7 @@ class SharedStorageConnector(KVConnectorBase_V1):
         for new_req in scheduler_output.scheduled_new_reqs:
             if new_req.req_id in self._requests_need_load:
                 meta.add_request(token_ids=new_req.prompt_token_ids,
-                                 block_ids=new_req.block_ids,
+                                 block_ids=new_req.block_ids[0],
                                  block_size=self._block_size,
                                  is_store=False)
                 total_need_load += 1
@@ -299,7 +300,7 @@ class SharedStorageConnector(KVConnectorBase_V1):
                 # the original prompt tokens.
                 if not self._found_match_for_request(new_req):
                     meta.add_request(token_ids=new_req.prompt_token_ids,
-                                     block_ids=new_req.block_ids,
+                                     block_ids=new_req.block_ids[0],
                                      block_size=self._block_size,
                                      is_store=True)
 
@@ -319,7 +320,7 @@ class SharedStorageConnector(KVConnectorBase_V1):
 
                 # NOTE(rob): For resumed req, new_block_ids is all
                 # of the block_ids for the request.
-                block_ids = cached_req.new_block_ids
+                block_ids = cached_req.new_block_ids[0]
 
                 meta.add_request(token_ids=token_ids,
                                  block_ids=block_ids,

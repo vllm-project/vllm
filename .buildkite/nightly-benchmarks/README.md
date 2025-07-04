@@ -113,7 +113,7 @@ WARNING: The benchmarking script will save json results by itself, so please do 
 
 ### Visualizing the results
 
-The `convert-results-json-to-markdown.py` helps you put the benchmarking results inside a markdown table, by formatting [descriptions.md](tests/descriptions.md) with real benchmarking results.
+The `convert-results-json-to-markdown.py` helps you put the benchmarking results inside a markdown table, by formatting [descriptions.md](performance-benchmarks-descriptions.md) with real benchmarking results.
 You can find the result presented as a table inside the `buildkite/performance-benchmark` job page.
 If you do not see the table, please wait till the benchmark finish running.
 The json version of the table (together with the json version of the benchmark) will be also attached to the markdown file.

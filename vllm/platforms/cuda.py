@@ -1,14 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Code inside this file can safely assume cuda platform, e.g. importing
 pynvml. However, it should not initialize cuda context.
 """
 
 import os
+from datetime import timedelta
 from functools import wraps
-from typing import (TYPE_CHECKING, Callable, List, Optional, Tuple, TypeVar,
-                    Union)
+from typing import TYPE_CHECKING, Callable, Optional, TypeVar, Union
 
 import torch
+from torch.distributed import PrefixStore, ProcessGroup
+from torch.distributed.distributed_c10d import is_nccl_available
 from typing_extensions import ParamSpec
 
 # import custom ops, trigger op registration
@@ -34,24 +37,6 @@ pynvml = import_pynvml()
 torch.backends.cuda.enable_cudnn_sdp(False)
 
 
-def device_id_to_physical_device_id(device_id: int) -> int:
-    if "CUDA_VISIBLE_DEVICES" in os.environ:
-        device_ids = os.environ["CUDA_VISIBLE_DEVICES"].split(",")
-        if device_ids == [""]:
-            msg = (
-                "CUDA_VISIBLE_DEVICES is set to empty string, which means"
-                " GPU support is disabled. If you are using ray, please unset"
-                " the environment variable `CUDA_VISIBLE_DEVICES` inside the"
-                " worker/actor. "
-                "Check https://github.com/vllm-project/vllm/issues/8402 for"
-                " more information.")
-            raise RuntimeError(msg)
-        physical_device_id = device_ids[device_id]
-        return int(physical_device_id)
-    else:
-        return device_id
-
-
 def with_nvml_context(fn: Callable[_P, _R]) -> Callable[_P, _R]:
 
     @wraps(fn)
@@ -72,6 +57,19 @@ class CudaPlatformBase(Platform):
     dispatch_key: str = "CUDA"
     ray_device_key: str = "GPU"
     device_control_env_var: str = "CUDA_VISIBLE_DEVICES"
+
+    @property
+    def supported_dtypes(self) -> list[torch.dtype]:
+        if self.has_device_capability(80):
+            # Ampere and Hopper or later NVIDIA GPUs.
+            return [torch.bfloat16, torch.float16, torch.float32]
+        elif (not self.has_device_capability(80)
+              ) and self.has_device_capability(60):
+            # Pascal, Volta and Turing NVIDIA GPUs, BF16 is not supported
+            return [torch.float16, torch.float32]
+        # Kepler and Maxwell NVIDIA GPUs, only FP32 is supported,
+        # though vLLM doesn't support these GPUs.
+        return [torch.float32]
 
     @classmethod
     def get_device_capability(cls,
@@ -98,7 +96,7 @@ class CudaPlatformBase(Platform):
         return True
 
     @classmethod
-    def is_fully_connected(cls, device_ids: List[int]) -> bool:
+    def is_fully_connected(cls, device_ids: list[int]) -> bool:
         raise NotImplementedError
 
     @classmethod
@@ -109,7 +107,6 @@ class CudaPlatformBase(Platform):
     def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:
         parallel_config = vllm_config.parallel_config
         scheduler_config = vllm_config.scheduler_config
-        compilation_config = vllm_config.compilation_config
         model_config = vllm_config.model_config
 
         if parallel_config.worker_cls == "auto":
@@ -157,18 +154,26 @@ class CudaPlatformBase(Platform):
                 logger.info(
                     "Forcing kv cache block size to 64 for FlashMLA backend.")
 
-        if (parallel_config.data_parallel_size > 1
-                and compilation_config.use_cudagraph):
+        if (envs.VLLM_ALL2ALL_BACKEND == "deepep_high_throughput"
+                and parallel_config.data_parallel_size > 1
+                and vllm_config.compilation_config.use_cudagraph):
             logger.info(
-                "Data Parallel: Forcing enforce eager to be True since DP is "
-                "currently not supported with CUDA Graphs.")
+                "Data Parallel: Forcing enforce eager to be True since DP "
+                "with DeepEP high-throughput kernels are not CUDA Graph "
+                "compatible. The DeepEP low-latency kernels are CUDA Graph "
+                "compatible. Set the all_to_all backend to deepep_low_latency "
+                "to use those kernels instead.")
+            vllm_config.compilation_config.use_cudagraph = False
             vllm_config.model_config.enforce_eager = True
-            compilation_config.use_cudagraph = False
+            # TODO (varun): Turning this ON gives incorrect results for the
+            # Deepseek-V2-lite model.
+            vllm_config.compilation_config.use_inductor = False
 
     @classmethod
     def get_current_memory_usage(cls,
                                  device: Optional[torch.types.Device] = None
                                  ) -> float:
+        torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats(device)
         return torch.cuda.max_memory_allocated(device)
 
@@ -179,6 +184,14 @@ class CudaPlatformBase(Platform):
         if use_mla:
             # TODO(lucas): refactor to  be more concise
             #  we should probably consider factoring out V1 here
+            if selected_backend == _Backend.CUTLASS_MLA_VLLM_V1:
+                if use_v1:
+                    logger.info_once("Using Cutlass MLA backend on V1 engine.")
+                    return ("vllm.v1.attention.backends.mla."
+                            "cutlass_mla.CutlassMLABackend")
+                else:
+                    logger.warning(
+                        "Cutlass MLA backend is only supported on V1 engine")
             if selected_backend == _Backend.TRITON_MLA or block_size != 64:
                 if use_v1:
                     logger.info_once("Using Triton MLA backend on V1 engine.")
@@ -217,6 +230,21 @@ class CudaPlatformBase(Platform):
                 logger.info_once("Using Triton backend on V1 engine.")
                 return ("vllm.v1.attention.backends."
                         "triton_attn.TritonAttentionBackend")
+            if cls.is_device_capability(100):
+                # Prefer FlashInfer for V1 on Blackwell GPUs if installed
+                try:
+                    import flashinfer  # noqa: F401
+                    logger.info_once(
+                        "Using FlashInfer backend on V1 engine by default for "
+                        "Blackwell (SM 10.0) GPUs.")
+                    return ("vllm.v1.attention.backends."
+                            "flashinfer.FlashInferBackend")
+                except ImportError:
+                    logger.info_once(
+                        "FlashInfer failed to import for V1 engine on "
+                        "Blackwell (SM 10.0) GPUs; it is recommended to "
+                        "install FlashInfer for better performance.")
+                    pass
             if cls.has_device_capability(80):
                 logger.info_once("Using Flash Attention backend on V1 engine.")
                 return ("vllm.v1.attention.backends."
@@ -227,6 +255,10 @@ class CudaPlatformBase(Platform):
         elif selected_backend == _Backend.XFORMERS:
             logger.info("Using XFormers backend.")
             return "vllm.attention.backends.xformers.XFormersBackend"
+        elif selected_backend == _Backend.DUAL_CHUNK_FLASH_ATTN:
+            logger.info("Using DualChunkFlashAttention backend.")
+            return ("vllm.attention.backends.dual_chunk_flash_attn."
+                    "DualChunkFlashAttentionBackend")
         elif selected_backend == _Backend.FLASH_ATTN:
             pass
         elif selected_backend:
@@ -312,6 +344,40 @@ class CudaPlatformBase(Platform):
     def use_custom_allreduce(cls) -> bool:
         return True
 
+    @classmethod
+    def get_piecewise_backend_cls(cls) -> str:
+        return "vllm.compilation.cuda_piecewise_backend.CUDAPiecewiseBackend"  # noqa
+
+    @classmethod
+    def stateless_init_device_torch_dist_pg(
+        cls,
+        backend: str,
+        prefix_store: PrefixStore,
+        group_rank: int,
+        group_size: int,
+        timeout: timedelta,
+    ) -> ProcessGroup:
+        assert is_nccl_available()
+        pg: ProcessGroup = ProcessGroup(
+            prefix_store,
+            group_rank,
+            group_size,
+        )
+        from torch.distributed.distributed_c10d import ProcessGroupNCCL
+
+        backend_options = ProcessGroupNCCL.Options()
+        backend_options._timeout = timeout
+
+        backend_class = ProcessGroupNCCL(prefix_store, group_rank, group_size,
+                                         backend_options)
+        backend_type = ProcessGroup.BackendType.NCCL
+        device = torch.device("cuda")
+        pg._set_default_backend(backend_type)
+        backend_class._set_sequence_number_for_group()
+
+        pg._register_backend(device, backend_type, backend_class)
+        return pg
+
 
 # NVML utils
 # Note that NVML is not affected by `CUDA_VISIBLE_DEVICES`,
@@ -325,7 +391,7 @@ class NvmlCudaPlatform(CudaPlatformBase):
                               device_id: int = 0
                               ) -> Optional[DeviceCapability]:
         try:
-            physical_device_id = device_id_to_physical_device_id(device_id)
+            physical_device_id = cls.device_id_to_physical_device_id(device_id)
             handle = pynvml.nvmlDeviceGetHandleByIndex(physical_device_id)
             major, minor = pynvml.nvmlDeviceGetCudaComputeCapability(handle)
             return DeviceCapability(major=major, minor=minor)
@@ -336,7 +402,7 @@ class NvmlCudaPlatform(CudaPlatformBase):
     @with_nvml_context
     def has_device_capability(
         cls,
-        capability: Union[Tuple[int, int], int],
+        capability: Union[tuple[int, int], int],
         device_id: int = 0,
     ) -> bool:
         try:
@@ -347,26 +413,26 @@ class NvmlCudaPlatform(CudaPlatformBase):
     @classmethod
     @with_nvml_context
     def get_device_name(cls, device_id: int = 0) -> str:
-        physical_device_id = device_id_to_physical_device_id(device_id)
+        physical_device_id = cls.device_id_to_physical_device_id(device_id)
         return cls._get_physical_device_name(physical_device_id)
 
     @classmethod
     @with_nvml_context
     def get_device_uuid(cls, device_id: int = 0) -> str:
-        physical_device_id = device_id_to_physical_device_id(device_id)
+        physical_device_id = cls.device_id_to_physical_device_id(device_id)
         handle = pynvml.nvmlDeviceGetHandleByIndex(physical_device_id)
         return pynvml.nvmlDeviceGetUUID(handle)
 
     @classmethod
     @with_nvml_context
     def get_device_total_memory(cls, device_id: int = 0) -> int:
-        physical_device_id = device_id_to_physical_device_id(device_id)
+        physical_device_id = cls.device_id_to_physical_device_id(device_id)
         handle = pynvml.nvmlDeviceGetHandleByIndex(physical_device_id)
         return int(pynvml.nvmlDeviceGetMemoryInfo(handle).total)
 
     @classmethod
     @with_nvml_context
-    def is_fully_connected(cls, physical_device_ids: List[int]) -> bool:
+    def is_fully_connected(cls, physical_device_ids: list[int]) -> bool:
         """
         query if the set of gpus are fully connected by nvlink (1 hop)
         """
@@ -431,7 +497,7 @@ class NonNvmlCudaPlatform(CudaPlatformBase):
         return device_props.total_memory
 
     @classmethod
-    def is_fully_connected(cls, physical_device_ids: List[int]) -> bool:
+    def is_fully_connected(cls, physical_device_ids: list[int]) -> bool:
         logger.exception(
             "NVLink detection not possible, as context support was"
             " not found. Assuming no NVLink available.")

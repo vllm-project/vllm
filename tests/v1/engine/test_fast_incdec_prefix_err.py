@@ -36,6 +36,7 @@ def test_fast_inc_detok_invalid_utf8_err_case():
         0.0,
         None,
         cache_salt=None,
+        data_parallel_rank=None,
     )
 
     detokenizer = IncrementalDetokenizer.from_new_request(tokenizer, request)

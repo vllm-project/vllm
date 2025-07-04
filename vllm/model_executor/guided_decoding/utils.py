@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import re
+import regex as re
 
 
 def has_xgrammar_unsupported_json_features(schema: dict) -> bool:

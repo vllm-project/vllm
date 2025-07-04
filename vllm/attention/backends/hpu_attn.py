@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 ###############################################################################
 # Copyright (C) 2024-2025 Habana Labs, Ltd. an Intel Company
@@ -102,16 +103,16 @@ class HPUMLAAttentionBackend(AttentionBackend):
     def swap_blocks(
         src_kv_cache: torch.Tensor,
         dst_kv_cache: torch.Tensor,
-        src_to_dst: torch.Tensor,
+        src_to_dsts: torch.Tensor,
     ) -> None:
-        HPUPagedAttention.swap_blocks(src_kv_cache, dst_kv_cache, src_to_dst)
+        HPUPagedAttention.swap_blocks(src_kv_cache, dst_kv_cache, src_to_dsts)
 
     @staticmethod
     def copy_blocks(
         kv_caches: List[torch.Tensor],
-        src_to_dists: torch.Tensor,
+        src_to_dsts: torch.Tensor,
     ) -> None:
-        HPUPagedAttention.copy_blocks(kv_caches, src_to_dists)
+        HPUPagedAttention.copy_blocks(kv_caches, src_to_dsts)
 
 
 @dataclass
@@ -156,13 +157,14 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
             blocksparse_params: Optional[Dict[str, Any]],
             logits_soft_cap: Optional[float],
             attn_type: str,
+            kv_sharing_target_layer_name: Optional[str] = None,
             # MLA Specific Arguments
             **kwargs) -> None:
         torch.nn.Module.__init__(self)
         MLACommonImpl.__init__(self, num_heads, head_size, scale, num_kv_heads,
                                alibi_slopes, sliding_window, kv_cache_dtype,
                                blocksparse_params, logits_soft_cap, attn_type,
-                               **kwargs)
+                               kv_sharing_target_layer_name, **kwargs)
         self.enable_fp8_attn = kv_cache_dtype == 'fp8_inc' and os.environ.get(
             'QUANT_CONFIG', None) is None
         self.matmul_qk = Matmul() if not self.enable_fp8_attn \
@@ -214,13 +216,8 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
         batch_size = q.shape[0]
         is_prefill = attn_metadata.is_prompt
 
-        # Restore head dim (for rotary embedding)
         k_pe = k_pe.view(-1, 1, self.qk_rope_head_dim)
         q = q.view(-1, self.num_heads, self.qk_head_dim)
-        assert hasattr(attn_metadata,
-                       "input_positions"), f"attn meta: {attn_metadata}"
-
-        input_positions = attn_metadata.input_positions.view(-1)
         if not is_prefill:
             # decode
             q_nope, q_pe = q.split(
@@ -231,19 +228,13 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
             decode_ql_nope = torch.bmm(q_nope, self.W_UK_T)
             # Convert from (N, B, L) to (B, N, L)
             decode_ql_nope = decode_ql_nope.transpose(0, 1)
-            q_pe, k_pe = \
-                self.rotary_emb(input_positions, q_pe, k_pe)
-        else:
-            # prefill
-            q_pe = q[..., self.qk_nope_head_dim:]
-            q[..., self.qk_nope_head_dim:], k_pe = \
-                self.rotary_emb(input_positions, q_pe, k_pe)
 
         slot_mapping = attn_metadata.slot_mapping.flatten(
         ) if attn_metadata.slot_mapping is not None else None
 
         latent_vec_k = torch.concat(
-            (k_c_normed, k_pe.view(batch_size, -1, self.qk_rope_head_dim)),
+            (k_c_normed,
+             k_pe.view(*k_c_normed.shape[:-1], self.qk_rope_head_dim)),
             dim=-1)
         latent_vec_k = latent_vec_k.view(
             -1, self.qk_rope_head_dim + self.kv_lora_rank)
@@ -252,15 +243,13 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
         if kv_cache is not None and len(kv_cache) == 2:
             self.latent_cache_k(latent_vec_k, kv_cache[0], slot_mapping)
             k_cache = kv_cache[0]
-            v_cache = None
 
         if is_prefill:
             return self._forward_prefill(q, k_c_normed, k_pe, attn_metadata,
                                          batch_size)
         else:
-            return self._forward_decode(decode_ql_nope, q_pe,
-                                        (k_cache, v_cache), attn_metadata,
-                                        batch_size)
+            return self._forward_decode(decode_ql_nope, q_pe, k_cache,
+                                        attn_metadata, batch_size)
 
     def _forward_prefill(  # type: ignore
             self, q: torch.Tensor, k_c_normed: torch.Tensor,
@@ -309,11 +298,11 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
 
     def _forward_decode(  # type: ignore
             self, q_nope: torch.Tensor, q_pe: torch.Tensor,
-            kv_cache: torch.Tensor, attn_metadata: HPUAttentionMetadata,
+            k_cache: torch.Tensor, attn_metadata: HPUAttentionMetadata,
             batch_size: int) -> torch.Tensor:
         query = torch.cat([q_nope, q_pe], dim=-1)
-        key_cache = kv_cache[0].unsqueeze(1)
-        value_cache = kv_cache[1]  # value_cache is None
+        key_cache = k_cache.unsqueeze(1)
+        value_cache = None
         output = HPUPagedAttention.forward_decode(
             query=query,
             key_cache=key_cache,
@@ -331,7 +320,6 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
             keys_fetch_func=self.latent_cache_k.fetch_from_cache,
             values_fetch_func=None,
             kv_lora_rank=self.kv_lora_rank)
-        output = output.view(batch_size, 1, -1)
         result = self._v_up_proj(output)
         result = result.view(batch_size, 1, -1)
         return result
@@ -366,9 +354,12 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         blocksparse_params: Optional[Dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         attn_type: str = AttentionType.DECODER,
+        kv_sharing_target_layer_name: Optional[str] = None,
         use_irope: bool = False,
     ) -> None:
         super(AttentionImpl, self).__init__()
+        if kv_sharing_target_layer_name is not None:
+            raise NotImplementedError("KV sharing is not supported in V0.")
         if use_irope:
             logger.warning_once(
                 "Using irope in HPU is not supported yet, it will fall back "

@@ -1,12 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
 import random
 import tempfile
 from typing import Union
 from unittest.mock import patch
-
-import pytest
 
 import vllm.envs as envs
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
@@ -16,14 +15,6 @@ from vllm.lora.models import LoRAMapping
 from vllm.lora.request import LoRARequest
 from vllm.v1.worker.gpu_worker import Worker as V1Worker
 from vllm.worker.worker import Worker
-
-
-@pytest.fixture(autouse=True)
-def v1(run_with_both_engines_lora):
-    # Simple autouse wrapper to run both engines for each test
-    # This can be promoted up to conftest.py to run for every
-    # test in a package
-    pass
 
 
 @patch.dict(os.environ, {"RANK": "0"})
@@ -58,13 +49,19 @@ def test_worker_apply_lora(sql_lora_files):
             download_dir=None,
             load_format="dummy",
         ),
-        parallel_config=ParallelConfig(1, 1, False),
+        parallel_config=ParallelConfig(
+            pipeline_parallel_size=1,
+            tensor_parallel_size=1,
+            data_parallel_size=1,
+        ),
         scheduler_config=SchedulerConfig("generate", 32, 32, 32),
         device_config=DeviceConfig("cuda"),
-        cache_config=CacheConfig(block_size=16,
-                                 gpu_memory_utilization=1.,
-                                 swap_space=0,
-                                 cache_dtype="auto"),
+        cache_config=CacheConfig(
+            block_size=16,
+            gpu_memory_utilization=1.0,
+            swap_space=0,
+            cache_dtype="auto",
+        ),
         lora_config=LoRAConfig(max_lora_rank=8, max_cpu_loras=32,
                                max_loras=32),
     )

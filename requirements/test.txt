@@ -10,9 +10,13 @@ aiohappyeyeballs==2.4.3
     # via aiohttp
 aiohttp==3.10.11
     # via
+    #   aiohttp-cors
     #   datasets
     #   fsspec
     #   lm-eval
+    #   ray
+aiohttp-cors==0.8.1
+    # via ray
 aiosignal==1.3.1
     # via
     #   aiohttp
@@ -57,6 +61,8 @@ bounded-pool-executor==0.0.3
     # via pqdm
 buildkite-test-collector==0.1.9
     # via -r requirements/test.in
+cachetools==5.5.2
+    # via google-auth
 certifi==2024.8.30
     # via
     #   httpcore
@@ -81,6 +87,8 @@ colorama==0.4.6
     #   sacrebleu
     #   schemathesis
     #   tqdm-multiprocess
+colorful==0.5.6
+    # via ray
 contourpy==1.3.0
     # via matplotlib
 cramjam==2.9.0
@@ -99,6 +107,7 @@ datasets==3.0.2
     # via
     #   evaluate
     #   lm-eval
+    #   mteb
 decorator==5.1.1
     # via librosa
 dill==0.3.8
@@ -107,6 +116,8 @@ dill==0.3.8
     #   evaluate
     #   lm-eval
     #   multiprocess
+distlib==0.3.9
+    # via virtualenv
 dnspython==2.7.0
     # via email-validator
 docopt==0.6.2
@@ -124,6 +135,8 @@ email-validator==2.2.0
     # via pydantic
 encodec==0.1.1
     # via vocos
+eval-type-backport==0.2.2
+    # via mteb
 evaluate==0.4.3
     # via lm-eval
 fastparquet==2024.11.0
@@ -140,6 +153,7 @@ filelock==3.16.1
     #   ray
     #   torch
     #   transformers
+    #   virtualenv
 fonttools==4.54.1
     # via matplotlib
 fqdn==1.5.1
@@ -162,8 +176,16 @@ genai-perf==0.0.8
     # via -r requirements/test.in
 genson==1.3.0
     # via datamodel-code-generator
+google-api-core==2.24.2
+    # via opencensus
+google-auth==2.40.2
+    # via google-api-core
+googleapis-common-protos==1.70.0
+    # via google-api-core
 graphql-core==3.2.6
     # via hypothesis-graphql
+grpcio==1.71.0
+    # via ray
 h11==0.14.0
     # via httpcore
 harfile==0.3.0
@@ -291,6 +313,8 @@ msgpack==1.1.0
     # via
     #   librosa
     #   ray
+mteb==1.38.11
+    # via -r requirements/test.in
 multidict==6.1.0
     # via
     #   aiohttp
@@ -331,6 +355,7 @@ numpy==1.26.4
     #   librosa
     #   matplotlib
     #   mistral-common
+    #   mteb
     #   numba
     #   numexpr
     #   opencv-python-headless
@@ -386,6 +411,10 @@ nvidia-nvjitlink-cu12==12.8.61
     #   torch
 nvidia-nvtx-cu12==12.8.55
     # via torch
+opencensus==0.11.4
+    # via ray
+opencensus-context==0.1.3
+    # via opencensus
 opencv-python-headless==4.11.0.86
     # via
     #   -r requirements/test.in
@@ -439,20 +468,30 @@ platformdirs==4.3.6
     # via
     #   black
     #   pooch
+    #   virtualenv
 plotly==5.24.1
     # via genai-perf
 pluggy==1.5.0
     # via pytest
+polars==1.29.0
+    # via mteb
 pooch==1.8.2
     # via librosa
 portalocker==2.10.1
     # via sacrebleu
 pqdm==0.2.0
     # via -r requirements/test.in
+prometheus-client==0.22.0
+    # via ray
 propcache==0.2.0
     # via yarl
+proto-plus==1.26.1
+    # via google-api-core
 protobuf==5.28.3
     # via
+    #   google-api-core
+    #   googleapis-common-protos
+    #   proto-plus
     #   ray
     #   tensorizer
 psutil==6.1.0
@@ -462,21 +501,32 @@ psutil==6.1.0
     #   tensorizer
 py==1.11.0
     # via pytest-forked
+py-spy==0.4.0
+    # via ray
 pyarrow==18.0.0
     # via
     #   datasets
     #   genai-perf
+pyasn1==0.6.1
+    # via
+    #   pyasn1-modules
+    #   rsa
+pyasn1-modules==0.4.2
+    # via google-auth
 pybind11==2.13.6
     # via lm-eval
 pycparser==2.22
     # via cffi
 pycryptodomex==3.22.0
     # via blobfile
-pydantic==2.9.2
+pydantic==2.11.5
     # via
+    #   -r requirements/test.in
     #   datamodel-code-generator
     #   mistral-common
-pydantic-core==2.23.4
+    #   mteb
+    #   ray
+pydantic-core==2.33.2
     # via pydantic
 pygments==2.18.0
     # via rich
@@ -522,6 +572,8 @@ python-dateutil==2.9.0.post0
     #   typepy
 python-rapidjson==1.20
     # via tritonclient
+pytrec-eval-terrier==0.5.7
+    # via mteb
 pytz==2024.2
     # via
     #   pandas
@@ -561,9 +613,11 @@ requests==2.32.3
     #   buildkite-test-collector
     #   datasets
     #   evaluate
+    #   google-api-core
     #   huggingface-hub
     #   lm-eval
     #   mistral-common
+    #   mteb
     #   pooch
     #   ray
     #   responses
@@ -580,6 +634,7 @@ rfc3987==1.3.8
 rich==13.9.4
     # via
     #   genai-perf
+    #   mteb
     #   typer
 rouge-score==0.1.2
     # via lm-eval
@@ -587,6 +642,8 @@ rpds-py==0.20.1
     # via
     #   jsonschema
     #   referencing
+rsa==4.9.1
+    # via google-auth
 runai-model-streamer==0.11.0
     # via -r requirements/test.in
 runai-model-streamer-s3==0.11.0
@@ -607,16 +664,20 @@ scikit-learn==1.5.2
     # via
     #   librosa
     #   lm-eval
+    #   mteb
     #   sentence-transformers
 scipy==1.13.1
     # via
     #   librosa
+    #   mteb
     #   scikit-learn
     #   sentence-transformers
     #   statsmodels
     #   vocos
 sentence-transformers==3.2.1
-    # via -r requirements/test.in
+    # via
+    #   -r requirements/test.in
+    #   mteb
 sentencepiece==0.2.0
     # via mistral-common
 setuptools==77.0.3
@@ -630,9 +691,12 @@ shellingham==1.5.4
 six==1.16.0
     # via
     #   junit-xml
+    #   opencensus
     #   python-dateutil
     #   rfc3339-validator
     #   rouge-score
+smart-open==7.1.0
+    # via ray
 sniffio==1.3.1
     # via
     #   anyio
@@ -696,6 +760,7 @@ torch==2.7.0+cu128
     #   fastsafetensors
     #   lm-eval
     #   mamba-ssm
+    #   mteb
     #   peft
     #   runai-model-streamer
     #   sentence-transformers
@@ -720,6 +785,7 @@ tqdm==4.66.6
     #   evaluate
     #   huggingface-hub
     #   lm-eval
+    #   mteb
     #   nltk
     #   peft
     #   pqdm
@@ -728,7 +794,7 @@ tqdm==4.66.6
     #   transformers
 tqdm-multiprocess==0.0.11
     # via lm-eval
-transformers==4.51.3
+transformers==4.52.4
     # via
     #   -r requirements/test.in
     #   genai-perf
@@ -759,11 +825,15 @@ typing-extensions==4.12.2
     #   huggingface-hub
     #   librosa
     #   mistral-common
+    #   mteb
     #   pqdm
     #   pydantic
     #   pydantic-core
     #   torch
     #   typer
+    #   typing-inspection
+typing-inspection==0.4.1
+    # via pydantic
 tzdata==2024.2
     # via pandas
 uri-template==1.3.0
@@ -777,6 +847,8 @@ urllib3==2.2.3
     #   tritonclient
 vector-quantize-pytorch==1.21.2
     # via -r requirements/test.in
+virtualenv==20.31.2
+    # via ray
 vocos==0.1.0
     # via -r requirements/test.in
 webcolors==24.11.1
@@ -785,6 +857,8 @@ werkzeug==3.1.3
     # via schemathesis
 word2number==1.1
     # via lm-eval
+wrapt==1.17.2
+    # via smart-open
 xxhash==3.5.0
     # via
     #   datasets

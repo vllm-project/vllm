@@ -1,8 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import copy
 from dataclasses import dataclass
+from typing import Optional
 
 import torch
+from typing_extensions import Self
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -53,6 +57,16 @@ class KVCacheSpec:
         """
         raise NotImplementedError
 
+    @classmethod
+    def merge(cls, specs: list[Self]) -> Self:
+        """
+        Merge a list of KVCacheSpec objects into a single KVCacheSpec object.
+        """
+        assert all(spec.type_id == specs[0].type_id for spec in specs[1:]), (
+            "All layers in the same KV cache group must share the same "
+            "type_id.")
+        return copy.deepcopy(specs[0])
+
 
 @dataclass
 class AttentionSpec(KVCacheSpec):
@@ -71,6 +85,16 @@ class AttentionSpec(KVCacheSpec):
 
 @dataclass
 class FullAttentionSpec(AttentionSpec):
+    sliding_window: Optional[int] = None
+    """
+    When hybrid allocator is disabled and the model contains both full 
+    attention layers and sliding window attention layers, sliding 
+    window attention are regarded as full attention in KV cache manager 
+    (blocks are allocated for all tokens), while computed as sliding window 
+    attention in model runner.
+    In this case, we use FullAttentionSpec and record the sliding window size.
+    Default to None for not using sliding window attention.
+    """
 
     @property
     def type_id(self) -> str:
@@ -79,6 +103,25 @@ class FullAttentionSpec(AttentionSpec):
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         max_model_len = vllm_config.model_config.max_model_len
         return cdiv(max_model_len, self.block_size) * self.page_size_bytes
+
+    @classmethod
+    def merge(cls, specs: list[Self]) -> Self:
+        """
+        Merge a list of FullAttentionSpec objects into a single 
+        FullAttentionSpec object.
+        """
+        merged_spec = super().merge(specs)
+        sliding_window = set(spec.sliding_window for spec in specs
+                             if spec.sliding_window is not None)
+        if len(sliding_window) == 0:
+            merged_spec.sliding_window = None
+        elif len(sliding_window) == 1:
+            merged_spec.sliding_window = sliding_window.pop()
+        else:
+            raise ValueError(
+                "All sliding window layers in the same KV cache group "
+                "must have the same window size.")
+        return merged_spec
 
 
 @dataclass
@@ -114,11 +157,10 @@ class SlidingWindowSpec(AttentionSpec):
 @dataclass
 class KVCacheTensor:
     """
-    A dataclass for specifying how the workers should initialize the KV cache
-    for a layer. Only contains the size of KV cache for that layer for now. Will
-    be extended to support multiple layers sharing the same memory pool.
+    A class for specifying how the workers should initialize the KV cache.
     """
-    size: int  # The size of KV cache Tensor in bytes
+    size: int  # size of the KV cache tensor in bytes
+    shared_by: list[str]  # layer names that share the same KV cache tensor
 
 
 @dataclass
@@ -140,27 +182,13 @@ class KVCacheConfig:
     """
     """The number of KV cache blocks"""
     num_blocks: int
-    """layer_name -> how to initialize KV cache for that layer"""
-    tensors: dict[str, KVCacheTensor]
+    """How should model runner initialize the KV cache tensors for each layer"""
+    kv_cache_tensors: list[KVCacheTensor]
     """
     The kv cache groups of the model.
-    The layers in the models are repeated with some patterns, e.g., a model
-    with 10 full attention layers and 20 sliding window attention layers can be
-    regarded as repeating the pattern (1 * full, 2 * sw) 10 times. 
-    The KVCacheManager allocates different block tables for each of the 3 layers
-    in the pattern, and repeats each of them 10 times to generate the 
-    block_table for the 30 layers in the model.
-    Therefore, we can group the layers in the model into 3 groups, each of which
-    contains 10 layers in the model.
-    The KVCacheManager allocates the block_table for each group based on its
-    kv_cache spec, and the model runner applies the block table to each layer 
-    in the group.
-    For example:
-    1. A model only uses full attention. The pattern is 
-    (num_hidden_layers * full), so there is only one group and the block table 
-    is shared by all layers.
-    2. (WIP) A model with 10 full attention layers and 20 sliding window 
-    attention layers. There are 3 layers in the pattern (1 * full, 2 * sw), so 
-    there are 3 groups, each of which represents 10 layers in the model.
+    For models with only one type of attention, there is only one group that
+    contains all layers.
+    For models with multiple types of attention, there will be multiple groups,
+    see `_get_kv_cache_config_uniform_page_size` for more details.
     """
     kv_cache_groups: list[KVCacheGroupSpec]

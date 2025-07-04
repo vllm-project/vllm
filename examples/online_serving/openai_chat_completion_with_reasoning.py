@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 An example shows how to generate chat completions from reasoning models
 like DeepSeekR1.
@@ -45,12 +46,12 @@ def main():
 
     # Round 2
     messages.append({"role": "assistant", "content": content})
-    messages.append({
-        "role":
-        "user",
-        "content":
-        "How many Rs are there in the word 'strawberry'?",
-    })
+    messages.append(
+        {
+            "role": "user",
+            "content": "How many Rs are there in the word 'strawberry'?",
+        }
+    )
     response = client.chat.completions.create(model=model, messages=messages)
 
     reasoning_content = response.choices[0].message.reasoning_content

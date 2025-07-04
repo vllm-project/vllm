@@ -593,11 +593,11 @@ class HPUModelRunner:
         self.input_batch = InputBatch(
             max_num_reqs=self.scheduler_config.max_num_seqs,
             max_model_len=self.max_model_len,
-            max_num_blocks_per_req=self.max_num_blocks_per_req,
+            max_num_batched_tokens=self.max_num_tokens,
             device=self.device,
             pin_memory=self.pin_memory,
             vocab_size=self.model_config.get_vocab_size(),
-        )
+            block_sizes=[self.block_size])
         self.mem_margin = None
 
         self.use_hpu_graph = not self.model_config.enforce_eager
@@ -992,7 +992,8 @@ class HPUModelRunner:
         # DECODES are the first num_decodes REQUESTS.
         # PREFILLS are the next num_reqs - num_decodes REQUESTS.
         num_reqs = num_prefills + num_decodes
-        block_table_cpu_tensor = self.input_batch.block_table.get_cpu_tensor()
+        block_table_cpu_tensor = self.input_batch.block_table[
+            0].get_cpu_tensor()
         all_batch_contents = [BatchContents()]
 
         for batch_idx in range(num_decodes, num_reqs):
@@ -1187,7 +1188,8 @@ class HPUModelRunner:
         # logic knows to ignore those indicies. Otherwise, the
         # padding data can be dummy since we have a causal mask.
 
-        block_table_cpu_tensor = self.input_batch.block_table.get_cpu_tensor()
+        block_table_cpu_tensor = self.input_batch.block_table[
+            0].get_cpu_tensor()
         if num_decodes == 0:
             return DecodeInputData(num_decodes=0)
         # BLOCK_TABLE [batch, max_num_blocks_per_req]
@@ -1983,7 +1985,7 @@ class HPUModelRunner:
             mm_hashes=[],
             mm_positions=[],
             sampling_params=sampling_params,
-            block_ids=block_ids,
+            block_ids=[block_ids],
             num_computed_tokens=num_computed_tokens,
             lora_request=None,
         )
@@ -2032,7 +2034,7 @@ class HPUModelRunner:
             total_num_scheduled_tokens=sum(scheduled_tokens.values()),
             scheduled_spec_decode_tokens={},
             scheduled_encoder_inputs={},
-            num_common_prefix_blocks=0,
+            num_common_prefix_blocks=[0],
             finished_req_ids=set(),
             free_encoder_input_ids=[],
             structured_output_request_ids={},
@@ -2045,7 +2047,7 @@ class HPUModelRunner:
             total_num_scheduled_tokens=0,
             scheduled_spec_decode_tokens={},
             scheduled_encoder_inputs={},
-            num_common_prefix_blocks=0,
+            num_common_prefix_blocks=[0],
             finished_req_ids=set(req.req_id for req in requests),
             free_encoder_input_ids=[],
             structured_output_request_ids={},
@@ -2235,13 +2237,17 @@ class HPUModelRunner:
                 "supported yet.")
 
         kv_caches: dict[str, torch.Tensor] = {}
+        kv_cache_sizes = {}
+        for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
+            assert len(kv_cache_tensor.shared_by) == 1
+            kv_cache_sizes[kv_cache_tensor.shared_by[0]] = kv_cache_tensor.size
 
         for kv_cache_group in kv_cache_config.kv_cache_groups:
             kv_cache_spec = kv_cache_group.kv_cache_spec
             for layer_name in kv_cache_group.layer_names:
-                tensor_config = kv_cache_config.tensors[layer_name]
-                assert tensor_config.size % kv_cache_spec.page_size_bytes == 0
-                num_blocks = tensor_config.size // kv_cache_spec.page_size_bytes
+                tensor_size = kv_cache_sizes[layer_name]
+                assert tensor_size % kv_cache_spec.page_size_bytes == 0
+                num_blocks = tensor_size // kv_cache_spec.page_size_bytes
                 # `num_blocks` is the number of blocks the model runner can use.
                 # `kv_cache_config.num_blocks` is the number of blocks that
                 # KVCacheManager may allocate.

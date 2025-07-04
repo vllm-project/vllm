@@ -1,0 +1,130 @@
+site_name: vLLM
+site_url: https://docs.vllm.ai
+repo_url: https://github.com/vllm-project/vllm
+exclude_docs: |
+  *.inc.md
+  *.template.md
+theme:
+  name: material
+  logo: assets/logos/vllm-logo-only-light.ico
+  favicon: assets/logos/vllm-logo-only-light.ico
+  palette:
+    # Palette toggle for automatic mode
+    - media: "(prefers-color-scheme)"
+      toggle:
+        icon: material/brightness-auto
+        name: Switch to light mode
+    # Palette toggle for light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default 
+      primary: white
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    # Palette toggle for dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: black
+      toggle:
+        icon: material/brightness-2
+        name: Switch to system preference
+  features:
+    - content.code.copy
+    - content.tabs.link
+    - navigation.tracking
+    - navigation.tabs
+    - navigation.sections
+    - navigation.prune
+    - navigation.top
+    - search.highlight
+    - search.share
+    - toc.follow
+  custom_dir: docs/mkdocs/overrides
+
+hooks:
+  - docs/mkdocs/hooks/remove_announcement.py
+  - docs/mkdocs/hooks/generate_examples.py
+  - docs/mkdocs/hooks/url_schemes.py
+
+# Required to stop api-autonav from raising an error
+# https://github.com/tlambert03/mkdocs-api-autonav/issues/16
+nav:
+  - api
+
+plugins:
+  - meta
+  - search
+  - autorefs
+  - awesome-nav
+  # For API reference generation
+  - api-autonav:
+      modules: ["vllm"]
+      api_root_uri: "api"
+      exclude:
+        - "re:vllm\\._.*"  # Internal modules
+        - "vllm.third_party"
+        - "vllm.vllm_flash_attn"
+  - mkdocstrings:
+      handlers:
+        python:
+          options:
+            show_symbol_type_heading: true
+            show_symbol_type_toc: true
+            filters: []
+            summary:
+              modules: true
+            show_if_no_docstring: true
+            show_signature_annotations: true
+            separate_signature: true
+            show_overloads: true
+            signature_crossrefs: true
+          inventories:
+          - https://docs.python.org/3/objects.inv
+          - https://typing-extensions.readthedocs.io/en/latest/objects.inv
+          - https://docs.aiohttp.org/en/stable/objects.inv
+          - https://pillow.readthedocs.io/en/stable/objects.inv
+          - https://numpy.org/doc/stable/objects.inv
+          - https://pytorch.org/docs/stable/objects.inv
+          - https://psutil.readthedocs.io/en/stable/objects.inv
+
+markdown_extensions:
+  - attr_list
+  - md_in_html
+  - admonition
+  - pymdownx.details
+  # For content tabs
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      slugify: !!python/object/apply:pymdownx.slugs.slugify
+        kwds:
+          case: lower
+      alternate_style: true
+  # For code highlighting
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  # For emoji and icons
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  # For in page [TOC] (not sidebar)
+  - toc:
+      permalink: true
+  # For math rendering
+  - mdx_math:
+      enable_dollar_delimiter: true
+
+extra_css:
+  - mkdocs/stylesheets/extra.css
+
+extra_javascript:
+  - mkdocs/javascript/run_llm_widget.js
+  - https://cdn.mathjax.org/mathjax/latest/MathJax.js?config=TeX-AMS_HTML
+
+# Makes the url format end in .html rather than act as a dir
+# So index.md generates as index.html and is available under URL /index.html
+# https://www.mkdocs.org/user-guide/configuration/#use_directory_urls
+use_directory_urls: false

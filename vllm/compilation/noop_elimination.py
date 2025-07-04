@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Iterable, Union
+from collections.abc import Iterable
+from typing import Union
 
 import torch.fx
 from torch import SymInt

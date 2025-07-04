@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Utility methods for model layers."""
-from typing import Callable, Optional, Tuple
+from typing import Callable, Optional
 
 import torch
 
@@ -13,7 +14,7 @@ def get_token_bin_counts_and_mask(
     tokens: torch.Tensor,
     vocab_size: int,
     num_seqs: int,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     # Compute the bin counts for the tokens.
     # vocab_size + 1 for padding.
     bin_counts = torch.zeros((num_seqs, vocab_size + 1),
@@ -49,16 +50,11 @@ def apply_penalties(logits: torch.Tensor, prompt_tokens_tensor: torch.Tensor,
                                                    vocab_size, num_seqs)
     output_bin_counts, output_mask = get_token_bin_counts_and_mask(
         output_tokens_tensor, vocab_size, num_seqs)
-    repetition_penalties = repetition_penalties.unsqueeze(dim=1).repeat(
-        1, vocab_size)
 
-    # If token appears in prompt or output, apply, otherwise use 1.0 for no-op.
-    penalties = torch.where(prompt_mask | output_mask, repetition_penalties,
-                            1.0)
-
-    # If logits are positive, divide by penalty, otherwise multiply by penalty.
-    scaling = torch.where(logits > 0, 1.0 / penalties, penalties)
-    logits *= scaling
+    # Apply repetition penalties as a custom op
+    from vllm._custom_ops import apply_repetition_penalties
+    apply_repetition_penalties(logits, prompt_mask, output_mask,
+                               repetition_penalties)
 
     # We follow the definition in OpenAI API.
     # Refer to https://platform.openai.com/docs/api-reference/parameter-details
@@ -70,9 +66,9 @@ def apply_penalties(logits: torch.Tensor, prompt_tokens_tensor: torch.Tensor,
 def rocm_unquantized_gemm(x: torch.Tensor,
                           weight: torch.Tensor,
                           bias: Optional[torch.Tensor] = None):
-    from vllm.platforms.rocm import on_mi250_mi300
+    from vllm.platforms.rocm import on_gfx9
     k = weight.shape[1]
-    use_skinny = (envs.VLLM_ROCM_USE_SKINNY_GEMM and on_mi250_mi300() and \
+    use_skinny = (envs.VLLM_ROCM_USE_SKINNY_GEMM and on_gfx9() and \
                     x.dtype in [torch.float16, torch.bfloat16] \
                     and k % 8 == 0 and bias is None)
 
@@ -84,7 +80,7 @@ def rocm_unquantized_gemm(x: torch.Tensor,
     m = weight.shape[0]
     cu_count = current_platform.get_cu_count()
 
-    if m > 8 and 0 < n < 4:
+    if m > 8 and 0 < n <= 4:
         out = ops.wvSplitK(weight, x_view, cu_count)
         return out.view(*x.shape[:-1], weight.shape[0])
     elif m % 4 == 0 and n == 1 and k <= 8192:

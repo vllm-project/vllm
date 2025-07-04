@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 import torch
 
@@ -25,7 +26,7 @@ class AWQConfig(QuantizationConfig):
         weight_bits: int,
         group_size: int,
         zero_point: bool,
-        modules_to_not_convert: Optional[List[str]] = None,
+        modules_to_not_convert: Optional[list[str]] = None,
     ) -> None:
         super().__init__()
         self.weight_bits = weight_bits
@@ -48,7 +49,7 @@ class AWQConfig(QuantizationConfig):
     def get_name(self) -> QuantizationMethods:
         return "awq"
 
-    def get_supported_act_dtypes(self) -> List[torch.dtype]:
+    def get_supported_act_dtypes(self) -> list[torch.dtype]:
         return [torch.half]
 
     @classmethod
@@ -57,7 +58,7 @@ class AWQConfig(QuantizationConfig):
         return 75
 
     @staticmethod
-    def get_config_filenames() -> List[str]:
+    def get_config_filenames() -> list[str]:
         return [
             "quant_config.json",  # E.g., casperhansen/vicuna-7b-v1.5-awq
             # E.g., abhinavkulkarni/mosaicml-mpt-7b-instruct-w4-g128-awq
@@ -65,7 +66,7 @@ class AWQConfig(QuantizationConfig):
         ]
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "AWQConfig":
+    def from_config(cls, config: dict[str, Any]) -> "AWQConfig":
         weight_bits = cls.get_from_keys(config, ["w_bit", "bits"])
         group_size = cls.get_from_keys(config, ["q_group_size", "group_size"])
         zero_point = cls.get_from_keys(config, ["zero_point"])
@@ -82,7 +83,7 @@ class AWQConfig(QuantizationConfig):
         return None
 
 
-def is_layer_skipped_awq(prefix: str, modules_to_not_convert: List[str]):
+def is_layer_skipped_awq(prefix: str, modules_to_not_convert: list[str]):
     return any(module_name in prefix for module_name in modules_to_not_convert)
 
 
@@ -98,10 +99,16 @@ class AWQLinearMethod(LinearMethodBase):
 
     def create_weights(self, layer: torch.nn.Module,
                        input_size_per_partition: int,
-                       output_partition_sizes: List[int], input_size: int,
+                       output_partition_sizes: list[int], input_size: int,
                        output_size: int, params_dtype: torch.dtype,
                        **extra_weight_attrs):
-        if input_size_per_partition % self.quant_config.group_size != 0:
+        # Normalize group_size
+        if self.quant_config.group_size != -1:
+            group_size = self.quant_config.group_size
+        else:
+            group_size = input_size
+
+        if input_size_per_partition % group_size != 0:
             raise ValueError(
                 "The input size is not aligned with the quantized "
                 "weight shape. This can be caused by too large "
@@ -127,9 +134,11 @@ class AWQLinearMethod(LinearMethodBase):
             packed_factor=self.quant_config.pack_factor,
             weight_loader=weight_loader)
 
+        num_groups = input_size_per_partition // group_size
+
         qzeros = PackedvLLMParameter(
             data=torch.empty(
-                input_size_per_partition // self.quant_config.group_size,
+                num_groups,
                 output_size_per_partition // self.quant_config.pack_factor,
                 dtype=torch.int32,
             ),
@@ -140,7 +149,7 @@ class AWQLinearMethod(LinearMethodBase):
             weight_loader=weight_loader)
 
         scales = GroupQuantScaleParameter(data=torch.empty(
-            input_size_per_partition // self.quant_config.group_size,
+            num_groups,
             output_size_per_partition,
             dtype=params_dtype,
         ),

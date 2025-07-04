@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
 import os
@@ -59,14 +60,22 @@ async def generate(engine: AsyncLLM,
 
 
 @pytest.mark.parametrize(
-    "output_kind", [RequestOutputKind.DELTA, RequestOutputKind.FINAL_ONLY])
+    "output_kind",
+    [
+        RequestOutputKind.DELTA,
+        RequestOutputKind.FINAL_ONLY,
+    ],
+)
+@pytest.mark.parametrize("data_parallel_backend", ["mp", "ray"])
 @pytest.mark.asyncio
-async def test_load(output_kind: RequestOutputKind):
+async def test_load(output_kind: RequestOutputKind,
+                    data_parallel_backend: str):
 
     with ExitStack() as after:
 
         prompt = "This is a test of data parallel"
 
+        engine_args.data_parallel_backend = data_parallel_backend
         engine = AsyncLLM.from_engine_args(engine_args)
         after.callback(engine.shutdown)
 
@@ -82,7 +91,6 @@ async def test_load(output_kind: RequestOutputKind):
                 asyncio.create_task(
                     generate(engine, request_id, prompt, output_kind,
                              NUM_EXPECTED_TOKENS)))
-
         # Confirm that we got all the EXPECTED tokens from the requests.
         done, pending = await asyncio.wait(tasks,
                                            return_when=asyncio.FIRST_EXCEPTION)

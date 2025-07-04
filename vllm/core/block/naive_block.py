@@ -1,4 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 import heapq
 from typing import FrozenSet, Iterable, List, Optional, Tuple, Union
 

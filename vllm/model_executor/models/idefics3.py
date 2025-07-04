@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Copyright 2024 the HuggingFace Inc. team. All rights reserved.
 #
@@ -17,12 +18,12 @@
 
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Dict, Literal, Optional, Set, Tuple, TypedDict, Union
+from typing import Literal, Optional, TypedDict, Union
 
 import torch
 from torch import nn
-from transformers import (BatchFeature, Idefics3Config, Idefics3ImageProcessor,
-                          Idefics3Processor)
+from transformers import (AddedToken, BatchFeature, Idefics3Config,
+                          Idefics3ImageProcessor, Idefics3Processor)
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.linear import ReplicatedLinear
@@ -85,7 +86,7 @@ class Idefics3ProcessingInfo(BaseProcessingInfo):
     def get_hf_processor(
         self,
         *,
-        size: Optional[Dict[str, int]] = None,
+        size: Optional[dict[str, int]] = None,
         **kwargs: object,
     ) -> Idefics3Processor:
         if size is not None:
@@ -198,13 +199,21 @@ class Idefics3ProcessingInfo(BaseProcessingInfo):
 
         return grid_w * grid_h + 1
 
+    # TODO: Remove after requiring transformers>=4.52
+    def _get_content(self, token: Union[AddedToken, str]) -> str:
+        if isinstance(token, str):
+            return token
+
+        return token.content
+
     def _get_image_token(
             self,
             processor: Optional[Idefics3Processor]) -> tuple[str, str, str]:
         if processor is None:
             processor = self.get_hf_processor()
-        image_token = processor.image_token.content
-        fake_image_token = processor.fake_image_token.content
+
+        image_token = self._get_content(processor.image_token)
+        fake_image_token = self._get_content(processor.fake_image_token)
         global_image_token = processor.global_image_tag
         return image_token, fake_image_token, global_image_token
 
@@ -752,8 +761,8 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal,
                                        sampling_metadata)
         return logits
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
 

@@ -2,8 +2,8 @@
 # to run the OpenAI compatible server.
 
 # Please update any changes made here to
-# docs/source/contributing/dockerfile/dockerfile.md and
-# docs/source/assets/contributing/dockerfile-stages-dependency.png
+# docs/contributing/dockerfile/dockerfile.md and
+# docs/assets/contributing/dockerfile-stages-dependency.png
 
 ARG CUDA_VERSION=12.8.1
 #################### BASE BUILD IMAGE ####################
@@ -77,7 +77,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # can be useful for both `dev` and `test`
 # explicitly set the list to avoid issues with torch 2.2
 # see https://github.com/pytorch/pytorch/pull/123243
-ARG torch_cuda_arch_list='7.0 7.5 8.0 8.6 8.9 9.0+PTX'
+ARG torch_cuda_arch_list='7.0 7.5 8.0 8.9 9.0 10.0+PTX'
 ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 # Override the arch list for flash-attn to reduce the binary size
 ARG vllm_fa_cmake_gpu_arches='80-real;90-real'
@@ -189,6 +189,8 @@ WORKDIR /vllm-workspace
 ENV DEBIAN_FRONTEND=noninteractive
 ARG TARGETPLATFORM
 
+SHELL ["/bin/bash", "-c"]
+
 RUN PYTHON_VERSION_STR=$(echo ${PYTHON_VERSION} | sed 's/\.//g') && \
     echo "export PYTHON_VERSION_STR=${PYTHON_VERSION_STR}" >> /etc/environment
 
@@ -255,9 +257,17 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
 RUN --mount=type=cache,target=/root/.cache/uv \
 . /etc/environment && \
 if [ "$TARGETPLATFORM" != "linux/arm64" ]; then \
-    # TESTING: install FlashInfer from source to test 2.7.0 final RC
-    FLASHINFER_ENABLE_AOT=1 TORCH_CUDA_ARCH_LIST='7.5 8.0 8.6 8.9 9.0+PTX' \
-    uv pip install --system --no-build-isolation "git+https://github.com/flashinfer-ai/flashinfer@v0.2.2.post1" ; \
+    # FlashInfer alreary has a wheel for PyTorch 2.7.0 and CUDA 12.8. This is enough for CI use
+    if [[ "$CUDA_VERSION" == 12.8* ]]; then \
+        uv pip install --system https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.5%2Bcu128torch2.7-cp38-abi3-linux_x86_64.whl; \
+    else \
+        export TORCH_CUDA_ARCH_LIST='7.5 8.0 8.9 9.0+PTX'; \
+        CUDA_MAJOR="${CUDA_VERSION%%.*}"; \
+        if [ "$CUDA_MAJOR" -lt 12 ]; then \
+            export FLASHINFER_ENABLE_SM90=0; \
+        fi; \
+        uv pip install --system --no-build-isolation "git+https://github.com/flashinfer-ai/flashinfer@21ea1d2545f74782b91eb8c08fd503ac4c0743fc" ; \
+    fi \
 fi
 COPY examples examples
 COPY benchmarks benchmarks
@@ -267,7 +277,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 . /etc/environment && \
 uv pip list
 
-# Although we build Flashinfer with AOT mode, there's still
+# Even when we build Flashinfer with AOT mode, there's still
 # some issues w.r.t. JIT compilation. Therefore we need to
 # install build dependencies for JIT compilation.
 # TODO: Remove this once FlashInfer AOT wheel is fixed
@@ -295,8 +305,11 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system --no-build-isolation "git+https://github.com/state-spaces/mamba@v2.2.4"
 
 # install development dependencies (for testing)
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system -r requirements/dev.txt
+RUN --mount=type=cache,target=/root/.cache/uv \   
+    CUDA_MAJOR="${CUDA_VERSION%%.*}"; \
+    if [ "$CUDA_MAJOR" -ge 12 ]; then \
+        uv pip install --system -r requirements/dev.txt; \
+    fi
 
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/uv \
@@ -315,7 +328,9 @@ COPY vllm/v1 /usr/local/lib/python3.12/dist-packages/vllm/v1
 # will not be imported by other tests
 RUN mkdir test_docs
 RUN mv docs test_docs/
+RUN cp -r examples test_docs/
 RUN mv vllm test_docs/
+RUN mv mkdocs.yaml test_docs/
 #################### TEST IMAGE ####################
 
 #################### OPENAI API SERVER ####################
