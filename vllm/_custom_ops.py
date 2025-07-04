@@ -695,19 +695,13 @@ def cutlass_scaled_mm(a: torch.Tensor,
         scale_a.shape * [1, 128] == a.shape
         scale_b.shape * [128, 128] == b.shape
     """
+    assert (b.shape[0] % 16 == 0 and b.shape[1] % 16 == 0)
     assert (out_dtype is torch.bfloat16 or out_dtype is torch.float16)
     assert bias is None or bias.shape[0] == b.shape[
         1] and bias.dtype == out_dtype
 
     m = a.shape[0]
     n = b.shape[1]
-
-    cutlass_compatible_b = (b.shape[0] % 16 == 0 and b.shape[1] % 16 == 0)
-    if current_platform.is_rocm() or not cutlass_compatible_b:
-        from vllm.model_executor.layers.quantization.compressed_tensors.triton_scaled_mm import (  # noqa
-            triton_scaled_mm)
-        return triton_scaled_mm(a, b, scale_a, scale_b, out_dtype, bias)
-
     out = torch.empty((m, n), dtype=out_dtype, device=a.device)
 
     torch.ops._C.cutlass_scaled_mm(out, a, b, scale_a, scale_b, bias)
