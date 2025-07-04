@@ -202,7 +202,7 @@ def parse_args():
 
 
 
-def deserialize():
+def deserialize(args, tensorizer_config):
     if args.lora_path:
         tensorizer_config.lora_dir = tensorizer_config.tensorizer_dir
         llm = LLM(model=args.model,
@@ -242,7 +242,7 @@ def deserialize():
     return llm
 
 
-if __name__ == '__main__':
+def main():
     args = parse_args()
 
     s3_access_key_id = (getattr(args, 's3_access_key_id', None)
@@ -259,8 +259,6 @@ if __name__ == '__main__':
     }
 
     model_ref = args.model
-
-    model_name = model_ref.split("/")[1]
 
     if args.command == "serialize" or args.command == "deserialize":
         keyfile = args.keyfile
@@ -309,6 +307,10 @@ if __name__ == '__main__':
                 encryption_keyfile = keyfile,
                 **credentials
             )
-        deserialize()
+        deserialize(args, tensorizer_config)
     else:
         raise ValueError("Either serialize or deserialize must be specified.")
+
+
+if __name__ == "__main__":
+    main()
