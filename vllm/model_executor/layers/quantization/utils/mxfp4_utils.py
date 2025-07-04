@@ -22,8 +22,9 @@ def quantize(w, dtype, dev, **opt):
         fp8e4_dtype = torch.float8_e4m3fn if get_cdna_version() != 3 \
             else torch.float8_e4m3fnuz
         wq = w.to(fp8e4_dtype)
-        return wq, InFlexData(dtype=wq.dtype, scale=w.abs().max().unsqueeze(0)), \
-                   MicroscalingCtx()
+        return (wq, InFlexData(dtype=wq.dtype,
+                               scale=w.abs().max().unsqueeze(0)),
+                MicroscalingCtx())
     else:
         assert dtype == "mx4", f"{dtype=}"
         swizzle_mx_scale = opt.get("swizzle_mx_scale")
