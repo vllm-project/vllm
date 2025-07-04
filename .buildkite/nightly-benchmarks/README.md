@@ -11,7 +11,7 @@ See [vLLM performance dashboard](https://perf.vllm.ai) for the latest performanc
 
 ## Performance benchmark quick overview
 
-**Benchmarking Coverage**: latency, throughput and fix-qps serving on A100 (the support for FP8 benchmark on H100 is coming!), with different models.
+**Benchmarking Coverage**: latency, throughput and fix-qps serving on A100 (the support for FP8 benchmark on H100 is coming!) and Intel® Xeon® Processors, with different models.
 
 **Benchmarking Duration**: about 1hr.
 
@@ -31,13 +31,27 @@ Performance benchmark will be triggered when:
 - A PR being merged into vllm.
 - Every commit for those PRs with `perf-benchmarks` label AND `ready` label.
 
+Manually Trigger the benchmark
+
+```bash
+bash .buildkite/nightly-benchmarks/scripts/run-performance-benchmarks.sh
+```
+
+Runtime environment variables:
+- `ON_CPU`: set the value to '1' on Intel® Xeon® Processors. Default value is 0.
+- `SERVING_JSON`: JSON file to use for the serving tests. Default value is empty string (use default file).
+- `LATENCY_JSON`: JSON file to use for the latency tests. Default value is empty string (use default file).
+- `THROUGHPUT_JSON`: JSON file to use for the throughout tests. Default value is empty string (use default file).
+- `REMOTE_HOST`: IP for the remote vLLM service to benchmark. Default value is empty string.
+- `REMOTE_PORT`: Port for the remote vLLM service to benchmark. Default value is empty string.
+
 Nightly benchmark will be triggered when:
 - Every commit for those PRs with `perf-benchmarks` label and `nightly-benchmarks` label.
 
 ## Performance benchmark details
 
 See [performance-benchmarks-descriptions.md](performance-benchmarks-descriptions.md) for detailed descriptions, and use `tests/latency-tests.json`, `tests/throughput-tests.json`, `tests/serving-tests.json` to configure the test cases.
-
+> NOTE: For Intel® Xeon® Processors, use `tests/latency-tests-cpu.json`, `tests/throughput-tests-cpu.json`, `tests/serving-tests-cpu.json` instead.
 ### Latency test
 
 Here is an example of one test inside `latency-tests.json`:
@@ -118,6 +132,30 @@ You can find the result presented as a table inside the `buildkite/performance-b
 If you do not see the table, please wait till the benchmark finish running.
 The json version of the table (together with the json version of the benchmark) will be also attached to the markdown file.
 The raw benchmarking results (in the format of json files) are in the `Artifacts` tab of the benchmarking.
+
+The `compare-json-results.py` helps to compare benchmark results JSON files converted using `convert-results-json-to-markdown.py`.
+When run, benchmark script generates results under `benchmark/results` folder, along with the `benchmark_results.md` and `benchmark_results.json`.
+`compare-json-results.py` compares two `benchmark_results.json` files and provides performance ratio e.g. for Output Tput, Median TTFT and Median TPOT.
+
+Here is an example using the script to compare result_a and result_b without detail test name.
+`python3 compare-json-results.py -f results_a/benchmark_results.json -f results_b/benchmark_results.json --ignore_test_name`
+
+|    | results_a/benchmark_results.json | results_b/benchmark_results.json | perf_ratio        |
+|----|----------------------------------------|----------------------------------------|----------|
+| 0  | 142.633982                             | 156.526018                             | 1.097396 |
+| 1  | 241.620334                             | 294.018783                             | 1.216863 |
+| 2  | 218.298905                             | 262.664916                             | 1.203235 |
+| 3  | 242.743860                             | 299.816190                             | 1.235113 |
+
+Here is an example using the script to compare result_a and result_b with detail test name.
+`python3 compare-json-results.py -f results_a/benchmark_results.json -f results_b/benchmark_results.json`
+|   | results_a/benchmark_results.json_name | results_a/benchmark_results.json | results_b/benchmark_results.json_name | results_b/benchmark_results.json | perf_ratio        |
+|---|---------------------------------------------|----------------------------------------|---------------------------------------------|----------------------------------------|----------|
+| 0 | serving_llama8B_tp1_sharegpt_qps_1          | 142.633982                             | serving_llama8B_tp1_sharegpt_qps_1          | 156.526018                             | 1.097396 |
+| 1 | serving_llama8B_tp1_sharegpt_qps_16         | 241.620334                             | serving_llama8B_tp1_sharegpt_qps_16         | 294.018783                             | 1.216863 |
+| 2 | serving_llama8B_tp1_sharegpt_qps_4          | 218.298905                             | serving_llama8B_tp1_sharegpt_qps_4          | 262.664916                             | 1.203235 |
+| 3 | serving_llama8B_tp1_sharegpt_qps_inf        | 242.743860                             | serving_llama8B_tp1_sharegpt_qps_inf        | 299.816190                             | 1.235113 |
+| 4 | serving_llama8B_tp2_random_1024_128_qps_1   | 96.613390                              | serving_llama8B_tp4_random_1024_128_qps_1   | 108.404853                             | 1.122048 |
 
 ## Nightly test details
 
