@@ -118,8 +118,8 @@ class NixlConnector(KVConnectorBase_V1):
     # Class Methods
     ############################################################
     @classmethod
-    def get_required_kvcache_layout(cls, config: VllmConfig):
-        use_mla = config.model_config.use_mla
+    def get_required_kvcache_layout(cls, vllm_config: VllmConfig):
+        use_mla = vllm_config.model_config.use_mla
         return "NHD" if use_mla else "HND"
 
     ############################################################
