@@ -186,8 +186,8 @@ def set_forward_context(attn_metadata: Any,
                                      topk_weights_across_dp, hidden_states)
         else:
             dp_metadata = DPMetadata.make(vllm_config.parallel_config,
-                                     attn_metadata, num_tokens or 0,
-                                     num_tokens_across_dp)
+                                          attn_metadata, num_tokens or 0,
+                                          num_tokens_across_dp)
 
     global _forward_context
     prev_context = _forward_context
