@@ -1030,3 +1030,126 @@ def test_resolve_content_format_examples(template_path, expected_format):
     )
 
     assert resolved_format == expected_format
+
+
+def test_parse_chat_messages_with_reasoning_content(
+    phi3v_model_config,
+    phi3v_tokenizer,
+):
+    # Test with reasoning_content in string format
+    conversation, _ = parse_chat_messages(
+        [{
+            "role": "user",
+            "content": "What is 2+2?"
+        }, {
+            "role": "assistant",
+            "content": "The answer is 4.",
+            "reasoning_content": "Let me calculate: 2+2 equals 4."
+        }],
+        phi3v_model_config,
+        phi3v_tokenizer,
+        content_format="string",
+    )
+    
+    assert conversation == [{
+        "role": "user",
+        "content": "What is 2+2?"
+    }, {
+        "role": "assistant",
+        "content": "The answer is 4.",
+        "reasoning_content": "Let me calculate: 2+2 equals 4."
+    }]
+
+    # Test with reasoning_content in openai format
+    conversation, _ = parse_chat_messages(
+        [{
+            "role": "user",
+            "content": [{
+                "type": "text",
+                "text": "Explain gravity"
+            }]
+        }, {
+            "role": "assistant",
+            "content": [{
+                "type": "text",
+                "text": "Gravity is a fundamental force."
+            }],
+            "reasoning_content": "I should explain gravity in simple terms."
+        }],
+        phi3v_model_config,
+        phi3v_tokenizer,
+        content_format="openai",
+    )
+    
+    assert conversation == [{
+        "role": "user",
+        "content": [{
+            "type": "text",
+            "text": "Explain gravity"
+        }]
+    }, {
+        "role": "assistant",
+        "content": [{
+            "type": "text",
+            "text": "Gravity is a fundamental force."
+        }],
+        "reasoning_content": "I should explain gravity in simple terms."
+    }]
+
+    # Test without reasoning_content (should work as before)
+    conversation, _ = parse_chat_messages(
+        [{
+            "role": "user",
+            "content": "Hello"
+        }, {
+            "role": "assistant",
+            "content": "Hi there!"
+        }],
+        phi3v_model_config,
+        phi3v_tokenizer,
+        content_format="string",
+    )
+    
+    assert conversation == [{
+        "role": "user",
+        "content": "Hello"
+    }, {
+        "role": "assistant",
+        "content": "Hi there!"
+    }]
+
+    # Test with multiple messages, some with reasoning_content
+    conversation, _ = parse_chat_messages(
+        [{
+            "role": "user",
+            "content": "What is the capital of France?"
+        }, {
+            "role": "assistant",
+            "content": "The capital of France is Paris.",
+            "reasoning_content": "This is a straightforward geography question."
+        }, {
+            "role": "user",
+            "content": "What about Germany?"
+        }, {
+            "role": "assistant",
+            "content": "The capital of Germany is Berlin."
+        }],
+        phi3v_model_config,
+        phi3v_tokenizer,
+        content_format="string",
+    )
+    
+    assert conversation == [{
+        "role": "user",
+        "content": "What is the capital of France?"
+    }, {
+        "role": "assistant",
+        "content": "The capital of France is Paris.",
+        "reasoning_content": "This is a straightforward geography question."
+    }, {
+        "role": "user",
+        "content": "What about Germany?"
+    }, {
+        "role": "assistant",
+        "content": "The capital of Germany is Berlin."
+    }]
