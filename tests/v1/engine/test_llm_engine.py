@@ -1,19 +1,30 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from __future__ import annotations
 
 import random
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import pytest
 
-from vllm import LLM, SamplingParams
+from vllm import LLM
+from vllm.sampling_params import GuidedDecodingParams, SamplingParams
 from vllm.v1.metrics.reader import Counter, Gauge, Histogram, Metric, Vector
+
+if TYPE_CHECKING:
+    from tests.conftest import VllmRunner
 
 MODEL = "facebook/opt-125m"
 DTYPE = "half"
 
 
-def _vllm_model(apc: bool, vllm_runner, monkeypatch):
+def _vllm_model(
+    apc: bool,
+    vllm_runner: type[VllmRunner],
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    skip_tokenizer_init: bool = False,
+):
     """Set up VllmRunner instance."""
     monkeypatch.setenv("VLLM_USE_V1", "1")
     return vllm_runner(
@@ -23,6 +34,7 @@ def _vllm_model(apc: bool, vllm_runner, monkeypatch):
         enforce_eager=True,
         enable_prefix_caching=apc,
         gpu_memory_utilization=0.5,
+        skip_tokenizer_init=skip_tokenizer_init,
     )
 
 
@@ -45,9 +57,27 @@ def vllm_model_apc(vllm_runner, monkeypatch):
         yield vllm_model
 
 
+@pytest.fixture(
+    # Function scope decouples tests & allows
+    # env var adjustment via monkeypatch
+    scope="function",
+    # Prefix caching
+    params=[False, True])
+def vllm_model_skip_tokenizer_init(vllm_runner, request, monkeypatch):
+    """VllmRunner test fixture with APC."""
+    with _vllm_model(
+            request.param,
+            vllm_runner,
+            monkeypatch,
+            skip_tokenizer_init=True,
+    ) as vllm_model:
+        yield vllm_model
+
+
 def _get_test_sampling_params(
     prompt_list: list[str],
     seed: Optional[int] = 42,
+    structured_outputs: bool = False,
 ) -> tuple[list[SamplingParams], list[int]]:
     """Generate random sampling params for a batch."""
 
@@ -62,14 +92,34 @@ def _get_test_sampling_params(
     n_list = [get_mostly_n_gt1() for _ in range(len(prompt_list))]
     # High temperature to maximize the chance of unique completions
     return [
-        SamplingParams(temperature=0.95, top_p=0.95, n=n, seed=seed)
-        for n in n_list
+        SamplingParams(
+            temperature=0.95,
+            top_p=0.95,
+            n=n,
+            seed=seed,
+            guided_decoding=GuidedDecodingParams(
+                regex="[0-9]+") if structured_outputs else None,
+        ) for n in n_list
     ], n_list
+
+
+def test_compatibility_with_skip_tokenizer_init(
+    vllm_model_skip_tokenizer_init: VllmRunner,
+    example_prompts: list[str],
+):
+    # Case 1: Structured output request should raise an error.
+    sampling_params_list, _ = _get_test_sampling_params(
+        example_prompts,
+        structured_outputs=True,
+    )
+    model: LLM = vllm_model_skip_tokenizer_init.model
+    with pytest.raises(ValueError):
+        _ = model.generate(example_prompts, sampling_params_list)
 
 
 def test_parallel_sampling(vllm_model, example_prompts) -> None:
     """Test passes if parallel sampling `n>1` yields `n` unique completions.
-    
+
     Args:
       vllm_model: VllmRunner instance under test.
       example_prompt: test fixture providing prompts for testing.
