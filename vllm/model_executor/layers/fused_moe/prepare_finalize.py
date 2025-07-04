@@ -35,6 +35,7 @@ class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
         expert_map: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
+        skip_quant: Optional[bool]=False,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor],
                Optional[torch.Tensor], Optional[torch.Tensor]]:
 
@@ -44,12 +45,17 @@ class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
             assert topk == 1, \
                 "apply_router_weight_on_input is only implemented for topk=1"
             a1.mul_(topk_weights.to(a1.dtype))
-
+        
+        if skip_quant:
+            # print("skiped_quant"*10)
+            # print(f"skiped_quant:{skip_quant}")
+            return a1, None, None, None, None
         a1q, a1q_scale = moe_kernel_quantize_input(
             a1, a1_scale, quant_config.quant_dtype,
             quant_config.per_act_token_quant, quant_config.block_shape)
 
         return a1q, a1q_scale, None, None, None
+
 
     def finalize(
         self,
@@ -58,6 +64,15 @@ class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
+        skip_permute_reduce: Optional[bool]=False,
     ) -> None:
-        _moe_unpermute_and_reduce(output, fused_expert_output, None,
-                                  topk_weights, apply_router_weight_on_input)
+        # print("skip_permute_reduce"*10)
+        # print(f"skip_permute_reduce:{skip_permute_reduce}")
+        if skip_permute_reduce:
+            assert output.shape == fused_expert_output.shape
+            output.copy_(fused_expert_output)
+        else:
+            _moe_unpermute_and_reduce(
+                output, fused_expert_output, None,
+                topk_weights, apply_router_weight_on_input
+            )

@@ -4,6 +4,7 @@ from typing import Optional
 
 import torch
 from flashinfer import fp4_swizzle_blockscale
+from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.distributed import get_dp_group
@@ -20,7 +21,7 @@ def get_local_sizes():
         sizes.append((cu_sizes[i] - cu_sizes[i - 1]).item())
     return sizes
 
-
+#should be mk.FusedMoEPrepareAndFinalize chk pplx
 class FlashInferCutlassMoEPrepareAndFinalize(MoEPrepareAndFinalizeNoEP
                                                  ):
 
@@ -50,8 +51,9 @@ class FlashInferCutlassMoEPrepareAndFinalize(MoEPrepareAndFinalizeNoEP
         topk_ids: torch.Tensor,
         num_experts: int,
         expert_map: Optional[torch.Tensor],
-        apply_router_weight_on_input: bool = False,
-        use_dp: bool = True,
+        apply_router_weight_on_input: bool,
+        quant_config: FusedMoEQuantConfig,
+        use_dp: Optional[bool] = True,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor],
                Optional[torch.Tensor], Optional[torch.Tensor]]:
 
@@ -65,7 +67,7 @@ class FlashInferCutlassMoEPrepareAndFinalize(MoEPrepareAndFinalizeNoEP
         a1q, a1q_scale = moe_kernel_quantize_input(
             a1,
             a1_scale,
-            self.quant_dtype,
+            quant_config.quant_dtype,
             self.per_channel_quant,
             self.block_shape,
             is_sf_swizzled_layout=

@@ -520,7 +520,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
     
     def select_experts_impl(self, moe_parallel_config):
         if not self.allow_flashinfer_cutlass:
-			return
+            return
 	
         logger.debug("FlashInferExperts")
         # default to TP/EP case only
@@ -863,24 +863,28 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 extra_expert_args=extra_expert_args,
                 extra_prepare_args=extra_prepare_args,
             )
-        else:  # cutlass_moe_fp4, TP case only
+        else:
+            from vllm.model_executor.layers.fused_moe.cutlass_moe import (
+                run_cutlass_moe_fp4)
+
+            # cutlass_moe_fp4, TP case only(no EP)
             out = self.fused_experts(
                 a=x,
                 w1_fp4=layer.w13_weight,
-                w1_blockscale=layer.w13_blockscale_swizzled,
-                w1_alphas=layer.g1_alphas,
                 w2_fp4=layer.w2_weight,
+                w1_blockscale=layer.w13_blockscale_swizzled,
                 w2_blockscale=layer.w2_blockscale_swizzled,
-                w2_alphas=layer.g2_alphas,
+                g1_alphas=layer.g1_alphas,
+                g2_alphas=layer.g2_alphas,
+                a1_scale=layer.w13_input_scale_quant,
+                a2_scale=layer.w2_input_scale_quant,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
                 m=x.shape[0],
                 n=layer.w2_weight.shape[2] * 2,
                 k=x.shape[1],
                 e=layer.w13_weight.shape[0],
-                a1_gscale=layer.w13_input_scale_quant,
-                a2_gscale=layer.w2_input_scale_quant,
-                device=x.device
-            ).to(x.dtype)
+                device=x.device,
+                expert_map=expert_map,
+            )
         return out
-
