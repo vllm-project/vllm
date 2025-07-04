@@ -20,10 +20,11 @@ from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.utils import (CacheInfo, FlexibleArgumentParser, LRUCache,
                         MemorySnapshot, PlaceholderModule, StoreBoolean,
                         bind_kv_cache, common_broadcastable_dtype,
-                        deprecate_kwargs, get_open_port, is_lossless_cast,
-                        make_zmq_path, make_zmq_socket, memory_profiling,
-                        merge_async_iterators, sha256, split_zmq_path,
-                        supports_kw, swap_dict_values)
+                        deprecate_kwargs, get_open_port, get_tcp_uri,
+                        is_lossless_cast, join_host_port, make_zmq_path,
+                        make_zmq_socket, memory_profiling,
+                        merge_async_iterators, sha256, split_host_port,
+                        split_zmq_path, supports_kw, swap_dict_values)
 
 from .utils import create_new_process_for_each_test, error_on_warning
 
@@ -876,3 +877,44 @@ def test_make_zmq_socket_ipv6():
 def test_make_zmq_path():
     assert make_zmq_path("tcp", "127.0.0.1", "5555") == "tcp://127.0.0.1:5555"
     assert make_zmq_path("tcp", "::1", "5555") == "tcp://[::1]:5555"
+
+
+def test_get_tcp_uri():
+    assert get_tcp_uri("127.0.0.1", 5555) == "tcp://127.0.0.1:5555"
+    assert get_tcp_uri("::1", 5555) == "tcp://[::1]:5555"
+
+
+def test_split_host_port():
+    # valid ipv4
+    assert split_host_port("127.0.0.1:5555") == ("127.0.0.1", 5555)
+    # invalid ipv4
+    with pytest.raises(ValueError):
+        # multi colon
+        assert split_host_port("127.0.0.1::5555")
+    with pytest.raises(ValueError):
+        # tailing colon
+        assert split_host_port("127.0.0.1:5555:")
+    with pytest.raises(ValueError):
+        # no colon
+        assert split_host_port("127.0.0.15555")
+    with pytest.raises(ValueError):
+        # none int port
+        assert split_host_port("127.0.0.1:5555a")
+
+    # valid ipv6
+    assert split_host_port("[::1]:5555") == ("::1", 5555)
+    # invalid ipv6
+    with pytest.raises(ValueError):
+        # multi colon
+        assert split_host_port("[::1]::5555")
+    with pytest.raises(IndexError):
+        # no colon
+        assert split_host_port("[::1]5555")
+    with pytest.raises(ValueError):
+        # none int port
+        assert split_host_port("[::1]:5555a")
+
+
+def test_join_host_port():
+    assert join_host_port("127.0.0.1", 5555) == "127.0.0.1:5555"
+    assert join_host_port("::1", 5555) == "[::1]:5555"
