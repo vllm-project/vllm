@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING, cast
 import torch
 
 from vllm.model_executor.models.config import VerifyAndUpdateConfig
-from vllm.model_executor.models.utils import AutoWeightsLoader
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -45,6 +44,7 @@ def load_weights_using_from_2_way_softmax(
     # refer to https://huggingface.co/Qwen/Qwen3-Reranker-0.6B/discussions/3
     from vllm.model_executor.layers.vocab_parallel_embedding import (
         ParallelLMHead)
+    from vllm.model_executor.models.utils import AutoWeightsLoader
 
     model_config = model.vllm_config.model_config
     tokens = getattr(model.config, "classifier_from_token", [])
