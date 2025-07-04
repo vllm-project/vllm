@@ -367,6 +367,7 @@ INFO 08-02 17:38:43 hpu_executor.py:91] init_cache_engine took 37.92 GiB of devi
 - `VLLM_T_COMPILE_FULLGRAPH`: if `true` - PyTorch compile function raises an error if any graph breaks happen during compilation. This allows for the easy detection of existing graph breaks, which usually reduce performance. Disabled by default.
 - `VLLM_T_COMPILE_DYNAMIC_SHAPES`: if `true` - PyTorch compiles graph with dynamic options set to None. It causes using dynamic shapes when needed.
 - `VLLM_FULL_WARMUP`: if `true` - PyTorch assumes that warmup fully cover all possible tensor sizes and no compilation will occur afterwards. If compilation occurs after warmup, PyTorch will crash (with message like this: `Recompilation triggered with skip_guard_eval_unsafe stance. This usually means that you have not warmed up your model with enough inputs such that you can guarantee no more recompilations.`). If this happens, disable it. `false` by default.
+- `VLLM_HPU_CONVERT_TO_FP8UZ` - Divides all the weights by 2 and multiplies scales by 2. This can be used to overcome limitations of Gaudi2 FP8 implementation for models that have checkpoint in FP8 (like Deepseek). More detailed explanation can be found [here](https://docs.habana.ai/en/latest/PyTorch/Reference/Debugging_Guide/Model_Troubleshooting.html?highlight=fnuz#using-torch-float8-e4m3fn-on-gaudi-2). Converting the model offline using script from vllm-hpu-extension is recommended.
 
 **Performance Tuning Knobs:**
 

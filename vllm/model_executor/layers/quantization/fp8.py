@@ -219,6 +219,8 @@ class Fp8LinearMethod(LinearMethodBase):
         layer.output_size_per_partition = output_size_per_partition
         layer.orig_dtype = params_dtype
         layer.weight_block_size = None
+        if current_platform.is_hpu() and envs.VLLM_HPU_CONVERT_TO_FP8UZ:
+            weight_loader = self._gaudi_weight_wrapper(weight_loader)
 
         if self.block_quant:
             tp_size = get_tensor_model_parallel_world_size()
@@ -301,6 +303,25 @@ class Fp8LinearMethod(LinearMethodBase):
                 layer.register_parameter("input_scale", scale)
             else:
                 layer.register_parameter("input_scale", None)
+
+    def _gaudi_weight_wrapper(self, weight_loader):
+        """Wrapper for Gaudi weight conversion."""
+
+        def wrapper(*args, **kwargs):
+            # args[0] is parameter, args[1] is loaded_weight
+            # weights will be always in fp8, but scales will be in fp32,
+            # so we can detect it by dtype
+            loaded_weight = args[1]
+            if loaded_weight.dtype == torch.float8_e4m3fn:
+                loaded_weight = (loaded_weight.float() * 0.5).to(
+                    torch.float8_e4m3fn)
+            else:
+                loaded_weight = (loaded_weight.data * 2.0)
+            args = (args[0], loaded_weight) + args[2:]
+
+            weight_loader(*args, **kwargs)
+
+        return wrapper
 
     def _maybe_pad_weight(self, weight: torch.Tensor) -> torch.Tensor:
         # Pad the weight tensor. This is an optimization on ROCm platform, which
@@ -509,7 +530,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         layer.num_experts = num_experts
         layer.orig_dtype = params_dtype
         layer.weight_block_size = None
-
+        layer.weight_block_size = None
+        if current_platform.is_hpu() and envs.VLLM_HPU_CONVERT_TO_FP8UZ:
+            extra_weight_attrs["weight_loader"] = self._gaudi_weight_wrapper(
+                extra_weight_attrs.get("weight_loader"))
         layer.quant_config = self.quant_config
         if self.quant_config.is_checkpoint_fp8_serialized:
             params_dtype = torch.float8_e4m3fn
@@ -628,6 +652,24 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         else:
             layer.w13_input_scale = None
             layer.w2_input_scale = None
+
+    def _gaudi_weight_wrapper(self, weight_loader):
+        """Wrapper for Gaudi weight conversion."""
+
+        def wrapper(*args, **kwargs):
+            # args[0] is parameter, args[1] is loaded_weight
+            # weights will be always in fp8, but scales will be in fp32,
+            # so we can detect it by dtype
+            loaded_weight = args[1]
+            if loaded_weight.dtype == torch.float8_e4m3fn:
+                loaded_weight.data = (loaded_weight.data.float() * 0.5).to(
+                    torch.float8_e4m3fn)
+            else:
+                loaded_weight.data = (loaded_weight.data * 2.0)
+            args = (args[0], loaded_weight) + args[2:]
+            weight_loader(*args, **kwargs)
+
+        return wrapper
 
     def process_weights_after_loading(self, layer: Module) -> None:
         # Lazy import to avoid importing triton too early.
