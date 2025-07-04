@@ -1421,7 +1421,7 @@ class ModelConfig:
 
     @property
     def is_cross_encoder(self) -> bool:
-        return self.registry.is_cross_encoder_model(self.architectures)
+        return self.task == "classify"
 
     @property
     def use_mla(self) -> bool:
@@ -4762,6 +4762,13 @@ class VllmConfig:
         cls = MODELS_CONFIG_MAP.get(architecture, None)
         if cls is not None:
             cls.verify_and_update_config(self)
+
+        if self.model_config.task == "classify":
+            # Maybe using:
+            # Online convert ForCausalLM into ForSequenceClassification model.
+            from vllm.model_executor.model_loader.seq_cls_models_loader import (
+                SequenceClassificationConfig)
+            SequenceClassificationConfig.verify_and_update_config(self)
 
     def __str__(self):
         return (

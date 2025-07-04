@@ -193,6 +193,7 @@ def as_seq_cls_model(cls: _T) -> _T:
             config = vllm_config.model_config.hf_config
             quant_config = vllm_config.quant_config
 
+            self.vllm_config = vllm_config
             self.task = vllm_config.model_config.task
             self.pooling_type = (
                 vllm_config.model_config.pooler_config.pooling_type)
@@ -241,6 +242,19 @@ def as_seq_cls_model(cls: _T) -> _T:
                     self._pooler.build_output(data) for data in pooled_data
                 ]
                 return PoolerOutput(outputs=pooled_outputs)
+
+        def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
+            tokens = getattr(self.config, "classifier_from_token", None)
+            method = getattr(self.config, "method", None)
+
+            if tokens is None and method is None:
+                return super().load_weights(weights)
+            else:
+                # Online convert ForCausalLM into
+                # ForSequenceClassification model.
+                from ..model_loader.seq_cls_models_loader import (
+                    seq_cls_model_loader)
+                return seq_cls_model_loader(self, weights)
 
 
     ModelForSequenceClassification.__name__ = \
