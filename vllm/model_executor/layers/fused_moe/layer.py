@@ -1061,7 +1061,8 @@ class FusedMoE(torch.nn.Module):
         if "ModelOpt" in quant_method_name:
             # Determine per-tensor weight scale patterns based on variant
             # Use the dedicated method instead of brittle string matching
-            uses_weight_scale_2 = self.quant_method.uses_weight_scale_2_pattern()
+            uses_weight_scale_2 = self.quant_method.uses_weight_scale_2_pattern(
+            )
 
             # For per-tensor, FP4 uses "weight_scale_2", FP8 uses "weight_scale"
             per_tensor_conditions = (
