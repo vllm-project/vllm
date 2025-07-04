@@ -131,6 +131,8 @@ class FlashAttentionMetadata:
 
     local_attn_metadata: Optional[LocalAttentionMetadata] = None
 
+    prefill_skipped_attn_metadata: Optional["FlashAttentionMetadata"] = None
+
 
 def _get_sliding_window_configs(
         vllm_config: VllmConfig) -> set[Optional[tuple[int, int]]]:
@@ -196,16 +198,83 @@ class FlashAttentionMetadataBuilder(
         # populated on first build() call.
         self.aot_sliding_window: Optional[tuple[int, int]] = None
 
-    def build(
-        self, common_prefix_len: int,
-        common_attn_metadata: CommonAttentionMetadata
+    def build_skip_prefill(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: CommonAttentionMetadata,
     ) -> FlashAttentionMetadata:
+        num_reqs = common_attn_metadata.num_reqs
+        query_start_loc = common_attn_metadata.query_start_loc
+        seq_lens = common_attn_metadata.seq_lens
+        decode_indices = common_attn_metadata.decode_indices
+        # Example inputs
+        # num_reqs: 3
+        # decode_indices:  [14, 18, 19, 27]
+        # query_start_loc: [0, 15, 20, 28]
+        # seq_lens:        [41, 31, 40]
+
+        # Find how many decode indices belong to each request
+        # request_ids: [0, 1, 1, 2]
+        request_ids = torch.bucketize(decode_indices,
+                                      query_start_loc[1:],
+                                      right=True)
+
+        # Figure out how many tokens are in each request
+        # num_decode_tokens: [1, 2, 1]
+        num_decode_tokens = torch.bincount(request_ids, minlength=num_reqs)
+
+        # Calculate new query_start_loc with tokens in decode_indices
+        # decode_query_start_loc: [0, 1, 3, 4]
+        decode_query_start_loc = torch.empty(num_reqs + 1,
+                                             device=query_start_loc.device,
+                                             dtype=query_start_loc.dtype)
+
+        decode_query_start_loc[0] = 0
+        decode_query_start_loc[1:] = torch.cumsum(num_decode_tokens, dim=0)
+        decode_max_query_len = num_decode_tokens.max().item()
+        total_num_decode_tokens = num_decode_tokens.sum().item()
+
+        common_attn_metadata = CommonAttentionMetadata(
+            query_start_loc=decode_query_start_loc,
+            # TODO(sarckk): optimize
+            query_start_loc_np=decode_query_start_loc.cpu().numpy(),
+            seq_lens=seq_lens,
+            num_reqs=num_reqs,
+            num_actual_tokens=total_num_decode_tokens,
+            max_query_len=decode_max_query_len,
+            # Set to None so we don't recurse again
+            decode_indices=None,
+        )
+        metadata = self.build(
+            common_prefix_len=common_prefix_len,
+            common_attn_metadata=common_attn_metadata,
+        )
+        return metadata
+
+    def build(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: CommonAttentionMetadata,
+    ) -> FlashAttentionMetadata:
+        prefill_skipped_attn_metadata = None
+        if common_attn_metadata.decode_indices is not None:
+            # NOTE(sarckk): attention metadata for partial prefill skip case
+            # needs to be built first, otherwise the line below
+            # block_table.slot_mapping[num_actual_tokens:].fill_(-1)
+            # will override the correct slot mapping
+            prefill_skipped_attn_metadata = self.build_skip_prefill(
+                common_prefix_len=0,  # disable cascade attention
+                common_attn_metadata=common_attn_metadata)
+
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len
 
         max_seq_len = int(self.runner.seq_lens_np[:num_reqs].max())
         query_start_loc = common_attn_metadata.query_start_loc
+        query_start_loc_np = common_attn_metadata.query_start_loc_np
+        if query_start_loc_np is None:
+            query_start_loc_np = self.runner.query_start_loc_np[:num_reqs + 1]
         seq_lens = common_attn_metadata.seq_lens
         block_table = self.block_table
         block_table_tensor = block_table.get_device_tensor()[:num_reqs]
@@ -260,7 +329,7 @@ class FlashAttentionMetadataBuilder(
             seqlens_q_local_np, virt_q_cu_seqlens_np, virt_k_seqlens_np, \
                 virt_block_table_tensor = make_local_attention_virtual_batches(
                     self.runner.attention_chunk_size,
-                    self.runner.query_start_loc_np[:num_reqs + 1],
+                    query_start_loc_np,
                     self.runner.seq_lens_np[:num_reqs],
                     block_table_tensor,
                     self.block_size,
@@ -364,6 +433,7 @@ class FlashAttentionMetadataBuilder(
             local_attn_metadata=local_attn_metadata,
             prefix_scheduler_metadata=prefix_scheduler_metadata,
             max_num_splits=max_num_splits,
+            prefill_skipped_attn_metadata=prefill_skipped_attn_metadata,
         )
         return attn_metadata
 
@@ -435,6 +505,8 @@ class FlashAttentionImpl(AttentionImpl):
             raise NotImplementedError(
                 "FlashAttention does not support fp8 kv-cache on this device.")
 
+        self.kv_sharing_skip_prefill = False
+
     def forward(
         self,
         layer: torch.nn.Module,
@@ -470,6 +542,11 @@ class FlashAttentionImpl(AttentionImpl):
         if attn_metadata is None:
             # Profiling run.
             return output
+
+        if (self.kv_sharing_target_layer_name is not None
+                and self.kv_sharing_skip_prefill
+                and attn_metadata.prefill_skipped_attn_metadata is not None):
+            attn_metadata = attn_metadata.prefill_skipped_attn_metadata
 
         # IMPORTANT!
         # NOTE(woosuk): With piece-wise CUDA graphs, this method is executed in

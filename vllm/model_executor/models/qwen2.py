@@ -110,6 +110,7 @@ class Qwen2Attention(nn.Module):
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
         dual_chunk_attention_config: Optional[dict[str, Any]] = None,
+        **attn_kwargs,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -171,7 +172,8 @@ class Qwen2Attention(nn.Module):
             **{
                 "layer_idx": extract_layer_index(prefix),
                 "dual_chunk_attention_config": dual_chunk_attention_config,
-            } if dual_chunk_attention_config else {})
+            } if dual_chunk_attention_config else {},
+            **attn_kwargs)
 
     def forward(
         self,

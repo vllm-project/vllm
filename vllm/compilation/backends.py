@@ -391,8 +391,11 @@ class VllmBackend:
         # them, e.g. backbone (default), eagle_head, etc.
         self.prefix = prefix or model_tag
 
-        global global_graph_pool
-        if global_graph_pool is None:
+        if vllm_config.compilation_config.cudagraph_share_memory_pool:
+            global global_graph_pool
+            if global_graph_pool is None:
+                global_graph_pool = current_platform.graph_pool_handle()
+        else:
             global_graph_pool = current_platform.graph_pool_handle()
 
         # TODO: in the future, if we want to use multiple
