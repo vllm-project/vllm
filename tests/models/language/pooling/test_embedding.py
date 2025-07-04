@@ -27,14 +27,8 @@ from ...utils import check_embeddings_close
     ],
 )
 @pytest.mark.parametrize("dtype", ["half", "float"])
-def test_models(
-    hf_runner,
-    vllm_runner,
-    example_prompts,
-    model,
-    monkeypatch,
-    dtype
-) -> None:
+def test_models(hf_runner, vllm_runner, example_prompts, model, monkeypatch,
+                dtype) -> None:
 
     if model == "BAAI/bge-multilingual-gemma2" and current_platform.is_rocm():
         # ROCm Triton FA does not currently support sliding window attention
