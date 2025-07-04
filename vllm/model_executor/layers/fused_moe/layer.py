@@ -1258,7 +1258,8 @@ class FusedMoE(torch.nn.Module):
                     shard_dim=shard_dim,
                     loaded_weight=loaded_weight,
                     expert_data=expert_data,
-                    tp_rank=self.tp_rank)
+                    tp_rank=self.tp_rank,
+                    expert_id=expert_id)
             return
 
         # Case weight scales, zero_points and offset
