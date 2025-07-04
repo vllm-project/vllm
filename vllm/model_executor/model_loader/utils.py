@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Utilities for selecting and loading models."""
+
 import contextlib
 import inspect
 import warnings
@@ -116,8 +117,8 @@ def process_weights_after_loading(model: nn.Module, model_config: ModelConfig,
     # NOTE: This intentionally happens after other modules so we can easily
     # decompress the weights for MLA.
     for _, module in model.named_modules():
-        if isinstance(module, Attention) and \
-            hasattr(module, "process_weights_after_loading"):
+        if isinstance(module, Attention) and hasattr(
+                module, "process_weights_after_loading"):
             # TODO(lucas): see if there is a way to unify the signatures
             # of process_weights_after_loading
             module.process_weights_after_loading(model_config.dtype)
@@ -171,8 +172,8 @@ def resolve_transformers_arch(model_config: ModelConfig,
     for i, arch in enumerate(architectures):
         if arch == "TransformersForCausalLM":
             continue
-        auto_map: dict[str, str] = getattr(model_config.hf_config, "auto_map",
-                                           None) or dict()
+        auto_map: dict[str, str] = (getattr(model_config.hf_config, "auto_map",
+                                            None) or dict())
         # Make sure that config class is always initialized before model class,
         # otherwise the model class won't be able to access the config class,
         # the expected auto_map should have correct order like:
@@ -215,19 +216,26 @@ def resolve_transformers_arch(model_config: ModelConfig,
             logger.warning(
                 "%s has no vLLM implementation, falling back to Transformers "
                 "implementation. Some features may not be supported and "
-                "performance may not be optimal.", arch)
+                "performance may not be optimal.",
+                arch,
+            )
             architectures[i] = "TransformersForCausalLM"
     return architectures
 
 
 def get_model_architecture(
-        model_config: ModelConfig) -> tuple[type[nn.Module], str]:
+    model_config: ModelConfig, ) -> tuple[type[nn.Module], str]:
     architectures = getattr(model_config.hf_config, "architectures", [])
 
     # Special handling for quantized Mixtral.
     # FIXME(woosuk): This is a temporary hack.
     mixtral_supported = [
-        "fp8", "compressed-tensors", "gptq_marlin", "awq_marlin", "quark"
+        "fp8",
+        "compressed-tensors",
+        "gptq_marlin",
+        "awq_marlin",
+        "quark",
+        "bitsandbytes",
     ]
 
     vllm_supported_archs = ModelRegistry.get_supported_archs()
@@ -266,9 +274,10 @@ def get_architecture_class_name(model_config: ModelConfig) -> str:
 class ParamMapping:
     """
     A class to handle parameter mapping for model weight loading.
-    It creates a bidirectional mapping between packed parameters and their 
+    It creates a bidirectional mapping between packed parameters and their
     constituent parts.
     """
+
     packed_mapping: dict[str, list[str]]
     inverse_packed_mapping: dict[str, tuple[str,
                                             int]] = field(default_factory=dict)

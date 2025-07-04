@@ -40,7 +40,6 @@ from vllm.platforms import current_platform
 
 # yapf conflicts with isort for this block
 
-
 # yapf conflicts with isort for this block
 
 logger = init_logger(__name__)
@@ -525,8 +524,8 @@ class BitsAndBytesModelLoader(BaseModelLoader):
 
         self._get_bnb_target_modules(model)
         self._classify_module_sharding(model)
-    
-    def _dequantize_dq(self,quant_states: Any):
+
+    def _dequantize_dq(self, quant_states: Any):
         """
         When BNB employs Double Quantization, we perform the dequantization of 
         these constants during weight loading rather than at inference time, 
@@ -537,13 +536,13 @@ class BitsAndBytesModelLoader(BaseModelLoader):
 
         def _dequantize_single_state(quant_state):
             """Helper function to dequantize a single QuantState object."""
-            if not (isinstance(quant_state, QuantState) and quant_state.nested):
+            if not (isinstance(quant_state, QuantState)
+                    and quant_state.nested):
                 return
 
             # Copied from: https://github.com/bitsandbytes-foundation/bitsandbytes/blob/0.45.3/bitsandbytes/functional.py#L1352-#L1356
-            absmax = dequantize_blockwise(
-                quant_state.absmax, quant_state.state2
-            )
+            absmax = dequantize_blockwise(quant_state.absmax,
+                                          quant_state.state2)
             absmax += quant_state.offset
 
             # Ensure float32 dtype
@@ -562,9 +561,8 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             _dequantize_single_state(quant_states)
         return quant_states
 
-
-    def _fuse_moe_quant_states(self,model: nn.Module,
-                                    quant_states_dict: dict) -> dict:
+    def _fuse_moe_quant_states(self, model: nn.Module,
+                               quant_states_dict: dict) -> dict:
         """
         
         This function consolidates individual expert quantization states into
@@ -576,7 +574,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             return dict()
 
         expert_mapping = model.get_expert_mapping()
-        expert_qs_dict={}
+        expert_qs_dict = {}
         for name, module in model.named_modules():
             if not isinstance(module, FusedMoE):
                 continue
@@ -587,12 +585,11 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                 shard_id = exp[-1]
                 if shard_id not in ("w1", "w2", "w3"):
                     raise ValueError(f"shard_id must be ['w1','w2','w3'] but "
-                                        f"got {shard_id}.")
+                                     f"got {shard_id}.")
                 layer_prefix = name.split("experts")[0]
                 weight_qual_name = layer_prefix + exp[1] + "weight"
                 quant_state = self._dequantize_dq(
-                    quant_states_dict[weight_qual_name]
-                )
+                    quant_states_dict[weight_qual_name])
                 if shard_id == "w1":
                     w1_states_lst.append(quant_state)
                 elif shard_id == "w2":
@@ -606,9 +603,8 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             w2_absmax_lst = []
             w13_total_dim0 = 0
             w2_total_dim0 = 0
-            for w1_qs, w2_qs, w3_qs in zip(
-                w1_states_lst, w2_states_lst, w3_states_lst
-            ):
+            for w1_qs, w2_qs, w3_qs in zip(w1_states_lst, w2_states_lst,
+                                           w3_states_lst):
                 assert w1_qs.shape == w3_qs.shape
                 assert w1_qs.blocksize == w2_qs.blocksize == w3_qs.blocksize
                 assert w1_qs.dtype == w2_qs.dtype == w3_qs.dtype
@@ -622,17 +618,21 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             w13_absmax = torch.cat(w13_absmax_lst)
             w2_absmax = torch.cat(w2_absmax_lst)
             # Create fused quantization state for w13.
-            w13_qs = QuantState(absmax=w13_absmax,
+            w13_qs = QuantState(
+                absmax=w13_absmax,
                 shape=(w13_total_dim0, w1_states_lst[0].shape[1]),
                 code=w1_states_lst[0].code,
                 blocksize=w1_states_lst[0].blocksize,
+                quant_type="nf4",
                 dtype=w1_states_lst[0].dtype,
             )
             # Create fused quantization state for w2.
-            w2_qs = QuantState(absmax=w2_absmax,
-                shape=(w2_total_dim0,  w2_states_lst[0].shape[1]),
+            w2_qs = QuantState(
+                absmax=w2_absmax,
+                shape=(w2_total_dim0, w2_states_lst[0].shape[1]),
                 code=w2_states_lst[0].code,
                 blocksize=w2_states_lst[0].blocksize,
+                quant_type="nf4",
                 dtype=w2_states_lst[0].dtype,
             )
             # The weight suffixes .w13_weight and .w2_weight are consistent
@@ -643,9 +643,9 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             expert_qs_dict[w2_weight_name] = w2_qs
         return expert_qs_dict
 
-    def _stack_quantization_states (
-        self, model: nn.Module, quant_state_dict: dict
-    ) -> dict[str, dict[int, Any]]:
+    def _stack_quantization_states(
+            self, model: nn.Module,
+            quant_state_dict: dict) -> dict[str, dict[int, Any]]:
         stacked_quant_state_dict: dict[str, dict[int, Any]] = {}
         # TODO: Change this lazy import to normal import
         # after the checks are updated to run on a new version
@@ -694,7 +694,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         return stacked_quant_state_dict
 
     def _bind_quant_states_to_params(self, model: nn.Module,
-                             stacked_quant_state_dict: dict) -> None:
+                                     stacked_quant_state_dict: dict) -> None:
         # save quant_states and offsets as the attributes of the parameters
         param_dict = dict(model.named_parameters())
         for param_name, param in param_dict.items():
@@ -724,6 +724,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                 if self.load_8bit:
                     set_weight_attrs(
                         param, {"matmul_state": [None] * len(quant_states)})
+
     def load_weights(self, model: nn.Module,
                      model_config: ModelConfig) -> None:
 
@@ -746,18 +747,17 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                 raise ValueError("Following weights were not initialized from "
                                  f"checkpoint: {weights_not_loaded}")
         expert_quant_state_dict = self._fuse_moe_quant_states(
-            model, quant_state_dict
-        )
-    
-        stacked_quant_state_dict = self._stack_quantization_states (
-            model, quant_state_dict
-        )
-    
-        stacked_quant_state_dict = {**expert_quant_state_dict,
-            **stacked_quant_state_dict}
+            model, quant_state_dict)
+
+        stacked_quant_state_dict = self._stack_quantization_states(
+            model, quant_state_dict)
+
+        stacked_quant_state_dict = {
+            **expert_quant_state_dict,
+            **stacked_quant_state_dict
+        }
         self._bind_quant_states_to_params(model, stacked_quant_state_dict)
         torch.cuda.empty_cache()
 
     def download_model(self, model_config: ModelConfig) -> None:
         self._prepare_weights(model_config.model, model_config.revision)
-
