@@ -7,7 +7,9 @@ import torch
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
-from vllm.config import KVTransferConfig, VllmConfig, get_current_vllm_config
+from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.distributed.kv_transfer.kv_connector.factory import (
+    KVConnectorFactory)
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -101,19 +103,9 @@ def get_kv_connector_cache_layout():
         logger.warning_once("Unable to detect current VLLM config. " \
         "Defaulting to NHD kv cache layout.")
     else:
-        use_mla = vllm_config.model_config.use_mla
-        has_nixl_connector = False
-        if kv_config.kv_connector == "NixlConnector":
-            has_nixl_connector = True
-        elif kv_config.kv_connector == "MultiConnector":
-            ktcs = kv_config.kv_connector_extra_config.get("connectors", [])
-            for ktc in ktcs:
-                kv_transfer_config = KVTransferConfig(**ktc)
-                if kv_transfer_config.kv_connector == "NixlConnector":
-                    has_nixl_connector = True
-                    break
-        if not use_mla and has_nixl_connector:
-            logger.info_once("NixlConnector detected. Setting KV cache " \
-            "layout to HND for better xfer performance.")
-            return "HND"
+        connector_cls = KVConnectorFactory.get_connector_class(kv_config)
+        required_kvcache_layout = connector_cls.get_required_kvcache_layout(
+            vllm_config)
+        if required_kvcache_layout is not None:
+            return required_kvcache_layout
     return "NHD"

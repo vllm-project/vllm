@@ -9,7 +9,7 @@ The class provides two primary abstract methods:
 """
 
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Union
+from typing import TYPE_CHECKING, Optional, Union
 
 import torch
 
@@ -123,6 +123,20 @@ class KVConnectorBase(ABC):
         """
 
         raise NotImplementedError
+
+    @classmethod
+    def get_required_kvcache_layout(cls,
+                                    config: "VllmConfig") -> Optional[str]:
+        """
+        Get the required KV cache layout for this connector.
+        Args:
+            config (KVTransferConfig): the KV transfer config of this connector.
+
+        Returns:
+            str: the required KV cache layout. e.g. HND, or NHD.
+            None if the connector does not require a specific layout.
+        """
+        return None
 
 
 KVConnectorBaseType = Union[KVConnectorBase, KVConnectorBase_V1]
