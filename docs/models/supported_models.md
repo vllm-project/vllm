@@ -477,16 +477,13 @@ If your model is not in the above list, we will try to automatically convert the
 
 Specified using `--task score`.
 
-| Architecture                          | Models            | Example HF Models                                                                                    | [V1](gh-issue:8779) |
-|---------------------------------------|-------------------|------------------------------------------------------------------------------------------------------|---------------------|
-| `BertForSequenceClassification`       | BERT-based        | `cross-encoder/ms-marco-MiniLM-L-6-v2`, etc.                                                         |                     |
-| `Qwen2ForSequenceClassification`      | Qwen2-based       | `mixedbread-ai/mxbai-rerank-base-v2` (see note), etc.  (see important)                               | ✅︎                  |
-| `Qwen3ForSequenceClassification`      | Qwen3-based       | `tomaarsen/Qwen3-Reranker-0.6B-seq-cls`, `Qwen/Qwen3-Reranker-0.6B` (see note), etc. (see important) | ✅︎                  |
-| `RobertaForSequenceClassification`    | RoBERTa-based     | `cross-encoder/quora-roberta-base`, etc.                                                             |                     |
-| `XLMRobertaForSequenceClassification` | XLM-RoBERTa-based | `BAAI/bge-reranker-v2-m3`, etc.                                                                      |                     |
-
-!!! important
-    Please use the query_template and document_template to format the query and document for better reranker results. Without template, the results are almost as random.
+| Architecture                          | Models            | Example HF Models                                                                    | [V1](gh-issue:8779) |
+|---------------------------------------|-------------------|--------------------------------------------------------------------------------------|---------------------|
+| `BertForSequenceClassification`       | BERT-based        | `cross-encoder/ms-marco-MiniLM-L-6-v2`, etc.                                         |                     |
+| `Qwen2ForSequenceClassification`      | Qwen2-based       | `mixedbread-ai/mxbai-rerank-base-v2` (see note), etc.                                | ✅︎                  |
+| `Qwen3ForSequenceClassification`      | Qwen3-based       | `tomaarsen/Qwen3-Reranker-0.6B-seq-cls`, `Qwen/Qwen3-Reranker-0.6B` (see note), etc. | ✅︎                  |
+| `RobertaForSequenceClassification`    | RoBERTa-based     | `cross-encoder/quora-roberta-base`, etc.                                             |                     |
+| `XLMRobertaForSequenceClassification` | XLM-RoBERTa-based | `BAAI/bge-reranker-v2-m3`, etc.                                                      |                     |
 !!! note
     Load the official original `mxbai-rerank-v2` by using the following command.
 
