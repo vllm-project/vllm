@@ -99,10 +99,10 @@ def get_kv_connector_cache_layout():
     # used for faster transfer.
     vllm_config = get_current_vllm_config()
     kv_config = vllm_config.kv_transfer_config
-    if vllm_config.model_config is None or kv_config is None:
+    if kv_config is not None and vllm_config.model_config is None:
         logger.warning_once("Unable to detect current VLLM config. " \
         "Defaulting to NHD kv cache layout.")
-    else:
+    elif kv_config is not None:
         connector_cls = KVConnectorFactory.get_connector_class(kv_config)
         required_kvcache_layout = connector_cls.get_required_kvcache_layout(
             vllm_config)
