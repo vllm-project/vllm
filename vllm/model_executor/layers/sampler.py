@@ -2,10 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """A layer that samples the next tokens from the model's outputs."""
 import itertools
-from collections.abc import Iterator
 import math
 import os
-import warnings
+from collections.abc import Iterator
 from dataclasses import dataclass
 from importlib.util import find_spec
 from math import inf
