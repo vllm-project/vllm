@@ -11,6 +11,7 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, ModelConfig,
                          VllmConfig)
 from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.platforms import current_platform
+from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.spec_decode.eagle import EagleProposer
 
 model_dir = "meta-llama/Llama-3.1-8B-Instruct"
@@ -50,6 +51,31 @@ def _create_proposer(method: str, k: int) -> EagleProposer:
 
     return EagleProposer(vllm_config=vllm_config,
                          device=current_platform.device_type)
+
+
+def _create_common_attn_metadata(
+        cu_target_query_lens: torch.Tensor,
+        device: torch.device) -> CommonAttentionMetadata:
+    """Create minimal CommonAttentionMetadata for testing."""
+    batch_size = cu_target_query_lens.shape[0] - 1
+    num_tokens = cu_target_query_lens[-1].item()
+    seq_lens = cu_target_query_lens[1:] - cu_target_query_lens[:-1]
+
+    return CommonAttentionMetadata(
+        query_start_loc=cu_target_query_lens,
+        query_start_loc_cpu=cu_target_query_lens.cpu(),
+        seq_lens=seq_lens,
+        seq_lens_cpu=seq_lens.cpu(),
+        num_computed_tokens_cpu=seq_lens.cpu(),
+        num_reqs=batch_size,
+        num_actual_tokens=int(num_tokens),
+        max_query_len=int(seq_lens.max().item()),
+        block_table_tensor=torch.zeros((batch_size, 1),
+                                       dtype=torch.int32,
+                                       device=device),
+        slot_mapping=torch.arange(num_tokens, dtype=torch.int64,
+                                  device=device),
+    )
 
 
 def test_prepare_inputs():
@@ -106,13 +132,19 @@ def test_prepare_inputs():
         device=device)
 
     # n1 + n2 + n3 - a - b -c
-    num_tokens = cu_target_query_lens[-1].item() - num_rejected_tokens.sum(
-    ).item()
+    num_tokens = int(cu_target_query_lens[-1].item() -
+                     num_rejected_tokens.sum().item())
 
-    cu_num_tokens, token_indices = EagleProposer.prepare_inputs(
-        cu_target_query_lens, num_rejected_tokens, num_tokens)
+    # Create CommonAttentionMetadata for new API
+    common_attn_metadata = _create_common_attn_metadata(
+        cu_target_query_lens, device)
+    proposer = _create_proposer("eagle", 1)
 
-    assert torch.equal(cu_num_tokens, expected_cu_num_tokens)
+    updated_metadata, token_indices = proposer.prepare_inputs(
+        common_attn_metadata, num_rejected_tokens.cpu(), num_tokens)
+
+    assert torch.equal(updated_metadata.query_start_loc,
+                       expected_cu_num_tokens)
     assert token_indices.shape[0] == expected_cu_num_tokens[-1].item()
     assert torch.equal(token_indices, expected_token_indices)
 
@@ -284,26 +316,33 @@ def test_propose(num_speculative_tokens):
     target_hidden_states = torch.randn(total_tokens,
                                        hidden_size,
                                        device=device)
-    target_slot_mapping = torch.randint(0,
-                                        100, (total_tokens, ),
-                                        device=device)
     next_token_ids = torch.randint(0,
                                    vocab_size, (batch_size, ),
                                    dtype=torch.int32,
                                    device=device)
-    block_table = torch.randint(0, 10, (batch_size, 10), device=device)
-
     sampling_metadata = mock.MagicMock()
 
-    # Call the method under test
-    result = proposer.propose(target_token_ids=target_token_ids,
-                              target_positions=target_positions,
-                              target_hidden_states=target_hidden_states,
-                              target_slot_mapping=target_slot_mapping,
-                              next_token_ids=next_token_ids,
-                              cu_num_tokens=cu_num_tokens,
-                              block_table=block_table,
-                              sampling_metadata=sampling_metadata)
+    # Create CommonAttentionMetadata for new API
+    common_attn_metadata = _create_common_attn_metadata(cu_num_tokens, device)
+
+    # Mock runner for attention metadata building
+    proposer.runner = mock.MagicMock()
+    proposer.runner.attn_metadata_builders = [mock.MagicMock()]
+
+    # Create mock with required attributes for multi-token tests
+    attn_metadata_mock = mock.MagicMock()
+    attn_metadata_mock.max_seq_len = 10
+    attn_metadata_mock.seq_lens = torch.tensor([5, 3], device=device)
+    proposer.runner.attn_metadata_builders[
+        0].build.return_value = attn_metadata_mock
+
+    with mock.patch('vllm.v1.spec_decode.eagle.isinstance', return_value=True):
+        result = proposer.propose(target_token_ids=target_token_ids,
+                                  target_positions=target_positions,
+                                  target_hidden_states=target_hidden_states,
+                                  next_token_ids=next_token_ids,
+                                  common_attn_metadata=common_attn_metadata,
+                                  sampling_metadata=sampling_metadata)
 
     assert result.shape == (batch_size, num_speculative_tokens)
 

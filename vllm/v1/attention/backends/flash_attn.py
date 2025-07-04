@@ -305,8 +305,8 @@ class FlashAttentionMetadataBuilder(
             prefix_kv_lens = torch.tensor([common_prefix_len],
                                           dtype=torch.int32,
                                           device=self.device)
-            suffix_kv_lens = (seq_lens_cpu[:num_reqs] - common_prefix_len)
-            suffix_kv_lens = torch.from_numpy(suffix_kv_lens).to(self.device)
+            suffix_kv_lens = (seq_lens_cpu[:num_reqs] - common_prefix_len).to(
+                self.device, non_blocking=True)
             prefix_scheduler_metadata = schedule(
                 batch_size=1,
                 cu_query_lens=cu_prefix_query_lens,
