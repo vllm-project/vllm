@@ -110,7 +110,7 @@ class SamplingMetadata:
     ```
 
     Args:
-        seq_groups: List of batched sequence groups.
+        seq_groups: list of batched sequence groups.
         selected_token_indices: (num_query_tokens_to_logprob). Indices to find
             logits from the initial model output hidden states.
         categorized_sample_indices: SamplingType -> token indices to sample.
@@ -400,15 +400,15 @@ class SamplingTensors:
         dtype: torch.dtype,
     ) -> tuple["SamplingTensors", bool, bool, bool, Optional[int],
                Optional[float]]:
-        prompt_tokens: List[array] = []
-        output_tokens: List[array] = []
-        top_ks: List[int] = []
-        temperatures: List[float] = []
-        top_ps: List[float] = []
-        min_ps: List[float] = []
-        presence_penalties: List[float] = []
-        frequency_penalties: List[float] = []
-        repetition_penalties: List[float] = []
+        prompt_tokens: list[array] = []
+        output_tokens: list[array] = []
+        top_ks: list[int] = []
+        temperatures: list[float] = []
+        top_ps: list[float] = []
+        min_ps: list[float] = []
+        presence_penalties: list[float] = []
+        frequency_penalties: list[float] = []
+        repetition_penalties: list[float] = []
         do_penalties = False
         do_top_p_top_k = False
         do_min_p = False
