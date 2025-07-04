@@ -40,6 +40,7 @@ from vllm.transformers_utils.configs import (ChatGLMConfig, Cohere2Config,
                                              NemotronConfig, NVLM_D_Config,
                                              OvisConfig, RWConfig,
                                              SkyworkR1VChatConfig, SolarConfig,
+                                             StableLMAlphaConfig,
                                              Telechat2Config, UltravoxConfig)
 # yapf: enable
 from vllm.transformers_utils.utils import check_gguf_file
@@ -95,6 +96,7 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = {
     "ovis": OvisConfig,
     "solar": SolarConfig,
     "skywork_chat": SkyworkR1VChatConfig,
+    "stablelm_alpha": StableLMAlphaConfig,
     "telechat": Telechat2Config,
     "ultravox": UltravoxConfig,
     **_CONFIG_REGISTRY_OVERRIDE_HF
