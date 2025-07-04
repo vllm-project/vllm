@@ -339,13 +339,14 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
         raise ValueError("Only image modality is supported")
 
     packed_modules_mapping = {}
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
         multimodal_config = vllm_config.model_config.multimodal_config
         self.config = config
         self.multimodal_config = multimodal_config
-        
+
         dataclass_fields = {field.name for field in fields(VisionEncoderArgs)}
         vision_args = {
             key: value
@@ -487,42 +488,66 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
 
     # Reverse mapping from HF to original Pixtral format
     MISTRAL3_REVERSE_MAPPING = {
-        r"^language_model\.lm_head\.weight": r"output.weight",
-        r"^language_model\.model\.norm\.weight": r"norm.weight",
-        r"^language_model\.model\.embed_tokens\.weight": r"tok_embeddings.weight",
-        r"^language_model\.model\.layers\.(\d+)\.input_layernorm\.weight": r"layers.\1.attention_norm.weight",
-        r"^language_model\.model\.layers\.(\d+)\.post_attention_layernorm\.weight": r"layers.\1.ffn_norm.weight",
-        r"^language_model\.model\.layers\.(\d+)\.self_attn\.(q|k|v|o)_proj\.weight": r"layers.\1.attention.w\2.weight",
-        r"^language_model\.model\.layers\.(\d+)\.mlp\.gate_proj\.weight": r"layers.\1.feed_forward.w1.weight",
-        r"^language_model\.model\.layers\.(\d+)\.mlp\.down_proj\.weight": r"layers.\1.feed_forward.w2.weight",
-        r"^language_model\.model\.layers\.(\d+)\.mlp\.up_proj\.weight": r"layers.\1.feed_forward.w3.weight",
-        r"^vision_tower\.transformer\.layers\.(\d+)\.attention_norm\.weight": r"vision_encoder.transformer.layers.\1.attention_norm.weight",
-        r"^vision_tower\.transformer\.layers\.(\d+)\.ffn_norm\.weight": r"vision_encoder.transformer.layers.\1.ffn_norm.weight",
-        r"^vision_tower\.transformer\.layers\.(\d+)\.attention\.(q|k|v|o)_proj\.weight": r"vision_encoder.transformer.layers.\1.attention.w\2.weight",
-        r"^vision_tower\.transformer\.layers\.(\d+)\.feed_forward\.gate_proj\.weight": r"vision_encoder.transformer.layers.\1.feed_forward.w1.weight",
-        r"^vision_tower\.transformer\.layers\.(\d+)\.feed_forward\.down_proj\.weight": r"vision_encoder.transformer.layers.\1.feed_forward.w2.weight",
-        r"^vision_tower\.transformer\.layers\.(\d+)\.feed_forward\.up_proj\.weight": r"vision_encoder.transformer.layers.\1.feed_forward.w3.weight",
-        r"^multi_modal_projector\.linear_1": r"vision_language_adapter.w_in",
-        r"^multi_modal_projector\.linear_2": r"vision_language_adapter.w_out",
-        r"^vision_tower\.ln_pre\.weight": r"vision_encoder.ln_pre.weight",
-        r"^vision_tower\.patch_conv\.weight": r"vision_encoder.patch_conv.weight",
-        r"^multi_modal_projector\.patch_merger\.merging_layer\.weight": r"patch_merger.merging_layer.weight",
-        r"^multi_modal_projector\.norm\.weight": r"pre_mm_projector_norm.weight",
-        r"^language_model\.model\.layers\.(\d+)\.(.+)\.(g_idx|zp|scales|zeros|qweight|qzeros)$": r"layers.\1.\2.\3"
+        r"^language_model\.lm_head\.weight":
+        r"output.weight",
+        r"^language_model\.model\.norm\.weight":
+        r"norm.weight",
+        r"^language_model\.model\.embed_tokens\.weight":
+        r"tok_embeddings.weight",
+        r"^language_model\.model\.layers\.(\d+)\.input_layernorm\.weight":
+        r"layers.\1.attention_norm.weight",
+        r"^language_model\.model\.layers\.(\d+)\.post_attention_layernorm\.weight":
+        r"layers.\1.ffn_norm.weight",
+        r"^language_model\.model\.layers\.(\d+)\.self_attn\.(q|k|v|o)_proj\.weight":
+        r"layers.\1.attention.w\2.weight",
+        r"^language_model\.model\.layers\.(\d+)\.mlp\.gate_proj\.weight":
+        r"layers.\1.feed_forward.w1.weight",
+        r"^language_model\.model\.layers\.(\d+)\.mlp\.down_proj\.weight":
+        r"layers.\1.feed_forward.w2.weight",
+        r"^language_model\.model\.layers\.(\d+)\.mlp\.up_proj\.weight":
+        r"layers.\1.feed_forward.w3.weight",
+        r"^vision_tower\.transformer\.layers\.(\d+)\.attention_norm\.weight":
+        r"vision_encoder.transformer.layers.\1.attention_norm.weight",
+        r"^vision_tower\.transformer\.layers\.(\d+)\.ffn_norm\.weight":
+        r"vision_encoder.transformer.layers.\1.ffn_norm.weight",
+        r"^vision_tower\.transformer\.layers\.(\d+)\.attention\.(q|k|v|o)_proj\.weight":
+        r"vision_encoder.transformer.layers.\1.attention.w\2.weight",
+        r"^vision_tower\.transformer\.layers\.(\d+)\.feed_forward\.gate_proj\.weight":
+        r"vision_encoder.transformer.layers.\1.feed_forward.w1.weight",
+        r"^vision_tower\.transformer\.layers\.(\d+)\.feed_forward\.down_proj\.weight":
+        r"vision_encoder.transformer.layers.\1.feed_forward.w2.weight",
+        r"^vision_tower\.transformer\.layers\.(\d+)\.feed_forward\.up_proj\.weight":
+        r"vision_encoder.transformer.layers.\1.feed_forward.w3.weight",
+        r"^multi_modal_projector\.linear_1":
+        r"vision_language_adapter.w_in",
+        r"^multi_modal_projector\.linear_2":
+        r"vision_language_adapter.w_out",
+        r"^vision_tower\.ln_pre\.weight":
+        r"vision_encoder.ln_pre.weight",
+        r"^vision_tower\.patch_conv\.weight":
+        r"vision_encoder.patch_conv.weight",
+        r"^multi_modal_projector\.patch_merger\.merging_layer\.weight":
+        r"patch_merger.merging_layer.weight",
+        r"^multi_modal_projector\.norm\.weight":
+        r"pre_mm_projector_norm.weight",
+        r"^language_model\.model\.layers\.(\d+)\.(.+)\.(g_idx|zp|scales|zeros|qweight|qzeros)$":
+        r"layers.\1.\2.\3"
     }
 
-    def maybe_remap_mistral3(self, name: str, tensor: torch.Tensor) -> tuple[str, torch.Tensor]:
+    def maybe_remap_mistral3(self, name: str,
+                             tensor: torch.Tensor) -> tuple[str, torch.Tensor]:
         """Remap HF-style weight names back to original Pixtral format."""
 
         for pattern, replacement in self.MISTRAL3_REVERSE_MAPPING.items():
             new_name, n_replace = re.subn(pattern, replacement, name)
             if n_replace > 0:
-                logger.debug(f"remapped %s to %s for Pixtral compat", name, new_name)
+                logger.debug("remapped %s to %s for Pixtral compat", name,
+                             new_name)
                 return new_name, tensor
         return name, tensor  # Return unchanged if no match
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-    
+
         def is_vision_encoder_weights(weight: tuple[str, torch.Tensor]):
             return weight[0].startswith("vision_encoder")
 
@@ -554,7 +579,8 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         def llm_weights_generator():
             # Single pass over weights
-            remapped_weights = (self.maybe_remap_mistral3(name, w) for name, w in weights)
+            remapped_weights = (self.maybe_remap_mistral3(name, w)
+                                for name, w in weights)
             for name, w in remapped_weights:
                 if is_vision_encoder_weights((name, w)):
                     # Load vision encoder weights directly
@@ -565,9 +591,7 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
                         dim1 = param.shape[0]  # num_heads * head_dim
                         dim2 = param.shape[1]  # hidden_size
                         w = inverse_permute_for_rope(w, n_heads, dim1, dim2)
-                        logger.debug(
-                            "reversed permute_for_rope for %s", name
-                        )
+                        logger.debug("reversed permute_for_rope for %s", name)
                     with torch.no_grad():
                         default_weight_loader(param, w)
                 elif is_patch_merger((name, w)):
