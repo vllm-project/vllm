@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Sequence
-from typing import Optional, Union
+from typing import Any, Optional, Union
 
 from torch.nn import CosineSimilarity
 from typing_extensions import Required, TypeAlias, TypedDict
@@ -138,19 +138,40 @@ def apply_score_template(
         f"Unsupported model architecture: {model_config.architectures}")
 
 
-def post_process_tokens_mm_data(
+def post_process_tokens(
     model_arch: str,
     prompt: TokensPrompt,
-    mm_data: Optional[MultiModalDataDict],
 ):
     """
-    Performs architecture-specific manipulations on the input tokens and multimodal data.
+    Performs architecture-specific manipulations on the input tokens.
     Currently handles special processing for 'JinaVLForRanking' models.
     """
     if 'JinaVLForRanking' in model_arch:
         prompt['prompt_token_ids'].append(100)  # add score target token
 
-        if mm_data is not None:
-            for key, value in mm_data.items():
-                if isinstance(value, list):
-                    value.reverse()
+
+def get_score_prompt(
+    model_config: ModelConfig,
+    tokenizer: AnyTokenizer,
+    tokenization_kwargs: Optional[dict[str, Any]],
+    data_1: Union[str, ScoreContentPartParam],
+    data_2: Union[str, ScoreContentPartParam],
+) -> tuple[SingletonPrompt, TokensPrompt]:
+    prompt_1, prompt_2, mm_data = parse_score_data(
+        data_1,
+        data_2,
+        model_config,
+        tokenizer,
+    )
+
+    full_prompt = apply_score_template(model_config, prompt_1, prompt_2)
+
+    prompt_inputs = tokenizer(full_prompt, **tokenization_kwargs)
+
+    engine_prompt = TokensPrompt(prompt_token_ids=prompt_inputs["input_ids"])
+
+    post_process_tokens(model_config.architectures, engine_prompt)
+
+    if mm_data is not None:
+        engine_prompt["multi_modal_data"] = mm_data
+    return full_prompt, engine_prompt

@@ -1,12 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import itertools
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from typing import Optional
 
 import torch
 import torch.nn as nn
-from transformers import PretrainedConfig
+from transformers import BatchFeature, PretrainedConfig
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -44,7 +43,23 @@ class JinaVLScorer(nn.Module):
         return x
 
 
-@MULTIMODAL_REGISTRY.register_processor(Qwen2VLMultiModalProcessor,
+class JinaVLMultiModalProcessor(Qwen2VLMultiModalProcessor):
+
+    def _call_hf_processor(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+
+        for key, value in mm_data.items():
+            value.reverse()
+        return super()._call_hf_processor(prompt, mm_data, mm_kwargs,
+                                          tok_kwargs)
+
+
+@MULTIMODAL_REGISTRY.register_processor(JinaVLMultiModalProcessor,
                                         info=Qwen2VLProcessingInfo,
                                         dummy_inputs=Qwen2VLDummyInputsBuilder)
 class JinaVLForSequenceClassification(nn.Module, SupportsCrossEncoding,
@@ -119,14 +134,3 @@ class JinaVLForSequenceClassification(nn.Module, SupportsCrossEncoding,
 
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.weight_mapper)
-
-
-def split_weights(
-    all_weights: Iterable[tuple[str, torch.Tensor]]
-) -> tuple[Iterable[tuple[str, torch.Tensor]], Iterable[tuple[str,
-                                                              torch.Tensor]]]:
-    all_weights1, all_weights2 = itertools.tee(all_weights)
-
-    return ((n, w) for n, w in all_weights1
-            if not n.startswith("score.")), ((n, w) for n, w in all_weights2
-                                             if n.startswith("score."))
