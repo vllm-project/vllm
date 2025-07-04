@@ -13,9 +13,9 @@ import os
 import time
 import warnings
 from abc import ABC, abstractmethod
+from collections.abc import Generator, Iterable
 from contextlib import contextmanager
-from typing import (Any, Callable, Dict, Generator, Iterable, List, Optional,
-                    Tuple, cast)
+from typing import Any, Callable, Dict, List, Optional, Tuple, cast
 
 import gguf
 import huggingface_hub
