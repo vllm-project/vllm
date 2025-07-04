@@ -446,7 +446,7 @@ class Fp8LinearMethod(LinearMethodBase):
         if current_platform.is_xpu():
             weight = layer.weight.data
             scale = layer.weight_scale.data
-            output = torch.ops.torch_ipex.fp8_gemm2(x, False, weight, True, None, x.dtype, None, scale, bias, False)
+            output = torch.ops.torch_ipex.fp8_gemm_w8a16(x, weight, True, scale, bias)
             return output
 
         if self.use_marlin:
