@@ -37,9 +37,6 @@ class EagleProposer:
         self.method = self.speculative_config.method
 
         self.runner = runner
-        self.arange_np = np.arange(vllm_config.scheduler_config.max_num_seqs +
-                                   1)
-
         self.dtype = vllm_config.model_config.dtype
         self.max_model_len = vllm_config.model_config.max_model_len
         self.block_size = vllm_config.cache_config.block_size
@@ -47,6 +44,7 @@ class EagleProposer:
             self.speculative_config.num_speculative_tokens)
         self.max_num_tokens = (
             vllm_config.scheduler_config.max_num_batched_tokens)
+        self.arange_np = np.arange(self.max_num_tokens)
         # We need to get the hidden size from the draft model config because
         # the draft model's hidden size can be different from the target model's
         # hidden size (e.g., Llama 3.3 70B).
@@ -286,7 +284,14 @@ class EagleProposer:
         # Step 3. [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
         arange = self.arange_np[:total_num_tokens] - cumsums_offsets
 
-        tokens_indices = arange + query_start_loc_cpu[:-1]
+        # Expand starting positions to match token pattern
+        query_start_expanded = np.repeat(query_start_loc_cpu[:-1].numpy(),
+                                         num_tokens_per_req.numpy())
+        tokens_indices = arange + query_start_expanded
+
+        # Ensure tokens_indices are within valid range for slot_mapping
+        max_slot_idx = common_attn_metadata.slot_mapping.size(0) - 1
+        tokens_indices = np.clip(tokens_indices, 0, max_slot_idx)
 
         spec_common_attn_metadata = CommonAttentionMetadata(
             query_start_loc=spec_query_start_loc_cpu.to(device,
@@ -297,13 +302,14 @@ class EagleProposer:
             num_computed_tokens_cpu=(
                 common_attn_metadata.num_computed_tokens_cpu),
             num_reqs=common_attn_metadata.num_reqs,
-            num_actual_tokens=num_tokens,
+            num_actual_tokens=total_num_tokens,
             max_query_len=query_len_per_req.max().item(),
             block_table_tensor=common_attn_metadata.block_table_tensor,
             slot_mapping=common_attn_metadata.slot_mapping[tokens_indices],
         )
 
-        return spec_common_attn_metadata, tokens_indices
+        return spec_common_attn_metadata, torch.from_numpy(tokens_indices).to(
+            device)
 
     def load_model(self, target_model: nn.Module) -> None:
         draft_model_config = \
