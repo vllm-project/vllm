@@ -143,6 +143,11 @@ class MistralToolParser(ToolParser):
         # Handle multiple tools separated by commas/whitespace
         if self.current_tool_name_finished and self.current_tool_arguments_finished:
             if self._should_advance_to_next_v11_tool():
+                # Remove the completed tool from raw_tool_calls before resetting state
+                pattern = r'([a-zA-Z0-9_-]+\{[^}]*\})\s*[,\s]*'
+                match = re.search(pattern, self.raw_tool_calls)
+                if match:
+                    self.raw_tool_calls = self.raw_tool_calls[match.end(1):]
                 self._reset_v11_tool_state()
                 logger.debug("v11 streaming: found next tool, resetting state")
 
