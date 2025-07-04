@@ -212,7 +212,7 @@ class MooncakeStoreConnector(KVConnectorBase):
         self,
         model_executable: torch.nn.Module,
         model_input: "ModelInputForHPUWithSamplingMetadata",
-        kv_caches: List[torch.Tensor],
+        kv_caches: list[torch.Tensor],
         hidden_or_intermediate_states: Union[torch.Tensor,
                                              IntermediateTensors],
     ) -> None:
@@ -282,8 +282,8 @@ class MooncakeStoreConnector(KVConnectorBase):
     def recv_kv_caches_and_hidden_states_hpu(
         self, model_executable: torch.nn.Module,
         model_input: "ModelInputForHPUWithSamplingMetadata",
-        attn_metadata: AttentionMetadata, kv_caches: List[torch.Tensor]
-    ) -> Tuple[Union[torch.Tensor, IntermediateTensors], bool,
+        attn_metadata: AttentionMetadata, kv_caches: list[torch.Tensor]
+    ) -> tuple[Union[torch.Tensor, IntermediateTensors], bool,
                "ModelInputForHPUWithSamplingMetadata"]:
         # When bypass_model_exec is set to False, it means that at least for one
         # request its corresponding KV cache or hidden state is missing.
