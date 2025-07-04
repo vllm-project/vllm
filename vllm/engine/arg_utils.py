@@ -6,7 +6,6 @@ import argparse
 import dataclasses
 import json
 import os
-import re
 import sys
 import threading
 import warnings
