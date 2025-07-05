@@ -1625,11 +1625,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 ]
                 num_rejected_tokens_cpu = torch.tensor(num_rejected_tokens,
                                                        dtype=torch.int32)
-                num_tokens = (num_scheduled_tokens -
-                              num_rejected_tokens_cpu.sum())
                 common_attn_metadata, token_indices =\
                     self.drafter.prepare_inputs(
-                    common_attn_metadata, num_rejected_tokens_cpu, num_tokens)
+                    common_attn_metadata, num_rejected_tokens_cpu)
 
                 target_token_ids = self.input_ids[token_indices]
                 # TODO(woosuk): Support M-RoPE.

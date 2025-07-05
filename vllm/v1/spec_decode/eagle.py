@@ -239,11 +239,11 @@ class EagleProposer:
         return draft_token_ids
 
     def prepare_inputs(
-            self,
-            common_attn_metadata: CommonAttentionMetadata,
-            # [batch_size]
-            num_rejected_tokens: torch.Tensor,
-            num_tokens: int) -> tuple[CommonAttentionMetadata, torch.Tensor]:
+        self,
+        common_attn_metadata: CommonAttentionMetadata,
+        # [batch_size]
+        num_rejected_tokens: torch.Tensor
+    ) -> tuple[CommonAttentionMetadata, torch.Tensor]:
         # query_start_loc_cpu: [0, a, a + b, a + b + c]
         # num_rejected_tokens: [n1, n2, n3]
         # num_tokens_per_req: [a - n1, b - n2, c - n3]
@@ -262,54 +262,52 @@ class EagleProposer:
                              query_start_loc_cpu[:-1])
         # [a, b, c] -> [a - n1, b - n2, c - n3]
         num_tokens_per_req = query_len_per_req - num_rejected_tokens
+        num_tokens_per_req_np = num_tokens_per_req.numpy()
 
         # [a - n1, b - n2, c - n3] ->
         # [0, a - n1, a + b - n1 - n2, a + b + c - n1 - n2 - n3]
-        spec_query_start_loc_cpu = torch.zeros_like(query_start_loc_cpu,
-                                                    pin_memory=True)
-        torch.cumsum(num_tokens_per_req,
-                     dim=0,
-                     out=spec_query_start_loc_cpu[1:])
+        spec_query_start_loc_cpu = torch.zeros(query_start_loc_cpu.shape,
+                                               dtype=torch.int32,
+                                               pin_memory=True)
+        spec_query_start_loc_np = spec_query_start_loc_cpu.numpy()
+        np.cumsum(num_tokens_per_req_np, out=spec_query_start_loc_np[1:])
         """Get the cumulative sum and batched arange of the given array.
         # E.g., [2, 5, 3] -> ([2, 7, 10], [0, 1, 0, 1, 2, 3, 4, 0, 1, 2])
         # Equivalent to but faster than:
         # np.concatenate([np.arange(n) for n in num_tokens])
         """
+
         # Step 1. [2, 5, 3] -> [2, 7, 10]
-        total_num_tokens = spec_query_start_loc_cpu[-1]
+        total_num_tokens = spec_query_start_loc_np[-1]
         # Step 2. [2, 7, 10] -> [0, 0, 2, 2, 2, 2, 2, 7, 7, 7]
-        cumsums_offsets = np.repeat(
-            spec_query_start_loc_cpu[1:].numpy() - num_tokens_per_req.numpy(),
-            num_tokens_per_req.numpy())
+        cumsums_offsets = np.repeat(spec_query_start_loc_np[:-1],
+                                    num_tokens_per_req_np)
         # Step 3. [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
         arange = self.arange_np[:total_num_tokens] - cumsums_offsets
 
         # Expand starting positions to match token pattern
         query_start_expanded = np.repeat(query_start_loc_cpu[:-1].numpy(),
-                                         num_tokens_per_req.numpy())
-        tokens_indices = arange + query_start_expanded
-
-        # Ensure tokens_indices are within valid range for slot_mapping
-        max_slot_idx = common_attn_metadata.slot_mapping.size(0) - 1
-        tokens_indices = np.clip(tokens_indices, 0, max_slot_idx)
+                                         num_tokens_per_req_np)
+        token_indices_np = arange + query_start_expanded
+        token_indices = torch.from_numpy(token_indices_np).to(
+            device, non_blocking=True)
 
         spec_common_attn_metadata = CommonAttentionMetadata(
             query_start_loc=spec_query_start_loc_cpu.to(device,
                                                         non_blocking=True),
             seq_lens=spec_seq_lens_cpu.to(device, non_blocking=True),
-            query_start_loc_cpu=spec_query_start_loc_cpu.cpu(),
-            seq_lens_cpu=spec_seq_lens_cpu.cpu(),
-            num_computed_tokens_cpu=(
-                common_attn_metadata.num_computed_tokens_cpu),
+            query_start_loc_cpu=spec_query_start_loc_cpu,
+            seq_lens_cpu=spec_seq_lens_cpu,
+            num_computed_tokens_cpu=common_attn_metadata.
+            num_computed_tokens_cpu,
             num_reqs=common_attn_metadata.num_reqs,
             num_actual_tokens=total_num_tokens,
             max_query_len=query_len_per_req.max().item(),
             block_table_tensor=common_attn_metadata.block_table_tensor,
-            slot_mapping=common_attn_metadata.slot_mapping[tokens_indices],
+            slot_mapping=common_attn_metadata.slot_mapping[token_indices],
         )
 
-        return spec_common_attn_metadata, torch.from_numpy(tokens_indices).to(
-            device)
+        return spec_common_attn_metadata, token_indices
 
     def load_model(self, target_model: nn.Module) -> None:
         draft_model_config = \
