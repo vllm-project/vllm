@@ -85,6 +85,11 @@ class OpenAIServingResponses(OpenAIServing):
             logger.info("Using default chat sampling params from %s: %s",
                         source, self.default_sampling_params)
 
+        # HACK(woosuk): This is a hack. We should use a better store.
+        # FIXME: This causes a memory leak since we never remove responses
+        # from the store.
+        self.response_store: dict[str, ResponsesResponse] = {}
+
     async def create_responses(
         self,
         request: ResponsesRequest,
@@ -172,12 +177,29 @@ class OpenAIServingResponses(OpenAIServing):
         result_generator, = generators
 
         if request.background:
-            return await self.create_background_response(
+            created_time = int(time.time())
+            response = ResponsesResponse.from_request(
                 request,
                 sampling_params,
-                result_generator,
-                model_name,
+                model_name=model_name,
+                created_time=created_time,
+                output=[],
+                status="queued",
+                usage=None,
             )
+            self.response_store[response.id] = response
+            asyncio.create_task(
+                self.responses_full_generator(
+                    request,
+                    sampling_params,
+                    result_generator,
+                    model_name,
+                    tokenizer,
+                    request_metadata,
+                    created_time,
+                    is_background=True,
+                ))
+            return response
 
         if request.stream:
             raise NotImplementedError("Streaming responses are not supported")
@@ -202,8 +224,11 @@ class OpenAIServingResponses(OpenAIServing):
         model_name: str,
         tokenizer: AnyTokenizer,
         request_metadata: RequestResponseMetadata,
+        created_time: Optional[int] = None,
+        is_background: bool = False,
     ) -> Union[ErrorResponse, ResponsesResponse]:
-        created_time = int(time.time())
+        if created_time is None:
+            created_time = int(time.time())
         final_res: Optional[RequestOutput] = None
 
         try:
@@ -278,29 +303,33 @@ class OpenAIServingResponses(OpenAIServing):
             status="completed",
             usage=usage,
         )
+
+        response_id = response.id
+        if is_background:
+            # Background request. The response must be in the store.
+            assert response_id in self.response_store
+            # Update the response in the store.
+            self.response_store[response_id] = response
+        else:
+            # Not a background request. The response must not be in the store.
+            assert response_id not in self.response_store
+            if request.store:
+                self.response_store[response_id] = response
         return response
 
-    async def create_background_response(
+    async def retrieve_responses(
         self,
-        request: ResponsesRequest,
-        sampling_params: SamplingParams,
-        result_generator: AsyncIterator[RequestOutput],
-        model_name: str,
-    ) -> ResponsesResponse:
-        created_time = int(time.time())
-        # Start the task but don't await it.
-        asyncio.create_task(_drain_generator(result_generator))
-        return ResponsesResponse.from_request(
-            request,
-            sampling_params,
-            model_name=model_name,
-            created_time=created_time,
-            output=[],
-            status="queued",
-            usage=None,
-        )
-
-
-async def _drain_generator(generator: AsyncIterator):
-    async for _ in generator:
-        pass
+        response_id: str,
+    ) -> Union[ErrorResponse, ResponsesResponse]:
+        if not response_id.startswith("resp_"):
+            return self.create_error_response(
+                err_type="invalid_request_error",
+                message=(f"Invalid 'response_id': '{response_id}'. "
+                         "Expected an ID that begins with 'resp'."),
+            )
+        if response_id not in self.response_store:
+            return self.create_error_response(
+                err_type="invalid_request_error",
+                message=f"Response with id '{response_id}' not found. ",
+            )
+        return self.response_store[response_id]
