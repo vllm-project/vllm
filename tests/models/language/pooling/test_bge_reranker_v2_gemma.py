@@ -115,7 +115,7 @@ class GemmaMtebEncoder(VllmMtebEncoder):
             corpus = self.document_template.format(doc=corpus, prompt=prompt)
             _sentences.append((query, corpus, prompt))
 
-        return super().predict(sentences, *args, **kwargs)
+        return super().predict(_sentences, *args, **kwargs)
 
 
 @pytest.mark.parametrize("model_info", RERANK_MODELS)
