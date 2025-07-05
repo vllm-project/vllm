@@ -3994,7 +3994,7 @@ class CompilationConfig:
         certain small batchsizes, where inductor is good at optimizing.
     """
     # Top-level Compilation control
-    level: int = -1  # -1 for no user-setting, VllmConfig.__post_init__ will handle it  # noqa
+    level: Optional[int] = None
     """The level of compilation:
 
     - 0: no compilation.
@@ -4615,9 +4615,13 @@ class VllmConfig:
             # By default, V1 uses piecewise CUDA graphs. If full_cuda_graph
             # is set to True, full CUDA graphs will be used.
             self.compilation_config.cudagraph_num_of_warmups = 1
-            if self.compilation_config.level == -1:
+            if self.compilation_config.level is None:
                 self.compilation_config.level = CompilationLevel.PIECEWISE
             self.compilation_config.set_splitting_ops_for_v1()
+
+        # For V0 or other cases, default to level 0 with no compilation
+        if self.compilation_config.level is None:
+            self.compilation_config.level = CompilationLevel.NO_COMPILATION
 
         self._set_cudagraph_sizes()
 
