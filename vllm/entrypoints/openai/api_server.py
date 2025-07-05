@@ -910,6 +910,8 @@ TASK_HANDLERS: dict[str, dict[str, tuple]] = {
 }
 
 if envs.VLLM_SERVER_DEV_MODE:
+    logger.warning("SECURITY WARNING: Development endpoints are enabled! "
+                   "This should NOT be used in production!")
 
     @router.get("/server_info")
     async def show_server_info(raw_request: Request):
