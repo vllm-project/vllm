@@ -81,8 +81,7 @@ class KVCacheManager:
         self.enable_caching = enable_caching
         self.caching_hash_fn = (
             sha256_cbor if caching_hash_algo == "sha256_cbor" else
-            sha256 if caching_hash_algo == "sha256" else
-            hash)
+            sha256 if caching_hash_algo == "sha256" else hash)
         init_none_hash(self.caching_hash_fn)
         self.use_eagle = use_eagle
         self.log_stats = log_stats

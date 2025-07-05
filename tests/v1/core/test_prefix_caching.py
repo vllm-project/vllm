@@ -15,7 +15,8 @@ from vllm.utils import sha256, sha256_cbor
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheManager, Request
 from vllm.v1.core.kv_cache_utils import (BlockHash, BlockHashWithGroupId,
-                                         KVCacheBlock, hash_block_tokens, init_none_hash)
+                                         KVCacheBlock, hash_block_tokens,
+                                         init_none_hash)
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec, SlidingWindowSpec)
 
@@ -101,9 +102,8 @@ def test_prefill(hash_algo):
     )
 
     # choose the hash function according to the parameter
-    hash_fn = (
-            sha256_cbor if hash_algo == "sha256_cbor" else
-            sha256 if hash_algo == "sha256" else hash)
+    hash_fn = (sha256_cbor if hash_algo == "sha256_cbor" else
+               sha256 if hash_algo == "sha256" else hash)
 
     # Complete 3 blocks (48 tokens)
     common_token_ids = [i for i in range(3) for _ in range(16)]

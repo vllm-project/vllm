@@ -16,8 +16,8 @@ from vllm.v1.core.kv_cache_utils import (
     FreeKVCacheBlockQueue, KVCacheBlock, PrefixCachingMetrics,
     estimate_max_model_len, generate_block_hash_extra_keys,
     get_kv_cache_config, get_max_concurrency_for_kv_cache_config,
-    hash_block_tokens, hash_request_tokens, unify_kv_cache_configs,
-    init_none_hash)
+    hash_block_tokens, hash_request_tokens, init_none_hash,
+    unify_kv_cache_configs)
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec, KVCacheTensor,
                                         SlidingWindowSpec)
@@ -77,6 +77,7 @@ def new_sliding_window_spec(block_size=16,
                              dtype=dtype,
                              use_mla=use_mla,
                              sliding_window=sliding_window)
+
 
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor, hash])
 def test_none_hash(monkeypatch, hash_fn):
@@ -339,7 +340,6 @@ def test_hash_request_tokens(hash_fn):
 
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor, hash])
 def test_hash_tokens_different_mm_input(hash_fn):
-    import vllm.v1.core.kv_cache_utils
     init_none_hash(hash_fn)
 
     request1 = make_request(
@@ -369,7 +369,6 @@ def test_hash_tokens_different_mm_input(hash_fn):
 
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor, hash])
 def test_hash_request_tokens_no_mm_inputs(hash_fn):
-    import vllm.v1.core.kv_cache_utils
     init_none_hash(hash_fn)
 
     request = make_request(
