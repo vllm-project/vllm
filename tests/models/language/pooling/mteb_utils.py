@@ -122,8 +122,8 @@ class ScoreClientMtebEncoder(mteb.Encoder):
         response = requests.post(self.url,
                                  json={
                                      "model": self.model_name,
-                                     "text_1": query,
-                                     "text_2": corpus,
+                                     "data_1": query,
+                                     "data_2": corpus,
                                      "truncate_prompt_tokens": -1,
                                  }).json()
         return response['data'][0]["score"]
