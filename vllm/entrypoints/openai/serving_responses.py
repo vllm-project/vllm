@@ -117,16 +117,14 @@ class OpenAIServingResponses(OpenAIServing):
             # Reponses API supports simple text inputs without chat format.
             if isinstance(request.input, str):
                 text_input = request.input
-                request.input = [{"role": "user", "content": text_input}]
+                messages = [{"role": "user", "content": text_input}]
+            else:
+                messages = request.input
 
-            (
-                conversation,
-                request_prompts,
-                engine_prompts,
-            ) = await self._preprocess_chat(
+            _, request_prompts, engine_prompts = await self._preprocess_chat(
                 request,
                 tokenizer,
-                request.input,
+                messages,
                 chat_template=self.chat_template,
                 chat_template_content_format=self.chat_template_content_format,
             )
