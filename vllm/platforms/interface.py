@@ -521,18 +521,11 @@ class Platform:
         raise NotImplementedError
 
     @classmethod
-    def get_piecewise_backend_cls(cls) -> str:
+    def get_static_graph_wrapper_cls(cls) -> str:
         """
-        Get piecewise backend class for piecewise graph.
+        Get static graph wrapper class for static graph.
         """
-        return "vllm.compilation.base_piecewise_backend.AbstractPiecewiseBackend"  # noqa
-
-    @classmethod
-    def get_fullgraph_wrapper_cls(cls) -> str:
-        """
-        Get fullgraph wrapper class for fullgraph static graph.
-        """
-        return "vllm.compilation.base_piecewise_backend.AbstractFullgraphWrapper"  # noqa
+        return "vllm.compilation.base_static_graph.AbstractStaticGraphWrapper"
 
     @classmethod
     def stateless_init_device_torch_dist_pg(

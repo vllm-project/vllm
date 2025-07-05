@@ -27,7 +27,7 @@ from vllm.logger import init_logger
 from vllm.utils import cdiv
 from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder, CommonAttentionMetadata, get_kv_cache_layout,
-    make_local_attention_virtual_batches)
+    make_local_attention_virtual_batches, AttentionCGSupport)
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.block_table import BlockTable
 
@@ -141,17 +141,17 @@ def _get_sliding_window_configs(
 
 class FlashAttentionMetadataBuilder(
         AttentionMetadataBuilder[FlashAttentionMetadata]):
-    full_cudagraph_supported: ClassVar[bool] = True
+    attn_cudagraph_support: ClassVar[int] = AttentionCGSupport.ALWAYS
     # FlashAttn support a unified varlen fwd kernel for prefill-decode phase, so
     # it's ok to either separate attention routine or not for both FA2 or 3.
-    force_separate_routine: ClassVar[Optional[bool]] = None
+    # TODO: change the default preference if needed.
+    prefer_separate_routine: ClassVar[Optional[bool]] = None
 
     support_full_cudagraph_only: ClassVar[bool] = True
 
     def __init__(self, runner: "GPUModelRunner", kv_cache_spec: AttentionSpec,
                  block_table: BlockTable):
         model_config = runner.model_config
-        compilation_config = runner.vllm_config.compilation_config
 
         self.runner = runner
         self.num_heads_q = model_config.get_num_attention_heads(
@@ -164,7 +164,7 @@ class FlashAttentionMetadataBuilder(
         self.block_table = block_table
 
         self.aot_schedule = (get_flash_attn_version() == 3)
-        self.use_full_cuda_graph = compilation_config.full_cuda_graph
+        self.use_full_cuda_graph = self.runner.full_cuda_graph
 
         if self.use_full_cuda_graph:
             # NOTE(lucas): AOT scheduling not supported in full cuda graph mode

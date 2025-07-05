@@ -15,12 +15,13 @@ import vllm.envs as envs
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionType)
 from vllm.attention.layer import Attention
-from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.config import VllmConfig, get_layers_from_vllm_config, CUDAGraphMode
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.flash_attn import use_cascade_attention
 from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
                                               CommonAttentionMetadata,
-                                              get_kv_cache_layout)
+                                              get_kv_cache_layout,
+                                              AttentionCGSupport)
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.block_table import BlockTable
 
@@ -218,8 +219,8 @@ class FlashInferMetadata:
 
 
 class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
-    full_cudagraph_supported: ClassVar[bool] = True
-    force_separate_routine: ClassVar[Optional[bool]] = True
+    attn_cudagraph_support: ClassVar[int] = AttentionCGSupport.PURE_DECODE_ONLY
+    prefer_separate_routine: ClassVar[Optional[bool]] = True
 
     def __init__(self, runner: GPUModelRunner, kv_cache_spec: AttentionSpec,
                  block_table: BlockTable):
@@ -228,8 +229,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self._workspace_buffer = None
         self._prefill_wrapper = None  # Wrapper for prefill/append
         self._decode_wrapper = None  # Wrapper for decode (general shape)
-        self.enable_cuda_graph = (
-            self.vllm_config.compilation_config.full_cuda_graph)
+        self.enable_cuda_graph = self.runner.full_cuda_graph
         if self.enable_cuda_graph:
             # For full cudagraph capture, one `decode_wrapper` for each batch
             # size is needed for FlashInfer.

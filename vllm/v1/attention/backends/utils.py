@@ -46,19 +46,33 @@ class CommonAttentionMetadata:
 
 M = TypeVar("M")
 
+class AttentionCGSupport:
+    # constants for the cudagraph support of the attention backend
+
+    ALWAYS = 2  # Cudagraph always supported
+    # Cudagraph supported for pure decode, need to use piecewise
+    # if mixed prefill-decode batches
+    PURE_DECODE_ONLY = 1  
+    NEVER = 0 # No support
+    
 
 class AttentionMetadataBuilder(abc.ABC, Generic[M]):
     # Does this backend/builder support CUDA Graphs for attention.
-    full_cudagraph_supported: ClassVar[bool] = False
-    # If full cudagraph support, select if this attention backend
-    # enforce separate rountine to be True, False or None (free).
-    force_separate_routine: ClassVar[Optional[bool]] = None
-
-    # If the attention backend supports full cudagraph only. Which means,
-    # it supports full cudagraph for both prefill-decode phase and pure
-    # decode phase. Used to check if compilation_config.force_no_split_graph
-    # = True is valid when full cudagraph is enable.
-    support_full_cudagraph_only: ClassVar[bool] = False
+    attn_cudagraph_support: ClassVar[int] = AttentionCGSupport.NEVER
+    # If attn_cudagraph_supported >0, attention backend can set its
+    # preference of separate rountine to be True, False or None.
+    # True: expect to explicit separate routines for capturing cudagraph
+    #       of pure decode batches and mixed batches. Should be true if 
+    #       attn_cudagraph_supported is PURE_DECODE_ONLY. And may be faster
+    #       to set it true if attn_cudagraph_supported is ALWAYS.
+    # False: expect to keep a unified kernel routine when 
+    #       attn_cudagraph_supported is ALWAYS. It is the case if an 
+    #       attention kernel can dynamically dispatch different optimzied 
+    #       rountines inside a kernel, so no need to manually separate them 
+    #       outside kernel when capturing cudagraph.
+    # None: indicates no specific preference, and the control is left
+    #       to the users.
+    prefer_separate_routine: ClassVar[Optional[bool]] = None
 
     @abstractmethod
     def build(self, common_prefix_len: int,

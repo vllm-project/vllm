@@ -19,7 +19,7 @@ from vllm.platforms import current_platform
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder, CommonAttentionMetadata,
-    make_local_attention_virtual_batches)
+    make_local_attention_virtual_batches, AttentionCGSupport)
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.block_table import BlockTable
 
@@ -73,9 +73,7 @@ class TritonAttentionMetadata:
 
 class TritonAttentionMetadataBuilder(
         AttentionMetadataBuilder[TritonAttentionMetadata]):
-    full_cudagraph_supported: ClassVar[bool] = True
-
-    support_full_cudagraph_only: ClassVar[bool] = True
+    attn_cudagraph_support: ClassVar[int] = AttentionCGSupport.ALWAYS
 
     def __init__(self, runner: "GPUModelRunner", kv_cache_spec: AttentionSpec,
                  block_table: BlockTable):

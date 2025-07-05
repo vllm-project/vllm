@@ -18,7 +18,7 @@ import vllm.envs as envs
 from vllm.config import CompilationConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils import is_torch_equal_or_newer, resolve_obj_by_qualname
+from vllm.utils import is_torch_equal_or_newer
 
 from .compiler_interface import (CompilerInterface, EagerAdaptor,
                                  InductorAdaptor, InductorStandaloneAdaptor)
@@ -258,6 +258,12 @@ def split_graph(graph: fx.GraphModule,
 # we share the global graph pool among all the backends
 global_graph_pool = None
 
+def get_global_graph_pool():
+    global global_graph_pool    
+    if global_graph_pool is None:
+        global_graph_pool = current_platform.graph_pool_handle()
+    return global_graph_pool
+
 compilation_start_time = 0.0
 
 
@@ -317,10 +323,9 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
                 graph_index=index,
                 num_graphs=len(self.compile_submod_names),
                 runtime_shape=None)
-
-            piecewise_backend = resolve_obj_by_qualname(
-                current_platform.get_piecewise_backend_cls())
-            self.module.__dict__[target] = piecewise_backend(
+            # Lazy import here to avoid circular import
+            from .piecewise_backend import PiecewiseBackend
+            self.module.__dict__[target] = PiecewiseBackend(
                 submod, self.vllm_config, self.graph_pool, index,
                 len(self.compile_submod_names), sym_shape_indices,
                 compiled_graph_for_general_shape, self.vllm_backend)
@@ -391,9 +396,8 @@ class VllmBackend:
         # them, e.g. backbone (default), eagle_head, etc.
         self.prefix = prefix or model_tag
 
-        global global_graph_pool
-        if global_graph_pool is None:
-            global_graph_pool = current_platform.graph_pool_handle()
+        
+        global_graph_pool = get_global_graph_pool()
 
         # TODO: in the future, if we want to use multiple
         # streams, it might not be safe to share a global pool.
@@ -563,6 +567,10 @@ class VllmBackend:
 
         self._called = True
 
+        if not self.compilation_config.use_cudagraph or \
+            not self.compilation_config.cudagraph_copy_inputs:
+            return self.split_gm
+
         # if we need to copy input buffers for cudagraph
         from torch._guards import detect_fake_mode
         fake_mode = detect_fake_mode()
@@ -581,18 +589,14 @@ class VllmBackend:
                 any(is_symbolic(d) for d in x.size())
         ]
 
-        if self.compilation_config.full_cuda_graph:
-            assert self.compilation_config.use_cudagraph, \
-                "full_cuda_graph mode requires use_cudagraph to be True"
-            fullgraph_wrapper = resolve_obj_by_qualname(
-                current_platform.get_fullgraph_wrapper_cls())
-            self.split_gm = fullgraph_wrapper(self.split_gm, self.vllm_config,
-                                              self.graph_pool,
-                                              self.sym_tensor_indices)
-
-        if not self.compilation_config.use_cudagraph or \
-            not self.compilation_config.cudagraph_copy_inputs:
-            return self.split_gm
+        # if self.compilation_config.full_cuda_graph:
+        #     assert self.compilation_config.use_cudagraph, \
+        #         "full_cuda_graph mode requires use_cudagraph to be True"
+        #     fullgraph_wrapper = resolve_obj_by_qualname(
+        #         current_platform.get_fullgraph_wrapper_cls())
+        #     self.split_gm = fullgraph_wrapper(self.split_gm, self.vllm_config,
+        #                                       self.graph_pool,
+        #                                       self.sym_tensor_indices)
 
         # compiler managed cudagraph input buffers
         # we assume the first run with symbolic shapes
