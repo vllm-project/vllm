@@ -104,8 +104,12 @@ class TensorizerLoader(BaseModelLoader):
 
         if is_vllm_tensorized(self.tensorizer_config):
             tensorizer_config = self._patch_tensorizer_config(model_config)
-            model = init_tensorizer_model(tensorizer_config=tensorizer_config,
-                                          vllm_config=vllm_config)
+            device_config = vllm_config.device_config
+            with set_default_torch_dtype(model_config.dtype):
+                with torch.device(device_config.device):
+                    model = init_tensorizer_model(
+                        tensorizer_config=tensorizer_config,
+                        vllm_config=vllm_config)
             self.load_weights(model, model_config)
             return model
         return self._load_model_serialized_cpu(vllm_config=vllm_config)
