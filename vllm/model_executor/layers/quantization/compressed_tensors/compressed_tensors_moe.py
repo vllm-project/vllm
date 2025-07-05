@@ -368,6 +368,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             "weights")
         self.input_quant = self.quant_config.target_scheme_map["Linear"].get(
             "input_activations")
+        self.topk_indices_dtype = None
 
         per_tensor = (self.weight_quant.strategy == QuantizationStrategy.TENSOR
                       and self.input_quant.strategy
@@ -738,6 +739,7 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
 
         from vllm.model_executor.layers.fused_moe.cutlass_moe import (
             cutlass_moe_fp8)
+        self.topk_indices_dtype = None
         self.fused_experts = cutlass_moe_fp8  # type: ignore
         self.disable_expert_map = False
 
