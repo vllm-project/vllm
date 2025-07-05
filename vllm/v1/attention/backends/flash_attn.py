@@ -26,8 +26,8 @@ from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
 from vllm.utils import cdiv
 from vllm.v1.attention.backends.utils import (
-    AttentionMetadataBuilder, CommonAttentionMetadata, get_kv_cache_layout,
-    make_local_attention_virtual_batches, AttentionCGSupport)
+    AttentionCGSupport, AttentionMetadataBuilder, CommonAttentionMetadata,
+    get_kv_cache_layout, make_local_attention_virtual_batches)
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.block_table import BlockTable
 
@@ -175,7 +175,7 @@ class FlashAttentionMetadataBuilder(
             if not self.aot_schedule:
                 raise ValueError(
                     "AoT scheduling is required for full cuda graph.")
-            capture_sizes = compilation_config.cudagraph_capture_sizes
+            capture_sizes = self.runner.compilation_config.cudagraph_capture_sizes  # noqa: E501
             if not capture_sizes:
                 raise ValueError(
                     "cudagraph_capture_sizes should not be None when "

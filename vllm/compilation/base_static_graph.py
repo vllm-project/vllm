@@ -13,7 +13,7 @@ class AbstractStaticGraphWrapper(Protocol):
     """
 
     def __init__(self, runnable: Callable, vllm_config: VllmConfig,
-                 graph_pool: Any, runtime_style: Any, **kwargs):
+                 graph_pool: Any, runtime_style: int, **kwargs):
         """
         Initializes the StaticGraphWrapper class with graph capturing and
         execution-related configurations.
@@ -31,7 +31,7 @@ class AbstractStaticGraphWrapper(Protocol):
                 configurations.
         """
         raise NotImplementedError
-    
+
     def maybe_replace_runnable(self, shape: int, runnable: Any):
         """
         Replaces the runnable with a new one for a specific compiled shape.

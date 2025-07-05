@@ -3890,17 +3890,20 @@ class CompilationLevel:
     DYNAMO_ONCE = 2
     PIECEWISE = 3
 
+
 class CUDAGraphMode:
     # constants for the config of the cudagraph mode
     NONE = 0
     PIECEWISE = 1
     FULL = 2
 
+
 class CUDAGraphRuntimeStyle:
     # constants same as CUDAGraphMode, but used for runtime dispatching
     NONE = 0
     PIECEWISE = 1
     FULL = 2
+
 
 @config
 @dataclass
@@ -4059,8 +4062,8 @@ class CompilationConfig:
     constructor, e.g. `CompilationConfig(inductor_passes={"a": func})`."""
 
     # CudaGraph compilation
-    cudagraph_mode: int = field(default_factory= lambda:
-                        1 if envs.VLLM_USE_V1 else 0)
+    cudagraph_mode: int = field(
+        default_factory=lambda: 1 if envs.VLLM_USE_V1 else 0)
     """
     The mode of the cudagraph.
     - 0: NONE, no cudagraph capture.
@@ -4320,7 +4323,7 @@ class CompilationConfig:
     def set_splitting_ops_for_v1(self):
         # NOTE: this function needs to be called
         if self.separate_attention_routine:
-            assert self.cudagraph_mode==CUDAGraphMode.FULL, (
+            assert self.cudagraph_mode == CUDAGraphMode.FULL, (
                 "separate_attention_routine requires "
                 "cudagraph_mode be CUDAGraphMode.FULL")
 
@@ -4335,12 +4338,12 @@ class CompilationConfig:
                 "vllm.unified_attention",
                 "vllm.unified_attention_with_output",
             ]
-        elif len(self.splitting_ops)==0:
-            assert self.cudagraph_mode==CUDAGraphMode.FULL, (
-                    "Seting splitting_ops as empty list requires "
-                    "cudagraph_mode be CUDAGraphMode.FULL")
-            
-            self.splitting_ops = []  
+        elif len(self.splitting_ops) == 0:
+            assert self.cudagraph_mode == CUDAGraphMode.FULL, (
+                "Seting splitting_ops as empty list requires "
+                "cudagraph_mode be CUDAGraphMode.FULL")
+
+            self.splitting_ops = []
 
 
 @config

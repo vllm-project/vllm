@@ -11,7 +11,7 @@ import torch
 import torch.distributed as dist
 
 import vllm.envs as envs
-from vllm.config import ParallelConfig, VllmConfig, CUDAGraphRuntimeStyle
+from vllm.config import CUDAGraphRuntimeStyle, ParallelConfig, VllmConfig
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:

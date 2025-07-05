@@ -10,7 +10,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
-from vllm.config import VllmConfig, CUDAGraphRuntimeStyle
+from vllm.config import CUDAGraphRuntimeStyle, VllmConfig
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.utils import weak_ref_tensors
@@ -39,9 +39,12 @@ class CUDAGraphWrapper:
     taking responsibility of capturing cudagraph and running the replay.
     """
 
-    def __init__(self, runnable: Any, vllm_config: VllmConfig, graph_pool: Any,
-                 runtime_style: CUDAGraphRuntimeStyle,
-                 cudagraph_specific_config: dict[str, Any]={}):
+    def __init__(self,
+                 runnable: Any,
+                 vllm_config: VllmConfig,
+                 graph_pool: Any,
+                 runtime_style: int,
+                 cudagraph_specific_config: Optional[dict[str, Any]] = None):
         self.runnable = runnable
         self.vllm_config = vllm_config
         self.graph_pool = graph_pool
@@ -50,30 +53,30 @@ class CUDAGraphWrapper:
 
         self.first_run_finished = False
         self.is_debugging_mode = envs.VLLM_LOGGING_LEVEL == "DEBUG"
-        
+
         assert self.runtime_style >= CUDAGraphRuntimeStyle.PIECEWISE
         assert graph_pool is not None
+        if cudagraph_specific_config is None:
+            cudagraph_specific_config = {}
         self.debug_capturing = cudagraph_specific_config.get(
             "debug_capturing", True)
-        self.gc_disable = cudagraph_specific_config.get(
-            "gc_disable", False)
+        self.gc_disable = cudagraph_specific_config.get("gc_disable", False)
         self.weak_ref_output = cudagraph_specific_config.get(
             "weak_ref_output", True)
-        usage_type = cudagraph_specific_config.get("usage_type", None)
+        usage_type = cudagraph_specific_config.get("usage_type")
         self.cudagraph_capture_sizes: set[int] = set(
-            self.compilation_config.cudagraph_capture_sizes
-        )
+            self.compilation_config.cudagraph_capture_sizes)
         # the entries for different shapes that we need to capture cudagraph
         self.concrete_cudagraph_entries: dict[int, CUDAGraphEntry] = {}
 
         for shape in self.cudagraph_capture_sizes:
-            
+
             self.concrete_cudagraph_entries[shape] = CUDAGraphEntry(
                 runtime_shape=shape,
                 runnable=self.runnable,
                 usage_type=usage_type,  # for debug logging only
             )
-    
+
     def maybe_replace_runnable(self, shape: int, runnable: Callable):
         # this is a hack to replace a general shape runnable with a compiled
         # runnable of a specific shape.
@@ -82,7 +85,7 @@ class CUDAGraphWrapper:
         entry = self.concrete_cudagraph_entries[shape]
         assert entry.cudagraph is None, "Cudagraph is already captured"
         entry.runnable = runnable
-            
+
     def __call__(self, *args, **kwargs):
         forward_context = get_forward_context()
         runtime_shape = forward_context.num_tokens
@@ -94,8 +97,8 @@ class CUDAGraphWrapper:
             return self.runnable(*args, **kwargs)
         if cudagraph_runtime_style != self.runtime_style:
             # CUDAGraph runtime style don't match the current
-            # configuration, so directly call runnable eagerly 
-            # as it's always safe. 
+            # configuration, so directly call runnable eagerly
+            # as it's always safe.
             return self.runnable(*args, **kwargs)
 
         if runtime_shape not in self.concrete_cudagraph_entries:
@@ -103,7 +106,6 @@ class CUDAGraphWrapper:
             return self.runnable(*args, **kwargs)
 
         entry = self.concrete_cudagraph_entries[runtime_shape]
-        
 
         if entry.cudagraph is None:
             if entry.num_finished_warmup < self.compilation_config.cudagraph_num_of_warmups:  # noqa
@@ -120,9 +122,8 @@ class CUDAGraphWrapper:
                 # Since we capture cudagraph for many different shapes and
                 # capturing is fast, we don't need to log it for every
                 # shape. We only log it in the debug mode.
-                logger.debug(
-                    "Capturing a cudagraph of %s usage for shape %s",
-                    entry.usage_type, entry.runtime_shape)
+                logger.debug("Capturing a cudagraph of %s usage for shape %s",
+                             entry.usage_type, entry.runtime_shape)
 
             input_addresses = [
                 x.data_ptr() for x in args if isinstance(x, torch.Tensor)
@@ -133,8 +134,8 @@ class CUDAGraphWrapper:
             with ExitStack() as stack:
                 if self.gc_disable:
                     # during every model forward for piecewise cudagraph
-                    # mode, we will capture many pieces of cudagraphs 
-                    # (roughly one per layer). running gc again and again 
+                    # mode, we will capture many pieces of cudagraphs
+                    # (roughly one per layer). running gc again and again
                     # across layers will make the cudagraph capture very slow.
                     # therefore, we only run gc for the first graph,
                     # and disable gc for the rest of the graphs.

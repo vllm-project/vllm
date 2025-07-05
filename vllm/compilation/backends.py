@@ -258,11 +258,13 @@ def split_graph(graph: fx.GraphModule,
 # we share the global graph pool among all the backends
 global_graph_pool = None
 
+
 def get_global_graph_pool():
-    global global_graph_pool    
+    global global_graph_pool
     if global_graph_pool is None:
         global_graph_pool = current_platform.graph_pool_handle()
     return global_graph_pool
+
 
 compilation_start_time = 0.0
 
@@ -396,7 +398,6 @@ class VllmBackend:
         # them, e.g. backbone (default), eagle_head, etc.
         self.prefix = prefix or model_tag
 
-        
         global_graph_pool = get_global_graph_pool()
 
         # TODO: in the future, if we want to use multiple
