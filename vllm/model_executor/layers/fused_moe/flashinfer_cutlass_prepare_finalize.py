@@ -98,7 +98,4 @@ class FlashInferCutlassMoEPrepareAndFinalize(MoEPrepareAndFinalizeNoEP
                 dim=0,
                 sizes=get_local_sizes(),
             )
-        # print(f"use_dp: {use_dp}")
-        # print(f"output:{output.shape}")
-        # print(f"fused_expert_output:{fused_expert_output.shape}")
         output.copy_(fused_expert_output)

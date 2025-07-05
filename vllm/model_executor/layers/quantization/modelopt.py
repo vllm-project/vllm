@@ -554,7 +554,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         assert moe is not None
         assert prepare_finalize is not None
         experts = None
-        # print("fffff"*100)
         all2all_manager = get_ep_group().device_communicator.all2all_manager
         assert all2all_manager is not None
         if self.allow_flashinfer_cutlass:
@@ -845,33 +844,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             extra_finalize_args = {
                 'use_dp': layer.dp_size > 1,
             }
-            # from flashinfer import fp4_quantize as fp4_quantize
-            # from flashinfer.fused_moe import cutlass_fused_moe as flashinfer_cutlass_fused_moe
-            # quant_scales = [
-            #     torch.min(layer.w13_input_scale_quant),
-            #     layer.w13_blockscale_swizzled.view(torch.int32),
-            #     layer.g1_alphas,
-            #     torch.min(layer.w2_input_scale_quant),
-            #     layer.w2_blockscale_swizzled.view(torch.int32),
-            #     layer.g2_alphas,
-            # ]
-            # xq, input_sf = fp4_quantize(x, torch.min(layer.w13_input_scale_quant))  
-            # out = flashinfer_cutlass_fused_moe(
-            #     xq,
-            #     topk_ids,
-            #     topk_weights,
-            #     layer.w13_weight.view(torch.long),
-            #     layer.w2_weight.view(torch.long),
-            #     x.dtype,
-            #     quant_scales,
-            #     input_sf,
-            #     self.fused_experts.fused_experts.tp_size,
-            #     self.fused_experts.fused_experts.tp_rank,
-            #     self.fused_experts.fused_experts.ep_size,
-            #     self.fused_experts.fused_experts.ep_rank,
-            # )[0]
 
-            # print(f"usedp:{layer.dp_size > 1}")
             out = self.fused_experts(
                 hidden_states=x,
                 w1=layer.w13_weight,

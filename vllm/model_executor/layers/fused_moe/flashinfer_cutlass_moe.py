@@ -121,7 +121,6 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         output_shape = (aq_m, aq_n * 2)
         workspace_dtype = a.dtype
         workspace1 = output_shape
-        # print(f"inside workspace_shape: workspace1:{workspace1} and output_shape:{output_shape} with type:{workspace_dtype}")
         # determined by aq, since aq is the one after possible communication op and participate in experts computation.
         return (workspace1, workspace2, output_shape, workspace_dtype)
 
@@ -161,7 +160,6 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
                 w2_scale.view(torch.int32),
                 g2_alphas,
             ]
-            # print(self.ep_size, self.ep_rank, self.tp_rank, self.tp_size)
             out = flashinfer_cutlass_fused_moe(
                 hidden_states,
                 topk_ids.to(torch.int),
@@ -177,9 +175,7 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
                 ep_size=self.ep_size,
                 ep_rank=self.ep_rank,
             )[0]
-            # print(f"callsite hidden_states:{hidden_states.shape}")
-            # print(f"tmp:{out.shape}")
-            # print(f"output:{output.shape}")
+            # TODO(shuw): Handle the allocation from FlashInfer to framework
             output.copy_(out)
         else:
             raise ValueError("Only nvfp4 quantization is currently supported.")

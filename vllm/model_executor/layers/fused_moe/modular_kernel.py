@@ -531,12 +531,9 @@ class FusedMoEModularKernel(torch.nn.Module):
 
             if num_chunks == 1:
                 fused_out = _resize_cache(workspace13, fused_out_shape)
-                # print(f"fused_out_shape:{fused_out_shape}")
-                # print(f"a1q:{a1q.shape}")
                 if 'topk_weights' in expert_kwargs and expert_kwargs['topk_weights'] is None:
                     expert_kwargs['topk_weights'] = topk_weights
                     assert expert_kwargs['topk_weights'] is not None
-                    # print("replacing topk_weights")
                 self.fused_experts.apply(
                     fused_out,
                     a1q,
