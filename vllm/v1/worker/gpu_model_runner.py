@@ -2489,9 +2489,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     @contextmanager
     def cudagraph_dispatch(self, cudagraph_runtime_style: int,
                            is_pure_decode: bool):
+        # if no cudagraph candidates inside other platforms,
+        # just skip cudagraph dispatching.
+        if not self.cudagraph_candidates:
+            logger.warning_once("cudagraphs are not initialized."
+                                " No cudagraph will be used.")
+            yield
+            return
+
         old_model = self.model
-        assert self.cudagraph_candidates, ("cudagraph_candidates are "
-                                           "not initialized.")
         # select between no cudagraph and piecewise cudagraph
         if cudagraph_runtime_style in [
                 CUDAGraphRuntimeStyle.NONE, CUDAGraphRuntimeStyle.PIECEWISE
