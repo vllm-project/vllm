@@ -365,3 +365,9 @@ void cutlass_blockwise_scaled_grouped_mm(
   }
 #endif
 }
+
+TORCH_LIBRARY_IMPL_EXPAND(TORCH_EXTENSION_NAME, CUDA, m) {
+    m.impl("cutlass_blockwise_scaled_grouped_mm", 
+           &cutlass_blockwise_scaled_grouped_mm);
+}
+  
