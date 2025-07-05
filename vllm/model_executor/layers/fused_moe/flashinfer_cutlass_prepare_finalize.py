@@ -66,11 +66,11 @@ class FlashInferCutlassMoEPrepareAndFinalize(MoEPrepareAndFinalizeNoEP
 
         a1q, a1q_scale = moe_kernel_quantize_input(
             a1,
-            torch.min(a1_scale), # special to nvfp4
+            a1_scale,
             quant_config.quant_dtype,
             self.per_channel_quant,
             self.block_shape,
-            is_sf_swizzled_layout=
+            is_fp4_scalar_swizzled=
             not use_dp,  # Needs swizzling after communication
         )
         if use_dp:
@@ -98,4 +98,7 @@ class FlashInferCutlassMoEPrepareAndFinalize(MoEPrepareAndFinalizeNoEP
                 dim=0,
                 sizes=get_local_sizes(),
             )
+        # print(f"use_dp: {use_dp}")
+        # print(f"output:{output.shape}")
+        # print(f"fused_expert_output:{fused_expert_output.shape}")
         output.copy_(fused_expert_output)

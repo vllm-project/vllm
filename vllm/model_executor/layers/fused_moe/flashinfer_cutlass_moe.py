@@ -115,11 +115,14 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         # M_sum = (M * topk) + num_experts * (block_m - 1)
         # M_sum = round_up(M_sum, block_m)
         # workspace1 = ()
+        # TODO(shuw): This is nvfp4 specialized, add branch for other quant type.
+        aq_m, aq_n = aq.shape
         workspace2 = ()
-        output_shape = a.shape
+        output_shape = (aq_m, aq_n * 2)
         workspace_dtype = a.dtype
         workspace1 = output_shape
-
+        # print(f"inside workspace_shape: workspace1:{workspace1} and output_shape:{output_shape} with type:{workspace_dtype}")
+        # determined by aq, since aq is the one after possible communication op and participate in experts computation.
         return (workspace1, workspace2, output_shape, workspace_dtype)
 
     def apply(
@@ -151,10 +154,10 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         # min because inv_scale.
         if self.use_nvfp4_w4a4:
             quant_scales = [
-                torch.min(a1_scale),
+                a1_scale,
                 w1_scale.view(torch.int32),
                 g1_alphas,
-                torch.min(a2_scale),
+                a2_scale,
                 w2_scale.view(torch.int32),
                 g2_alphas,
             ]
@@ -174,6 +177,9 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
                 ep_size=self.ep_size,
                 ep_rank=self.ep_rank,
             )[0]
+            # print(f"callsite hidden_states:{hidden_states.shape}")
+            # print(f"tmp:{out.shape}")
+            # print(f"output:{output.shape}")
             output.copy_(out)
         else:
             raise ValueError("Only nvfp4 quantization is currently supported.")

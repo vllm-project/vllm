@@ -91,7 +91,7 @@ def moe_kernel_quantize_input(
     quant_dtype: Optional[torch.dtype],
     per_act_token_quant: bool,
     block_shape: Optional[list[int]] = None,
-    is_sf_swizzled_layout: bool = True,
+    is_fp4_scalar_swizzled: bool = True,
 ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
     if quant_dtype == torch.float8_e4m3fn:
         return _fp8_quantize(A, A_scale, per_act_token_quant, block_shape)
@@ -99,7 +99,7 @@ def moe_kernel_quantize_input(
         return _int8_quantize(A, A_scale, per_act_token_quant, block_shape)
     elif quant_dtype == torch.uint8:  # nvfp4
         # print(f"calling fp4 quantize:{is_sf_swizzled_layout}")
-        return _fp4_quantize(A, A_scale, is_sf_swizzled_layout=is_sf_swizzled_layout)        
+        return _fp4_quantize(A, A_scale, is_sf_swizzled_layout=is_fp4_scalar_swizzled)        
     else:
         return A, A_scale
 

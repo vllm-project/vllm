@@ -368,8 +368,9 @@ class GroupCoordinator:
             return input_
         assert -input_.dim() <= dim < input_.dim(), (
             f"Invalid dim ({dim}) for input tensor with shape {input_.size()}")
-
-        if self.use_custom_op_call:
+        
+        # TODO(shuw): enable it
+        if self.use_custom_op_call and False:
             return torch.ops.vllm.all_gather(input_,
                                              dim,
                                              world_size,
@@ -398,7 +399,7 @@ class GroupCoordinator:
         assert -input_.dim() <= dim < input_.dim(), (
             f"Invalid dim ({dim}) for input tensor with shape {input_.size()}")
 
-        if self.use_custom_op_call:
+        if self.use_custom_op_call and False:
             assert sizes is None, "Varying size reduce scatter not supported with vllm custom op"
             return torch.ops.vllm.reduce_scatter(input_,
                                                  dim,

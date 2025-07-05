@@ -486,17 +486,14 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         self.allow_flashinfer_cutlass = False
         
         if envs.VLLM_USE_FLASHINFER_MOE:
-            if not self.cutlass_nvfp4_supported:
-                logger.warning_once(
-                    "Failed to import Flashinfer CUTLASS Fused MoE kernels.")
-            elif (current_platform.is_cuda()
-                  and current_platform.has_device_capability(10, 0)):
+            if self.cutlass_nvfp4_supported and current_platform.is_cuda() \
+               and current_platform.has_device_capability(10, 0):
                 logger.info_once(
                     "Using FlashInfer kernels for ModelOptNvFp4FusedMoE.")
                 self.allow_flashinfer_cutlass = True
             else:
                 logger.warning_once(
-                    "Flashinfer CUTLASS Fused MoE not supported on the current platform."
+                    "Flashinfer CUTLASS Fused MoE not supported or found on the current platform."
                 )
 
         if not self.cutlass_nvfp4_supported:
@@ -514,9 +511,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
     @property
     def load_up_proj_weight_first(self) -> bool:
         # FlashInfer CUTLASS kernel assumes [Up, Gate] Proj as W13
-        if self.allow_flashinfer_cutlass:
-            return True
-        return False
+        return self.allow_flashinfer_cutlass
     
     def select_experts_impl(self, moe_parallel_config):
         if not self.allow_flashinfer_cutlass:
@@ -842,9 +837,12 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
               'g1_alphas': layer.g1_alphas,
               'g2_alphas': layer.g2_alphas,
               'out_dtype': x.dtype,
-              'a1_scale': layer.w13_input_scale_quant,
+              'a1_scale': torch.min(layer.w13_input_scale_quant),
             }
             extra_prepare_args = {
+                'use_dp': layer.dp_size > 1,
+            }
+            extra_finalize_args = {
                 'use_dp': layer.dp_size > 1,
             }
             # from flashinfer import fp4_quantize as fp4_quantize
@@ -886,10 +884,11 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 expert_map=expert_map,
                 w1_scale=layer.w13_blockscale_swizzled,
                 w2_scale=layer.w2_blockscale_swizzled,
-                a1_scale=layer.w13_input_scale_quant,
-                a2_scale=layer.w2_input_scale_quant,
+                a1_scale=torch.min(layer.w13_input_scale_quant),
+                a2_scale=torch.min(layer.w2_input_scale_quant),
                 extra_expert_args=extra_expert_args,
                 extra_prepare_args=extra_prepare_args,
+                extra_finalize_args=extra_finalize_args,
             )
         else:
             from vllm.model_executor.layers.fused_moe.cutlass_moe import (
