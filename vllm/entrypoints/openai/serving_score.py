@@ -173,8 +173,12 @@ class ServingScores(OpenAIServing):
             *(tokenize_async(text=t1, text_pair=t2, **tokenization_kwargs)
               for t1, t2 in input_pairs))
 
+        use_pad_token = getattr(self.model_config.hf_config, "use_pad_token",
+                                True)
+
         for prompt_inputs, (t1, t2) in zip(tokenized_prompts, input_pairs):
-            sep_token = tokenizer.sep_token if tokenizer.sep_token else ''
+            sep_token = tokenizer.sep_token if (tokenizer.sep_token
+                                                and use_pad_token) else ''
             request_prompt = f"{t1}{sep_token}{t2}"
 
             input_ids = prompt_inputs["input_ids"]
