@@ -10,7 +10,7 @@ from typing import Any, Callable, NamedTuple, Optional
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.utils import GiB_bytes, cdiv, sha256
+from vllm.utils import GiB_bytes, cdiv, sha256, sha256_cbor
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec, KVCacheSpec,
                                         KVCacheTensor, SlidingWindowSpec)
@@ -46,18 +46,25 @@ class BlockHashWithGroupId(NamedTuple):
         return self.block_hash.hash_value
 
 
-# The hash seed for the first block of the prefix block sequence.
-#
-# Even if the hash function is the builtin hash(), we use sha256 to generate
-# the initial hash to simplify the code. This is not performance critical
-# as it is done one per process.
+# The hash seed for the first block of any prefix block sequence.
 #
 # We use a random value to avoid hash collisions or PYTHONHASHSEED environment
 # variable if set such that processes can share the seed if needed.
 # This aligns with the behavior of Python's hash() function, which also uses
 # a random seed if PYTHONHASHSEED is not set.
-NONE_HASH = int.from_bytes(os.urandom(32), byteorder="big") if os.getenv(
-    "PYTHONHASHSEED") is None else sha256(os.getenv("PYTHONHASHSEED"))
+#
+# The function `init_none_hash` initializes this variable globally.
+NONE_HASH: int
+def init_none_hash(hash_fn: Callable):
+    global NONE_HASH
+
+    seed = os.getenv("PYTHONHASHSEED")
+    if seed is None:
+        # Use random bytes as seed if not set
+        source = os.urandom(32)
+    else:
+        source = seed
+    NONE_HASH = hash_fn(source)
 
 
 class PrefixCachingMetrics:
