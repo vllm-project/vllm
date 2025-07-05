@@ -156,12 +156,7 @@ def test_models(
     max_tokens: int,
     num_logprobs: int,
     tp_size: int,
-    monkeypatch,
 ) -> None:
-    # As of this writing, head_size=80 is only supported by FlexAttention in V1
-    if model == STABLELM_CONFIG:
-        monkeypatch.setenv("VLLM_ATTENTION_BACKEND", "FLEX_ATTENTION")
-
     check_model_outputs(vllm_runner, example_prompts, model, dtype, max_tokens,
                         num_logprobs, tp_size)
 
@@ -182,11 +177,6 @@ def test_distributed(
     max_tokens: int,
     num_logprobs: int,
     tp_size: int,
-    monkeypatch,
 ) -> None:
-    # As of this writing, head_size=80 is only supported by FlexAttention in V1
-    if model == STABLELM_CONFIG:
-        monkeypatch.setenv("VLLM_ATTENTION_BACKEND", "FLEX_ATTENTION")
-
     check_model_outputs(vllm_runner, example_prompts, model, dtype, max_tokens,
                         num_logprobs, tp_size)

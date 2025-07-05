@@ -37,12 +37,6 @@ REQUIRES_V0_MODELS = [
     "fuyu",
 ]
 
-# As of this writing, head_size=80 is only supported by FlexAttention in V1
-REQUIRES_FLEX_ATTN_MODELS = [
-    "Salesforce/blip2-opt-2.7b",
-    "h2oai/h2ovl-mississippi-2b",
-]
-
 # yapf: disable
 COMMON_BROADCAST_SETTINGS = {
     "test_type": VLMTestType.IMAGE,
@@ -780,9 +774,6 @@ def test_single_image_models(tmp_path: PosixPath, model_type: str,
                              image_assets: ImageTestAssets, monkeypatch):
     if model_type in REQUIRES_V0_MODELS:
         monkeypatch.setenv("VLLM_USE_V1", "0")
-    if test_case.model in REQUIRES_FLEX_ATTN_MODELS:
-        monkeypatch.setenv("VLLM_ATTENTION_BACKEND", "FLEX_ATTENTION")
-
     model_test_info = VLM_TEST_SETTINGS[model_type]
     runners.run_single_image_test(
         tmp_path=tmp_path,
@@ -808,9 +799,6 @@ def test_multi_image_models(tmp_path: PosixPath, model_type: str,
                             image_assets: ImageTestAssets, monkeypatch):
     if model_type in REQUIRES_V0_MODELS:
         monkeypatch.setenv("VLLM_USE_V1", "0")
-    if test_case.model in REQUIRES_FLEX_ATTN_MODELS:
-        monkeypatch.setenv("VLLM_ATTENTION_BACKEND", "FLEX_ATTENTION")
-
     model_test_info = VLM_TEST_SETTINGS[model_type]
     runners.run_multi_image_test(
         tmp_path=tmp_path,
@@ -836,9 +824,6 @@ def test_image_embedding_models(model_type: str,
                                 image_assets: ImageTestAssets, monkeypatch):
     if model_type in REQUIRES_V0_MODELS:
         monkeypatch.setenv("VLLM_USE_V1", "0")
-    if test_case.model in REQUIRES_FLEX_ATTN_MODELS:
-        monkeypatch.setenv("VLLM_ATTENTION_BACKEND", "FLEX_ATTENTION")
-
     model_test_info = VLM_TEST_SETTINGS[model_type]
     runners.run_embedding_test(
         model_test_info=model_test_info,
@@ -861,9 +846,6 @@ def test_video_models(model_type: str, test_case: ExpandableVLMTestArgs,
                       video_assets: VideoTestAssets, monkeypatch):
     if model_type in REQUIRES_V0_MODELS:
         monkeypatch.setenv("VLLM_USE_V1", "0")
-    if test_case.model in REQUIRES_FLEX_ATTN_MODELS:
-        monkeypatch.setenv("VLLM_ATTENTION_BACKEND", "FLEX_ATTENTION")
-
     model_test_info = VLM_TEST_SETTINGS[model_type]
     runners.run_video_test(
         model_test_info=model_test_info,
@@ -886,9 +868,6 @@ def test_audio_models(model_type: str, test_case: ExpandableVLMTestArgs,
                       audio_assets: AudioTestAssets, monkeypatch):
     if model_type in REQUIRES_V0_MODELS:
         monkeypatch.setenv("VLLM_USE_V1", "0")
-    if test_case.model in REQUIRES_FLEX_ATTN_MODELS:
-        monkeypatch.setenv("VLLM_ATTENTION_BACKEND", "FLEX_ATTENTION")
-
     model_test_info = VLM_TEST_SETTINGS[model_type]
     runners.run_audio_test(
         model_test_info=model_test_info,
@@ -915,9 +894,6 @@ def test_custom_inputs_models(
 ):
     if model_type in REQUIRES_V0_MODELS:
         monkeypatch.setenv("VLLM_USE_V1", "0")
-    if test_case.model in REQUIRES_FLEX_ATTN_MODELS:
-        monkeypatch.setenv("VLLM_ATTENTION_BACKEND", "FLEX_ATTENTION")
-
     model_test_info = VLM_TEST_SETTINGS[model_type]
     runners.run_custom_inputs_test(
         model_test_info=model_test_info,
@@ -943,9 +919,6 @@ def test_single_image_models_heavy(tmp_path: PosixPath, model_type: str,
                                    image_assets: ImageTestAssets, monkeypatch):
     if model_type in REQUIRES_V0_MODELS:
         monkeypatch.setenv("VLLM_USE_V1", "0")
-    if test_case.model in REQUIRES_FLEX_ATTN_MODELS:
-        monkeypatch.setenv("VLLM_ATTENTION_BACKEND", "FLEX_ATTENTION")
-
     model_test_info = VLM_TEST_SETTINGS[model_type]
     runners.run_single_image_test(
         tmp_path=tmp_path,
@@ -972,9 +945,6 @@ def test_multi_image_models_heavy(tmp_path: PosixPath, model_type: str,
                                   image_assets: ImageTestAssets, monkeypatch):
     if model_type in REQUIRES_V0_MODELS:
         monkeypatch.setenv("VLLM_USE_V1", "0")
-    if test_case.model in REQUIRES_FLEX_ATTN_MODELS:
-        monkeypatch.setenv("VLLM_ATTENTION_BACKEND", "FLEX_ATTENTION")
-
     model_test_info = VLM_TEST_SETTINGS[model_type]
     runners.run_multi_image_test(
         tmp_path=tmp_path,
@@ -1002,9 +972,6 @@ def test_image_embedding_models_heavy(model_type: str,
                                       monkeypatch):
     if model_type in REQUIRES_V0_MODELS:
         monkeypatch.setenv("VLLM_USE_V1", "0")
-    if test_case.model in REQUIRES_FLEX_ATTN_MODELS:
-        monkeypatch.setenv("VLLM_ATTENTION_BACKEND", "FLEX_ATTENTION")
-
     model_test_info = VLM_TEST_SETTINGS[model_type]
     runners.run_embedding_test(
         model_test_info=model_test_info,
@@ -1028,9 +995,6 @@ def test_video_models_heavy(model_type: str, test_case: ExpandableVLMTestArgs,
                             video_assets: VideoTestAssets, monkeypatch):
     if model_type in REQUIRES_V0_MODELS:
         monkeypatch.setenv("VLLM_USE_V1", "0")
-    if test_case.model in REQUIRES_FLEX_ATTN_MODELS:
-        monkeypatch.setenv("VLLM_ATTENTION_BACKEND", "FLEX_ATTENTION")
-
     model_test_info = VLM_TEST_SETTINGS[model_type]
     runners.run_video_test(
         model_test_info=model_test_info,
@@ -1054,9 +1018,6 @@ def test_audio_models_heavy(model_type: str, test_case: ExpandableVLMTestArgs,
                             audio_assets: AudioTestAssets, monkeypatch):
     if model_type in REQUIRES_V0_MODELS:
         monkeypatch.setenv("VLLM_USE_V1", "0")
-    if test_case.model in REQUIRES_FLEX_ATTN_MODELS:
-        monkeypatch.setenv("VLLM_ATTENTION_BACKEND", "FLEX_ATTENTION")
-
     model_test_info = VLM_TEST_SETTINGS[model_type]
     runners.run_audio_test(
         model_test_info=model_test_info,
@@ -1084,9 +1045,6 @@ def test_custom_inputs_models_heavy(
 ):
     if model_type in REQUIRES_V0_MODELS:
         monkeypatch.setenv("VLLM_USE_V1", "0")
-    if test_case.model in REQUIRES_FLEX_ATTN_MODELS:
-        monkeypatch.setenv("VLLM_ATTENTION_BACKEND", "FLEX_ATTENTION")
-
     model_test_info = VLM_TEST_SETTINGS[model_type]
     runners.run_custom_inputs_test(
         model_test_info=model_test_info,

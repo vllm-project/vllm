@@ -92,12 +92,6 @@ def run_aya_vision(questions: list[str], modality: str) -> ModelRequestData:
 
 # BLIP-2
 def run_blip2(questions: list[str], modality: str) -> ModelRequestData:
-    model_name = "Salesforce/blip2-opt-2.7b"  # or -6.7b
-
-    # As of this writing, head_size=80 is only supported by FlexAttention in V1
-    if model_name.endswith("-2.7b"):
-        os.environ["VLLM_ATTENTION_BACKEND"] = "FLEX_ATTENTION"
-
     assert modality == "image"
 
     # BLIP-2 prompt format is inaccurate on HuggingFace model repository.
@@ -294,11 +288,7 @@ def run_glm4_1v(questions: list[str], modality: str) -> ModelRequestData:
 def run_h2ovl(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
 
-    model_name = "h2oai/h2ovl-mississippi-800m"  # or -2b
-
-    # As of this writing, head_size=80 is only supported by FlexAttention in V1
-    if model_name.endswith("-2b"):
-        os.environ["VLLM_ATTENTION_BACKEND"] = "FLEX_ATTENTION"
+    model_name = "h2oai/h2ovl-mississippi-800m"
 
     engine_args = EngineArgs(
         model=model_name,
