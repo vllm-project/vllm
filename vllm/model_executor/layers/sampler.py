@@ -1197,8 +1197,7 @@ def _get_next_prompt_tokens(
     prompt_tokens = seq_data.prompt_token_ids
     # +1 because we are looking for a next prompt token.
     next_token_index_start = computed_len + 1
-    next_token_index_end = min(computed_len + query_len + 1,
-                               len(prompt_tokens))
+    next_token_index_end = min(computed_len + query_len, len(prompt_tokens))
     next_prompt_tokens = prompt_tokens[
         next_token_index_start:next_token_index_end]
     return next_prompt_tokens
