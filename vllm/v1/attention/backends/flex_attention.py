@@ -467,7 +467,7 @@ class FlexAttentionImpl(AttentionImpl):
         # default M=64, N=64 may run out of shared memory on
         # some GPUs with fp32, so we use smaller M and N.
         extra_kernel_options = {
-            "BLOCK_M": 64,
+            "BLOCK_M": 32,
             "BLOCK_N": 32
         } if query.dtype == torch.float32 else {}
         out = flex_attention_compiled(
