@@ -48,10 +48,16 @@ class MediaConnector:
             media_io_kwargs: Additional args passed to process media 
                              inputs, keyed by modalities. For example, 
                              to set num_frames for video, set 
-                             `--media-io-kwargs '{"video": {"num_frames": 40} }'`
+                             `--media-io-kwargs '{"video":{"num_frames":40}}'`
             connection: HTTP connection client to download media contents.
+<<<<<<< HEAD
             allowed_local_media_path: A local directory to load media files from.
         """ # noqa: E501
+=======
+            allowed_local_media_path: A local directory to load media files
+                                      from.
+        """
+>>>>>>> origin/main
         super().__init__()
 
         self.media_io_kwargs: dict[str, dict[
