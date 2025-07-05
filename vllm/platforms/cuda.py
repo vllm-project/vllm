@@ -255,6 +255,14 @@ class CudaPlatformBase(Platform):
             from vllm.attention.selector import supports_head_size
 
             # Default backends for V1 engine
+            # FP32 is only supported by FlexAttention
+            if dtype not in (torch.float16, torch.bfloat16):
+                logger.info_once(
+                    "Using FlexAttention backend for %s on V1 engine.",
+                    dtype,
+                )
+                return FLEX_ATTENTION_V1
+
             # Prefer FlashInfer for Blackwell GPUs if installed
             if cls.is_device_capability(100) and \
                 supports_head_size(FLASHINFER_V1, head_size):

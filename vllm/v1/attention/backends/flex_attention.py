@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with FlashAttention."""
-
+from collections import defaultdict
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -20,9 +20,6 @@ from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
                                               CommonAttentionMetadata)
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.block_table import BlockTable
-
-if current_platform.is_cuda():
-    pass
 
 logger = init_logger(__name__)
 
@@ -460,6 +457,20 @@ class FlexAttentionImpl(AttentionImpl):
         # Doesn't work for now -> constraint violation
         # torch._dynamo.try_mark_dynamic(query, 2)
 
+        # default M=64, N=64 may run out of shared memory on some GPUs
+        # TODO: Explicit configs for each GPU?
+        # Not sure how to calculate the shared memory requirement
+        extra_kernel_options = defaultdict[str, int](lambda: 64)
+        if query.dtype == torch.float32:
+            extra_kernel_options["BLOCK_M"] //= 2
+            extra_kernel_options["BLOCK_N"] //= 2
+        if current_platform.is_cuda():
+            device_props = torch.cuda.get_device_properties()
+            max_shared_memory = device_props.shared_memory_per_block_optin
+            if max_shared_memory < 144 * 1024:
+                extra_kernel_options["BLOCK_M"] //= 2
+                extra_kernel_options["BLOCK_N"] //= 2
+
         out = flex_attention_compiled(
             query,
             key_cache,
@@ -470,9 +481,7 @@ class FlexAttentionImpl(AttentionImpl):
             enable_gqa=enable_gqa,
             kernel_options={
                 "FORCE_USE_FLEX_ATTENTION": True,
-                # Avoid running out of shared memory on some GPUs
-                "BLOCK_M": 64,
-                "BLOCK_N": 32,
+                **extra_kernel_options
             },
         )
 
