@@ -55,7 +55,7 @@ def test_oot_registration_embedding(
         prompts = ["Hello, my name is", "The text does not matter"]
         llm = LLM(model=dummy_gemma2_embedding_path,
                   load_format="dummy",
-                  max_model_len=4096)
+                  max_model_len=2048)
         outputs = llm.embed(prompts)
 
         for output in outputs:

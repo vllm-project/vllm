@@ -39,14 +39,14 @@ from argparse import (Action, ArgumentDefaultsHelpFormatter, ArgumentParser,
 from asyncio import FIRST_COMPLETED, AbstractEventLoop, Task
 from collections import UserDict, defaultdict
 from collections.abc import (AsyncGenerator, Awaitable, Collection, Generator,
-                             Hashable, Iterable, Iterator, KeysView, Mapping)
+                             Hashable, Iterable, Iterator, KeysView, Mapping,
+                             Sequence)
 from concurrent.futures.process import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from functools import cache, lru_cache, partial, wraps
 from types import MappingProxyType
 from typing import (TYPE_CHECKING, Any, Callable, Generic, Literal, NamedTuple,
-                    Optional, Sequence, Tuple, Type, TypeVar, Union, cast,
-                    overload)
+                    Optional, Tuple, TypeVar, Union, cast, overload)
 from urllib.parse import urlparse
 from uuid import uuid4
 
@@ -67,9 +67,6 @@ from torch.library import Library
 from typing_extensions import Never, ParamSpec, TypeIs, assert_never
 
 import vllm.envs as envs
-# NOTE: import triton_utils to make TritonPlaceholderModule work
-#       if triton is unavailable
-import vllm.triton_utils  # noqa: F401
 from vllm.logger import enable_trace_function_call, init_logger
 
 if TYPE_CHECKING:
@@ -92,15 +89,15 @@ MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS = 5120
 
 STR_NOT_IMPL_ENC_DEC_SWA = \
     "Sliding window attention for encoder/decoder models " + \
-                    "is not currently supported."
+    "is not currently supported."
 
 STR_NOT_IMPL_ENC_DEC_PREFIX_CACHE = \
     "Prefix caching for encoder/decoder models " + \
-                    "is not currently supported."
+    "is not currently supported."
 
 STR_NOT_IMPL_ENC_DEC_CHUNKED_PREFILL = \
     "Chunked prefill for encoder/decoder models " + \
-                    "is not currently supported."
+    "is not currently supported."
 
 STR_NOT_IMPL_ENC_DEC_LOGIT_SOFTCAP = (
     "Models with logits_soft_cap "
@@ -631,14 +628,34 @@ def is_valid_ipv6_address(address: str) -> bool:
         return False
 
 
+def split_host_port(host_port: str) -> Tuple[str, int]:
+    # ipv6
+    if host_port.startswith('['):
+        host, port = host_port.rsplit(']', 1)
+        host = host[1:]
+        port = port.split(':')[1]
+        return host, int(port)
+    else:
+        host, port = host_port.split(':')
+        return host, int(port)
+
+
+def join_host_port(host: str, port: int) -> str:
+    if is_valid_ipv6_address(host):
+        return f"[{host}]:{port}"
+    else:
+        return f"{host}:{port}"
+
+
 def get_distributed_init_method(ip: str, port: int) -> str:
     return get_tcp_uri(ip, port)
 
 
 def get_tcp_uri(ip: str, port: int) -> str:
-    # Brackets are not permitted in ipv4 addresses,
-    # see https://github.com/python/cpython/issues/103848
-    return f"tcp://[{ip}]:{port}" if ":" in ip else f"tcp://{ip}:{port}"
+    if is_valid_ipv6_address(ip):
+        return f"tcp://[{ip}]:{port}"
+    else:
+        return f"tcp://{ip}:{port}"
 
 
 def get_open_zmq_ipc_path() -> str:
@@ -755,7 +772,7 @@ def _generate_random_fp8(
     # to generate random data for fp8 data.
     # For example, s.11111.00 in fp8e5m2 format represents Inf.
     #     | E4M3        | E5M2
-    #-----|-------------|-------------------
+    # -----|-------------|-------------------
     # Inf | N/A         | s.11111.00
     # NaN | s.1111.111  | s.11111.{01,10,11}
     from vllm import _custom_ops as ops
@@ -843,7 +860,6 @@ def create_kv_caches_with_random(
     seed: Optional[int] = None,
     device: Optional[str] = "cuda",
 ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
-
     if cache_dtype == "fp8" and head_size % 16:
         raise ValueError(
             f"Does not support key cache of type fp8 with head_size {head_size}"
@@ -1208,7 +1224,6 @@ def deprecate_args(
     is_deprecated: Union[bool, Callable[[], bool]] = True,
     additional_message: Optional[str] = None,
 ) -> Callable[[F], F]:
-
     if not callable(is_deprecated):
         is_deprecated = partial(identity, is_deprecated)
 
@@ -1358,7 +1373,7 @@ def weak_bind(bound_method: Callable[..., Any], ) -> Callable[..., None]:
     return weak_bound
 
 
-#From: https://stackoverflow.com/a/4104188/2749989
+# From: https://stackoverflow.com/a/4104188/2749989
 def run_once(f: Callable[P, None]) -> Callable[P, None]:
 
     def wrapper(*args: P.args, **kwargs: P.kwargs) -> None:
@@ -1477,7 +1492,7 @@ class FlexibleArgumentParser(ArgumentParser):
 
         # Convert underscores to dashes and vice versa in argument names
         processed_args = list[str]()
-        for arg in args:
+        for i, arg in enumerate(args):
             if arg.startswith('--'):
                 if '=' in arg:
                     key, value = arg.split('=', 1)
@@ -1486,10 +1501,17 @@ class FlexibleArgumentParser(ArgumentParser):
                 else:
                     key = pattern.sub(repl, arg, count=1)
                     processed_args.append(key)
-            elif arg.startswith('-O') and arg != '-O' and len(arg) == 2:
-                # allow -O flag to be used without space, e.g. -O3
-                processed_args.append('-O')
-                processed_args.append(arg[2:])
+            elif arg.startswith('-O') and arg != '-O' and arg[2] != '.':
+                # allow -O flag to be used without space, e.g. -O3 or -Odecode
+                # -O.<...> handled later
+                # also handle -O=<level> here
+                level = arg[3:] if arg[2] == '=' else arg[2:]
+                processed_args.append(f'-O.level={level}')
+            elif arg == '-O' and i + 1 < len(args) and args[i + 1] in {
+                    "0", "1", "2", "3"
+            }:
+                # Convert -O <n> to -O.level <n>
+                processed_args.append('-O.level')
             else:
                 processed_args.append(arg)
 
@@ -1507,26 +1529,43 @@ class FlexibleArgumentParser(ArgumentParser):
         def recursive_dict_update(
             original: dict[str, Any],
             update: dict[str, Any],
-        ):
-            """Recursively updates a dictionary with another dictionary."""
+        ) -> set[str]:
+            """Recursively updates a dictionary with another dictionary.
+            Returns a set of duplicate keys that were overwritten.
+            """
+            duplicates = set[str]()
             for k, v in update.items():
                 if isinstance(v, dict) and isinstance(original.get(k), dict):
-                    recursive_dict_update(original[k], v)
+                    nested_duplicates = recursive_dict_update(original[k], v)
+                    duplicates |= {f"{k}.{d}" for d in nested_duplicates}
+                elif isinstance(v, list) and isinstance(original.get(k), list):
+                    original[k] += v
                 else:
+                    if k in original:
+                        duplicates.add(k)
                     original[k] = v
+            return duplicates
 
         delete = set[int]()
         dict_args = defaultdict[str, dict[str, Any]](dict)
+        duplicates = set[str]()
         for i, processed_arg in enumerate(processed_args):
-            if processed_arg.startswith("--") and "." in processed_arg:
+            if i in delete:  # skip if value from previous arg
+                continue
+
+            if processed_arg.startswith("-") and "." in processed_arg:
                 if "=" in processed_arg:
                     processed_arg, value_str = processed_arg.split("=", 1)
                     if "." not in processed_arg:
-                        # False positive, . was only in the value
+                        # False positive, '.' was only in the value
                         continue
                 else:
                     value_str = processed_args[i + 1]
                     delete.add(i + 1)
+
+                if processed_arg.endswith("+"):
+                    processed_arg = processed_arg[:-1]
+                    value_str = json.dumps(list(value_str.split(",")))
 
                 key, *keys = processed_arg.split(".")
                 try:
@@ -1536,12 +1575,17 @@ class FlexibleArgumentParser(ArgumentParser):
 
                 # Merge all values with the same key into a single dict
                 arg_dict = create_nested_dict(keys, value)
-                recursive_dict_update(dict_args[key], arg_dict)
+                arg_duplicates = recursive_dict_update(dict_args[key],
+                                                       arg_dict)
+                duplicates |= {f'{key}.{d}' for d in arg_duplicates}
                 delete.add(i)
         # Filter out the dict args we set to None
         processed_args = [
             a for i, a in enumerate(processed_args) if i not in delete
         ]
+        if duplicates:
+            logger.warning("Found duplicate keys %s", ", ".join(duplicates))
+
         # Add the dict args back as if they were originally passed as JSON
         for dict_arg, dict_value in dict_args.items():
             processed_args.append(dict_arg)
@@ -1732,6 +1776,7 @@ def supports_kw(
         last_param = params[next(reversed(params))]  # type: ignore
         return (last_param.kind == inspect.Parameter.VAR_KEYWORD
                 and last_param.name != kw_name)
+
     return False
 
 
@@ -1774,6 +1819,7 @@ def resolve_mm_processor_kwargs(
     # Merge the final processor kwargs, prioritizing inference
     # time values over the initialization time values.
     mm_processor_kwargs = {**init_mm_kwargs, **runtime_mm_kwargs}
+
     return mm_processor_kwargs
 
 
@@ -1895,9 +1941,9 @@ class LazyDict(Mapping[str, T], Generic[T]):
         return len(self._factory)
 
 
-class ClassRegistry(UserDict[Type[T], _V]):
+class ClassRegistry(UserDict[type[T], _V]):
 
-    def __getitem__(self, key: Type[T]) -> _V:
+    def __getitem__(self, key: type[T]) -> _V:
         for cls in key.mro():
             if cls in self.data:
                 return self.data[cls]
@@ -2208,7 +2254,7 @@ def direct_register_custom_op(
         fake_impl: Optional[Callable] = None,
         target_lib: Optional[Library] = None,
         dispatch_key: str = "CUDA",
-        tags: Tuple[torch.Tag, ...] = (),
+        tags: tuple[torch.Tag, ...] = (),
 ):
     """
     `torch.library.custom_op` can have significant overhead because it
@@ -2406,7 +2452,7 @@ def memory_profiling(
     The increase of `torch.cuda.memory_stats()["allocated_bytes.all.peak"]` during profiling gives (b.).
 
     The increase of `non_torch_memory` from creating the current vLLM instance until after profiling to get (c.).
-    """ # noqa
+    """  # noqa
     gc.collect()
     torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats()
@@ -2463,7 +2509,7 @@ def get_exception_traceback():
     return err_str
 
 
-def split_zmq_path(path: str) -> Tuple[str, str, str]:
+def split_zmq_path(path: str) -> tuple[str, str, str]:
     """Split a zmq path into its parts."""
     parsed = urlparse(path)
     if not parsed.scheme:
@@ -2753,7 +2799,7 @@ def warn_for_unimplemented_methods(cls: type[T]) -> type[T]:
         if unimplemented_methods:
             method_names = ','.join(unimplemented_methods)
             msg = (f"Methods {method_names} not implemented in {self}")
-            logger.warning(msg)
+            logger.debug(msg)
 
     @wraps(original_init)
     def wrapped_init(self, *args, **kwargs) -> None:
@@ -2922,8 +2968,41 @@ def is_torch_equal_or_newer(target: str) -> bool:
         Whether the condition meets.
     """
     try:
-        torch_version = version.parse(str(torch.__version__))
-        return torch_version >= version.parse(target)
+        return _is_torch_equal_or_newer(str(torch.__version__), target)
     except Exception:
         # Fallback to PKG-INFO to load the package info, needed by the doc gen.
         return Version(importlib.metadata.version('torch')) >= Version(target)
+
+
+# Helper function used in testing.
+def _is_torch_equal_or_newer(torch_version: str, target: str) -> bool:
+    torch_version = version.parse(torch_version)
+    return torch_version >= version.parse(target)
+
+
+@cache
+def _has_module(module_name: str) -> bool:
+    """Return True if *module_name* can be found in the current environment.
+
+    The result is cached so that subsequent queries for the same module incur
+    no additional overhead.
+    """
+    return importlib.util.find_spec(module_name) is not None
+
+
+def has_pplx() -> bool:
+    """Whether the optional `pplx_kernels` package is available."""
+
+    return _has_module("pplx_kernels")
+
+
+def has_deep_ep() -> bool:
+    """Whether the optional `deep_ep` package is available."""
+
+    return _has_module("deep_ep")
+
+
+def has_deep_gemm() -> bool:
+    """Whether the optional `deep_gemm` package is available."""
+
+    return _has_module("deep_gemm")
