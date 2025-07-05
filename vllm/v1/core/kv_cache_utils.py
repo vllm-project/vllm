@@ -58,13 +58,11 @@ NONE_HASH: int
 def init_none_hash(hash_fn: Callable):
     global NONE_HASH
 
-    seed = os.getenv("PYTHONHASHSEED")
-    if seed is None:
-        # Use random bytes as seed if not set
-        source = os.urandom(32)
-    else:
-        source = seed
-    NONE_HASH = hash_fn(source)
+    NONE_HASH = (
+        int.from_bytes(os.urandom(32), byteorder="big")
+        if os.getenv("PYTHONHASHSEED") is None
+        else hash_fn(os.getenv("PYTHONHASHSEED"))
+    )
 
 
 class PrefixCachingMetrics:
