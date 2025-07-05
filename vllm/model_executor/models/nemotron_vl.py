@@ -17,7 +17,6 @@ import torch.nn as nn
 import torchvision.transforms as T
 from PIL import Image
 from transformers import BatchEncoding, PretrainedConfig, TensorType
-## add kylehh
 from transformers.image_processing_utils_fast import BaseImageProcessorFast
 
 from vllm.config import VllmConfig
@@ -37,6 +36,8 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         PromptUpdate, PromptUpdateDetails)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.processor import (
+    cached_image_processor_from_config)
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
@@ -303,6 +304,7 @@ class BaseInternVLProcessor(ABC):
         self,
         config: PretrainedConfig,
         tokenizer: AnyTokenizer,
+        image_processor: BaseImageProcessorFast,
         *,
         min_dynamic_patch: Optional[int] = None,
         max_dynamic_patch: Optional[int] = None,
@@ -312,20 +314,20 @@ class BaseInternVLProcessor(ABC):
 
         self.config = config
         self.tokenizer = tokenizer
-
-        image_size: int = config.force_image_size  #512
-        patch_size: int = config.patch_size  #16
+        self.image_processor = image_processor
+        image_size: int = config.force_image_size
+        patch_size: int = config.patch_size
 
         if min_dynamic_patch is None:
-            min_dynamic_patch = 1  #config.min_dynamic_patch
+            min_dynamic_patch = 1
         assert isinstance(min_dynamic_patch, int)
 
         if max_dynamic_patch is None:
-            max_dynamic_patch = 12  #config.max_dynamic_patch
+            max_dynamic_patch = self.image_processor.max_num_tiles
         assert isinstance(max_dynamic_patch, int)
 
         if dynamic_image_size is None:
-            dynamic_image_size = True  #config.dynamic_image_size
+            dynamic_image_size = True
         assert isinstance(dynamic_image_size, bool)
 
         self.num_image_token = int(
@@ -334,7 +336,7 @@ class BaseInternVLProcessor(ABC):
         self.min_dynamic_patch = min_dynamic_patch
         self.max_dynamic_patch = max_dynamic_patch
         self.dynamic_image_size = dynamic_image_size
-        self.use_thumbnail: bool = True  #config.use_thumbnail
+        self.use_thumbnail: bool = self.image_processor.use_thumbnail
 
     @property
     @abstractmethod
@@ -513,6 +515,7 @@ class InternVLProcessor(BaseInternVLProcessor):
         self,
         config: PretrainedConfig,
         tokenizer: AnyTokenizer,
+        image_processor: BaseImageProcessorFast,
         *,
         min_dynamic_patch: Optional[int] = None,
         max_dynamic_patch: Optional[int] = None,
@@ -522,6 +525,7 @@ class InternVLProcessor(BaseInternVLProcessor):
         super().__init__(
             config=config,
             tokenizer=tokenizer,
+            image_processor=image_processor,
             min_dynamic_patch=min_dynamic_patch,
             max_dynamic_patch=max_dynamic_patch,
             dynamic_image_size=dynamic_image_size,
@@ -883,7 +887,7 @@ class InternVLProcessingInfo(BaseInternVLProcessingInfo):
         max_dynamic_patch: Optional[int] = None,
         dynamic_image_size: Optional[bool] = None,
         **kwargs: object,
-    ) -> BaseImageProcessorFast:
+    ) -> InternVLProcessor:
         if min_dynamic_patch is not None:
             kwargs["min_dynamic_patch"] = min_dynamic_patch
         if max_dynamic_patch is not None:
@@ -892,11 +896,21 @@ class InternVLProcessingInfo(BaseInternVLProcessingInfo):
             kwargs["dynamic_image_size"] = dynamic_image_size
 
         kwargs["video_token"] = self.get_video_token()
-
+        image_processor = self.get_image_processor()
         return self.ctx.init_processor(
             InternVLProcessor,
             config=self.get_hf_config(),
             tokenizer=self.get_tokenizer(),
+            image_processor=image_processor,
+            **kwargs,
+        )
+
+    def get_image_processor(
+        self,
+        **kwargs: object,
+    ):
+        return cached_image_processor_from_config(
+            self.ctx.model_config,
             **kwargs,
         )
 
@@ -1305,12 +1319,12 @@ class Llama_Nemotron_Nano_VL_Model(nn.Module, SupportsMultiModal, SupportsPP,
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def get_multimodal_embeddings(
-            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
+    def get_multimodal_embeddings(self,
+                                  **kwargs: object) -> MultiModalEmbeddings:
 
         modalities = self._parse_and_validate_multimodal_inputs(**kwargs)
         if not modalities:
-            return None
+            return []
 
         # The result multimodal_embeddings is tuple of tensors, with each
         # tensor correspoending to a multimodal data item (image or video).
@@ -1336,7 +1350,8 @@ class Llama_Nemotron_Nano_VL_Model(nn.Module, SupportsMultiModal, SupportsPP,
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
-        if multimodal_embeddings is not None:
+        if multimodal_embeddings is not None \
+            and len(multimodal_embeddings) != 0:
             context_token_ids = [
                 token_id for token_id in (self.img_context_token_id,
                                           self.video_context_token_id)
