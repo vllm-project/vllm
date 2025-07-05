@@ -42,8 +42,8 @@ class CUDAGraphWrapper:
     def __init__(self,
                  runnable: Any,
                  vllm_config: VllmConfig,
-                 graph_pool: Any,
                  runtime_style: int,
+                 graph_pool: Any = None,
                  cudagraph_specific_config: Optional[dict[str, Any]] = None):
         self.runnable = runnable
         self.vllm_config = vllm_config
@@ -55,7 +55,11 @@ class CUDAGraphWrapper:
         self.is_debugging_mode = envs.VLLM_LOGGING_LEVEL == "DEBUG"
 
         assert self.runtime_style >= CUDAGraphRuntimeStyle.PIECEWISE
-        assert graph_pool is not None
+        if self.graph_pool is None:
+            # lazy import to avoid triggering some import issues.
+            from vllm.compilation.backends import get_global_graph_pool
+            self.graph_pool = get_global_graph_pool()
+
         if cudagraph_specific_config is None:
             cudagraph_specific_config = {}
         self.debug_capturing = cudagraph_specific_config.get(

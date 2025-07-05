@@ -18,7 +18,6 @@ import vllm.envs as envs
 from vllm.attention import AttentionType, get_attn_backend
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.attention.layer import Attention
-from vllm.compilation.backends import get_global_graph_pool
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphWrapper
 from vllm.config import (CompilationLevel, CUDAGraphMode,
@@ -2450,7 +2449,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     CUDAGraphWrapper(
                         self.model,
                         self.vllm_config,
-                        get_global_graph_pool(),
                         runtime_style=CUDAGraphRuntimeStyle.FULL,
                         cudagraph_specific_config={"usage_type": "general"})
                 })
@@ -2464,7 +2462,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     CUDAGraphWrapper(
                         self.model,
                         self.vllm_config,
-                        get_global_graph_pool(),
                         runtime_style=CUDAGraphRuntimeStyle.FULL,
                         cudagraph_specific_config={"usage_type": "decode"})
                 })

@@ -8,7 +8,6 @@ import torch.fx as fx
 
 import vllm.envs as envs
 from vllm.compilation.backends import VllmBackend
-from vllm.compilation.cuda_graph import CUDAGraphWrapper
 from vllm.compilation.monitor import end_monitoring_torch_compile
 from vllm.config import CUDAGraphRuntimeStyle, VllmConfig
 from vllm.forward_context import get_forward_context
@@ -86,7 +85,7 @@ class PiecewiseBackend:
                                                     "piecewise/general"
 
         self.cudagraph_capture_sizes: set[int] = set()
-        self.cudagraph_runable: Optional[CUDAGraphWrapper] = None
+        self.cudagraph_runable: Optional[Any] = None
         if self.compilation_config.cudagraph_mode > 0:
             cudagraph_specific_config = {
                 "debug_capturing": self.is_first_graph,
@@ -104,8 +103,8 @@ class PiecewiseBackend:
             self.cudagraph_runable = static_graph_wrapper_class(
                 self.compiled_graph_for_general_shape,
                 vllm_config,
-                self.graph_pool,
                 runtime_style=CUDAGraphRuntimeStyle.PIECEWISE,
+                graph_pool=self.graph_pool,
                 cudagraph_specific_config=cudagraph_specific_config)
 
             self.cudagraph_capture_sizes = (self.compilation_config.\
