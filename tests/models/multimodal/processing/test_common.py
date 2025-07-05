@@ -24,6 +24,22 @@ from ....multimodal.utils import random_audio, random_image, random_video
 from ...registry import HF_EXAMPLE_MODELS
 
 
+def glm4_1v_patch_mm_data(mm_data: MultiModalDataDict) -> MultiModalDataDict:
+    """
+    Patch the multimodal data for GLM4.1V model.
+    """
+    # Ensure video metadata is included
+    if "video" in mm_data:
+        video = mm_data["video"]
+        mm_data["video"] = (video, {
+            "total_num_frames": len(video),
+            "fps": len(video),
+            "duration": 1,
+            "video_backend": "opencv"
+        })
+    return mm_data
+
+
 def _test_processing_correctness(
     model_id: str,
     hit_rate: float,
@@ -154,6 +170,11 @@ _IGNORE_MM_KEYS = {
     "ultravox": {"audio_features"},
 }
 
+MM_DATA_PATCHES = {
+    # GLM4.1V requires video metadata to be included in the input
+    "glm4v": glm4_1v_patch_mm_data,
+}
+
 
 def _test_processing_correctness_one(
     model_config: ModelConfig,
@@ -166,6 +187,8 @@ def _test_processing_correctness_one(
 ):
     model_type = model_config.hf_config.model_type
     ignore_mm_keys = _IGNORE_MM_KEYS.get(model_type, set[str]())
+    if model_type in MM_DATA_PATCHES:
+        mm_data = MM_DATA_PATCHES[model_type](mm_data)
 
     if isinstance(prompt, str):
         text_prompt = prompt
@@ -245,6 +268,7 @@ def _test_processing_correctness_one(
     "adept/fuyu-8b",
     "google/gemma-3-4b-it",
     "THUDM/glm-4v-9b",
+    "THUDM/GLM-4.1V-9B-Thinking",
     "ibm-granite/granite-speech-3.3-2b",
     "h2oai/h2ovl-mississippi-800m",
     "OpenGVLab/InternVL2-1B",
