@@ -2605,7 +2605,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Trigger cudagraph initialization here (after
         # initializing attn backends).
-        # TODO: move this to the better place
+        # TODO: move this to better place.
         self._maybe_initialize_cudagraph()
 
     def may_reinitialize_input_batch(self,
