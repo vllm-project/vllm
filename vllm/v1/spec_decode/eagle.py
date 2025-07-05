@@ -255,7 +255,7 @@ class EagleProposer:
         device = common_attn_metadata.query_start_loc.device
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
         spec_seq_lens_cpu =\
-            common_attn_metadata.seq_lens_cpu - num_rejected_tokens
+            common_attn_metadata.seq_lens_cpu - num_rejected_tokens + 1
 
         # [0, a, a + b, a + b + c] -> [a, b, c]
         query_len_per_req = (query_start_loc_cpu[1:] -
