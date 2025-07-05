@@ -281,3 +281,10 @@ class KVConnectorBase_V1(ABC):
             returned by the engine.
         """
         return False, None
+
+    def close(self) -> None:
+        """
+        Close the connector. This is called when the connector is no longer
+        needed.
+        """
+        return
