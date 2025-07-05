@@ -240,11 +240,10 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "OrionForCausalLM": _HfExamplesInfo("OrionStarAI/Orion-14B-Chat",
                                         trust_remote_code=True),
     "PersimmonForCausalLM": _HfExamplesInfo("adept/persimmon-8b-chat"),
-    "PhiForCausalLM": _HfExamplesInfo("microsoft/phi-2", v0_only=True),
+    "PhiForCausalLM": _HfExamplesInfo("microsoft/phi-2"),
     "Phi3ForCausalLM": _HfExamplesInfo("microsoft/Phi-3-mini-4k-instruct"),
     "Phi3SmallForCausalLM": _HfExamplesInfo("microsoft/Phi-3-small-8k-instruct",
-                                            trust_remote_code=True,
-                                            v0_only=True),
+                                            trust_remote_code=True),
     "PhiMoEForCausalLM": _HfExamplesInfo("microsoft/Phi-3.5-MoE-instruct",
                                          trust_remote_code=True),
     "Plamo2ForCausalLM": _HfExamplesInfo("pfnet/plamo-2-1b",
@@ -258,10 +257,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "Qwen3MoeForCausalLM": _HfExamplesInfo("Qwen/Qwen3-30B-A3B"),
     "Qwen3ForSequenceClassification": _HfExamplesInfo("tomaarsen/Qwen3-Reranker-0.6B-seq-cls"),  # noqa: E501
     "RWForCausalLM": _HfExamplesInfo("tiiuae/falcon-40b"),
-    "StableLMEpochForCausalLM": _HfExamplesInfo("stabilityai/stablelm-zephyr-3b",  # noqa: E501
-                                                v0_only=True),
-    "StableLmForCausalLM": _HfExamplesInfo("stabilityai/stablelm-3b-4e1t",
-                                           v0_only=True),
+    "StableLMEpochForCausalLM": _HfExamplesInfo("stabilityai/stablelm-zephyr-3b"),  # noqa: E501
+    "StableLmForCausalLM": _HfExamplesInfo("stabilityai/stablelm-3b-4e1t"),
     "Starcoder2ForCausalLM": _HfExamplesInfo("bigcode/starcoder2-3b"),
     "SolarForCausalLM": _HfExamplesInfo("upstage/solar-pro-preview-instruct"),
     "TeleChat2ForCausalLM": _HfExamplesInfo("Tele-AI/TeleChat2-3B",
