@@ -1,3 +1,5 @@
+#include "core/registration.h"
+
 #include <torch/all.h>
 #include <cutlass/arch/arch.h>
 
@@ -367,7 +369,6 @@ void cutlass_blockwise_scaled_grouped_mm(
 }
 
 TORCH_LIBRARY_IMPL_EXPAND(TORCH_EXTENSION_NAME, CUDA, m) {
-    m.impl("cutlass_blockwise_scaled_grouped_mm", 
-           &cutlass_blockwise_scaled_grouped_mm);
+  m.impl("cutlass_blockwise_scaled_grouped_mm",
+         &cutlass_blockwise_scaled_grouped_mm);
 }
-  
