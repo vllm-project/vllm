@@ -123,6 +123,11 @@ KVConnectorFactory.register_connector(
     "LMCacheConnectorV1")
 
 KVConnectorFactory.register_connector(
+    "SafeLMCacheConnectorV1",
+    "vllm.distributed.kv_transfer.kv_connector.v1.safe_lmcache_connector",
+    "SafeLMCacheConnectorV1")
+
+KVConnectorFactory.register_connector(
     "NixlConnector",
     "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector",
     "NixlConnector")
