@@ -10,7 +10,7 @@ from typing import Any, Callable, NamedTuple, Optional
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.utils import GiB_bytes, cdiv, sha256, sha256_cbor
+from vllm.utils import GiB_bytes, cdiv
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec, KVCacheSpec,
                                         KVCacheTensor, SlidingWindowSpec)
@@ -55,14 +55,14 @@ class BlockHashWithGroupId(NamedTuple):
 #
 # The function `init_none_hash` initializes this variable globally.
 NONE_HASH: int
+
+
 def init_none_hash(hash_fn: Callable):
     global NONE_HASH
 
-    NONE_HASH = (
-        int.from_bytes(os.urandom(32), byteorder="big")
-        if os.getenv("PYTHONHASHSEED") is None
-        else hash_fn(os.getenv("PYTHONHASHSEED"))
-    )
+    NONE_HASH = (int.from_bytes(os.urandom(32), byteorder="big")
+                 if os.getenv("PYTHONHASHSEED") is None else hash_fn(
+                     os.getenv("PYTHONHASHSEED")))
 
 
 class PrefixCachingMetrics:

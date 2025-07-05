@@ -3177,6 +3177,7 @@ def sha256(input) -> int:
     return int.from_bytes(hashlib.sha256(input_bytes).digest(),
                           byteorder="big")
 
+
 def sha256_cbor(input) -> int:
     """
     Hash objects using CBOR serialization and SHA-256, then truncate to 64bits.
