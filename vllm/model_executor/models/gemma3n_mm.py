@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Any, Optional, TypedDict, Union
+from typing import Any, Optional, TypedDict, Union, cast
 
 import torch
 from torch import nn
@@ -19,6 +19,7 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import RowParallelLinear
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
+from vllm.model_executor.models.gemma3n import Gemma3nForCausalLM
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -37,7 +38,7 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal
-from .utils import (AutoWeightsLoader, WeightsMapper,
+from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
                     init_vllm_registered_model, maybe_prefix,
                     merge_multimodal_embeddings)
 
@@ -80,6 +81,42 @@ class Gemma3nProcessingInfo(BaseProcessingInfo):
 
         return {"image": TOKENS_PER_IMAGE, "audio": TOKENS_PER_AUDIO}
 
+    def get_image_repl(
+        self,
+        *,
+        image_width: int,
+        image_height: int,
+        processor: Optional[Gemma3nProcessor],
+    ) -> str:
+        """
+        Get the replacement text for image tokens.
+        
+        For Gemma3n, this should return the full_image_sequence which includes
+        BOI token, repeated image tokens, and EOI token.
+        """
+        if processor is None:
+            processor = self.get_hf_processor()
+
+        # Return the full image sequence as defined by the processor
+        return processor.full_image_sequence
+
+    def get_audio_repl(
+        self,
+        *,
+        processor: Optional[Gemma3nProcessor],
+    ) -> str:
+        """
+        Get the replacement text for audio tokens.
+        
+        For Gemma3n, this should return the full_audio_sequence which includes
+        BOA token, repeated audio tokens, and EOA token.
+        """
+        if processor is None:
+            processor = self.get_hf_processor()
+
+        # Return the full audio sequence as defined by the processor
+        return processor.full_audio_sequence
+
 
 class Gemma3nDummyInputsBuilder(BaseDummyInputsBuilder[Gemma3nProcessingInfo]):
 
@@ -106,7 +143,7 @@ class Gemma3nDummyInputsBuilder(BaseDummyInputsBuilder[Gemma3nProcessingInfo]):
         audio_len = feature_extractor.fft_length
         image_processor: SiglipImageProcessorFast = processor.image_processor
         img_width = image_processor.size.get("width", 224)
-        img_height = image_processor.size.get("width", 224)
+        img_height = image_processor.size.get("height", 224)
 
         return {
             "image":
@@ -153,25 +190,48 @@ class Gemma3MultiModalProcessor(BaseMultiModalProcessor[Gemma3nProcessingInfo]
         out_mm_kwargs: MultiModalKwargs,
     ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-        image_token = hf_processor.boi_token
+        
+        prompt_updates = []
+        
+        # Handle image tokens
+        if "image" in mm_items:
+            image_token = hf_processor.image_token
 
-        def get_replacement_gemma3(item_idx: int):
-            images = mm_items.get_items("image", ImageProcessorItems)
+            def get_replacement_image(item_idx: int):
+                images = mm_items.get_items("image", ImageProcessorItems)
+                image_size = images.get_image_size(item_idx)
+                return self.info.get_image_repl(
+                    image_width=image_size.width,
+                    image_height=image_size.height,
+                    processor=hf_processor,
+                )
 
-            image_size = images.get_image_size(item_idx)
-            return self.info.get_image_repl(
-                image_width=image_size.width,
-                image_height=image_size.height,
-                processor=hf_processor,
+            prompt_updates.append(
+                PromptReplacement(
+                    modality="image",
+                    target=image_token,
+                    replacement=get_replacement_image,
+                )
+            )
+        
+        # Handle audio tokens
+        if "audio" in mm_items:
+            audio_token = hf_processor.audio_token
+
+            def get_replacement_audio(item_idx: int):
+                return self.info.get_audio_repl(
+                    processor=hf_processor,
+                )
+
+            prompt_updates.append(
+                PromptReplacement(
+                    modality="audio",
+                    target=audio_token,
+                    replacement=get_replacement_audio,
+                )
             )
 
-        return [
-            PromptReplacement(
-                modality="image",
-                target=image_token,
-                replacement=get_replacement_gemma3,
-            )
-        ]
+        return prompt_updates
 
     def _apply_token_matches(
         self,
@@ -381,16 +441,41 @@ class Gemma3nForConditionalGeneration(nn.Module, SupportsMultiModal):
         self.embed_audio = Gemma3nMultimodalEmbedder(config.audio_config,
                                                      config.text_config)
 
-        self.language_model = init_vllm_registered_model(
+        self.language_model: nn.Module = init_vllm_registered_model(
             vllm_config=vllm_config,
             hf_config=config.text_config,
             prefix=maybe_prefix(prefix, "language_model"),
             architectures=["Gemma3nForCausalLM"],
         )
+        self.language_model = cast(Gemma3nForCausalLM, self.language_model)
 
     @property
     def dtype(self):
         return next(self.parameters()).dtype
+
+    def _validate_pixel_values(self, data: torch.Tensor) -> torch.Tensor:
+        # TODO check if there are any 
+        return data
+
+    def _parse_and_validate_image_input(
+            self, **kwargs: object) -> Optional[Gemma3nImageInputs]:
+        pixel_values = kwargs.pop("pixel_values", None)
+        image_embeds = kwargs.pop("image_embeds", None)
+        # TODO is this the case?
+        assert image_embeds is None, "Gemma3n does not support image_embeds."
+        if pixel_values is None:
+            return None
+
+        if not isinstance(pixel_values, (torch.Tensor, list)):
+            raise ValueError("Incorrect type of pixel values. "
+                             f"Got type: {type(pixel_values)}")
+
+        pixel_values = flatten_bn(pixel_values, concat=True)
+        pixel_values = pixel_values.contiguous()
+
+        return Gemma3nImagePixelInputs(
+            pixel_values=self._validate_pixel_values(pixel_values),
+        )
 
     def _process_image_input(
         self,
@@ -402,11 +487,12 @@ class Gemma3nForConditionalGeneration(nn.Module, SupportsMultiModal):
         vision_outputs = self.vision_tower(pixel_values=pixel_values,
                                            do_pooling=False,
                                            return_dict=True).last_hidden_state
+        # TODO try to avoid copy here
         vision_outputs = vision_outputs.reshape(
             vision_outputs.shape[0],
             self.config.vision_config.hidden_size,
             self.config.vision_soft_tokens_per_image,
-        ).permute(0, 2, 1)
+        ).permute(0, 2, 1).contiguous()
         # Normalize and embed the soft tokens into language model space.
         vision_outputs *= self.config.vision_config.hidden_size**0.5
         return self.embed_vision(inputs_embeds=vision_outputs)
@@ -465,6 +551,7 @@ class Gemma3nForConditionalGeneration(nn.Module, SupportsMultiModal):
 
             inputs_embeds = self.get_input_embeddings(input_ids,
                                                       vision_embeddings)
+            # TODO check whether this is needed at all
             if vision_embeddings is not None:
                 kwargs = self.prepare_attn_masks(
                     input_ids,
@@ -476,11 +563,73 @@ class Gemma3nForConditionalGeneration(nn.Module, SupportsMultiModal):
 
         hidden_states = self.language_model.model(input_ids,
                                                   positions,
-                                                  intermediate_tensors,
+                                                #   intermediate_tensors
                                                   inputs_embeds=inputs_embeds,
                                                   **kwargs)
 
         return hidden_states
+
+    def prepare_attn_masks(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        mask_dtype: torch.dtype,
+        **kwargs,
+    ):
+        kwargs["has_images"] = True
+        # NOTE(woosuk): Here, we distinguish the sequences by the position id 0.
+        # This is a HACK. Fix this.
+        start_indices = (positions == 0).cpu().nonzero()
+        num_seqs = len(start_indices)
+        seq_lens = []
+        for i in range(num_seqs):
+            start_idx = start_indices[i].item()
+            if i < num_seqs - 1:
+                end_idx = start_indices[i + 1].item()
+            else:
+                end_idx = len(input_ids)
+            seq_lens.append(end_idx - start_idx)
+        kwargs["seq_lens"] = seq_lens
+
+        global_attn_masks = []
+        local_attn_masks = []
+        start_idx = 0
+        for seq_len in seq_lens:
+            end_idx = start_idx + seq_len
+            input_token_ids = input_ids[start_idx:end_idx]
+            start_idx = end_idx
+            # Create a global causal mask.
+            global_attn_mask = torch.empty(
+                1,
+                1,
+                seq_len,
+                seq_len,
+                dtype=mask_dtype,
+                device=input_ids.device,
+            )
+            global_attn_mask.fill_(float("-inf"))
+            # Fill the lower triangle with 0.
+            global_attn_mask = global_attn_mask.triu(diagonal=1)
+
+            # Consider the bidirectional attention between image tokens.
+            img_mask = torch.zeros_like(global_attn_mask)
+            img_pos = (input_token_ids == self.config.image_token_id)
+            img_mask[:, :, :, img_pos] += 1
+            img_mask[:, :, img_pos, :] += 1
+            global_attn_mask = torch.where(img_mask == 2, 0, global_attn_mask)
+            global_attn_masks.append(global_attn_mask)
+
+            if self.sliding_window is not None:
+                # Create a local causal mask with sliding window (1024).
+                local_attn_mask = torch.ones_like(global_attn_mask)
+                local_attn_mask = torch.tril(local_attn_mask,
+                                             diagonal=-self.sliding_window)
+                local_attn_mask = torch.where(local_attn_mask == 0,
+                                              global_attn_mask, float("-inf"))
+                local_attn_masks.append(local_attn_mask)
+        kwargs["global_attn_masks"] = global_attn_masks
+        kwargs["local_attn_masks"] = local_attn_masks
+        return kwargs
 
     def compute_logits(
         self,
