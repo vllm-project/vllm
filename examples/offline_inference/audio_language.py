@@ -44,7 +44,7 @@ class ModelRequestData(NamedTuple):
 def run_voxtral(question: str, audio_count: int) -> ModelRequestData:
     from mistral_common.protocol.instruct.messages import TextChunk, AudioChunk, UserMessage
     from mistral_common.audio import Audio
-    from mistral_common.tokens.tokenizers.mistral_tokenizer import MistralTokenizer
+    from mistral_common.tokens.tokenizers.mistral import MistralTokenizer
     from mistral_common.protocol.instruct.request import ChatCompletionRequest
 
     model_name = "/mnt/vast/runs/sanchitgandhi/250626_instruct_3b_32k/250626_instruct_3b_32k_run000/checkpoints/checkpoint_00010000/consolidated_vllm"
@@ -55,17 +55,15 @@ def run_voxtral(question: str, audio_count: int) -> ModelRequestData:
         max_model_len=8192,
         max_num_seqs=2,
         limit_mm_per_prompt={"audio": audio_count},
-        tokenizer_format="mistral",
-        load_format="mistral",
     )
 
     text_chunk = TextChunk(text=question)
-    audios = [Audio.from_file(audio_assets[i]) for i in range(audio_count)]
-    audio_chunks = [AudioChunk.from_audio[audio] for audio in audios]
+    audios = [Audio.from_file(str(audio_assets[i].get_local_path())) for i in range(audio_count)]
+    audio_chunks = [AudioChunk.from_audio(audio) for audio in audios]
 
-    messages = [UserMessage(chunks=[*audio_chunks, text_chunk])]
+    messages = [UserMessage(content=[*audio_chunks, text_chunk])]
 
-    req = ChatCompletionRequest(messages, model=model_name)
+    req = ChatCompletionRequest(messages=messages, model=model_name)
 
     prompt_ids = tokenizer.encode_chat_completion(req).tokens
 
