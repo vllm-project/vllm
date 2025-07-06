@@ -15,6 +15,7 @@ from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group,
                                           is_v1_kv_transfer_group)
 from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
@@ -22,6 +23,8 @@ from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.platforms import _Backend, current_platform
 from vllm.utils import direct_register_custom_op
 from vllm.v1.attention.backends.utils import validate_kv_sharing_target
+
+logger = init_logger(__name__)
 
 
 class Attention(nn.Module):
@@ -179,9 +182,28 @@ class Attention(nn.Module):
             ).parallel_config.pipeline_parallel_size)
         ]
 
-        self.q_range = torch.tensor(envs.Q_SCALE_CONSTANT, dtype=torch.float32)
-        self.k_range = torch.tensor(envs.K_SCALE_CONSTANT, dtype=torch.float32)
-        self.v_range = torch.tensor(envs.V_SCALE_CONSTANT, dtype=torch.float32)
+        try:
+            self.q_range = torch.tensor(envs.Q_SCALE_CONSTANT,
+                                        dtype=torch.float32)
+            self.k_range = torch.tensor(envs.K_SCALE_CONSTANT,
+                                        dtype=torch.float32)
+            self.v_range = torch.tensor(envs.V_SCALE_CONSTANT,
+                                        dtype=torch.float32)
+        except RuntimeError as e:
+            if torch.cuda.is_available():
+                # This helps to see how much memory is allocated when using CUDA
+                logger.error(
+                    "Failed to initialize attention q/k/v range "
+                    "constants: %s", e)
+                logger.debug("CUDA device: %s", torch.cuda.current_device())
+                allocated_gb = torch.cuda.memory_allocated() / 1024**3
+                logger.debug("Allocated: %.2f GB", allocated_gb)
+                reserved_gb = torch.cuda.memory_reserved() / 1024**3
+                logger.debug("Reserved: %.2f GB", reserved_gb)
+            raise RuntimeError(
+                "Failed to initialize q/k/v range constants. "
+                "This may be caused by insufficient memory to allocate "
+                "kv cache.") from e
 
     def forward(
         self,
