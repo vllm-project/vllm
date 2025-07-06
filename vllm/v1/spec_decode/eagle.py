@@ -44,7 +44,7 @@ class EagleProposer:
             self.speculative_config.num_speculative_tokens)
         self.max_num_tokens = (
             vllm_config.scheduler_config.max_num_batched_tokens)
-        self.arange_np = np.arange(self.max_num_tokens)
+        self.token_arange_np = np.arange(self.max_num_tokens)
         # We need to get the hidden size from the draft model config because
         # the draft model's hidden size can be different from the target model's
         # hidden size (e.g., Llama 3.3 70B).
@@ -245,65 +245,87 @@ class EagleProposer:
         # [batch_size]
         num_rejected_tokens: torch.Tensor
     ) -> tuple[CommonAttentionMetadata, torch.Tensor]:
-        # query_start_loc_cpu: [0, a, a + b, a + b + c]
-        # num_rejected_tokens: [n1, n2, n3]
-        # num_tokens_per_req: [a - n1, b - n2, c - n3]
-        # cu_num_tokens: [0, a - n1, a + b - n1 - n2, a + b + c - n1 - n2 - n3]
-        # token_indices: [0, 1, ..., a - n1 - 1,
-        #                 a, a + 1, ..., a + b - n2 - 1,
-        #                 a + b, a + b + 1, ..., a + b + c - n3 - 1]
+        """
+        This function is used to prepare the inputs for the spec decode.
+        It updates to the common_attn_metadata to account for the rejected
+        tokens (and newly sampled tokens). It also returns the token indices
+        of the tokens that should be fed to the speculator.
+        """
+        # E.g.
+        #  common_attn_metadata.query_start_loc{_cpu}:
+        #         [0, q1, q1 + q2, q1 + q2 + q3]
+        #  common_attn_metadata.seq_lens{_cpu}: [s1, s2, s3]
+        #  num_rejected_tokens: [n1, n2, n3]
+        # This function computes the intermediate values:
+        #  num_tokens_per_req: [q1 - n1, q2 - n2, q3 - n3]
+        # And returns:
+        #  common_attn_metadata.query_start_loc{_cpu}:
+        #         [0, q1 - n1, q1 + q2 - n1 - n2, q1 + q2 + q3 - n1 - n2 - n3]
+        #  common_attn_metadata.seq_lens{_cpu}:
+        #         [s1 - n1 + 1, s2 - n2 + 1, s3 - n3 + 1]
+        #  token_indices: [0, 1, ..., q1 - n1 - 1,
+        #                  q1, q1 + 1, ..., q1 + q2 - n2 - 1,
+        #                  q1 + q2, q1 + q2 + 1, ..., q1 + q2 + q3 - n3 - 1]
 
         device = common_attn_metadata.query_start_loc.device
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
-        spec_seq_lens_cpu =\
-            common_attn_metadata.seq_lens_cpu - num_rejected_tokens + 1
+        new_seq_lens_cpu = common_attn_metadata.seq_lens_cpu \
+            - num_rejected_tokens
 
-        # [0, a, a + b, a + b + c] -> [a, b, c]
-        query_len_per_req = (query_start_loc_cpu[1:] -
-                             query_start_loc_cpu[:-1])
-        # [a, b, c] -> [a - n1, b - n2, c - n3]
-        num_tokens_per_req = query_len_per_req - num_rejected_tokens
-        num_tokens_per_req_np = num_tokens_per_req.numpy()
+        # [0, q1, q1 + q2, q1 + q2 + q3] -> [q1, q2, q3]
+        new_query_len_per_req = (query_start_loc_cpu[1:] -
+                                 query_start_loc_cpu[:-1])
+        # [q1, q2, q3] -> [q1 - n1, q2 - n2, q3 - n3]
+        new_num_tokens_per_req = new_query_len_per_req - num_rejected_tokens
+        new_num_tokens_per_req_np = new_num_tokens_per_req.numpy()
 
-        # [a - n1, b - n2, c - n3] ->
-        # [0, a - n1, a + b - n1 - n2, a + b + c - n1 - n2 - n3]
-        spec_query_start_loc_cpu = torch.zeros(query_start_loc_cpu.shape,
-                                               dtype=torch.int32,
-                                               pin_memory=True)
-        spec_query_start_loc_np = spec_query_start_loc_cpu.numpy()
-        np.cumsum(num_tokens_per_req_np, out=spec_query_start_loc_np[1:])
-        """Get the cumulative sum and batched arange of the given array.
-        # E.g., [2, 5, 3] -> ([2, 7, 10], [0, 1, 0, 1, 2, 3, 4, 0, 1, 2])
-        # Equivalent to but faster than:
-        # np.concatenate([np.arange(n) for n in num_tokens])
-        """
+        # [q1 - n1, q2 - n2, q3 - n3] ->
+        # [0, q1 - n1, q1 + q2 - n1 - n2, q1 + q2 + q3 - n1 - n2 - n3]
+        new_query_start_loc_cpu = torch.zeros(query_start_loc_cpu.shape,
+                                              dtype=torch.int32,
+                                              pin_memory=True)
+        new_query_start_loc_np = new_query_start_loc_cpu.numpy()
+        np.cumsum(new_num_tokens_per_req_np, out=new_query_start_loc_np[1:])
 
-        # Step 1. [2, 5, 3] -> [2, 7, 10]
-        total_num_tokens = spec_query_start_loc_np[-1]
-        # Step 2. [2, 7, 10] -> [0, 0, 2, 2, 2, 2, 2, 7, 7, 7]
-        cumsums_offsets = np.repeat(spec_query_start_loc_np[:-1],
-                                    num_tokens_per_req_np)
-        # Step 3. [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
-        arange = self.arange_np[:total_num_tokens] - cumsums_offsets
+        total_num_tokens = new_query_start_loc_np[-1]
+        # Example assuming num_tokens_per_req_np = [2, 4, 3]
+        # this implies that `new_query_start_locs` is:
+        # [0, 2, 6, 9] ->
+        # [0, 0, 2, 2, 2, 2, 6, 6, 6]
+        #  _r1_  ____r2____  ___r3__
+        new_query_start_locs_expanded = np.repeat(new_query_start_loc_np[:-1],
+                                                  new_num_tokens_per_req_np)
+        # [0, 1, 2, 3, 4, 5, 6, 7, 8] ->
+        # [0, 1, 0, 1, 2, 3, 0, 1, 2]
+        #  _r1_  ____r2____  ___r3__
+        token_offests = self.token_arange_np[:total_num_tokens] \
+            - new_query_start_locs_expanded
 
         # Expand starting positions to match token pattern
-        query_start_expanded = np.repeat(query_start_loc_cpu[:-1].numpy(),
-                                         num_tokens_per_req_np)
-        token_indices_np = arange + query_start_expanded
+        # [0, q1, q1 + q2] ->
+        # [0, 0, q1, q1, q1, q1, q1 + q2, q1 + q2, q1 + q2]
+        #  _r1_  _____r2_______  ___________r3____________
+        old_query_start_locs_expanded = np.repeat(
+            query_start_loc_cpu[:-1].numpy(), new_num_tokens_per_req_np)
+        # Final token indices are:
+        # [0, 1,                                   // req 1
+        #  q1 + 0, q1 + 1, q1 + 2, q1 + 3,         // req 2
+        #  q1 + q2 + 0, q1 + q2 + 1, q1 + q2 + 2]  // req 3
+        token_indices_np = token_offests + old_query_start_locs_expanded
         token_indices = torch.from_numpy(token_indices_np).to(
             device, non_blocking=True)
 
         spec_common_attn_metadata = CommonAttentionMetadata(
-            query_start_loc=spec_query_start_loc_cpu.to(device,
-                                                        non_blocking=True),
-            seq_lens=spec_seq_lens_cpu.to(device, non_blocking=True),
-            query_start_loc_cpu=spec_query_start_loc_cpu,
-            seq_lens_cpu=spec_seq_lens_cpu,
+            query_start_loc=new_query_start_loc_cpu.to(device,
+                                                       non_blocking=True),
+            seq_lens=new_seq_lens_cpu.to(device, non_blocking=True),
+            query_start_loc_cpu=new_query_start_loc_cpu,
+            seq_lens_cpu=new_seq_lens_cpu,
             num_computed_tokens_cpu=common_attn_metadata.
             num_computed_tokens_cpu,
             num_reqs=common_attn_metadata.num_reqs,
             num_actual_tokens=total_num_tokens,
-            max_query_len=query_len_per_req.max().item(),
+            max_query_len=new_query_len_per_req.max().item(),
             block_table_tensor=common_attn_metadata.block_table_tensor,
             slot_mapping=common_attn_metadata.slot_mapping[token_indices],
         )
