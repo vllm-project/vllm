@@ -138,6 +138,9 @@ if TYPE_CHECKING:
     VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: str = "NONE"
     VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16: bool = True
     VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB: Optional[int] = None
+    VLLM_OBJECT_STORAGE_MAX_OBJECT_SIZE_MB: int = 128
+    VLLM_OBJECT_STORAGE_SHM_BUFFER_SIZE_MB: int = 1024
+    VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME: str = "VLLM_OBJECT_STORAGE_SHM_BUFFER"
 
 
 def get_default_cache_root():
@@ -953,7 +956,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # generations on machines < 100 for compressed-tensors
     # models
     "VLLM_USE_NVFP4_CT_EMULATIONS":
-    lambda: bool(int(os.getenv("VLLM_USE_NVFP4_CT_EMULATIONS", "0")))
+    lambda: bool(int(os.getenv("VLLM_USE_NVFP4_CT_EMULATIONS", "0"))),
+    "VLLM_OBJECT_STORAGE_MAX_OBJECT_SIZE_MB":
+    lambda: int(os.getenv("VLLM_OBJECT_STORAGE_MAX_OBJECT_SIZE_MB", "128")),
+    "VLLM_OBJECT_STORAGE_SHM_BUFFER_SIZE_MB":
+    lambda: int(os.getenv("VLLM_OBJECT_STORAGE_SHM_BUFFER_SIZE_MB", "1024")),
+    "VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME":
+    lambda: os.getenv("VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME",
+                      "VLLM_OBJECT_STORAGE_SHM_BUFFER"),
 }
 
 # --8<-- [end:env-vars-definition]
