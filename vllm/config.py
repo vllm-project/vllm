@@ -4086,8 +4086,8 @@ class CompilationConfig:
     Note that the cudagraph logic is generally orthogonal to the 
     compilation logic. For piecewise cudagraph, the logic is kept
     inside the compilation. Meanwhile, the full cudagraph is captured
-    outside the compilation, and in future it will further supports 
-    cudagraph without compilation.
+    outside the compilation, and it further supports cudagraph 
+    without compilation.
     """
     use_cudagraph: bool = field(default_factory=lambda: envs.VLLM_USE_V1)
     """Whether to use cudagraph inside compilation.

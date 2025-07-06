@@ -151,8 +151,6 @@ class FlashAttentionMetadataBuilder(
     # TODO: change the default preference if needed.
     prefer_separate_routine: ClassVar[Optional[bool]] = None
 
-    support_full_cudagraph_only: ClassVar[bool] = True
-
     def __init__(self, runner: "GPUModelRunner", kv_cache_spec: AttentionSpec,
                  block_table: BlockTable):
         model_config = runner.model_config
