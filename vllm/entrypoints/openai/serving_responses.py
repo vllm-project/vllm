@@ -85,10 +85,7 @@ class OpenAIServingResponses(OpenAIServing):
             logger.info("Using default chat sampling params from %s: %s",
                         source, self.default_sampling_params)
 
-        # HACK(woosuk): This is a hack. We should use a better store.
-        # FIXME: This causes a memory leak since we never remove responses
-        # from the store.
-        self.response_store: dict[str, ResponsesResponse] = {}
+        self.response_store = ResponseStore()
 
     async def create_responses(
         self,
@@ -165,7 +162,6 @@ class OpenAIServingResponses(OpenAIServing):
                     prompt_adapter_request=prompt_adapter_request,
                     priority=request.priority,
                 )
-
                 generators.append(generator)
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
@@ -185,7 +181,7 @@ class OpenAIServingResponses(OpenAIServing):
                 status="queued",
                 usage=None,
             )
-            self.response_store[response.id] = response
+            await self.response_store.add_response(response)
             asyncio.create_task(
                 self.responses_full_generator(
                     request,
@@ -195,7 +191,6 @@ class OpenAIServingResponses(OpenAIServing):
                     tokenizer,
                     request_metadata,
                     created_time,
-                    is_background=True,
                 ))
             return response
 
@@ -223,7 +218,6 @@ class OpenAIServingResponses(OpenAIServing):
         tokenizer: AnyTokenizer,
         request_metadata: RequestResponseMetadata,
         created_time: Optional[int] = None,
-        is_background: bool = False,
     ) -> Union[ErrorResponse, ResponsesResponse]:
         if created_time is None:
             created_time = int(time.time())
@@ -302,17 +296,8 @@ class OpenAIServingResponses(OpenAIServing):
             usage=usage,
         )
 
-        response_id = response.id
-        if is_background:
-            # Background request. The response must be in the store.
-            assert response_id in self.response_store
-            # Update the response in the store.
-            self.response_store[response_id] = response
-        else:
-            # Not a background request. The response must not be in the store.
-            assert response_id not in self.response_store
-            if request.store:
-                self.response_store[response_id] = response
+        if request.store:
+            await self.response_store.add_response(response)
         return response
 
     async def retrieve_responses(
@@ -325,9 +310,31 @@ class OpenAIServingResponses(OpenAIServing):
                 message=(f"Invalid 'response_id': '{response_id}'. "
                          "Expected an ID that begins with 'resp'."),
             )
-        if response_id not in self.response_store:
+        response = await self.response_store.get_response(response_id)
+        if response is None:
             return self.create_error_response(
                 err_type="invalid_request_error",
                 message=f"Response with id '{response_id}' not found. ",
             )
-        return self.response_store[response_id]
+        return response
+
+
+class ResponseStore:
+
+    def __init__(self):
+        # HACK(woosuk): This is a hack. We should use a better store.
+        # FIXME: This causes a memory leak since we never remove responses
+        # from the store.
+        self.responses: dict[str, ResponsesResponse] = {}
+        self.lock = asyncio.Lock()
+
+    async def add_response(self, response: ResponsesResponse):
+        async with self.lock:
+            self.responses[response.id] = response
+
+    async def get_response(
+        self,
+        response_id: str,
+    ) -> Optional[ResponsesResponse]:
+        async with self.lock:
+            return self.responses.get(response_id)
