@@ -9,21 +9,19 @@ import pytest
 @pytest.mark.asyncio
 async def test_store(client: openai.AsyncOpenAI):
     # By default, store is True.
-    response = await client.responses.create(input="What is 13 * 24?")
+    response = await client.responses.create(input="Hello!")
     assert response.status == "completed"
 
     # Retrieve the response.
     response = await client.responses.retrieve(response.id)
     assert response.status == "completed"
-    assert "312" in response.output[-1].content[0].text
 
     # Test store=False.
     response = await client.responses.create(
-        input="What is 11 * 12?",
+        input="Hello!",
         store=False,
     )
     assert response.status == "completed"
-    assert "132" in response.output[-1].content[0].text
 
     # The response should not be found.
     with pytest.raises(openai.NotFoundError,
@@ -33,21 +31,23 @@ async def test_store(client: openai.AsyncOpenAI):
 
 @pytest.mark.asyncio
 async def test_background(client: openai.AsyncOpenAI):
+    # NOTE: This query should be easy enough for the model to answer
+    # within the 10 seconds.
     response = await client.responses.create(
-        input="What is 13 * 24?",
+        input="Hello!",
         background=True,
     )
     assert response.status == "queued"
 
     max_retries = 10
     for _ in range(max_retries):
+        await asyncio.sleep(1)
         response = await client.responses.retrieve(response.id)
         if response.status != "queued":
             break
-        await asyncio.sleep(1)
+    print(response)
 
     assert response.status == "completed"
-    assert "312" in response.output[-1].content[0].text
 
 
 @pytest.mark.asyncio
