@@ -677,6 +677,7 @@ def run_mistral3(questions: list[str], modality: str) -> ModelRequestData:
         max_num_seqs=2,
         tensor_parallel_size=2,
         limit_mm_per_prompt={modality: 1},
+        ignore_patterns=["consolidated.safetensors"],
     )
 
     prompts = [f"<s>[INST]{question}\n[IMG][/INST]" for question in questions]

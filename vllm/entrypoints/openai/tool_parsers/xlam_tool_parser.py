@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # ruff: noqa
 import json
 from collections.abc import Sequence
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Optional, Union
 
 import regex as re
 
