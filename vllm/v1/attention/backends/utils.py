@@ -79,11 +79,20 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
         self.kv_cache_spec = kv_cache_spec
 
     @abstractmethod
-    def build(self, common_prefix_len: int,
-              common_attn_metadata: CommonAttentionMetadata) -> M:
+    def build(self,
+              common_prefix_len: int,
+              common_attn_metadata: CommonAttentionMetadata,
+              fast_build: bool = False) -> M:
         """
         Central method that builds attention metadata.
         Some builders (MLA) require reorder_batch to be called prior to build.
+        
+        Args:
+            common_prefix_len: The length of the common prefix of the batch.
+            common_attn_metadata: The common attention metadata.
+            fast_build: The meta-data will prioritize speed of building over
+                then speed at execution. Can be used for spec-decode where the
+                result of a build call may only be used for few layers/iters.
         """
         raise NotImplementedError
 

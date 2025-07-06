@@ -211,11 +211,10 @@ class FlashAttentionMetadataBuilder(
         # populated on first build() call.
         self.aot_sliding_window: Optional[tuple[int, int]] = None
 
-    def build(
-        self,
-        common_prefix_len: int,
-        common_attn_metadata: CommonAttentionMetadata,
-    ) -> FlashAttentionMetadata:
+    def build(self,
+              common_prefix_len: int,
+              common_attn_metadata: CommonAttentionMetadata,
+              fast_build: bool = False) -> FlashAttentionMetadata:
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len
@@ -227,13 +226,16 @@ class FlashAttentionMetadataBuilder(
         block_table_tensor = common_attn_metadata.block_table_tensor
         slot_mapping = common_attn_metadata.slot_mapping
 
+        # the overhead of the aot schedule is not worth it for spec-decode
+        aot_schedule = self.aot_schedule and not fast_build
+
         if self.aot_sliding_window is None:
             self.aot_sliding_window = (-1, -1)
             # For the AOT scheduler we need the sliding window value to be
             # constant for all layers to. We have to populate this on the first
             # build() call so the layers are constructed (cannot populate)
             # in __init__.
-            if self.aot_schedule:
+            if aot_schedule:
                 sliding_window_configs = _get_sliding_window_configs(
                     self.vllm_config)
                 if len(sliding_window_configs) == 1:
@@ -242,10 +244,11 @@ class FlashAttentionMetadataBuilder(
                         self.aot_sliding_window = sliding_window_config
                 elif len(sliding_window_configs) > 1:
                     self.aot_schedule = False
+                    aot_schedule = False
 
         def schedule(batch_size, cu_query_lens, max_query_len, seqlens,
                      max_seq_len, causal):
-            if self.aot_schedule:
+            if aot_schedule:
                 return get_scheduler_metadata(
                     batch_size=batch_size,
                     max_seqlen_q=max_query_len,
