@@ -250,14 +250,14 @@ class ResponsesRequest(OpenAIBaseModel):
     previous_response_id: Optional[str] = None
     prompt: Optional[ResponsePrompt] = None
     reasoning: Optional[Reasoning] = None
-    service_tier: Optional[Literal["auto", "default", "flex", "scale",
-                                   "priority"]] = "auto"
+    service_tier: Literal["auto", "default", "flex", "scale",
+                          "priority"] = "auto"
     store: Optional[bool] = True
     stream: Optional[bool] = False
     temperature: Optional[float] = None
     text: Optional[ResponseTextConfig] = None
-    tool_choice: Optional[ToolChoice] = None
-    tools: Optional[list[Tool]] = None
+    tool_choice: ToolChoice = "auto"
+    tools: list[Tool] = Field(default_factory=list)
     top_logprobs: Optional[int] = 0
     top_p: Optional[float] = None
     truncation: Optional[Literal["auto", "disabled"]] = "disabled"
@@ -1615,7 +1615,7 @@ class ResponsesResponse(OpenAIBaseModel):
     output: list[Union[ResponseOutputMessage, ResponseReasoningItem]]
     parallel_tool_calls: bool
     temperature: float
-    # tool_choice: ToolChoice
+    tool_choice: ToolChoice
     tools: list[Tool]
     top_p: float
     background: bool
@@ -1652,7 +1652,8 @@ class ResponsesResponse(OpenAIBaseModel):
             output=output,
             parallel_tool_calls=request.parallel_tool_calls,
             temperature=sampling_params.temperature,
-            tools=request.tools if request.tools is not None else [],
+            tool_choice=request.tool_choice,
+            tools=request.tools,
             top_p=sampling_params.top_p,
             background=request.background,
             max_output_tokens=sampling_params.max_tokens,
