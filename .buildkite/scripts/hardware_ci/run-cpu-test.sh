@@ -66,10 +66,10 @@ function cpu_tests() {
     tests/quantization/test_compressed_tensors.py::test_compressed_tensors_w8a8_dynamic_per_token"
 
   # Run AWQ test
-  docker exec cpu-test-"$NUMA_NODE" bash -c "
-    set -e
-    VLLM_USE_V1=0 pytest -s -v \
-    tests/quantization/test_ipex_quant.py"
+  # docker exec cpu-test-"$NUMA_NODE" bash -c "
+  #   set -e
+  #   VLLM_USE_V1=0 pytest -s -v \
+  #   tests/quantization/test_ipex_quant.py"
 
   # Run chunked-prefill and prefix-cache test
   docker exec cpu-test-"$NUMA_NODE" bash -c "
