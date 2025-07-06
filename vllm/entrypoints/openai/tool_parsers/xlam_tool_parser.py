@@ -17,6 +17,7 @@ from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     ToolParser, ToolParserManager)
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
 
