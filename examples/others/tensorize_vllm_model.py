@@ -267,7 +267,8 @@ def deserialize(args, tensorizer_config):
             lora_request=LoRARequest("sql-lora",
                                      1,
                                      args.lora_path,
-                                     tensorizer_config = tensorizer_config)
+                                     tensorizer_config_dict = tensorizer_config
+                                     .to_serializable())
             )
         )
     else:
