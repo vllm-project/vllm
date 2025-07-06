@@ -1341,8 +1341,8 @@ class LLM:
                                             ScoreMultiModalParam]):
                 if isinstance(data, dict) and "content" in data:
                     raise ValueError(
-                        "Multi-modal prompt is not supported for Model %s",
-                        self.llm_engine.model_config.architectures)
+                        f"ScoreMultiModalParam is not supported for {self.llm_engine.model_config.architectures}",
+                    )
 
             check_data_type(data_1)
             check_data_type(data_2)
@@ -1350,10 +1350,8 @@ class LLM:
             def ensure_str(prompt: SingletonPrompt):
                 if isinstance(prompt, dict):
                     if "multi_modal_data" in prompt:
-                        raise ValueError(
-                            "Multi-modal prompt is not "
-                            "supported for Model %s",
-                            self.llm_engine.model_config.architectures)
+                        raise ValueError("Multi-modal prompt is not "
+                                         "supported for scoring")
                     elif "prompt_token_ids" in prompt:
                         prompt = tokenizer.decode(
                             cast(TokensPrompt, prompt)["prompt_token_ids"])

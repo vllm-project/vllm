@@ -295,6 +295,12 @@ class ServingScores(OpenAIServing):
         trace_headers = (None if raw_request is None else await
                          self._get_trace_headers(raw_request.headers))
 
+        if not self.model_config.is_multimodal_model:
+            if isinstance(data_1, dict) or isinstance(data_2, dict):
+                raise ValueError(
+                    f"MultiModalParam is not supported for {self.model_config.architectures}"
+                )
+
         if isinstance(data_1, str):
             data_1 = [data_1]
         elif isinstance(data_1, dict):
@@ -320,12 +326,10 @@ class ServingScores(OpenAIServing):
                 trace_headers=trace_headers)
 
         else:
-            if isinstance(data_1, dict) or isinstance(data_2, dict):
-                raise ValueError("MultiModalParam is not supported for ")
             return await self._embedding_score(
                 tokenizer=tokenizer,
-                data_1=data_1,
-                data_2=data_2,
+                texts_1=data_1,
+                texts_2=data_2,
                 request=request,
                 request_id=request_id,
                 tokenization_kwargs=tokenization_kwargs,
