@@ -7,6 +7,11 @@ pytest-rerunfailures
 pytest-shard
 pytest-timeout
 
+# must be installed before other dependencie, it may fail the nightly build setup
+numba == 0.60.0; python_version == '3.9' # v0.61 doesn't support Python 3.9. Required for N-gram speculative decoding
+numba == 0.61.2; python_version > '3.9'
+numpy
+
 # testing utils
 backoff # required for phi4mm test
 blobfile # required for kimi-vl test
@@ -21,7 +26,8 @@ ray[cgraph,default]>=2.43.0, !=2.44.* # Ray Compiled Graph, required by pipeline
 sentence-transformers # required for embedding tests
 soundfile # required for audio tests
 jiwer # required for audio tests
-timm # required for internvl test
+timm # required for internvl test.
+
 torch==2.7.0
 torchaudio==2.7.0
 torchvision==0.22.0
@@ -42,13 +48,9 @@ schemathesis>=3.39.15 # Required for openai schema test.
 bitsandbytes==0.46.1
 buildkite-test-collector==0.1.9
 
-
 genai_perf==0.0.8
 tritonclient==2.51.0
 
-numba == 0.60.0; python_version == '3.9' # v0.61 doesn't support Python 3.9. Required for N-gram speculative decoding
-numba == 0.61.2; python_version > '3.9'
-numpy
 runai-model-streamer==0.11.0
 runai-model-streamer-s3==0.11.0
 fastsafetensors>=0.1.10
