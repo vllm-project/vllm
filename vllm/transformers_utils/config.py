@@ -867,7 +867,7 @@ def try_get_generation_config(
 
 
 def get_classification_activation_function(config: PretrainedConfig):
-    return nn.Sigmoid() if config.num_labels == 1 else nn.Identity()
+    return nn.Sigmoid() if config.num_labels == 1 else nn.Softmax()
 
 
 def get_cross_encoder_activation_function(config: PretrainedConfig):
@@ -885,7 +885,7 @@ def get_cross_encoder_activation_function(config: PretrainedConfig):
             "torch.nn.modules for security reasons")
         return resolve_obj_by_qualname(function_name)()
 
-    return get_classification_activation_function(config)
+    return nn.Sigmoid() if config.num_labels == 1 else nn.Identity()
 
 
 def try_get_safetensors_metadata(
