@@ -8,8 +8,7 @@ from typing import Callable, Final, Optional, Union
 
 import jinja2
 from fastapi import Request
-from openai.types.responses import (ResponseOutputMessage, ResponseOutputText,
-                                    ResponseStatus)
+from openai.types.responses import ResponseOutputMessage, ResponseOutputText
 
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
@@ -86,7 +85,11 @@ class OpenAIServingResponses(OpenAIServing):
             logger.info("Using default chat sampling params from %s: %s",
                         source, self.default_sampling_params)
 
-        self.response_store = ResponseStore()
+        # HACK(woosuk): This is a hack. We should use a better store.
+        # FIXME: This causes a memory leak since we never remove responses
+        # from the store.
+        self.response_store: dict[str, ResponsesResponse] = {}
+        self.lock = asyncio.Lock()
 
     async def create_responses(
         self,
@@ -182,7 +185,8 @@ class OpenAIServingResponses(OpenAIServing):
                 status="queued",
                 usage=None,
             )
-            await self.response_store.add_response(response)
+            async with self.lock:
+                self.response_store[response.id] = response
             asyncio.create_task(
                 self._run_background_request(
                     request,
@@ -299,7 +303,12 @@ class OpenAIServingResponses(OpenAIServing):
         )
 
         if request.store:
-            await self.response_store.add_response(response)
+            async with self.lock:
+                stored_response = self.response_store.get(response.id)
+                # If the response is already cancelled, don't update it.
+                if (stored_response is None
+                        or stored_response.status != "cancelled"):
+                    self.response_store[response.id] = response
         return response
 
     async def _run_background_request(
@@ -316,50 +325,60 @@ class OpenAIServingResponses(OpenAIServing):
         if isinstance(response, ErrorResponse):
             # If the request has failed, update the status to "failed".
             response_id = request.request_id
-            self.response_store.update_status(response_id, "failed")
+            async with self.lock:
+                stored_response = self.response_store.get(response_id)
+                if stored_response.status != "cancelled":
+                    stored_response.status = "failed"
 
     async def retrieve_responses(
         self,
         response_id: str,
     ) -> Union[ErrorResponse, ResponsesResponse]:
         if not response_id.startswith("resp_"):
-            return self.create_error_response(
-                err_type="invalid_request_error",
-                message=(f"Invalid 'response_id': '{response_id}'. "
-                         "Expected an ID that begins with 'resp'."),
-            )
-        response = await self.response_store.get_response(response_id)
+            return self._make_invalid_id_error(response_id)
+
+        async with self.lock:
+            response = self.response_store.get(response_id)
+
         if response is None:
-            return self.create_error_response(
-                err_type="invalid_request_error",
-                message=f"Response with id '{response_id}' not found. ",
-            )
+            return self._make_not_found_error(response_id)
         return response
 
-
-class ResponseStore:
-
-    def __init__(self):
-        # HACK(woosuk): This is a hack. We should use a better store.
-        # FIXME: This causes a memory leak since we never remove responses
-        # from the store.
-        self.responses: dict[str, ResponsesResponse] = {}
-        self.lock = asyncio.Lock()
-
-    async def add_response(self, response: ResponsesResponse):
-        async with self.lock:
-            self.responses[response.id] = response
-
-    async def get_response(
+    async def cancel_responses(
         self,
         response_id: str,
-    ) -> Optional[ResponsesResponse]:
-        async with self.lock:
-            return self.responses.get(response_id)
+    ) -> Union[ErrorResponse, ResponsesResponse]:
+        if not response_id.startswith("resp_"):
+            return self._make_invalid_id_error(response_id)
 
-    async def update_status(self, response_id: str, status: ResponseStatus):
         async with self.lock:
-            response = self.responses.get(response_id)
+            response = self.response_store.get(response_id)
             if response is None:
-                return
-            response.status = status
+                return self._make_not_found_error(response_id)
+
+            if response.status not in ("queued", "in_progress"):
+                return self.create_error_response(
+                    err_type="invalid_request_error",
+                    message="Cannot cancel a completed response.",
+                )
+
+            # Update the status to "cancelled".
+            response.status = "cancelled"
+
+        # Abort the request.
+        await self.engine_client.abort(response_id)
+        return response
+
+    def _make_invalid_id_error(self, response_id: str) -> ErrorResponse:
+        return self.create_error_response(
+            err_type="invalid_request_error",
+            message=(f"Invalid 'response_id': '{response_id}'. "
+                     "Expected an ID that begins with 'resp'."),
+        )
+
+    def _make_not_found_error(self, response_id: str) -> ErrorResponse:
+        return self.create_error_response(
+            err_type="invalid_request_error",
+            message=f"Response with id '{response_id}' not found. ",
+            status_code=404,
+        )

@@ -590,6 +590,21 @@ async def retrieve_responses(response_id: str, raw_request: Request):
     return JSONResponse(content=response.model_dump())
 
 
+@router.post("/v1/responses/{response_id}/cancel")
+async def cancel_responses(response_id: str, raw_request: Request):
+    handler = responses(raw_request)
+    if handler is None:
+        return base(raw_request).create_error_response(
+            message="The model does not support Responses API")
+
+    response = await handler.cancel_responses(response_id)
+
+    if isinstance(response, ErrorResponse):
+        return JSONResponse(content=response.model_dump(),
+                            status_code=response.code)
+    return JSONResponse(content=response.model_dump())
+
+
 @router.post("/v1/chat/completions",
              dependencies=[Depends(validate_json_request)],
              responses={
