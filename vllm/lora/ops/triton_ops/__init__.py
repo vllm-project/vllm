@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from vllm.lora.ops.triton_ops.lora_expand_op import lora_expand
 from vllm.lora.ops.triton_ops.lora_kernel_metadata import LoRAKernelMeta

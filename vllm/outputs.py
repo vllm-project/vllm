@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import time
 from collections.abc import MutableSequence
@@ -452,6 +453,7 @@ class ClassificationOutput:
 
     @staticmethod
     def from_base(pooling_output: PoolingOutput):
+        # pooling_output shape: (num_classes)
         pooled_data = pooling_output.data
         if pooled_data.ndim != 1:
             raise ValueError("pooled_data should be a 1-D probability vector")
@@ -489,7 +491,10 @@ class ScoringOutput:
 
     @staticmethod
     def from_base(pooling_output: PoolingOutput):
-        pooled_data = pooling_output.data
+        # pooling_output shape:
+        #   classify task: (num_classes) num_classes == 1
+        #   embed task: a scalar value
+        pooled_data = pooling_output.data.squeeze()
         if pooled_data.ndim != 0:
             raise ValueError("pooled_data should be a scalar score")
 

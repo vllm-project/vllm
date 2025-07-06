@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Benchmark offline inference throughput."""
 import argparse
 import dataclasses
@@ -83,7 +84,7 @@ def run_vllm(
         assert lora_requests is None, "BeamSearch API does not support LoRA"
         prompts = [request.prompt for request in requests]
         # output_len should be the same for all requests.
-        output_len = requests[0][2]
+        output_len = requests[0].expected_output_len
         for request in requests:
             assert request.expected_output_len == output_len
         start = time.perf_counter()

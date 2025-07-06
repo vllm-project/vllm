@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Example for starting a Gradio OpenAI Chatbot Webserver
 Start vLLM API server:
     vllm serve meta-llama/Llama-2-7b-chat-hf

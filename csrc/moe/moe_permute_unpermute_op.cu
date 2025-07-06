@@ -12,7 +12,7 @@ void moe_permute(
     const torch::Tensor& input,                      // [n_token, hidden]
     const torch::Tensor& topk_weights,               //[n_token, topk]
     torch::Tensor& topk_ids,                         // [n_token, topk]
-    const torch::Tensor& token_expert_indicies,      // [n_token, topk]
+    const torch::Tensor& token_expert_indices,       // [n_token, topk]
     const std::optional<torch::Tensor>& expert_map,  // [n_expert]
     int64_t n_expert, int64_t n_local_expert, int64_t topk,
     const std::optional<int64_t>& align_block_size,
@@ -27,15 +27,15 @@ void moe_permute(
               "expert_first_token_offset must be int64");
   TORCH_CHECK(topk_ids.scalar_type() == at::ScalarType::Int,
               "topk_ids must be int32");
-  TORCH_CHECK(token_expert_indicies.scalar_type() == at::ScalarType::Int,
-              "token_expert_indicies must be int32");
+  TORCH_CHECK(token_expert_indices.scalar_type() == at::ScalarType::Int,
+              "token_expert_indices must be int32");
   TORCH_CHECK(src_row_id2dst_row_id_map.scalar_type() == at::ScalarType::Int,
               "src_row_id2dst_row_id_map must be int32");
   TORCH_CHECK(expert_first_token_offset.size(0) == n_local_expert + 1,
               "expert_first_token_offset shape != n_local_expert+1")
   TORCH_CHECK(
-      src_row_id2dst_row_id_map.sizes() == token_expert_indicies.sizes(),
-      "token_expert_indicies shape must be same as src_row_id2dst_row_id_map");
+      src_row_id2dst_row_id_map.sizes() == token_expert_indices.sizes(),
+      "token_expert_indices shape must be same as src_row_id2dst_row_id_map");
   auto n_token = input.sizes()[0];
   auto n_hidden = input.sizes()[1];
   auto align_block_size_value =
@@ -71,7 +71,7 @@ void moe_permute(
                              expert_map_ptr, n_expert, stream);
   }
   // expert sort topk expert id and scan expert id get expert_first_token_offset
-  sortAndScanExpert(get_ptr<int>(topk_ids), get_ptr<int>(token_expert_indicies),
+  sortAndScanExpert(get_ptr<int>(topk_ids), get_ptr<int>(token_expert_indices),
                     get_ptr<int>(permuted_experts_id),
                     get_ptr<int>(dst_row_id2src_row_id_map),
                     get_ptr<int64_t>(expert_first_token_offset), n_token,
@@ -130,11 +130,67 @@ void moe_unpermute(
   });
 }
 
+template <typename T>
+__global__ void shuffleInputRowsKernel(const T* input,
+                                       const int32_t* dst2src_map, T* output,
+                                       int64_t num_src_rows,
+                                       int64_t num_dst_rows, int64_t num_cols) {
+  int64_t dest_row_idx = blockIdx.x;
+  int64_t const source_row_idx = dst2src_map[dest_row_idx];
+
+  if (blockIdx.x < num_dst_rows) {
+    // Load 128-bits per thread
+    constexpr int64_t ELEM_PER_THREAD = 128 / sizeof(T) / 8;
+    using DataElem = cutlass::Array<T, ELEM_PER_THREAD>;
+
+    // Duplicate and permute rows
+    auto const* source_row_ptr =
+        reinterpret_cast<DataElem const*>(input + source_row_idx * num_cols);
+    auto* dest_row_ptr =
+        reinterpret_cast<DataElem*>(output + dest_row_idx * num_cols);
+
+    int64_t const start_offset = threadIdx.x;
+    int64_t const stride = blockDim.x;
+    int64_t const num_elems_in_col = num_cols / ELEM_PER_THREAD;
+
+    for (int elem_index = start_offset; elem_index < num_elems_in_col;
+         elem_index += stride) {
+      dest_row_ptr[elem_index] = source_row_ptr[elem_index];
+    }
+  }
+}
+
+void shuffle_rows(const torch::Tensor& input_tensor,
+                  const torch::Tensor& dst2src_map,
+                  torch::Tensor& output_tensor) {
+  TORCH_CHECK(input_tensor.scalar_type() == output_tensor.scalar_type(),
+              "Input and output tensors must have the same data type");
+
+  auto stream = at::cuda::getCurrentCUDAStream().stream();
+  int64_t const blocks = output_tensor.size(0);
+  int64_t const threads = 256;
+  int64_t const num_dest_rows = output_tensor.size(0);
+  int64_t const num_src_rows = input_tensor.size(0);
+  int64_t const num_cols = input_tensor.size(1);
+
+  TORCH_CHECK(!(num_cols % (128 / sizeof(input_tensor.scalar_type()) / 8)),
+              "num_cols must be divisible by 128 / "
+              "sizeof(input_tensor.scalar_type()) / 8");
+
+  MOE_DISPATCH(input_tensor.scalar_type(), [&] {
+    shuffleInputRowsKernel<scalar_t><<<blocks, threads, 0, stream>>>(
+        reinterpret_cast<scalar_t*>(input_tensor.data_ptr()),
+        dst2src_map.data_ptr<int32_t>(),
+        reinterpret_cast<scalar_t*>(output_tensor.data_ptr()), num_src_rows,
+        num_dest_rows, num_cols);
+  });
+}
+
 #else
 
 void moe_permute(const torch::Tensor& input, const torch::Tensor& topk_weights,
                  torch::Tensor& topk_ids,
-                 const torch::Tensor& token_expert_indicies,
+                 const torch::Tensor& token_expert_indices,
                  const std::optional<torch::Tensor>& expert_map,
                  int64_t n_expert, int64_t n_local_expert, int64_t topk,
                  const std::optional<int64_t>& align_block_size,
@@ -147,7 +203,7 @@ void moe_permute(const torch::Tensor& input, const torch::Tensor& topk_weights,
 
 void moe_unpermute(const torch::Tensor& input,
                    const torch::Tensor& topk_weights, torch::Tensor& topk_ids,
-                   const torch::Tensor& token_expert_indicies,
+                   const torch::Tensor& token_expert_indices,
                    const std::optional<torch::Tensor>& expert_map,
                    int64_t n_expert, int64_t n_local_expert, int64_t topk,
                    const std::optional<int64_t>& align_block_size,
