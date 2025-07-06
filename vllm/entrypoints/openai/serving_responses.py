@@ -4,6 +4,7 @@
 import asyncio
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
+from http import HTTPStatus
 from typing import Callable, Final, Optional, Union
 
 import jinja2
@@ -90,6 +91,7 @@ class OpenAIServingResponses(OpenAIServing):
         # from the store.
         self.response_store: dict[str, ResponsesResponse] = {}
         self.lock = asyncio.Lock()
+        self.background_tasks: dict[str, asyncio.Task] = {}
 
     async def create_responses(
         self,
@@ -187,7 +189,9 @@ class OpenAIServingResponses(OpenAIServing):
             )
             async with self.lock:
                 self.response_store[response.id] = response
-            asyncio.create_task(
+
+            # Run the request in the background.
+            task = asyncio.create_task(
                 self._run_background_request(
                     request,
                     sampling_params,
@@ -196,7 +200,15 @@ class OpenAIServingResponses(OpenAIServing):
                     tokenizer,
                     request_metadata,
                     created_time,
-                ))
+                ),
+                name=f"create_{response.id}",
+            )
+
+            # For cleanup.
+            response_id = response.id
+            self.background_tasks[response_id] = task
+            task.add_done_callback(
+                lambda _: self.background_tasks.pop(response_id, None))
             return response
 
         if request.stream:
@@ -321,13 +333,16 @@ class OpenAIServingResponses(OpenAIServing):
             response = await self.responses_full_generator(
                 request, *args, **kwargs)
         except Exception as e:
+            logger.exception("Background request failed for %s",
+                             request.request_id)
             response = self.create_error_response(str(e))
+
         if isinstance(response, ErrorResponse):
             # If the request has failed, update the status to "failed".
             response_id = request.request_id
             async with self.lock:
                 stored_response = self.response_store.get(response_id)
-                if stored_response.status != "cancelled":
+                if stored_response.status not in ("completed", "cancelled"):
                     stored_response.status = "failed"
 
     async def retrieve_responses(
@@ -368,7 +383,12 @@ class OpenAIServingResponses(OpenAIServing):
 
         # Abort the request.
         if prev_status in ("queued", "in_progress"):
-            await self.engine_client.abort(response_id)
+            if task := self.background_tasks.get(response_id):
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
         return response
 
     def _make_invalid_id_error(self, response_id: str) -> ErrorResponse:
@@ -382,5 +402,5 @@ class OpenAIServingResponses(OpenAIServing):
         return self.create_error_response(
             err_type="invalid_request_error",
             message=f"Response with id '{response_id}' not found.",
-            status_code=404,
+            status_code=HTTPStatus.NOT_FOUND,
         )
