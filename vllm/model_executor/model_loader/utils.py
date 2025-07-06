@@ -169,7 +169,7 @@ def device_loading_context(module: torch.nn.Module,
 def resolve_transformers_arch(model_config: ModelConfig,
                               architectures: list[str]):
     for i, arch in enumerate(architectures):
-        if arch == "TransformersForCausalLM":
+        if arch in ["TransformersForCausalLM", "TransformersForMultimodalLM"]:
             continue
         auto_map: dict[str, str] = getattr(model_config.hf_config, "auto_map",
                                            None) or dict()
@@ -205,7 +205,13 @@ def resolve_transformers_arch(model_config: ModelConfig,
                 raise ValueError(
                     f"The Transformers implementation of {arch} is not "
                     "compatible with vLLM.")
-            architectures[i] = "TransformersForCausalLM"
+            # Check if text-config is `self`. If not most probably it is
+            # a composite config, i.e. mutlimodal
+            if model_config.hf_config.get_text_config(
+            ) != model_config.hf_config:
+                architectures[i] = "TransformersForMultimodalLM"
+            else:
+                architectures[i] = "TransformersForCausalLM"
         if model_config.model_impl == ModelImpl.AUTO:
             if not model_module.is_backend_compatible():
                 raise ValueError(
@@ -216,7 +222,13 @@ def resolve_transformers_arch(model_config: ModelConfig,
                 "%s has no vLLM implementation, falling back to Transformers "
                 "implementation. Some features may not be supported and "
                 "performance may not be optimal.", arch)
-            architectures[i] = "TransformersForCausalLM"
+            # Check if text-config is `self`. If not most probably it is
+            # a composite config, i.e. mutlimodal
+            if model_config.hf_config.get_text_config(
+            ) != model_config.hf_config:
+                architectures[i] = "TransformersForMultimodalLM"
+            else:
+                architectures[i] = "TransformersForCausalLM"
     return architectures
 
 
