@@ -114,8 +114,7 @@ def test_kv_cache_block():
     assert block.ref_cnt == 0
 
     # Test block hash setting and resetting
-    block_hash = vllm.v1.core.kv_cache_utils.BlockHash(hash_value=123,
-                                                       token_ids=(1, 2, 3))
+    block_hash = vllm.v1.request.BlockHash(hash_value=123, token_ids=(1, 2, 3))
     block.block_hash = block_hash
     assert block.block_hash == block_hash
 
@@ -296,7 +295,7 @@ def test_hash_block_tokens(hash_fn):
 
     block_hash = hash_block_tokens(hash_fn, parent_block_hash,
                                    curr_block_token_ids, extra_keys)
-    assert isinstance(block_hash, vllm.v1.core.kv_cache_utils.BlockHash)
+    assert isinstance(block_hash, vllm.v1.request.BlockHash)
     assert block_hash.hash_value == hash_fn(
         (parent_block_hash, curr_block_token_ids, extra_keys))
     assert block_hash.token_ids == curr_block_token_ids
@@ -320,8 +319,8 @@ def test_hash_request_tokens(hash_fn):
     block_hashes = hash_request_tokens(hash_fn, block_size, request)
 
     assert len(block_hashes) == 2
-    assert isinstance(block_hashes[0], vllm.v1.core.kv_cache_utils.BlockHash)
-    assert isinstance(block_hashes[1], vllm.v1.core.kv_cache_utils.BlockHash)
+    assert isinstance(block_hashes[0], vllm.v1.request.BlockHash)
+    assert isinstance(block_hashes[1], vllm.v1.request.BlockHash)
 
     # Check the first block
     assert block_hashes[0].token_ids == (0, 1, 2)

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections import defaultdict
 from dataclasses import dataclass
 from typing import Optional
 
@@ -9,8 +8,7 @@ from vllm.distributed.kv_events import KVCacheEvent
 from vllm.logger import init_logger
 from vllm.utils import sha256
 from vllm.v1.core.kv_cache_coordinator import get_kv_cache_coordinator
-from vllm.v1.core.kv_cache_utils import (BlockHash, KVCacheBlock,
-                                         hash_request_tokens)
+from vllm.v1.core.kv_cache_utils import KVCacheBlock, hash_request_tokens
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request, RequestStatus
@@ -106,12 +104,6 @@ class KVCacheManager:
         self.block_pool = self.coordinator.block_pool
         self.kv_cache_config = kv_cache_config
 
-        # Mapping from request ID to kv block hashes.
-        # This is to avoid recomputing the block hashes for each call of
-        # `get_computed_blocks` or `allocate_slots`.
-        self.req_to_block_hashes: defaultdict[
-            str, list[BlockHash]] = defaultdict(list)
-
     @property
     def usage(self) -> float:
         """Get the KV cache usage.
@@ -155,12 +147,12 @@ class KVCacheManager:
 
         # The block hashes for the request may already be computed
         # if the scheduler has tried to schedule the request before.
-        block_hashes = self.req_to_block_hashes[request.request_id]
+        block_hashes = request.block_hashes
         if not block_hashes:
             assert self.block_size is not None
             block_hashes = hash_request_tokens(self.caching_hash_fn,
                                                self.block_size, request)
-            self.req_to_block_hashes[request.request_id] = block_hashes
+            request.block_hashes = block_hashes
 
         if self.log_stats:
             assert self.prefix_cache_stats is not None
@@ -290,8 +282,7 @@ class KVCacheManager:
         # not cache any speculated tokens. We only cache blocks with
         # generated (accepted) tokens.
         self.coordinator.cache_blocks(
-            request, self.req_to_block_hashes[request.request_id],
-            num_computed_tokens + num_new_tokens - num_draft_tokens)
+            request, num_computed_tokens + num_new_tokens - num_draft_tokens)
 
         return KVCacheBlocks(new_blocks)
 
@@ -364,14 +355,6 @@ class KVCacheManager:
         return self.coordinator.get_num_common_prefix_blocks(
             request.request_id, num_running_requests)
 
-    def free_block_hashes(self, request: Request) -> None:
-        """Discard the block hashes for the request.
-
-        NOTE: Unlike `free`, this method should be called only when the request
-        is finished, not when it is preempted.
-        """
-        self.req_to_block_hashes.pop(request.request_id, None)
-
     def take_events(self) -> list[KVCacheEvent]:
         """Take the KV cache events from the block pool.
 
@@ -388,9 +371,7 @@ class KVCacheManager:
     def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
         """Cache the blocks for the request, if enabled."""
         if self.enable_caching:
-            block_hashes = self.req_to_block_hashes[request.request_id]
-            self.coordinator.cache_blocks(request, block_hashes,
-                                          num_computed_tokens)
+            self.coordinator.cache_blocks(request, num_computed_tokens)
 
     def create_empty_block_list(self) -> KVCacheBlocks:
         """Creates a new KVCacheBlocks instance with no blocks."""

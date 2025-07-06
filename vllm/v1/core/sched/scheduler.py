@@ -992,7 +992,6 @@ class Scheduler(SchedulerInterface):
     def _free_blocks(self, request: Request):
         assert request.is_finished()
         self.kv_cache_manager.free(request)
-        self.kv_cache_manager.free_block_hashes(request)
         del self.requests[request.request_id]
 
     def get_num_unfinished_requests(self) -> int:

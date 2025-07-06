@@ -3,7 +3,7 @@
 
 import enum
 import time
-from typing import TYPE_CHECKING, Any, Optional, Union
+from typing import TYPE_CHECKING, Any, NamedTuple, Optional, Union
 
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.pooling_params import PoolingParams
@@ -16,6 +16,20 @@ from vllm.v1.utils import ConstantList
 
 if TYPE_CHECKING:
     from vllm.lora.request import LoRARequest
+
+
+class BlockHash(NamedTuple):
+    """Hash value of a block (int), the token IDs in the block, and extra keys.
+    We keep a tuple of token IDs and extra keys to reduce the likelihood of
+    hash collisions when the hash value is the same. By using SHA256 however,
+    hash collisions are practically impossible.
+    """
+    # Hash value of the block in an integer.
+    hash_value: int
+    # Token IDs in the block.
+    token_ids: tuple[int, ...]
+    # Extra keys for the block.
+    extra_keys: Optional[Any] = None
 
 
 class Request:
@@ -80,6 +94,8 @@ class Request:
         self.spec_token_ids: list[int] = []
         self.num_computed_tokens = 0
         self.cache_salt: Optional[str] = cache_salt
+
+        self.block_hashes: list[BlockHash] = []
 
         # Multi-modal related
         self.mm_positions = multi_modal_placeholders or []
