@@ -1204,7 +1204,7 @@ class LLM:
 
         input_pairs = [(t1, t2) for t1, t2 in zip(text_1, text_2)]
 
-        pooling_params = PoolingParams()
+        pooling_params = PoolingParams(use_cross_encoder=True)
 
         tokenization_kwargs: dict[str, Any] = {}
         _validate_truncation_size(self.llm_engine.model_config.max_model_len,
