@@ -75,9 +75,10 @@ class LoggingStatLogger(StatLoggerBase):
 
     def _get_throughput(self, tracked_stats: int, now: float) -> float:
         # Compute summary metrics for tracked stats
-        if now == self.last_log_time:
+        delta_time = now - self.last_log_time
+        if delta_time <= 0.0:
             return 0.0
-        return float(tracked_stats / (now - self.last_log_time))
+        return float(tracked_stats / delta_time)
 
     def record(self, scheduler_stats: Optional[SchedulerStats],
                iteration_stats: Optional[IterationStats]):
