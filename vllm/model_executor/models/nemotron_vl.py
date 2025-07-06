@@ -23,7 +23,6 @@ from vllm.config import VllmConfig
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.awq import AWQConfig
 from vllm.model_executor.models.module_mapping import MultiModelKeys
-#from vllm.model_executor.models.nemotron_radio import RADIOModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.image import convert_image_mode
@@ -1107,15 +1106,11 @@ class Llama_Nemotron_Nano_VL_Model(nn.Module, SupportsMultiModal, SupportsPP,
         *,
         prefix: str,
     ):
-        # return RADIOModel(config.vision_config,
-        #                   quant_config=quant_config,
-        #                   prefix=prefix)
         from transformers import AutoModel
         return AutoModel.from_config(config.vision_config,
                                      trust_remote_code=True)
 
     def _init_mlp1(self, config: PretrainedConfig) -> nn.Sequential:
-        #vit_hidden_size = config.vision_config.hidden_size
         vit_hidden_size = config.vit_hidden_size
         vision_projection_hidden_size = config.projector_hidden_size
         llm_hidden_size = config.text_config.hidden_size
