@@ -3,6 +3,7 @@
 
 import copy
 import gc
+import inspect
 import time
 import weakref
 from contextlib import contextmanager
@@ -42,6 +43,8 @@ from vllm.multimodal.utils import group_mm_inputs_by_modality
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
+from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
                         GiB_bytes, LazyLoader, async_tensor_h2d, cdiv,
                         check_use_alibi, get_dtype_size,
@@ -248,7 +251,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.slot_mapping = torch.zeros(self.max_num_tokens,
                                         dtype=torch.int64,
                                         device=self.device)
-
+        self.token_type_ids: Optional[torch.Tensor] = None
+        self.supports_token_type_ids: bool = False
         # None in the first PP rank. The rest are set after load_model.
         self.intermediate_tensors: Optional[IntermediateTensors] = None
 
@@ -316,6 +320,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # means this layer will perform attention using the keys and values
         # from the KV cache of `shared_kv_cache_layers[layer_name]`.
         self.shared_kv_cache_layers: dict[str, str] = {}
+
+    def get_token_type_ids(self) -> torch.Tensor:
+        if self.token_type_ids is None:
+            self.token_type_ids = torch.zeros(self.max_num_tokens,
+                                              dtype=torch.int32,
+                                              device=self.device)
+        return self.token_type_ids
+
+    def _maybe_add_model_args(self, num_tokens: int, model_kwargs: dict[str,
+                                                                        Any]):
+        if self.supports_token_type_ids:
+            model_kwargs["token_type_ids"] =\
+                  self.get_token_type_ids()[:num_tokens]
 
     def _may_reorder_batch(self, scheduler_output: "SchedulerOutput") -> None:
         """
@@ -415,6 +432,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.requests[req_id] = CachedRequestState(
                 req_id=req_id,
                 prompt_token_ids=new_req_data.prompt_token_ids,
+                token_type_ids=new_req_data.token_type_ids,
                 mm_inputs=new_req_data.mm_inputs,
                 mm_positions=new_req_data.mm_positions,
                 sampling_params=sampling_params,
@@ -636,6 +654,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                            0,
                            torch.from_numpy(token_indices),
                            out=self.input_ids_cpu[:total_num_scheduled_tokens])
+        if self.input_batch.token_type_ids_cpu_tensor is not None:
+            token_type_ids = torch.index_select(
+                self.input_batch.token_type_ids_cpu_tensor.flatten(), 0,
+                torch.from_numpy(token_indices))
+            # Copy the tensors to the GPU.
+            self.get_token_type_ids()[:total_num_scheduled_tokens]\
+                .copy_(token_type_ids, non_blocking=True)
 
         # Calculate the slot mapping for each KV cache group.
         for kv_cache_group_id, kv_cache_group_spec in enumerate(
@@ -1322,11 +1347,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         else:
             mm_embeds = []
 
+        model_kwargs: dict[str, Any] = {}
+
         if self.is_multimodal_model and get_pp_group().is_first_rank:
             # NOTE(woosuk): To unify token ids and soft tokens (vision
             # embeddings), we always use embeddings (rather than token ids)
             # as input to the multimodal model, even when the input is text.
             input_ids = self.input_ids[:num_scheduled_tokens]
+            self._maybe_add_model_args(num_scheduled_tokens, model_kwargs)
             if mm_embeds:
                 inputs_embeds = self.model.get_input_embeddings(
                     input_ids, mm_embeds)
@@ -1342,6 +1370,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # multimodal models, it is not desirable for performance since
             # then the embedding layer is not included in the CUDA graph.
             input_ids = self.input_ids[:num_input_tokens]
+            self._maybe_add_model_args(num_input_tokens, model_kwargs)
             inputs_embeds = None
         if self.uses_mrope:
             positions = self.mrope_positions[:, :num_input_tokens]
@@ -1375,6 +1404,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 positions=positions,
                 intermediate_tensors=intermediate_tensors,
                 inputs_embeds=inputs_embeds,
+                **model_kwargs,
             )
 
             self.maybe_wait_for_kv_save()
@@ -1765,6 +1795,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 draft_token_ids.append(drafter_output.tolist())
         return draft_token_ids
 
+    def _get_tokenizer(self) -> AnyTokenizer:
+        tokenizer_group = init_tokenizer_from_configs(
+            model_config=self.model_config,
+            scheduler_config=self.scheduler_config,
+            lora_config=self.lora_config)
+
+        return tokenizer_group.get_lora_tokenizer()
+
     def load_model(self) -> None:
         logger.info("Starting to load model %s...", self.model_config.model)
         with DeviceMemoryProfiler() as m:  # noqa: SIM117
@@ -1811,6 +1849,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.device,
                 self.parallel_config,
             )
+
+        model_supports_token_type_ids = 'token_type_ids' in \
+                inspect.getfullargspec(self.model.forward).args
+
+        tokenizer = self._get_tokenizer()
+        if not isinstance(tokenizer, MistralTokenizer):
+            tok_output = tokenizer(text="foo")
+            if "token_type_ids" in tok_output:
+                assert model_supports_token_type_ids
+                self.supports_token_type_ids = True
+
+        if self.supports_token_type_ids:
+            # pre-allocate tensor
+            self.get_token_type_ids()
 
     def save_tensorized_model(
         self,
@@ -2024,6 +2076,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         with self.maybe_dummy_run_with_lora(self.lora_config,
                                             num_scheduled_tokens):
             model = self.model
+            model_kwargs: dict[str, Any] = {}
+            self._maybe_add_model_args(num_tokens, model_kwargs)
             if self.is_multimodal_model:
                 input_ids = None
                 inputs_embeds = self.inputs_embeds[:num_tokens]
@@ -2058,6 +2112,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     positions=positions,
                     intermediate_tensors=intermediate_tensors,
                     inputs_embeds=inputs_embeds,
+                    **model_kwargs,
                 )
             if self.use_aux_hidden_state_outputs:
                 hidden_states, _ = outputs
@@ -2631,7 +2686,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 continue
 
             # TODO: Support other attention modules, e.g., cross-attention
-            if attn_module.attn_type == AttentionType.DECODER:
+            if attn_module.attn_type in (AttentionType.DECODER,
+                                         AttentionType.ENCODER_ONLY):
                 if attn_module.sliding_window is not None:
                     kv_cache_spec[layer_name] = SlidingWindowSpec(
                         block_size=block_size,
@@ -2639,17 +2695,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         head_size=attn_module.head_size,
                         dtype=self.kv_cache_dtype,
                         sliding_window=attn_module.sliding_window,
-                        use_mla=use_mla)
+                        use_mla=use_mla,
+                        attn_type=str(attn_module.attn_type))
                 else:
                     kv_cache_spec[layer_name] = FullAttentionSpec(
                         block_size=block_size,
                         num_kv_heads=attn_module.num_kv_heads,
                         head_size=attn_module.head_size,
                         dtype=self.kv_cache_dtype,
-                        use_mla=use_mla)
-            elif attn_module.attn_type in (AttentionType.ENCODER,
-                                           AttentionType.ENCODER_ONLY):
-                # encoder-only attention does not need KV cache.
+                        use_mla=use_mla,
+                        attn_type=str(attn_module.attn_type))
+            elif attn_module.attn_type == AttentionType.ENCODER:
+                # encoder attention does not need KV cache.
                 continue
             elif attn_module.attn_type == AttentionType.ENCODER_DECODER:
                 raise NotImplementedError
