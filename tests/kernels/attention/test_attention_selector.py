@@ -172,7 +172,7 @@ def test_env(
                     expected = "FLASHINFER_VLLM_V1" if use_v1 else name
                     assert backend.get_name() == expected
                 else:
-                    backend = get_attn_backend(16,
+                    backend = get_attn_backend(32,
                                                torch.float16,
                                                torch.float16,
                                                block_size,
@@ -180,6 +180,17 @@ def test_env(
                                                use_mla=use_mla)
                     expected = "FLASH_ATTN_VLLM_V1" if use_v1 else name
                     assert backend.get_name() == expected
+
+                    if use_v1:
+                        backend = get_attn_backend(16,
+                                                   torch.float16,
+                                                   torch.float16,
+                                                   block_size,
+                                                   False,
+                                                   use_mla=use_mla)
+                        assert backend.get_name() == "FLEX_ATTENTION", (
+                            "Should fallback to FlexAttention if head size is "
+                            "not supported by FlashAttention")
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"])

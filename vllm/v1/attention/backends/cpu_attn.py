@@ -3,7 +3,8 @@
 import numpy as np
 import torch
 
-from vllm.attention.backends.abstract import AttentionMetadata
+from vllm.attention.backends.abstract import (AttentionBackend,
+                                              AttentionMetadata)
 from vllm.attention.backends.torch_sdpa import (TorchSDPABackendImpl,
                                                 TorchSDPAMetadata)
 from vllm.attention.backends.utils import CommonAttentionState
@@ -17,8 +18,23 @@ from vllm.v1.worker.cpu_model_runner import CPUModelRunner
 from vllm.v1.worker.gpu_input_batch import InputBatch
 
 
-class TorchSDPABackend:
+class TorchSDPABackend(AttentionBackend):
     accept_output_buffer: bool = False
+
+    @classmethod
+    def get_supported_head_sizes(cls) -> list[int]:
+        return PagedAttention.get_supported_head_sizes()
+
+    @classmethod
+    def validate_head_size(cls, head_size: int) -> None:
+        supported_head_sizes = cls.get_supported_head_sizes()
+        if head_size not in supported_head_sizes:
+            attn_type = cls.__name__.removesuffix("Backend")
+            raise ValueError(
+                f"Head size {head_size} is not supported by {attn_type}. "
+                f"Supported head sizes are: {supported_head_sizes}. "
+                "Set VLLM_ATTENTION_BACKEND=FLEX_ATTENTION to use "
+                "FlexAttention backend which supports all head sizes.")
 
     @staticmethod
     def get_name() -> str:
