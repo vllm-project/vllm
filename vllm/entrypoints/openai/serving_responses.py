@@ -16,12 +16,15 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
                                          ChatTemplateContentFormatOption)
 from vllm.entrypoints.logger import RequestLogger
+# yapf conflicts with isort for this block
+# yapf: disable
 from vllm.entrypoints.openai.protocol import (ErrorResponse,
                                               PromptTokenUsageInfo,
                                               RequestResponseMetadata,
                                               ResponseReasoningItem,
                                               ResponsesRequest,
                                               ResponsesResponse, UsageInfo)
+# yapf: enable
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.logger import init_logger
@@ -436,13 +439,13 @@ class OpenAIServingResponses(OpenAIServing):
             response.status = "cancelled"
 
         # Abort the request.
-        if prev_status in ("queued", "in_progress"):
-            if task := self.background_tasks.get(response_id):
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
+        if (task := self.background_tasks.get(response_id)):
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                logger.exception("Background task for %s was cancelled",
+                                 response_id)
         return response
 
     def _make_invalid_id_error(self, response_id: str) -> ErrorResponse:
