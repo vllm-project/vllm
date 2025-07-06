@@ -54,7 +54,7 @@ class ServingScores(OpenAIServing):
         texts_1: list[str],
         texts_2: list[str],
         request: Union[RerankRequest, ScoreRequest],
-        request_id=str,
+        request_id: str,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[Union[LoRARequest, None]] = None,
         prompt_adapter_request: Optional[Union[PromptAdapterRequest,
@@ -139,31 +139,58 @@ class ServingScores(OpenAIServing):
 
         return final_res_batch
 
-    async def _cross_encoding_score(
+    async def _preprocess_score(
         self,
-        tokenizer: Union[AnyTokenizer],
+        request: Union[RerankRequest, ScoreRequest],
+        tokenizer: AnyTokenizer,
         texts_1: list[str],
         texts_2: list[str],
-        request: Union[RerankRequest, ScoreRequest],
-        request_id=str,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
-        lora_request: Optional[Union[LoRARequest, None]] = None,
-        prompt_adapter_request: Optional[Union[PromptAdapterRequest,
-                                               None]] = None,
-        trace_headers: Optional[Mapping[str, str]] = None,
-    ) -> list[PoolingRequestOutput]:
-
+    ) -> tuple[list[str], list[TokensPrompt]]:
         request_prompts: list[str] = []
         engine_prompts: list[TokensPrompt] = []
 
         if len(texts_1) == 1:
             texts_1 = texts_1 * len(texts_2)
 
-        input_pairs = [(t1, t2) for t1, t2 in zip(texts_1, texts_2)]
+        def identity_processor(t1: str, t2: str) -> tuple[str, str]:
+            return t1, t2
 
-        if isinstance(tokenizer, MistralTokenizer):
-            raise ValueError(
-                "MistralTokenizer not supported for cross-encoding")
+        pair_processor = identity_processor
+
+        template_config = (request.score_template
+                           or self.model_config.hf_config.get(
+                               "score_template"))
+
+        if isinstance(template_config, dict):
+
+            def template_processor(t1: str, t2: str) -> tuple[str, str]:
+                default_context = template_config.get("default_context", {})
+                context = default_context.copy() if isinstance(
+                    default_context, dict) else {}
+                if request.score_template_kwargs:
+                    context.update(request.score_template_kwargs)
+
+                context['query'] = t1
+                context['document'] = t2
+
+                query_template = template_config.get("query_template",
+                                                     "{query}")
+                doc_template = template_config.get("document_template",
+                                                   "{document}")
+
+                formatted_t1 = query_template.format(
+                    **context) if "query_template" in template_config else t1
+                formatted_t2 = doc_template.format(
+                    **context
+                ) if "document_template" in template_config else t2
+                return formatted_t1, formatted_t2
+
+            pair_processor = template_processor
+
+        input_pairs = [
+            pair_processor(t1, t2) for t1, t2 in zip(texts_1, texts_2)
+        ]
 
         tokenize_async = make_async(tokenizer.__call__,
                                     executor=self._tokenizer_executor)
@@ -186,6 +213,28 @@ class ServingScores(OpenAIServing):
 
             request_prompts.append(request_prompt)
             engine_prompts.append(engine_prompt)
+        return request_prompts, engine_prompts
+
+    async def _cross_encoding_score(
+        self,
+        tokenizer: AnyTokenizer,
+        texts_1: list[str],
+        texts_2: list[str],
+        request: Union[RerankRequest, ScoreRequest],
+        request_id: str,
+        tokenization_kwargs: Optional[dict[str, Any]] = None,
+        lora_request: Optional[Union[LoRARequest, None]] = None,
+        prompt_adapter_request: Optional[Union[PromptAdapterRequest,
+                                               None]] = None,
+        trace_headers: Optional[Mapping[str, str]] = None,
+    ) -> list[PoolingRequestOutput]:
+
+        if isinstance(tokenizer, MistralTokenizer):
+            raise ValueError(
+                "MistralTokenizer not supported for cross-encoding")
+
+        request_prompts, engine_prompts = await self._preprocess_score(
+            request, tokenizer, texts_1, texts_2, tokenization_kwargs)
 
         # Schedule the request and get the result generator.
         generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
