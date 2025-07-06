@@ -8,7 +8,8 @@ from typing import Callable, Final, Optional, Union
 
 import jinja2
 from fastapi import Request
-from openai.types.responses import ResponseOutputMessage, ResponseOutputText
+from openai.types.responses import (ResponseOutputMessage, ResponseOutputText,
+                                    ResponseStatus)
 
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
@@ -183,7 +184,7 @@ class OpenAIServingResponses(OpenAIServing):
             )
             await self.response_store.add_response(response)
             asyncio.create_task(
-                self.responses_full_generator(
+                self._run_background_request(
                     request,
                     sampling_params,
                     result_generator,
@@ -301,6 +302,22 @@ class OpenAIServingResponses(OpenAIServing):
             await self.response_store.add_response(response)
         return response
 
+    async def _run_background_request(
+        self,
+        request: ResponsesRequest,
+        *args,
+        **kwargs,
+    ):
+        try:
+            response = await self.responses_full_generator(
+                request, *args, **kwargs)
+        except Exception as e:
+            response = self.create_error_response(str(e))
+        if isinstance(response, ErrorResponse):
+            # If the request has failed, update the status to "failed".
+            response_id = request.request_id
+            self.response_store.update_status(response_id, "failed")
+
     async def retrieve_responses(
         self,
         response_id: str,
@@ -339,3 +356,10 @@ class ResponseStore:
     ) -> Optional[ResponsesResponse]:
         async with self.lock:
             return self.responses.get(response_id)
+
+    async def update_status(self, response_id: str, status: ResponseStatus):
+        async with self.lock:
+            response = self.responses.get(response_id)
+            if response is None:
+                return
+            response.status = status
