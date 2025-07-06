@@ -6,6 +6,7 @@ import json
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
+from http import HTTPStatus
 from typing import Callable, Final, Optional, Union
 
 import jinja2
@@ -16,6 +17,7 @@ from pydantic import TypeAdapter
 
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
+from vllm.v1.engine.exceptions import SchedulerWaitingQueueFullError
 from vllm.entrypoints.chat_utils import (ChatTemplateContentFormatOption,
                                          ConversationMessage,
                                          random_tool_call_id)
@@ -254,6 +256,11 @@ class OpenAIServingChat(OpenAIServing):
                     )
 
                 generators.append(generator)
+        except SchedulerWaitingQueueFullError as e:
+            return self.create_error_response(
+                str(e),
+                err_type="ServiceUnavailableError", 
+                status_code=HTTPStatus.SERVICE_UNAVAILABLE)
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))

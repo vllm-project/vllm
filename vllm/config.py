@@ -2101,6 +2101,10 @@ class SchedulerConfig:
     - "priority" means requests are handled based on given priority (lower
     value means earlier handling) and time of arrival deciding any ties)."""
 
+    limit_queue_length: bool = False
+    """If set, incoming requests will be rejected with HTTP 503
+    when number of waiting requests exceeds number of running requests."""
+
     chunked_prefill_enabled: bool = field(init=False)
     """True if chunked prefill is enabled."""
 

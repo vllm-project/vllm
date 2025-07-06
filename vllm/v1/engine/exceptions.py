@@ -15,3 +15,8 @@ class EngineDeadError(Exception):
         # Make stack trace clearer when using with LLMEngine by
         # silencing irrelevant ZMQError.
         self.__suppress_context__ = suppress_context
+
+
+class SchedulerWaitingQueueFullError(Exception):
+    """Raised when the scheduler waiting queue is full and cannot accept new requests."""
+    pass

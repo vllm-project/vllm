@@ -16,6 +16,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (KVConnectorBase_V1,
                                                           KVConnectorRole)
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
+from vllm.v1.engine.exceptions import SchedulerWaitingQueueFullError
 from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
                                                 compute_encoder_budget)
 from vllm.v1.core.kv_cache_manager import KVCacheManager
@@ -915,6 +916,15 @@ class Scheduler(SchedulerInterface):
         return len(self.running), len(self.waiting)
 
     def add_request(self, request: Request) -> None:
+        """Adds a request to the waiting queue."""
+        # Check if waiting queue is full
+        if (self.scheduler_config.limit_queue_length and
+            len(self.waiting) >= len(self.running)):
+            raise SchedulerWaitingQueueFullError(
+                f"Scheduler waiting queue is too big ({len(self.waiting)} >= "
+                f"{len(self.running)}). "
+                f"Cannot add request {request.request_id}.")
+        
         self.waiting.add_request(request)
         self.requests[request.request_id] = request
         if self.log_stats:

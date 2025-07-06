@@ -5,6 +5,7 @@ import asyncio
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
+from http import HTTPStatus
 from typing import Optional, Union, cast
 
 import jinja2
@@ -13,6 +14,7 @@ from typing_extensions import assert_never
 
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
+from vllm.v1.engine.exceptions import SchedulerWaitingQueueFullError
 from vllm.entrypoints.logger import RequestLogger
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -203,6 +205,11 @@ class OpenAIServingCompletion(OpenAIServing):
                     )
 
                 generators.append(generator)
+        except SchedulerWaitingQueueFullError as e:
+            return self.create_error_response(
+                str(e),
+                err_type="ServiceUnavailableError", 
+                status_code=HTTPStatus.SERVICE_UNAVAILABLE)
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))

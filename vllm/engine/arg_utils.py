@@ -861,6 +861,9 @@ class EngineArgs:
         scheduler_group.add_argument("--scheduling-policy",
                                      **scheduler_kwargs["policy"])
         scheduler_group.add_argument(
+            "--max-waiting-queue-length",
+            **scheduler_kwargs["max_waiting_queue_length"])
+        scheduler_group.add_argument(
             "--enable-chunked-prefill",
             **scheduler_kwargs["enable_chunked_prefill"])
         scheduler_group.add_argument(
