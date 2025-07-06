@@ -33,7 +33,7 @@ from vllm.entrypoints.openai.serving_engine import (OpenAIServing,
                                                     is_text_tokens_prompt)
 # yapf: enable
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
-from vllm.entrypoints.utils import get_max_tokens
+from vllm.entrypoints.utils import PREPROCESSING_PROMPT_ERROR, get_max_tokens
 from vllm.inputs.data import (EmbedsPrompt, TokensPrompt, is_embeds_prompt,
                               is_tokens_prompt)
 from vllm.logger import init_logger
@@ -128,16 +128,16 @@ class OpenAIServingCompletion(OpenAIServing):
                 add_special_tokens=request.add_special_tokens,
             )
         except ValueError as e:
-            logger.exception("Error in preprocessing prompt inputs")
+            logger.exception(PREPROCESSING_PROMPT_ERROR)
             return self.create_error_response(str(e))
         except TypeError as e:
-            logger.exception("Error in preprocessing prompt inputs")
+            logger.exception(PREPROCESSING_PROMPT_ERROR)
             return self.create_error_response(str(e))
         except RuntimeError as e:
-            logger.exception("Error in preprocessing prompt inputs")
+            logger.exception(PREPROCESSING_PROMPT_ERROR)
             return self.create_error_response(str(e))
         except jinja2.TemplateError as e:
-            logger.exception("Error in preprocessing prompt inputs")
+            logger.exception(PREPROCESSING_PROMPT_ERROR)
             return self.create_error_response(str(e))
 
         # Schedule the request and get the result generator.

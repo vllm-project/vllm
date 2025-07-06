@@ -21,6 +21,7 @@ from vllm.entrypoints.openai.protocol import (DetokenizeRequest,
 # yapf: enable
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
+from vllm.entrypoints.utils import PREPROCESSING_PROMPT_ERROR
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -94,7 +95,7 @@ class OpenAIServingTokenization(OpenAIServing):
                      add_special_tokens=request.add_special_tokens,
                  )
         except (ValueError, TypeError, jinja2.TemplateError) as e:
-            logger.exception("Error in preprocessing prompt inputs")
+            logger.exception(PREPROCESSING_PROMPT_ERROR)
             return self.create_error_response(f"{e} {e.__cause__}")
 
         input_ids: list[int] = []

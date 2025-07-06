@@ -27,6 +27,8 @@ VLLM_SUBCMD_PARSER_EPILOG = (
     "   - To search by keyword:         --help=max\n"
     "   - To list all groups:           --help=listgroup")
 
+PREPROCESSING_PROMPT_ERROR = "Error in preprocessing prompt inputs"
+
 
 async def listen_for_disconnect(request: Request) -> None:
     """Returns if a disconnect message is received"""

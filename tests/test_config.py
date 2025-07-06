@@ -5,6 +5,7 @@ from dataclasses import MISSING, Field, asdict, dataclass, field
 
 import pytest
 
+from tests.utils import get_skip_reason
 from vllm.compilation.backends import VllmBackend
 from vllm.config import (LoadConfig, ModelConfig, PoolerConfig, VllmConfig,
                          get_field)
@@ -179,7 +180,7 @@ def test_get_sliding_window():
 
 
 @pytest.mark.skipif(current_platform.is_rocm(),
-                    reason="Xformers backend is not supported on ROCm.")
+                    reason=get_skip_reason("Xformers backend", "ROCm"))
 def test_get_pooling_config():
     model_id = "sentence-transformers/all-MiniLM-L12-v2"
     model_config = ModelConfig(
@@ -201,7 +202,7 @@ def test_get_pooling_config():
 
 
 @pytest.mark.skipif(current_platform.is_rocm(),
-                    reason="Xformers backend is not supported on ROCm.")
+                    reason=get_skip_reason("Xformers backend", "ROCm"))
 def test_get_pooling_config_from_args():
     model_id = "sentence-transformers/all-MiniLM-L12-v2"
     model_config = ModelConfig(model_id,
@@ -222,7 +223,7 @@ def test_get_pooling_config_from_args():
 
 
 @pytest.mark.skipif(current_platform.is_rocm(),
-                    reason="Xformers backend is not supported on ROCm.")
+                    reason=get_skip_reason("Xformers backend", "ROCm"))
 def test_get_bert_tokenization_sentence_transformer_config():
     bge_model_config = ModelConfig(
         model="BAAI/bge-base-en-v1.5",

@@ -5,6 +5,7 @@ import os
 
 import pytest
 
+from tests.utils import get_skip_reason
 from vllm.model_executor.layers.pooler import CLSPool, MeanPool, PoolingType
 from vllm.model_executor.models.bert import BertEmbeddingModel
 from vllm.model_executor.models.roberta import RobertaEmbeddingModel
@@ -20,7 +21,7 @@ REVISION_ROBERTA = os.environ.get("REVISION", "main")
 
 
 @pytest.mark.skipif(current_platform.is_rocm(),
-                    reason="Xformers backend is not supported on ROCm.")
+                    reason=get_skip_reason("Xformers backend", "ROCm"))
 def test_model_loading_with_params(vllm_runner):
     """
     Test parameter weight loading with tp>1.
@@ -58,7 +59,7 @@ def test_model_loading_with_params(vllm_runner):
 
 
 @pytest.mark.skipif(current_platform.is_rocm(),
-                    reason="Xformers backend is not supported on ROCm.")
+                    reason=get_skip_reason("Xformers backend", "ROCm"))
 def test_roberta_model_loading_with_params(vllm_runner):
     """
     Test parameter weight loading with tp>1.
@@ -96,7 +97,7 @@ def test_roberta_model_loading_with_params(vllm_runner):
 
 
 @pytest.mark.skipif(current_platform.is_rocm(),
-                    reason="Xformers backend is not supported on ROCm.")
+                    reason=get_skip_reason("Xformers backend", "ROCm"))
 def test_facebook_roberta_model_loading_with_params(vllm_runner):
     """
     Test loading roberta-base model with no lm_head.

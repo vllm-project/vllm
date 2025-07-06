@@ -9,6 +9,7 @@ import torch
 
 from tests.kernels.allclose_default import get_default_atol, get_default_rtol
 from tests.kernels.utils import opcheck
+from tests.utils import get_skip_reason
 from vllm import _custom_ops as ops
 from vllm.attention.layer import Attention, MultiHeadAttention
 from vllm.platforms import current_platform
@@ -394,7 +395,7 @@ def ref_multi_query_kv_attention(
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @pytest.mark.skipif(current_platform.is_rocm(),
-                    reason="Xformers backend is not supported on ROCm.")
+                    reason=get_skip_reason("Xformers backend", "ROCm"))
 @torch.inference_mode()
 def test_multi_query_kv_attention(
     num_seqs: int,
@@ -489,7 +490,7 @@ def test_multi_query_kv_attention(
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @pytest.mark.skipif(current_platform.is_rocm(),
-                    reason="Xformers backend is not supported on ROCm.")
+                    reason=get_skip_reason("Xformers backend", "ROCm"))
 @torch.inference_mode()
 def test_multi_query_kv_attention_with_alibi(
     num_seqs: int,

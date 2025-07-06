@@ -23,7 +23,8 @@ from vllm.entrypoints.openai.protocol import (ErrorResponse,
                                               PoolingResponseData, UsageInfo)
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
-from vllm.entrypoints.utils import _validate_truncation_size
+from vllm.entrypoints.utils import (PREPROCESSING_PROMPT_ERROR,
+                                    _validate_truncation_size)
 from vllm.logger import init_logger
 from vllm.outputs import PoolingOutput, PoolingRequestOutput
 from vllm.utils import merge_async_iterators
@@ -134,7 +135,7 @@ class OpenAIServingPooling(OpenAIServing):
                      add_special_tokens=request.add_special_tokens,
                  )
         except (ValueError, TypeError, jinja2.TemplateError) as e:
-            logger.exception("Error in preprocessing prompt inputs")
+            logger.exception(PREPROCESSING_PROMPT_ERROR)
             return self.create_error_response(str(e))
 
         # Schedule the request and get the result generator.

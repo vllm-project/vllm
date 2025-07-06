@@ -7,6 +7,7 @@ import pytest
 import torch
 
 from tests.kernels.utils import torch_experts
+from tests.utils import get_skip_reason
 from vllm import _custom_ops as ops
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe.cutlass_moe import CutlassExpertsFp8
@@ -233,7 +234,7 @@ def _pplx_moe(
 @pytest.mark.skipif(
     (lambda x: x is None or not ops.cutlass_group_gemm_supported(x.to_int()))(
         current_platform.get_device_capability()),
-    reason="Grouped gemm is not supported on this GPU type.")
+    reason=get_skip_reason("Grouped gemm"))
 @requires_pplx
 def test_cutlass_moe_pplx(
     m: int,

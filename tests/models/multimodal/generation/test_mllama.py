@@ -7,6 +7,7 @@ import pytest
 import torch
 from transformers import AutoConfig, AutoModelForImageTextToText, AutoTokenizer
 
+from tests.utils import get_skip_reason
 from vllm import LLM, SamplingParams
 from vllm.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.attention.selector import (_Backend, _cached_get_attn_backend,
@@ -432,7 +433,7 @@ def test_models_distributed(
 @pytest.mark.parametrize("dtype", ["float16"])
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.skipif(not is_quant_method_supported("bitsandbytes"),
-                    reason='bitsandbytes is not supported on this GPU type.')
+                    reason=get_skip_reason("bitsandbytes"))
 def test_bnb_regression(
     image_assets: ImageTestAssets,
     model: str,

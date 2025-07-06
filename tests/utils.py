@@ -973,3 +973,9 @@ def get_client_text_logprob_generations(
     return [(text_generations, text,
              (None if x.logprobs is None else x.logprobs.top_logprobs))
             for completion in completions for x in completion.choices]
+
+
+def get_skip_reason(feature: str, platform: str = "GPU"):
+    if platform == "ROCm":
+        return f"{feature} is not supported on {platform}."
+    return f"{feature} is not supported on this {platform} type."

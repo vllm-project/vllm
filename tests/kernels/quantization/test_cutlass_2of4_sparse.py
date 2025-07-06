@@ -9,6 +9,7 @@ import pytest
 import torch
 
 from tests.kernels.utils import baseline_scaled_mm, to_fp8, to_int8
+from tests.utils import get_skip_reason
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     sparse_cutlass_supported)
@@ -108,7 +109,7 @@ def make_rand_sparse_tensors(
 
 
 @pytest.mark.skipif(not sparse_cutlass_supported(),
-                    reason="Sparse CUTLASS is not supported on this GPU type.")
+                    reason=get_skip_reason("Sparse CUTLASS"))
 # Test working with a subset of A and B for sparse matmul
 def test_cutlass_sparse_subset():
 
@@ -162,7 +163,7 @@ MNK_FACTORS = [
 
 # Test working with a subset of A and B for sparse matmul
 @pytest.mark.skipif(not sparse_cutlass_supported(),
-                    reason="Sparse CUTLASS is not supported on this GPU type.")
+                    reason=get_skip_reason("Sparse CUTLASS"))
 @pytest.mark.parametrize("m, n, k", MNK_FACTORS)
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("use_bias", [True, False])
@@ -195,10 +196,10 @@ def test_cutlass_sparse_gemm(m: int, k: int, n: int, dtype: type[torch.dtype],
 
 
 @pytest.mark.skipif(not sparse_cutlass_supported(),
-                    reason="Sparse CUTLASS is not supported on this GPU type.")
+                    reason=get_skip_reason("Sparse CUTLASS"))
 @pytest.mark.parametrize("m, k, n", MNK_FACTORS)
 @pytest.mark.skipif(not current_platform.has_device_capability(89),
-                    reason="FP8 is not supported on this GPU type.")
+                    reason=get_skip_reason("FP8"))
 @pytest.mark.parametrize("use_bias", [True, False])
 def test_cutlass_sparse_fp8_gemm(m: int, n: int, k: int, use_bias: bool):
 
@@ -230,7 +231,7 @@ def test_cutlass_sparse_fp8_gemm(m: int, n: int, k: int, use_bias: bool):
 
 
 @pytest.mark.skipif(not sparse_cutlass_supported(),
-                    reason="Sparse CUTLASS is not supported on this GPU type.")
+                    reason=get_skip_reason("Sparse CUTLASS"))
 @pytest.mark.parametrize("m,k,n", MNK_FACTORS)
 @pytest.mark.parametrize("per_act_token", [True, False])
 @pytest.mark.parametrize("per_out_ch", [True, False])

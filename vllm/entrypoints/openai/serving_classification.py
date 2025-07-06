@@ -19,6 +19,7 @@ from vllm.entrypoints.openai.serving_engine import (ClassificationServeContext,
                                                     OpenAIServing,
                                                     ServeContext)
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
+from vllm.entrypoints.utils import PREPROCESSING_PROMPT_ERROR
 from vllm.logger import init_logger
 from vllm.outputs import ClassificationOutput, PoolingRequestOutput
 
@@ -72,7 +73,7 @@ class ClassificationMixin(OpenAIServing):
             return None
 
         except (ValueError, TypeError) as e:
-            logger.exception("Error in preprocessing prompt inputs")
+            logger.exception(PREPROCESSING_PROMPT_ERROR)
             return self.create_error_response(str(e))
 
     def _build_response(

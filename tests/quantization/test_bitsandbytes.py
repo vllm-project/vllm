@@ -12,6 +12,7 @@ import torch
 from transformers import BitsAndBytesConfig
 
 from tests.quantization.utils import is_quant_method_supported
+from tests.utils import get_skip_reason
 
 from ..models.utils import check_embeddings_close
 from ..utils import compare_two_settings, create_new_process_for_each_test
@@ -40,7 +41,7 @@ models_pre_quant_8bit_to_test = [
 
 
 @pytest.mark.skipif(not is_quant_method_supported("bitsandbytes"),
-                    reason='bitsandbytes is not supported on this GPU type.')
+                    reason=get_skip_reason("bitsandbytes"))
 @pytest.mark.parametrize("model_name, description", models_4bit_to_test)
 @create_new_process_for_each_test()
 def test_load_4bit_bnb_model(hf_runner, vllm_runner, example_prompts,
@@ -53,7 +54,7 @@ def test_load_4bit_bnb_model(hf_runner, vllm_runner, example_prompts,
 
 
 @pytest.mark.skipif(not is_quant_method_supported("bitsandbytes"),
-                    reason='bitsandbytes is not supported on this GPU type.')
+                    reason=get_skip_reason("bitsandbytes"))
 @pytest.mark.parametrize("model_name, description",
                          models_pre_qaunt_4bit_to_test)
 @create_new_process_for_each_test()
@@ -65,7 +66,7 @@ def test_load_pre_quant_4bit_bnb_model(hf_runner, vllm_runner, example_prompts,
 
 
 @pytest.mark.skipif(not is_quant_method_supported("bitsandbytes"),
-                    reason='bitsandbytes is not supported on this GPU type.')
+                    reason=get_skip_reason("bitsandbytes"))
 @pytest.mark.parametrize("model_name, description",
                          models_pre_quant_8bit_to_test)
 @create_new_process_for_each_test()
@@ -79,7 +80,7 @@ def test_load_8bit_bnb_model(hf_runner, vllm_runner, example_prompts,
 @pytest.mark.skipif(torch.cuda.device_count() < 2,
                     reason='Test requires at least 2 GPUs.')
 @pytest.mark.skipif(not is_quant_method_supported("bitsandbytes"),
-                    reason='bitsandbytes is not supported on this GPU type.')
+                    reason=get_skip_reason("bitsandbytes"))
 @pytest.mark.parametrize("model_name, description", models_4bit_to_test)
 @create_new_process_for_each_test()
 def test_load_tp_4bit_bnb_model(hf_runner, vllm_runner, example_prompts,
@@ -99,7 +100,7 @@ def test_load_tp_4bit_bnb_model(hf_runner, vllm_runner, example_prompts,
 @pytest.mark.skipif(torch.cuda.device_count() < 2,
                     reason='Test requires at least 2 GPUs.')
 @pytest.mark.skipif(not is_quant_method_supported("bitsandbytes"),
-                    reason='bitsandbytes is not supported on this GPU type.')
+                    reason=get_skip_reason("bitsandbytes"))
 @pytest.mark.parametrize("model_name, description", models_4bit_to_test)
 @create_new_process_for_each_test()
 def test_load_pp_4bit_bnb_model(model_name, description) -> None:
@@ -123,7 +124,7 @@ def test_load_pp_4bit_bnb_model(model_name, description) -> None:
 
 
 @pytest.mark.skipif(not is_quant_method_supported("bitsandbytes"),
-                    reason='bitsandbytes is not supported on this GPU type.')
+                    reason=get_skip_reason("bitsandbytes"))
 @pytest.mark.parametrize("model_name, description",
                          models_4bit_to_embedding_test)
 @pytest.mark.parametrize("dtype", ["half"])

@@ -6,6 +6,7 @@ from typing import Optional
 import pytest
 import torch
 
+from tests.utils import get_skip_reason
 from vllm import _custom_ops as ops
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe.cutlass_moe import cutlass_moe_fp8
@@ -226,7 +227,7 @@ def run_8_bit(moe_tensors: MOETensors8Bit,
 @pytest.mark.skipif(
     (lambda x: x is None or not ops.cutlass_group_gemm_supported(x.to_int()))(
         current_platform.get_device_capability()),
-    reason="Grouped gemm is not supported on this GPU type.")
+    reason=get_skip_reason("Grouped gemm"))
 def test_cutlass_moe_8_bit_no_graph(
     m: int,
     n: int,
@@ -272,7 +273,7 @@ def test_cutlass_moe_8_bit_no_graph(
 @pytest.mark.skipif(
     (lambda x: x is None or not ops.cutlass_group_gemm_supported(x.to_int()))(
         current_platform.get_device_capability()),
-    reason="Grouped gemm is not supported on this GPU type.")
+    reason=get_skip_reason("Grouped gemm"))
 def test_cutlass_moe_8_bit_cuda_graph(
     m: int,
     n: int,
@@ -329,7 +330,7 @@ def test_cutlass_moe_8_bit_cuda_graph(
 @pytest.mark.skipif(
     (lambda x: x is None or not ops.cutlass_group_gemm_supported(x.to_int()))(
         current_platform.get_device_capability()),
-    reason="Grouped gemm is not supported on this GPU type.")
+    reason=get_skip_reason("Grouped gemm"))
 def test_cutlass_moe_8_bit_EP(
     m: int,
     n: int,

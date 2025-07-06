@@ -10,6 +10,7 @@ import pytest
 import torch
 
 from tests.kernels.utils import baseline_scaled_mm, opcheck, to_fp8, to_int8
+from tests.utils import get_skip_reason
 from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
 from vllm.utils import cdiv
@@ -142,7 +143,7 @@ def cutlass_int8_gemm_helper(m: int,
                          [PER_OUT_CH_GROUP_SHAPE, TENSORWISE_GROUP_SHAPE])
 @pytest.mark.parametrize("use_bias", [True, False])
 @pytest.mark.skipif(not current_platform.has_device_capability(89),
-                    reason="FP8 is not supported on this GPU type.")
+                    reason=get_skip_reason("FP8"))
 def test_cutlass_fp8_gemm(m: int, n: int, k: int, a_scale_group_shape,
                           b_scale_group_shape, use_bias: bool):
     cutlass_fp8_gemm_helper(m, n, k, a_scale_group_shape, b_scale_group_shape,
@@ -154,7 +155,7 @@ def test_cutlass_fp8_gemm(m: int, n: int, k: int, a_scale_group_shape,
                          [((1, 128), (128, 128))])
 @pytest.mark.parametrize("use_bias", [False])
 @pytest.mark.skipif(not current_platform.has_device_capability(90),
-                    reason="FP8 blockwise is not supported on this GPU type.")
+                    reason=get_skip_reason("FP8 blockwise"))
 def test_cutlass_fp8_blockwise_scale_gemm(m: int, n: int, k: int,
                                           a_scale_group_shape,
                                           b_scale_group_shape, use_bias: bool):
@@ -206,7 +207,7 @@ def test_cutlass_int8_gemm_output_dtype(a_scale_group_shape,
 @pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("use_bias", [True, False])
 @pytest.mark.skipif(not current_platform.has_device_capability(89),
-                    reason="FP8 is not supported on this GPU type.")
+                    reason=get_skip_reason("FP8"))
 def test_cutlass_fp8_gemm_output_dtype(a_scale_group_shape,
                                        b_scale_group_shape,
                                        out_dtype: type[torch.dtype],
@@ -225,7 +226,7 @@ def test_cutlass_fp8_gemm_output_dtype(a_scale_group_shape,
 @pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("use_bias", [False])
 @pytest.mark.skipif(not current_platform.has_device_capability(90),
-                    reason="FP8 blockwise is not supported on this GPU type.")
+                    reason=get_skip_reason("FP8 blockwise"))
 def test_cutlass_fp8_blockwise_scale_gemm_dtype(a_scale_group_shape,
                                                 b_scale_group_shape,
                                                 out_dtype: type[torch.dtype],
@@ -246,7 +247,7 @@ def test_cutlass_fp8_blockwise_scale_gemm_dtype(a_scale_group_shape,
 @pytest.mark.parametrize("use_bias", [True, False])
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @pytest.mark.skipif(not current_platform.has_device_capability(89),
-                    reason="FP8 is not supported on this GPU type.")
+                    reason=get_skip_reason("FP8"))
 def test_cutlass_fp8_gemm_devices(a_scale_group_shape, b_scale_group_shape,
                                   use_bias: bool, device: str):
     cutlass_fp8_gemm_helper(512, 512, 512, a_scale_group_shape,
@@ -283,7 +284,7 @@ def test_cutlass_int8_gemm_devices(a_scale_group_shape, b_scale_group_shape,
                          [PER_OUT_CH_GROUP_SHAPE, TENSORWISE_GROUP_SHAPE])
 @pytest.mark.parametrize("use_bias", [True, False])
 @pytest.mark.skipif(not current_platform.has_device_capability(89),
-                    reason="FP8 is not supported on this GPU type.")
+                    reason=get_skip_reason("FP8"))
 def test_cutlass_fp8_gemm_m_sweep(a_scale_group_shape, b_scale_group_shape,
                                   use_bias: bool):
     for nk in range(32, 128, 32):
@@ -518,7 +519,7 @@ def test_cutlass_support_opcheck():
 @pytest.mark.skipif(
     (lambda x: x is None or not ops.cutlass_group_gemm_supported(x.to_int()))(
         current_platform.get_device_capability()),
-    reason="Grouped gemm is not supported on this GPU type.")
+    reason=get_skip_reason("Grouped gemm"))
 def test_cutlass_fp8_group_gemm(num_experts: int, per_act_token: bool,
                                 per_out_ch: bool, use_bias: bool):
 

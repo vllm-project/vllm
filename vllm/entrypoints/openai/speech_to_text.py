@@ -23,6 +23,7 @@ from vllm.entrypoints.openai.protocol import (
 from vllm.entrypoints.openai.serving_engine import (OpenAIServing,
                                                     SpeechToTextRequest)
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
+from vllm.entrypoints.utils import PREPROCESSING_PROMPT_ERROR
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model_cls
@@ -181,7 +182,7 @@ class OpenAISpeechToText(OpenAIServing):
             )
 
         except ValueError as e:
-            logger.exception("Error in preprocessing prompt inputs")
+            logger.exception(PREPROCESSING_PROMPT_ERROR)
             return self.create_error_response(str(e))
 
         list_result_generator: Optional[list[AsyncGenerator[RequestOutput,

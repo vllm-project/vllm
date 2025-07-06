@@ -13,6 +13,7 @@ import pytest
 import torch
 
 from tests.kernels.utils import opcheck
+from tests.utils import get_skip_reason
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.utils.machete_utils import (
     query_machete_supported_group_sizes)
@@ -258,8 +259,7 @@ def machete_mm_test_helper(types: TypeConfig,
                                atol=atol)
 
 
-@pytest.mark.skipif(not IS_SUPPORTED_BY_GPU,
-                    reason="Machete is not supported on this GPU type.")
+@pytest.mark.skipif(not IS_SUPPORTED_BY_GPU, reason=get_skip_reason("Machete"))
 @pytest.mark.parametrize("shape",
                          MNK_SHAPES,
                          ids=lambda x: "x".join(str(v) for v in x))
@@ -288,8 +288,7 @@ def test_machete_all_schedules(shape, types: TypeConfig):
             machete_mm_test_helper(types, tensors, group_size, schedule)
 
 
-@pytest.mark.skipif(not IS_SUPPORTED_BY_GPU,
-                    reason="Machete is not supported on this GPU type.")
+@pytest.mark.skipif(not IS_SUPPORTED_BY_GPU, reason=get_skip_reason("Machete"))
 @pytest.mark.parametrize("shape",
                          MNK_SHAPES,
                          ids=lambda x: "x".join(str(v) for v in x))
@@ -310,8 +309,7 @@ def test_machete_heuristic(shape, types: TypeConfig):
 
 
 # Test working on other devices
-@pytest.mark.skipif(not IS_SUPPORTED_BY_GPU,
-                    reason="Machete is not supported on this GPU type.")
+@pytest.mark.skipif(not IS_SUPPORTED_BY_GPU, reason=get_skip_reason("Machete"))
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 def test_machete_devices(device: str):
     group_size = 128
@@ -335,8 +333,7 @@ def test_machete_devices(device: str):
 
 
 # Test working with a subset of A and B
-@pytest.mark.skipif(not IS_SUPPORTED_BY_GPU,
-                    reason="Machete is not supported on this GPU type.")
+@pytest.mark.skipif(not IS_SUPPORTED_BY_GPU, reason=get_skip_reason("Machete"))
 def test_machete_subset():
     group_size = 128
 
@@ -366,8 +363,7 @@ class MacheteLayer(torch.nn.Module):
         return ops.machete_mm(a=a, **self.kwargs)
 
 
-@pytest.mark.skipif(not IS_SUPPORTED_BY_GPU,
-                    reason="Machete is not supported on this GPU type.")
+@pytest.mark.skipif(not IS_SUPPORTED_BY_GPU, reason=get_skip_reason("Machete"))
 def test_machete_cuda_graph():
     m, n, k = 512, 4096, 4096
 

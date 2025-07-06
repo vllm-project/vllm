@@ -34,7 +34,7 @@ from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.openai.tool_parsers import ToolParser, ToolParserManager
 from vllm.entrypoints.openai.tool_parsers.mistral_tool_parser import (
     MistralToolCall)
-from vllm.entrypoints.utils import get_max_tokens
+from vllm.entrypoints.utils import PREPROCESSING_PROMPT_ERROR, get_max_tokens
 from vllm.logger import init_logger
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
@@ -219,7 +219,7 @@ class OpenAIServingChat(OpenAIServing):
             )
         except (ValueError, TypeError, RuntimeError,
                 jinja2.TemplateError) as e:
-            logger.exception("Error in preprocessing prompt inputs")
+            logger.exception(PREPROCESSING_PROMPT_ERROR)
             return self.create_error_response(f"{e} {e.__cause__}")
 
         request_id = "chatcmpl-" \
