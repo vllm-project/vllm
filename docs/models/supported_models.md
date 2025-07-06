@@ -627,9 +627,6 @@ Specified using `--task generate`.
     Only `InternVLChatModel` with Qwen2.5 text backbone (`OpenGVLab/InternVL3-2B`, `OpenGVLab/InternVL2.5-1B` etc) has video inputs support currently.
 
 !!! note
-    `h2oai/h2ovl-mississippi-2b` will be available in V1 once we support head size 80.
-
-!!! note
     To use `TIGER-Lab/Mantis-8B-siglip-llama3`, you have to pass `--hf_overrides '{"architectures": ["MantisForConditionalGeneration"]}'` when running vLLM.
 
 !!! warning
@@ -671,11 +668,8 @@ Specified using `--task generate`.
     Our PaliGemma implementations have the same problem as Gemma 3 (see above) for both V0 and V1.
 
 !!! note
-    To use Qwen2.5-Omni, you have to install Hugging Face Transformers library from source via
-    `pip install git+https://github.com/huggingface/transformers.git`.
-
-    Read audio from video pre-processing is currently supported on V0 (but not V1), because overlapping modalities is not yet supported in V1.
-    `--mm-processor-kwargs '{"use_audio_in_video": true}'`.
+    For Qwen2.5-Omni, reading audio from video pre-processing (`--mm-processor-kwargs '{"use_audio_in_video": true}'`)
+    is currently supported on V0 (but not V1), because overlapping modalities is not yet supported in V1.
 
 #### Transcription
 
