@@ -234,35 +234,44 @@ class CudaPlatformBase(Platform):
                         return ("vllm.attention.backends."
                                 "flashmla.FlashMLABackend")
         if use_v1:
+            FLASHINFER_V1 = "vllm.v1.attention.backends.flashinfer.FlashInferBackend"  # noqa: E501
+            FLEX_ATTENTION_V1 = "vllm.v1.attention.backends.flex_attention.FlexAttentionBackend"  # noqa: E501
+            TRITON_ATTN_VLLM_V1 = "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend"  # noqa: E501
+            FLASH_ATTN_V1 = "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"  # noqa: E501
+
             if selected_backend == _Backend.FLASHINFER:
                 logger.info_once("Using FlashInfer backend on V1 engine.")
-                return "vllm.v1.attention.backends.flashinfer.FlashInferBackend"
+                return FLASHINFER_V1
             elif selected_backend == _Backend.FLEX_ATTENTION:
-                logger.info("Using FlexAttenion backend on V1 engine.")
-                return "vllm.v1.attention.backends.flex_attention.FlexAttentionBackend"  # noqa: E501
+                logger.info_once("Using FlexAttention backend on V1 engine.")
+                return FLEX_ATTENTION_V1
             elif selected_backend == _Backend.TRITON_ATTN_VLLM_V1:
                 logger.info_once("Using Triton backend on V1 engine.")
-                return ("vllm.v1.attention.backends."
-                        "triton_attn.TritonAttentionBackend")
+                return TRITON_ATTN_VLLM_V1
             elif selected_backend == _Backend.FLASH_ATTN:
                 logger.info_once("Using Flash Attention backend on V1 engine.")
-                return ("vllm.v1.attention.backends."
-                        "flash_attn.FlashAttentionBackend")
+                return FLASH_ATTN_V1
+
+            from vllm.attention.selector import supports_head_size
 
             # Default backends for V1 engine
-            # Prefer FlashInfer for Blackwell GPUs if installed
+            # FP32 is only supported by FlexAttention
             if dtype not in (torch.float16, torch.bfloat16):
                 logger.info_once(
-                    f"Using FlexAttenion backend for {dtype} on V1 engine.")
-                return "vllm.v1.attention.backends.flex_attention.FlexAttentionBackend"  # noqa: E501
-            if cls.is_device_capability(100):
+                    "Using FlexAttention backend for %s on V1 engine.",
+                    dtype,
+                )
+                return FLEX_ATTENTION_V1
+
+            # Prefer FlashInfer for Blackwell GPUs if installed
+            if cls.is_device_capability(100) and \
+                supports_head_size(FLASHINFER_V1, head_size):
                 try:
                     import flashinfer  # noqa: F401
                     logger.info_once(
                         "Using FlashInfer backend on V1 engine by default for "
                         "Blackwell (SM 10.0) GPUs.")
-                    return ("vllm.v1.attention.backends."
-                            "flashinfer.FlashInferBackend")
+                    return FLASHINFER_V1
                 except ImportError:
                     logger.info_once(
                         "FlashInfer failed to import for V1 engine on "
@@ -270,10 +279,13 @@ class CudaPlatformBase(Platform):
                         "install FlashInfer for better performance.")
                     pass
             # FlashAttention is the default for SM 8.0+ GPUs
-            if cls.has_device_capability(80):
+            if cls.has_device_capability(80) and \
+                supports_head_size(FLASH_ATTN_V1, head_size):
                 logger.info_once("Using Flash Attention backend on V1 engine.")
-                return ("vllm.v1.attention.backends."
-                        "flash_attn.FlashAttentionBackend")
+                return FLASH_ATTN_V1
+
+            logger.info_once("Using FlexAttention backend on V1 engine.")
+            return FLEX_ATTENTION_V1
 
         # Backends for V0 engine
         if selected_backend == _Backend.FLASHINFER:

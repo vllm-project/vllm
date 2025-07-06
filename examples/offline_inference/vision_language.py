@@ -98,7 +98,7 @@ def run_blip2(questions: list[str], modality: str) -> ModelRequestData:
     # See https://huggingface.co/Salesforce/blip2-opt-2.7b/discussions/15#64ff02f3f8cf9e4f5b038262 #noqa
     prompts = [f"Question: {question} Answer:" for question in questions]
     engine_args = EngineArgs(
-        model="Salesforce/blip2-opt-6.7b",
+        model="Salesforce/blip2-opt-2.7b",
         limit_mm_per_prompt={modality: 1},
     )
 
@@ -971,7 +971,7 @@ def run_pixtral_hf(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
-# Qwen
+# Qwen-VL
 def run_qwen_vl(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
 

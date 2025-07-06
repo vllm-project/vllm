@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with FlashAttention."""
-
+from collections import defaultdict
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -20,9 +20,6 @@ from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
                                               CommonAttentionMetadata)
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.block_table import BlockTable
-
-if current_platform.is_cuda():
-    pass
 
 logger = init_logger(__name__)
 
@@ -45,9 +42,9 @@ def _offsets_to_doc_ids_tensor(offsets: torch.Tensor) -> torch.Tensor:
 class FlexAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
 
-    @staticmethod
-    def get_supported_head_sizes() -> list[int]:
-        return [16, 32, 64, 96, 128, 160, 192, 224, 256]
+    @classmethod
+    def validate_head_size(cls, head_size: int) -> None:
+        return  # FlexAttention supports any head size
 
     @staticmethod
     def get_name() -> str:
@@ -384,12 +381,8 @@ class FlexAttentionImpl(AttentionImpl):
             raise NotImplementedError(
                 "FlexAttention does not support kv sharing yet.")
 
-        support_head_sizes = FlexAttentionBackend.get_supported_head_sizes()
-        if head_size not in support_head_sizes:
-            raise ValueError(
-                f"Head size {head_size} is not supported by FlashAttention. "
-                f"Supported head sizes are: {support_head_sizes}. "
-                "Set VLLM_USE_V1=0 to use another attention backend.")
+        FlexAttentionBackend.validate_head_size(head_size)
+
         if is_quantized_kv_cache(self.kv_cache_dtype):
             raise NotImplementedError(
                 "FlexAttention does not support quantized kv-cache. Yet")
@@ -464,12 +457,20 @@ class FlexAttentionImpl(AttentionImpl):
         # Doesn't work for now -> constraint violation
         # torch._dynamo.try_mark_dynamic(query, 2)
 
-        # default M=64, N=64 may run out of shared memory on
-        # some GPUs with fp32, so we use smaller M and N.
-        extra_kernel_options = {
-            "BLOCK_M": 32,
-            "BLOCK_N": 32
-        } if query.dtype == torch.float32 else {}
+        # default M=64, N=64 may run out of shared memory on some GPUs
+        # TODO: Explicit configs for each GPU?
+        # Not sure how to calculate the shared memory requirement
+        extra_kernel_options = defaultdict[str, int](lambda: 64)
+        if query.dtype == torch.float32:
+            extra_kernel_options["BLOCK_M"] //= 2
+            extra_kernel_options["BLOCK_N"] //= 2
+        if current_platform.is_cuda():
+            device_props = torch.cuda.get_device_properties()
+            max_shared_memory = device_props.shared_memory_per_block_optin
+            if max_shared_memory < 144 * 1024:
+                extra_kernel_options["BLOCK_M"] //= 2
+                extra_kernel_options["BLOCK_N"] //= 2
+
         out = flex_attention_compiled(
             query,
             key_cache,
