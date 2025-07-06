@@ -452,7 +452,6 @@ class ClassifierPooler(nn.Module):
                 for _, pooling_param in pooling_metadata.seq_groups
             ]
         else:
-            assert isinstance(pooled_data, list)
             use_cross_encoder_list = [
                 pooling_param.use_cross_encoder
                 for pooling_param in pooling_metadata.pooling_params
@@ -467,7 +466,7 @@ class ClassifierPooler(nn.Module):
             scores = torch.stack([
                 self._get_act_fn(use_cross_encoder)(vecs)
                 for use_cross_encoder, vecs in zip(use_cross_encoder_list,
-                                                   pooled_data)
+                                                   pooled_output)
             ])
 
         pooled_outputs = [PoolingSequenceGroupOutput(data) for data in scores]
