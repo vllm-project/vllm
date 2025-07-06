@@ -28,7 +28,7 @@ async def test_structured_output(client: openai.AsyncOpenAI):
                 "schema": {
                     "type": "object",
                     "properties": {
-                        "name": {
+                        "event_name": {
                             "type": "string"
                         },
                         "date": {
@@ -41,7 +41,7 @@ async def test_structured_output(client: openai.AsyncOpenAI):
                             }
                         },
                     },
-                    "required": ["name", "date", "participants"],
+                    "required": ["event_name", "date", "participants"],
                     "additionalProperties": False,
                 },
                 "description": "A calendar event.",
@@ -55,7 +55,7 @@ async def test_structured_output(client: openai.AsyncOpenAI):
     output_text = response.output[-1].content[0].text
     event = json.loads(output_text)
 
-    assert event["name"].lower() == "science fair"
+    assert event["event_name"].lower() == "science fair"
     assert event["date"] == "Friday"
     participants = event["participants"]
     assert len(participants) == 2
@@ -67,7 +67,7 @@ async def test_structured_output(client: openai.AsyncOpenAI):
 async def test_structured_output_with_parse(client: openai.AsyncOpenAI):
 
     class CalendarEvent(BaseModel):
-        name: str
+        event_name: str
         date: str
         participants: list[str]
 
@@ -84,7 +84,7 @@ async def test_structured_output_with_parse(client: openai.AsyncOpenAI):
     assert event is not None
 
     # The output is correct.
-    assert event.name.lower() == "science fair"
+    assert event.event_name.lower() == "science fair"
     assert event.date == "Friday"
     participants = event.participants
     assert len(participants) == 2
