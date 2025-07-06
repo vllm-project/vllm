@@ -16,7 +16,7 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.prompt_adapter.request import PromptAdapterRequest
-from vllm.sequence import ExecuteModelRequest, PoolerOutput
+from vllm.sequence import ExecuteModelRequest, IntermediateTensors, PoolerOutput
 from vllm.utils import make_async
 from vllm.worker.worker_base import WorkerBase
 
@@ -137,7 +137,7 @@ class ExecutorBase(ABC):
 
     def execute_model(
         self, execute_model_req: ExecuteModelRequest
-    ) -> Optional[List[Union[SamplerOutput, PoolerOutput]]]:
+    ) -> Optional[Union[List[Union[SamplerOutput, PoolerOutput]], IntermediateTensors]]:
         output = self.collective_rpc("execute_model",
                                      args=(execute_model_req, ))
         return output[0]
@@ -261,7 +261,7 @@ class ExecutorBase(ABC):
 
     async def execute_model_async(
             self,
-            execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
+            execute_model_req: ExecuteModelRequest) -> Union[List[SamplerOutput], IntermediateTensors]:
         """Executes one model step on the given sequences."""
         output = await make_async(self.execute_model)(execute_model_req)
         return output
@@ -289,7 +289,7 @@ class DistributedExecutorBase(ExecutorBase):
     def execute_model(
         self,
         execute_model_req: ExecuteModelRequest,
-    ) -> List[SamplerOutput]:
+    ) -> Union[List[SamplerOutput], IntermediateTensors]:
         # TODO: unify into collective_rpc
         if self.parallel_worker_tasks is None:
             self.parallel_worker_tasks = self._run_workers(
@@ -315,7 +315,7 @@ class DistributedExecutorBase(ExecutorBase):
     @abstractmethod
     def _driver_execute_model(
         self, execute_model_req: Optional[ExecuteModelRequest]
-    ) -> Optional[List[SamplerOutput]]:
+    ) -> Optional[Union[List[SamplerOutput], IntermediateTensors]]:
         """Run execute_model in the driver worker.
 
         Passing None will cause the driver to stop the model execution loop
@@ -360,7 +360,7 @@ class DistributedExecutorBase(ExecutorBase):
 
     async def execute_model_async(
             self,
-            execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
+            execute_model_req: ExecuteModelRequest) -> Union[List[SamplerOutput], IntermediateTensors]:
         if self.parallel_worker_tasks is None:
             # Start model execution loop running in the parallel workers
             self.parallel_worker_tasks = asyncio.create_task(
@@ -384,7 +384,7 @@ class DistributedExecutorBase(ExecutorBase):
     async def _driver_execute_model_async(
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None,
-    ) -> List[SamplerOutput]:
+    ) -> Union[List[SamplerOutput], IntermediateTensors]:
         """Execute the model asynchronously in the driver worker.
 
         Passing None will cause the driver to stop the model execution

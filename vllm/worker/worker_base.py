@@ -78,7 +78,7 @@ class WorkerBase:
     def execute_model(
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None
-    ) -> Optional[List[SamplerOutput]]:
+    ) -> Optional[Union[List[SamplerOutput], IntermediateTensors]]:
         raise NotImplementedError
 
     def start_worker_execution_loop(self) -> None:
@@ -168,7 +168,7 @@ class DelegateWorkerBase(WorkerBase):
     def execute_model(
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None
-    ) -> Optional[List[SamplerOutput]]:
+    ) -> Optional[Union[List[SamplerOutput], IntermediateTensors]]:
         return self.worker.execute_model(execute_model_req)
 
     def get_cache_block_size_bytes(self) -> int:
@@ -386,7 +386,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
     def execute_model(
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None,
-    ) -> Optional[List[SamplerOutput]]:
+    ) -> Optional[Union[List[SamplerOutput], IntermediateTensors]]:
         """Executes at least one model step on the given sequences, unless no
         sequences are provided."""
         start_time = time.perf_counter()
@@ -437,13 +437,17 @@ class LocalOrDistributedWorkerBase(WorkerBase):
             get_pp_group().send_tensor_dict(output.tensors,
                                             all_gather_group=get_tp_group())
             return [None]
+        
         if (self.observability_config is not None
                 and self.observability_config.collect_model_execute_time
-                and output is not None):
+                and output is not None and isinstance(output, List[SamplerOutput])):
             for o in output:
                 o.model_execute_time = (orig_model_execute_time +
                                         model_execute_time)
-
+        # If the output is IntermediateTensors, we return it directly.
+        if isinstance(output, IntermediateTensors):
+            # This is where we would return the intermediate tensors
+            return output
         # output is List[SamplerOutput]
         return output
 
@@ -451,7 +455,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         self,
         execute_model_req: ExecuteModelRequest,
         intermediate_tensors: Optional[IntermediateTensors] = None
-    ) -> Optional[List[SamplerOutput]]:
+    ) -> Optional[Union[List[SamplerOutput], IntermediateTensors]]:
         """
         Execute model in Single Program Multiple Data (SPMD) fashion.
         All workers take the same request, prepare the input and

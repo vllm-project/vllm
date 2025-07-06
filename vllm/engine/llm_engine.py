@@ -46,7 +46,7 @@ from vllm.outputs import (PoolingRequestOutput, RequestOutput,
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import RequestOutputKind, SamplingParams
-from vllm.sequence import (ExecuteModelRequest, ParallelSampleSequenceGroup,
+from vllm.sequence import (ExecuteModelRequest, IntermediateTensors, ParallelSampleSequenceGroup,
                            PoolingSequenceGroupOutput, Sequence, SequenceGroup,
                            SequenceGroupBase, SequenceGroupMetadata,
                            SequenceGroupOutput, SequenceStatus)
@@ -79,7 +79,7 @@ class SchedulerOutputState:
 
 
 class OutputData(NamedTuple):
-    outputs: List[SamplerOutput]
+    outputs: Union[List[SamplerOutput], IntermediateTensors]
     seq_group_metadata_list: List[SequenceGroupMetadata]
     scheduler_outputs: SchedulerOutputs
     is_async: bool
@@ -105,7 +105,7 @@ class SchedulerContext:
 
         self.multi_step_stream_outputs: bool = multi_step_stream_outputs
 
-    def append_output(self, outputs: List[SamplerOutput],
+    def append_output(self, outputs: Union[List[SamplerOutput], IntermediateTensors],
                       seq_group_metadata_list: List[SequenceGroupMetadata],
                       scheduler_outputs: SchedulerOutputs, is_async: bool,
                       is_last_step: bool,
@@ -1551,7 +1551,7 @@ class LLMEngine:
 
     def do_log_stats(self,
                      scheduler_outputs: Optional[SchedulerOutputs] = None,
-                     model_output: Optional[List[SamplerOutput]] = None,
+                     model_output: Union[Optional[List[SamplerOutput]], IntermediateTensors] = None,
                      finished_before: Optional[List[int]] = None,
                      skip: Optional[List[int]] = None) -> None:
         """Forced log when no requests active."""
@@ -1563,7 +1563,7 @@ class LLMEngine:
 
     def _get_stats(self,
                    scheduler_outputs: Optional[SchedulerOutputs],
-                   model_output: Optional[List[SamplerOutput]] = None,
+                   model_output: Union[Optional[List[SamplerOutput]], IntermediateTensors] = None,
                    finished_before: Optional[List[int]] = None,
                    skip: Optional[List[int]] = None) -> Stats:
         """Get Stats to be Logged to Prometheus.

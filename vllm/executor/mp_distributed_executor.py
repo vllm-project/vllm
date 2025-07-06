@@ -13,7 +13,7 @@ from vllm.executor.multiproc_worker_utils import (
     set_multiprocessing_worker_envs)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.sampler import SamplerOutput
-from vllm.sequence import ExecuteModelRequest
+from vllm.sequence import ExecuteModelRequest, IntermediateTensors
 from vllm.utils import (_run_task_with_lock, cuda_device_count_stateless,
                         get_distributed_init_method, get_ip, get_open_port,
                         make_async, run_method, update_environment_variables)
@@ -136,7 +136,7 @@ class MultiprocessingDistributedExecutor(DistributedExecutorBase):
 
     def _driver_execute_model(
         self, execute_model_req: Optional[ExecuteModelRequest]
-    ) -> Optional[List[SamplerOutput]]:
+    ) -> Optional[Union[List[SamplerOutput], IntermediateTensors]]:
         """Run execute_model in the driver worker.
 
         Passing None will cause the driver to stop the model execution
@@ -205,7 +205,7 @@ class MultiprocessingDistributedExecutor(DistributedExecutorBase):
     async def _driver_execute_model_async(
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None
-    ) -> List[SamplerOutput]:
+    ) -> Union[List[SamplerOutput], IntermediateTensors]:
         if not self.tp_driver_workers:
             return await self.driver_exec_model(execute_model_req)
 

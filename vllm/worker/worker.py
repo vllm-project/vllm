@@ -28,7 +28,7 @@ from vllm.utils import (GiB_bytes, MemorySnapshot, bind_kv_cache,
                         memory_profiling)
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.enc_dec_model_runner import EncoderDecoderModelRunner
-from vllm.worker.model_runner import GPUModelRunnerBase, ModelRunner
+from vllm.worker.model_runner import GPUModelRunnerBase, ModelRunner, MiddleModelRunner
 from vllm.worker.pooling_model_runner import PoolingModelRunner
 from vllm.worker.worker_base import (LocalOrDistributedWorkerBase, WorkerBase,
                                      WorkerInput)
@@ -84,6 +84,8 @@ class Worker(LocalOrDistributedWorkerBase):
             ModelRunnerClass = PoolingModelRunner
         elif self.model_config.is_encoder_decoder:
             ModelRunnerClass = EncoderDecoderModelRunner
+        elif model_config.is_middle_blocks:
+            ModelRunnerClass = MiddleModelRunner
         self.model_runner: GPUModelRunnerBase = ModelRunnerClass(
             vllm_config=self.vllm_config,
             kv_cache_dtype=self.cache_config.cache_dtype,
@@ -466,7 +468,7 @@ class Worker(LocalOrDistributedWorkerBase):
         self,
         execute_model_req: ExecuteModelRequest,
         intermediate_tensors: Optional[IntermediateTensors] = None,
-    ) -> Optional[List[SamplerOutput]]:
+    ) -> Optional[Union[List[SamplerOutput], IntermediateTensors]]:
         if execute_model_req is not None:
             new_seq_group_metadata_list = self._get_cached_seq_group_metadata(
                 execute_model_req.seq_group_metadata_list,

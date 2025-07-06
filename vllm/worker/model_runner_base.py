@@ -4,7 +4,7 @@
 import dataclasses
 from abc import ABC, abstractmethod
 from typing import (TYPE_CHECKING, Any, Dict, Generic, List, Optional, Type,
-                    TypeVar)
+                    TypeVar, Union)
 
 import torch
 import torch.nn as nn
@@ -230,7 +230,7 @@ class ModelRunnerBase(ABC, Generic[T]):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
         **kwargs,
-    ) -> Optional[List[SamplerOutput]]:
+    ) -> Optional[Union[List[SamplerOutput], IntermediateTensors]]:
         """
         Execute the model on the given input.
         """

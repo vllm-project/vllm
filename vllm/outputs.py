@@ -14,7 +14,7 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalPlaceholderDict
 from vllm.sampling_params import RequestOutputKind
-from vllm.sequence import (PromptLogprobs, RequestMetrics, SampleLogprobs,
+from vllm.sequence import (IntermediateTensors, PromptLogprobs, RequestMetrics, SampleLogprobs,
                            SequenceGroup, SequenceGroupBase, SequenceStatus)
 
 logger = init_logger(__name__)
@@ -47,6 +47,7 @@ class CompletionOutput:
     finish_reason: Optional[str] = None
     stop_reason: Union[int, str, None] = None
     lora_request: Optional[LoRARequest] = None
+    hidden_states: Optional[IntermediateTensors] = None
 
     def finished(self) -> bool:
         return self.finish_reason is not None
@@ -436,6 +437,39 @@ class EmbeddingRequestOutput(PoolingRequestOutput[EmbeddingOutput]):
         return EmbeddingRequestOutput(
             request_id=request_output.request_id,
             outputs=EmbeddingOutput.from_base(request_output.outputs),
+            prompt_token_ids=request_output.prompt_token_ids,
+            finished=request_output.finished,
+        )
+    
+@dataclass
+class HiddenStatesOutput:
+    """The output data of one hidden states output of a request.
+
+    Args:
+        hidden_states: The hidden states, which is a list of lists of floats.
+                       Each inner list corresponds to the hidden states for a
+                       specific token in the input sequence.
+    """
+    hidden_states: torch.Tensor
+
+    @staticmethod
+    def from_base(pooling_output: PoolingOutput):
+        pooled_data = pooling_output.data
+        if pooled_data.ndim != 3:
+            raise ValueError("pooled_data should be a 3-D tensor of hidden states")
+
+        return HiddenStatesOutput(pooled_data)
+
+    def __repr__(self) -> str:
+        return f"HiddenStatesOutput(num_tokens={self.hidden_states.size(1)})"
+
+class HiddenStatesRequestOutput(PoolingRequestOutput[HiddenStatesOutput]):
+
+    @staticmethod
+    def from_base(request_output: PoolingRequestOutput):
+        return HiddenStatesRequestOutput(
+            request_id=request_output.request_id,
+            outputs=HiddenStatesOutput.from_base(request_output.outputs),
             prompt_token_ids=request_output.prompt_token_ids,
             finished=request_output.finished,
         )
