@@ -115,6 +115,14 @@ class NixlConnector(KVConnectorBase_V1):
                 vllm_config, self.engine_id)
 
     ############################################################
+    # Class Methods
+    ############################################################
+    @classmethod
+    def get_required_kvcache_layout(cls, vllm_config: VllmConfig):
+        use_mla = vllm_config.model_config.use_mla
+        return "NHD" if use_mla else "HND"
+
+    ############################################################
     # Scheduler Side Methods
     ############################################################
 
