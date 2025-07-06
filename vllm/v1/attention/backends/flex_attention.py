@@ -42,8 +42,8 @@ def _offsets_to_doc_ids_tensor(offsets: torch.Tensor) -> torch.Tensor:
 class FlexAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
 
-    @staticmethod
-    def validate_head_size(head_size: int) -> None:
+    @classmethod
+    def validate_head_size(cls, head_size: int) -> None:
         return  # FlexAttention supports any head size
 
     @staticmethod
