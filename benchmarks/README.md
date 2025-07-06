@@ -59,6 +59,12 @@ become available.
       <td><code>AI-MO/aimo-validation-aime</code> , <code>AI-MO/NuminaMath-1.5</code>, <code>AI-MO/NuminaMath-CoT</code></td>
     </tr>
     <tr>
+      <td><strong>HuggingFace-Unsloth</strong></td>
+      <td style="text-align: center;">✅</td>
+      <td style="text-align: center;">✅</td>
+      <td><code>unsloth/LaTeX_OCR</code>, <code>unsloth/Radiology_mini</code></td>
+    </tr>
+    <tr>
       <td><strong>HuggingFace-Other</strong></td>
       <td style="text-align: center;">✅</td>
       <td style="text-align: center;">✅</td>
@@ -255,6 +261,49 @@ python3 vllm/benchmarks/benchmark_serving.py \
     --num-prompts 80
 ```
 
+**`unsloth/LaTeX_OCR`**
+
+``` bash
+# Serve the model
+vllm serve unsloth/Qwen2-VL-2B-Instruct \
+    --dtype bfloat16 \
+    --max-model-len 4096 \
+    --max-num-seqs 5 \
+    --limit-mm-per-prompt "image=1,video=0" \
+    --max-seq-len-to-capture 4096 \
+    --mm-processor-kwargs '{"min_pixels": 784, "max_pixels": 1003520}'
+```
+
+``` bash
+python3 vllm/benchmarks/benchmark_serving.py \
+  --backend openai-chat \
+  --request-rate 5 \
+  --max-concurrency 5 \
+  --model unsloth/Qwen2-VL-2B-Instruct \
+  --endpoint /v1/chat/completions \
+  --dataset-name hf \
+  --dataset-path unsloth/LaTeX_OCR \
+  --hf-split train \
+  --hf-output-len 256 \
+  --num-prompts 1000 
+```
+
+**`unsloth/Radiology_mini`**
+
+``` bash
+python3 vllm/benchmarks/benchmark_serving.py \
+  --backend openai-chat \
+  --request-rate 5 \
+  --max-concurrency 5 \
+  --model unsloth/Qwen2-VL-2B-Instruct \
+  --endpoint /v1/chat/completions \
+  --dataset-name hf \
+  --dataset-path unsloth/Radiology_mini \
+  --hf-split train \
+  --hf-output-len 256 \
+  --num-prompts 1000
+```
+
 **Running With Sampling Parameters**
 
 When using OpenAI-compatible backends such as `vllm`, optional sampling
@@ -392,6 +441,30 @@ python3 benchmarks/benchmark_throughput.py \
   --dataset-path AI-MO/aimo-validation-aime \
   --hf-split train \
   --num-prompts 10
+```
+
+**`unsloth/LaTeX_OCR`**
+
+```bash
+python3 vllm/benchmarks/benchmark_throughput.py \
+  --model unsloth/Qwen2-VL-2B-Instruct \
+  --backend vllm-chat \
+  --dataset-name hf \
+  --dataset-path unsloth/LaTeX_OCR \
+  --hf-split train \
+  --num-prompts 1000 
+```
+
+**`unsloth/Radiology_mini`**
+
+```bash
+python3 vllm/benchmarks/benchmark_throughput.py \
+  --model unsloth/Qwen2-VL-2B-Instruct \
+  --backend vllm-chat \
+  --dataset-name hf \
+  --dataset-path unsloth/Radiology_mini \
+  --hf-split train \
+  --num-prompts 1000
 ```
 
 **Benchmark with LoRA Adapters**
