@@ -128,6 +128,7 @@ if TYPE_CHECKING:
     VLLM_NIXL_SIDE_CHANNEL_PORT: int = 5557
     VLLM_ALL2ALL_BACKEND: str = "naive"
     VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE: int = 163840
+    VLLM_UNIFORM_RANDOM_TOPK_IDS: bool = False 
     VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS: int = 1
     VLLM_SLEEP_WHEN_IDLE: bool = False
     VLLM_MQ_MAX_CHUNK_BYTES_MB: int = 16
@@ -912,6 +913,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # This is used to prevent the kernel from running out of memory.
     "VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE":
     lambda: int(os.getenv("VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE", "163840")),
+
+    # Use uniform random topk ids for perfect load balancing in expectation.
+    # Use it for analyzing performance when using --load-format=dummy.
+    # MoE layers will not produce the correct answer when it is set.
+    "VLLM_UNIFORM_RANDOM_TOPK_IDS":
+    lambda: os.environ.get("VLLM_UNIFORM_RANDOM_TOPK_IDS", "false").lower() in
+    ("1", "true"),
 
     # Regex timeout for use by the vLLM tool parsing plugins.
     "VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS":
