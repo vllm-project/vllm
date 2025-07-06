@@ -456,6 +456,10 @@ class NaiveBlock(Block):
     @property
     def prev_block(self) -> Optional["Block"]:
         return self._prev_block
+    
+    @prev_block.setter
+    def prev_block(self, value: Optional["Block"]) -> None:
+        self._prev_block = value
 
     @property
     def extra_hash(self):
