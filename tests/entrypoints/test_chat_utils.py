@@ -264,10 +264,8 @@ def test_parse_chat_messages_multiple_images(
                     "url": image_url
                 }
             }, {
-                "type": "image_url",
-                "image_url": {
-                    "url": image_url
-                }
+                "type": "image_pil",
+                "image_pil": ImageAsset('cherry_blossom').pil_image
             }, {
                 "type": "text",
                 "text": "What's in these images?"
@@ -303,10 +301,8 @@ async def test_parse_chat_messages_multiple_images_async(
                     "url": image_url
                 }
             }, {
-                "type": "image_url",
-                "image_url": {
-                    "url": image_url
-                }
+                "type": "image_pil",
+                "image_pil": ImageAsset('cherry_blossom').pil_image
             }, {
                 "type": "text",
                 "text": "What's in these images?"
