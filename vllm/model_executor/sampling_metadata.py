@@ -335,6 +335,8 @@ def _prepare_seq_groups(
                 range(logit_idx, logit_idx + prompt_logprob_len))
             logit_idx += prompt_logprob_len
         if do_sample:
+            # Note: sample_indices is expected to be contiguous
+            # as required by LogitsProcessor.
             sample_indices.extend(range(logit_idx, logit_idx + sample_len))
             categorized_sample_indices[sampling_params.sampling_type].extend(
                 list(range(logit_idx, logit_idx + sample_len)))
