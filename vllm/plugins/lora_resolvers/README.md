@@ -6,10 +6,15 @@ via the LoRAResolver plugin framework.
 Note that `VLLM_ALLOW_RUNTIME_LORA_UPDATING` must be set to true to allow LoRA resolver plugins
 to work, and `VLLM_PLUGINS` must be set to include the desired resolver plugins.
 
+The LoRA Resolvers listed below are installed with vLLM by default.
+
 # lora_filesystem_resolver
-This LoRA Resolver is installed with vLLM by default.
-To use, set `VLLM_PLUGIN_LORA_CACHE_DIR` to a local directory. When vLLM receives a request
+To use, set `VLLM_LORA_RESOLVER_CACHE_DIR` to a local directory. When vLLM receives a request
 for a LoRA adapter `foobar` it doesn't currently recognize, it will look in that local directory
-for a subdirectory `foobar` containing a LoRA adapter. If such an adapter exists, it will
-load that adapter, and then service the request as normal. That adapter will then be available
-for future requests as normal.
+for a subdirectory `foobar` containing a LoRA adapter. If such an adapter exists and matches the
+model's `base_model_name_or_path`, it will load that adapter, and then service the request
+as normal. That adapter will then be available for future requests as normal.
+
+# hf_hub_resolver
+To use, set `VLLM_LORA_RESOLVER_HF_REPO_LIST` to a comma separated list of repositories on Huggingface Hub. When vLLM receives
+a request for a LoRA adapter `my/repo/foobar` it doesn't currently recognize, it will download the `foobar` subpath from `my/repo` if it contains an adapter config, then proceed in an identical manner to the `lora_filesystem_resolver` using the cached directory.
