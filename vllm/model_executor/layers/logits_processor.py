@@ -3,7 +3,7 @@
 """A layer that compute logits from hidden_stats."""
 import inspect
 from concurrent.futures import ThreadPoolExecutor
-from typing import Optional
+from typing import Optional, Union
 
 import torch
 import torch.nn as nn
@@ -13,6 +13,7 @@ from vllm.distributed import (tensor_model_parallel_all_gather,
                               tensor_model_parallel_gather)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
+from vllm.model_executor.models.utils import PPMissingLayer
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.platforms import current_platform
 
@@ -102,13 +103,17 @@ class LogitsProcessor(nn.Module):
     def _get_logits(
         self,
         hidden_states: torch.Tensor,
-        lm_head: VocabParallelEmbedding,
+        lm_head: Union[VocabParallelEmbedding, PPMissingLayer],
         embedding_bias: Optional[torch.Tensor],
     ) -> Optional[torch.Tensor]:
         # Get the logits for the next tokens.
-        logits = lm_head.quant_method.apply(lm_head,
-                                            hidden_states,
-                                            bias=embedding_bias)
+        if isinstance(lm_head, VocabParallelEmbedding):
+            logits = lm_head.quant_method.apply(lm_head,
+                                                hidden_states,
+                                                bias=embedding_bias)
+        else:
+            # PPMissingLayer does not have quant_method
+            logits = lm_head(hidden_states)
 
         # Gather logits for TP
         logits = self._gather_logits(logits)
