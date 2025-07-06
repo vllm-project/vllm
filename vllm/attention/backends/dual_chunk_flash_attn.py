@@ -22,6 +22,11 @@ from vllm.utils import async_tensor_h2d
 from vllm.vllm_flash_attn import (flash_attn_varlen_func,
                                   flash_attn_with_kvcache, sparse_attn_func)
 
+from vllm.attention.utils.fa_utils import (flash_attn_supports_fp8,
+                                           get_flash_attn_version)
+
+from vllm.attention.backends.abstract import is_quantized_kv_cache
+
 if TYPE_CHECKING:
     from vllm.worker.model_runner import ModelInputForGPUBuilder
 
@@ -303,9 +308,12 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
         if alibi_slopes is not None:
             alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.float32)
         self.alibi_slopes = alibi_slopes
+        self.vllm_flash_attn_version = get_flash_attn_version(
+            requires_alibi=self.alibi_slopes is not None)
         self.sliding_window = ((sliding_window, sliding_window)
                                if sliding_window is not None else (-1, -1))
         self.kv_cache_dtype = kv_cache_dtype
+        self.kv_cache_fp8_attention = kv_cache_dtype.startswith("fp8")
 
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
         if sliding_window is not None:
@@ -313,6 +321,14 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
             # paged KV cache.
             raise ValueError(
                 "Sliding window is not supported in FlashAttention.")
+
+        if is_quantized_kv_cache(self.kv_cache_dtype) and (
+                not self.kv_cache_dtype.startswith("fp8")
+                or not flash_attn_supports_fp8()):
+            raise NotImplementedError(
+                f"FlashAttention does not support {self.kv_cache_dtype} "
+                "kv-cache on this device "
+                f"(FA supports fp8 = {flash_attn_supports_fp8()}).")
 
         support_head_sizes = (
             DualChunkFlashAttentionBackend.get_supported_head_sizes())
@@ -385,7 +401,7 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
             shape = [num_tokens, num_heads * head_size]
         """
         assert output is None, "Output tensor not supported for DualChunk"
-
+        kv_cache_fp8_attention = self.kv_cache_fp8_attention
         if output_scale is not None:
             raise NotImplementedError(
                 "fused output quantization is not yet supported"
@@ -409,13 +425,13 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
         query = query.view(-1, self.num_heads, self.head_size)
         query_succ = query_succ.view(-1, self.num_heads, self.head_size)
         query_inter = query_inter.view(-1, self.num_heads, self.head_size)
-        query_succ_critical = query_succ_critical.view(-1, self.num_heads,
-                                                       self.head_size)
-        query_inter_critical = query_inter_critical.view(
-            -1, self.num_heads, self.head_size)
+        query_succ_critical = query_succ_critical.view(-1, self.num_heads, self.head_size)
+        query_inter_critical = query_inter_critical.view(-1, self.num_heads, self.head_size)
         key = key.view(-1, self.num_kv_heads, self.head_size)
         value = value.view(-1, self.num_kv_heads, self.head_size)
 
+
+        # Apply position embedding scaling BEFORE FP8 quantization of K/V
         if self.original_max_position_embeddings > 0:
             if prefill_meta := attn_metadata.prefill_metadata:
                 assert prefill_meta.scaling_factor is not None
@@ -425,7 +441,7 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
                 query_start_loc_cpu = prefill_meta.query_start_loc.cpu()
                 for i in range(len(prefill_meta.orig_seq_lens)):
                     current_end = (current_start +
-                                   (query_start_loc_cpu[i + 1] -
+                                (query_start_loc_cpu[i + 1] -
                                     query_start_loc_cpu[i]).item())
                     key[current_start:current_end].mul_(
                         prefill_meta.scaling_factor[i])
@@ -437,13 +453,12 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
                 key[attn_metadata.num_prefill_tokens:].mul_(
                     scaling_factor.unsqueeze(-1).unsqueeze(-1))
 
+
         if kv_cache is not None and kv_cache.numel() > 0:
             key_cache = kv_cache[0]
             value_cache = kv_cache[1]
 
             # Reshape the input keys and values and store them in the cache.
-            # If kv_cache is not provided, the new key and value tensors are
-            # not cached. This happens during the initial memory profiling run.
             ops.reshape_and_cache_flash(
                 key,
                 value,
@@ -454,6 +469,13 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
                 layer._k_scale,
                 layer._v_scale,
             )
+
+            # Convert kv_cache to FP8 view if needed
+            if kv_cache_fp8_attention:
+                kv_cache = kv_cache.view(torch.float8_e4m3fn)
+                key_cache = key_cache.view(torch.float8_e4m3fn)
+                value_cache = value_cache.view(torch.float8_e4m3fn)
+
 
         num_prefill_tokens = attn_metadata.num_prefill_tokens
         num_decode_tokens = attn_metadata.num_decode_tokens
@@ -521,6 +543,7 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
                         block_table=prefill_meta.block_tables,
                         chunk_size=self.chunk_size,
                         local_size=self.local_size,
+                        layer=layer,
                     ))
 
         if decode_meta := attn_metadata.decode_metadata:
@@ -566,6 +589,7 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
         block_table: Optional[torch.Tensor] = None,
         chunk_size: int = 8192,
         local_size: int = 1024,
+        layer: Optional[AttentionLayer] = None,
     ):
         if alibi_slopes is not None:
             raise ValueError(
@@ -659,7 +683,8 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
                     sparse_attn_enabled=sparse_attn_enabled,
                     heads_vertical_size=heads_vertical_size,
                     heads_slash_size=heads_slash_size,
-                    group_size=group_size)
+                    group_size=group_size,
+                    layer=layer)
             else:
                 for head_id in range(current_q.size(-2)):
                     # (seq_len, num_heads, head_size)
@@ -697,6 +722,7 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
                         scaling_factor[i].item(),
                         ke - ks,
                         sparse_attn_enabled=sparse_attn_enabled,
+                        layer=layer,
                     )
                     current_output[:, head_id:head_id + 1, :] = current_out
             all_outputs.append(current_output)
@@ -721,7 +747,9 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
         heads_vertical_size=None,
         heads_slash_size=None,
         group_size=None,
+        layer=None,
     ):
+        
         flash_results = []
         chunk_len = chunk_size - local_size
 
@@ -1062,7 +1090,9 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
                     vertical_indices_count=vertical_size_buffer,
                     slash_indices_count=slash_sizes_buffer,
                     mergehead_softmax_scale=softmax_scale,
-                    sparse_attn_enabled=sparse_attn_enabled)
+                    sparse_attn_enabled=sparse_attn_enabled,
+                    layer=layer
+                )
             else:
                 flash_result = self._do_flash_attn(
                     q_states_intra,
@@ -1074,7 +1104,9 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
                     stage="intra",
                     vertical_indices=intra_vertical_indices,
                     slash_indices=intra_slash_indices,
-                    sparse_attn_enabled=sparse_attn_enabled)
+                    sparse_attn_enabled=sparse_attn_enabled,
+                    layer=layer
+                )
             flash_per_chunk.append(flash_result)
 
             if prev_chunk_end_pos - chunk_len >= 0:
@@ -1092,7 +1124,8 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
                         vertical_indices_count=succ_vertical_size_buffer,
                         slash_indices_count=succ_slash_sizes_buffer,
                         mergehead_softmax_scale=softmax_scale,
-                        sparse_attn_enabled=sparse_attn_enabled)
+                        sparse_attn_enabled=sparse_attn_enabled,
+                        layer=layer)
                 else:
                     flash_result = self._do_flash_attn(
                         q_states_succ,
@@ -1104,7 +1137,8 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
                         stage="succ",
                         vertical_indices=succ_vertical_indices,
                         slash_indices=succ_slash_indices,
-                        sparse_attn_enabled=sparse_attn_enabled)
+                        sparse_attn_enabled=sparse_attn_enabled,
+                        layer=layer)
                 flash_per_chunk.append(flash_result)
 
             if prev_chunk_end_pos - chunk_len * 2 >= 0:
@@ -1122,7 +1156,8 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
                         vertical_indices_count=inter_vertical_size_buffer,
                         slash_indices_count=inter_slash_sizes_buffer,
                         mergehead_softmax_scale=softmax_scale,
-                        sparse_attn_enabled=sparse_attn_enabled)
+                        sparse_attn_enabled=sparse_attn_enabled,
+                        layer=layer)
                 else:
                     flash_result = self._do_flash_attn(
                         q_states_inter,
@@ -1134,7 +1169,9 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
                         stage="inter",
                         vertical_indices=inter_vertical_indices,
                         slash_indices=inter_slash_indices,
-                        sparse_attn_enabled=sparse_attn_enabled)
+                        sparse_attn_enabled=sparse_attn_enabled,
+                        layer=layer)
+                        
                 flash_per_chunk.append(flash_result)
 
             flash_results.append(flash_per_chunk)
@@ -1160,6 +1197,7 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
         slash_indices_count: Optional[torch.Tensor] = None,
         mergehead_softmax_scale: Optional[float] = None,
         sparse_attn_enabled: Optional[bool] = False,
+        layer: Optional[AttentionLayer] = None,
     ):
         if max_seqlen_k is None:
             max_seqlen_k = key_states.shape[0]
@@ -1216,25 +1254,38 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
                 s_lse = s_lse.view(q_len, q_heads, 1).transpose(0, 2).float()
             return res, s_lse
 
+        descale_shape = None
+        q_descale = k_descale = v_descale = None
+        if self.kv_cache_fp8_attention and layer is not None:
+            # For FP8, we need to provide descaling parameters but keep tensors in original dtype
+            # FlashAttention will handle the quantization internally
+            descale_shape = (q_len, query_states.shape[1])
+            q_descale = layer._q_scale.expand(descale_shape) if hasattr(layer, '_q_scale') else None
+            k_descale = layer._k_scale.expand(descale_shape) if hasattr(layer, '_k_scale') else None
+            v_descale = layer._v_scale.expand(descale_shape) if hasattr(layer, '_v_scale') else None
+
         output, softmax_lse = flash_attn_varlen_func(
             q=query_states,
             k=key_states,
             v=value_states,
             softmax_scale=softmax_scale,
             cu_seqlens_q=torch.tensor([0, query_states.shape[0]],
-                                      dtype=torch.int32,
-                                      device=query_states.device),
+                                    dtype=torch.int32,
+                                    device=query_states.device),
             max_seqlen_q=query_states.shape[0],
             cu_seqlens_k=torch.tensor([0, max_seqlen_k],
-                                      dtype=torch.int32,
-                                      device=query_states.device),
+                                    dtype=torch.int32,
+                                    device=query_states.device),
             max_seqlen_k=max_seqlen_k,
             causal=causal,
-            block_table=block_table.unsqueeze(0),
             return_softmax_lse=True,
+            fa_version=self.vllm_flash_attn_version,
+            # Add FP8 descaling parameters - FlashAttention will handle quantization internally
+            q_descale=q_descale,
+            k_descale=k_descale,
+            v_descale=v_descale,
         )
-        softmax_lse = softmax_lse.view(q_len, q_heads, 1).transpose(0,
-                                                                    2).float()
+        softmax_lse = softmax_lse.view(q_len, q_heads, 1).transpose(0, 2).float()
         return output, softmax_lse
 
     def _merge_attn_outputs(
@@ -1296,6 +1347,7 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
         local_size: int,
         original_max_position_embeddings: int,
         decode_meta: DualChunkFlashAttentionMetadata,
+        layer: Optional[AttentionLayer] = None,
     ):
         if not causal:
             raise ValueError(
@@ -1329,6 +1381,7 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
                 softmax_scale,
                 alibi_slopes,
                 causal=False,
+                layer=layer
             ))
         outputs_list.append(intra_output)
         softmax_lses_list.append(intra_softmax_lse)
@@ -1345,6 +1398,7 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
                     softmax_scale,
                     alibi_slopes,
                     causal=False,
+                    layer=layer
                 ))
             outputs_list.append(succ_output)
             softmax_lses_list.append(succ_softmax_lse)
@@ -1361,6 +1415,7 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
                     softmax_scale,
                     alibi_slopes,
                     causal=False,
+                    layer=layer
                 ))
             outputs_list.append(inter_output)
             softmax_lses_list.append(inter_softmax_lse)
@@ -1386,7 +1441,16 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
         softmax_scale: float,
         alibi_slopes: Optional[torch.Tensor],
         causal: bool,
+        layer: Optional[AttentionLayer] = None,
     ):
+        descale_shape = None
+        q_descale = k_descale = v_descale = None
+        if self.kv_cache_fp8_attention:
+            descale_shape = (cache_seqlens.shape[0], key_cache.shape[-2])
+            q_descale = layer._q_scale.expand(descale_shape)
+            k_descale = layer._k_scale.expand(descale_shape)
+            v_descale = layer._v_scale.expand(descale_shape)
+
         out, softmax_lse = flash_attn_with_kvcache(
             q=query,
             k_cache=key_cache,
@@ -1397,6 +1461,11 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
             alibi_slopes=alibi_slopes,
             causal=causal,
             return_softmax_lse=True,
+            fa_version=self.vllm_flash_attn_version,
+            # Add FP8 descaling parameters
+            q_descale=q_descale,
+            k_descale=k_descale,
+            v_descale=v_descale,
         )
         mask = (cache_seqlens == 0)
         out[mask] = 0
