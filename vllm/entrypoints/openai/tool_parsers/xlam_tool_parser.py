@@ -7,6 +7,7 @@ from typing import Any, Optional, Union
 
 import regex as re
 
+from vllm.entrypoints.chat_utils import random_tool_call_id
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DeltaFunctionCall, DeltaMessage,
                                               DeltaToolCall,
@@ -16,7 +17,6 @@ from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     ToolParser, ToolParserManager)
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
 
@@ -225,7 +225,7 @@ class xLAMToolParser(ToolParser):
                         function_name = name_match.group(1)
 
                         # The test expects us to send just the name first
-                        tool_id = f"chatcmpl-tool-{random_uuid()}"
+                        tool_id = random_tool_call_id()
                         delta = DeltaMessage(tool_calls=[
                             DeltaToolCall(
                                 index=0,
