@@ -25,8 +25,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.sequence import IntermediateTensors, PoolerOutput
-from vllm.transformers_utils.config import (
-    get_cross_encoder_activation_function)
 
 from .interfaces import SupportsCrossEncoding, SupportsQuant, SupportsV0Only
 from .utils import WeightsMapper, maybe_prefix
@@ -461,9 +459,6 @@ class BertForSequenceClassification(nn.Module, SupportsV0Only,
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
-
-        self.default_activation_function = \
-            get_cross_encoder_activation_function(config)
 
         self.num_labels = config.num_labels
         self.bert = BertModel(vllm_config=vllm_config,
