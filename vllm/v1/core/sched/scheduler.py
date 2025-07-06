@@ -952,6 +952,7 @@ class Scheduler(SchedulerInterface):
 
         # First pass: collect requests to remove from queues
         for req_id in request_ids:
+            self.finished_recving_kv_req_ids.discard(req_id)
             request = self.requests.get(req_id)
             if request is None:
                 # Invalid request ID.
@@ -1091,8 +1092,6 @@ class Scheduler(SchedulerInterface):
         # Update the request state for scheduling.
         request.num_computed_tokens = num_computed_tokens
 
-        # Return that we are ready.
-        self.finished_recving_kv_req_ids.remove(request.request_id)
         return True
 
     def _update_from_kv_xfer_finished(self,
