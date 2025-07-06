@@ -433,7 +433,7 @@ class OpenAIServingResponses(OpenAIServing):
             if prev_status not in ("queued", "in_progress"):
                 return self.create_error_response(
                     err_type="invalid_request_error",
-                    message="Cannot cancel a completed response.",
+                    message="Cannot cancel a synchronous response.",
                 )
 
             # Update the status to "cancelled".

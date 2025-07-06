@@ -333,7 +333,8 @@ class ResponsesRequest(OpenAIBaseModel):
         if not data.get("background"):
             return data
         if not data.get("store", True):
-            raise ValueError("store must be true if background is true")
+            raise ValueError(
+                "background can only be used when `store` is true")
         return data
 
     @model_validator(mode="before")

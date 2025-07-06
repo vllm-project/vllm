@@ -1,0 +1,131 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import asyncio
+
+import openai
+import pytest
+
+
+@pytest.mark.asyncio
+async def test_store(client: openai.AsyncOpenAI):
+    # By default, store is True.
+    response = await client.responses.create(input="What is 13 * 24?")
+    assert response.status == "completed"
+
+    # Retrieve the response.
+    response = await client.responses.retrieve(response.id)
+    assert response.status == "completed"
+    assert "312" in response.output[-1].content[0].text
+
+    # Test store=False.
+    response = await client.responses.create(
+        input="What is 11 * 12?",
+        store=False,
+    )
+    assert response.status == "completed"
+    assert "132" in response.output[-1].content[0].text
+
+    # The response should not be found.
+    with pytest.raises(openai.NotFoundError,
+                       match="Response with id .* not found."):
+        await client.responses.retrieve(response.id)
+
+
+@pytest.mark.asyncio
+async def test_background(client: openai.AsyncOpenAI):
+    response = await client.responses.create(
+        input="What is 13 * 24?",
+        background=True,
+    )
+    assert response.status == "queued"
+
+    max_retries = 10
+    for _ in range(max_retries):
+        response = await client.responses.retrieve(response.id)
+        if response.status != "queued":
+            break
+        await asyncio.sleep(1)
+
+    assert response.status == "completed"
+    assert "312" in response.output[-1].content[0].text
+
+
+@pytest.mark.asyncio
+async def test_background_error(client: openai.AsyncOpenAI):
+    with pytest.raises(
+            openai.BadRequestError,
+            match="background can only be used when `store` is true"):
+        _ = await client.responses.create(
+            input="What is 13 * 24?",
+            background=True,
+            store=False,
+        )
+
+
+@pytest.mark.asyncio
+async def test_background_cancel(client: openai.AsyncOpenAI):
+    response = await client.responses.create(
+        input="Write a long story about a cat.",
+        background=True,
+    )
+    assert response.status == "queued"
+
+    # Cancel the response before it is completed.
+    # FIXME: This test can be flaky.
+    await asyncio.sleep(0.5)
+    response = await client.responses.cancel(response.id)
+    assert response.status == "cancelled"
+
+    # Make sure the response status remains unchanged.
+    await asyncio.sleep(5)
+    response = await client.responses.retrieve(response.id)
+    assert response.status == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_cancel_completed(client: openai.AsyncOpenAI):
+    response = await client.responses.create(input="Hello")
+    assert response.status == "completed"
+
+    with pytest.raises(openai.BadRequestError,
+                       match="Cannot cancel a synchronous response."):
+        await client.responses.cancel(response.id)
+
+
+@pytest.mark.asyncio
+async def test_previous_response_id(client: openai.AsyncOpenAI):
+    response1 = await client.responses.create(input="What is 13 * 24?")
+    assert "312" in response1.output[-1].content[0].text
+
+    response2 = await client.responses.create(
+        input="What if I increase both numbers by 1?",
+        previous_response_id=response1.id,
+    )
+    assert "350" in response2.output[-1].content[0].text
+
+    response3 = await client.responses.create(
+        input="Divide the result by 2.",
+        previous_response_id=response2.id,
+    )
+    assert "175" in response3.output[-1].content[0].text
+
+
+@pytest.mark.asyncio
+async def test_two_responses_with_same_prev_id(client: openai.AsyncOpenAI):
+    response1 = await client.responses.create(input="What is 13 * 24?")
+    assert "312" in response1.output[-1].content[0].text
+
+    # Both response 2 and 3 use response 1 as the previous response.
+    response2 = client.responses.create(
+        input="What if I increase both numbers by 1?",
+        previous_response_id=response1.id,
+    )
+    response3 = client.responses.create(
+        input="Divide the result by 2.",
+        previous_response_id=response1.id,
+    )
+
+    response2_result = await response2
+    response3_result = await response3
+    assert "350" in response2_result.output[-1].content[0].text
+    assert "156" in response3_result.output[-1].content[0].text
