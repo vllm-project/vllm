@@ -409,20 +409,22 @@ def split_decodes_and_prefills(
     num_tokens = common_attn_metadata.num_actual_tokens
     query_start_loc = common_attn_metadata.query_start_loc_cpu
 
-    if max_query_len == 1:
+    if max_query_len <= decode_threshold:
         return num_reqs, 0, num_tokens, 0
-    else:
-        query_lens = query_start_loc[1:] - query_start_loc[:-1]
-        first_prefill = (query_lens
-                         > decode_threshold).int().argmax(dim=-1).item()
-        assert torch.all(query_lens[first_prefill:] > decode_threshold)
-        assert torch.all(query_lens[:first_prefill] <= decode_threshold)
-        num_decodes = first_prefill
-        num_prefills = num_reqs - num_decodes
-        num_decode_tokens = first_prefill
-        num_prefill_tokens = num_tokens - query_start_loc[first_prefill]
-        return (num_decodes, num_prefills, num_decode_tokens,
-                num_prefill_tokens)
+
+    query_lens = query_start_loc[1:] - query_start_loc[:-1]
+    is_prefill = query_lens > decode_threshold
+    if not torch.any(is_prefill):
+        return num_reqs, 0, num_tokens, 0
+
+    first_prefill = is_prefill.int().argmax(dim=-1).item()
+    assert torch.all(query_lens[first_prefill:] > decode_threshold)
+    assert torch.all(query_lens[:first_prefill] <= decode_threshold)
+    num_decodes = first_prefill
+    num_prefills = num_reqs - num_decodes
+    num_decode_tokens = query_start_loc[first_prefill].item()
+    num_prefill_tokens = num_tokens - num_decode_tokens
+    return (num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens)
 
 
 def reoder_batch_to_split_decodes_and_prefills(
