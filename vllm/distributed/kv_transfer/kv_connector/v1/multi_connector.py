@@ -10,10 +10,13 @@ from vllm.config import KVTransferConfig, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.factory import (
     KVConnectorFactory)
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-    KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
+    KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole,
+    KVConnectorWorkerEvent, KVConnectorWorkerEvents,
+    KVConnectorWorkerEventType)
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.outputs import ModelRunnerOutput
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
@@ -102,32 +105,58 @@ class MultiConnector(KVConnectorBase_V1):
         for c in self._connectors:
             c.wait_for_save()
 
-    def get_finished(
-        self, finished_req_ids: set[str]
-    ) -> tuple[Optional[set[str]], Optional[set[str]]]:
-        finished_sending: set[str] = set()
-        finished_recving: set[str] = set()
-        for c in self._connectors:
-            sending, recving = c.get_finished(finished_req_ids)
-            if not recving and not sending:
+    def build_worker_events(
+            self,
+            model_runner_output: ModelRunnerOutput) -> KVConnectorWorkerEvents:
+        events: KVConnectorWorkerEvents = {}
+        for idx, c in enumerate(self._connectors):
+            worker_events = c.build_worker_events(model_runner_output)
+            if not worker_events:
                 continue
-            # Aggregate finished recving request ids.
-            finished_recving.update(recving or ())
+
+            # Aggregate events of requests finished receiving
+            worker_recv_events = worker_events.get(
+                KVConnectorWorkerEventType.REQUEST_FINISHED_RECVING)
+            if worker_recv_events:
+                recv_events = events.setdefault(
+                    KVConnectorWorkerEventType.REQUEST_FINISHED_RECVING, {})
+                for req_id, event in worker_recv_events.items():
+                    # assert only a single connector receiving
+                    assert req_id not in recv_events
+                    assert event.n_workers == 1
+                    recv_events[req_id] = KVConnectorWorkerEvent()
+
             # Aggregate finished sending request ids - only include
             # once we've drained the "extra" count (for cases where
             # more than one connector is async-saving the same request).
-            for req_id in sending or ():
-                extra_pending = self._extra_async_saves.get(req_id)
-                if extra_pending is None:
-                    finished_sending.add(req_id)
-                    continue
-                assert extra_pending > 0
-                if extra_pending == 1:
-                    del self._extra_async_saves[req_id]
-                else:
-                    self._extra_async_saves[req_id] = extra_pending - 1
+            worker_send_events = worker_events.get(
+                KVConnectorWorkerEventType.REQUEST_FINISHED_SENDING)
+            if worker_send_events:
+                send_events = events.setdefault(
+                    KVConnectorWorkerEventType.REQUEST_FINISHED_SENDING, {})
+                for req_id, event in worker_send_events.items():
+                    extra_pending = self._extra_async_saves.get(req_id)
+                    if extra_pending is None:
+                        # assert a single sent event
+                        assert req_id not in send_events
+                        send_events[req_id] = KVConnectorWorkerEvent()
+                        continue
+                    assert extra_pending > 0
+                    if extra_pending == 1:
+                        del self._extra_async_saves[req_id]
+                    else:
+                        self._extra_async_saves[req_id] = extra_pending - 1
 
-        return finished_sending or None, finished_recving or None
+            worker_other_events = worker_events.get(
+                KVConnectorWorkerEventType.OTHER)
+            if worker_other_events:
+                other_events = events.setdefault(
+                    KVConnectorWorkerEventType.OTHER, {})
+                for event_id, event in worker_other_events.items():
+                    # prepend connector idx to event ID
+                    other_events[f"{idx} {event_id}"] = event
+
+        return events
 
     # ==============================
     # Scheduler-side methods
@@ -169,9 +198,6 @@ class MultiConnector(KVConnectorBase_V1):
         metadata = MultiKVConnectorMetadata(metadata=tuple(
             c.build_connector_meta(scheduler_output)
             for c in self._connectors))
-        if self._extra_async_saves:
-            metadata.extra_async_saves = self._extra_async_saves
-            self._extra_async_saves = {}
         return metadata
 
     def request_finished(
@@ -199,3 +225,26 @@ class MultiConnector(KVConnectorBase_V1):
         self._requests_to_connector.pop(request.request_id, None)
 
         return async_saves > 0, kv_txfer_params
+
+    def update_worker_events(self, events: KVConnectorWorkerEvents):
+        other_events = events.get(KVConnectorWorkerEventType.OTHER)
+        if not other_events:
+            return
+
+        # map events back by connector idx
+        events_by_connector_idx: dict[int, dict[str,
+                                                KVConnectorWorkerEvent]] = {}
+        for event_id, event in other_events.items():
+            # parse event_id as f"{connector_idx} {orig_event_id}"
+            parts = event_id.split(maxsplit=1)
+            assert len(parts) == 2 and parts[0].isdigit()
+            connector_idx = int(parts[0])
+            orig_event_id = parts[1]
+            events_by_connector_idx.setdefault(connector_idx,
+                                               {})[orig_event_id] = event
+
+        # notify each connector on relevant events
+        events_copy = copy.copy(events)
+        for idx, connector_events in events_by_connector_idx.items():
+            events_copy[KVConnectorWorkerEventType.OTHER] = connector_events
+            self.update_worker_events(events_copy)

@@ -17,9 +17,12 @@ import zmq
 from vllm.config import KVTransferConfig
 from vllm.distributed.device_communicators.pynccl_wrapper import (
     NCCLLibrary, buffer_type, cudaStream_t, ncclComm_t, ncclDataTypeEnum)
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorWorkerEvents)
 from vllm.distributed.kv_transfer.kv_connector.v1.p2p.tensor_memory_pool import (  # noqa: E501
     TensorMemoryPool)
 from vllm.utils import current_stream, get_ip
+from vllm.v1.outputs import ModelRunnerOutput
 
 if TYPE_CHECKING:
     from vllm.forward_context import ForwardContext
@@ -447,20 +450,8 @@ class P2pNcclEngine:
 
         return True
 
-    def get_finished(
-        self, finished_req_ids: set[str], forward_context: "ForwardContext"
-    ) -> tuple[Optional[set[str]], Optional[set[str]]]:
-        """
-        Notifies worker-side connector ids of requests that have
-        finished generating tokens.
-
-        Returns:
-            ids of requests that have finished asynchronous transfer,
-            tuple of (sending/saving ids, recving/loading ids).
-            The finished saves/sends req ids must belong to a set provided in a
-            call to this method (this call or a prior one).
-        """
-
+    def update_finished_requests(self, finished_req_ids: set[str],
+                                 forward_context: "ForwardContext"):
         # Clear the buffer upon request completion.
         for request_id in finished_req_ids:
             for layer_name in forward_context.no_compile_layers:
@@ -477,13 +468,13 @@ class P2pNcclEngine:
                         addr, _, _ = tensor
                         self.pool.free(addr)
 
+    def build_worker_events(
+        self,
+        model_runner_output: ModelRunnerOutput,
+    ) -> Optional[KVConnectorWorkerEvents]:
         # TODO:Retrieve requests that have already sent the KV cache.
-        finished_sending: set[str] = set()
-
         # TODO:Retrieve requests that have already received the KV cache.
-        finished_recving: set[str] = set()
-
-        return finished_sending or None, finished_recving or None
+        return None
 
     def _ping(self):
         sock = self.context.socket(zmq.DEALER)

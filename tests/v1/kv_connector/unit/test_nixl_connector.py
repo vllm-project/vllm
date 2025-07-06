@@ -9,10 +9,13 @@ from unittest.mock import patch
 
 import pytest
 
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorWorkerEventType)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
     KVConnectorRole, NixlAgentMetadata, NixlConnector, NixlConnectorMetadata,
     NixlConnectorWorker)
 from vllm.forward_context import ForwardContext
+from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
 
 from .utils import create_request, create_scheduler, create_vllm_config
 
@@ -201,8 +204,9 @@ class TestNixlHandshake:
         This test triggers the connector to load remote KV for the same
         `request_id`. The transfer is not done immediately due to
         `set_cycles_before_xfer_done`, so there is a state where there are
-        multiple transfer states for the same `request_id`, and `get_finished`
-        should handle it correctly (wait for all transfers to be done).
+        multiple transfer states for the same `request_id`, and
+        `build_worker_events` should handle it correctly (wait for all
+        transfers to be done).
         """
         vllm_config = create_vllm_config()
 
@@ -253,11 +257,15 @@ class TestNixlHandshake:
             assert _after_load - _before_load < 0.1, "start_load_kv took " \
                 f"{_after_load - _before_load} seconds"
 
-            # Mimic get_finished_kv_transfers in gpu_model_runner.
-            _, done_recving = connector.get_finished(finished_req_ids=set())
-            if len(done_recving) > 0:
-                assert request_id in done_recving
-                break
+            # Mimic build_worker_events in gpu_model_runner.
+            worker_events = connector.build_worker_events(
+                EMPTY_MODEL_RUNNER_OUTPUT)
+            if worker_events is not None:
+                recv_events = worker_events.get(
+                    KVConnectorWorkerEventType.REQUEST_FINISHED_RECVING)
+                if recv_events:
+                    assert request_id in recv_events
+                    break
 
             connector.clear_connector_metadata()
 
@@ -314,9 +322,13 @@ class TestNixlHandshake:
                 f"{_after_load - _before_load} seconds"
             time.sleep(0.5)  # backoff for the async handshake to complete.
             connector.bind_connector_metadata(NixlConnectorMetadata())
-            _, done_recving = connector.get_finished(finished_req_ids=set())
-            if len(done_recving) > 0:
-                return
+            worker_events = connector.build_worker_events(
+                EMPTY_MODEL_RUNNER_OUTPUT)
+            if worker_events is not None:
+                recv_events = worker_events.get(
+                    KVConnectorWorkerEventType.REQUEST_FINISHED_RECVING)
+                if recv_events:
+                    return
         raise TimeoutError("Took too long to complete async handshake.")
 
     @patch(
@@ -365,9 +377,14 @@ class TestNixlHandshake:
                 f"{_after_load - _before_load} seconds"
             time.sleep(0.5)  # backoff for the async handshake to complete.
             connector.bind_connector_metadata(NixlConnectorMetadata())
-            _, done_recving = connector.get_finished(finished_req_ids=set())
-            if len(done_recving) > 0:
-                cnt_finished_reqs += len(done_recving)
-                if cnt_finished_reqs == total_reqs:
-                    return
+            worker_events = connector.build_worker_events(
+                EMPTY_MODEL_RUNNER_OUTPUT)
+            if worker_events is not None:
+                recv_events = worker_events.get(
+                    KVConnectorWorkerEventType.REQUEST_FINISHED_RECVING)
+                if recv_events:
+                    cnt_finished_reqs += len(recv_events)
+                    if cnt_finished_reqs == total_reqs:
+                        return
+
         raise TimeoutError("Took too long to complete async handshake.")

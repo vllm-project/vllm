@@ -1,12 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import copy
-
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
 from vllm.v1.request import FinishReason, RequestStatus
 
-from .utils import (assert_scheduler_empty, create_model_runner_output,
-                    create_request, create_scheduler, create_vllm_config)
+from .utils import (assert_scheduler_empty, create_empty_model_runner_output,
+                    create_model_runner_output, create_request,
+                    create_scheduler, create_vllm_config)
 
 
 def test_basic_lifecycle():
@@ -85,8 +84,8 @@ def test_basic_lifecycle():
     assert len(scheduler.finished_req_ids) == 0
 
     # (3b): execute_model()
-    model_runner_output = copy.deepcopy(EMPTY_MODEL_RUNNER_OUTPUT)
-    model_runner_output.finished_sending = [request_id]
+    model_runner_output = create_empty_model_runner_output(
+        finished_sending=[request_id])
 
     # (3c): update_from_output()
     scheduler.update_from_output(scheduler_output, model_runner_output)
@@ -175,8 +174,8 @@ def test_prefix_cache_lifecycle():
     # STEP (2): Ensure it is freed.
     scheduler_output = scheduler.schedule()
     scheduler.schedule()
-    model_runner_output = copy.deepcopy(EMPTY_MODEL_RUNNER_OUTPUT)
-    model_runner_output.finished_sending = [request_remote.request_id]
+    model_runner_output = create_empty_model_runner_output(
+        finished_sending=[request_remote.request_id])
     scheduler.update_from_output(scheduler_output, model_runner_output)
     _ = scheduler.schedule()
     assert_scheduler_empty(scheduler)
