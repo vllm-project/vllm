@@ -10,6 +10,7 @@ import numpy as np
 import prometheus_client
 
 from vllm.config import SupportsMetricsInfo, VllmConfig
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVTransferLogging
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_utils import PrefixCachingMetrics
 from vllm.v1.engine import FinishReason
@@ -58,6 +59,7 @@ class LoggingStatLogger(StatLoggerBase):
         # TODO: Make the interval configurable.
         self.prefix_caching_metrics = PrefixCachingMetrics()
         self.spec_decoding_logging = SpecDecodingLogging()
+        self.kv_transfer_logging = KVTransferLogging()
         self.last_prompt_throughput: float = 0.0
         self.last_generation_throughput: float = 0.0
 
@@ -95,6 +97,9 @@ class LoggingStatLogger(StatLoggerBase):
 
             self.last_scheduler_stats = scheduler_stats
 
+        if iteration_stats and iteration_stats.kv_transfer_stats:
+            self.kv_transfer_logging.observe(iteration_stats.kv_transfer_stats)
+
     def log(self):
         now = time.monotonic()
         prompt_throughput = self._get_throughput(self.num_prompt_tokens, now)
@@ -131,6 +136,7 @@ class LoggingStatLogger(StatLoggerBase):
             self.prefix_caching_metrics.hit_rate * 100,
         )
         self.spec_decoding_logging.log(log_fn=log_fn)
+        self.kv_transfer_logging.log(log_fn=log_fn)
 
     def log_engine_initialized(self):
         if self.vllm_config.cache_config.num_gpu_blocks:

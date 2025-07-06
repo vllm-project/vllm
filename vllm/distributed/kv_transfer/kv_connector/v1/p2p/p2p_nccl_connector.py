@@ -10,6 +10,7 @@ import torch
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVTransferAggregatedStats
 from vllm.distributed.kv_transfer.kv_connector.v1.p2p.p2p_nccl_engine import (
     P2pNcclEngine)
 from vllm.distributed.parallel_state import get_world_group
@@ -272,7 +273,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
 
     def get_finished(
             self, finished_req_ids: set[str],
-            **kwargs) -> tuple[Optional[set[str]], Optional[set[str]]]:
+            **kwargs) -> tuple[Optional[set[str]], Optional[set[str]], Optional[KVTransferAggregatedStats]]:
         """
         Notifies worker-side connector ids of requests that have
         finished generating tokens.

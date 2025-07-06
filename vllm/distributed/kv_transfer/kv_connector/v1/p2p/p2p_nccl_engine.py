@@ -17,6 +17,7 @@ import zmq
 from vllm.config import KVTransferConfig
 from vllm.distributed.device_communicators.pynccl_wrapper import (
     NCCLLibrary, buffer_type, cudaStream_t, ncclComm_t, ncclDataTypeEnum)
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVTransferAggregatedStats
 from vllm.distributed.kv_transfer.kv_connector.v1.p2p.tensor_memory_pool import (  # noqa: E501
     TensorMemoryPool)
 from vllm.utils import current_stream, get_ip
@@ -449,7 +450,7 @@ class P2pNcclEngine:
 
     def get_finished(
         self, finished_req_ids: set[str], forward_context: "ForwardContext"
-    ) -> tuple[Optional[set[str]], Optional[set[str]]]:
+    ) -> tuple[Optional[set[str]], Optional[set[str]], Optional[KVTransferAggregatedStats]]:
         """
         Notifies worker-side connector ids of requests that have
         finished generating tokens.
@@ -482,8 +483,8 @@ class P2pNcclEngine:
 
         # TODO:Retrieve requests that have already received the KV cache.
         finished_recving: set[str] = set()
-
-        return finished_sending or None, finished_recving or None
+        # TODO: Stats not supported yet.
+        return finished_sending or None, finished_recving or None, None
 
     def _ping(self):
         sock = self.context.socket(zmq.DEALER)

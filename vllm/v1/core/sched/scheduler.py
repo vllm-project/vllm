@@ -861,6 +861,7 @@ class Scheduler(SchedulerInterface):
                         events=request.take_events(),
                         kv_transfer_params=kv_transfer_params,
                         num_cached_tokens=request.num_cached_tokens,
+                        kv_transfer_stats=model_runner_output.kv_transfer_stats,
                     ))
 
             else:
