@@ -19,6 +19,7 @@ from transformers import AutoTokenizer
 from vllm import LLM, EngineArgs, SamplingParams
 from vllm.assets.audio import AudioAsset
 from vllm.lora.request import LoRARequest
+from vllm.inputs.data import TokensPrompt
 from vllm.utils import FlexibleArgumentParser
 
 audio_assets = [AudioAsset("mary_had_lamb"), AudioAsset("winning_call")]
@@ -31,7 +32,8 @@ question_per_audio_count = {
 
 class ModelRequestData(NamedTuple):
     engine_args: EngineArgs
-    prompt: Union[str, Dict[str, list[int]]]
+    prompt: Optional[str] = None
+    prompt_token_ids: Optional[Dict[str, list[int]]] = None
     stop_token_ids: Optional[list[int]] = None
     lora_requests: Optional[list[LoRARequest]] = None
 
@@ -55,6 +57,9 @@ def run_voxtral(question: str, audio_count: int) -> ModelRequestData:
         max_model_len=8192,
         max_num_seqs=2,
         limit_mm_per_prompt={"audio": audio_count},
+        config_format="mistral",
+        load_format="mistral",
+        tokenizer_mode="mistral",
     )
 
     text_chunk = TextChunk(text=question)
@@ -67,11 +72,9 @@ def run_voxtral(question: str, audio_count: int) -> ModelRequestData:
 
     prompt_ids = tokenizer.encode_chat_completion(req).tokens
 
-    prompt = {"prompt_token_ids": prompt_ids}
-
     return ModelRequestData(
         engine_args=engine_args,
-        prompt=prompt,
+        prompt_token_ids=TokensPrompt(prompt_token_ids=prompt_ids),
     )
 
 # Granite Speech
@@ -356,7 +359,13 @@ def main(args):
         }
 
     assert args.num_prompts > 0
-    inputs = {"prompt": req_data.prompt, "multi_modal_data": mm_data}
+    inputs = {"multi_modal_data": mm_data}
+
+    if req_data.prompt:
+        inputs["prompt"] = req_data.prompt,  
+    else:
+        inputs["prompt_token_ids"] = req_data.prompt_token_ids,  
+
     if args.num_prompts > 1:
         # Batch inference
         inputs = [inputs] * args.num_prompts
