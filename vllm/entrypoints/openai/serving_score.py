@@ -7,6 +7,7 @@ from typing import Any, Optional, Union
 
 from fastapi import Request
 
+import vllm.envs as envs
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.logger import RequestLogger
@@ -23,6 +24,7 @@ from vllm.entrypoints.utils import _validate_truncation_size
 from vllm.inputs.data import TokensPrompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.multimodal.inputs import MultiModalDataDict
 from vllm.outputs import PoolingRequestOutput, ScoringRequestOutput
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.transformers_utils.tokenizer import (AnyTokenizer, MistralTokenizer,
@@ -180,9 +182,17 @@ class ServingScores(OpenAIServing):
             input_ids = prompt_inputs["input_ids"]
             text_token_prompt = \
                 self._validate_input(request, input_ids, request_prompt)
+
+            token_type_ids = prompt_inputs.get("token_type_ids")
+            mm_data: MultiModalDataDict = {}
+            if envs.VLLM_USE_V1 and token_type_ids is not None:
+                mm_data = {"token_type_ids": token_type_ids}
+                token_type_ids = None
+
             engine_prompt = TokensPrompt(
                 prompt_token_ids=text_token_prompt["prompt_token_ids"],
-                token_type_ids=prompt_inputs.get("token_type_ids"))
+                token_type_ids=token_type_ids,
+                multi_modal_data=mm_data)
 
             request_prompts.append(request_prompt)
             engine_prompts.append(engine_prompt)
