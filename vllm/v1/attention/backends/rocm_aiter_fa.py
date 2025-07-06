@@ -194,8 +194,10 @@ class AiterFlashAttentionMetadataBuilder:
                       scheduler_output: "SchedulerOutput") -> bool:
         return False
 
-    def build(self, common_prefix_len: int,
-              common_attn_metadata: CommonAttentionMetadata):
+    def build(self,
+              common_prefix_len: int,
+              common_attn_metadata: CommonAttentionMetadata,
+              fast_build: bool = False) -> 'AiterFlashAttentionMetadata':
 
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens

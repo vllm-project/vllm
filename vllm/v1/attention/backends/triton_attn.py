@@ -92,10 +92,10 @@ class TritonAttentionMetadataBuilder(
         attn_metadata.seq_lens.fill_(1)
         return attn_metadata
 
-    def build(
-        self, common_prefix_len: int,
-        common_attn_metadata: CommonAttentionMetadata
-    ) -> TritonAttentionMetadata:
+    def build(self,
+              common_prefix_len: int,
+              common_attn_metadata: CommonAttentionMetadata,
+              fast_build: bool = False) -> TritonAttentionMetadata:
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len

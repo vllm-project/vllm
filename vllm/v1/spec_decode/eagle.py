@@ -111,6 +111,7 @@ class EagleProposer:
         attn_metadata = self.runner.attn_metadata_builders[0].build(
             common_prefix_len=0,
             common_attn_metadata=common_attn_metadata,
+            fast_build=True,
         )
 
         # At this moment, we assume all eagle layers belong to the same KV
