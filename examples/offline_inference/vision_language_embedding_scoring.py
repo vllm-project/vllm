@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 This example shows how to use vLLM for running offline inference with
-the correct prompt format on vision language models for multimodal embedding.
+the correct prompt format on vision language models for multimodal embedding and scoring.
 
 For most models, the prompt format should follow corresponding examples
 on HuggingFace model repository.

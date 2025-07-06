@@ -537,7 +537,7 @@ The following extra parameters are supported:
 
 ### Score API
 
-Our Score API can apply a cross-encoder model or an embedding model to predict scores for sentence pairs. When using an embedding model the score corresponds to the cosine similarity between each embedding pair.
+Our Score API can apply a cross-encoder model or an embedding model to predict scores for sentence pairs or multimodal pairs. When using an embedding model the score corresponds to the cosine similarity between each embedding pair.
 Usually, the score for a sentence pair refers to the similarity between two sentences, on a scale of 0 to 1.
 
 You can find the documentation for cross encoder models at [sbert.net](https://www.sbert.net/docs/package_reference/cross_encoder/cross_encoder.html).
@@ -546,7 +546,7 @@ Code example: <gh-file:examples/online_serving/openai_cross_encoder_score.py>
 
 #### Single inference
 
-You can pass a string to both `text_1` and `text_2`, forming a single sentence pair.
+You can pass a string to both `data_1` and `data_2`, forming a single sentence pair.
 
 ```bash
 curl -X 'POST' \
@@ -556,8 +556,8 @@ curl -X 'POST' \
   -d '{
   "model": "BAAI/bge-reranker-v2-m3",
   "encoding_format": "float",
-  "text_1": "What is the capital of France?",
-  "text_2": "The capital of France is Paris."
+  "data_1": "What is the capital of France?",
+  "data_2": "The capital of France is Paris."
 }'
 ```
 
@@ -582,9 +582,9 @@ curl -X 'POST' \
 
 #### Batch inference
 
-You can pass a string to `text_1` and a list to `text_2`, forming multiple sentence pairs
-where each pair is built from `text_1` and a string in `text_2`.
-The total number of pairs is `len(text_2)`.
+You can pass a string to `data_1` and a list to `data_2`, forming multiple sentence pairs
+where each pair is built from `data_1` and a string in `data_2`.
+The total number of pairs is `len(data_2)`.
 
 ??? console "Request"
 
@@ -595,8 +595,8 @@ The total number of pairs is `len(text_2)`.
       -H 'Content-Type: application/json' \
       -d '{
       "model": "BAAI/bge-reranker-v2-m3",
-      "text_1": "What is the capital of France?",
-      "text_2": [
+      "data_1": "What is the capital of France?",
+      "data_2": [
         "The capital of Brazil is Brasilia.",
         "The capital of France is Paris."
       ]
@@ -627,9 +627,9 @@ The total number of pairs is `len(text_2)`.
     }
     ```
 
-You can pass a list to both `text_1` and `text_2`, forming multiple sentence pairs
-where each pair is built from a string in `text_1` and the corresponding string in `text_2` (similar to `zip()`).
-The total number of pairs is `len(text_2)`.
+You can pass a list to both `data_1` and `data_2`, forming multiple sentence pairs
+where each pair is built from a string in `data_1` and the corresponding string in `data_2` (similar to `zip()`).
+The total number of pairs is `len(data_2)`.
 
 ??? console "Request"
 
@@ -641,11 +641,11 @@ The total number of pairs is `len(text_2)`.
       -d '{
       "model": "BAAI/bge-reranker-v2-m3",
       "encoding_format": "float",
-      "text_1": [
+      "data_1": [
         "What is the capital of Brazil?",
         "What is the capital of France?"
       ],
-      "text_2": [
+      "data_2": [
         "The capital of Brazil is Brasilia.",
         "The capital of France is Paris."
       ]
@@ -675,6 +675,54 @@ The total number of pairs is `len(text_2)`.
       "usage": {}
     }
     ```
+#### Multi-modal inputs
+
+You can pass multi-modal inputs to scoring models by passing `content` including a list of multi-modal input(image, etc.) in the request. Refer to the examples below for illustration.
+
+=== "JinaVL-Reranker"
+
+    To serve the model:
+
+    ```bash
+    vllm serve jinaai/jina-reranker-m0
+    ```
+
+    Since the request schema is not defined by OpenAI client, we post a request to the server using the lower-level `requests` library:
+
+    ??? Code
+
+        ```python
+        import requests
+
+        response = requests.post(
+            "http://localhost:8000/v1/score",
+            json={
+                "model": "jinaai/jina-reranker-m0",
+                "data_1":"slm markdown",
+                "data_2": {
+                  "content": [
+                          {
+                              "type": "image_url",
+                              "image_url": {
+                                  "url": "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/handelsblatt-preview.png"
+                              },
+                          },
+                          {
+                              "type": "image_url",
+                              "image_url": {
+                                  "url": "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/paper-11.png"
+                              },
+                          },
+                      ]
+                  }
+                },
+        )
+        response.raise_for_status()
+        response_json = response.json()
+        print("Scoring output:", response_json["data"][0]["score"])
+        print("Scoring output:", response_json["data"][1]["score"])
+        ```
+Full example: <gh-file:examples/online_serving/openai_cross_encoder_score_for_multimodal.py>
 
 #### Extra parameters
 
