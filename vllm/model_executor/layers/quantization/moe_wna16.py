@@ -454,4 +454,6 @@ class MoeWNA16Method(FusedMoEMethodBase):
                 weight_loader(param, loaded_weight, weight_name, shard_id,
                               expert_id)
 
+        # Mark as supporting MoE-specific loading to avoid expensive reflection
+        moe_wna16_weight_loader.supports_moe_loading = True
         return moe_wna16_weight_loader
