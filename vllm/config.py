@@ -3891,6 +3891,20 @@ class CompilationLevel:
     PIECEWISE = 3
 
 
+class CUDAGraphMode:
+    # constants for the config of the cudagraph mode
+    NONE = 0
+    PIECEWISE = 1
+    FULL = 2
+
+
+class CUDAGraphRuntimeStyle:
+    # constants same as CUDAGraphMode, but used for runtime dispatching
+    NONE = 0
+    PIECEWISE = 1
+    FULL = 2
+
+
 @config
 @dataclass
 class PassConfig:
@@ -3954,14 +3968,13 @@ class CompilationConfig:
         - [`custom_ops`][vllm.config.CompilationConfig.custom_ops]
         - [`splitting_ops`][vllm.config.CompilationConfig.splitting_ops]
     - CudaGraph capture:
-        - [`use_cudagraph`][vllm.config.CompilationConfig.use_cudagraph]
+        - [`cudagraph_mode`][vllm.config.CompilationConfig.cudagraph_mode]
         - [`cudagraph_capture_sizes`]
         [vllm.config.CompilationConfig.cudagraph_capture_sizes]
         - [`cudagraph_num_of_warmups`]
         [vllm.config.CompilationConfig.cudagraph_num_of_warmups]
         - [`cudagraph_copy_inputs`]
         [vllm.config.CompilationConfig.cudagraph_copy_inputs]
-        - [`full_cuda_graph`][vllm.config.CompilationConfig.full_cuda_graph]
     - Inductor compilation:
         - [`use_inductor`][vllm.config.CompilationConfig.use_inductor]
         - [`compile_sizes`][vllm.config.CompilationConfig.compile_sizes]
@@ -3981,7 +3994,7 @@ class CompilationConfig:
         certain small batchsizes, where inductor is good at optimizing.
     """
     # Top-level Compilation control
-    level: int = 0
+    level: Optional[int] = None
     """The level of compilation:
 
     - 0: no compilation.
@@ -4019,7 +4032,7 @@ class CompilationConfig:
     By default, all custom ops are enabled when running without Inductor and
     disabled when running with Inductor: level>=PIECEWISE and use_inductor=True.
     Inductor generates (fused) Triton kernels for disabled custom ops."""
-    splitting_ops: list[str] = field(default_factory=list)
+    splitting_ops: Optional[list[str]] = None
     """A list of ops to split the full graph into subgraphs, used in piecewise
     compilation."""
 
@@ -4049,6 +4062,33 @@ class CompilationConfig:
     constructor, e.g. `CompilationConfig(inductor_passes={"a": func})`."""
 
     # CudaGraph compilation
+    cudagraph_mode: int = field(
+        default_factory=lambda: 1 if envs.VLLM_USE_V1 else 0)
+    """
+    The mode of the cudagraph.
+    - 0: NONE, no cudagraph capture.
+    - 1: PIECEWISE. (v1 default)
+    - 2: FULL.
+    For cudagraph_mode > 0, It requires that all input buffers have
+    fixed addresses and all splitting ops write their outputs to 
+    input buffers.
+
+    PIECEWISE mode build piecewise cudagraph only, keeping the cudagraph
+    incompatiable ops (i.e. some attention ops) outside the cudagraph
+    for general flexibility. 
+
+    FULL mode instead try to capture full cudagraph for fully compatible
+    routines (i.e. most attention backend support pure decode batches),
+    and may fall back to piecewise cudagraph for partially imcompatible
+    routines. This may provide performance benefits for smaller models.
+
+    Currently, the cudagraph mode is only used for the v1 engine.
+    Note that the cudagraph logic is generally orthogonal to the 
+    compilation logic. For piecewise cudagraph, the logic is kept
+    inside the compilation. Meanwhile, the full cudagraph is captured
+    outside the compilation, and it further supports cudagraph 
+    without compilation.
+    """
     use_cudagraph: bool = field(default_factory=lambda: envs.VLLM_USE_V1)
     """Whether to use cudagraph inside compilation.
     - False: cudagraph inside compilation is not used.
@@ -4059,8 +4099,9 @@ class CompilationConfig:
     CompilationLevel.PIECEWISE (aka -O3).
     Note that this is orthogonal to the cudagraph capture logic
     outside of compilation.
-    TODO: move outside cudagraph logic into compilation.
-    torch.compile will handle cudagraph capture logic in the future."""
+    TODO: Now this flag is treated as a placeholder for cudagraph
+    control inside compilation, will removed it in future.
+    """
     cudagraph_num_of_warmups: int = 0
     """Number of warmup runs for cudagraph.
     It means the first several runs will be treated as warmup runs.
@@ -4076,12 +4117,14 @@ class CompilationConfig:
     are always used, it can set this to False. Otherwise, it should
     set this to True, and the compiler will copy the input to an
     internally managed buffer. Default is False."""
-    full_cuda_graph: bool = False
-    """whether to use a full cuda graph for the entire forward pass rather than
-    splitting certain operations such as attention into subgraphs. Thus this
-    flag cannot be used together with splitting_ops. This may provide
-    performance benefits for smaller models."""
-
+    separate_attention_routine: bool = False
+    """
+    Enable a distinct attention calls routine under an attention backend for
+    full cuda graph capturing. This is because some attention backends like
+    FlashMLA, FlashInfer, FA2, etc. implement different branches for mix
+    prefill-decode and pure decode cases. This flag enables us to potentially
+    capture the cudagraph separately for each branch.
+    """
     pass_config: PassConfig = field(default_factory=PassConfig)
     """Custom inductor passes, see PassConfig for more details"""
 
@@ -4279,16 +4322,28 @@ class CompilationConfig:
 
     def set_splitting_ops_for_v1(self):
         # NOTE: this function needs to be called
-        if self.splitting_ops and self.full_cuda_graph:
-            raise ValueError("full_cuda_graph cannot be used together with "
-                             "splitting_ops, as Full CUDA graph will override "
-                             f"the splitting_ops: {self.splitting_ops}")
+        if self.separate_attention_routine:
+            assert self.cudagraph_mode == CUDAGraphMode.FULL, (
+                "separate_attention_routine requires "
+                "cudagraph_mode be CUDAGraphMode.FULL")
 
-        if not self.splitting_ops:
-            self.splitting_ops = [] if self.full_cuda_graph else [
+        if self.splitting_ops is None:
+            # NOTE: When using full cudagraph, instead of setting an empty
+            # list and capture the full cudagraph inside the flattened fx
+            # graph, we keep the piecewise fx graph structure but capture the
+            # full cudagraph outside the fx graph. This reduces some cpu
+            # overhead when the runtime batch_size is not cudagraph captured.
+            # see https://github.com/vllm-project/vllm/pull/20059 for details.
+            self.splitting_ops = [
                 "vllm.unified_attention",
                 "vllm.unified_attention_with_output",
             ]
+        elif len(self.splitting_ops) == 0:
+            assert self.cudagraph_mode == CUDAGraphMode.FULL, (
+                "Seting splitting_ops as empty list requires "
+                "cudagraph_mode be CUDAGraphMode.FULL")
+
+            self.splitting_ops = []
 
 
 @config
@@ -4560,8 +4615,13 @@ class VllmConfig:
             # By default, V1 uses piecewise CUDA graphs. If full_cuda_graph
             # is set to True, full CUDA graphs will be used.
             self.compilation_config.cudagraph_num_of_warmups = 1
-            self.compilation_config.level = CompilationLevel.PIECEWISE
+            if self.compilation_config.level is None:
+                self.compilation_config.level = CompilationLevel.PIECEWISE
             self.compilation_config.set_splitting_ops_for_v1()
+
+        # For V0 or other cases, default to level 0 with no compilation
+        if self.compilation_config.level is None:
+            self.compilation_config.level = CompilationLevel.NO_COMPILATION
 
         self._set_cudagraph_sizes()
 
@@ -4581,10 +4641,11 @@ class VllmConfig:
                 "Disabling `torch.compile`.")
             self.compilation_config.level = CompilationLevel.NO_COMPILATION
 
-        if self.compilation_config.full_cuda_graph and \
+        if self.compilation_config.cudagraph_mode == CUDAGraphMode.FULL and \
             not self.model_config.disable_cascade_attn:
-            logger.info("full_cuda_graph is not supported with "
-                        "cascade attention. Disabling cascade attention.")
+            logger.info("CUDAGraphMode.FULL is not supported with "
+                        "cascade attention currently. Disabling cascade"
+                        "attention.")
             self.model_config.disable_cascade_attn = True
 
         disable_chunked_prefill_reasons: list[str] = []

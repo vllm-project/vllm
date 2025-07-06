@@ -26,8 +26,8 @@ from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
 from vllm.utils import cdiv
 from vllm.v1.attention.backends.utils import (
-    AttentionMetadataBuilder, CommonAttentionMetadata, get_kv_cache_layout,
-    make_local_attention_virtual_batches)
+    AttentionCGSupport, AttentionMetadataBuilder, CommonAttentionMetadata,
+    get_kv_cache_layout, make_local_attention_virtual_batches)
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.block_table import BlockTable
 
@@ -145,12 +145,15 @@ def _get_sliding_window_configs(
 
 class FlashAttentionMetadataBuilder(
         AttentionMetadataBuilder[FlashAttentionMetadata]):
-    full_cudagraph_supported: ClassVar[bool] = get_flash_attn_version() == 3
+    attn_cudagraph_support: ClassVar[int] = AttentionCGSupport.ALWAYS
+    # FlashAttn support a unified varlen fwd kernel for prefill-decode phase, so
+    # it's ok to either separate attention routine or not for both FA2 or 3.
+    # TODO: change the default preference if needed.
+    prefer_separate_routine: ClassVar[Optional[bool]] = None
 
     def __init__(self, runner: "GPUModelRunner", kv_cache_spec: AttentionSpec,
                  block_table: BlockTable):
         model_config = runner.model_config
-        compilation_config = runner.vllm_config.compilation_config
 
         self.runner = runner
         self.num_heads_q = model_config.get_num_attention_heads(
@@ -164,12 +167,13 @@ class FlashAttentionMetadataBuilder(
 
         self.max_num_splits = 0  # No upper bound on the number of splits.
         self.aot_schedule = (get_flash_attn_version() == 3)
-        self.use_full_cuda_graph = compilation_config.full_cuda_graph
+        self.use_full_cuda_graph = self.runner.full_cuda_graph
+
         if self.use_full_cuda_graph:
             if not self.aot_schedule:
                 raise ValueError(
                     "AoT scheduling is required for full cuda graph.")
-            capture_sizes = compilation_config.cudagraph_capture_sizes
+            capture_sizes = self.runner.compilation_config.cudagraph_capture_sizes  # noqa: E501
             if not capture_sizes:
                 raise ValueError(
                     "cudagraph_capture_sizes should not be None when "
@@ -369,7 +373,7 @@ class FlashAttentionMetadataBuilder(
 
     def can_run_in_cudagraph(
             self, common_attn_metadata: CommonAttentionMetadata) -> bool:
-        # Full CUDA Graph always supported (FA2 support checked separately)
+        # Full CUDA Graph always supported
         return True
 
     def use_cascade_attention(self, *args, **kwargs) -> bool:

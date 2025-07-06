@@ -11,7 +11,7 @@ import torch
 import torch.distributed as dist
 
 import vllm.envs as envs
-from vllm.config import ParallelConfig, VllmConfig
+from vllm.config import CUDAGraphRuntimeStyle, ParallelConfig, VllmConfig
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
@@ -92,9 +92,12 @@ class ForwardContext:
     attn_metadata: Union["AttentionMetadata", dict[str, "AttentionMetadata"]]
     # TODO: remove after making all virtual_engines share the same kv cache
     virtual_engine: int  # set dynamically for each forward pass
+    num_tokens: Optional[int] = None
     # set dynamically for each forward pass
     dp_metadata: Optional[DPMetadata] = None
-    skip_cuda_graphs: bool = False
+    # determine the cudagraph style at runtime to be FULL, PIECEWISE, or NONE.
+    # by default NONE, no cudagraph is used.
+    cudagraph_runtime_style: int = CUDAGraphRuntimeStyle.NONE
 
 
 _forward_context: Optional[ForwardContext] = None
@@ -115,7 +118,7 @@ def set_forward_context(
     virtual_engine: int = 0,
     num_tokens: Optional[int] = None,
     num_tokens_across_dp: Optional[torch.Tensor] = None,
-    skip_cuda_graphs: bool = False,
+    cudagraph_runtime_style: int = CUDAGraphRuntimeStyle.NONE,
 ):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
@@ -137,10 +140,11 @@ def set_forward_context(
     _forward_context = ForwardContext(
         no_compile_layers=vllm_config.compilation_config.
         static_forward_context,
+        num_tokens=num_tokens,
         virtual_engine=virtual_engine,
         attn_metadata=attn_metadata,
         dp_metadata=dp_metadata,
-        skip_cuda_graphs=skip_cuda_graphs,
+        cudagraph_runtime_style=cudagraph_runtime_style,
     )
 
     try:
