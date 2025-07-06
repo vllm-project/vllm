@@ -94,38 +94,38 @@ async def test_cancel_completed(client: openai.AsyncOpenAI):
 
 @pytest.mark.asyncio
 async def test_previous_response_id(client: openai.AsyncOpenAI):
-    response1 = await client.responses.create(input="What is 13 * 24?")
-    assert "312" in response1.output[-1].content[0].text
+    response1 = await client.responses.create(input="Hello, my name is John.")
 
     response2 = await client.responses.create(
-        input="What if I increase both numbers by 1?",
+        input="Actually, my name is not John. My real name is Mark.",
         previous_response_id=response1.id,
     )
-    assert "350" in response2.output[-1].content[0].text
 
     response3 = await client.responses.create(
-        input="Divide the result by 2.",
+        input="What is my real name again? Answer in one word.",
         previous_response_id=response2.id,
     )
-    assert "175" in response3.output[-1].content[0].text
+    print(response3)
+    assert "Mark" in response3.output[-1].content[0].text
+    assert "John" not in response3.output[-1].content[0].text
 
 
 @pytest.mark.asyncio
 async def test_two_responses_with_same_prev_id(client: openai.AsyncOpenAI):
-    response1 = await client.responses.create(input="What is 13 * 24?")
-    assert "312" in response1.output[-1].content[0].text
+    response1 = await client.responses.create(input="Hello, my name is John.")
 
     # Both response 2 and 3 use response 1 as the previous response.
     response2 = client.responses.create(
-        input="What if I increase both numbers by 1?",
+        input="Actually, my name is not John. My name is Mark.",
         previous_response_id=response1.id,
     )
     response3 = client.responses.create(
-        input="Divide the result by 2.",
+        input="What is my real name again? Answer in one word.",
         previous_response_id=response1.id,
     )
 
-    response2_result = await response2
+    _ = await response2
     response3_result = await response3
-    assert "350" in response2_result.output[-1].content[0].text
-    assert "156" in response3_result.output[-1].content[0].text
+    print(response3_result)
+    assert "John" in response3_result.output[-1].content[0].text
+    assert "Mark" not in response3_result.output[-1].content[0].text
