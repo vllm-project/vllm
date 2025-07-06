@@ -32,6 +32,7 @@ class TpuPlatform(Platform):
     device_type: str = "tpu"
     dispatch_key: str = "XLA"
     ray_device_key: str = "TPU"
+    dist_backend: str = "gloo"
     device_control_env_var: str = "TPU_VISIBLE_CHIPS"
     simple_compile_backend: str = "openxla"
 
