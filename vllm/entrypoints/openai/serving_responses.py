@@ -356,7 +356,8 @@ class OpenAIServingResponses(OpenAIServing):
             if response is None:
                 return self._make_not_found_error(response_id)
 
-            if response.status not in ("queued", "in_progress"):
+            prev_status = response.status
+            if prev_status not in ("queued", "in_progress"):
                 return self.create_error_response(
                     err_type="invalid_request_error",
                     message="Cannot cancel a completed response.",
@@ -366,7 +367,8 @@ class OpenAIServingResponses(OpenAIServing):
             response.status = "cancelled"
 
         # Abort the request.
-        await self.engine_client.abort(response_id)
+        if prev_status in ("queued", "in_progress"):
+            await self.engine_client.abort(response_id)
         return response
 
     def _make_invalid_id_error(self, response_id: str) -> ErrorResponse:
