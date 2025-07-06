@@ -240,7 +240,7 @@ class ResponsesRequest(OpenAIBaseModel):
             "reasoning.encrypted_content",
         ],
     ]] = None
-    input: Optional[Union[str, ResponseInputParam]] = None
+    input: Union[str, ResponseInputParam]
     instructions: Optional[str] = None
     max_output_tokens: Optional[int] = None
     max_tool_calls: Optional[int] = None

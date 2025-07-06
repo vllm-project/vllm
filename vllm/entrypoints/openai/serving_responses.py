@@ -377,7 +377,7 @@ class OpenAIServingResponses(OpenAIServing):
         if isinstance(request.input, str):
             messages.append({"role": "user", "content": request.input})
         else:
-            messages.extend(request.input)
+            messages.extend(request.input)  # type: ignore
         return messages
 
     async def _run_background_request(
