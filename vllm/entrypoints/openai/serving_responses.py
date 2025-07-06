@@ -277,10 +277,11 @@ class OpenAIServingResponses(OpenAIServing):
         assert final_res.prompt_token_ids is not None
         num_prompt_tokens = len(final_res.prompt_token_ids)
         num_generated_tokens = len(final_output.token_ids)
-        usage = UsageInfo(prompt_tokens=num_prompt_tokens,
-                          completion_tokens=num_generated_tokens,
-                          total_tokens=num_prompt_tokens +
-                          num_generated_tokens)
+        usage = UsageInfo(
+            prompt_tokens=num_prompt_tokens,
+            completion_tokens=num_generated_tokens,
+            total_tokens=num_prompt_tokens + num_generated_tokens,
+        )
         if self.enable_prompt_tokens_details and final_res.num_cached_tokens:
             usage.prompt_tokens_details = PromptTokenUsageInfo(
                 cached_tokens=final_res.num_cached_tokens)
