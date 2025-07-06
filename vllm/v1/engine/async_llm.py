@@ -21,6 +21,7 @@ from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
+from vllm.tracing import init_tracer
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
 from vllm.transformers_utils.tokenizer import AnyTokenizer
@@ -91,6 +92,7 @@ class AsyncLLM(EngineClient):
 
         self.model_config = vllm_config.model_config
         self.vllm_config = vllm_config
+        self.observability_config = vllm_config.observability_config
         self.log_requests = log_requests
         self.log_stats = log_stats
 
@@ -118,6 +120,11 @@ class AsyncLLM(EngineClient):
         # OutputProcessor (converts EngineCoreOutputs --> RequestOutput).
         self.output_processor = OutputProcessor(self.tokenizer,
                                                 log_stats=self.log_stats)
+        if self.observability_config.otlp_traces_endpoint is not None:
+            tracer = init_tracer(
+                "vllm.llm_engine",
+                self.observability_config.otlp_traces_endpoint)
+            self.output_processor.tracer = tracer
 
         # EngineCore (starts the engine in background process).
 
@@ -539,7 +546,7 @@ class AsyncLLM(EngineClient):
         return self.tokenizer.get_lora_tokenizer(lora_request)
 
     async def is_tracing_enabled(self) -> bool:
-        return False
+        return self.observability_config.otlp_traces_endpoint is not None
 
     async def do_log_stats(
         self,
