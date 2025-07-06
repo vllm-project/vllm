@@ -613,6 +613,8 @@ class ModelConfig:
         self.original_max_model_len = self.max_model_len
         self.max_model_len = self.get_and_verify_max_len(self.max_model_len)
         self.multimodal_config = self._init_multimodal_config()
+        self.model_supports_multimodal_raw_input = (
+            self._init_model_supports_multimodal_raw_input())
         if not self.skip_tokenizer_init:
             self._verify_tokenizer_mode()
 
@@ -715,6 +717,9 @@ class ModelConfig:
                              "supported for multimodal models.")
 
         return None
+
+    def _init_model_supports_multimodal_raw_input(self):
+        return self.registry.supports_multimodal_raw_input(self.architectures)
 
     def _get_encoder_config(self):
         return get_sentence_transformer_tokenizer_config(
@@ -1121,10 +1126,10 @@ class ModelConfig:
         return self.get_hf_config_sliding_window()
 
     def get_vocab_size(self) -> int:
-        return self.hf_text_config.vocab_size
+        return getattr(self.hf_text_config, "vocab_size", 0)
 
     def get_hidden_size(self) -> int:
-        return self.hf_text_config.hidden_size
+        return getattr(self.hf_text_config, "hidden_size", 0)
 
     @property
     def is_deepseek_mla(self) -> bool:
@@ -1418,6 +1423,10 @@ class ModelConfig:
     @property
     def is_multimodal_model(self) -> bool:
         return self.multimodal_config is not None
+    
+    @property
+    def is_pooling_model(self) -> bool: 
+        return self.registry.is_pooling_model(self.architectures)
 
     @property
     def is_cross_encoder(self) -> bool:
