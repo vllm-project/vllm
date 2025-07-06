@@ -15,6 +15,7 @@ from vllm.model_executor.pooling_metadata import (  # noqa: E501
 from vllm.model_executor.pooling_metadata import PoolingTensors
 from vllm.sequence import PoolerOutput, PoolingSequenceGroupOutput
 from vllm.transformers_utils.config import (
+    get_classification_activation_function,
     get_cross_encoder_activation_function)
 from vllm.v1.pool.metadata import PoolingMetadata as V1PoolingMetadata
 
@@ -388,15 +389,14 @@ class ClassifierPooler(nn.Module):
         self.classifier = classifier
         self.pooler = pooler
 
-        if config.task == "score":
-            self.default_activation_function = \
-                get_cross_encoder_activation_function(config.hf_config)
-        elif config.task == "classify":
-            self.default_activation_function = nn.Sigmoid() \
-                if config.hf_config.num_labels == 1 else nn.Softmax()
-        else:
-            raise NotImplementedError(f"task={config.task!r} is not supported"
-                                      " with the classification pooler")
+        self.classification_act_fn = get_classification_activation_function(
+            config.hf_config)
+        self.cross_encoder_act_fn = get_cross_encoder_activation_function(
+            config.hf_config)
+
+    def _get_act_fn(self, use_cross_encoder: bool):
+        return (self.cross_encoder_act_fn
+                if use_cross_encoder else self.classification_act_fn)
 
     def get_prompt_lens(
         self,
@@ -446,8 +446,28 @@ class ClassifierPooler(nn.Module):
             # apply classifier once on the full batch if possible
             pooled_output = self.classifier(pooled_output)
 
-        # shape: (batch_size, num_labels)
-        scores = self.default_activation_function(pooled_output)
+        if isinstance(pooling_metadata, V0PoolingMetadata):
+            use_cross_encoder_list = [
+                pooling_param.use_cross_encoder
+                for _, pooling_param in pooling_metadata.seq_groups
+            ]
+        else:
+            use_cross_encoder_list = [
+                pooling_param.use_cross_encoder
+                for pooling_param in pooling_metadata.pooling_params
+            ]
+
+        # shape of scores: (batch_size, num_labels)
+        if all(use_cross_encoder == use_cross_encoder_list[0]
+               for use_cross_encoder in use_cross_encoder_list):
+            act_fn = self._get_act_fn(use_cross_encoder_list[0])
+            scores = act_fn(pooled_output)
+        else:
+            scores = torch.stack([
+                self._get_act_fn(use_cross_encoder)(vecs)
+                for use_cross_encoder, vecs in zip(use_cross_encoder_list,
+                                                   pooled_output)
+            ])
 
         pooled_outputs = [PoolingSequenceGroupOutput(data) for data in scores]
         return PoolerOutput(outputs=pooled_outputs)

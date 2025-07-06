@@ -866,24 +866,26 @@ def try_get_generation_config(
             return None
 
 
+def get_classification_activation_function(config: PretrainedConfig):
+    return nn.Sigmoid() if config.num_labels == 1 else nn.Softmax()
+
+
 def get_cross_encoder_activation_function(config: PretrainedConfig):
-
     function_name: Optional[str] = None
-    if hasattr(config, "sentence_transformers") and "activation_fn" in \
-        config.sentence_transformers:
+    if (hasattr(config, "sentence_transformers")
+            and "activation_fn" in config.sentence_transformers):
         function_name = config.sentence_transformers["activation_fn"]
-
     elif (hasattr(config, "sbert_ce_default_activation_function")
           and config.sbert_ce_default_activation_function is not None):
         function_name = config.sbert_ce_default_activation_function
 
     if function_name is not None:
-        assert function_name.startswith("torch.nn.modules."), \
-            "Loading of activation functions is restricted to " \
-            "torch.nn.modules for security reasons"
+        assert function_name.startswith("torch.nn.modules."), (
+            "Loading of activation functions is restricted to "
+            "torch.nn.modules for security reasons")
         return resolve_obj_by_qualname(function_name)()
-    else:
-        return nn.Sigmoid() if config.num_labels == 1 else nn.Identity()
+
+    return nn.Sigmoid() if config.num_labels == 1 else nn.Identity()
 
 
 def try_get_safetensors_metadata(
