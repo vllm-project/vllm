@@ -399,6 +399,7 @@ class OpenAIServingResponses(OpenAIServing):
             response_id = request.request_id
             async with self.response_store_lock:
                 stored_response = self.response_store.get(response_id)
+                assert stored_response is not None
                 if stored_response.status not in ("completed", "cancelled"):
                     stored_response.status = "failed"
 
