@@ -381,6 +381,6 @@ class OpenAIServingResponses(OpenAIServing):
     def _make_not_found_error(self, response_id: str) -> ErrorResponse:
         return self.create_error_response(
             err_type="invalid_request_error",
-            message=f"Response with id '{response_id}' not found. ",
+            message=f"Response with id '{response_id}' not found.",
             status_code=404,
         )

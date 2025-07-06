@@ -562,16 +562,13 @@ async def create_responses(request: ResponsesRequest, raw_request: Request):
         return base(raw_request).create_error_response(
             message="The model does not support Responses API")
 
-    print(request, raw_request)
     generator = await handler.create_responses(request, raw_request)
 
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
                             status_code=generator.code)
-
     elif isinstance(generator, ResponsesResponse):
         return JSONResponse(content=generator.model_dump())
-
     return StreamingResponse(content=generator, media_type="text/event-stream")
 
 
