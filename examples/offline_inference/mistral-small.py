@@ -6,6 +6,7 @@ import argparse
 
 from vllm import LLM
 from vllm.sampling_params import SamplingParams
+from vllm.assets.image import ImageAsset
 
 # This script is an offline demo for running Mistral-Small-3.1
 #
@@ -71,14 +72,16 @@ def run_simple_demo(args: argparse.Namespace):
     )
 
     prompt = "Describe this image in one sentence."
-    image_url = "https://picsum.photos/id/237/200/300"
 
     messages = [
         {
             "role": "user",
             "content": [
                 {"type": "text", "text": prompt},
-                {"type": "image_url", "image_url": {"url": image_url}},
+                {
+                    "type": "image_pil",
+                    "image_pil": ImageAsset("cherry_blossom").pil_image,
+                },
             ],
         },
     ]
