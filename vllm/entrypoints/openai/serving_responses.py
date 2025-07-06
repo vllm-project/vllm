@@ -13,7 +13,8 @@ from openai.types.responses import ResponseOutputMessage, ResponseOutputText
 
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
+from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
+                                         ChatTemplateContentFormatOption)
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (ErrorResponse,
                                               PromptTokenUsageInfo,
@@ -90,7 +91,13 @@ class OpenAIServingResponses(OpenAIServing):
         # FIXME: This causes a memory leak since we never remove responses
         # from the store.
         self.response_store: dict[str, ResponsesResponse] = {}
-        self.lock = asyncio.Lock()
+        self.response_store_lock = asyncio.Lock()
+
+        # HACK(woosuk): This is a hack. We should use a better store.
+        # FIXME: This causes a memory leak since we never remove messages
+        # from the store.
+        self.msg_store: dict[str, list[ChatCompletionMessageParam]] = {}
+
         self.background_tasks: dict[str, asyncio.Task] = {}
 
     async def create_responses(
@@ -109,6 +116,20 @@ class OpenAIServingResponses(OpenAIServing):
         if self.engine_client.errored:
             raise self.engine_client.dead_error
 
+        # Handle the previous response ID.
+        prev_response_id = request.previous_response_id
+        if prev_response_id is not None:
+            if not prev_response_id.startswith("resp_"):
+                return self._make_invalid_id_error(prev_response_id)
+            async with self.response_store_lock:
+                prev_response = self.response_store.get(prev_response_id)
+            if prev_response is None:
+                return self._make_not_found_error(prev_response_id)
+        else:
+            prev_response = None
+        # Construct the input messages.
+        messages = self._construct_input_messages(request, prev_response)
+
         try:
             (
                 lora_request,
@@ -116,13 +137,6 @@ class OpenAIServingResponses(OpenAIServing):
             ) = self._maybe_get_adapters(request)
             model_name = self._get_model_name(request.model, lora_request)
             tokenizer = await self.engine_client.get_tokenizer(lora_request)
-
-            # Reponses API supports simple text inputs without chat format.
-            if isinstance(request.input, str):
-                text_input = request.input
-                messages = [{"role": "user", "content": text_input}]
-            else:
-                messages = request.input
 
             _, request_prompts, engine_prompts = await self._preprocess_chat(
                 request,
@@ -176,6 +190,10 @@ class OpenAIServingResponses(OpenAIServing):
         assert len(generators) == 1
         result_generator, = generators
 
+        # Store the input messages.
+        if request.store:
+            self.msg_store[request.request_id] = messages
+
         if request.background:
             created_time = int(time.time())
             response = ResponsesResponse.from_request(
@@ -187,7 +205,7 @@ class OpenAIServingResponses(OpenAIServing):
                 status="queued",
                 usage=None,
             )
-            async with self.lock:
+            async with self.response_store_lock:
                 self.response_store[response.id] = response
 
             # Run the request in the background.
@@ -315,13 +333,49 @@ class OpenAIServingResponses(OpenAIServing):
         )
 
         if request.store:
-            async with self.lock:
+            async with self.response_store_lock:
                 stored_response = self.response_store.get(response.id)
                 # If the response is already cancelled, don't update it.
                 if (stored_response is None
                         or stored_response.status != "cancelled"):
                     self.response_store[response.id] = response
         return response
+
+    def _construct_input_messages(
+        self,
+        request: ResponsesRequest,
+        prev_response: Optional[ResponsesResponse] = None,
+    ) -> list[ChatCompletionMessageParam]:
+        messages: list[ChatCompletionMessageParam] = []
+        if request.instructions:
+            messages.append({
+                "role": "system",
+                "content": request.instructions,
+            })
+
+        # Prepend the conversation history.
+        if prev_response is not None:
+            # Add the previous messages.
+            prev_msg = self.msg_store[prev_response.id]
+            messages.extend(prev_msg)
+
+            # Add the previous output.
+            for output_item in prev_response.output:
+                # NOTE: We skip the reasoning output.
+                if isinstance(output_item, ResponseOutputMessage):
+                    for content in output_item.content:
+                        messages.append({
+                            "role": "assistant",
+                            "content": content.text,
+                        })
+
+        # Append the new input.
+        # Reponses API supports simple text inputs without chat format.
+        if isinstance(request.input, str):
+            messages.append({"role": "user", "content": request.input})
+        else:
+            messages.extend(request.input)
+        return messages
 
     async def _run_background_request(
         self,
@@ -340,7 +394,7 @@ class OpenAIServingResponses(OpenAIServing):
         if isinstance(response, ErrorResponse):
             # If the request has failed, update the status to "failed".
             response_id = request.request_id
-            async with self.lock:
+            async with self.response_store_lock:
                 stored_response = self.response_store.get(response_id)
                 if stored_response.status not in ("completed", "cancelled"):
                     stored_response.status = "failed"
@@ -352,7 +406,7 @@ class OpenAIServingResponses(OpenAIServing):
         if not response_id.startswith("resp_"):
             return self._make_invalid_id_error(response_id)
 
-        async with self.lock:
+        async with self.response_store_lock:
             response = self.response_store.get(response_id)
 
         if response is None:
@@ -366,7 +420,7 @@ class OpenAIServingResponses(OpenAIServing):
         if not response_id.startswith("resp_"):
             return self._make_invalid_id_error(response_id)
 
-        async with self.lock:
+        async with self.response_store_lock:
             response = self.response_store.get(response_id)
             if response is None:
                 return self._make_not_found_error(response_id)
