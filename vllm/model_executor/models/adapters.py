@@ -312,6 +312,10 @@ class SequenceClassificationConfig(VerifyAndUpdateConfig):
         else:
             config.num_labels = len(tokens)
 
+        # `llm as reranker` defaults to not using pad_token
+        use_pad_token = getattr(config, "use_pad_token", False)
+        config.use_pad_token = use_pad_token
+
 
 def load_weights_using_from_2_way_softmax(
         model, weights: Iterable[tuple[str, torch.Tensor]]):
@@ -356,8 +360,49 @@ def load_weights_using_from_2_way_softmax(
     return loaded_weights
 
 
+def load_weights_no_post_processing(model,
+                                    weights: Iterable[tuple[str,
+                                                            torch.Tensor]]):
+    from vllm.model_executor.layers.vocab_parallel_embedding import (
+        ParallelLMHead)
+    from vllm.model_executor.models.utils import AutoWeightsLoader
+
+    model_config = model.vllm_config.model_config
+    tokens = getattr(model.config, "classifier_from_token", [])
+    tokens = cast(list[int], tokens)
+    assert len(tokens) > 0
+
+    device = model.score.weight.device
+
+    if model.config.tie_word_embeddings:
+        model.lm_head = model.model.embed_tokens
+    else:
+        model.lm_head = ParallelLMHead(model.config.vocab_size,
+                                       model.config.hidden_size,
+                                       quant_config=model.quant_config)
+
+    loader = AutoWeightsLoader(model)
+    loaded_weights = loader.load_weights(weights)
+
+    from vllm.transformers_utils.tokenizer import get_tokenizer
+    tokenizer = get_tokenizer(model_config.tokenizer,
+                              revision=model_config.tokenizer_revision,
+                              tokenizer_mode=model_config.tokenizer_mode,
+                              trust_remote_code=model_config.trust_remote_code)
+
+    token_ids = [tokenizer.convert_tokens_to_ids(t) for t in tokens]
+    score_weight = model.lm_head.weight.data[token_ids].to(device)
+    model.score.weight.data.copy_(score_weight)
+
+    del model.lm_head
+    loaded_weights.add("score.weight")
+    loaded_weights.discard("lm_head.weight")
+    return loaded_weights
+
+
 SEQ_CLS_LOAD_METHODS = {
     "from_2_way_softmax": load_weights_using_from_2_way_softmax,
+    "no_post_processing": load_weights_no_post_processing,
 }
 
 
@@ -368,6 +413,9 @@ def seq_cls_model_loader(model, weights: Iterable[tuple[str, torch.Tensor]]):
     #     - Qwen3-Reranker
     #   - Qwen2ForCausalLM
     #     - mxbai-rerank-v2
+    # - no_post_processing:
+    #   - GemmaForCausalLM
+    #     - bge-reranker-v2-gemma
 
     config = model.vllm_config.model_config.hf_config
     method = getattr(config, "method", None)
