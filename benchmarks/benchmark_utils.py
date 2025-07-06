@@ -81,13 +81,13 @@ def get_memory_usage() -> float:
     import platform
 
     if platform.system() == "Darwin":  # macOS - ru_maxrss in bytes
-        max_self_usage = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1 << 30)
-        max_children_usage = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss / (
-            1 << 30
-        )
+        # Convert bytes to GiB
+        divisor = 1 << 30
     else:  # Linux (including most CI systems) - ru_maxrss in kilobytes
-        max_self_usage = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1 << 20)
-        max_children_usage = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss / (
-            1 << 20
-        )
+        # Convert kilobytes to GiB
+        divisor = 1 << 20
+
+    max_self_usage = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / divisor
+    max_children_usage = resource.getrusage(
+        resource.RUSAGE_CHILDREN).ru_maxrss / divisor
     return max_self_usage + max_children_usage
