@@ -200,16 +200,14 @@ class VoxtralDummyInputsBuilder(BaseDummyInputsBuilder[VoxtralProcessingInfo]
         dummy_audios = dummy_mm_data.get("audio", [])
 
         audio_chunks: list[AudioChunk] = []
-        format = AudioFormat("WAV")
+        format = "wav"
         for audio in dummy_audios:
             audio_item = Audio(
                 audio_array=audio,
                 sampling_rate=self.info.get_hf_processor().sampling_rate,
-            )
-            chunk = AudioChunk(input_audio=RawAudio(
                 format=format,
-                data=audio_item.to_base64(format=format),
-            ), )
+            )
+            chunk = AudioChunk.from_audio(audio_item)
             audio_chunks.append(chunk)
 
         request = ChatCompletionRequest(messages=[
@@ -460,6 +458,12 @@ class VoxtralForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         for name in self.language_model.load_weights(llm_weights_generator()):
             loaded_weights.add(f"language_model.{name}")
+
+        # potentially manually add position embeddings
+        sin_pos_embed_key = "whisper_encoder.whisper_encoder.embed_positions.weight"
+        if sin_pos_embed_key not in loaded_weights:
+            # make sure we don't hit an error here
+            loaded_weights.add(sin_pos_embed_key)
 
         return loaded_weights
 

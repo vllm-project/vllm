@@ -9,8 +9,9 @@ on HuggingFace model repository.
 """
 
 import os
+from pathlib import Path
 from dataclasses import asdict
-from typing import NamedTuple, Optional
+from typing import NamedTuple, Optional, Union, Dict
 
 from huggingface_hub import snapshot_download
 from transformers import AutoTokenizer
@@ -30,7 +31,7 @@ question_per_audio_count = {
 
 class ModelRequestData(NamedTuple):
     engine_args: EngineArgs
-    prompt: str
+    prompt: Union[str, Dict[str, list[int]]]
     stop_token_ids: Optional[list[int]] = None
     lora_requests: Optional[list[LoRARequest]] = None
 
@@ -39,6 +40,41 @@ class ModelRequestData(NamedTuple):
 # lower-end GPUs.
 # Unless specified, these settings have been tested to work on a single L4.
 
+# Voxtral
+def run_voxtral(question: str, audio_count: int) -> ModelRequestData:
+    from mistral_common.protocol.instruct.messages import TextChunk, AudioChunk, UserMessage
+    from mistral_common.audio import Audio
+    from mistral_common.tokens.tokenizers.mistral_tokenizer import MistralTokenizer
+    from mistral_common.protocol.instruct.request import ChatCompletionRequest
+
+    model_name = "/mnt/vast/runs/sanchitgandhi/250626_instruct_3b_32k/250626_instruct_3b_32k_run000/checkpoints/checkpoint_00010000/consolidated_vllm"
+    tokenizer = MistralTokenizer.from_file(Path(model_name) / "tekken.json")
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=8192,
+        max_num_seqs=2,
+        limit_mm_per_prompt={"audio": audio_count},
+        tokenizer_format="mistral",
+        load_format="mistral",
+    )
+
+    text_chunk = TextChunk(text=question)
+    audios = [Audio.from_file(audio_assets[i]) for i in range(audio_count)]
+    audio_chunks = [AudioChunk.from_audio[audio] for audio in audios]
+
+    messages = [UserMessage(chunks=[*audio_chunks, text_chunk])]
+
+    req = ChatCompletionRequest(messages, model=model_name)
+
+    prompt_ids = tokenizer.encode_chat_completion(req).tokens
+
+    prompt = {"prompt_token_ids": prompt_ids}
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+    )
 
 # Granite Speech
 def run_granite_speech(question: str, audio_count: int) -> ModelRequestData:
@@ -243,6 +279,7 @@ def run_whisper(question: str, audio_count: int) -> ModelRequestData:
 
 
 model_example_map = {
+    "voxtral": run_voxtral,
     "granite_speech": run_granite_speech,
     "minicpmo": run_minicpmo,
     "phi4_mm": run_phi4mm,
@@ -262,7 +299,8 @@ def parse_args():
         "--model-type",
         "-m",
         type=str,
-        default="ultravox",
+        # default="ultravox",
+        default="voxtral",
         choices=model_example_map.keys(),
         help='Huggingface "model_type".',
     )
