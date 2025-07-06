@@ -248,6 +248,10 @@ class CudaPlatformBase(Platform):
                 logger.info_once("Using Flash Attention backend on V1 engine.")
                 return ("vllm.v1.attention.backends."
                         "flash_attn.FlashAttentionBackend")
+            elif selected_backend == _Backend.TREE_ATTN:
+                logger.info_once("Using Tree Attention backend on V1 engine.")
+                return ("vllm.v1.attention.backends."
+                        "tree_attn.TreeAttentionBackend")
 
             # Default backends for V1 engine
             # Prefer FlashInfer for Blackwell GPUs if installed
