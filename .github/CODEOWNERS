@@ -16,7 +16,7 @@
 /vllm/lora @jeejeelee
 /vllm/reasoning @aarnphm
 /vllm/entrypoints @aarnphm
-CMakeLists.txt @tlrmchlsmth
+CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 
 # Any change to the VllmConfig changes can have a large user-facing impact,
 # so spam a lot of people
