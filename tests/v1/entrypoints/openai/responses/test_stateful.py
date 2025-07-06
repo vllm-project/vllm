@@ -94,7 +94,10 @@ async def test_cancel_completed(client: openai.AsyncOpenAI):
 
 @pytest.mark.asyncio
 async def test_previous_response_id(client: openai.AsyncOpenAI):
-    response1 = await client.responses.create(input="Hello, my name is John.")
+    response1 = await client.responses.create(
+        instructions="You are tested on your ability to retrieve the correct "
+        "information from the previous response.",
+        input="Hello, my name is John.")
 
     response2 = await client.responses.create(
         input="Actually, my name is not John. My real name is Mark.",
@@ -112,7 +115,10 @@ async def test_previous_response_id(client: openai.AsyncOpenAI):
 
 @pytest.mark.asyncio
 async def test_two_responses_with_same_prev_id(client: openai.AsyncOpenAI):
-    response1 = await client.responses.create(input="Hello, my name is John.")
+    response1 = await client.responses.create(
+        instructions="You are tested on your ability to retrieve the correct "
+        "information from the previous response.",
+        input="Hello, my name is John.")
 
     # Both response 2 and 3 use response 1 as the previous response.
     response2 = client.responses.create(
@@ -120,7 +126,7 @@ async def test_two_responses_with_same_prev_id(client: openai.AsyncOpenAI):
         previous_response_id=response1.id,
     )
     response3 = client.responses.create(
-        input="What is my real name again? Answer in one word.",
+        input="What is my name again? Answer in one word.",
         previous_response_id=response1.id,
     )
 
