@@ -83,7 +83,7 @@ MODELS = [
     QWEN2_CONFIG,
     PHI3_CONFIG,
     GPT2_CONFIG,
-    # STABLELM_CONFIG,  # enable this when v1 support head_size=80
+    STABLELM_CONFIG,
     DOLPHIN_CONFIG,
     # STARCODER_CONFIG, # broken
 ]
