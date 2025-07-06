@@ -6,10 +6,8 @@ from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 
-from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionMetadata, AttentionType,
-                                              is_quantized_kv_cache)
+                                              AttentionMetadata, AttentionType)
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.flash_attn import (
@@ -17,6 +15,8 @@ from vllm.v1.attention.backends.flash_attn import (
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.block_table import BlockTable
+
+_PARTITION_SIZE_ROCM = 256
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -39,6 +39,9 @@ if current_platform.is_rocm():
         b_seq_lens_loc,
         block_table,
         block_table_stride_0,
+        k_scale,
+        v_scale,
+        output_dtype: tl.constexpr,
         E_DIM: tl.constexpr,
         BLOCK_SIZE: tl.constexpr,
     ):
@@ -60,16 +63,27 @@ if current_platform.is_rocm():
                           tl.arange(0, BLOCK_SIZE)[:, None]) < seq_len
 
             kv_idx = tl.load(block_table + batch_idx * block_table_stride_0 +
-                             block_idx)
+                             block_idx).to(tl.int64)
 
             kv_buffer_off = kv_idx * BLOCK_SIZE * E_DIM + tl.arange(
                 0, BLOCK_SIZE)[:, None] * E_DIM + tl.arange(0, E_DIM)[None, :]
             k_vals = tl.load(k_buffer_ptr + kv_buffer_off,
                              mask=block_mask,
                              other=0.0)
+            if k_vals.dtype.is_fp8():
+                k_vals = (k_vals.to(tl.float32) *
+                          tl.load(k_scale)).to(output_dtype)
+            else:
+                k_vals = k_vals.to(output_dtype)
+
             v_vals = tl.load(v_buffer_ptr + kv_buffer_off,
                              mask=block_mask,
                              other=0.0)
+            if v_vals.dtype.is_fp8():
+                v_vals = (v_vals.to(tl.float32) *
+                          tl.load(v_scale)).to(output_dtype)
+            else:
+                v_vals = v_vals.to(output_dtype)
 
             kv_values_off = batch_token_start * E_DIM + \
                 block_idx * BLOCK_SIZE * E_DIM + \
@@ -79,20 +93,27 @@ if current_platform.is_rocm():
             tl.store(v_values_ptr + kv_values_off, v_vals, mask=block_mask)
 
     def vllm_layout_trans(b_query_lens_loc, b_seq_lens_loc, block_table,
-                          k_buffer, v_buffer, max_seq_len, total_tokens):
+                          k_buffer, v_buffer, max_seq_len, total_tokens,
+                          k_scale, v_scale, output_dtype):
         H_KV = v_buffer.shape[2]
         D = v_buffer.shape[3]
         BLOCK_SIZE = v_buffer.shape[1]
-        dtype = k_buffer.dtype
         k_values = torch.empty((total_tokens, H_KV, D),
-                               dtype=dtype,
+                               dtype=output_dtype,
                                device="cuda")
         v_values = torch.empty((total_tokens, H_KV, D),
-                               dtype=dtype,
+                               dtype=output_dtype,
                                device="cuda")
 
         grid = (block_table.shape[0],
                 (max_seq_len + BLOCK_SIZE - 1) // BLOCK_SIZE)
+
+        if output_dtype == torch.float16:
+            output_dtype = tl.float16
+        elif output_dtype == torch.bfloat16:
+            output_dtype = tl.bfloat16
+        else:
+            raise ValueError(f"Unsupported output dtype: {output_dtype}")
 
         _vllm_layout_trans_kernel[grid](k_buffer,
                                         v_buffer,
@@ -102,6 +123,9 @@ if current_platform.is_rocm():
                                         b_seq_lens_loc,
                                         block_table,
                                         block_table.stride(0),
+                                        k_scale,
+                                        v_scale,
+                                        output_dtype=output_dtype,
                                         E_DIM=H_KV * D,
                                         BLOCK_SIZE=BLOCK_SIZE)
 
@@ -121,9 +145,12 @@ if current_platform.is_rocm():
         window_size: Optional[list[int]],  # -1 means infinite context window
         alibi_slopes: Optional[list[float]],
         block_table: torch.Tensor,
+        k_scale: torch.Tensor,
+        v_scale: torch.Tensor,
     ) -> torch.Tensor:
         k, v = vllm_layout_trans(cu_seqlens_q, cu_seqlens_k, block_table,
-                                 k_cache, v_cache, max_seqlen_k, total_tokens)
+                                 k_cache, v_cache, max_seqlen_k, total_tokens,
+                                 k_scale, v_scale, q.dtype)
         output = aiter.flash_attn_varlen_func(
             q=q,
             k=k,
@@ -155,6 +182,8 @@ if current_platform.is_rocm():
         window_size: Optional[list[int]],  # -1 means infinite context window
         alibi_slopes: Optional[list[float]],
         block_table: torch.Tensor,
+        k_scale: torch.Tensor,
+        v_scale: torch.Tensor,
     ) -> torch.Tensor:
         return torch.empty(q.shape[0],
                            q.shape[1],
@@ -185,7 +214,6 @@ class AiterFlashAttentionMetadataBuilder:
         self.block_size = kv_cache_spec.block_size
         self.kv_cache_spec = kv_cache_spec
         self.block_table = block_table
-
         # Sliding window size to be used with the AOT scheduler will be
         # populated on first build() call.
         self.aot_sliding_window: Optional[tuple[int, int]] = None
@@ -282,6 +310,18 @@ class AiterFlashAttentionMetadataBuilder:
         prefix_kv_lens = None
         suffix_kv_lens = None
 
+        nbytes_per_qo_elem = torch.finfo(self.runner.dtype).bits // 8
+        max_num_partitions = (max_seq_len + _PARTITION_SIZE_ROCM -
+                              1) // _PARTITION_SIZE_ROCM
+
+        workspace_buffer = torch.empty(
+            (num_reqs * self.num_heads_q * max_num_partitions * self.headdim) *
+            nbytes_per_qo_elem + 2 *
+            (num_reqs * self.num_heads_q * max_num_partitions) * 4,
+            dtype=torch.uint8,
+            device=self.runner.device,
+        )
+
         attn_metadata = AiterFlashAttentionMetadata(
             num_actual_tokens=num_actual_tokens,
             max_query_len=max_query_len,
@@ -293,6 +333,7 @@ class AiterFlashAttentionMetadataBuilder:
             block_table=block_table_tensor,
             slot_mapping=slot_mapping,
             use_cascade=use_cascade,
+            workspace_buffer=workspace_buffer,
             common_prefix_len=common_prefix_len,
             cu_prefix_query_lens=cu_prefix_query_lens,
             prefix_kv_lens=prefix_kv_lens,
@@ -316,7 +357,7 @@ class AiterFlashAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_supported_head_sizes() -> list[int]:
-        return [32, 64, 96, 128, 160, 192, 224, 256]
+        return [64, 128, 256]
 
     @staticmethod
     def get_name() -> str:
@@ -365,6 +406,7 @@ class AiterFlashAttentionMetadata:
     total_tokens: int
     block_table: torch.Tensor
     slot_mapping: torch.Tensor
+    workspace_buffer: torch.Tensor
 
     # For cascade attention.
     use_cascade: bool
@@ -443,10 +485,6 @@ class AiterFlashAttentionImpl(AttentionImpl):
                                       "are not implemented for "
                                       "FlashAttentionImpl")
         self.use_irope = use_irope
-        if is_quantized_kv_cache(self.kv_cache_dtype):
-            raise NotImplementedError(
-                "AiterFlashAttention does not support fp8 kv-cache on this "
-                "device.")
 
     def forward(
         self,
@@ -517,12 +555,6 @@ class AiterFlashAttentionImpl(AttentionImpl):
         if self.kv_cache_dtype.startswith("fp8"):
             key_cache = key_cache.view(torch.float8_e4m3fnuz)
             value_cache = value_cache.view(torch.float8_e4m3fnuz)
-            num_tokens, num_heads, head_size = query.shape
-            query, _ = ops.scaled_fp8_quant(
-                query.reshape(
-                    (num_tokens, num_heads * head_size)).contiguous(),
-                layer._q_scale)
-            query = query.reshape((num_tokens, num_heads, head_size))
 
         # Compute attention and update output up to `num_actual_tokens`.
         use_local_attn = \
@@ -562,26 +594,13 @@ class AiterFlashAttentionImpl(AttentionImpl):
                     block_table=block_table,
                     cu_seqlens_k=(cu_seq_lens if not use_local_attn else
                                   local_metadata.local_cu_seq_lens),
+                    k_scale=layer._k_scale,
+                    v_scale=layer._v_scale,
                 )
 
-            _, num_heads, head_size = query.shape
-            _PARTITION_SIZE_ROCM = 256
-            num_seqs = seqused_k.shape[0]
-            nbyes_per_qo_elem = torch.finfo(output.dtype).bits // 8
-            max_num_partitions = (max_seqlen_k + _PARTITION_SIZE_ROCM -
-                                  1) // _PARTITION_SIZE_ROCM
-
-            workspace_buffer = torch.empty(
-                (num_seqs * num_heads * max_num_partitions * head_size) *
-                nbyes_per_qo_elem + 2 *
-                (num_seqs * num_heads * max_num_partitions) * 4,
-                dtype=torch.uint8,
-                device=output.device,
-            )
-
-            aiter.paged_attention_v1(
+            torch.ops.aiter.paged_attention_v1(
                 output[:num_actual_tokens],
-                workspace_buffer,
+                attn_metadata.workspace_buffer,
                 query[:num_actual_tokens],
                 key_cache,
                 value_cache,
