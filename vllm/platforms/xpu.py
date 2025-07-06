@@ -39,10 +39,12 @@ class XPUPlatform(Platform):
         if selected_backend != _Backend.IPEX:
             logger.info("Cannot use %s backend on XPU.", selected_backend)
         use_v1 = envs.VLLM_USE_V1
-        if not use_v1:
-            raise ValueError("XPU backend only supports V1.")
-        logger.info("Using Flash Attention backend on V1 engine.")
-        return "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"
+        if use_v1:
+            logger.info("Using Flash Attention backend on V1 engine.")
+            return "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"
+        else:
+            logger.info("Using IPEX attention backend.")
+            return "vllm.attention.backends.ipex_attn.IpexAttnBackend"
 
     @classmethod
     def get_device_capability(
@@ -75,7 +77,10 @@ class XPUPlatform(Platform):
         cache_config = vllm_config.cache_config
         # in V1(or with ipex chunked prefill) block_size is 64
         if cache_config and cache_config.block_size is None:
-            cache_config.block_size = 64
+            if envs.VLLM_USE_V1:
+                cache_config.block_size = 64
+            else:
+                cache_config.block_size = 16
 
         # Instances created using VllmConfig() typically have model_config as
         # None by default. The modification involves adding a check to prevent
@@ -101,7 +106,11 @@ class XPUPlatform(Platform):
 
         # check and update parallel config
         parallel_config = vllm_config.parallel_config
-        parallel_config.worker_cls = "vllm.v1.worker.xpu_worker.XPUWorker"
+        if envs.VLLM_USE_V1:
+            parallel_config.worker_cls =\
+                "vllm.v1.worker.xpu_worker.XPUWorker"
+        else:
+            parallel_config.worker_cls = "vllm.worker.xpu_worker.XPUWorker"
 
         if parallel_config.distributed_executor_backend is None:
             if parallel_config.world_size > 1:
