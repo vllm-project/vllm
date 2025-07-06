@@ -371,10 +371,12 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                                                       ...]
 
                 # bitsandbytes requires data in GPU
-                if weight_sub_tensor.is_cuda:
+                if (weight_sub_tensor.is_cuda
+                        or weight_sub_tensor.device.type == "hpu"):
                     loaded_weight = weight_sub_tensor
                 else:
-                    loaded_weight = weight_sub_tensor.cuda()
+                    loaded_weight = weight_sub_tensor.to(
+                        device=current_platform.device_type)
 
                 # remove the following after the issue is fixed:
                 # https://github.com/bitsandbytes-foundation/bitsandbytes/issues/1342
