@@ -3943,6 +3943,38 @@ class PassConfig:
 
 @config
 @dataclass
+class EPConfig:
+    """Configuration for Expert Parallelism (EP)."""
+
+    enable_eplb: bool = False
+    """Enable expert parallelism load balancing for MoE layers."""
+    lb_window_size: int = 1000
+    """Window size for expert load recording."""
+    lb_step_interval: int = 3000
+    """
+    Interval for rearranging experts in expert parallelism.
+
+    Note that if this is greater than the EPLB window size, only the metrics
+    of the last `lb_window_size` steps will be used for rearranging experts.
+    """
+
+    num_redundant_experts: int = 0
+    """Number of redundant experts to use for expert parallelism."""
+
+    lb_log_balancedness: bool = False
+    """
+    Log the balancedness each step of expert parallelism.
+    This is turned off by default since it will cause communication overhead.
+    """
+
+    @classmethod
+    def from_cli(cls, cli_value: str) -> "EPConfig":
+        """Parse the CLI value for the EP config."""
+        return TypeAdapter(EPConfig).validate_json(cli_value)
+
+
+@config
+@dataclass
 class CompilationConfig:
     """Configuration for compilation. It has three parts:
 
@@ -4354,6 +4386,9 @@ class VllmConfig:
     instance_id: str = ""
     """The ID of the vLLM instance."""
 
+    ep_config: EPConfig = field(default_factory=EPConfig)
+    """Expert parallelism configuration."""
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -4526,6 +4561,16 @@ class VllmConfig:
 
         self.cache_config.verify_with_parallel_config(self.parallel_config)
 
+        if self.ep_config.enable_eplb:
+            from vllm.platforms import current_platform
+            if not current_platform.is_cuda():
+                raise ValueError(
+                    "Expert parallelism load balancing is only supported on "
+                    "CUDA devices now.")
+            if self.parallel_config.num_redundant_experts < 0:
+                raise ValueError(
+                    "num_redundant_experts must be non-negative, but got "
+                    f"{self.parallel_config.num_redundant_experts}.")
         if self.lora_config is not None:
             self.lora_config.verify_with_cache_config(self.cache_config)
             self.lora_config.verify_with_model_config(self.model_config)

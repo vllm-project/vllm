@@ -24,10 +24,11 @@ import vllm.envs as envs
 from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
                          ConfigFormat, ConfigType, DecodingConfig,
                          DetailedTraceModules, Device, DeviceConfig,
-                         DistributedExecutorBackend, GuidedDecodingBackend,
-                         GuidedDecodingBackendV1, HfOverrides, KVEventsConfig,
-                         KVTransferConfig, LoadConfig, LoadFormat, LoRAConfig,
-                         ModelConfig, ModelDType, ModelImpl, MultiModalConfig,
+                         DistributedExecutorBackend, EPConfig,
+                         GuidedDecodingBackend, GuidedDecodingBackendV1,
+                         HfOverrides, KVEventsConfig, KVTransferConfig,
+                         LoadConfig, LoadFormat, LoRAConfig, ModelConfig,
+                         ModelDType, ModelImpl, MultiModalConfig,
                          ObservabilityConfig, ParallelConfig, PoolerConfig,
                          PrefixCachingHashAlgo, PromptAdapterConfig,
                          SchedulerConfig, SchedulerPolicy, SpeculativeConfig,
@@ -468,6 +469,7 @@ class EngineArgs:
 
     enable_multimodal_encoder_data_parallel: bool = \
         ParallelConfig.enable_multimodal_encoder_data_parallel
+    ep_config: EPConfig = get_field(VllmConfig, "ep_config")
 
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
@@ -476,6 +478,22 @@ class EngineArgs:
         if isinstance(self.compilation_config, (int, dict)):
             self.compilation_config = CompilationConfig.from_cli(
                 str(self.compilation_config))
+        # support `EngineArgs(ep_config={...})`
+        # without having to manually construct an
+        # EPConfig object
+        if isinstance(self.ep_config, dict):
+            self.ep_config = EPConfig.from_cli(str(self.ep_config))
+
+        # Handle backward compatibility: if individual EPLB fields are set,
+        # update the ep_config accordingly
+        if self.enable_eplb:
+            self.ep_config = EPConfig(
+                enable_eplb=self.enable_eplb,
+                lb_window_size=self.eplb_window_size,
+                lb_step_interval=self.eplb_step_interval,
+                lb_log_balancedness=self.eplb_log_balancedness,
+                num_redundant_experts=self.num_redundant_experts)
+
         if self.qlora_adapter_name_or_path is not None:
             warnings.warn(
                 "The `qlora_adapter_name_or_path` is deprecated "
@@ -916,7 +934,7 @@ class EngineArgs:
                                 **vllm_kwargs["compilation_config"])
         vllm_group.add_argument("--additional-config",
                                 **vllm_kwargs["additional_config"])
-
+        vllm_group.add_argument("--ep-config", **vllm_kwargs["ep_config"])
         # Other arguments
         parser.add_argument('--use-v2-block-manager',
                             action='store_true',
@@ -1299,6 +1317,7 @@ class EngineArgs:
             kv_transfer_config=self.kv_transfer_config,
             kv_events_config=self.kv_events_config,
             additional_config=self.additional_config,
+            ep_config=self.ep_config,
         )
 
         return config
