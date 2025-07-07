@@ -329,17 +329,14 @@ class NixlConnectorWorker:
         self.block_size = vllm_config.cache_config.block_size
 
         # Agent.
-        import os
-        num_workers = 32
         # setting num_workers on the prefiller causes no notifs to be recved???
         # this is a hack to make sure we set num workers on the prefiller to 1.
-        if os.getenv("VLLM_IS_PREFILL", "0") == "1":
-            num_workers = None
-        print(f"NUM_WORKERS: {num_workers=}")
+        NUM_WORKERS = 32
+        logger.info(f"{NUM_WORKERS=}")
         self.nixl_wrapper = NixlWrapper(str(uuid.uuid4()),
                                         None,
                                         num_workers=None,
-                                        num_shared_workers=num_workers)
+                                        num_shared_workers=NUM_WORKERS)
         # Map of engine_id -> {rank0: agent_name0, rank1: agent_name1..}.
         self._remote_agents: dict[str, dict[int, str]] = defaultdict(dict)
 
