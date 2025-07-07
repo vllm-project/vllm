@@ -27,7 +27,7 @@ from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.sequence import IntermediateTensors, PoolerOutput
 
 from .interfaces import SupportsCrossEncoding, SupportsQuant, SupportsV0Only
-from .utils import WeightsMapper, maybe_prefix
+from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
 
 
 class BertEmbedding(nn.Module):
@@ -44,8 +44,9 @@ class BertEmbedding(nn.Module):
             config.type_vocab_size, config.hidden_size)
         self.LayerNorm = nn.LayerNorm(config.hidden_size,
                                       eps=config.layer_norm_eps)
-        self.position_ids = nn.Parameter(
-            torch.empty((1, config.max_position_embeddings)), )
+        self.register_buffer(
+            "position_ids",
+            torch.arange(config.max_position_embeddings).expand((1, -1)))
 
         self.position_embedding_type = config.position_embedding_type
         if self.position_embedding_type != "absolute":
@@ -470,26 +471,28 @@ class BertForSequenceClassification(nn.Module, SupportsV0Only,
                                         self.classifier, self.bert.pooler)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
+        bert_weights = []
+        classifier_weights = []
 
-        self_weights = []
+        for name, weight in weights:
+            if name.startswith("bert."):
+                bert_weights.append((name, weight))
+            else:
+                classifier_weights.append((name, weight))
 
-        def weight_filter():
-            for name, weight in weights:
-                if name.startswith("bert."):
-                    yield (name[len("bert."):], weight)
-                else:
-                    self_weights.append((name, weight))
-
-        self.bert.load_weights(weight_filter())
+        loader = AutoWeightsLoader(self)
+        loaded_params = loader.load_weights(bert_weights)
 
         params_dict = dict(self.named_parameters())
-
-        for name, loaded_weight in self_weights:
-            if name.startswith("classifier"):
+        for name, loaded_weight in classifier_weights:
+            if name in params_dict:
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
+                loaded_params.add(name)
+
+        return loaded_params
 
     def pooler(
         self,
