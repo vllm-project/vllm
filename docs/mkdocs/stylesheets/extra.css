@@ -143,3 +143,13 @@ body[data-md-color-scheme="slate"] .md-nav__item--section > label.md-nav__link .
 [data-md-color-scheme="slate"] .logo-light {
   display: none;
 }
+
+/* Outline for content tabs */
+.md-typeset .tabbed-set {
+  border: 0.075rem solid var(--md-default-fg-color);
+  border-radius: 0.2rem;
+}
+
+.md-typeset .tabbed-content {
+  padding: 0 0.6em;
+}
