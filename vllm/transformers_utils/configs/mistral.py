@@ -36,7 +36,7 @@ def adapt_config_dict(config_dict: dict[str, Any],
 
     config = PretrainedConfig.from_dict(config_dict)
 
-    logger.info(f"Initialized config {config}")
+    logger.info("Initialized config", config)
 
     return config
 
