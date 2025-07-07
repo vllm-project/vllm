@@ -24,7 +24,6 @@ from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.platforms import current_platform
-from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import ExecuteModelRequest
 from vllm.utils import bind_kv_cache
 from vllm.worker.cache_engine import CacheEngine
@@ -366,23 +365,6 @@ class HPUWorker(LocalOrDistributedWorkerBase):
 
     def list_loras(self) -> Set[int]:
         return self.model_runner.list_loras()
-
-    def add_prompt_adapter(
-            self, prompt_adapter_request: PromptAdapterRequest) -> bool:
-        raise NotImplementedError(
-            "Prompt Adapter is not implemented for HPU backend.")
-
-    def remove_prompt_adapter(self, prompt_adapter_id: int) -> bool:
-        raise NotImplementedError(
-            "Prompt Adapter is not implemented for HPU backend.")
-
-    def pin_prompt_adapter(self, prompt_adapter_id: int) -> bool:
-        raise NotImplementedError(
-            "Prompt Adapter is not implemented for HPU backend.")
-
-    def list_prompt_adapters(self) -> Set[int]:
-        raise NotImplementedError(
-            "Prompt Adapter is not implemented for HPU backend.")
 
     def shutdown_inc(self):
         self.model_runner.shutdown_inc()

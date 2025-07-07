@@ -91,10 +91,9 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         '''
         EncoderDecoderModelRunner constructor.
 
-        `lora_config` and `prompt_adapter_config` are
-        unused (since these features are not yet supported for encoder/decoder
-        models) but these arguments are present here for compatibility with 
-        the base-class constructor.
+        `lora_config` is unused (since these features are not yet supported
+        for encoder/decoder models) but these arguments are present here for
+        compatibility with the base-class constructor.
         '''
         self._maybe_force_supported_attention_backend()
 

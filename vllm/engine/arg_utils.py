@@ -29,10 +29,10 @@ from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
                          KVTransferConfig, LoadConfig, LoadFormat, LoRAConfig,
                          ModelConfig, ModelDType, ModelImpl, MultiModalConfig,
                          ObservabilityConfig, ParallelConfig, PoolerConfig,
-                         PrefixCachingHashAlgo, PromptAdapterConfig,
-                         SchedulerConfig, SchedulerPolicy, SpeculativeConfig,
-                         TaskOption, TokenizerMode, TokenizerPoolConfig,
-                         VllmConfig, get_attr_docs, get_field)
+                         PrefixCachingHashAlgo, SchedulerConfig,
+                         SchedulerPolicy, SpeculativeConfig, TaskOption,
+                         TokenizerMode, TokenizerPoolConfig, VllmConfig,
+                         get_attr_docs, get_field)
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -388,11 +388,6 @@ class EngineArgs:
     lora_extra_vocab_size: int = LoRAConfig.lora_extra_vocab_size
     long_lora_scaling_factors: Optional[tuple[float, ...]] = \
         LoRAConfig.long_lora_scaling_factors
-    # PromptAdapter fields
-    enable_prompt_adapter: bool = False
-    max_prompt_adapters: int = PromptAdapterConfig.max_prompt_adapters
-    max_prompt_adapter_token: int = \
-        PromptAdapterConfig.max_prompt_adapter_token
 
     device: Device = DeviceConfig.device
     num_scheduler_steps: int = SchedulerConfig.num_scheduler_steps
@@ -791,23 +786,6 @@ class EngineArgs:
                                 **lora_kwargs["max_cpu_loras"])
         lora_group.add_argument("--fully-sharded-loras",
                                 **lora_kwargs["fully_sharded_loras"])
-
-        # PromptAdapter related configs
-        prompt_adapter_kwargs = get_kwargs(PromptAdapterConfig)
-        prompt_adapter_group = parser.add_argument_group(
-            title="PromptAdapterConfig",
-            description=PromptAdapterConfig.__doc__,
-        )
-        prompt_adapter_group.add_argument(
-            "--enable-prompt-adapter",
-            action=argparse.BooleanOptionalAction,
-            help="If True, enable handling of PromptAdapters.")
-        prompt_adapter_group.add_argument(
-            "--max-prompt-adapters",
-            **prompt_adapter_kwargs["max_prompt_adapters"])
-        prompt_adapter_group.add_argument(
-            "--max-prompt-adapter-token",
-            **prompt_adapter_kwargs["max_prompt_adapter_token"])
 
         # Device arguments
         device_kwargs = get_kwargs(DeviceConfig)
@@ -1262,11 +1240,6 @@ class EngineArgs:
 
         load_config = self.create_load_config()
 
-        prompt_adapter_config = PromptAdapterConfig(
-            max_prompt_adapters=self.max_prompt_adapters,
-            max_prompt_adapter_token=self.max_prompt_adapter_token) \
-                                        if self.enable_prompt_adapter else None
-
         decoding_config = DecodingConfig(
             backend=self.guided_decoding_backend,
             disable_fallback=self.guided_decoding_disable_fallback,
@@ -1294,7 +1267,6 @@ class EngineArgs:
             load_config=load_config,
             decoding_config=decoding_config,
             observability_config=observability_config,
-            prompt_adapter_config=prompt_adapter_config,
             compilation_config=self.compilation_config,
             kv_transfer_config=self.kv_transfer_config,
             kv_events_config=self.kv_events_config,
@@ -1380,12 +1352,6 @@ class EngineArgs:
                 _raise_or_fallback(feature_name="--kv-cache-dtype",
                                    recommend_to_remove=False)
                 return False
-
-        # No Prompt Adapter so far.
-        if self.enable_prompt_adapter:
-            _raise_or_fallback(feature_name="--enable-prompt-adapter",
-                               recommend_to_remove=False)
-            return False
 
         # No text embedding inputs so far.
         if self.enable_prompt_embeds:
@@ -1525,7 +1491,6 @@ class EngineArgs:
 
                 if (is_gpu and not use_sliding_window and not use_spec_decode
                         and not self.enable_lora
-                        and not self.enable_prompt_adapter
                         and model_config.runner_type != "pooling"):
                     self.enable_chunked_prefill = True
                     logger.warning(
