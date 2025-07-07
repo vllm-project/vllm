@@ -51,7 +51,6 @@ from vllm.utils import (DEFAULT_MAX_NUM_BATCHED_TOKENS,
                         cuda_device_count_stateless, get_cpu_memory,
                         get_open_port, is_torch_equal_or_newer, random_uuid,
                         resolve_obj_by_qualname)
-from vllm.v1.sample.logits_processor import LogitsProcessorsSpec
 
 # yapf: enable
 
@@ -4360,8 +4359,10 @@ class VllmConfig:
     you are using. Contents must be hashable."""
     instance_id: str = ""
     """The ID of the vLLM instance."""
-    logits_processors: Optional[list[LogitsProcessorsSpec]] = None
-    """Specifications for which logits processors to load"""
+    logits_processors_fqns: Optional[list[str]] = None
+    """Logits processors to load by fully-qualified name (FQN)"""
+    logits_processors_entrypoints: Optional[list[str]] = None
+    """Logits processors to load by entrypoint"""
 
     def compute_hash(self) -> str:
         """

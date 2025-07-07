@@ -44,8 +44,6 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.utils import (STR_DUAL_CHUNK_FLASH_ATTN_VAL, FlexibleArgumentParser,
                         GiB_bytes, get_ip, is_in_ray_actor)
 from vllm.v1.sample.logits_processor import logitsprocs_package_pattern
-from vllm.v1.sample.logits_processor.load import (LogitsProcessorEntrypoint,
-                                                  LogitsProcessorsSpec)
 
 # yapf: enable
 
@@ -498,9 +496,8 @@ class EngineArgs:
     enable_multimodal_encoder_data_parallel: bool = \
         ParallelConfig.enable_multimodal_encoder_data_parallel
 
-    logits_processors_qualnames: Optional[list[str]] = None
-    logits_processors_entrypoints: Optional[
-        list[LogitsProcessorEntrypoint]] = None
+    logits_processors_fqns: Optional[list[str]] = None
+    logits_processors_entrypoints: Optional[list[str]] = None
 
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
@@ -1334,10 +1331,6 @@ class EngineArgs:
             collect_detailed_traces=self.collect_detailed_traces,
         )
 
-        logits_processors: Optional[list[LogitsProcessorsSpec]] = (
-            ((self.logits_processors_qualnames or []) +
-             (self.logits_processors_entrypoints or [])) or None)
-
         config = VllmConfig(
             model_config=model_config,
             cache_config=cache_config,
@@ -1354,7 +1347,8 @@ class EngineArgs:
             kv_transfer_config=self.kv_transfer_config,
             kv_events_config=self.kv_events_config,
             additional_config=self.additional_config,
-            logits_processors=logits_processors,
+            logits_processors_fqns=self.logits_processors_fqns,
+            logits_processors_entrypoints=self.logits_processors_entrypoints,
         )
 
         return config

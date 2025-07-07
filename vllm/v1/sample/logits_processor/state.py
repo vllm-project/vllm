@@ -178,11 +178,10 @@ class LogitsProcessorManager:
 
     def add_logitsprocs_by_ctor(self,
                                 ctor_list: list["LogitprocCtor"]) -> None:
-        pass
-        # for ctor in ctor_list:
-        #     logitproc: LogitsProcessor = ctor()
-        #     (self.argmax_invariant if logitproc.is_argmax_invariant() else
-        #      self.non_argmax_invariant).append(logitproc)
+        for ctor in ctor_list:
+            logitproc: LogitsProcessor = ctor()
+            (self.argmax_invariant if logitproc.is_argmax_invariant() else
+             self.non_argmax_invariant).append(logitproc)
 
     @property
     def all(self) -> Iterator["LogitsProcessor"]:

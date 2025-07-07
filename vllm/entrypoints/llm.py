@@ -49,7 +49,6 @@ from vllm.transformers_utils.tokenizer import (AnyTokenizer, MistralTokenizer,
                                                get_cached_tokenizer)
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Counter, Device, deprecate_kwargs, is_list_of
-from vllm.v1.sample.logits_processor import LogitsProcessorEntrypoint
 
 if TYPE_CHECKING:
     from vllm.v1.metrics.reader import Metric
@@ -192,9 +191,8 @@ class LLM:
         override_pooler_config: Optional[PoolerConfig] = None,
         compilation_config: Optional[Union[int, dict[str, Any],
                                            CompilationConfig]] = None,
-        logits_processors_qualnames: Optional[list[str]] = None,
-        logits_processors_entrypoints: Optional[
-            list[LogitsProcessorEntrypoint]] = None,
+        logits_processors_fqns: Optional[list[str]] = None,
+        logits_processors_entrypoints: Optional[list[str]] = None,
         **kwargs,
     ) -> None:
         """LLM constructor."""
@@ -268,7 +266,7 @@ class LLM:
             mm_processor_kwargs=mm_processor_kwargs,
             override_pooler_config=override_pooler_config,
             compilation_config=compilation_config_instance,
-            logits_processors_qualnames=logits_processors_qualnames,
+            logits_processors_fqns=logits_processors_fqns,
             logits_processors_entrypoints=logits_processors_entrypoints,
             **kwargs,
         )

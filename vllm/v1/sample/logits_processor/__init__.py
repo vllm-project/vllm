@@ -5,7 +5,7 @@ from vllm.v1.sample.logits_processor.impls import (LogitBiasLogitsProcessor,
                                                    MinPLogitsProcessor,
                                                    MinTokensLogitsProcessor)
 from vllm.v1.sample.logits_processor.load import (LogitprocCtor,
-                                                  LogitsProcessorEntrypoint,
+                                                  LogitProcessorEntrypoint,
                                                   LogitsProcessorsSpec,
                                                   init_builtin_logitsprocs,
                                                   logitsprocs_ctors)
@@ -28,6 +28,6 @@ __all__ = [
     "LogitsProcessorManager",
     "logitsprocs_ctors",
     "logitsprocs_package_pattern",
-    "LogitsProcessorEntrypoint",
+    "LogitProcessorEntrypoint",
     "LogitsProcessorsSpec",
 ]
