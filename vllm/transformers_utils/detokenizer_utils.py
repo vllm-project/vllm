@@ -6,6 +6,12 @@ from typing import Optional
 from .tokenizer import AnyTokenizer
 
 
+def _replace_none_with_empty(tokens: list[Optional[str]]):
+    for i, token in enumerate(tokens):
+        if token is None:
+            tokens[i] = ""
+
+
 def _convert_tokens_to_string_with_added_encoders(
     tokenizer: AnyTokenizer,
     output_tokens: list[str],
@@ -58,18 +64,14 @@ def convert_prompt_ids_to_tokens(
     """
     # We do not need to convert the whole prompt to tokens.
     # Offset a little more in case we have special tokens.
-    new_tokens = []
-    token_ids = prompt_ids[-INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET - 2:]
-    for token_id in token_ids:
-        new_token = tokenizer.decode([token_id],
-                                     skip_special_tokens=skip_special_tokens)
-        if new_token is None:
-            # This is required to guard against out-of-vocab prompt token ids
-            new_token = ""
-        new_tokens.append(new_token)
+    new_tokens = tokenizer.convert_ids_to_tokens(
+        prompt_ids[-INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET - 2:],
+        skip_special_tokens=skip_special_tokens)
     read_offset = len(new_tokens)
     prefix_offset = max(
         read_offset - INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET, 0)
+    # This is required to guard against out-of-vocab prompt token ids
+    _replace_none_with_empty(new_tokens)  # type: ignore[arg-type]
     return new_tokens, prefix_offset, read_offset
 
 
