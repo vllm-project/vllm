@@ -23,9 +23,7 @@ class AsyncScheduler(Scheduler):
         scheduler_output: SchedulerOutput,
     ) -> None:
         super()._update_after_schedule(scheduler_output)
-
-        num_scheduled_tokens = scheduler_output.num_scheduled_tokens
-        for req_id in num_scheduled_tokens:
+        for req_id in scheduler_output.num_scheduled_tokens:
             request = self.requests[req_id]
             if request.has_encoder_inputs:
                 self._free_encoder_inputs(request)

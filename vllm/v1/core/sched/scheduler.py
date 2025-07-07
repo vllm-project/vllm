@@ -794,7 +794,7 @@ class Scheduler(SchedulerInterface):
 
             # NOTE(woosuk): This has to be executed after updating
             # `request.num_computed_tokens`.
-            if request.has_encoder_inputs:
+            if not self.is_async and request.has_encoder_inputs:
                 self._free_encoder_inputs(request)
 
             stopped = False
