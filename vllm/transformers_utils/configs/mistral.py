@@ -12,31 +12,24 @@ logger = init_logger(__name__)
 def adapt_config_dict(config_dict: dict[str, Any],
                       **kwargs) -> PretrainedConfig:
     config_dict.update(kwargs)
-
-    is_quant = bool(config_dict.get("quantization"))
-    is_vision = bool(
-        (config_dict.get("multimodal") or {}).get("vision_encoder_args")
-        or config_dict.get("vision_encoder"))
-    is_moe = bool(config_dict.get("moe"))
-    is_yarn = bool(config_dict.get("yarn"))
-
     config_dict = _remap_general_mistral_args(config_dict)
-    if is_quant:
+
+    if bool(config_dict.get("quantization")):
         config_dict = _remap_mistral_quantization_args(config_dict)
 
-    if is_moe:
+    if bool(config_dict.get("moe")):
         config_dict["architectures"] = ["MixtralForCausalLM"]
     else:
         config_dict["architectures"] = ["MistralForCausalLM"]
 
-    if is_yarn:
+    if bool(config_dict.get("yarn")):
         config_dict = _remap_mistral_yarn_args(config_dict)
-    if is_vision:
+    if bool((config_dict.get("multimodal") or {}).get("vision_encoder_args") or config_dict.get("vision_encoder")):
         config_dict = _remap_mistral_vision_args(config_dict)
 
     config = PretrainedConfig.from_dict(config_dict)
 
-    logger.info("Initialized config", config)
+    logger.debug("Initialized config", config)
 
     return config
 
@@ -62,23 +55,17 @@ def _remap_mistral_vision_args(config: dict) -> dict:
 def _remap_mistral_yarn_args(config: dict) -> dict:
     # Direct remaps: yarn.X -> rope_scaling.Y
     # Source keys are from mistral.model.args.YarnArgs
-    yarn_config_map = {
-        "factor": "factor",
-        "original_max_position_embeddings": "original_max_position_embeddings",
+    _map = {
         "beta": "beta_fast",
         "alpha": "beta_slow",
     }
     yarn_config = config.get("yarn") or {}
+    renamed_yarn_config = {_map.get(k, k): v for k, v in yarn_config.items()}
     config["rope_scaling"] = {
         "rope_type": "yarn",
         "mscale_all_dim": 1,  # We hardcoded this to 1
+        **renamed_yarn_config
     }
-    for old_name, new_name in yarn_config_map.items():
-        if old_name in yarn_config:
-            config["rope_scaling"][new_name] = yarn_config.pop(old_name)
-
-    assert len(yarn_config) == 0, f"Unparsed yarn config: {yarn_config}"
-
     return config
 
 
