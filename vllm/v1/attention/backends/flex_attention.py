@@ -305,9 +305,8 @@ class FlexAttentionMetadataBuilder(
             block_table_tensor, self.cache_config.num_gpu_blocks)
 
         # Get the original offset tensor
-        offset_tensor = torch.tensor(
-            common_attn_metadata.num_computed_tokens_cpu[:num_reqs]).to(
-                self.device, non_blocking=True)
+        offset_tensor = common_attn_metadata.num_computed_tokens_cpu.to(
+            self.device, non_blocking=True)
 
         out = FlexAttentionMetadata(
             num_actual_tokens=num_actual_tokens,
