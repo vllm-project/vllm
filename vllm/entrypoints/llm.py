@@ -1235,11 +1235,12 @@ class LLM:
                 if self.llm_engine.model_config.use_pad_token:
                     # cross_encoder models defaults to using pad_token.
                     prompt_inputs = tokenizer(text=q,
-                                            text_pair=t,
-                                            **tokenization_kwargs)
+                                              text_pair=t,
+                                              **tokenization_kwargs)
                 else:
                     # `llm as reranker` models defaults to not using pad_token.
-                    prompt_inputs = tokenizer(text=q + t, **tokenization_kwargs)
+                    prompt_inputs = tokenizer(text=q + t,
+                                              **tokenization_kwargs)
                 engine_prompt = TokensPrompt(
                     prompt_token_ids=prompt_inputs["input_ids"],
                     token_type_ids=prompt_inputs.get("token_type_ids"))

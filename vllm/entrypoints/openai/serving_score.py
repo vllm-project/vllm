@@ -215,18 +215,26 @@ class ServingScores(OpenAIServing):
             if use_pad_token:
                 # cross_encoder models defaults to using pad_token.
                 tokenized_prompts = await asyncio.gather(
-                    *(tokenize_async(text=t1, text_pair=t2, **tokenization_kwargs)
-                    for t1, t2 in input_pairs))
+                    *(tokenize_async(
+                        text=t1, text_pair=t2, **tokenization_kwargs)
+                      for t1, t2 in input_pairs))
             else:
                 # `llm as reranker` models defaults to not using pad_token.
                 tokenized_prompts = await asyncio.gather(
                     *(tokenize_async(text=t1 + t2, **tokenization_kwargs)
-                    for t1, t2 in input_pairs))
+                      for t1, t2 in input_pairs))
 
             for prompt_inputs, (t1, t2) in zip(tokenized_prompts, input_pairs):
                 sep_token = tokenizer.sep_token if (tokenizer.sep_token
                                                     and use_pad_token) else ''
                 request_prompt = f"{t1}{sep_token}{t2}"
+
+                input_ids = prompt_inputs["input_ids"]
+                text_token_prompt = \
+                    self._validate_input(request, input_ids, request_prompt)
+                engine_prompt = TokensPrompt(
+                    prompt_token_ids=text_token_prompt["prompt_token_ids"],
+                    token_type_ids=prompt_inputs.get("token_type_ids"))
 
                 request_prompts.append(request_prompt)
                 engine_prompts.append(engine_prompt)
