@@ -84,9 +84,12 @@ class PallasAttentionBackend(AttentionBackend):
     # can spill SREGs easily which leads to bad performance. The strategy we
     # apply here is trying to split max-model-len to 16 pages which make the
     # spill less likely. Meanwhile we make sure the page size is in [16, 256].
-    # For long model length, we use 16 pages to avoid too much VMEM spill.
     @staticmethod
     def get_page_size(vllm_config: VllmConfig) -> int:
+        # TODO: This is a temporary fix for vmem OOM.
+        # For long model length, we use 16 page-size to avoid too much
+        # VMEM spill. A more robust solution should be implemented to
+        # handle VREG spills.
         if vllm_config.model_config.max_model_len > 8192:
             return 16
         page_size = next_power_of_2(
