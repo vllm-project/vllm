@@ -14,6 +14,8 @@ vLLM supports AMD GPUs with ROCm 6.3.
 # --8<-- [end:requirements]
 # --8<-- [start:set-up-using-python]
 
+There is no extra information on creating a new Python environment for this device.
+
 # --8<-- [end:set-up-using-python]
 # --8<-- [start:pre-built-wheels]
 
