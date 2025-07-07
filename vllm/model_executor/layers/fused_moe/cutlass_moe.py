@@ -11,314 +11,12 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP)
-from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    per_token_group_quant_fp8)
 from vllm.model_executor.layers.fused_moe.utils import (_fp8_perm,
                                                         _fp8_quantize,
                                                         _resize_cache)
 from vllm.scalar_type import scalar_types
 
 logger = init_logger(__name__)
-
-
-def run_blocked_cutlass_moe_fp8(
-    output: torch.Tensor,
-    hidden_states: torch.Tensor,
-    w1: torch.Tensor,
-    w2: torch.Tensor,
-    topk_ids: torch.Tensor,
-    activation_callable: Callable,
-    global_num_experts: int,
-    expert_map: Optional[torch.Tensor],
-    w1_scale: Optional[torch.Tensor],
-    w2_scale: Optional[torch.Tensor],
-    a1q_scale: Optional[torch.Tensor],
-    a2_scale: Optional[torch.Tensor],
-    workspace13: torch.Tensor,
-    workspace2: torch.Tensor,
-    out_dtype: torch.dtype,
-    per_act_block: bool,
-) -> torch.Tensor:
-    """
-    This function computes a a8w8-blockwise quantized Mixture of Experts (MoE)
-    layer  using two sets of quantized weight-scale pairs, w1-w1_scale and
-    w2-w2_scale, and top-k gating mechanism. The matrix multiplications are
-    implemented with CUTLASS grouped gemm. The weights are quantized with block
-    size 128x128. When per_act_block is True, the input is quantized with
-    per-token 128-blocked scales (equivalent to block size 1x128). When
-    it's False, the input is quantized with per-tensor scales.
-    """
-
-    a1q = hidden_states
-
-    assert w1_scale is not None
-    assert w2_scale is not None
-    assert w1.dtype == torch.float8_e4m3fn
-    assert w2.dtype == torch.float8_e4m3fn
-    assert a1q.shape[1] == w1.shape[2], "Hidden size mismatch w1"
-    assert w1.shape[1] == w2.shape[2] * 2, "Hidden size mismatch w2"
-    assert w1.shape[0] == w2.shape[0], "Expert number mismatch"
-    assert a1q_scale is None or a1q_scale.dim(
-    ) == 0 or a1q_scale.shape[0] == 1 or a1q_scale.shape[0] == a1q.shape[
-        0], "Input scale shape mismatch"
-    assert w1.shape[0] == w2.shape[0], "Weights expert number mismatch"
-    assert w1.shape[0] == w1_scale.shape[0], "w1 scales expert number mismatch"
-    assert w1.shape[0] == w2_scale.shape[0], "w2 scales expert number mismatch"
-    assert a2_scale is None or a2_scale.dim(
-    ) == 0 or a2_scale.shape[0] == 1, "Intermediate scale shape mismatch"
-    assert out_dtype in [torch.half, torch.bfloat16], "Invalid output dtype"
-
-    M = a1q.shape[0]
-    _, K, N = w2.shape
-    device = a1q.device
-
-    assert w1.shape[2] == K
-    assert global_num_experts != -1
-    assert a1q_scale is not None
-
-    if expert_map is not None:
-        "Translate info from expert_map to topk_ids"
-        local_topk_ids = torch.where(expert_map[topk_ids] != -1,
-                                     expert_map[topk_ids], -1)
-    else:
-        local_topk_ids = topk_ids
-
-    topk = local_topk_ids.shape[1]
-
-    expert_offsets = torch.empty((global_num_experts + 1),
-                                 dtype=torch.int32,
-                                 device=device)
-    problem_sizes1 = torch.empty((global_num_experts, 3),
-                                 dtype=torch.int32,
-                                 device=device)
-    problem_sizes2 = torch.empty((global_num_experts, 3),
-                                 dtype=torch.int32,
-                                 device=device)
-
-    if expert_map is not None:
-        a_map = torch.zeros((local_topk_ids.numel()),
-                            dtype=torch.int32,
-                            device=device)
-    else:
-        a_map = torch.empty((local_topk_ids.numel()),
-                            dtype=torch.int32,
-                            device=device)
-
-    c_map = torch.empty((local_topk_ids.numel()),
-                        dtype=torch.int32,
-                        device=device)
-
-    ops.get_cutlass_moe_mm_data(local_topk_ids, expert_offsets, problem_sizes1,
-                                problem_sizes2, a_map, c_map,
-                                global_num_experts, N, K)
-
-    a1q = _fp8_perm(a1q, a_map)
-    a1q_scale = a1q_scale[a_map] if per_act_block else a1q_scale
-    expert_offsets = expert_offsets[:-1]
-
-    ab_strides1 = torch.full((w1.shape[0], ),
-                             K,
-                             device=device,
-                             dtype=torch.int64)
-    c_strides1 = torch.full((w1.shape[0], ),
-                            2 * N,
-                            device=device,
-                            dtype=torch.int64)
-    ab_strides2 = torch.full((w1.shape[0], ),
-                             N,
-                             device=device,
-                             dtype=torch.int64)
-    c_strides2 = torch.full((w1.shape[0], ),
-                            K,
-                            device=device,
-                            dtype=torch.int64)
-
-    c1 = _resize_cache(workspace13, (M * topk, N * 2))
-    c2 = _resize_cache(workspace2, (M * topk, N))
-    c3 = _resize_cache(workspace13, (M * topk, K))
-
-    if per_act_block:
-        a1q_scale_t = ops.transpose_cutlass_moe_a_scales(
-            a1q_scale, expert_offsets, problem_sizes1)
-    else:
-        a1q_scale = a1q_scale.repeat(a1q.shape[1] // 128, a1q.shape[0])
-
-    if expert_map is not None:
-        c1.fill_(0)
-
-    ops.cutlass_moe_blockwise_mm(c1, a1q.contiguous(), w1.contiguous(),
-                                 a1q_scale_t if per_act_block else a1q_scale,
-                                 w1_scale.transpose(1, 2).contiguous(),
-                                 expert_offsets, problem_sizes1, ab_strides1,
-                                 ab_strides1, c_strides1, per_act_block)
-
-    activation_callable(c2, c1)
-
-    if per_act_block:
-        a2q, a2q_scale = per_token_group_quant_fp8(c2, 128)
-        a2q_scale_t = ops.transpose_cutlass_moe_a_scales(
-            a2q_scale, expert_offsets, problem_sizes2)
-    else:
-        a2q, a2q_scale = ops.scaled_fp8_quant(c2,
-                                              use_per_token_if_dynamic=False)
-        a2q_scale = a2q_scale.repeat(a2q.shape[1] // 128, a2q.shape[0])
-
-    if expert_map is not None:
-        c3.fill_(0)
-
-    ops.cutlass_moe_blockwise_mm(c3, a2q, w2,
-                                 a2q_scale_t if per_act_block else a2q_scale,
-                                 w2_scale.transpose(1, 2).contiguous(),
-                                 expert_offsets, problem_sizes2, ab_strides2,
-                                 ab_strides2, c_strides2, per_act_block)
-
-    output.copy_(c3[c_map].view(M * topk, K), non_blocking=True)
-
-
-class CutlassExpertsBlockedFp8(mk.FusedMoEPermuteExpertsUnpermute):
-
-    def __init__(
-        self,
-        max_experts_per_worker: int,
-        out_dtype: torch.dtype,
-        per_act_block: bool,
-    ):
-        super().__init__()
-        self.max_experts_per_worker = max_experts_per_worker
-        self.out_dtype = out_dtype
-        self.per_act_block = per_act_block
-
-    def workspace_shapes(
-        self,
-        a: torch.Tensor,
-        aq: torch.Tensor,
-        M: int,
-        N: int,
-        K: int,
-        topk: int,
-        global_num_experts: int,
-        local_num_experts: int,
-    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
-        workspace1 = (M * topk, max(N * 2, K))
-        workspace2 = (M * topk, N)
-        output = (M * topk, K)
-        return (workspace1, workspace2, output, self.out_dtype)
-
-    # TODO: check if we can add support for chunking
-    def supports_chunking(self) -> bool:
-        return False
-
-    def apply(
-        self,
-        output: torch.Tensor,
-        hidden_states: torch.Tensor,
-        w1: torch.Tensor,
-        w2: torch.Tensor,
-        topk_ids: torch.Tensor,
-        activation: str,
-        global_num_experts: int,
-        expert_map: Optional[torch.Tensor],
-        w1_scale: Optional[torch.Tensor],
-        w2_scale: Optional[torch.Tensor],
-        w1_zp: Optional[torch.Tensor],
-        w2_zp: Optional[torch.Tensor],
-        a1q_scale: Optional[torch.Tensor],
-        a2_scale: Optional[torch.Tensor],
-        workspace13: torch.Tensor,
-        workspace2: torch.Tensor,
-        expert_num_tokens: Optional[torch.Tensor],
-    ) -> torch.Tensor:
-        assert w1_zp is None, "w1_zp is not supported in CUTLASS MoE"
-        assert w2_zp is None, "w2_zp is not supported in CUTLASS MoE"
-        activation_callable = lambda i, o: self.activation(activation, i, o)
-        assert expert_num_tokens is None, "PPLX is not supported in blocked CUTLASS MoE"  # noqa: E501
-        return run_blocked_cutlass_moe_fp8(output, hidden_states, w1, w2,
-                                           topk_ids, activation_callable,
-                                           global_num_experts, expert_map,
-                                           w1_scale, w2_scale, a1q_scale,
-                                           a2_scale, workspace13, workspace2,
-                                           self.out_dtype, self.per_act_block)
-
-
-def cutlass_moe_blocked_fp8(
-    a: torch.Tensor,
-    w1_q: torch.Tensor,
-    w2_q: torch.Tensor,
-    topk_weights: torch.Tensor,
-    topk_ids: torch.Tensor,
-    w1_scale: torch.Tensor,
-    w2_scale: torch.Tensor,
-    activation: str = "silu",
-    a1_scale: Optional[torch.Tensor] = None,
-    a2_scale: Optional[torch.Tensor] = None,
-    apply_router_weight_on_input: bool = False,
-    global_num_experts: int = -1,
-    per_act_block: bool = True,
-) -> torch.Tensor:
-    """
-    This function computes a a8w8-blockwise quantized Mixture of Experts (MoE)
-    layer  using two sets of quantized weights, w1_q and w2_q, and top-k gating
-    mechanism. The matrix multiplications are implemented with CUTLASS
-    grouped gemm.
-
-    Parameters:
-    - a (torch.Tensor): The input tensor to the MoE layer.
-        Shape: [M, K]
-    - w1_q (torch.Tensor): The first set of fp8-quantized expert weights.
-        Shape: [num_experts, K, 2N] (the weights are passed transposed)
-    - w2_q (torch.Tensor): The second set of fp8-quantized expert weights.
-        Shape: [num_experts, N, K] (the weights are passed transposed)
-    - topk_weights (torch.Tensor): The weights of each token->expert mapping.
-    - topk_ids (torch.Tensor): The token->expert mappings.
-    - w1_scale (torch.Tensor): The fp32 scale to dequantize w1_q.
-        Shape: [num_experts] or [num_experts, 2N]
-    - w2_scale (torch.Tensor): The fp32 scale to dequantize w2_q.
-        Shape: [num_experts] or [num_experts, K]
-    - a1_scale (Optional[torch.Tensor]): The optional fp32 scale to quantize a.
-        Shape: scalar or [M]
-    - a2_scale (Optional[torch.Tensor]): The optional fp32 scale to
-        quantize the intermediate result between the gemms.
-        Shape: scalar or [M]
-    - apply_router_weight_on_input (bool): When true, the topk weights are
-        applied directly on the inputs. This is only applicable when topk is 1.
-    - global_num_experts (int): The total number of experts.
-
-    Returns:
-    - torch.Tensor: The 16-bit output tensor after applying the MoE layer.
-    """
-
-    out_dtype = a.dtype
-
-    fn = mk.FusedMoEModularKernel(
-        MoEPrepareAndFinalizeNoEP(
-            quant_dtype=torch.float8_e4m3fn,
-            per_channel_quant=per_act_block,
-            block_shape=[128, 128] if per_act_block else None,
-        ),
-        CutlassExpertsBlockedFp8(
-            max_experts_per_worker=global_num_experts,
-            out_dtype=out_dtype,
-            per_act_block=per_act_block,
-        ),
-    )
-
-    return fn(
-        a,
-        w1_q,
-        w2_q,
-        topk_weights,
-        topk_ids,
-        False,
-        activation,
-        global_num_experts if global_num_experts != -1 else w1_q.size(0),
-        None,
-        w1_scale,
-        w2_scale,
-        a1_scale=a1_scale,
-        a2_scale=a2_scale,
-        apply_router_weight_on_input=apply_router_weight_on_input,
-    )
-
 
 def run_cutlass_moe_fp8(
     output: torch.Tensor,
@@ -944,3 +642,323 @@ def run_cutlass_block_scaled_fused_experts(
 
     return (c2[c_map].view(m, topk, k) *
             topk_weights.view(m, topk, 1).to(out_dtype)).sum(dim=1)
+
+def run_blocked_cutlass_moe_fp8(
+    output: torch.Tensor,
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk_ids: torch.Tensor,
+    activation_callable: Callable,
+    global_num_experts: int,
+    expert_map: Optional[torch.Tensor],
+    w1_scale: Optional[torch.Tensor],
+    w2_scale: Optional[torch.Tensor],
+    a1q_scale: Optional[torch.Tensor],
+    a2_scale: Optional[torch.Tensor],
+    workspace13: torch.Tensor,
+    workspace2: torch.Tensor,
+    out_dtype: torch.dtype,
+    per_act_block: bool,
+) -> torch.Tensor:
+    """
+    This function computes a a8w8-blockwise quantized Mixture of Experts (MoE)
+    layer  using two sets of quantized weight-scale pairs, w1-w1_scale and
+    w2-w2_scale, and top-k gating mechanism. The matrix multiplications are
+    implemented with CUTLASS grouped gemm. The weights are quantized with block
+    size 128x128. When per_act_block is True, the input is quantized with
+    per-token 128-blocked scales (equivalent to block size 1x128). When
+    it's False, the input is quantized with per-tensor scales.
+    """
+
+    if hidden_states.dtype == torch.float8_e4m3fn:
+        a1q = hidden_states
+    else:
+        a = hidden_states
+
+    assert w1_scale is not None
+    assert w2_scale is not None
+    assert w1.dtype == torch.float8_e4m3fn
+    assert w2.dtype == torch.float8_e4m3fn
+    assert a1q.shape[1] == w1.shape[2], "Hidden size mismatch w1"
+    assert w1.shape[1] == w2.shape[2] * 2, "Hidden size mismatch w2"
+    assert w1.shape[0] == w2.shape[0], "Expert number mismatch"
+    assert a1q_scale is None or a1q_scale.dim(
+    ) == 0 or a1q_scale.shape[0] == 1 or a1q_scale.shape[0] == a1q.shape[
+        0], "Input scale shape mismatch"
+    assert w1.shape[0] == w2.shape[0], "Weights expert number mismatch"
+    assert w1.shape[0] == w1_scale.shape[0], "w1 scales expert number mismatch"
+    assert w1.shape[0] == w2_scale.shape[0], "w2 scales expert number mismatch"
+    assert a2_scale is None or a2_scale.dim(
+    ) == 0 or a2_scale.shape[0] == 1, "Intermediate scale shape mismatch"
+    assert out_dtype in [torch.half, torch.bfloat16], "Invalid output dtype"
+
+    M = a1q.shape[0]
+    _, K, N = w2.shape
+    device = a1q.device
+
+    assert w1.shape[2] == K
+    assert global_num_experts != -1
+
+    if expert_map is not None:
+        "Translate info from expert_map to topk_ids"
+        local_topk_ids = torch.where(expert_map[topk_ids] != -1,
+                                     expert_map[topk_ids], -1)
+    else:
+        local_topk_ids = topk_ids
+
+    topk = local_topk_ids.shape[1]
+
+    expert_offsets = torch.empty((global_num_experts + 1),
+                                 dtype=torch.int32,
+                                 device=device)
+    problem_sizes1 = torch.empty((global_num_experts, 3),
+                                 dtype=torch.int32,
+                                 device=device)
+    problem_sizes2 = torch.empty((global_num_experts, 3),
+                                 dtype=torch.int32,
+                                 device=device)
+
+    if a1q_scale is None:
+        a1q, a1q_scale = _fp8_quantize(
+            a, A_scale=None, per_act_token=False,
+            block_shape=[128, 128] if per_act_block else None)
+
+    if expert_map is not None:
+        a_map = torch.zeros((local_topk_ids.numel()),
+                            dtype=torch.int32,
+                            device=device)
+    else:
+        a_map = torch.empty((local_topk_ids.numel()),
+                            dtype=torch.int32,
+                            device=device)
+
+    c_map = torch.empty((local_topk_ids.numel()),
+                        dtype=torch.int32,
+                        device=device)
+
+    ops.get_cutlass_moe_mm_data(local_topk_ids, expert_offsets, problem_sizes1,
+                                problem_sizes2, a_map, c_map,
+                                global_num_experts, N, K)
+
+    a1q = _fp8_perm(a1q, a_map)
+    a1q_scale = a1q_scale[a_map] if per_act_block else a1q_scale
+    expert_offsets = expert_offsets[:-1]
+
+    ab_strides1 = torch.full((w1.shape[0], ),
+                             K,
+                             device=device,
+                             dtype=torch.int64)
+    c_strides1 = torch.full((w1.shape[0], ),
+                            2 * N,
+                            device=device,
+                            dtype=torch.int64)
+    ab_strides2 = torch.full((w1.shape[0], ),
+                             N,
+                             device=device,
+                             dtype=torch.int64)
+    c_strides2 = torch.full((w1.shape[0], ),
+                            K,
+                            device=device,
+                            dtype=torch.int64)
+
+    c1 = _resize_cache(workspace13, (M * topk, N * 2))
+    c2 = _resize_cache(workspace2, (M * topk, N))
+    c3 = _resize_cache(workspace13, (M * topk, K))
+
+    if per_act_block:
+        a1q_scale = ops.transpose_cutlass_moe_a_scales(
+            a1q_scale, expert_offsets, problem_sizes1)
+    else:
+        a1q_scale = a1q_scale.repeat(a1q.shape[1] // 128, a1q.shape[0])
+
+    if expert_map is not None:
+        c1.fill_(0)
+
+    ops.cutlass_moe_blockwise_mm(c1, a1q, w1, a1q_scale,
+                                 w1_scale.transpose(1, 2).contiguous(),
+                                 expert_offsets, problem_sizes1, ab_strides1,
+                                 ab_strides1, c_strides1, per_act_block)
+
+    activation_callable(c2, c1)
+
+    a2q, a2q_scale = _fp8_quantize(
+        c2, A_scale=None, per_act_token=False,
+        block_shape=[128, 128] if per_act_block else None)
+    if per_act_block:
+        a2q_scale = ops.transpose_cutlass_moe_a_scales(
+            a2q_scale, expert_offsets, problem_sizes2)
+    else:
+        a2q_scale = a2q_scale.repeat(a2q.shape[1] // 128, a2q.shape[0])
+
+    if expert_map is not None:
+        c3.fill_(0)
+
+    ops.cutlass_moe_blockwise_mm(c3, a2q, w2, a2q_scale,
+                                 w2_scale.transpose(1, 2).contiguous(),
+                                 expert_offsets, problem_sizes2, ab_strides2,
+                                 ab_strides2, c_strides2, per_act_block)
+
+    output.copy_(c3[c_map].view(M * topk, K), non_blocking=True)
+
+
+class CutlassExpertsBlockedFp8(mk.FusedMoEPermuteExpertsUnpermute):
+
+    def __init__(
+        self,
+        max_experts_per_worker: int,
+        out_dtype: torch.dtype,
+        per_act_block: bool,
+        block_shape: list[int] = [128, 128],
+    ):
+        super().__init__(
+            FusedMoEQuantConfig(
+                quant_dtype=torch.float8_e4m3fn,
+                per_act_token_quant=False,
+                per_out_ch_quant=False,
+                block_shape=block_shape if per_act_block else None,
+            ))
+        assert max_experts_per_worker > 0
+        self.max_experts_per_worker = max_experts_per_worker
+        self.out_dtype = out_dtype
+        self.per_act_block = per_act_block
+
+    @property
+    def activation_formats(
+        self
+    ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
+        return (mk.FusedMoEActivationFormat.Standard,
+                mk.FusedMoEActivationFormat.Standard)
+
+    # Will be added later
+    def supports_chunking(self) -> bool:
+        return False
+
+    def supports_expert_map(self) -> bool:
+        return True
+
+    def workspace_shapes(
+        self,
+        a: torch.Tensor,
+        aq: torch.Tensor,
+        M: int,
+        N: int,
+        K: int,
+        topk: int,
+        global_num_experts: int,
+        local_num_experts: int,
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
+        workspace1 = (M * topk, max(N * 2, K))
+        workspace2 = (M * topk, N)
+        output = (M * topk, K)
+        return (workspace1, workspace2, output,
+                self.out_dtype if self.out_dtype is not None else a.dtype)
+
+    def apply(
+        self,
+        output: torch.Tensor,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_ids: torch.Tensor,
+        activation: str,
+        global_num_experts: int,
+        expert_map: Optional[torch.Tensor],
+        w1_scale: Optional[torch.Tensor],
+        w2_scale: Optional[torch.Tensor],
+        w1_zp: Optional[torch.Tensor],
+        w2_zp: Optional[torch.Tensor],
+        a1q_scale: Optional[torch.Tensor],
+        a2_scale: Optional[torch.Tensor],
+        workspace13: torch.Tensor,
+        workspace2: torch.Tensor,
+        expert_num_tokens: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        assert w1_zp is None, "w1_zp is not supported in CUTLASS MoE"
+        assert w2_zp is None, "w2_zp is not supported in CUTLASS MoE"
+        activation_callable = lambda i, o: self.activation(activation, i, o)
+        assert expert_num_tokens is None, "PPLX is not supported in blocked CUTLASS MoE"  # noqa: E501
+        return run_blocked_cutlass_moe_fp8(output, hidden_states, w1, w2,
+                                           topk_ids, activation_callable,
+                                           global_num_experts, expert_map,
+                                           w1_scale, w2_scale, a1q_scale,
+                                           a2_scale, workspace13, workspace2,
+                                           self.out_dtype, self.per_act_block)
+
+
+def cutlass_moe_blocked_fp8(
+    a: torch.Tensor,
+    w1_q: torch.Tensor,
+    w2_q: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    w1_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    activation: str = "silu",
+    a1_scale: Optional[torch.Tensor] = None,
+    a2_scale: Optional[torch.Tensor] = None,
+    apply_router_weight_on_input: bool = False,
+    global_num_experts: int = -1,
+    per_act_block: bool = True,
+    block_shape: list[int] = [128, 128],
+) -> torch.Tensor:
+    """
+    This function computes a a8w8-blockwise quantized Mixture of Experts (MoE)
+    layer  using two sets of quantized weights, w1_q and w2_q, and top-k gating
+    mechanism. The matrix multiplications are implemented with CUTLASS
+    grouped gemm.
+
+    Parameters:
+    - a (torch.Tensor): The input tensor to the MoE layer.
+        Shape: [M, K]
+    - w1_q (torch.Tensor): The first set of fp8-quantized expert weights.
+        Shape: [num_experts, K, 2N] (the weights are passed transposed)
+    - w2_q (torch.Tensor): The second set of fp8-quantized expert weights.
+        Shape: [num_experts, N, K] (the weights are passed transposed)
+    - topk_weights (torch.Tensor): The weights of each token->expert mapping.
+    - topk_ids (torch.Tensor): The token->expert mappings.
+    - w1_scale (torch.Tensor): The fp32 scale to dequantize w1_q.
+        Shape: [num_experts] or [num_experts, 2N]
+    - w2_scale (torch.Tensor): The fp32 scale to dequantize w2_q.
+        Shape: [num_experts] or [num_experts, K]
+    - a1_scale (Optional[torch.Tensor]): The optional fp32 scale to quantize a.
+        Shape: scalar or [M]
+    - a2_scale (Optional[torch.Tensor]): The optional fp32 scale to
+        quantize the intermediate result between the gemms.
+        Shape: scalar or [M]
+    - apply_router_weight_on_input (bool): When true, the topk weights are
+        applied directly on the inputs. This is only applicable when topk is 1.
+    - global_num_experts (int): The total number of experts.
+
+    Returns:
+    - torch.Tensor: The 16-bit output tensor after applying the MoE layer.
+    """
+
+    out_dtype = a.dtype
+
+    fn = mk.FusedMoEModularKernel(
+        MoEPrepareAndFinalizeNoEP(),
+        CutlassExpertsBlockedFp8(
+            max_experts_per_worker=global_num_experts,
+            out_dtype=out_dtype,
+            per_act_block=per_act_block,
+            block_shape=block_shape,
+        ),
+    )
+
+    return fn(
+        a,
+        w1_q,
+        w2_q,
+        topk_weights,
+        topk_ids,
+        False,
+        activation,
+        global_num_experts if global_num_experts != -1 else w1_q.size(0),
+        None,
+        w1_scale,
+        w2_scale,
+        a1_scale=a1_scale,
+        a2_scale=a2_scale,
+        apply_router_weight_on_input=apply_router_weight_on_input,
+    )
