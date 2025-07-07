@@ -20,8 +20,7 @@ from vllm.attention.ops.paged_attn import (PagedAttention,
 from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.platforms.rocm import (use_rocm_aiter_paged_attention,
-                                 use_rocm_custom_paged_attention)
+from vllm.platforms.rocm import use_rocm_custom_paged_attention
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
@@ -894,11 +893,6 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                 decode_meta.max_decode_seq_len, self.sliding_window,
                 self.kv_cache_dtype, self.alibi_slopes)
 
-            use_aiter_pa = use_rocm_aiter_paged_attention(
-                decode_query.dtype, head_size, block_size, gqa_ratio,
-                decode_meta.max_decode_seq_len, self.sliding_window,
-                self.alibi_slopes)
-
             if use_custom:
                 max_seq_len = (decode_meta.max_decode_seq_len if self.attn_type
                                != AttentionType.ENCODER_DECODER else
@@ -946,7 +940,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                     layer._v_scale,
                     output_scale,
                 )
-            elif is_rocm_aiter_paged_attn_enabled() and use_aiter_pa:
+            elif is_rocm_aiter_paged_attn_enabled():
                 if output_scale is not None:
                     raise NotImplementedError(
                         "fused output quantization only supported for Triton"
