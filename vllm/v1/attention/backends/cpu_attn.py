@@ -161,7 +161,8 @@ class TorchSDPAMetadataBuilderV1(AttentionMetadataBuilder[TorchSDPAMetadata]):
             num_prefill_tokens=num_prefill_tokens,
             num_decode_tokens=num_decode_tokens,
             slot_mapping=slot_mapping,
-            seq_lens=runner.seq_lens_cpu[:num_reqs].tolist(),  # ensure seq_lens is set
+            # to ensure inference when chunked_prefill is disabled
+            seq_lens=runner.seq_lens_cpu[:num_reqs].tolist(),  
             seq_lens_tensor=runner.
             seq_lens_cpu[num_prompt_req:num_reqs],  # decode
             max_decode_seq_len=max_decode_seq_len,  # decode
