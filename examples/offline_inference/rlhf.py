@@ -45,7 +45,8 @@ class MyLLM(LLM):
     """Configure the vLLM worker for Ray placement group execution."""
 
     def __init__(self, *args, **kwargs):
-        # Remove the top-level CUDA_VISIBLE_DEVICES variable set by Ray.
+        # Remove the top-level CUDA_VISIBLE_DEVICES variable set by Ray
+        # so that vLLM can manage its own device placement within the worker.
         os.environ.pop("CUDA_VISIBLE_DEVICES", None)
         super().__init__(*args, **kwargs)
 
@@ -54,12 +55,14 @@ class MyLLM(LLM):
 train_model = AutoModelForCausalLM.from_pretrained("facebook/opt-125m")
 train_model.to("cuda:0")
 
-# Initialize Ray and create a placement group that reserves GPU 1–2 for the
-# vLLM inference engine. Learn more about Ray placement groups:
-# https://docs.ray.io/en/latest/placement-groups.html
+# Initialize Ray and set the visible devices. The vLLM engine will
+# be placed on GPUs 1 and 2.
 os.environ["CUDA_VISIBLE_DEVICES"] = "1,2"
 ray.init()
 
+# Create a placement group that reserves GPU 1–2 for the vLLM inference engine.
+# Learn more about Ray placement groups:
+# https://docs.ray.io/en/latest/placement-groups.html
 pg_inference = placement_group([{"GPU": 1, "CPU": 0}] * 2)
 ray.get(pg_inference.ready())
 scheduling_inference = PlacementGroupSchedulingStrategy(
