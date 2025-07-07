@@ -38,20 +38,10 @@ class TorchSDPABackend(AttentionBackend):
     accept_output_buffer: bool = False
 
     @classmethod
-    def get_supported_head_sizes(cls) -> list[int]:
-        if _use_ipex:
-            return []
-        else:
-            return _get_paged_attn_impl()\
-                .get_supported_head_sizes() # type: ignore
-
-    @classmethod
     def validate_head_size(cls, head_size: int) -> None:
-        supported_head_sizes = cls.get_supported_head_sizes()
-        if len(supported_head_sizes) == 0:
-            return
-
-        if head_size not in supported_head_sizes:
+        is_valid, supported_head_sizes = _get_paged_attn_impl().\
+            validate_head_size(head_size) # type: ignore
+        if not is_valid:
             attn_type = cls.__name__.removesuffix("Backend")
             raise ValueError(
                 f"Head size {head_size} is not supported by {attn_type}. "
@@ -751,8 +741,9 @@ def _make_sliding_window_bias(
 class _PagedAttention:
 
     @staticmethod
-    def get_supported_head_sizes() -> list[int]:
-        return [32, 64, 80, 96, 112, 128, 192, 256]
+    def validate_head_size(head_size: int) -> tuple[bool, list[int]]:
+        SUPPORT_HS = [32, 64, 80, 96, 112, 128, 192, 256]
+        return head_size in SUPPORT_HS, SUPPORT_HS
 
     @staticmethod
     def get_kv_cache_shape(
@@ -862,6 +853,10 @@ class _PagedAttention:
 
 
 class _IPEXPagedAttention(_PagedAttention):
+
+    @staticmethod
+    def validate_head_size(head_size: int) -> tuple[bool, list[int]]:
+        return True, []
 
     @staticmethod
     def split_kv_cache(
