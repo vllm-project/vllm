@@ -182,7 +182,7 @@ class Qwen2Attention(nn.Module):
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
-        return output
+        return output, q[-1:, ...]
 
 
 class Qwen2DecoderLayer(nn.Module):
@@ -250,7 +250,7 @@ class Qwen2DecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.input_layernorm(
                 hidden_states, residual)
-        hidden_states = self.self_attn(
+        hidden_states, q = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
         )
@@ -259,7 +259,7 @@ class Qwen2DecoderLayer(nn.Module):
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
-        return hidden_states, residual
+        return hidden_states, residual, q
 
 
 @support_torch_compile(
@@ -350,8 +350,8 @@ class Qwen2Model(nn.Module):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
-        for layer in self.layers[self.start_layer:self.end_layer]:
-            hidden_states, residual = layer(
+        for i, layer in enumerate(self.layers[self.start_layer:self.end_layer]):
+            hidden_states, residual, q = layer(
                 positions,
                 hidden_states,
                 residual,
@@ -436,6 +436,15 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+        self.register_buffer(
+            'query_buffer',
+            torch.zeros(
+                (28, 1, 3584),  # 3584 = 28 heads * 128 head dim
+                dtype=torch.bfloat16,
+                device=torch.cuda.current_device(),
+            ),
+            persistent=False,
+        )
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
