@@ -24,7 +24,8 @@ def adapt_config_dict(config_dict: dict[str, Any],
 
     if bool(config_dict.get("yarn")):
         config_dict = _remap_mistral_yarn_args(config_dict)
-    if bool((config_dict.get("multimodal") or {}).get("vision_encoder_args") or config_dict.get("vision_encoder")):
+    if bool((config_dict.get("multimodal") or {}).get("vision_encoder_args")
+            or config_dict.get("vision_encoder")):
         config_dict = _remap_mistral_vision_args(config_dict)
 
     config = PretrainedConfig.from_dict(config_dict)
