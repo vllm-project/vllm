@@ -258,4 +258,3 @@ See [deployment-docker-build-image-from-source][deployment-docker-build-image-fr
 See [feature-x-hardware][feature-x-hardware] compatibility matrix for feature support information.
 
 # --8<-- [end:supported-features]
-# --8<-- [end:extra-information]

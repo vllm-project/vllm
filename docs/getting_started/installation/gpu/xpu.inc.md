@@ -85,4 +85,3 @@ By default, a ray instance will be launched automatically if no existing one is 
 XPU platform uses **torch-ccl** for torch<2.8 and **xccl** for torch>=2.8 as distributed backend, since torch 2.8 supports **xccl** as built-in backend for XPU.
 
 # --8<-- [end:distributed-backend]
-# --8<-- [end:extra-information]
