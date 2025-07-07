@@ -1,6 +1,7 @@
 #!/bin/bash
 #
 # Launch a Ray cluster inside Docker for vLLM inference.
+#
 # This script can start either a head node or a worker node, depending on the
 # --head or --worker flag provided as the third positional argument.
 #
@@ -26,8 +27,8 @@
 # node and thereby shuts down the entire cluster.
 # Every machine must be reachable at the supplied IP address.
 #
-# The container is named "node-<random_suffix>". To open a shell inside the container after
-# launch, use:
+# The container is named "node-<random_suffix>". To open a shell inside
+# a container after launch, use:
 #       docker exec -it node-<random_suffix> /bin/bash
 #
 # Then, you can execute vLLM commands on the Ray cluster as if it were a
@@ -59,9 +60,13 @@ if [ "${NODE_TYPE}" != "--head" ] && [ "${NODE_TYPE}" != "--worker" ]; then
 fi
 
 # Generate a unique container name with random suffix.
+# Docker container names must be unique on each host.
+# The random suffix allows multiple Ray containers to run simultaneously on the same machine,
+# for example, on a multi-GPU machine.
 CONTAINER_NAME="node-${RANDOM}"
 
 # Define a cleanup routine that removes the container when the script exits.
+# This prevents orphaned containers from accumulating if the script is interrupted.
 cleanup() {
     docker stop "${CONTAINER_NAME}"
     docker rm "${CONTAINER_NAME}"
@@ -70,6 +75,8 @@ cleanup() {
 trap cleanup EXIT
 
 # Build the Ray start command based on the node role.
+# The head node manages the cluster and accepts connections on port 6379, 
+# while workers connect to the head's address.
 RAY_START_CMD="ray start --block"
 if [ "${NODE_TYPE}" == "--head" ]; then
     RAY_START_CMD+=" --head --port=6379"
@@ -80,6 +87,10 @@ fi
 echo "Starting container: ${CONTAINER_NAME}"
 
 # Launch the container with the assembled parameters.
+# --network host: Allows Ray nodes to communicate directly via host networking
+# --shm-size 10.24g: Increases shared memory
+# --gpus all: Gives container access to all GPUs on the host
+# -v HF_HOME: Mounts HuggingFace cache to avoid re-downloading models
 docker run \
     --entrypoint /bin/bash \
     --network host \
