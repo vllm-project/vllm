@@ -30,29 +30,29 @@ def main(args):
     api_url = f"http://{args.host}:{args.port}/score"
     model_name = args.model
 
-    data_1 = "What is the capital of Brazil?"
-    data_2 = "The capital of Brazil is Brasilia."
-    prompt = {"model": model_name, "data_1": data_1, "data_2": data_2}
+    text_1 = "What is the capital of Brazil?"
+    text_2 = "The capital of Brazil is Brasilia."
+    prompt = {"model": model_name, "text_1": text_1, "text_2": text_2}
     score_response = post_http_request(prompt=prompt, api_url=api_url)
-    print("\nPrompt when data_1 and data_2 are both strings:")
+    print("\nPrompt when text_1 and text_2 are both strings:")
     pprint.pprint(prompt)
     print("\nScore Response:")
     pprint.pprint(score_response.json())
 
-    data_1 = "What is the capital of France?"
-    data_2 = ["The capital of Brazil is Brasilia.", "The capital of France is Paris."]
-    prompt = {"model": model_name, "data_1": data_1, "data_2": data_2}
+    text_1 = "What is the capital of France?"
+    text_2 = ["The capital of Brazil is Brasilia.", "The capital of France is Paris."]
+    prompt = {"model": model_name, "text_1": text_1, "text_2": text_2}
     score_response = post_http_request(prompt=prompt, api_url=api_url)
-    print("\nPrompt when data_1 is string and data_2 is a list:")
+    print("\nPrompt when text_1 is string and text_2 is a list:")
     pprint.pprint(prompt)
     print("\nScore Response:")
     pprint.pprint(score_response.json())
 
-    data_1 = ["What is the capital of Brazil?", "What is the capital of France?"]
-    data_2 = ["The capital of Brazil is Brasilia.", "The capital of France is Paris."]
-    prompt = {"model": model_name, "data_1": data_1, "data_2": data_2}
+    text_1 = ["What is the capital of Brazil?", "What is the capital of France?"]
+    text_2 = ["The capital of Brazil is Brasilia.", "The capital of France is Paris."]
+    prompt = {"model": model_name, "text_1": text_1, "text_2": text_2}
     score_response = post_http_request(prompt=prompt, api_url=api_url)
-    print("\nPrompt when data_1 and data_2 are both lists:")
+    print("\nPrompt when text_1 and text_2 are both lists:")
     pprint.pprint(prompt)
     print("\nScore Response:")
     pprint.pprint(score_response.json())

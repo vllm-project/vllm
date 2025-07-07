@@ -84,8 +84,8 @@ class TestModel:
         score_response = requests.post(server.url_for("score"),
                                        json={
                                            "model": model["name"],
-                                           "data_1": text_1,
-                                           "data_2": text_2,
+                                           "text_1": text_1,
+                                           "text_2": text_2,
                                        })
         score_response.raise_for_status()
         score = ScoreResponse.model_validate(score_response.json())
@@ -116,8 +116,8 @@ class TestModel:
         score_response = requests.post(server.url_for("score"),
                                        json={
                                            "model": model["name"],
-                                           "data_1": text_1,
-                                           "data_2": text_2,
+                                           "text_1": text_1,
+                                           "text_2": text_2,
                                        })
         score_response.raise_for_status()
         score = ScoreResponse.model_validate(score_response.json())
@@ -142,8 +142,8 @@ class TestModel:
         score_response = requests.post(server.url_for("score"),
                                        json={
                                            "model": model["name"],
-                                           "data_1": text_1,
-                                           "data_2": text_2,
+                                           "text_1": text_1,
+                                           "text_2": text_2,
                                        })
         score_response.raise_for_status()
         score = ScoreResponse.model_validate(score_response.json())
@@ -172,8 +172,8 @@ class TestModel:
         score_response = requests.post(server.url_for("score"),
                                        json={
                                            "model": model["name"],
-                                           "data_1": text_1,
-                                           "data_2": text_2,
+                                           "text_1": text_1,
+                                           "text_2": text_2,
                                        })
         assert score_response.status_code == 400
         # Assert just a small fragments of the response
@@ -184,8 +184,8 @@ class TestModel:
         score_response = requests.post(server.url_for("score"),
                                        json={
                                            "model": model["name"],
-                                           "data_1": text_1,
-                                           "data_2": text_2,
+                                           "text_1": text_1,
+                                           "text_2": text_2,
                                            "truncate_prompt_tokens": 101
                                        })
         assert score_response.status_code == 400

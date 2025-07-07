@@ -546,7 +546,7 @@ Code example: <gh-file:examples/online_serving/openai_cross_encoder_score.py>
 
 #### Single inference
 
-You can pass a string to both `data_1` and `data_2`, forming a single sentence pair.
+You can pass a string to both `text_1` and `text_2`, forming a single sentence pair.
 
 ```bash
 curl -X 'POST' \
@@ -556,8 +556,8 @@ curl -X 'POST' \
   -d '{
   "model": "BAAI/bge-reranker-v2-m3",
   "encoding_format": "float",
-  "data_1": "What is the capital of France?",
-  "data_2": "The capital of France is Paris."
+  "text_1": "What is the capital of France?",
+  "text_2": "The capital of France is Paris."
 }'
 ```
 
@@ -582,9 +582,9 @@ curl -X 'POST' \
 
 #### Batch inference
 
-You can pass a string to `data_1` and a list to `data_2`, forming multiple sentence pairs
-where each pair is built from `data_1` and a string in `data_2`.
-The total number of pairs is `len(data_2)`.
+You can pass a string to `text_1` and a list to `text_2`, forming multiple sentence pairs
+where each pair is built from `text_1` and a string in `text_2`.
+The total number of pairs is `len(text_2)`.
 
 ??? console "Request"
 
@@ -595,8 +595,8 @@ The total number of pairs is `len(data_2)`.
       -H 'Content-Type: application/json' \
       -d '{
       "model": "BAAI/bge-reranker-v2-m3",
-      "data_1": "What is the capital of France?",
-      "data_2": [
+      "text_1": "What is the capital of France?",
+      "text_2": [
         "The capital of Brazil is Brasilia.",
         "The capital of France is Paris."
       ]
@@ -627,9 +627,9 @@ The total number of pairs is `len(data_2)`.
     }
     ```
 
-You can pass a list to both `data_1` and `data_2`, forming multiple sentence pairs
-where each pair is built from a string in `data_1` and the corresponding string in `data_2` (similar to `zip()`).
-The total number of pairs is `len(data_2)`.
+You can pass a list to both `text_1` and `text_2`, forming multiple sentence pairs
+where each pair is built from a string in `text_1` and the corresponding string in `text_2` (similar to `zip()`).
+The total number of pairs is `len(text_2)`.
 
 ??? console "Request"
 
@@ -641,11 +641,11 @@ The total number of pairs is `len(data_2)`.
       -d '{
       "model": "BAAI/bge-reranker-v2-m3",
       "encoding_format": "float",
-      "data_1": [
+      "text_1": [
         "What is the capital of Brazil?",
         "What is the capital of France?"
       ],
-      "data_2": [
+      "text_2": [
         "The capital of Brazil is Brasilia.",
         "The capital of France is Paris."
       ]
@@ -698,8 +698,8 @@ You can pass multi-modal inputs to scoring models by passing `content` including
             "http://localhost:8000/v1/score",
             json={
                 "model": "jinaai/jina-reranker-m0",
-                "data_1":"slm markdown",
-                "data_2": {
+                "text_1":"slm markdown",
+                "text_2": {
                   "content": [
                           {
                               "type": "image_url",

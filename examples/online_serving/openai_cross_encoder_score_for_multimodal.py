@@ -30,8 +30,8 @@ def main(args):
     api_url = f"http://{args.host}:{args.port}/score"
     model_name = args.model
 
-    data_1 = "slm markdown"
-    data_2 = {
+    text_1 = "slm markdown"
+    text_2 = {
         "content": [
             {
                 "type": "image_url",
@@ -47,9 +47,9 @@ def main(args):
             },
         ]
     }
-    prompt = {"model": model_name, "data_1": data_1, "data_2": data_2}
+    prompt = {"model": model_name, "text_1": text_1, "text_2": text_2}
     score_response = post_http_request(prompt=prompt, api_url=api_url)
-    print("\nPrompt when data_1 is string and data_2 is a image list:")
+    print("\nPrompt when text_1 is string and text_2 is a image list:")
     pprint.pprint(prompt)
     print("\nScore Response:")
     pprint.pprint(score_response.json())

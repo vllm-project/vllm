@@ -364,8 +364,8 @@ class ServingScores(OpenAIServing):
 
         try:
             final_res_batch = await self._run_scoring(
-                request.data_1,
-                request.data_2,
+                request.text_1,
+                request.text_2,
                 request,
                 request_id,
                 raw_request,
