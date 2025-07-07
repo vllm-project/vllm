@@ -694,11 +694,11 @@ class FlashInferImpl(AttentionImpl):
             else:
                 # This path needs to be enabled with 
                 # VLLM_USE_TRTLLM_DECODE_ATTENTION = 1 and VLLM_KV_CACHE_LAYOUT = HND
-                max_seq_len = (attn_metadata.seq_lens[:num_decode_tokens].max())
                 if num_decode_tokens > 0:
+                    contiguous_query = decode_query.contiguous()
                     output[:num_decode_tokens] = trtllm_batch_decode_with_kv_cache(
-                        query=decode_query,
-                        kv_cache=kv_cache,
+                        query=contiguous_query,
+                        kv_cache=kv_cache.permute(*stride_order),
                         workspace_buffer=attn_metadata.workspace_buffer,
                         num_heads=self.num_heads,
                         num_kv_heads=self.num_kv_heads,
@@ -706,8 +706,8 @@ class FlashInferImpl(AttentionImpl):
                         block_tables=attn_metadata.block_table_tensor[:num_decode_tokens],
                         seq_lens=attn_metadata.seq_lens[:num_decode_tokens],
                         block_size=attn_metadata.page_size,
-                        max_seq_len=max_seq_len,
-                        kv_cache_dtype="auto",
+                        max_seq_len=((attn_metadata.seq_lens[:num_decode_tokens].max())),
+                        kv_cache_dtype=self.kv_cache_dtype,
                         k_scale=layer._k_scale_float,
                         v_scale=layer._v_scale_float,
                     )

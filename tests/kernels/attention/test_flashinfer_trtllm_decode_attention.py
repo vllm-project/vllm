@@ -5,10 +5,15 @@ import random
 import torch
 import flashinfer
 import pytest
+import csv
+import os
+from datetime import datetime
+import nvtx
 
 from typing import Optional
 from vllm.utils import get_max_shared_memory_bytes
 from vllm.platforms import current_platform
+
 
 FLOAT32_BYTES = torch.finfo(torch.float).bits // 8
 
@@ -17,16 +22,13 @@ FLOAT32_BYTES = torch.finfo(torch.float).bits // 8
 
 # Only supports num_query_heads / num_kv_heads == 1 or num_query_heads / num_kv_heads == 8
 NUM_HEADS = [(64, 8)]
-# NUM_HEADS = [(16, 16)]
 # HEAD_SIZES = [128, 256]
 HEAD_SIZES = [128]
-# BLOCK_SIZES = [16, 32]
-BLOCK_SIZES = [16]
-# DTYPES = [torch.float16, torch.bfloat16]
-DTYPES = [torch.float16]
+BLOCK_SIZES = [16, 32]
+DTYPES = [torch.float16, torch.bfloat16]
 NUM_BLOCKS = 32768  # Large enough to test overflow in index calculation.
-# SOFT_CAPS = [None, 30.0, 50.0]
-SOFT_CAPS = [None]
+SOFT_CAPS = [None, 30.0, 50.0]
+
 def to_float8(x, dtype=torch.float8_e4m3fn):
     finfo = torch.finfo(dtype)
     min_val, max_val = x.aminmax()
@@ -47,6 +49,8 @@ def benchmark_decode(num_seqs, page_size=16, dtype=torch.bfloat16,
     # Currently only HEAD_GRP_SIZE == 8 is supported
     HEAD_GRP_SIZE = 8
     MAX_SEQ_LEN = get_max_shared_memory_bytes() // FLOAT32_BYTES - 512
+    print(f"MAX_SEQ_LEN: {MAX_SEQ_LEN}")
+
     NUM_BLOCKS = 5423
     workspace_buffer = torch.empty(1024 * 1024 * 1024, dtype=torch.int8, device=device)
    
@@ -132,6 +136,7 @@ def benchmark_decode(num_seqs, page_size=16, dtype=torch.bfloat16,
                 use_tensor_cores=(
                     (num_qo_heads//num_kv_heads) > 4)
                 )
+
     wrapper.plan(kv_indptr,
                  kv_indices,
                  kv_last_page_lens,
@@ -153,6 +158,23 @@ def benchmark_decode(num_seqs, page_size=16, dtype=torch.bfloat16,
     speedup_percent = ((baseline_mean - trt_mean) / baseline_mean)
     
     print(f"****\t{num_seqs}\t{trt_mean:.3f}\t{trt_std.item():.3f}\t{baseline_mean:.3f}\t{baseline_std.item():.3f}\t{speedup_percent:.3f}")
+    
+    # Return results for CSV writing
+    return {
+        'num_seqs': num_seqs,
+        'trt_mean': trt_mean,
+        'trt_std': trt_std.item(),
+        'baseline_mean': baseline_mean,
+        'baseline_std': baseline_std.item(),
+        'speedup_percent': speedup_percent,
+        'q_dtype': str(dtype),
+        'kv_cache_dtype': kv_cache_dtype,
+        'page_size': page_size,
+        'num_kv_heads': num_kv_heads,
+        'head_dim': head_dim,
+        'max_seq_len': max_seq_len,
+        'kv_lens': kv_lens,
+    }
 
 @pytest.mark.parametrize("kv_lens", [[1328, 18, 463], [1, 54, 293, 70]])
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
@@ -257,15 +279,62 @@ def test_flashinfer_trtllm_decode_with_baseline(
     
     torch.testing.assert_close(output, output_trtllm, atol=1e-2, rtol=1e-2), \
         f"{torch.max(torch.abs(output - output_trtllm))}"
-  
+
+
+def write_results_to_csv(results, filename=None):
+    """Write benchmark results to CSV file."""
+    if filename is None:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"flashinfer_trtllm_benchmark_{timestamp}.csv"
     
+    fieldnames = [
+        'num_seqs', 'trt_mean', 'trt_std', 'baseline_mean', 'baseline_std', 
+        'speedup_percent', 'q_dtype', 'kv_cache_dtype', 'page_size', 
+        'num_kv_heads', 'head_dim'
+    ]
+    
+    file_exists = os.path.exists(filename)
+    
+    with open(filename, 'a', newline='') as csvfile:
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        
+        if not file_exists:
+            writer.writeheader()
+        
+        for result in results:
+            writer.writerow(result)
+    
+    print(f"Results written to {filename}")
+
+
 if __name__ == "__main__":
+    # num_seqs = [1, 2, 4, 8, 16, 32, 64, 128, 187, 200, 256, 512, 1024, 2048, 4096]
     num_seqs = [1, 2, 4, 8, 16, 32, 64, 128, 187, 200, 256, 512, 1024, 2048, 4096]
+    all_results = []
+    
     print(f"****\tRunning benchmark for kv_cache_dtype: bfloat16")
     print("****\tnum_seqs\ttrt_mean\ttrt_std\tbaseline_mean\tbaseline_std\tspeedup_percent")
     for bs in num_seqs:
-        benchmark_decode(bs)
-    print(f"****\tRunning benchmark for kv_cache_dtype: fp8")
+        result = benchmark_decode(bs, dtype=torch.bfloat16, kv_cache_dtype="auto")
+        all_results.append(result)
+    
+    print(f"****\tRunning benchmark for q_dtype = bfloat16, kv_cache_dtype: fp8")
     print("****\tnum_seqs\ttrt_mean\ttrt_std\tbaseline_mean\tbaseline_std\tspeedup_percent")
     for bs in num_seqs:
-        benchmark_decode(bs, kv_cache_dtype="fp8")
+        result = benchmark_decode(bs, dtype=torch.bfloat16, kv_cache_dtype="fp8")
+        all_results.append(result)
+    
+    print(f"****\tRunning benchmark for kv_cache_dtype: float16")
+    print("****\tnum_seqs\ttrt_mean\ttrt_std\tbaseline_mean\tbaseline_std\tspeedup_percent")
+    for bs in num_seqs:
+        result = benchmark_decode(bs, dtype=torch.float16, kv_cache_dtype="auto")
+        all_results.append(result)
+    
+    print(f"****\tRunning benchmark for q_dtype = float16, kv_cache_dtype: fp8")
+    print("****\tnum_seqs\ttrt_mean\ttrt_std\tbaseline_mean\tbaseline_std\tspeedup_percent")
+    for bs in num_seqs:
+        result = benchmark_decode(bs, dtype=torch.float16, kv_cache_dtype="fp8")
+        all_results.append(result)
+    
+    # Write all results to CSV
+    write_results_to_csv(all_results)
