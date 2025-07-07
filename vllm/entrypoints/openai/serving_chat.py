@@ -179,10 +179,9 @@ class OpenAIServingChat(OpenAIServing):
                     "--enable-auto-tool-choice and --tool-call-parser to be set"
                 )
 
-            if request.tools is None:
-                tool_dicts = None
-            elif (request.tool_choice == "none"
-                  and self.exclude_tools_when_tool_choice_none):
+            if (request.tools is None
+                    or (request.tool_choice == "none"
+                        and self.exclude_tools_when_tool_choice_none)):
                 tool_dicts = None
             else:
                 tool_dicts = [tool.model_dump() for tool in request.tools]
