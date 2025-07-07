@@ -7,6 +7,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from functools import cached_property
 from math import ceil
 from typing import Optional, Union, cast
+from vllm.multimodal.parse import MultiModalDataItems, MultiModalDataParser
 
 import numpy as np
 import torch
@@ -150,7 +151,7 @@ class VoxtralProcessingInfo(BaseProcessingInfo):
         return VoxtralProcessorAdapter(self.get_tokenizer())
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
-        return {"audio": 1}  # Only maximum one audio per request
+        return {"audio": 5}  # Performance tends to degrade after 5
 
     def get_mm_max_tokens_per_item(
         self,
@@ -279,6 +280,9 @@ class VoxtralMultiModalProcessor(
         # NOTE: The tokens are already inserted by the chat template
         return prompt_ids, mm_kwargs, mm_hashes, True
 
+    def _get_data_parser(self) -> MultiModalDataParser:
+        sampling_rate = self.info.get_hf_processor().sampling_rate
+        return MultiModalDataParser(target_sr=sampling_rate)
 
 @MULTIMODAL_REGISTRY.register_processor(
     VoxtralMultiModalProcessor,

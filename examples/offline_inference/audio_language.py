@@ -11,7 +11,7 @@ on HuggingFace model repository.
 import os
 from pathlib import Path
 from dataclasses import asdict
-from typing import NamedTuple, Optional, Union, Dict
+from typing import NamedTuple, Optional, Dict, Any
 
 from huggingface_hub import snapshot_download
 from transformers import AutoTokenizer
@@ -19,7 +19,6 @@ from transformers import AutoTokenizer
 from vllm import LLM, EngineArgs, SamplingParams
 from vllm.assets.audio import AudioAsset
 from vllm.lora.request import LoRARequest
-from vllm.inputs.data import TokensPrompt
 from vllm.utils import FlexibleArgumentParser
 
 audio_assets = [AudioAsset("mary_had_lamb"), AudioAsset("winning_call")]
@@ -34,6 +33,7 @@ class ModelRequestData(NamedTuple):
     engine_args: EngineArgs
     prompt: Optional[str] = None
     prompt_token_ids: Optional[Dict[str, list[int]]] = None
+    multi_modal_data: Optional[Dict[str, Any]] = None
     stop_token_ids: Optional[list[int]] = None
     lora_requests: Optional[list[LoRARequest]] = None
 
@@ -60,21 +60,29 @@ def run_voxtral(question: str, audio_count: int) -> ModelRequestData:
         config_format="mistral",
         load_format="mistral",
         tokenizer_mode="mistral",
+        enforce_eager=True,
+        enable_chunked_prefill=False,
     )
 
     text_chunk = TextChunk(text=question)
-    audios = [Audio.from_file(str(audio_assets[i].get_local_path())) for i in range(audio_count)]
+    audios = [Audio.from_file(str(audio_assets[i].get_local_path()), strict=False) for i in range(audio_count)]
     audio_chunks = [AudioChunk.from_audio(audio) for audio in audios]
 
     messages = [UserMessage(content=[*audio_chunks, text_chunk])]
 
     req = ChatCompletionRequest(messages=messages, model=model_name)
 
-    prompt_ids = tokenizer.encode_chat_completion(req).tokens
+    tokens = tokenizer.encode_chat_completion(req)
+    prompt_ids, audios = tokens.tokens, tokens.audios
+
+    audios_and_sr = [(au.audio_array, au.sampling_rate) for au in audios]
+
+    multi_modal_data = {"audio": audios_and_sr}
 
     return ModelRequestData(
         engine_args=engine_args,
-        prompt_token_ids=TokensPrompt(prompt_token_ids=prompt_ids),
+        prompt_token_ids=prompt_ids,
+        multi_modal_data=multi_modal_data,
     )
 
 # Granite Speech
@@ -300,8 +308,7 @@ def parse_args():
         "--model-type",
         "-m",
         type=str,
-        # default="ultravox",
-        default="voxtral",
+        default="ultravox",
         choices=model_example_map.keys(),
         help='Huggingface "model_type".',
     )
@@ -350,21 +357,23 @@ def main(args):
         temperature=0.2, max_tokens=64, stop_token_ids=req_data.stop_token_ids
     )
 
-    mm_data = {}
-    if audio_count > 0:
-        mm_data = {
-            "audio": [
-                asset.audio_and_sample_rate for asset in audio_assets[:audio_count]
-            ]
-        }
+    mm_data = req_data.multi_modal_data
+    if not mm_data:
+        mm_data = {}
+        if audio_count > 0:
+            mm_data = {
+                "audio": [
+                    asset.audio_and_sample_rate for asset in audio_assets[:audio_count]
+                ]
+            }
 
     assert args.num_prompts > 0
     inputs = {"multi_modal_data": mm_data}
 
     if req_data.prompt:
-        inputs["prompt"] = req_data.prompt,  
+        inputs["prompt"] = req_data.prompt 
     else:
-        inputs["prompt_token_ids"] = req_data.prompt_token_ids,  
+        inputs["prompt_token_ids"] = req_data.prompt_token_ids
 
     if args.num_prompts > 1:
         # Batch inference
