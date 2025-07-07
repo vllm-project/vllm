@@ -65,7 +65,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         return self.max_tokens_per_rank
 
     def topk_indices_dtype(self) -> Optional[torch.dtype]:
-        return torch.int32
+        return torch.int64
 
     def _do_quant(
         self,
