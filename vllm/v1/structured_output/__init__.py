@@ -109,7 +109,14 @@ class StructuredOutputManager:
         request_type, grammar_spec = key
 
         assert self.backend is not None
-        return self.backend.compile_grammar(request_type, grammar_spec)
+        try:
+            return self.backend.compile_grammar(request_type, grammar_spec)
+        except Exception as e:
+            logger.error("Failed to compile grammar for request %s: %s",
+                         request.request_id, e)
+            # Re-raise the exception so the executor can capture it
+            # and we can handle it in the main thread.
+            raise e
 
     def grammar_bitmask(
         self,

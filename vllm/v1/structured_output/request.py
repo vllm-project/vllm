@@ -24,16 +24,16 @@ class StructuredOutputRequest:
     reasoning_ended: Optional[bool] = None
 
     def _check_grammar_completion(self) -> bool:
-        # NOTE: We have to lazy import to gate circular imports
-        from vllm.v1.request import RequestStatus
-
         if isinstance(self._grammar, Future):
             try:
                 # We will check whether the future is ready within 100 us
                 self._grammar = self._grammar.result(timeout=0.0001)
-                self.status = RequestStatus.WAITING
             except TimeoutError:
                 return False
+            except Exception as e:
+                # The grammar compilation failed. We store the exception
+                # and it will be raised when the grammar is accessed.
+                self._grammar = e
         return True
 
     @property
@@ -43,8 +43,11 @@ class StructuredOutputRequest:
     @property
     def grammar(self) -> Optional[StructuredOutputGrammar]:
         completed = self._check_grammar_completion()
-        return cast(Optional[StructuredOutputGrammar],
-                    self._grammar) if completed else None
+        if not completed:
+            return None
+        if isinstance(self._grammar, Exception):
+            raise self._grammar
+        return cast(Optional[StructuredOutputGrammar], self._grammar)
 
     @grammar.setter
     def grammar(
