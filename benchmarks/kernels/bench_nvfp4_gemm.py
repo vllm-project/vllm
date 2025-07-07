@@ -29,7 +29,7 @@ def _quant_weight_nvfp4(b: torch.Tensor, device: str):
         (FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX) / torch.amax(b.flatten(), dim=-1)
     ).to(torch.float32)
     b_fp4, scale_b_fp4 = ops.scaled_fp4_quant(b, b_global_scale)
-    return b_fp4.t(), scale_b_fp4, b_global_scale
+    return b_fp4, scale_b_fp4, b_global_scale
 
 
 def build_nvfp4_runner(cfg, a, b, dtype, device):
