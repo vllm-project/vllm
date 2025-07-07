@@ -531,7 +531,7 @@ class Gemma3nForConditionalGeneration(nn.Module, SupportsMultiModal):
                 input_ids,
                 inputs_embeds,
                 multimodal_embeddings,
-                self.config.image_token_index,
+                self.config.image_token_id,
             )
         return inputs_embeds
 
