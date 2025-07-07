@@ -197,11 +197,11 @@ class CompilerManager:
                                 str(runtime_shape))
             if runtime_shape is None:
                 logger.debug(
-                    "store the %s-th graph for dynamic shape from %s via "
+                    "Store the %s-th graph for dynamic shape from %s via "
                     "handle %s", graph_index, self.compiler.name, handle)
             else:
                 logger.debug(
-                    "store the %s-th graph for shape %s from %s via handle %s",
+                    "Store the %s-th graph for shape %s from %s via handle %s",
                     graph_index, str(runtime_shape), self.compiler.name,
                     handle)
 
