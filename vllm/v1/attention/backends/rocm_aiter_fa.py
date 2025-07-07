@@ -198,8 +198,8 @@ class AiterFlashAttentionMetadataBuilder:
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len
 
-        max_seq_len = int(common_attn_metadata.seq_lens_cpu.max().item())
-        total_tokens = int(common_attn_metadata.seq_lens_cpu.sum().item())
+        max_seq_len = int(common_attn_metadata.seq_lens_cpu.max())
+        total_tokens = int(common_attn_metadata.seq_lens_cpu.sum())
         query_start_loc = common_attn_metadata.query_start_loc
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
         seq_lens = common_attn_metadata.seq_lens
