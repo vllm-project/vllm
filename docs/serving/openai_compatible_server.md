@@ -786,6 +786,6 @@ Key capabilities:
 - Scales from a single GPU to a multi-node cluster without code changes.
 - Provides observability and autoscaling policies through Ray dashboards and metrics.
 
-The following example shows how to deploy DeepSeek models with Ray Serve LLM: <gh-file:examples/online_serving/ray_serve_deepseek.py>.
+The following example shows how to deploy a large model like DeepSeek R1 with Ray Serve LLM: <gh-file:examples/online_serving/ray_serve_deepseek.py>.
 
 Learn more about Ray Serve LLM with the official [Ray Serve LLM documentation](https://docs.ray.io/en/latest/serve/llm/serving-llms.html).
