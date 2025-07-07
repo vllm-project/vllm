@@ -3,8 +3,8 @@ vllm-directory := "/home/rshaw/vllm/"
 
 PREFILL_GPU := "0"
 DECODE_GPU := "2"
-MODEL := "meta-llama/Llama-3.1-8B-Instruct"
-PROXY_PORT := "8192"
+MODEL := "RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8"
+PROXY_PORT := "8000"
 PREFILL_PORT := "8100"
 DECODE_PORT := "8200"
 PREFILL_NIXL_SIDE_CHANNEL_PORT := "5557"
@@ -79,4 +79,4 @@ benchmark_one_no_pd INPUT_LEN:
 eval:
   lm_eval --model local-completions --tasks gsm8k \
     --model_args model={{MODEL}},base_url=http://127.0.0.1:{{PROXY_PORT}}/v1/completions,num_concurrent=100,max_retries=3,tokenized_requests=False \
-    --limit 1000
+    --limit 10
