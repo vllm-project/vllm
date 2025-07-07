@@ -828,7 +828,7 @@ def _download_mistral_config_file(model, revision) -> dict:
     assert isinstance(config_dict, dict)
     return config_dict
 
-def _maybe_retrieve_max_pos_from_hf(model, revision, **kwargs) -> Optional[int]:
+def _maybe_retrieve_max_pos_from_hf(model, revision, **kwargs) -> int:
     max_position_embeddings = 128_000
     try:
         trust_remote_code_val = kwargs.get("trust_remote_code", False)
