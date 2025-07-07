@@ -297,7 +297,10 @@ class VoxtralMultiModalProcessor(
     info=VoxtralProcessingInfo,
     dummy_inputs=VoxtralDummyInputsBuilder)
 class VoxtralForConditionalGeneration(nn.Module, SupportsMultiModal,
-                                       SupportsPP, SupportsTranscription):
+                                       SupportsPP):
+# class VoxtralForConditionalGeneration(nn.Module, SupportsMultiModal,
+#                                        SupportsPP, SupportsTranscription):
+# When adding `SupportsTranscription`, chat completion is disabled - why can't both be allowed?
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
