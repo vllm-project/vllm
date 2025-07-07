@@ -439,8 +439,6 @@ class NixlConnectorWorker:
                 f"{self.device_type} with {self.kv_buffer_device} kv_buffer "
                 "is not supported.")
         self.device_kv_caches: dict[str, torch.Tensor] = {}
-        self.device: torch.device = None
-        self.device_index: int = -1
 
         # cpu kv buffer for xfer
         # used when xPU memory can not be registered under nixl
@@ -731,16 +729,6 @@ class NixlConnectorWorker:
             first_kv_cache.shape)
         self.dst_num_blocks[self.engine_id] = self.num_blocks
         self.device_kv_caches = kv_caches
-        self.device = first_kv_cache.device
-        # Note: non-CUDA devices may have a fixed device.index (0),
-        # use its tp_rank instead
-        self.device_index = (self.tp_rank if self.use_host_buffer or
-                             self.device_type != "cuda" else self.device.index)
-
-        assert self.device
-        assert self.device_index >= 0, \
-               f"cache device {self.device} index is invalid"
-
         kv_caches_base_addr = []
         caches_data = []
 
@@ -760,9 +748,7 @@ class NixlConnectorWorker:
             for cache in cache_list:
                 base_addr = cache.data_ptr()
                 region_len = self.num_blocks * self.block_len
-                # TODO: does device_id matter to DRAM?
-                caches_data.append(
-                    (base_addr, region_len, self.device_index, ""))
+                caches_data.append((base_addr, region_len, self.tp_rank, ""))
                 kv_caches_base_addr.append(base_addr)
         self.kv_caches_base_addr[self.engine_id] = kv_caches_base_addr
         self.num_regions = len(caches_data)
@@ -808,7 +794,7 @@ class NixlConnectorWorker:
                 addr = base_addr + block_offset
                 # (addr, len, device id)
                 # TODO: does device_id matter to DRAM?
-                blocks_data.append((addr, self.block_len, self.device_index))
+                blocks_data.append((addr, self.block_len, self.tp_rank))
         logger.debug("Created %s blocks for src engine %s and rank %s",
                      len(blocks_data), self.engine_id, self.tp_rank)
 
