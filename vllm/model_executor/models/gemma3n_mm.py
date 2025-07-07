@@ -184,7 +184,7 @@ class Gemma3MultiModalProcessor(BaseMultiModalProcessor[Gemma3nProcessingInfo]
         return dict(
             pixel_values=MultiModalFieldConfig.batched("image"),
             input_features=MultiModalFieldConfig.batched("audio"),
-            # input_features_mask=MultiModalFieldConfig.batched("audio"),
+            input_features_mask=MultiModalFieldConfig.batched("audio"),
         )
 
     def _get_prompt_updates(
@@ -435,6 +435,8 @@ class Gemma3nForConditionalGeneration(nn.Module, SupportsMultiModal):
         self.config = config
         self.quant_config = quant_config
         self.multimodal_config = multimodal_config
+        self.vocab_size = config.text_config.vocab_size
+
         self.sliding_window = getattr(config.text_config,
                                       "interleaved_sliding_window", None)
 
@@ -480,6 +482,37 @@ class Gemma3nForConditionalGeneration(nn.Module, SupportsMultiModal):
         return Gemma3nImagePixelInputs(
             pixel_values=self._validate_pixel_values(pixel_values),
         )
+    
+    def _parse_and_validate_audio_input(
+            self, **kwargs: object) -> Optional[Gemma3nAudioInputs]:
+        input_features = kwargs.pop("input_features", None)
+        if input_features is None:
+            return None
+        
+        input_features_mask = kwargs.pop("input_features_mask", None)
+        if input_features_mask is None:
+            return None
+        
+        return Gemma3nAudioInputs(
+            input_features=input_features,
+            input_features_mask=input_features_mask,
+        )
+    
+    def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict:
+        mm_input_by_modality = {}
+
+        # Preserve the order of modalities if there are multiple of them
+        # from the order of kwargs.
+        for input_key in kwargs:
+            if input_key in ("pixel_values", "image_embeds"
+                            ) and "image" not in mm_input_by_modality:
+                mm_input_by_modality[
+                    "image"] = self._parse_and_validate_image_input(**kwargs)
+            if input_key in ("input_audio_features"
+                            ) and "audio" not in mm_input_by_modality:
+                mm_input_by_modality[
+                    "audio"] = self._parse_and_validate_audio_input(**kwargs)
+        return mm_input_by_modality
 
     def _process_image_input(
         self,
@@ -492,6 +525,7 @@ class Gemma3nForConditionalGeneration(nn.Module, SupportsMultiModal):
                                            do_pooling=False,
                                            return_dict=True).last_hidden_state
         # TODO try to avoid copy here
+        # (batch, channels, height, width) to (batch, height * width, channels)
         vision_outputs = vision_outputs.reshape(
             vision_outputs.shape[0],
             self.config.vision_config.hidden_size,
@@ -499,29 +533,60 @@ class Gemma3nForConditionalGeneration(nn.Module, SupportsMultiModal):
         ).permute(0, 2, 1).contiguous()
         # Normalize and embed the soft tokens into language model space.
         vision_outputs *= self.config.vision_config.hidden_size**0.5
-        return self.embed_vision(inputs_embeds=vision_outputs)
+        # Return a list of embeddings instead of a batched tensor
+        return self.embed_vision(inputs_embeds=vision_outputs).unbind(0)
 
     def _process_audio_input(
         self,
         audio_input: Gemma3nAudioInputs,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> list[torch.Tensor]:
         assert self.audio_tower is not None
         input_features = audio_input["input_features"]
         input_features_mask = audio_input["input_features_mask"]
         audio_outputs, audio_mask = self.audio_tower(input_features,
                                                      input_features_mask)
-        return self.embed_audio(inputs_embeds=audio_outputs), audio_mask
+        audio_features = self.embed_audio(inputs_embeds=audio_outputs)
+
+        # The Gemma3nProcessor expects all audio will be 30s in length and inserts 188 audio soft tokens into the
+        # text to account for this. However, the audio preprocessing and encoder do not gurarantee they will
+        # produce 188 soft tokens; they will produce at most that many tokens, but they may produce fewer tokens
+        # depending on the length of the longest audio input in the batch. When we encounter this situation, we pad
+        # the audio feature out to 188 soft tokens with the emebedding of the last token in the embed_audio vocab.
+        # TODO precompute and cache padding
+        audio_padding_toks = torch.tensor([[self.vocab_size - 1]], dtype=torch.long, device=audio_features.device)
+        audio_padding_embs = self.embed_audio(input_ids=audio_padding_toks)
+        audio_features = torch.where(audio_mask.unsqueeze(-1), audio_padding_embs, audio_features)
+
+        audio_batch_size, audio_seq_len, audio_embed_dim = audio_features.shape
+        extra_padding_tokens = self.config.audio_soft_tokens_per_image - audio_seq_len
+        extra_padding_features = audio_padding_embs.expand(audio_batch_size, extra_padding_tokens, audio_embed_dim)
+
+        audio_features = torch.cat((audio_features, extra_padding_features), dim=1)
+        # Return a list of embeddings instead of a batched tensor
+        return audio_features.unbind(0)
 
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
     def get_multimodal_embeddings(self,
                                   **kwargs: object) -> MultiModalEmbeddings:
-        image_input = self._parse_and_validate_image_input(**kwargs)
-        if image_input is None:
+        mm_input_by_modality = self._parse_and_validate_multimodal_inputs(**kwargs)
+        if mm_input_by_modality is None:
             return []
 
-        return self._process_image_input(image_input)
+        multimodal_embeddings: list[torch.Tensor] = []
+
+        # NOTE: It is important to iterate over the keys in this dictionary
+        # to preserve the order of the modalities.
+        for modality in mm_input_by_modality:
+            multimodal_input = mm_input_by_modality[modality]
+            if modality == "image":
+                vision_embeddings = self._process_image_input(multimodal_input)
+                multimodal_embeddings.extend(vision_embeddings)
+            if modality == "audio":
+                audio_embeddings = self._process_audio_input(multimodal_input)
+                multimodal_embeddings.extend(audio_embeddings)
+        return multimodal_embeddings
 
     def get_input_embeddings(
         self,
@@ -535,9 +600,8 @@ class Gemma3nForConditionalGeneration(nn.Module, SupportsMultiModal):
                 input_ids,
                 inputs_embeds,
                 multimodal_embeddings,
-                self.config.image_token_id,
-                # TODO
-                # self.config.audio_token_id,
+                # NOTE: this order of processing mm items is important
+                [self.config.image_token_id, self.config.audio_token_id]
             )
         return inputs_embeds
 
@@ -553,12 +617,12 @@ class Gemma3nForConditionalGeneration(nn.Module, SupportsMultiModal):
         # NOTE: In v1, inputs_embeds is always generated at model runner, this
         # condition is for v0 compatibility.
         elif inputs_embeds is None:
-            vision_embeddings = self.get_multimodal_embeddings(**kwargs)
+            mm_embeddings = self.get_multimodal_embeddings(**kwargs)
 
             inputs_embeds = self.get_input_embeddings(input_ids,
-                                                      vision_embeddings)
+                                                      mm_embeddings)
             # TODO check whether this is needed at all
-            if vision_embeddings is not None:
+            if mm_embeddings is not None:
                 kwargs = self.prepare_attn_masks(
                     input_ids,
                     positions,
@@ -569,6 +633,7 @@ class Gemma3nForConditionalGeneration(nn.Module, SupportsMultiModal):
 
         hidden_states = self.language_model.model(input_ids,
                                                   positions,
+                                                  # TODO
                                                 #   intermediate_tensors
                                                   inputs_embeds=inputs_embeds,
                                                   **kwargs)
