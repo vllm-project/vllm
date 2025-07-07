@@ -138,9 +138,8 @@ class Gemma3nDummyInputsBuilder(BaseDummyInputsBuilder[Gemma3nProcessingInfo]):
         num_images = mm_counts.get("image", 0)
         num_audios = mm_counts.get("audio", 0)
         processor = self.info.get_hf_processor()
-        feature_extractor: Gemma3nAudioFeatureExtractor = processor.feature_extractor  # noqa: E501
-        # audio_len = feature_extractor.max_length
-        audio_len = feature_extractor.fft_length
+        audio_feature_extractor: Gemma3nAudioFeatureExtractor = processor.feature_extractor  # noqa: E501
+        audio_len = audio_feature_extractor.fft_length
         image_processor: SiglipImageProcessorFast = processor.image_processor
         img_width = image_processor.size.get("width", 224)
         img_height = image_processor.size.get("height", 224)
@@ -168,6 +167,9 @@ class Gemma3MultiModalProcessor(BaseMultiModalProcessor[Gemma3nProcessingInfo]
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
+        if 'audios' in mm_data:
+            # TODO why is it ignored?
+            mm_data['audio'] = mm_data['audios']
         processed_outputs = super()._call_hf_processor(
             prompt,
             mm_data,
@@ -508,8 +510,7 @@ class Gemma3nForConditionalGeneration(nn.Module, SupportsMultiModal):
                             ) and "image" not in mm_input_by_modality:
                 mm_input_by_modality[
                     "image"] = self._parse_and_validate_image_input(**kwargs)
-            if input_key in ("input_audio_features"
-                            ) and "audio" not in mm_input_by_modality:
+            if input_key =="input_features" and "audio" not in mm_input_by_modality:
                 mm_input_by_modality[
                     "audio"] = self._parse_and_validate_audio_input(**kwargs)
         return mm_input_by_modality
@@ -543,6 +544,11 @@ class Gemma3nForConditionalGeneration(nn.Module, SupportsMultiModal):
         assert self.audio_tower is not None
         input_features = audio_input["input_features"]
         input_features_mask = audio_input["input_features_mask"]
+        # TODO
+        input_features = input_features.squeeze(0)
+        input_features_mask = input_features_mask.squeeze(0)
+        print("input_features", input_features.shape, "\n")
+        print("input_features_mask", input_features_mask.shape, "\n")
         audio_outputs, audio_mask = self.audio_tower(input_features,
                                                      input_features_mask)
         audio_features = self.embed_audio(inputs_embeds=audio_outputs)
