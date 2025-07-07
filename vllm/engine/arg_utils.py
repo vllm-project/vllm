@@ -1166,6 +1166,19 @@ class EngineArgs:
             self.data_parallel_rpc_port
             is not None) else ParallelConfig.data_parallel_rpc_port
 
+        # When async scheduling is used, we can't use the uni-process backend.
+        if self.async_scheduling:
+            if self.distributed_executor_backend is None:
+                self.distributed_executor_backend = "mp"
+                logger.info("Using mp-based distributed executor backend "
+                            "for async scheduling.")
+            if self.distributed_executor_backend == "uni":
+                raise ValueError("Async scheduling is not supported with "
+                                 "uni-process backend.")
+            if self.pipeline_parallel_size > 1:
+                raise ValueError("Async scheduling is not supported with "
+                                 "pipeline-parallel-size > 1.")
+
         parallel_config = ParallelConfig(
             pipeline_parallel_size=self.pipeline_parallel_size,
             tensor_parallel_size=self.tensor_parallel_size,

@@ -2039,8 +2039,7 @@ class ParallelConfig:
                          backend)
 
         if self.distributed_executor_backend is None and self.world_size == 1:
-            # FIXME
-            self.distributed_executor_backend = "mp"
+            self.distributed_executor_backend = "uni"
 
     @property
     def use_ray(self) -> bool:
@@ -2215,7 +2214,11 @@ class SchedulerConfig:
     """
 
     async_scheduling: bool = False
-    """If set to True, perform async scheduling."""
+    """EXPERIMENTAL: If set to True, perform async scheduling. This may help
+    reduce the CPU overheads, leading to better latency and throughput. However,
+    async scheduling is currently not supported with some features such as
+    structured output, speculatice decoding, and pipeline parallelism.
+    """
 
     def compute_hash(self) -> str:
         """
