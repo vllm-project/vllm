@@ -1156,8 +1156,9 @@ class ScoreRequest(OpenAIBaseModel):
 
     # --8<-- [end:score-extra-params]
 
-    def to_pooling_params(self):
-        return PoolingParams(additional_data=self.additional_data)
+    def to_pooling_params(self, *, use_cross_encoder: bool = False):
+        return PoolingParams(use_cross_encoder=use_cross_encoder,
+                             additional_data=self.additional_data)
 
 
 class RerankRequest(OpenAIBaseModel):
@@ -1182,8 +1183,9 @@ class RerankRequest(OpenAIBaseModel):
 
     # --8<-- [end:rerank-extra-params]
 
-    def to_pooling_params(self):
-        return PoolingParams(additional_data=self.additional_data)
+    def to_pooling_params(self, *, use_cross_encoder: bool = False):
+        return PoolingParams(use_cross_encoder=use_cross_encoder,
+                             additional_data=self.additional_data)
 
 
 class RerankDocument(BaseModel):
