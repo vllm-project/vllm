@@ -43,6 +43,7 @@ from vllm.transformers_utils.utils import check_gguf_file
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import (STR_DUAL_CHUNK_FLASH_ATTN_VAL, FlexibleArgumentParser,
                         GiB_bytes, get_ip, is_in_ray_actor)
+from vllm.platforms import current_platform, CpuArchEnum
 
 # yapf: enable
 
@@ -1086,9 +1087,14 @@ class EngineArgs:
         # Set default arguments for V0 or V1 Engine.
         if use_v1:
             self._set_default_args_v1(usage_context, model_config)
+            # Disable chunked prefill for POWER (ppc64le) CPUs in V1
+            if current_platform.is_cpu() and current_platform.get_cpu_architecture() == CpuArchEnum.POWERPC:
+                logger.info(
+                    "Chunked prefill is not supported for POWER CPUs; "
+                    "disabling it for V1 backend.")
+                self.enable_chunked_prefill = False
         else:
             self._set_default_args_v0(model_config)
-
         assert self.enable_chunked_prefill is not None
 
         if envs.VLLM_ATTENTION_BACKEND in [STR_DUAL_CHUNK_FLASH_ATTN_VAL]:
