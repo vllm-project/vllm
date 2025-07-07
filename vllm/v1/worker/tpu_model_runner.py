@@ -30,9 +30,10 @@ from vllm.multimodal.inputs import (BatchedTensorInputs, MultiModalKwargs,
 from vllm.multimodal.utils import group_mm_inputs_by_modality
 from vllm.sequence import IntermediateTensors
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, LayerBlockType, cdiv,
-                        is_pin_memory_available, next_power_of_2)
+                        is_pin_memory_available, prev_power_of_2)
 from vllm.v1.attention.backends.pallas import (PallasAttentionBackend,
-                                               PallasMetadata)
+                                               PallasMetadata,
+                                               get_page_size_bytes)
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.kv_cache_interface import (AttentionSpec, FullAttentionSpec,
                                         KVCacheConfig, KVCacheSpec,
@@ -195,7 +196,12 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         self.encoder_cache_size = encoder_cache_size
 
         self._num_slices_per_kv_cache_update_block = \
-            _get_num_slices_per_kv_cache_update_block(self._get_page_size_bytes())
+            _get_num_slices_per_kv_cache_update_block(get_page_size_bytes(
+                block_size=self.block_size,
+                num_kv_heads=self.num_kv_heads,
+                head_size=self.head_size,
+                kv_cache_dtype=self.kv_cache_dtype,
+            ))
 
         # Lazy initialization
         self.model: nn.Module  # Set after load_model
@@ -594,10 +600,6 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         slot_mapping_metadata = np.stack(
             [kv_cache_start_indices, new_kv_start_indices, slice_lens], axis=1)
         return slot_mapping_metadata
-
-    def _get_page_size_bytes(self):
-        return self.block_size * self.num_kv_heads * self.head_size \
-            * self.kv_cache_dtype.itemsize
 
     def _prepare_inputs(self, scheduler_output: "SchedulerOutput",
                         start_index: int):
@@ -1846,7 +1848,7 @@ def _get_num_slices_per_kv_cache_update_block(page_size_bytes: int) -> int:
     vmem_limit = 32 * 1024 * 1024
     num_slices_per_block = vmem_limit // page_size_bytes
     assert num_slices_per_block > 0, "Number of slices should be positive"
-    num_slices_per_block = next_power_of_2(num_slices_per_block)
+    num_slices_per_block = prev_power_of_2(num_slices_per_block)
     if num_slices_per_block > 64:
         num_slices_per_block = 64
     return num_slices_per_block
