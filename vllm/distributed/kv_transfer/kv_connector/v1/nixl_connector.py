@@ -54,28 +54,12 @@ except ImportError:
     logger.warning("NIXL is not available")
     NixlWrapper = None
 
-
-class _NIXL_SUPPORTED_XPU:
-    """
-    xPUs and the corresponding types of kv transfer buffer
-    supported by NIXLConnector
-    """
-    # {xPU: tuple of supported kv buffer types}
-    # TODO: "cpu" xfer buffer for cuda
-    _support_dict = {
-        "cuda": ("cuda", ),
-        "tpu": ("cpu", ),
-    }
-
-    @classmethod
-    def is_supported_xpu(cls, device_type: str) -> bool:
-        return device_type in cls._support_dict
-
-    @classmethod
-    def is_supported_kv_buffer(cls, device_type: str,
-                               kv_buffer_type: str) -> bool:
-        return (device_type in cls._support_dict
-                and kv_buffer_type in cls._support_dict[device_type])
+# Supported xPUs and types of kv transfer buffer.
+# {xPU: tuple of supported kv buffer types}
+_NIXL_SUPPORTED_XPUS = {
+    "cuda": ("cuda", ),
+    "tpu": ("cpu", ),
+}
 
 
 class NixlAgentMetadata(
@@ -101,8 +85,8 @@ class ReqMeta:
     tp_size: int
     # load kv cache from remote engine / agent
     load_remote_cache: bool = True
-    # NOTE: save kv cache from accelerator to local
-    # host buffer; needed when kv_cache_device is cpu.
+    # NOTE: save kv cache from device to local host buffer.
+    # needed when kv_cache_device is cpu.
     save_to_host: bool = False
 
 
@@ -418,12 +402,6 @@ class NixlConnectorWorker:
         logger.info("Initializing NIXL wrapper")
         logger.info("Initializing NIXL worker %s", engine_id)
 
-        self.device_type = current_platform.device_type
-        if not _NIXL_SUPPORTED_XPU.is_supported_xpu(
-                device_type=self.device_type):
-            logger.error("%s is not supported.", self.device_type)
-            raise RuntimeError(f"{self.device_type} is not supported.")
-
         # Config.
         self.vllm_config = vllm_config
         self.block_size = vllm_config.cache_config.block_size
@@ -450,11 +428,13 @@ class NixlConnectorWorker:
         self.num_blocks = 0
 
         # KV Caches and nixl tracking data.
+        self.device_type = current_platform.device_type
         self.kv_buffer_device: str = \
             vllm_config.kv_transfer_config.kv_buffer_device
-        if not _NIXL_SUPPORTED_XPU.is_supported_kv_buffer(
-                device_type=self.device_type,
-                kv_buffer_type=self.kv_buffer_device):
+        if self.device_type not in _NIXL_SUPPORTED_XPUS:
+            raise RuntimeError(f"{self.device_type} is not supported.")
+        elif self.kv_buffer_device not in _NIXL_SUPPORTED_XPUS[
+                self.device_type]:
             raise RuntimeError(
                 f"{self.device_type} with {self.kv_buffer_device} kv_buffer "
                 "is not supported.")
