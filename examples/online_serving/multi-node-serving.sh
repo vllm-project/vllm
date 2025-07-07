@@ -5,7 +5,7 @@
 # of the head node.
 #
 # Subcommands:
-#   leader: Launches a Ray head node and blocks until the expected number of workers joins.
+#   leader: Launches a Ray head node and blocks until the cluster reaches the expected size (head + workers).
 #   worker: Starts a worker node that connects to an existing Ray head node.
 #
 # Example usage:
