@@ -46,9 +46,11 @@ if TYPE_CHECKING:
     VLLM_CPU_OMP_THREADS_BIND: str = ""
     VLLM_CPU_NUM_OF_RESERVED_CPU: int = 0
     VLLM_CPU_MOE_PREPACK: bool = True
+    VLLM_CPU_SGL_KERNEL: bool = False
     VLLM_XLA_CACHE_PATH: str = os.path.join(VLLM_CACHE_ROOT, "xla_cache")
     VLLM_XLA_CHECK_RECOMPILATION: bool = False
     VLLM_FUSED_MOE_CHUNK_SIZE: int = 64 * 1024
+    VLLM_ENABLE_FUSED_MOE_ACTIVATION_CHUNKING: bool = True
     VLLM_USE_RAY_SPMD_WORKER: bool = False
     VLLM_USE_RAY_COMPILED_DAG: bool = False
     VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE: str = "auto"
@@ -102,7 +104,6 @@ if TYPE_CHECKING:
     VLLM_SERVER_DEV_MODE: bool = False
     VLLM_V1_OUTPUT_PROC_CHUNK_SIZE: int = 128
     VLLM_MLA_DISABLE: bool = False
-    VLLM_ENABLE_MOE_ALIGN_BLOCK_SIZE_TRITON: bool = False
     VLLM_RAY_PER_WORKER_GPUS: float = 1.0
     VLLM_RAY_BUNDLE_INDICES: str = ""
     VLLM_CUDART_SO_PATH: Optional[str] = None
@@ -118,6 +119,7 @@ if TYPE_CHECKING:
     VLLM_MARLIN_USE_ATOMIC_ADD: bool = False
     VLLM_V0_USE_OUTLINES_CACHE: bool = False
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
+    VLLM_TPU_MOST_MODEL_LEN: Optional[int] = None
     VLLM_USE_DEEP_GEMM: bool = False
     VLLM_XGRAMMAR_CACHE_MB: int = 0
     VLLM_MSGPACK_ZERO_COPY_THRESHOLD: int = 256
@@ -129,7 +131,13 @@ if TYPE_CHECKING:
     VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS: int = 1
     VLLM_SLEEP_WHEN_IDLE: bool = False
     VLLM_MQ_MAX_CHUNK_BYTES_MB: int = 16
+    VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: int = 300
     VLLM_KV_CACHE_LAYOUT: Optional[str] = None
+    VLLM_COMPUTE_NANS_IN_LOGITS: bool = False
+    VLLM_USE_NVFP4_CT_EMULATIONS: bool = False
+    VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: str = "NONE"
+    VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16: bool = True
+    VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB: Optional[int] = None
 
 
 def get_default_cache_root():
@@ -439,6 +447,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_CPU_MOE_PREPACK":
     lambda: bool(int(os.getenv("VLLM_CPU_MOE_PREPACK", "1"))),
 
+    # (CPU backend only) whether to use SGL kernels, optimized for small batch.
+    "VLLM_CPU_SGL_KERNEL":
+    lambda: bool(int(os.getenv("VLLM_CPU_SGL_KERNEL", "0"))),
+
     # If the env var is set, then all workers will execute as separate
     # processes from the engine, and we use the same mechanism to trigger
     # execution on all workers.
@@ -534,6 +546,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: bool(int(os.getenv("VLLM_XLA_USE_SPMD", "0"))),
     "VLLM_FUSED_MOE_CHUNK_SIZE":
     lambda: int(os.getenv("VLLM_FUSED_MOE_CHUNK_SIZE", "32768")),
+    # Control whether to use fused MoE activation chunking. Current chunking
+    # logic is incompatible with torch.compile and causes IMA. See issue
+    # https://github.com/vllm-project/vllm/issues/19631.
+    "VLLM_ENABLE_FUSED_MOE_ACTIVATION_CHUNKING":
+    lambda: bool(
+        int(os.getenv("VLLM_ENABLE_FUSED_MOE_ACTIVATION_CHUNKING", "1"))),
 
     # If set, vllm will skip the deprecation warnings.
     "VLLM_NO_DEPRECATION_WARNING":
@@ -679,6 +697,31 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: (os.getenv("VLLM_ROCM_CUSTOM_PAGED_ATTN", "True").lower() in
              ("true", "1")),
 
+    # Custom quick allreduce kernel for MI3* cards
+    # Choice of quantization level: FP, INT8, INT6, INT4 or NONE
+    # Recommended for large models to get allreduce
+    "VLLM_ROCM_QUICK_REDUCE_QUANTIZATION":
+    lambda: os.getenv("VLLM_ROCM_QUICK_REDUCE_QUANTIZATION", "NONE").upper(),
+
+    # Custom quick allreduce kernel for MI3* cards
+    # Due to the lack of the bfloat16 asm instruction, bfloat16
+    # kernels are slower than fp16,
+    # If environment variable is set to 1, the input is converted to fp16
+    "VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16":
+    lambda:
+    (os.getenv("VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16", "True").lower() in
+     ("true", "1")),
+
+    # Custom quick allreduce kernel for MI3* cards.
+    # Controls the maximum allowed number of data bytes(MB) for custom quick
+    # allreduce communication.
+    # Default: 2048 MB.
+    # Data exceeding this size will use either custom allreduce or RCCL
+    # communication.
+    "VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB":
+    lambda: maybe_convert_int(
+        os.environ.get("VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB", None)),
+
     # If set, when running in Quark emulation mode, do not dequantize the
     # weights at load time. Instead, dequantize weights on-the-fly during
     # kernel execution.
@@ -724,12 +767,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # If set, vLLM will disable the MLA attention optimizations.
     "VLLM_MLA_DISABLE":
     lambda: bool(int(os.getenv("VLLM_MLA_DISABLE", "0"))),
-
-    # If set, vLLM will use the Triton implementation of moe_align_block_size,
-    # i.e. moe_align_block_size_triton in fused_moe.py.
-    "VLLM_ENABLE_MOE_ALIGN_BLOCK_SIZE_TRITON":
-    lambda: bool(int(os.getenv("VLLM_ENABLE_MOE_ALIGN_BLOCK_SIZE_TRITON", "0"))
-                 ),
 
     # Number of GPUs per worker in Ray, if it is set to be a fraction,
     # it allows ray to schedule multiple actors on a single GPU,
@@ -823,6 +860,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_TPU_BUCKET_PADDING_GAP":
     lambda: int(os.environ["VLLM_TPU_BUCKET_PADDING_GAP"])
     if "VLLM_TPU_BUCKET_PADDING_GAP" in os.environ else 0,
+    "VLLM_TPU_MOST_MODEL_LEN":
+    lambda: maybe_convert_int(os.environ.get("VLLM_TPU_MOST_MODEL_LEN", None)),
 
     # Allow use of DeepGemm kernels for fused moe ops.
     "VLLM_USE_DEEP_GEMM":
@@ -889,6 +928,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MQ_MAX_CHUNK_BYTES_MB":
     lambda: int(os.getenv("VLLM_MQ_MAX_CHUNK_BYTES_MB", "16")),
 
+    # Timeout in seconds for execute_model RPC calls in multiprocessing
+    # executor (only applies when TP > 1).
+    "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS":
+    lambda: int(os.getenv("VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS", "300")),
+
     # KV Cache layout used throughout vllm.
     # Some common values are:
     # - NHD
@@ -897,7 +941,19 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # leave the layout choice to the backend. Mind that backends may only
     # implement and support a subset of all possible layouts.
     "VLLM_KV_CACHE_LAYOUT":
-    lambda: os.getenv("VLLM_KV_CACHE_LAYOUT", None)
+    lambda: os.getenv("VLLM_KV_CACHE_LAYOUT", None),
+
+    # Enable checking whether the generated logits contain NaNs,
+    # indicating corrupted output. Useful for debugging low level bugs
+    # or bad hardware but it may add compute overhead.
+    "VLLM_COMPUTE_NANS_IN_LOGITS":
+    lambda: bool(int(os.getenv("VLLM_COMPUTE_NANS_IN_LOGITS", "0"))),
+
+    # Controls whether or not emulations are used for NVFP4
+    # generations on machines < 100 for compressed-tensors
+    # models
+    "VLLM_USE_NVFP4_CT_EMULATIONS":
+    lambda: bool(int(os.getenv("VLLM_USE_NVFP4_CT_EMULATIONS", "0")))
 }
 
 # --8<-- [end:env-vars-definition]
@@ -961,6 +1017,7 @@ def compute_hash() -> str:
         "VLLM_DP_RANK",
         "VLLM_DP_SIZE",
         "VLLM_USE_STANDALONE_COMPILE",
+        "VLLM_FUSED_MOE_CHUNK_SIZE",
     ]
     for key in environment_variables_to_hash:
         if key in environment_variables:

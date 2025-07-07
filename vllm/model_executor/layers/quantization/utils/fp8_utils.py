@@ -3,7 +3,6 @@
 
 # Adapted from https://github.com/sgl-project/sglang/pull/2575
 import functools
-import importlib.util
 import json
 import os
 from typing import Any, Callable, Optional, Union
@@ -19,10 +18,9 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     CUTLASS_BLOCK_FP8_SUPPORTED)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils import direct_register_custom_op
+from vllm.utils import cdiv, direct_register_custom_op, has_deep_gemm
 
 logger = init_logger(__name__)
-has_deep_gemm = importlib.util.find_spec("deep_gemm") is not None
 
 
 def is_fp8(x: Union[torch.dtype, torch.Tensor]) -> bool:
@@ -109,7 +107,7 @@ def should_use_deepgemm(output_dtype: torch.dtype, weight: torch.Tensor):
     """
 
     return (current_platform.is_cuda()
-            and current_platform.is_device_capability(90) and has_deep_gemm
+            and current_platform.is_device_capability(90) and has_deep_gemm()
             and envs.VLLM_USE_DEEP_GEMM and output_dtype == torch.bfloat16
             and weight.shape[0] % 128 == 0 and weight.shape[1] % 128 == 0)
 
@@ -158,12 +156,9 @@ def apply_w8a8_block_fp8_linear(
     if current_platform.is_cuda():
         if current_platform.has_device_capability(100):
 
-            def ceil_div(x: int, y: int) -> int:
-                return (x + y - 1) // y
-
             use_cutlass = cutlass_block_fp8_supported and (
-                ceil_div(weight.shape[0], 128) == weight_scale.shape[0]
-                and ceil_div(weight.shape[1], 128) == weight_scale.shape[1])
+                cdiv(weight.shape[0], 128) == weight_scale.shape[0]
+                and cdiv(weight.shape[1], 128) == weight_scale.shape[1])
         else:
             # TODO: update this after switching to public sm90 block scale gemm
             # as it also supports weight.shape % 128 != 0
@@ -206,12 +201,13 @@ def apply_w8a8_block_fp8_linear_fake(
     return torch.empty(output_shape, dtype=input.dtype, device=input.device)
 
 
-direct_register_custom_op(
-    op_name="apply_w8a8_block_fp8_linear",
-    op_func=apply_w8a8_block_fp8_linear,
-    mutates_args=[],
-    fake_impl=apply_w8a8_block_fp8_linear_fake,
-)
+if not current_platform.is_cpu():
+    direct_register_custom_op(
+        op_name="apply_w8a8_block_fp8_linear",
+        op_func=apply_w8a8_block_fp8_linear,
+        mutates_args=[],
+        fake_impl=apply_w8a8_block_fp8_linear_fake,
+    )
 
 
 def input_to_float8(
