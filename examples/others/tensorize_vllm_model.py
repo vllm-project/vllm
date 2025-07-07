@@ -140,10 +140,10 @@ def get_parser():
         required=False,
         help="Path to a LoRA adapter to "
         "serialize along with model tensors. This can then be deserialized "
-        "along with the model by passing a tensorizer_config kwarg to "
-        "LoRARequest with type TensorizerConfig. See the docstring for this "
-        "for a usage example."
-
+        "along with the model by instantiating a TensorizerConfig object, "
+        "creating a dict from it with TensorizerConfig.to_serializable(), "
+        "and passing it to LoRARequest's initializer with the kwarg "
+        "tensorizer_config_dict."
     )
 
     subparsers = parser.add_subparsers(dest='command', required=True)
@@ -357,6 +357,7 @@ def main():
     elif args.command == "deserialize":
         tensorizer_config = TensorizerConfig(
             tensorizer_uri=args.path_to_tensors,
+            tensorizer_dir=args.serialized_directory,
             encryption_keyfile=keyfile,
             deserialization_kwargs=args.deserialization_kwargs or {},
             **credentials
