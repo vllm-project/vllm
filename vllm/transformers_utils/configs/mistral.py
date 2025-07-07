@@ -1,7 +1,9 @@
-from pathlib import Path
-from typing import Any, Literal, Optional, Union
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import Any
 
-from transformers import PretrainedConfig, WhisperConfig
+from transformers import PretrainedConfig
+
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -37,6 +39,7 @@ def adapt_config_dict(config_dict: dict[str, Any],
     logger.info(f"Initialized config {config}")
 
     return config
+
 
 def _remap_mistral_vision_args(config: dict) -> dict:
     if config.get("multimodal"):

@@ -7,7 +7,7 @@ import os
 import time
 from functools import cache, partial
 from pathlib import Path
-from typing import Any, Callable, Literal, Optional, TypeVar, Union
+from typing import Any, Callable, Optional, TypeVar, Union
 
 import huggingface_hub
 from huggingface_hub import get_safetensors_metadata, hf_hub_download
@@ -44,7 +44,7 @@ from vllm.transformers_utils.configs import (ChatGLMConfig, Cohere2Config,
 # yapf: enable
 from vllm.transformers_utils.configs.mistral import adapt_config_dict
 from vllm.transformers_utils.utils import check_gguf_file
-from vllm.utils import MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS, resolve_obj_by_qualname
+from vllm.utils import resolve_obj_by_qualname
 
 if envs.VLLM_USE_MODELSCOPE:
     from modelscope import AutoConfig
@@ -398,8 +398,10 @@ def get_config(
         # This function loads a params.json config which
         # should be used when loading models in mistral format
         config_dict = _download_mistral_config_file(model, revision)
-        if (max_position_embeddings := config_dict.get("max_position_embeddings")) is None:
-            max_position_embeddings = _maybe_retrieve_max_pos_from_hf(model, revision, **kwargs)
+        if (max_position_embeddings :=
+                config_dict.get("max_position_embeddings")) is None:
+            max_position_embeddings = _maybe_retrieve_max_pos_from_hf(
+                model, revision, **kwargs)
             config_dict["max_position_embeddings"] = max_position_embeddings
 
         config = adapt_config_dict(config_dict)
@@ -828,14 +830,15 @@ def _download_mistral_config_file(model, revision) -> dict:
     assert isinstance(config_dict, dict)
     return config_dict
 
+
 def _maybe_retrieve_max_pos_from_hf(model, revision, **kwargs) -> int:
     max_position_embeddings = 128_000
     try:
         trust_remote_code_val = kwargs.get("trust_remote_code", False)
         hf_config = get_config(model=model,
-                            trust_remote_code=trust_remote_code_val,
-                            revision=revision,
-                            config_format=ConfigFormat.HF)
+                               trust_remote_code=trust_remote_code_val,
+                               revision=revision,
+                               config_format=ConfigFormat.HF)
         if hf_value := hf_config.get_text_config().max_position_embeddings:
             max_position_embeddings = hf_value
     except Exception as e:
