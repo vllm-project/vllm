@@ -32,20 +32,20 @@ def main(args):
 
     data_1 = "slm markdown"
     data_2 = {
-            "content": [
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/handelsblatt-preview.png"
-                        },
-                    },
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/paper-11.png"
-                        },
-                    },
-                ]
+        "content": [
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/handelsblatt-preview.png"
+                },
+            },
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/paper-11.png"
+                },
+            },
+        ]
     }
     prompt = {"model": model_name, "data_1": data_1, "data_2": data_2}
     score_response = post_http_request(prompt=prompt, api_url=api_url)
