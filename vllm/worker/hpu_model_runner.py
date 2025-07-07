@@ -136,6 +136,10 @@ class Singleton(type):
         return cls._instances[cls]
 
 
+def is_gemma3(model):
+    return 'Gemma3ForConditionalGeneration' in str(type(model))
+
+
 def pad_flat_tensor(tensor, desired_size):
     assert tensor.dim() == 1, 'Only flat tensors are supported'
     padding_needed = desired_size - tensor.size(0)
@@ -317,15 +321,27 @@ class HpuModelAdapter(torch.nn.Module):
         model_config = getattr(self.model, "config", None)
         self.model_is_mrope = uses_mrope(model_config)
 
+        text_config = vllm_config.model_config.hf_config.get_text_config()
+        self.interleaved_sliding_window = getattr(
+            text_config, "interleaved_sliding_window",
+            None) if text_config else None
+
         # This applies exclusively to Qwen2/2.5-VL models
         # both use mrope. We wrap the visual and language
         # models separately with HPU graph.
         # This is to ensure that we keeps
         # the static and dynamic parts distinct.
-        if htorch.utils.internal.is_lazy() and self.model_is_mrope:
-            logger.info("[Multimodal] Wrapping Visual Model")
-            self.model.visual = htorch.hpu.wrap_in_hpu_graph(
-                self.model.visual, disable_tensor_cache=True)
+        if htorch.utils.internal.is_lazy():
+            if self.model_is_mrope:
+                logger.info("[Multimodal] Wrapping Visual Model")
+                self.model.visual = htorch.hpu.wrap_in_hpu_graph(
+                    self.model.visual, disable_tensor_cache=True)
+            elif is_gemma3(self.model):
+                self.model.vision_tower = htorch.hpu.wrap_in_hpu_graph(
+                    self.model.vision_tower, disable_tensor_cache=True)
+                self.model.multi_modal_projector = htorch.hpu.wrap_in_hpu_graph(
+                    self.model.multi_modal_projector,
+                    disable_tensor_cache=True)
 
         self._rotary_embed_module = self._get_rotary_embedding_module(
             self.model)
@@ -362,6 +378,34 @@ class HpuModelAdapter(torch.nn.Module):
             delattr(self._rotary_embed_module, "cos")
         if hasattr(self._rotary_embed_module, "sin"):
             delattr(self._rotary_embed_module, "sin")
+
+    # copying from PR 1163
+    # needs cleanup/unified approach later
+    def compute_input_embeddings_for_gemma(self, **kwargs):
+
+        if 'inputs_embeds' in kwargs:
+            print('do nothing')
+            return kwargs
+
+        input_ids = kwargs['input_ids']
+
+        vision_embeddings = self.model.get_multimodal_embeddings(**kwargs)
+        inputs_embeds = self.model.get_input_embeddings(
+            input_ids, vision_embeddings)
+
+        if vision_embeddings is not None:
+            input_ids = kwargs['input_ids']
+            positions = kwargs['positions']
+            kwargs = self.model.prepare_attn_masks(
+                mask_dtype=self.dtype,
+                **kwargs,
+            )
+            kwargs['input_ids'] = input_ids
+            kwargs['positions'] = positions
+
+        kwargs.update({'inputs_embeds': inputs_embeds})
+        kwargs.pop('pixel_values', None)
+        return kwargs
 
     def _set_attn_bias(self, attn_metadata, batch_size, seq_len, device,
                        dtype):
@@ -423,37 +467,81 @@ class HpuModelAdapter(torch.nn.Module):
                                              attn_bias=attn_bias)
         return attn_metadata
 
-    def _set_block_mapping(self, metadata, batch_size, device, dtype):
+    def _set_attn_bias_for_sliding_window(self, attn_metadata, batch_size,
+                                          seq_len, window_size, device, dtype):
+
+        if seq_len <= window_size:
+            #no need to set sliding window mask, just use causal mask
+            return attn_metadata
+
+        prefill_metadata = attn_metadata
+        shift = 0
+
+        #causal + window size : accuracy good
+        tensor = torch.full((batch_size, 1, seq_len, seq_len),
+                            device=device,
+                            dtype=dtype,
+                            fill_value=1)
+        mask = torch.tril(tensor, diagonal=shift)
+        mask = torch.triu(mask, diagonal=shift - window_size + 1)
+        attn_bias = torch.log(mask)
+
+        attn_metadata = prefill_metadata._replace(window_attn_bias=attn_bias)
+
+        return attn_metadata
+
+    def _set_block_mapping(self, metadata, batch_size, device, dtype,
+                           is_window_block):
+
+        if is_window_block:
+            block_usage = metadata.window_block_usage
+            block_groups = metadata.window_block_groups
+        else:
+            block_usage = metadata.block_usage
+            block_groups = metadata.block_groups
+
         mask = torch.arange(0,
                             self.block_size,
                             device=device,
                             dtype=torch.int32).unsqueeze(0)
-        mask = mask >= metadata.block_usage.unsqueeze(-1)
+        mask = mask >= block_usage.unsqueeze(-1)
         attn_bias = (torch.zeros_like(mask, dtype=dtype).masked_fill_(
             mask, -math.inf))
 
         if not is_fake_hpu():
-            block_mapping = torch.nn.functional.one_hot(metadata.block_groups,
+            block_mapping = torch.nn.functional.one_hot(block_groups,
                                                         num_classes=batch_size)
         else:
             # Unfortunately one_hot on CPU
             # doesn't handle out of bounds classes so we need to convert
             # all negative values to 0 (block_mapping) or bs (block_groups)
-            block_groups = metadata.block_groups.to(torch.long)
+            block_groups = block_groups.to(torch.long)
             block_mapping = torch.nn.functional.relu(block_groups)
             block_mapping = torch.nn.functional.one_hot(block_mapping,
                                                         num_classes=batch_size)
             oob_values = block_groups.lt(0)
             block_mapping.masked_fill_(oob_values.unsqueeze(-1), 0)
             block_groups.masked_fill_(oob_values, batch_size)
+            if is_window_block:
+                metadata = custom_tuple_replace(
+                    metadata,
+                    "TrimmedAttentionMetadata",
+                    window_block_groups=block_groups)
+            else:
+                metadata = custom_tuple_replace(metadata,
+                                                "TrimmedAttentionMetadata",
+                                                block_groups=block_groups)
+        block_mapping = block_mapping.to(dtype)
+        if is_window_block:
             metadata = custom_tuple_replace(metadata,
                                             "TrimmedAttentionMetadata",
-                                            block_groups=block_groups)
-        block_mapping = block_mapping.to(dtype)
-        metadata = custom_tuple_replace(metadata,
-                                        "TrimmedAttentionMetadata",
-                                        block_mapping=block_mapping,
-                                        attn_bias=attn_bias)
+                                            window_block_mapping=block_mapping,
+                                            window_attn_bias=attn_bias)
+        else:
+            metadata = custom_tuple_replace(metadata,
+                                            "TrimmedAttentionMetadata",
+                                            block_mapping=block_mapping,
+                                            attn_bias=attn_bias)
         return metadata
 
     def forward_update_meta_only(self, *args, **kwargs):
@@ -468,15 +556,40 @@ class HpuModelAdapter(torch.nn.Module):
         kwargs['attn_metadata'] = attn_metadata
         return attn_metadata
 
-    def _update_metadata(self, attn_metadata, batch_size, seq_len, device,
-                         dtype):
+    def _update_metadata(self,
+                         attn_metadata,
+                         batch_size,
+                         seq_len,
+                         device,
+                         dtype,
+                         global_attn_masks=None,
+                         local_attn_masks=None):
 
         if attn_metadata.is_prompt:
             attn_metadata = self._set_attn_bias(attn_metadata, batch_size,
                                                 seq_len, device, dtype)
+
+            #For Gemma3, we need to override attn_mask with these sliding_window
+            #mask which are updated during prepare_attn_mask()
+            if global_attn_masks is not None:
+                attn_metadata = attn_metadata._replace(
+                    attn_bias=global_attn_masks[0])
+
+            if self.interleaved_sliding_window:
+                if local_attn_masks is not None:
+                    attn_metadata = attn_metadata._replace(
+                        window_attn_bias=local_attn_masks[0])
+                else:
+                    attn_metadata = self._set_attn_bias_for_sliding_window(
+                        attn_metadata, batch_size, seq_len,
+                        self.interleaved_sliding_window, device, dtype)
         else:
             attn_metadata = self._set_block_mapping(attn_metadata, batch_size,
-                                                    device, dtype)
+                                                    device, dtype, False)
+        if hasattr(attn_metadata, 'window_block_list'
+                   ) and attn_metadata.window_block_list is not None:
+            attn_metadata = self._set_block_mapping(attn_metadata, batch_size,
+                                                    device, dtype, True)
         return attn_metadata
 
     def compute_input_embeddings_for_mrope(self, **kwargs):
@@ -514,10 +627,18 @@ class HpuModelAdapter(torch.nn.Module):
         virtual_engine = 0
         if 'virtual_engine' in kwargs:
             virtual_engine = kwargs.pop('virtual_engine')
+
         input_ids = kwargs['input_ids']
+
+        global_attn_masks = kwargs.get("global_attn_masks") \
+                if kwargs.get("global_attn_masks") else None
+        local_attn_masks = kwargs.get("local_attn_masks") \
+                if kwargs.get("local_attn_masks") else None
+
         kwargs['attn_metadata'] = self._update_metadata(
             kwargs['attn_metadata'], input_ids.size(0), input_ids.size(1),
-            input_ids.device, self.dtype)
+            input_ids.device, self.dtype, global_attn_masks, local_attn_masks)
+
         if 'lora_mask' in kwargs:
             LoraMask.setLoraMask(kwargs.pop('lora_mask'))
         if self._rotary_prepare_cos_sin is not None and not self.model_is_mrope:
@@ -779,6 +900,11 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
 
         self.sliding_window = (self.model_config.get_sliding_window()
                                if self.model_config is not None else None)
+
+        self.interleaved_sliding_window = getattr(
+            self.model_config.hf_text_config, "interleaved_sliding_window",
+            None)
+
         self.device_config = (self.device_config if self.device_config
                               is not None else DeviceConfig())
         if is_fake_hpu():
@@ -1298,6 +1424,17 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             model = self.get_model()
             model.vision_buckets = VisionBuckets()
 
+    def _get_position_pad(self) -> int:
+        """
+        For gemma3 models,
+        due to the Hack in Gemma3ForConditionalGeneration::prepare_attn_masks,
+        '0' can't be used as pad for input position tensor.
+        In case, it might have '0's for bucketing, those '0' will be counted as
+        new sequence in the prepare_attn_masks() which is wrong.
+        """
+        model_type = getattr(self.model_config.hf_config, 'model_type', '')
+        return -1 if model_type == 'gemma3' else 0
+
     def _prepare_prompt(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
@@ -1546,11 +1683,11 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                 make_mrope_positions_tensor_with_pad(input_positions=input_positions,
                                                      input_mrope_positions=input_mrope_positions,
                                                      max_prompt_len=max_prompt_len,
-                                                     pad=0)
+                                                     pad=self._get_position_pad())
         else:
             input_positions = make_cpu_tensor(input_positions,
                                               max_len=max_prompt_len,
-                                              pad=0,
+                                              pad=self._get_position_pad(),
                                               dtype=torch.long,
                                               flat=self.use_merged_prefill)
 
@@ -1669,6 +1806,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         encoder_seq_lens: List[int] = []
         cross_block_tables: List[List[int]] = []
         block_tables: List[List[int]] = []
+        window_block_tables: List[List[int]] = []
         lora_index_mapping: List[List[int]] = []
         lora_prompt_mapping: List[List[int]] = []
         lora_requests: Set[LoRARequest] = set()
@@ -1750,6 +1888,12 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                     block_table = block_table[-sliding_window_blocks:]
                 block_tables.append(block_table)
 
+                if self.interleaved_sliding_window is not None:
+                    sliding_window_blocks = (self.interleaved_sliding_window //
+                                             self.block_size)
+                    window_block_table = block_table[-sliding_window_blocks:]
+                    window_block_tables.append(window_block_table)
+
         if output is None:
             input_tokens = torch.tensor(input_tokens,
                                         dtype=torch.long,
@@ -1779,6 +1923,25 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
 
         assert len(block_list) == len(block_groups)
         assert len(block_list) == len(block_usage)
+
+        if self.interleaved_sliding_window is not None:
+            window_block_groups = [[i] * len(bt)
+                                   for i, bt in enumerate(window_block_tables)]
+            window_block_usage = [
+                [self.block_size] * (len(bt) - 1) + [lbu]
+                for bt, lbu in zip(block_tables, last_block_usage) if bt
+            ]
+
+            window_block_list = flatten(window_block_tables)
+            window_block_groups = flatten(window_block_groups)
+            window_block_usage = flatten(window_block_usage)
+
+            assert len(window_block_list) == len(window_block_groups)
+            assert len(window_block_list) == len(window_block_list)
+        else:
+            window_block_list = None
+            window_block_groups = None
+            window_block_usage = None
 
         if is_enc_dec_model:
             last_cross_block_usage = [
@@ -1822,6 +1985,14 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                 indices[bid] = i
             padding_fn = lambda tensor, pad_value: gather_list(
                 tensor, indices, pad_value)
+            if self.interleaved_sliding_window is not None:
+                window_indices: List[Any]
+                window_indices = [None] * block_bucket_size
+                for i, bid in enumerate(window_block_list):
+                    window_indices[bid] = i
+                window_padding_fn = lambda tensor, pad_value: gather_list(
+                    tensor, window_indices, pad_value)
+
         else:
             block_bucket_size = self.bucketing_manager.find_decode_bucket(
                 len(seq_group_metadata_list), len(block_list))[2]
@@ -1838,6 +2009,17 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         block_list = padding_fn(block_list, _PAD_BLOCK_ID)
         block_groups = padding_fn(block_groups, -1)
         block_usage = padding_fn(block_usage, 1)
+
+        if self.interleaved_sliding_window is not None:
+            window_block_list = window_padding_fn(window_block_list,
+                                                  _PAD_BLOCK_ID)
+            window_block_groups = window_padding_fn(window_block_groups, -1)
+            #window_block_usage = window_padding_fn(window_block_usage, 1)
+            window_block_usage = [
+                [1] if i == 0 else [block_usage[idx]]
+                for idx, (i,
+                          j) in enumerate(zip(window_block_list, block_usage))
+            ]
 
         if is_enc_dec_model:
             if self.use_contiguous_pa:
@@ -1934,6 +2116,24 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             encoder_seq_lens_tensor = encoder_seq_lens_tensor.to(  # type: ignore
                 self.device, non_blocking=True)
 
+        if self.interleaved_sliding_window is not None:
+            window_block_list = torch.tensor(window_block_list,
+                                             dtype=torch.int,
+                                             device='cpu')
+            window_block_groups = torch.tensor(window_block_groups,
+                                               dtype=torch.int,
+                                               device='cpu')
+            window_block_usage = torch.tensor(window_block_usage,
+                                              dtype=self.model_config.dtype,
+                                              device='cpu')
+
+            window_block_list = window_block_list.to(  # type: ignore
+                self.device, non_blocking=True)
+            window_block_groups = window_block_groups.to(  # type: ignore
+                self.device, non_blocking=True)
+            window_block_usage = window_block_usage.to(  # type: ignore
+                self.device, non_blocking=True)
+
         attn_metadata = self.attn_backend.make_metadata(
             is_prompt=False,
             block_size=self.block_size,
@@ -1941,6 +2141,10 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             block_mapping=None,
             block_usage=block_usage,
             block_groups=block_groups,
+            window_block_list=window_block_list,
+            window_block_mapping=None,
+            window_block_usage=window_block_usage,
+            window_block_groups=window_block_groups,
             attn_bias=None,
             seq_lens_tensor=None,
             encoder_seq_lens=encoder_seq_lens,
@@ -2337,6 +2541,11 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             'block_groups',
             'input_positions',
             'alibi_blocks',
+            'window_block_list',
+            'window_block_mapping',
+            'window_block_usage',
+            'window_block_groups',
+            'window_attn_bias',
         ])
         return attention_metadata
 
@@ -3603,6 +3812,12 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                 }
 
                 if not bypass_model_exec:
+                    if is_gemma3(self.model.model):
+                        execute_model_kwargs = \
+                            self.model.compute_input_embeddings_for_gemma(
+                                **execute_model_kwargs
+                            )
+
                     with self.profiler.record_event('internal',
                                                     model_event_name,
                                                     args=profiler_args):
