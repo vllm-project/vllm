@@ -10,12 +10,10 @@ from vllm.attention.backends.abstract import AttentionBackend
 from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
                                               CommonAttentionMetadata)
 from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
-from vllm.v1.worker.block_table import BlockTable
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.worker.gpu_input_batch import InputBatch
-    from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 
 def _query_start_loc_to_chunk_indices_offsets(query_start_loc: torch.Tensor,
@@ -87,13 +85,11 @@ class Mamba2AttentionMetadata:
 class Mamba2AttentionMetadataBuilder(
         AttentionMetadataBuilder[Mamba2AttentionMetadata]):
 
-    def __init__(self, runner: "GPUModelRunner", kv_cache_spec: AttentionSpec,
-                 block_table: BlockTable):
+    def __init__(self, kv_cache_spec: AttentionSpec, vllm_config: VllmConfig,
+                 device: torch.device):
         assert isinstance(kv_cache_spec, MambaSpec)
-        self.runner = runner
         self.kv_cache_spec = kv_cache_spec
-        self.block_table = block_table
-        self.chunk_size = runner.vllm_config.model_config.get_mamba_chunk_size(
+        self.chunk_size = vllm_config.model_config.get_mamba_chunk_size(
         )
         assert self.chunk_size is not None, (
             "chunk_size needs to be set in the model config for Mamba2 models")
@@ -175,15 +171,14 @@ class Mamba2AttentionMetadataBuilder(
         has_initial_states = None
         prep_initial_states = False
 
-        state_indices_tensor = self.block_table.block_table[:num_reqs, 0]
+        state_indices_tensor = common_attn_metadata.block_table_tensor[:, 0]
 
         # Compute seq_idx, chunk_indices and chunk_offsets for prefill only
         if self._num_prefills > 0:
             #[batch,]
             has_initial_states_cpu = (
-                self.runner.input_batch.
-                num_computed_tokens_cpu_tensor[num_reqs -
-                                               self._num_prefills:num_reqs]
+                common_attn_metadata.
+                num_computed_tokens_cpu[num_reqs - self._num_prefills:num_reqs]
                 > 0)
             prep_initial_states = torch.any(has_initial_states_cpu).item()
             has_initial_states = has_initial_states_cpu.to(

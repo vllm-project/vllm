@@ -15,6 +15,7 @@ from flashinfer.decode import trtllm_batch_decode_with_kv_cache
 import vllm.envs as envs
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionType)
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.flash_attn import use_cascade_attention
@@ -29,7 +30,6 @@ from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.worker.gpu_input_batch import InputBatch
 
