@@ -376,6 +376,9 @@ class TestNixlHandshake:
         raise TimeoutError("Took too long to complete async handshake.")
 
 
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",
+    FakeNixlWrapper)
 def test_abort_timeout_on_prefiller(monkeypatch):
     """
     Test lifecycle of an aborted Remote Prefill request hitting the timeout.
