@@ -31,8 +31,7 @@ from torch import nn
 
 from vllm.attention import Attention
 from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed import (get_pp_group,
-                              get_tensor_model_parallel_rank,
+from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -42,7 +41,7 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
-from vllm.model_executor.layers.logits_processor import LogitsProcessor                                               
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.rotary_embedding import get_rope
@@ -55,10 +54,8 @@ from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.bailing_moe import BailingMoeConfig
 
 from .interfaces import SupportsLoRA, SupportsPP
-from .utils import (PPMissingLayer,
-                    is_pp_missing_parameter,
-                    make_empty_intermediate_tensors_factory,
-                    make_layers,
+from .utils import (PPMissingLayer, is_pp_missing_parameter,
+                    make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
 
 KVCache = tuple[torch.Tensor, torch.Tensor]
@@ -84,14 +81,13 @@ class BailingAttention(nn.Module):
         assert self.total_num_heads >= self.total_kv_heads
 
         self.num_heads = self.total_num_heads // tp_size
-        self.head_dim = config.head_dim or (self.hidden_size // 
+        self.head_dim = config.head_dim or (self.hidden_size //
                                             self.total_num_heads)
         self.q_size_per_rank = self.head_dim * self.num_heads
 
         self.num_kv_heads = self.total_kv_heads // tp_size
         self.kv_size_per_rank = self.num_kv_heads * self.head_dim
-
-        self.scale = self.head_dim ** -0.5
+        self.scale = self.head_dim**-0.5
 
         self.query_key_value = QKVParallelLinear(
             self.hidden_size,
@@ -103,11 +99,13 @@ class BailingAttention(nn.Module):
             prefix=f"{prefix}.query_key_value",
         )
 
-        self.dense = RowParallelLinear(self.total_num_heads * self.head_dim,
-                                       self.hidden_size,
-                                       bias=config.use_bias,
-                                       quant_config=quant_config,
-                                       prefix=f"{prefix}.dense",)
+        self.dense = RowParallelLinear(
+            self.total_num_heads * self.head_dim,
+            self.hidden_size,
+            bias=config.use_bias,
+            quant_config=quant_config,
+            prefix=f"{prefix}.dense",
+        )
 
         self.attn = Attention(self.num_heads,
                               self.head_dim,
@@ -132,10 +130,10 @@ class BailingAttention(nn.Module):
     ) -> torch.Tensor:
 
         qkv, _ = self.query_key_value(hidden_states)
-        q, k, v = qkv.split(
-            [self.q_size_per_rank, self.kv_size_per_rank, self.kv_size_per_rank],
-            dim=-1
-        )
+        q, k, v = qkv.split([
+            self.q_size_per_rank, self.kv_size_per_rank, self.kv_size_per_rank
+        ],
+                            dim=-1)
 
         q, k = self.rotary_emb(position_ids, q, k)
 
@@ -210,16 +208,14 @@ class BailingMoE(nn.Module):
                                      bias=False,
                                      quant_config=None)
 
-        self.experts = FusedMoE(
-            num_experts=self.num_experts,
-            top_k=self.top_k,
-            hidden_size=self.hidden_size,
-            intermediate_size=config.moe_intermediate_size,
-            reduce_results=False,
-            renormalize=self.norm_expert_prob,
-            quant_config=quant_config,
-            prefix=f"{prefix}.experts"
-        )
+        self.experts = FusedMoE(num_experts=self.num_experts,
+                                top_k=self.top_k,
+                                hidden_size=self.hidden_size,
+                                intermediate_size=config.moe_intermediate_size,
+                                reduce_results=False,
+                                renormalize=self.norm_expert_prob,
+                                quant_config=quant_config,
+                                prefix=f"{prefix}.experts")
 
         if self.num_shared_experts > 0:
             intermediate_size = (config.moe_intermediate_size *
@@ -229,8 +225,7 @@ class BailingMoE(nn.Module):
                 config=config,
                 quant_config=quant_config,
                 reduce_results=False,
-                prefix=f"{prefix}.shared_experts"
-            )
+                prefix=f"{prefix}.shared_experts")
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_size = hidden_states.shape
@@ -239,9 +234,8 @@ class BailingMoE(nn.Module):
             shared_output = self.shared_experts(hidden_states)
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
-        final_hidden_states = self.experts(
-            hidden_states=hidden_states, router_logits=router_logits
-        )
+        final_hidden_states = self.experts(hidden_states=hidden_states,
+                                           router_logits=router_logits)
 
         if self.num_shared_experts > 0:
             final_hidden_states = final_hidden_states + shared_output
@@ -250,6 +244,7 @@ class BailingMoE(nn.Module):
             final_hidden_states = tensor_model_parallel_all_reduce(
                 final_hidden_states)
         return final_hidden_states.view(num_tokens, hidden_size)
+
 
 class BailingMoeBlock(nn.Module):
 
@@ -268,8 +263,13 @@ class BailingMoeBlock(nn.Module):
                                           cache_config,
                                           quant_config,
                                           prefix=f"{prefix}.attention")
-        self.post_attention_layernorm = RMSNorm(hidden_size, eps=config.rms_norm_eps)
-        self.mlp = BailingMoE(intermediate_size, config, quant_config, True, prefix=f"{prefix}.mlp")
+        self.post_attention_layernorm = RMSNorm(hidden_size,
+                                                eps=config.rms_norm_eps)
+        self.mlp = BailingMoE(intermediate_size,
+                              config,
+                              quant_config,
+                              True,
+                              prefix=f"{prefix}.mlp")
 
     def forward(
         self,
@@ -314,7 +314,8 @@ class BailingMoeModel(nn.Module):
 
         if get_pp_group().is_first_rank or (config.tie_word_embeddings
                                             and get_pp_group().is_last_rank):
-            self.word_embeddings = VocabParallelEmbedding(self.vocab_size, self.embed_dim)
+            self.word_embeddings = VocabParallelEmbedding(
+                self.vocab_size, self.embed_dim)
         else:
             self.word_embeddings = PPMissingLayer()
 
@@ -328,20 +329,17 @@ class BailingMoeModel(nn.Module):
                 quant_config=quant_config,
                 prefix=prefix,
             ),
-            prefix=f"{prefix}.layers"
-        )
+            prefix=f"{prefix}.layers")
 
         self.make_empty_intermediate_tensors = (
             make_empty_intermediate_tensors_factory(
-                ["hidden_states", "residual"], config.hidden_size
-            )
-        )
+                ["hidden_states", "residual"], config.hidden_size))
 
         if get_pp_group().is_last_rank:
             self.norm = RMSNorm(self.embed_dim, eps=config.rms_norm_eps)
         else:
             self.norm = PPMissingLayer()
-    
+
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.word_embeddings(input_ids)
 
@@ -417,28 +415,20 @@ class BailingMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self.lora_config = lora_config
         self.quant_config = quant_config
         self.max_position_embeddings = config.max_position_embeddings
-        self.model = BailingMoeModel(
-                                    vllm_config=vllm_config,
-                                    prefix=maybe_prefix(prefix, "model")
-        )
+        self.model = BailingMoeModel(vllm_config=vllm_config,
+                                     prefix=maybe_prefix(prefix, "model"))
         if get_pp_group().is_last_rank:
-            self.lm_head = (
-                self.word_embeddings
-                if config.tie_word_embeddings
-                else ParallelLMHead(
-                    config.vocab_size,
-                    config.hidden_size,
-                    quant_config=quant_config
-                )
-            )
+            self.lm_head = (self.word_embeddings if config.tie_word_embeddings
+                            else ParallelLMHead(config.vocab_size,
+                                                config.hidden_size,
+                                                quant_config=quant_config))
             self.logits_processor = LogitsProcessor(config.vocab_size)
         else:
             self.lm_head = PPMissingLayer()
 
         self.sampler = get_sampler()
         self.make_empty_intermediate_tensors = (
-            self.model.make_empty_intermediate_tensors
-        )
+            self.model.make_empty_intermediate_tensors)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
@@ -459,7 +449,8 @@ class BailingMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.lm_head, hidden_states, sampling_metadata)
+        logits = self.logits_processor(self.lm_head, hidden_states,
+                                       sampling_metadata)
         return logits
 
     def sample(
@@ -470,7 +461,8 @@ class BailingMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("gate_up_proj", "gate_proj", 0),
@@ -490,7 +482,10 @@ class BailingMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                 continue
             if self.config.norm_head and "lm_head.weight" in name:
                 import torch.nn.functional as F
-                loaded_weight = F.normalize(loaded_weight, dim=0, p=2, eps=1e-7)
+                loaded_weight = F.normalize(loaded_weight,
+                                            dim=0,
+                                            p=2,
+                                            eps=1e-7)
 
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
@@ -538,7 +533,8 @@ class BailingMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                         continue
 
                     param = params_dict[name]
-                    weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                    weight_loader = getattr(param, "weight_loader",
+                                            default_weight_loader)
                     weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
