@@ -90,7 +90,8 @@ class VoxtralProcessorAdapter:
         self,
         audio_length: int,
     ) -> int:
-        return ceil(audio_length / (self.sampling_rate // self.frame_rate))
+        pad_audio_length = self._audio_processor.next_multiple_of_chunk_frames(audio_length, self.sampling_rate)
+        return ceil(pad_audio_length / (self.sampling_rate // self.frame_rate))
 
     def __call__(
         self,
@@ -126,9 +127,14 @@ class VoxtralProcessorAdapter:
         for audio in audios:
             assert isinstance(audio, np.ndarray)
             assert audio.ndim == 1
+
+            # pad if necessary
+            audio = self._audio_processor.pad(audio, self.sampling_rate)
+
             audio_tokens = [
                 self.begin_audio_token_id
             ] + [self.audio_token_id] * self.get_num_audio_tokens(len(audio))
+
             audios_tokens.append(torch.tensor(audio_tokens))
             audios_processed.append(torch.tensor(audio))
 
@@ -595,7 +601,6 @@ class VoxtralEncoderModel(nn.Module):
             result = out[chunk_idx:chunk_idx + n_chunks].flatten(0, 1)
             results.append(result)
             chunk_idx += n_chunks
-        print(f"{[a.shape for a in results]=}")
 
         return results
 
