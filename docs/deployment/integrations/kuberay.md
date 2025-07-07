@@ -13,9 +13,8 @@ A Ray cluster can be declared in YAML, and the operator then handles pod schedul
 | Feature | Manual scripts | KubeRay |
 |---------|-----------------------------------------------------------|---------|
 | Cluster bootstrap | Manually SSH into every node and run a script | One command to create or update the whole cluster: `kubectl apply -f cluster.yaml` |
-| Fault-tolerance | Nodes must be restarted by hand | Pods are automatically rescheduled; head-node fail-over supported |
-| Autoscaling | Unsupported | Native horizontal **and** vertical autoscaling via Ray Autoscaler & Kubernetes HPA |
-| Upgrades | Tear down & re-create manually | Rolling updates handled by the operator |
+| Autoscaling | Manual | Automatically patches CRDs for adjusting cluster size |
+| Upgrades | Tear down & re-create manually | Blue/green deployment updates supported |
 | Monitoring | ad-hoc | Distributed observability with Ray Dashboard |
 | Declarative config | Bash flags & environment variables | Git-ops-friendly YAML CRDs (RayCluster/RayService) |
 
