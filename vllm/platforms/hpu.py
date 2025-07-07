@@ -26,6 +26,7 @@ class HpuPlatform(Platform):
     device_type: str = "hpu"
     dispatch_key: str = "HPU"
     ray_device_key: str = "HPU"
+    dist_backend: str = "hccl"
     device_control_env_var: str = "HABANA_VISIBLE_MODULES"
 
     @classmethod
