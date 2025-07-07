@@ -513,8 +513,11 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         # FlashInfer CUTLASS kernel assumes [Up, Gate] Proj as W13
         return self.allow_flashinfer_cutlass
     
-    def select_experts_impl(self, moe_parallel_config):
+    def select_experts_impl(self, moe_parallel_config):      
         if not self.allow_flashinfer_cutlass:
+            # if moe_parallel_config.dp_size > 1:
+            #     raise ValueError("CutlassExpertsFp4 Doesn't support DP. "
+            #                 "Use flashinfer CUTLASS FusedMoE backend instead.")
             return
 	
         logger.debug("FlashInferExperts")
