@@ -419,6 +419,7 @@ class TTWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
             fabric_config_map = {
                 "DISABLED": ttnn.FabricConfig.DISABLED,
                 "FABRIC_1D": ttnn.FabricConfig.FABRIC_1D,
+                "FABRIC_1D_RING": ttnn.FabricConfig.FABRIC_1D_RING,
                 "FABRIC_2D": ttnn.FabricConfig.FABRIC_2D,
                 "CUSTOM": ttnn.FabricConfig.CUSTOM,
             }
