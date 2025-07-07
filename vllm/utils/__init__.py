@@ -39,14 +39,14 @@ from argparse import (Action, ArgumentDefaultsHelpFormatter, ArgumentParser,
 from asyncio import FIRST_COMPLETED, AbstractEventLoop, Task
 from collections import UserDict, defaultdict
 from collections.abc import (AsyncGenerator, Awaitable, Collection, Generator,
-                             Hashable, Iterable, Iterator, KeysView, Mapping)
+                             Hashable, Iterable, Iterator, KeysView, Mapping,
+                             Sequence)
 from concurrent.futures.process import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from functools import cache, lru_cache, partial, wraps
 from types import MappingProxyType
 from typing import (TYPE_CHECKING, Any, Callable, Generic, Literal, NamedTuple,
-                    Optional, Sequence, Tuple, Type, TypeVar, Union, cast,
-                    overload)
+                    Optional, Tuple, TypeVar, Union, cast, overload)
 from urllib.parse import urlparse
 from uuid import uuid4
 
@@ -628,14 +628,34 @@ def is_valid_ipv6_address(address: str) -> bool:
         return False
 
 
+def split_host_port(host_port: str) -> Tuple[str, int]:
+    # ipv6
+    if host_port.startswith('['):
+        host, port = host_port.rsplit(']', 1)
+        host = host[1:]
+        port = port.split(':')[1]
+        return host, int(port)
+    else:
+        host, port = host_port.split(':')
+        return host, int(port)
+
+
+def join_host_port(host: str, port: int) -> str:
+    if is_valid_ipv6_address(host):
+        return f"[{host}]:{port}"
+    else:
+        return f"{host}:{port}"
+
+
 def get_distributed_init_method(ip: str, port: int) -> str:
     return get_tcp_uri(ip, port)
 
 
 def get_tcp_uri(ip: str, port: int) -> str:
-    # Brackets are not permitted in ipv4 addresses,
-    # see https://github.com/python/cpython/issues/103848
-    return f"tcp://[{ip}]:{port}" if ":" in ip else f"tcp://{ip}:{port}"
+    if is_valid_ipv6_address(ip):
+        return f"tcp://[{ip}]:{port}"
+    else:
+        return f"tcp://{ip}:{port}"
 
 
 def get_open_zmq_ipc_path() -> str:
@@ -1866,6 +1886,12 @@ def supports_dynamo() -> bool:
     return base_torch_version >= Version("2.4.0")
 
 
+# Supports xccl with PyTorch versions >= 2.8.0 for XPU platform
+def supports_xccl() -> bool:
+    return is_torch_equal_or_newer(
+        "2.8.0") and torch.distributed.is_xccl_available()
+
+
 # Some backends use pytorch version < 2.4.0 which doesn't
 # support `torch.library.custom_op`.
 def supports_custom_op() -> bool:
@@ -1921,9 +1947,9 @@ class LazyDict(Mapping[str, T], Generic[T]):
         return len(self._factory)
 
 
-class ClassRegistry(UserDict[Type[T], _V]):
+class ClassRegistry(UserDict[type[T], _V]):
 
-    def __getitem__(self, key: Type[T]) -> _V:
+    def __getitem__(self, key: type[T]) -> _V:
         for cls in key.mro():
             if cls in self.data:
                 return self.data[cls]
@@ -2234,7 +2260,7 @@ def direct_register_custom_op(
         fake_impl: Optional[Callable] = None,
         target_lib: Optional[Library] = None,
         dispatch_key: str = "CUDA",
-        tags: Tuple[torch.Tag, ...] = (),
+        tags: tuple[torch.Tag, ...] = (),
 ):
     """
     `torch.library.custom_op` can have significant overhead because it
@@ -2489,7 +2515,7 @@ def get_exception_traceback():
     return err_str
 
 
-def split_zmq_path(path: str) -> Tuple[str, str, str]:
+def split_zmq_path(path: str) -> tuple[str, str, str]:
     """Split a zmq path into its parts."""
     parsed = urlparse(path)
     if not parsed.scheme:
@@ -2779,7 +2805,7 @@ def warn_for_unimplemented_methods(cls: type[T]) -> type[T]:
         if unimplemented_methods:
             method_names = ','.join(unimplemented_methods)
             msg = (f"Methods {method_names} not implemented in {self}")
-            logger.warning(msg)
+            logger.debug(msg)
 
     @wraps(original_init)
     def wrapped_init(self, *args, **kwargs) -> None:

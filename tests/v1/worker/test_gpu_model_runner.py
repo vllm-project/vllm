@@ -9,6 +9,7 @@ import torch
 from vllm.attention import Attention
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig, VllmConfig, set_current_vllm_config)
+from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.utils import GiB_bytes
 from vllm.v1.core.kv_cache_utils import (estimate_max_model_len,
@@ -23,7 +24,7 @@ from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 BLOCK_SIZE = 16
 NUM_BLOCKS = 10
-DEVICE = "cuda"
+DEVICE = current_platform.device_type
 
 
 def initialize_kv_cache(runner: GPUModelRunner):
@@ -449,6 +450,7 @@ def test_load_model_weights_inplace(dist_init, model_runner, model_runner_2):
 
 
 def test_init_kv_cache_with_kv_sharing_invalid_target_layer_order():
+    torch.set_default_dtype(torch.float16)
     layer_0 = "model.layers.0.self_attn.attn"
     layer_1 = "model.layers.1.self_attn.attn"
     error_msg = f"{layer_1} must come before the current layer"
@@ -477,6 +479,7 @@ def test_init_kv_cache_with_kv_sharing_invalid_target_layer_order():
 
 
 def test_init_kv_cache_with_kv_sharing_target_layer_not_exist():
+    torch.set_default_dtype(torch.float16)
     layer_0 = "model.layers.0.self_attn.attn"
     layer_1 = "model.layers.1.self_attn.attn"
     invalid_layer = "model.layers.0.cross_attn.attn"
@@ -505,6 +508,7 @@ def test_init_kv_cache_with_kv_sharing_target_layer_not_exist():
 
 
 def test_init_kv_cache_with_kv_sharing_target_same_as_current():
+    torch.set_default_dtype(torch.float16)
     layer_0 = "model.layers.0.self_attn.attn"
     layer_1 = "model.layers.1.self_attn.attn"
     error_msg = f"{layer_1} cannot be the same as the current layer"
@@ -533,6 +537,7 @@ def test_init_kv_cache_with_kv_sharing_target_same_as_current():
 
 
 def test_init_kv_cache_without_kv_sharing():
+    torch.set_default_dtype(torch.float16)
     layer_0 = "model.layers.0.self_attn.attn"
     layer_1 = "model.layers.1.self_attn.attn"
     vllm_config = get_vllm_config()
@@ -600,6 +605,7 @@ def test_init_kv_cache_without_kv_sharing():
 
 
 def test_init_kv_cache_with_kv_sharing_valid():
+    torch.set_default_dtype(torch.float16)
     layer_0 = "model.layers.0.self_attn.attn"
     layer_1 = "model.layers.1.self_attn.attn"
     vllm_config = get_vllm_config()

@@ -132,6 +132,14 @@ class LLM:
         hf_overrides: If a dictionary, contains arguments to be forwarded to the
             HuggingFace config. If a callable, it is called to update the
             HuggingFace config.
+        mm_processor_kwargs: Arguments to be forwarded to the model's processor
+            for multi-modal data, e.g., image processor. Overrides for the
+            multi-modal processor obtained from `AutoProcessor.from_pretrained`.
+            The available overrides depend on the model that is being run.
+            For example, for Phi-3-Vision: `{"num_crops": 4}`.
+        override_pooler_config: Initialize non-default pooling config or
+            override default pooling config for the pooling model.
+            e.g. `PoolerConfig(pooling_type="mean", normalize=False)`.
         compilation_config: Either an integer or a dictionary. If it is an
             integer, it is used as the level of compilation optimization. If it
             is a dictionary, it can specify the full compilation configuration.
@@ -1196,8 +1204,7 @@ class LLM:
 
         input_pairs = [(t1, t2) for t1, t2 in zip(text_1, text_2)]
 
-        pooling_params = PoolingParams()
-
+        pooling_params = PoolingParams(use_cross_encoder=True)
         tokenization_kwargs: dict[str, Any] = {}
         _validate_truncation_size(self.llm_engine.model_config.max_model_len,
                                   truncate_prompt_tokens, tokenization_kwargs)
@@ -1205,9 +1212,14 @@ class LLM:
         parsed_prompts = []
 
         for q, t in input_pairs:
-            prompt_inputs = tokenizer(text=q,
-                                      text_pair=t,
-                                      **tokenization_kwargs)
+            if self.llm_engine.model_config.use_pad_token:
+                # cross_encoder models defaults to using pad_token.
+                prompt_inputs = tokenizer(text=q,
+                                          text_pair=t,
+                                          **tokenization_kwargs)
+            else:
+                # `llm as reranker` models defaults to not using pad_token.
+                prompt_inputs = tokenizer(text=q + t, **tokenization_kwargs)
             engine_prompt = TokensPrompt(
                 prompt_token_ids=prompt_inputs["input_ids"],
                 token_type_ids=prompt_inputs.get("token_type_ids"))
@@ -1281,9 +1293,13 @@ class LLM:
 
             raise ValueError(" ".join(messages))
 
-        if self.llm_engine.model_config.task not in ("embed", "score"):
-            raise ValueError(
-                "Score API is only enabled for `--task embed or --task score`")
+        if self.llm_engine.model_config.task not in ("embed", "classify"):
+            raise ValueError("Score API is only enabled for "
+                             "`--task embed or --task classify`.")
+
+        if (self.llm_engine.model_config.task == "classify"
+                and self.llm_engine.model_config.hf_config.num_labels != 1):
+            raise ValueError("Score API is only enabled for num_labels == 1.")
 
         # the tokenizer for models such as
         # "cross-encoder/ms-marco-MiniLM-L-6-v2" doesn't support passing
@@ -1347,16 +1363,16 @@ class LLM:
         during the sleep period, before `wake_up` is called.
 
         Args:
-            level: The sleep level. Level 1 sleep will offload the model 
-                weights and discard the kv cache. The content of kv cache 
+            level: The sleep level. Level 1 sleep will offload the model
+                weights and discard the kv cache. The content of kv cache
                 is forgotten. Level 1 sleep is good for sleeping and waking
-                up the engine to run the same model again. The model weights 
-                are backed up in CPU memory. Please make sure there's enough 
-                CPU memory to store the model weights. Level 2 sleep will 
-                discard both the model weights and the kv cache. The content 
-                of both the model weights and kv cache is forgotten. Level 2 
+                up the engine to run the same model again. The model weights
+                are backed up in CPU memory. Please make sure there's enough
+                CPU memory to store the model weights. Level 2 sleep will
+                discard both the model weights and the kv cache. The content
+                of both the model weights and kv cache is forgotten. Level 2
                 sleep is good for sleeping and waking up the engine to run a
-                different model or update the model, where previous model 
+                different model or update the model, where previous model
                 weights are not needed. It reduces CPU memory pressure.
         """
         self.reset_prefix_cache()
@@ -1366,12 +1382,12 @@ class LLM:
         """
         Wake up the engine from sleep mode. See the [sleep][] method
         for more details.
-        
+
         Args:
-            tags: An optional list of tags to reallocate the engine memory 
-                for specific memory allocations. Values must be in 
+            tags: An optional list of tags to reallocate the engine memory
+                for specific memory allocations. Values must be in
                 `("weights", "kv_cache")`. If None, all memory is reallocated.
-                wake_up should be called with all tags (or None) before the 
+                wake_up should be called with all tags (or None) before the
                 engine is used again.
         """
         self.llm_engine.wake_up(tags)
