@@ -39,8 +39,9 @@ class TorchSDPABackend(AttentionBackend):
 
     @classmethod
     def validate_head_size(cls, head_size: int) -> None:
-        is_valid, supported_head_sizes = _get_paged_attn_impl().\
-            validate_head_size(head_size) # type: ignore
+        attn_impl = _get_paged_attn_impl()
+        is_valid, supported_head_sizes = attn_impl.validate_head_size(
+            head_size)
         if not is_valid:
             attn_type = cls.__name__.removesuffix("Backend")
             raise ValueError(
@@ -76,7 +77,7 @@ class TorchSDPABackend(AttentionBackend):
         num_kv_heads: int,
         head_size: int,
     ) -> tuple[int, ...]:
-        return _get_paged_attn_impl().get_kv_cache_shape(  # type: ignore
+        return _get_paged_attn_impl().get_kv_cache_shape(
             num_blocks, block_size, num_kv_heads, head_size)
 
     @staticmethod
@@ -533,8 +534,7 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
             # Even if there are no new key/value pairs to cache,
             # we still need to break out key_cache and value_cache
             # i.e. for later use by paged attention
-            key_cache, value_cache = self.paged_attn_impl \
-            .split_kv_cache( # type: ignore
+            key_cache, value_cache = self.paged_attn_impl.split_kv_cache(
                 kv_cache, self.num_kv_heads, self.head_size)
 
             if (key is not None) and (value is not None):
@@ -547,7 +547,7 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
                     # Update self-attention KV cache (prefill/decode)
                     updated_slot_mapping = attn_metadata.slot_mapping
 
-                self.paged_attn_impl.write_to_paged_cache(  # type: ignore
+                self.paged_attn_impl.write_to_paged_cache(
                     key, value, key_cache, value_cache, updated_slot_mapping,
                     self.kv_cache_dtype, layer._k_scale, layer._v_scale)
 
@@ -611,7 +611,7 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
                 block_tables_arg,
             ) = decode_meta.get_seq_len_block_table_args(attn_type)
 
-            self.paged_attn_impl.forward_decode(  # type: ignore
+            self.paged_attn_impl.forward_decode(
                 output[attn_metadata.num_prefill_tokens:, :, :],
                 query[attn_metadata.num_prefill_tokens:, :, :],
                 key_cache,
@@ -913,7 +913,7 @@ class _IPEXPagedAttention(_PagedAttention):
             alibi_slopes)
 
 
-def _get_paged_attn_impl() -> type:
+def _get_paged_attn_impl():
     if _use_ipex:
         return _IPEXPagedAttention
     else:
