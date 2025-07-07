@@ -38,7 +38,7 @@
 
 # Check for minimum number of required arguments.
 if [ $# -lt 4 ]; then
-    echo "Usage: $0 docker_image head_node_address --head|--worker path_to_hf_home [additional_args...]"
+    echo "Usage: $0 docker_image head_node_ip --head|--worker path_to_hf_home [additional_args...]"
     exit 1
 fi
 
