@@ -37,7 +37,7 @@ class XPUPlatform(Platform):
                              dtype: torch.dtype, kv_cache_dtype: Optional[str],
                              block_size: int, use_v1: bool,
                              use_mla: bool) -> str:
-        if selected_backend != _Backend.IPEX:
+        if selected_backend is not None and selected_backend != _Backend.IPEX:
             logger.info("Cannot use %s backend on XPU.", selected_backend)
         use_v1 = envs.VLLM_USE_V1
         if not use_v1:
@@ -133,8 +133,7 @@ class XPUPlatform(Platform):
 
     @classmethod
     def is_pin_memory_available(cls):
-        logger.warning("Pin memory is not supported on XPU.")
-        return False
+        return True
 
     @classmethod
     def get_current_memory_usage(cls,
