@@ -178,7 +178,10 @@ class CompilerManager:
             self.is_cache_updated = True
             if graph_index == 0:
                 # adds some info logging for the first graph
-                logger.info("Cache the graph of shape %s for later use",
+                if runtime_shape is None:
+                    logger.info("Cache the graph for DYNAMIC shape for later use")
+                else:
+                    logger.info("Cache the graph of shape %s for later use",
                             str(runtime_shape))
             logger.debug(
                 "store the %s-th graph for shape %s from %s via handle %s",
