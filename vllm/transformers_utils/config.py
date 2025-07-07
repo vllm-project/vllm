@@ -402,16 +402,16 @@ def get_config(
             max_position_embeddings = _maybe_retrieve_max_pos_from_hf(model, revision, **kwargs)
             config_dict["max_position_embeddings"] = max_position_embeddings
 
-            config = adapt_config_dict(config_dict)
-        else:
-            supported_formats = [
-                fmt.value for fmt in ConfigFormat if fmt != ConfigFormat.AUTO
-            ]
-            raise ValueError(
-                f"Unsupported config format: {config_format}. "
-                f"Supported formats are: {', '.join(supported_formats)}. "
-                f"Ensure your model uses one of these configuration formats "
-                f"or specify the correct format explicitly.")
+        config = adapt_config_dict(config_dict)
+    else:
+        supported_formats = [
+            fmt.value for fmt in ConfigFormat if fmt != ConfigFormat.AUTO
+        ]
+        raise ValueError(
+            f"Unsupported config format: {config_format}. "
+            f"Supported formats are: {', '.join(supported_formats)}. "
+            f"Ensure your model uses one of these configuration formats "
+            f"or specify the correct format explicitly.")
 
     # Special architecture mapping check for GGUF models
     if is_gguf:
