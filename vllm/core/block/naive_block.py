@@ -93,7 +93,7 @@ class NaiveBlockAllocator(BlockAllocator):
             device: Optional[Device] = None) -> List[Block]:
         assert device is None
         num_blocks = len(block_token_ids)
-        if num_blocks > self.get_num_free_blocks:
+        if num_blocks > self.get_num_free_blocks():
             raise BlockAllocator.NoFreeBlocksError()
 
         block_ids = []
