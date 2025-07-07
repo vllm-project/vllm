@@ -748,6 +748,8 @@ class NixlConnectorWorker:
             for cache in cache_list:
                 base_addr = cache.data_ptr()
                 region_len = self.num_blocks * self.block_len
+                # NOTE: use tp_rank for device_id since multi-node TP
+                # is rarely used.
                 caches_data.append((base_addr, region_len, self.tp_rank, ""))
                 kv_caches_base_addr.append(base_addr)
         self.kv_caches_base_addr[self.engine_id] = kv_caches_base_addr
