@@ -319,9 +319,14 @@ _EMBEDDING_EXAMPLE_MODELS = {
 _CROSS_ENCODER_EXAMPLE_MODELS = {
     # [Text-only]
     "BertForSequenceClassification": _HfExamplesInfo("cross-encoder/ms-marco-MiniLM-L-6-v2", v0_only=True),  # noqa: E501
+    "GemmaForSequenceClassification": _HfExamplesInfo("BAAI/bge-reranker-v2-gemma", # noqa: E501
+                                                      v0_only=True,
+                                                      hf_overrides={"architectures": ["GemmaForSequenceClassification"], # noqa: E501
+                                                                    "classifier_from_token": ["Yes"], # noqa: E501
+                                                                    "method": "no_post_processing"}), # noqa: E501
+    "ModernBertForSequenceClassification": _HfExamplesInfo("Alibaba-NLP/gte-reranker-modernbert-base", v0_only=True), # noqa: E501
     "RobertaForSequenceClassification": _HfExamplesInfo("cross-encoder/quora-roberta-base", v0_only=True),  # noqa: E501
     "XLMRobertaForSequenceClassification": _HfExamplesInfo("BAAI/bge-reranker-v2-m3", v0_only=True),  # noqa: E501
-    "ModernBertForSequenceClassification": _HfExamplesInfo("Alibaba-NLP/gte-reranker-modernbert-base", v0_only=True),  # noqa: E501
 }
 
 _MULTIMODAL_EXAMPLE_MODELS = {
