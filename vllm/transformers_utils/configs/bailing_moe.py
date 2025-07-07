@@ -1,5 +1,8 @@
-""" Bailing MoE model configuration """
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+# Adapted from
+# https://github.com/inclusionAI/Ling/blob/master/models/configuration_bailing_moe.py
 from transformers.configuration_utils import PretrainedConfig
 
 
@@ -19,7 +22,8 @@ class BailingMoeConfig(PretrainedConfig):
         use_bias=True,  # bailing only
         rms_norm_eps=1e-05,
         norm_head=False,  # bailing only
-        tie_word_embeddings=False,  # PretrainedConfig key, here change default value.
+        tie_word_embeddings=False,  # PretrainedConfig key, 
+                                    # here change default value.
         embedding_dropout=0.1,
         attention_dropout=0.1,
         output_dropout=0.1,
@@ -62,7 +66,11 @@ class BailingMoeConfig(PretrainedConfig):
         self.use_sliding_window = use_sliding_window
         self.sliding_window = sliding_window
         self.max_window_layers = max_window_layers
-        self.head_dim = head_dim if head_dim is not None else self.hidden_size // self.num_attention_heads
+        self.head_dim = (
+            head_dim 
+            if head_dim is not None 
+            else self.hidden_size // self.num_attention_heads
+        )
         self.rope_scaling = rope_scaling
 
         # MoE configs
