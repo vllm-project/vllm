@@ -37,9 +37,6 @@ if TYPE_CHECKING:
 Transfer = tuple[int, float]  # (xfer_handle, start_time)
 GET_META_MSG = b"get_meta_msg"
 NIXL_MAX_DESCS = 1000
-import os
-
-USE_BATCHED = os.getenv("USE_BATCHED", "1") == "1"
 
 logger = init_logger(__name__)
 
@@ -1003,15 +1000,9 @@ class NixlConnectorWorker:
 
         # Begin async xfer.
         start = time.perf_counter()
-        if USE_BATCHED:
-            print("BATCHED!")
-            self.nixl_wrapper.transfer_batched(handles)
-        else:
-            print("NON BATCHED!")
-            for handle in handles:
-                self.nixl_wrapper.transfer(handle)
+        self.nixl_wrapper.transfer_batched(handles)
         end = time.perf_counter()
-        logger.info("======== LAUNCH TIME: %s ========", end - start)
+        logger.info("========== TRANSFER BATCHED: %s ==========", end - start)
 
         # Keep track of ongoing transfers.
         remote_rank = self.tp_rank // tp_ratio
