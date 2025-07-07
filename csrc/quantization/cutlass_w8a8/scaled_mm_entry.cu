@@ -140,10 +140,10 @@ bool cutlass_scaled_mm_supports_block_fp8(int64_t cuda_device_capability) {
   // and at least SM90 (Hopper)
 
 #if defined CUDA_VERSION
-  if (cuda_device_capability >= 90 && cuda_device_capability < 100) {
-    return CUDA_VERSION >= 12000;
-  } else if (cuda_device_capability >= 100) {
+  if (cuda_device_capability >= 100) {
     return CUDA_VERSION >= 12080;
+  } else if (cuda_device_capability >= 90) {
+    return CUDA_VERSION >= 12000;
   }
 #endif
 
@@ -155,11 +155,11 @@ bool cutlass_group_gemm_supported(int64_t cuda_device_capability) {
   // or CUDA 12.8 and SM100 (Blackwell)
 
 #if defined CUDA_VERSION
-  if (cuda_device_capability >= 90 && cuda_device_capability < 100) {
-    return CUDA_VERSION >= 12030;
-  }
   if (cuda_device_capability >= 100) {
     return CUDA_VERSION >= 12080;
+  }
+  if (cuda_device_capability >= 90) {
+    return CUDA_VERSION >= 12030;
   }
 #endif
 
