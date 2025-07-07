@@ -22,10 +22,6 @@ models_4bit_to_test = [
      "quantize inflight model with both HF and Mistral format weights")
 ]
 
-models_4bit_to_moe_test = [
-    ("Qwen/Qwen3-30B-A3B", "quantize moe model inflight"),
-]
-
 models_4bit_to_embedding_test = [
     ("intfloat/e5-mistral-7b-instruct", "quantize embedding model inflight"),
 ]
@@ -124,25 +120,6 @@ def test_load_pp_4bit_bnb_model(model_name, description) -> None:
         "2",
     ]
     compare_two_settings(model_name, common_args, pp_args)
-
-
-@pytest.mark.skip(reason="Skip this test to avoid adding pressure to CI.")
-@pytest.mark.skipif(not is_quant_method_supported("bitsandbytes"),
-                    reason='bitsandbytes is not supported on this GPU type.')
-@pytest.mark.parametrize("model_name, description", models_4bit_to_moe_test)
-@create_new_process_for_each_test()
-def test_4bit_bnb_moe_model(hf_runner, vllm_runner, example_prompts,
-                            model_name, description) -> None:
-
-    hf_model_kwargs = dict(quantization_config=BitsAndBytesConfig(
-        load_in_4bit=True))
-    validate_generated_texts(hf_runner,
-                             vllm_runner,
-                             example_prompts[:1],
-                             model_name,
-                             False,
-                             hf_model_kwargs,
-                             vllm_tp_size=2)
 
 
 @pytest.mark.skipif(not is_quant_method_supported("bitsandbytes"),
