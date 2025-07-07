@@ -23,5 +23,5 @@ Using KubeRay reduces the operational burden and simplifies integration of Ray +
 
 ## Learn more
 
-* ["Serve a Large Language Model using Ray Serve LLM on Kubernetes"](https://docs.ray.io/en/master/cluster/kubernetes/examples/rayserve-llm-example.html) - An end-to-end example of how to serve a model using vLLM, Kube Ray, and Ray Serve.
+* ["Serve a Large Language Model using Ray Serve LLM on Kubernetes"](https://docs.ray.io/en/master/cluster/kubernetes/examples/rayserve-llm-example.html) - An end-to-end example of how to serve a model using vLLM, KubeRay, and Ray Serve.
 * [KubeRay documentation](https://docs.ray.io/en/latest/cluster/kubernetes/index.html)
