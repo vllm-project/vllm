@@ -81,4 +81,9 @@ python -m vllm.entrypoints.openai.api_server \
 By default, a ray instance will be launched automatically if no existing one is detected in the system, with `num-gpus` equals to `parallel_config.world_size`. We recommend properly starting a ray cluster before execution, referring to the <gh-file:examples/online_serving/run_cluster.sh> helper script.
 
 # --8<-- [end:supported-features]
+# --8<-- [start:distributed-backend]
+
+XPU platform uses **torch-ccl** for torch<2.8 and **xccl** for torch>=2.8 as distributed backend, since torch 2.8 supports **xccl** as built-in backend for XPU.
+
+# --8<-- [end:distributed-backend]
 # --8<-- [end:extra-information]

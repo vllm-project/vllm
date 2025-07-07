@@ -162,10 +162,11 @@ __global__ void dynamic_scaled_int8_quant_kernel(
 
   // calculate for absmax
   float thread_max = 0.f;
-  for (int i = tid; i < hidden_size; i += stride) {
-    const auto v = fabsf(static_cast<float>(row_in[i]));
-    thread_max = fmaxf(thread_max, v);
-  }
+  vectorize_read_with_alignment<16>(
+      row_in, hidden_size, tid, stride, [&] __device__(const scalar_t& src) {
+        const float v = fabsf(static_cast<float>(src));
+        thread_max = fmaxf(thread_max, v);
+      });
   using BlockReduce = cub::BlockReduce<float, 256>;
   __shared__ typename BlockReduce::TempStorage tmp;
   float block_max = BlockReduce(tmp).Reduce(thread_max, cub::Max{}, blockDim.x);
@@ -232,9 +233,10 @@ __global__ void dynamic_scaled_int8_azp_quant_kernel(
 
   // 1. calculate min & max
   MinMax thread_mm;
-  for (int i = tid; i < hidden_size; i += stride) {
-    thread_mm += static_cast<float>(row_in[i]);
-  }
+  vectorize_read_with_alignment<16>(row_in, hidden_size, tid, stride,
+                                    [&] __device__(const scalar_t& src) {
+                                      thread_mm += static_cast<float>(src);
+                                    });
 
   using BlockReduce = cub::BlockReduce<MinMax, 256>;
   __shared__ typename BlockReduce::TempStorage tmp;
