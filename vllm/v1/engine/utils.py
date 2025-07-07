@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import contextlib
+import os
 import weakref
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -15,6 +16,7 @@ import zmq
 
 from vllm.config import CacheConfig, ParallelConfig, VllmConfig
 from vllm.logger import init_logger
+from vllm.ray.ray_env import get_env_vars_to_copy
 from vllm.utils import get_mp_context, get_open_zmq_ipc_path, zmq_socket_ctx
 from vllm.v1.engine.coordinator import DPCoordinator
 from vllm.v1.executor.abstract import Executor
@@ -164,6 +166,7 @@ class CoreEngineActorManager:
         import copy
 
         import ray
+        from ray.runtime_env import RuntimeEnv
         from ray.util.scheduling_strategies import (
             PlacementGroupSchedulingStrategy)
 
@@ -175,6 +178,12 @@ class CoreEngineActorManager:
         local_engine_count = \
             vllm_config.parallel_config.data_parallel_size_local
         world_size = vllm_config.parallel_config.world_size
+        env_vars_set = get_env_vars_to_copy(destination="DPEngineCoreActor")
+        env_vars_dict = {
+            name: os.environ[name]
+            for name in env_vars_set if name in os.environ
+        }
+        runtime_env = RuntimeEnv(env_vars=env_vars_dict)
 
         if ray.is_initialized():
             logger.info(
@@ -210,13 +219,14 @@ class CoreEngineActorManager:
                 scheduling_strategy=PlacementGroupSchedulingStrategy(
                     placement_group=pg,
                     placement_group_bundle_index=world_size,
-                )).remote(vllm_config=dp_vllm_config,
-                          executor_class=executor_class,
-                          log_stats=log_stats,
-                          local_client=local_client,
-                          addresses=addresses,
-                          dp_rank=index,
-                          local_dp_rank=local_index)
+                ),
+                runtime_env=runtime_env).remote(vllm_config=dp_vllm_config,
+                                                executor_class=executor_class,
+                                                log_stats=log_stats,
+                                                local_client=local_client,
+                                                addresses=addresses,
+                                                dp_rank=index,
+                                                local_dp_rank=local_index)
             if local_client:
                 self.local_engine_actors.append(actor)
             else:
