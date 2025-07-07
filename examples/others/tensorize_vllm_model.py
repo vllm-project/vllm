@@ -181,7 +181,7 @@ def get_parser():
         type=tensorizer_kwargs_arg,
         required=False,
         help=("A JSON string containing additional keyword arguments to "
-              "pass to Tensorizer's `TensorSerializer` during "
+              "pass to Tensorizer's TensorSerializer during "
               "serialization."))
 
     serialize_parser.add_argument(
