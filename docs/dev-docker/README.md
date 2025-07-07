@@ -12,7 +12,7 @@ The pre-built image includes:
 
 - ROCm™ 6.4.1
 - HipblasLT 0.15
-- vLLM 0.9.0.1
+- vLLM 0.9.1
 - PyTorch 2.7
 
 ## Pull latest Docker Image
@@ -21,14 +21,14 @@ Pull the most recent validated docker image with `docker pull rocm/vllm-dev:main
 
 ## What is New
 
-- Updated to ROCm 6.4.1 and vLLM v0.9.0.1
-- AITER MHA
-- IBM 3d kernel for unified attention
-- Full graph capture for split attention
+- V1 on by default (use VLLM_USE_V1=0 to override)
+- Fixed detokenizers issue
+- Fixed AITER MoE issues
+- vLLM v0.9.1
 
 ## Known Issues and Workarounds
 
-- No AITER MoE. Do not use VLLM_ROCM_USE_AITER for Mixtral or DeepSeek models.
+- --disable-custom-all-reduce required for Llama-3.1 405B
 
 ## Performance Results
 
@@ -41,16 +41,18 @@ The table below shows performance data where a local inference client is fed req
 
 | Model | Precision | TP Size | Input | Output | Num Prompts | Max Num Seqs | Throughput (tokens/s) |
 |-------|-----------|---------|-------|--------|-------------|--------------|-----------------------|
-| Llama 3.1 70B (amd/Llama-3.1-70B-Instruct-FP8-KV) | FP8 | 8 | 128 | 2048 | 3200 | 3200 | 16581.5  |
-|       |           |         | 128   | 4096   | 1500        | 1500         | 13667.3               |
-|       |           |         | 500   | 2000   | 2000        | 2000         | 13367.1               |
-|       |           |         | 2048  | 2048   | 1500        | 1500         | 8352.6                |
-| Llama 3.1 405B (amd/Llama-3.1-405B-Instruct-FP8-KV) | FP8 | 8 | 128 | 2048 | 1500 | 1500 | 4275.0 |
-|       |           |         | 128   | 4096   | 1500        | 1500         | 3356.7                |
-|       |           |         | 500   | 2000   | 2000        | 2000         | 3201.4                |
-|       |           |         | 2048  | 2048   | 500         | 500          | 2179.7                |
+| Llama 3.1 70B (amd/Llama-3.1-70B-Instruct-FP8-KV) | FP8 | 8 | 128 | 2048 | 3200 | 3200 | 10948.9  |
+|       |           |         | 128   | 4096   | 1500        | 1500         | 9489.2               |
+|       |           |         | 500   | 2000   | 2000        | 2000         | 9576.7               |
+|       |           |         | 2048  | 2048   | 1500        | 1500         | 6450.8                |
+| Llama 3.1 405B (amd/Llama-3.1-405B-Instruct-FP8-KV) | FP8 | 8 | 128 | 2048 | 1500 | 1500 | 3329.1 |
+|       |           |         | 128   | 4096   | 1500        | 1500         | 2733.0                |
+|       |           |         | 500   | 2000   | 2000        | 2000         | 2765.0                |
+|       |           |         | 2048  | 2048   | 500         | 500          | 2170.1                |
 
 *TP stands for Tensor Parallelism.*
+
+Supermicro AS-8125GS-TNMR2 with 2x AMD EPYC 9554 Processors, 2.25 TiB RAM, 8x AMD Instinct MI300X (192GiB, 750W) GPUs, Ubuntu 22.04, and amdgpu driver 6.8.5
 
 ### Latency Measurements
 
@@ -58,38 +60,38 @@ The table below shows latency measurement, which typically involves assessing th
 
 | Model | Precision | TP Size | Batch Size | Input | Output | MI300X Latency (sec) |
 |-------|-----------|----------|------------|--------|---------|-------------------|
-| Llama 3.1 70B (amd/Llama-3.1-70B-Instruct-FP8-KV) | FP8 | 8 | 1 | 128 | 2048 | 15.566 |
-| | | | 2 | 128 | 2048 | 16.858 |
-| | | | 4 | 128 | 2048 | 17.518 |
-| | | | 8 | 128 | 2048 | 18.898 |
-| | | | 16 | 128 | 2048 | 21.023 |
-| | | | 32 | 128 | 2048 | 23.896 |
-| | | | 64 | 128 | 2048 | 30.753 |
-| | | | 128 | 128 | 2048 | 43.767 |
-| | | | 1 | 2048 | 2048 | 15.496 |
-| | | | 2 | 2048 | 2048 | 17.380 |
-| | | | 4 | 2048 | 2048 | 17.983 |
-| | | | 8 | 2048 | 2048 | 19.771 |
-| | | | 16 | 2048 | 2048 | 22.702 |
-| | | | 32 | 2048 | 2048 | 27.392 |
-| | | | 64 | 2048 | 2048 | 36.879 |
-| | | | 128 | 2048 | 2048 | 57.003 |
-| Llama 3.1 405B (amd/Llama-3.1-405B-Instruct-FP8-KV) | FP8 | 8 | 1 | 128 | 2048 | 45.828 |
-| | | | 2 | 128 | 2048 | 46.757 |
-| | | | 4 | 128 | 2048 | 48.322 |
-| | | | 8 | 128 | 2048 | 51.479 |
-| | | | 16 | 128 | 2048 | 54.861 |
-| | | | 32 | 128 | 2048 | 63.119 |
-| | | | 64 | 128 | 2048 | 82.362 |
-| | | | 128 | 128 | 2048 | 109.698 |
-| | | | 1 | 2048 | 2048 | 46.514 |
-| | | | 2 | 2048 | 2048 | 47.271 |
-| | | | 4 | 2048 | 2048 | 49.679 |
-| | | | 8 | 2048 | 2048 | 54.366 |
-| | | | 16 | 2048 | 2048 | 60.390 |
-| | | | 32 | 2048 | 2048 | 74.209 |
-| | | | 64 | 2048 | 2048 | 104.728 |
-| | | | 128 | 2048 | 2048 | 154.041 |
+| Llama 3.1 70B (amd/Llama-3.1-70B-Instruct-FP8-KV) | FP8 | 8 | 1 | 128 | 2048 | 17.175 |
+| | | | 2 | 128 | 2048 | 17.603 |
+| | | | 4 | 128 | 2048 | 18.128 |
+| | | | 8 | 128 | 2048 | 19.549 |
+| | | | 16 | 128 | 2048 | 21.518 |
+| | | | 32 | 128 | 2048 | 24.103 |
+| | | | 64 | 128 | 2048 | 31.443 |
+| | | | 128 | 128 | 2048 | 42.932 |
+| | | | 1 | 2048 | 2048 | 17.112 |
+| | | | 2 | 2048 | 2048 | 17.857 |
+| | | | 4 | 2048 | 2048 | 18.711 |
+| | | | 8 | 2048 | 2048 | 19.770 |
+| | | | 16 | 2048 | 2048 | 21.865 |
+| | | | 32 | 2048 | 2048 | 25.302 |
+| | | | 64 | 2048 | 2048 | 33.435 |
+| | | | 128 | 2048 | 2048 | 48.935 |
+| Llama 3.1 405B (amd/Llama-3.1-405B-Instruct-FP8-KV) | FP8 | 8 | 1 | 128 | 2048 | 52.201 |
+| | | | 2 | 128 | 2048 | 52.689 |
+| | | | 4 | 128 | 2048 | 53.543 |
+| | | | 8 | 128 | 2048 | 56.713 |
+| | | | 16 | 128 | 2048 | 62.190 |
+| | | | 32 | 128 | 2048 | 68.914 |
+| | | | 64 | 128 | 2048 | 85.783 |
+| | | | 128 | 128 | 2048 | 116.485 |
+| | | | 1 | 2048 | 2048 | 52.309 |
+| | | | 2 | 2048 | 2048 | 52.551 |
+| | | | 4 | 2048 | 2048 | 53.685 |
+| | | | 8 | 2048 | 2048 | 56.905 |
+| | | | 16 | 2048 | 2048 | 63.313 |
+| | | | 32 | 2048 | 2048 | 71.007 |
+| | | | 64 | 2048 | 2048 | 88.708 |
+| | | | 128 | 2048 | 2048 | 124.583 |
 
 *TP stands for Tensor Parallelism.*
 
@@ -200,6 +202,8 @@ Some environment variables enhance the performance of the vLLM kernels on the MI
 
 ```bash
 export VLLM_USE_TRITON_FLASH_ATTN=0
+export VLLM_V1_USE_PREFILL_DECODE_ATTENTION=1
+
 ```
 
 ### vLLM engine performance settings
@@ -229,8 +233,6 @@ TP=8
 
 python3 /app/vllm/benchmarks/benchmark_latency.py \
     --distributed-executor-backend mp \
-    --quantization fp8 \
-    --kv-cache-dtype fp8 \
     --dtype float16 \
     --gpu-memory-utilization 0.9 \
     --trust-remote-code \
@@ -242,9 +244,12 @@ python3 /app/vllm/benchmarks/benchmark_latency.py \
     --num-iters-warmup 3 \
     --num-iters 5 \
     --output-json output.json
+    --disable-custom-all-reduce
+    --compilation-config '{"full_cuda_graph": true,"custom_ops":["+rms_norm","+silu_and_mul"],"pass_config":{"enable_noop":true,"enable_fusion":true}}’
+
 ```
 
-For FP16 models, remove `--quantization fp8 --kv-cache-dtype fp8`.
+For FP16 models, remove `--quantization fp8 --kv-cache-dtype fp8`. For all other models, remove `--disable-custom-all-reduce`.
 
 When measuring models with long context lengths, performance may improve by setting `--max-model-len` to a smaller value.  It is important, however, to ensure that the `--max-model-len` is at least as large as the IN + OUT token counts.
 
@@ -260,7 +265,7 @@ For additional information about the available parameters run:
 
 vLLM's benchmark_throughput.py script measures offline throughput.  It can either use an input dataset or random prompts with fixed input/output lengths.
 
-You can run latency tests for FP8 models with:
+You can run throughput tests for FP8 models with:
 
 ```bash
 export VLLM_USE_TRITON_FLASH_ATTN=0
@@ -273,7 +278,6 @@ MAX_NUM_SEQS=1500
 
 python3 /app/vllm/benchmarks/benchmark_throughput.py \
     --distributed-executor-backend mp \
-    --quantization fp8 \
     --kv-cache-dtype fp8 \
     --dtype float16 \
     --gpu-memory-utilization 0.9 \
@@ -290,9 +294,12 @@ python3 /app/vllm/benchmarks/benchmark_throughput.py \
     --num-prompts $PROMPTS \
     --max-num-seqs $MAX_NUM_SEQS \
     --output-json output.json
+    --disable-custom-all-reduce
+    --disable-detokenize
+    --compilation-config '{"full_cuda_graph": true,"custom_ops":["+silu_and_mul"],"pass_config":{"enable_noop":true,"enable_fusion":true}}’
 ```
 
-For FP16 models, remove `--quantization fp8 --kv-cache-dtype fp8`.
+For FP16 models, remove `--quantization fp8 --kv-cache-dtype fp8`. For all other models, remove `--disable-custom-all-reduce`.
 
 When measuring models with long context lengths, performance may improve by setting `--max-model-len` to a smaller value (8192 in this example).  It is important, however, to ensure that the `--max-model-len` is at least as large as the IN + OUT token counts.
 
@@ -357,7 +364,7 @@ docker run -it --rm --ipc=host --network=host --group-add render \
     --cap-add=CAP_SYS_ADMIN --cap-add=SYS_PTRACE \
     --device=/dev/kfd --device=/dev/dri --device=/dev/mem \
     -e VLLM_USE_TRITON_FLASH_ATTN=1 \
-    -e VLLM_USE_AITER=1 \
+    -e VLLM_ROCM_USE_AITER=1 \
     -e  VLLM_MLA_DISABLE=0 \
     rocm/vllm-dev:main
 
@@ -447,14 +454,14 @@ You should see some performance improvement about the e2e latency.
 
 ### AITER use cases
 
-`rocm/vllm-dev:main` image has experimental [AITER](https://github.com/ROCm/aiter) support, and can yield siginficant performance increase for some model/input/output/batch size configurations. To enable the feature make sure the following environment is set: `VLLM_USE_AITER=1`, the default value is `0`. When building your own image follow the [Docker build steps](#Docker-manifest) using the [aiter_integration_final](https://github.com/ROCm/vllm/tree/aiter_integration_final) branch.
+`rocm/vllm-dev:main` image has experimental [AITER](https://github.com/ROCm/aiter) support, and can yield siginficant performance increase for some model/input/output/batch size configurations. To enable the feature make sure the following environment is set: `VLLM_ROCM_USE_AITER=1`, the default value is `0`. When building your own image follow the [Docker build steps](#Docker-manifest) using the [aiter_integration_final](https://github.com/ROCm/vllm/tree/aiter_integration_final) branch.
 
 Some use cases include:
 - amd/Mixtral-8x7B-Instruct-v0.1-FP8-KV
 - amd/Mixtral-8x22B-Instruct-v0.1-FP8-KV
 
 ```bash
-export VLLM_USE_AITER=1
+export VLLM_ROCM_USE_AITER=1
 python3 /app/vllm/benchmarks/benchmark_latency.py --model amd/Mixtral-8x22B-Instruct-v0.1-FP8-KV -tp 8 --batch-size 256 --input-len 128 --output-len 2048
 ```
 
@@ -491,7 +498,7 @@ To reproduce the release docker:
 ```bash
     git clone https://github.com/ROCm/vllm.git
     cd vllm
-    git checkout 71faa188073d427c57862c45bf17745f3b54b1b1
+    git checkout b335519f20495128a47d86f2c01dd467e2fe602b
     docker build -f docker/Dockerfile.rocm -t <your_tag> --build-arg USE_CYTHON=1 .
 ```
 
@@ -508,6 +515,12 @@ Use AITER release candidate branch instead:
 
 ## Changelog
 
+20250620_aiter:
+- V1 on by default (use VLLM_USE_V1=0 to override)
+- Fixed detokenizers issue
+- Fixed AITER MoE issues
+- vLLM v0.9.1
+  
 20250605_aiter:
 - Updated to ROCm 6.4.1 and vLLM v0.9.0.1
 - AITER MHA
