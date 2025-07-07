@@ -30,9 +30,8 @@ _enabled = [k for k, v in PROVIDER_CFGS.items() if v["enabled"]]
 
 def _quant_weight_nvfp4(b: torch.Tensor, device: str):
     # Compute global scale for weight
-    b_global_scale = (
-        (FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX) / torch.amax(b.flatten(), dim=-1)
-    ).to(torch.float32)
+    b_amax = torch.abs(b).max().to(torch.float32)
+    b_global_scale = FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / b_amax
     b_fp4, scale_b_fp4 = ops.scaled_fp4_quant(b, b_global_scale)
     return b_fp4, scale_b_fp4, b_global_scale
 
@@ -41,9 +40,9 @@ def build_nvfp4_runner(cfg, a, b, dtype, device):
     b_fp4, scale_b_fp4, b_global_scale = _quant_weight_nvfp4(b, device)
 
     # Compute global scale for activation
-    a_global_scale = (
-        (FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX) / torch.amax(a.flatten(), dim=-1)
-    ).to(torch.float32)
+    # NOTE: This is generally provided ahead-of-time by the model checkpoint.
+    a_amax = torch.abs(a).max().to(torch.float32)
+    a_global_scale = FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / a_amax
 
     # Alpha for the GEMM operation
     alpha = 1.0 / (a_global_scale * b_global_scale)
