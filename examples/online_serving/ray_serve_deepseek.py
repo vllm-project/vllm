@@ -5,8 +5,6 @@ Deploy DeepSeek R1 or V3 with Ray Serve LLM.
 
 Ray Serve LLM is a scalable and production-grade model serving library built
 on the Ray distributed computing framework and first-class support for the vLLM engine.
- It manages model replicas,
-
 
 Key features:
 - Automatic scaling, back-pressure, and load balancing across a Ray cluster.
