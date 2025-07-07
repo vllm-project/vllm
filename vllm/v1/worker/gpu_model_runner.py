@@ -2228,8 +2228,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             max_num_mm_items_decoder_budget = self.max_num_reqs * \
                 max_mm_items_per_req
 
-            max_num_mm_items = min(max_num_mm_items_encoder_budget,
-                                   max_num_mm_items_decoder_budget)
+            max_num_mm_items = max(
+                1,
+                min(max_num_mm_items_encoder_budget,
+                    max_num_mm_items_decoder_budget))
 
             logger.info(
                 "Encoder cache will be initialized with a budget of %s tokens,"
