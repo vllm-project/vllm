@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 Tests for applying default registered multimodal loras.
 """
 
 import os
 
-import pytest
 from huggingface_hub import snapshot_download
 
 from vllm.lora.request import LoRARequest
@@ -23,15 +23,6 @@ AUDIO_PROMPT = "<|user|><|audio_1|>Can you transcribe this audio?<|end|><|assist
 # generates commentary on the transcription.
 RESPONSE_SUFFIX_WITH_LORA = "Spoken text: The first words I spoke in the original chronograph, a little piece of practical poetry. Mary had a little lamb, it slept with quite a snow, and everywhere that Mary went, the lamb was sure to go."  # noqa: E501
 RESPONSE_SUFFIX_WITHOUT_LORA = "Certainly! Here is the transcription of the audio you provided:\n\nThe first words I spoke in the original phonograph record: A little piece of practical poetry. Mary had a little lamb; its fleece was white as snow, and everywhere that Mary went, the lamb was sure to go."  # noqa: E501
-
-
-@pytest.fixture(autouse=True)
-def v1(run_with_both_engines_lora):
-    # Simple autouse wrapper to run both engines for each test
-    # This can be promoted up to conftest.py to run for every
-    # test in a package
-    pass
-
 
 VLLM_RUNNER_BASE_KWARGS = {
     "model_name": MODEL_PATH,
