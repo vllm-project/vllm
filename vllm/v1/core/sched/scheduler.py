@@ -55,6 +55,7 @@ class Scheduler(SchedulerInterface):
         self.lora_config = vllm_config.lora_config
         self.kv_cache_config = kv_cache_config
         self.kv_events_config = vllm_config.kv_events_config
+        self.parallel_config = vllm_config.parallel_config
         self.log_stats = log_stats
         self.structured_output_manager = structured_output_manager
 
@@ -87,7 +88,7 @@ class Scheduler(SchedulerInterface):
 
         self.kv_event_publisher = EventPublisherFactory.create(
             self.kv_events_config,
-            vllm_config.parallel_config.data_parallel_rank,
+            self.parallel_config.data_parallel_rank,
         )
 
         num_gpu_blocks = self.cache_config.num_gpu_blocks
@@ -159,6 +160,7 @@ class Scheduler(SchedulerInterface):
             log_stats=self.log_stats,
             enable_kv_cache_events=self.enable_kv_cache_events,
         )
+        self.use_pp = self.parallel_config.pipeline_parallel_size > 1
 
         self.is_async = False
 
@@ -222,7 +224,7 @@ class Scheduler(SchedulerInterface):
             # This is necessary when using spec decoding.
             num_new_tokens = min(
                 num_new_tokens,
-                self.max_model_len - request.num_computed_tokens)
+                self.max_model_len - 1 - request.num_computed_tokens)
 
             # Schedule encoder inputs.
             encoder_inputs_to_schedule = None
@@ -590,11 +592,10 @@ class Scheduler(SchedulerInterface):
             batch = KVEventBatch(ts=time.time(), events=events)
             self.kv_event_publisher.publish(batch)
 
-        self.update_before_output(scheduler_output)
-        self.finished_req_ids = set()
+        self._update_after_schedule(scheduler_output)
         return scheduler_output
 
-    def update_before_output(
+    def _update_after_schedule(
         self,
         scheduler_output: SchedulerOutput,
     ) -> None:
@@ -611,6 +612,11 @@ class Scheduler(SchedulerInterface):
         for req_id, num_scheduled_token in num_scheduled_tokens.items():
             request = self.requests[req_id]
             request.num_computed_tokens += num_scheduled_token
+
+        # Clear the finished request IDs.
+        # NOTE: We shouldn't do self.finished_req_ids.clear() here because
+        # it will also affect the scheduler output.
+        self.finished_req_ids = set()
 
     def _make_cached_request_data(
         self,
@@ -630,7 +636,12 @@ class Scheduler(SchedulerInterface):
             req_ids.append(req_id)
             num_tokens = (num_scheduled_tokens[req_id] -
                           len(spec_decode_tokens.get(req_id, ())))
-            if not self.is_async:
+            if self.use_pp:
+                # When using PP, the scheduler sends the sampled tokens back,
+                # because there's no direct communication between the first-
+                # stage worker and the last-stage worker. Otherwise, we don't
+                # need to send the sampled tokens back because the model runner
+                # will cache them.
                 token_ids = req.all_token_ids[req.num_computed_tokens:req.
                                               num_computed_tokens + num_tokens]
                 new_token_ids.append(token_ids)
@@ -783,7 +794,8 @@ class Scheduler(SchedulerInterface):
 
             # NOTE(woosuk): This has to be executed after updating
             # `request.num_computed_tokens`.
-            self._free_encoder_inputs(request)
+            if request.has_encoder_inputs:
+                self._free_encoder_inputs(request)
 
             stopped = False
             new_logprobs = None
@@ -892,16 +904,20 @@ class Scheduler(SchedulerInterface):
         cached_encoder_input_ids = (
             self.encoder_cache_manager.get_cached_input_ids(request))
         # OPTIMIZATION: Avoid list(set) if the set is empty.
-        if cached_encoder_input_ids:
-            for input_id in list(cached_encoder_input_ids):
-                mm_positions = request.mm_positions[input_id]
-                start_pos = mm_positions.offset
-                num_tokens = mm_positions.length
-                if start_pos + num_tokens <= request.num_computed_tokens:
-                    # The encoder output is already processed and stored
-                    # in the decoder's KV cache.
-                    self.encoder_cache_manager.free_encoder_input(
-                        request, input_id)
+        if not cached_encoder_input_ids:
+            return
+
+        # Here, we use list(set) to avoid modifying the set while iterating
+        # over it.
+        for input_id in list(cached_encoder_input_ids):
+            mm_positions = request.mm_positions[input_id]
+            start_pos = mm_positions.offset
+            num_tokens = mm_positions.length
+            if start_pos + num_tokens <= request.num_computed_tokens:
+                # The encoder output is already processed and stored
+                # in the decoder's KV cache.
+                self.encoder_cache_manager.free_encoder_input(
+                    request, input_id)
 
     def update_request(
         self,

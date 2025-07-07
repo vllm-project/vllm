@@ -700,9 +700,10 @@ class WhisperMultiModalProcessor(
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         if mm_data:
-            feature_extractor = self.info.get_feature_extractor(**mm_kwargs)
+            feature_extractor = self.info.get_feature_extractor()
             mm_data = dict(audio=mm_data.pop("audios"))
             mm_kwargs = dict(
                 **mm_kwargs,
@@ -712,6 +713,7 @@ class WhisperMultiModalProcessor(
             prompt=prompt,
             mm_data=mm_data,
             mm_kwargs=mm_kwargs,
+            tok_kwargs=tok_kwargs,
         )
         if "labels" in processed_outputs:
             processed_outputs["input_ids"] = processed_outputs.pop("labels")
@@ -758,6 +760,36 @@ class WhisperForConditionalGeneration(nn.Module, SupportsTranscription,
         ".fc1.": ".mlp.fc1.",
         ".fc2.": ".mlp.fc2."
     })
+
+    @classmethod
+    def validate_language(cls, language: str) -> bool:
+        if language in ISO639_1_SUPPORTED_LANGS:
+            return True
+        elif language in ISO639_1_OTHER_LANGS:
+            logger.warning(
+                "The selected language %s has limited accuracy with"
+                " reported WER>=0.5. Results may be less accurate "
+                "for this choice.", language)
+            return True
+        else:
+            raise ValueError(f"Unsupported language: {language}."
+                             "Language should be one of:" +
+                             f" {list(ISO639_1_SUPPORTED_LANGS.values())}" +
+                             f"or {list(ISO639_1_OTHER_LANGS.values())}")
+
+    @classmethod
+    def get_decoder_prompt(cls, language: str, task_type: str,
+                           prompt: str) -> str:
+        return ((f"<|prev|>{prompt}" if prompt else "") +
+                f"<|startoftranscript|><|{language}|>" +
+                f"<|{task_type}|><|notimestamps|>")
+
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+        if modality.startswith("audio"):
+            return None
+
+        raise ValueError("Only audio modality is supported")
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -837,28 +869,6 @@ class WhisperForConditionalGeneration(nn.Module, SupportsTranscription,
         # add fake zeros bias for k_proj to state_dict
         weights = _create_fake_bias_for_k_proj(weights)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-
-    @classmethod
-    def validate_language(cls, language: str) -> bool:
-        if language in ISO639_1_SUPPORTED_LANGS:
-            return True
-        elif language in ISO639_1_OTHER_LANGS:
-            logger.warning(
-                "The selected language %s has limited accuracy with"
-                " reported WER>=0.5. Results may be less accurate "
-                "for this choice.", language)
-            return True
-        else:
-            raise ValueError(f"Unsupported language: {language}."
-                             "Language should be one of:" +
-                             f" {list(ISO639_1_SUPPORTED_LANGS.values())}" +
-                             f"or {list(ISO639_1_OTHER_LANGS.values())}")
-
-    @classmethod
-    def get_decoder_prompt(cls, language: str, task_type: str,
-                           prompt: str) -> str:
-        return (f"<|startoftranscript|><|{language}|><|{task_type}|>"
-                f"<|notimestamps|>{prompt}")
 
 
 def _create_fake_bias_for_k_proj(

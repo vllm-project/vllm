@@ -18,11 +18,11 @@ class AsyncScheduler(Scheduler):
         super().__init__(*args, **kwargs)
         self.is_async = True
 
-    def update_before_output(
+    def _update_after_schedule(
         self,
         scheduler_output: SchedulerOutput,
     ) -> None:
-        super().update_before_output(scheduler_output)
+        super()._update_after_schedule(scheduler_output)
 
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
         for req_id in num_scheduled_tokens:

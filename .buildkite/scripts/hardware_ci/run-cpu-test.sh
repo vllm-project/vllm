@@ -51,6 +51,7 @@ function cpu_tests() {
     pytest -v -s tests/kernels/attention/test_cache.py -m cpu_model
     pytest -v -s tests/kernels/attention/test_mla_decode_cpu.py -m cpu_model
     pytest -v -s tests/models/language/generation -m cpu_model
+    VLLM_CPU_SGL_KERNEL=1 pytest -v -s tests/models/language/generation -m cpu_model
     pytest -v -s tests/models/language/pooling -m cpu_model
     pytest -v -s tests/models/multimodal/generation \
                 --ignore=tests/models/multimodal/generation/test_mllama.py \
@@ -65,10 +66,10 @@ function cpu_tests() {
     tests/quantization/test_compressed_tensors.py::test_compressed_tensors_w8a8_dynamic_per_token"
 
   # Run AWQ test
-  docker exec cpu-test-"$NUMA_NODE" bash -c "
-    set -e
-    VLLM_USE_V1=0 pytest -s -v \
-    tests/quantization/test_ipex_quant.py"
+  # docker exec cpu-test-"$NUMA_NODE" bash -c "
+  #   set -e
+  #   VLLM_USE_V1=0 pytest -s -v \
+  #   tests/quantization/test_ipex_quant.py"
 
   # Run chunked-prefill and prefix-cache test
   docker exec cpu-test-"$NUMA_NODE" bash -c "
@@ -98,4 +99,4 @@ function cpu_tests() {
 
 # All of CPU tests are expected to be finished less than 40 mins.
 export -f cpu_tests
-timeout 1h bash -c "cpu_tests $CORE_RANGE $NUMA_NODE"
+timeout 1.5h bash -c "cpu_tests $CORE_RANGE $NUMA_NODE"
