@@ -53,7 +53,8 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               EmbeddingRequest,
                                               EmbeddingResponse, ErrorResponse,
                                               PoolingResponse, RerankRequest,
-                                              ScoreRequest, ScoreResponse,
+                                              ResponsesRequest, ScoreRequest,
+                                              ScoreResponse,
                                               TokenizeChatRequest,
                                               TokenizeCompletionRequest,
                                               TokenizeResponse,
@@ -91,7 +92,8 @@ CompletionLikeRequest = Union[CompletionRequest, DetokenizeRequest,
 ChatLikeRequest = Union[ChatCompletionRequest, EmbeddingChatRequest,
                         TokenizeChatRequest]
 SpeechToTextRequest = Union[TranscriptionRequest, TranslationRequest]
-AnyRequest = Union[CompletionLikeRequest, ChatLikeRequest, SpeechToTextRequest]
+AnyRequest = Union[CompletionLikeRequest, ChatLikeRequest, SpeechToTextRequest,
+                   ResponsesRequest]
 
 AnyResponse = Union[
     CompletionResponse,
@@ -762,7 +764,7 @@ class OpenAIServing:
 
     async def _preprocess_chat(
         self,
-        request: ChatLikeRequest,
+        request: Union[ChatLikeRequest, ResponsesRequest],
         tokenizer: AnyTokenizer,
         messages: list[ChatCompletionMessageParam],
         chat_template: Optional[str],
