@@ -10,7 +10,7 @@ from functools import cached_property
 from typing import Callable, Optional, Union
 
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
-                                              DeltaMessage)
+                                              DeltaMessage, ResponsesRequest)
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import import_from_path, is_list_of
@@ -66,7 +66,9 @@ class ReasoningParser:
 
     @abstractmethod
     def extract_reasoning_content(
-            self, model_output: str, request: ChatCompletionRequest
+        self,
+        model_output: str,
+        request: Union[ChatCompletionRequest, ResponsesRequest],
     ) -> tuple[Optional[str], Optional[str]]:
         """
         Extract reasoning content from a complete model-generated string.

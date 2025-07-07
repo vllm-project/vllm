@@ -69,8 +69,9 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               PoolingCompletionRequest,
                                               PoolingRequest, PoolingResponse,
                                               RerankRequest, RerankResponse,
-                                              ScoreRequest, ScoreResponse,
-                                              TokenizeRequest,
+                                              ResponsesRequest,
+                                              ResponsesResponse, ScoreRequest,
+                                              ScoreResponse, TokenizeRequest,
                                               TokenizeResponse,
                                               TranscriptionRequest,
                                               TranscriptionResponse,
@@ -87,6 +88,7 @@ from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import (BaseModelPath,
                                                     OpenAIServingModels)
 from vllm.entrypoints.openai.serving_pooling import OpenAIServingPooling
+from vllm.entrypoints.openai.serving_responses import OpenAIServingResponses
 from vllm.entrypoints.openai.serving_score import ServingScores
 from vllm.entrypoints.openai.serving_tokenization import (
     OpenAIServingTokenization)
@@ -368,6 +370,10 @@ def models(request: Request) -> OpenAIServingModels:
     return request.app.state.openai_serving_models
 
 
+def responses(request: Request) -> Optional[OpenAIServingResponses]:
+    return request.app.state.openai_serving_responses
+
+
 def chat(request: Request) -> Optional[OpenAIServingChat]:
     return request.app.state.openai_serving_chat
 
@@ -529,6 +535,71 @@ async def show_available_models(raw_request: Request):
 async def show_version():
     ver = {"version": VLLM_VERSION}
     return JSONResponse(content=ver)
+
+
+@router.post("/v1/responses",
+             dependencies=[Depends(validate_json_request)],
+             responses={
+                 HTTPStatus.OK.value: {
+                     "content": {
+                         "text/event-stream": {}
+                     }
+                 },
+                 HTTPStatus.BAD_REQUEST.value: {
+                     "model": ErrorResponse
+                 },
+                 HTTPStatus.NOT_FOUND.value: {
+                     "model": ErrorResponse
+                 },
+                 HTTPStatus.INTERNAL_SERVER_ERROR.value: {
+                     "model": ErrorResponse
+                 },
+             })
+@with_cancellation
+async def create_responses(request: ResponsesRequest, raw_request: Request):
+    handler = responses(raw_request)
+    if handler is None:
+        return base(raw_request).create_error_response(
+            message="The model does not support Responses API")
+
+    generator = await handler.create_responses(request, raw_request)
+
+    if isinstance(generator, ErrorResponse):
+        return JSONResponse(content=generator.model_dump(),
+                            status_code=generator.code)
+    elif isinstance(generator, ResponsesResponse):
+        return JSONResponse(content=generator.model_dump())
+    return StreamingResponse(content=generator, media_type="text/event-stream")
+
+
+@router.get("/v1/responses/{response_id}")
+async def retrieve_responses(response_id: str, raw_request: Request):
+    handler = responses(raw_request)
+    if handler is None:
+        return base(raw_request).create_error_response(
+            message="The model does not support Responses API")
+
+    response = await handler.retrieve_responses(response_id)
+
+    if isinstance(response, ErrorResponse):
+        return JSONResponse(content=response.model_dump(),
+                            status_code=response.code)
+    return JSONResponse(content=response.model_dump())
+
+
+@router.post("/v1/responses/{response_id}/cancel")
+async def cancel_responses(response_id: str, raw_request: Request):
+    handler = responses(raw_request)
+    if handler is None:
+        return base(raw_request).create_error_response(
+            message="The model does not support Responses API")
+
+    response = await handler.cancel_responses(response_id)
+
+    if isinstance(response, ErrorResponse):
+        return JSONResponse(content=response.model_dump(),
+                            status_code=response.code)
+    return JSONResponse(content=response.model_dump())
 
 
 @router.post("/v1/chat/completions",
@@ -1272,6 +1343,22 @@ async def init_app_state(
         prompt_adapters=args.prompt_adapters,
     )
     await state.openai_serving_models.init_static_loras()
+    state.openai_serving_responses = OpenAIServingResponses(
+        engine_client,
+        model_config,
+        state.openai_serving_models,
+        request_logger=request_logger,
+        chat_template=resolved_chat_template,
+        chat_template_content_format=args.chat_template_content_format,
+        return_tokens_as_token_ids=args.return_tokens_as_token_ids,
+        enable_auto_tools=args.enable_auto_tool_choice,
+        expand_tools_even_if_tool_choice_none=args.
+        expand_tools_even_if_tool_choice_none,
+        tool_parser=args.tool_call_parser,
+        reasoning_parser=args.reasoning_parser,
+        enable_prompt_tokens_details=args.enable_prompt_tokens_details,
+        enable_force_include_usage=args.enable_force_include_usage,
+    ) if model_config.runner_type == "generate" else None
     state.openai_serving_chat = OpenAIServingChat(
         engine_client,
         model_config,
