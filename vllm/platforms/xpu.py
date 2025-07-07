@@ -93,10 +93,6 @@ class XPUPlatform(Platform):
                     "mode.")
                 model_config.enforce_eager = True
 
-        if vllm_config.speculative_config is not None:
-            raise NotImplementedError(
-                "XPU does not support speculative decoding")
-
         if vllm_config.device_config is not None:
             assert vllm_config.device_config.device_type == "xpu"
 
