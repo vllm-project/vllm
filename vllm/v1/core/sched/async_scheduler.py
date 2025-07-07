@@ -29,28 +29,33 @@ class AsyncScheduler(Scheduler):
                 self._free_encoder_inputs(request)
 
             if request.num_computed_tokens == request.num_tokens:
-                # Pre-allocate.
-                request.append_output_token_ids(-1)
+                # Pre-allocate the slot for output token ids.
+                request.num_output_placeholder += 1
 
     def _update_request(
         self,
         request: Request,
         new_token_ids: list[int],
     ) -> tuple[list[int], bool]:
-        if new_token_ids:
-            assert len(new_token_ids) == 1
-            new_token_id = new_token_ids[0]
-            request._output_token_ids[-1] = new_token_id
-            request._all_token_ids[-1] = new_token_id
+        if not new_token_ids:
+            return new_token_ids, False
 
-            # Now that the request has actual output tokens, we can cache the
-            # blocks. As an optimization, we only cache the blocks if the
-            # number of computed tokens is a multiple of the block size.
-            if request.num_computed_tokens % self.block_size == 0:
-                self.kv_cache_manager.cache_blocks(request,
-                                                   request.num_computed_tokens)
+        # Replace the pre-allocated placeholder token with the actual token.
+        request.num_output_placeholder -= len(new_token_ids)
+        assert request.num_output_placeholder >= 0
+        request.append_output_token_ids(new_token_ids)
 
-        # NOTE(woosuk): Even if new_token_ids is empty, we still need to check
-        # for stopping, because the request may be stopped by the length limit.
+        # Now that the request has actual output tokens, we can cache the
+        # blocks. As an optimization, we only cache the blocks if the number
+        # of computed tokens is a multiple of the block size.
+        if request.num_computed_tokens % self.block_size == 0:
+            self.kv_cache_manager.cache_blocks(request,
+                                               request.num_computed_tokens)
+
+        # NOTE: In async scheduling, the placeholder token should be ignored
+        # when checking the stop condition.
+        n = request.num_output_placeholder
+        request.num_output_placeholder = 0
         stopped = check_stop(request, self.max_model_len)
+        request.num_output_placeholder = n
         return new_token_ids, stopped

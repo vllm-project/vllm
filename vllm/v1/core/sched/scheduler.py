@@ -25,7 +25,7 @@ from vllm.v1.core.sched.output import (CachedRequestData, NewRequestData,
                                        SchedulerOutput)
 from vllm.v1.core.sched.request_queue import (SchedulingPolicy,
                                               create_request_queue)
-from vllm.v1.core.sched.utils import check_length, check_stop
+from vllm.v1.core.sched.utils import check_stop
 from vllm.v1.engine import (EngineCoreEventType, EngineCoreOutput,
                             EngineCoreOutputs)
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -162,6 +162,7 @@ class Scheduler(SchedulerInterface):
         )
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
 
+        # Used for async scheduler.
         self.is_async = False
 
     def schedule(self) -> SchedulerOutput:
@@ -205,12 +206,6 @@ class Scheduler(SchedulerInterface):
         req_index = 0
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
-            if self.is_async and not check_length(request, self.max_model_len):
-                # The request cannot be scheduled because it has reached its
-                # maximum length (either the max model len or its own max
-                # tokens).
-                req_index += 1
-                continue
 
             num_new_tokens = (request.num_tokens_with_spec -
                               request.num_computed_tokens)
@@ -222,9 +217,11 @@ class Scheduler(SchedulerInterface):
 
             # Make sure the input position does not exceed the max model len.
             # This is necessary when using spec decoding.
+            # Also, we don't need to generate more than max_total_tokens.
             num_new_tokens = min(
                 num_new_tokens,
-                self.max_model_len - 1 - request.num_computed_tokens)
+                self.max_model_len - 1 - request.num_computed_tokens,
+                request.max_total_tokens - 1 - request.num_computed_tokens)
 
             # Schedule encoder inputs.
             encoder_inputs_to_schedule = None
@@ -238,9 +235,11 @@ class Scheduler(SchedulerInterface):
             if num_new_tokens == 0:
                 # The request cannot be scheduled because one of the following
                 # reasons:
-                # 1. No new tokens to schedule. This may happen when PP>1 and
-                #    we have already scheduled all prompt tokens but they are
-                #    not finished yet.
+                # 1. No new tokens to schedule. This may happen when
+                #    (1) PP>1 and we have already scheduled all prompt tokens
+                #    but they are not finished yet.
+                #    (2) Async scheduling and the request has reached to either
+                #    its max_total_tokens or max_model_len.
                 # 2. The encoder budget is exhausted.
                 # 3. The encoder cache is exhausted.
                 # NOTE(woosuk): Here, by doing `continue` instead of `break`,

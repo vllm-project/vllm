@@ -75,8 +75,10 @@ class Request:
 
         self.prompt_token_ids = prompt_token_ids
         self.num_prompt_tokens = len(self.prompt_token_ids)
+        self.max_total_tokens = self.num_prompt_tokens + self.max_tokens
         self._output_token_ids: list[int] = []
         self._all_token_ids: list[int] = self.prompt_token_ids.copy()
+        self.num_output_placeholder = 0
         self.spec_token_ids: list[int] = []
         self.num_computed_tokens = 0
         self.cache_salt: Optional[str] = cache_salt
@@ -150,15 +152,16 @@ class Request:
 
     @property
     def num_tokens(self) -> int:
-        return len(self._all_token_ids)
+        return len(self._all_token_ids) + self.num_output_placeholder
 
     @property
     def num_tokens_with_spec(self) -> int:
-        return len(self._all_token_ids) + len(self.spec_token_ids)
+        return (len(self._all_token_ids) + self.num_output_placeholder +
+                len(self.spec_token_ids))
 
     @property
     def num_output_tokens(self) -> int:
-        return len(self._output_token_ids)
+        return len(self._output_token_ids) + self.num_output_placeholder
 
     def is_finished(self) -> bool:
         return RequestStatus.is_finished(self.status)
