@@ -2,11 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import warnings
-from typing import Optional
+from collections.abc import Mapping
+from typing import Literal, Optional
 
 import pytest
 
+from vllm.assets.audio import AudioAsset
 from vllm.assets.image import ImageAsset
+from vllm.assets.video import VideoAsset
 from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import (_try_extract_ast, load_chat_template,
                                          parse_chat_messages,
@@ -15,7 +18,8 @@ from vllm.entrypoints.chat_utils import (_try_extract_ast, load_chat_template,
                                          resolve_hf_chat_template)
 from vllm.entrypoints.llm import apply_hf_chat_template
 from vllm.multimodal import MultiModalDataDict
-from vllm.multimodal.utils import encode_image_base64
+from vllm.multimodal.utils import (encode_audio_base64, encode_image_base64,
+                                   encode_video_base64)
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 
 from ..models.registry import HF_EXAMPLE_MODELS
@@ -28,6 +32,7 @@ ULTRAVOX_MODEL_ID = "fixie-ai/ultravox-v0_5-llama-3_2-1b"
 QWEN2AUDIO_MODEL_ID = "Qwen/Qwen2-Audio-7B-Instruct"
 QWEN2VL_MODEL_ID = "Qwen/Qwen2-VL-2B-Instruct"
 QWEN25VL_MODEL_ID = "Qwen/Qwen2.5-VL-3B-Instruct"
+QWEN25OMNI_MODEL_ID = "Qwen/Qwen2.5-Omni-7B"
 MLLAMA_MODEL_ID = "meta-llama/Llama-3.2-11B-Vision-Instruct"
 LLAMA_GUARD_MODEL_ID = "meta-llama/Llama-Guard-3-1B"
 HERMES_MODEL_ID = "NousResearch/Hermes-3-Llama-3.1-8B"
@@ -48,10 +53,51 @@ def phi3v_model_config():
                        })
 
 
+@pytest.fixture(scope="function")
+def phi3v_model_config_mm_interleaved():
+    return ModelConfig(PHI3V_MODEL_ID,
+                       task="generate",
+                       tokenizer=PHI3V_MODEL_ID,
+                       tokenizer_mode="auto",
+                       trust_remote_code=True,
+                       dtype="auto",
+                       seed=0,
+                       interleave_mm_strings=True,
+                       limit_mm_per_prompt={
+                           "image": 2,
+                       })
+
+
 @pytest.fixture(scope="module")
 def phi3v_tokenizer():
     return TokenizerGroup(
         tokenizer_id=PHI3V_MODEL_ID,
+        enable_lora=False,
+        max_num_seqs=5,
+        max_input_length=None,
+    )
+
+
+@pytest.fixture(scope="function")
+def qwen25omni_model_config_mm_interleaved():
+    return ModelConfig(QWEN25OMNI_MODEL_ID,
+                       task="generate",
+                       tokenizer=QWEN25OMNI_MODEL_ID,
+                       tokenizer_mode="auto",
+                       dtype="auto",
+                       seed=0,
+                       interleave_mm_strings=True,
+                       limit_mm_per_prompt={
+                           "image": 2,
+                           "audio": 1,
+                           "video": 1,
+                       })
+
+
+@pytest.fixture(scope="module")
+def qwen25omni_tokenizer():
+    return TokenizerGroup(
+        tokenizer_id=QWEN25OMNI_MODEL_ID,
         enable_lora=False,
         max_num_seqs=5,
         max_input_length=None,
@@ -113,6 +159,20 @@ def image_url():
     return f"data:image/jpeg;base64,{base64}"
 
 
+@pytest.fixture(scope="module")
+def video_url():
+    video = VideoAsset('baby_reading', 1)
+    base64 = encode_video_base64(video.np_ndarrays)
+    return f"data:video/jpeg;base64,{base64}"
+
+
+@pytest.fixture(scope="module")
+def audio_url():
+    audio = AudioAsset('mary_had_lamb')
+    base64 = encode_audio_base64(*audio.audio_and_sample_rate)
+    return f"data:audio/ogg;base64,{base64}"
+
+
 def _assert_mm_data_is_image_input(
     mm_data: Optional[MultiModalDataDict],
     image_count: int,
@@ -124,6 +184,23 @@ def _assert_mm_data_is_image_input(
     assert image_data is not None
 
     assert isinstance(image_data, list) and len(image_data) == image_count
+
+
+ModalityType = Literal["image", "video", "audio"]
+MultiModalDataCounts = Mapping[ModalityType, int]
+
+
+def _assert_mm_data_inputs(
+    mm_data: Optional[MultiModalDataDict],
+    data_count: MultiModalDataCounts,
+) -> None:
+    assert mm_data is not None
+    assert set(data_count.keys()) == (set(mm_data.keys()))
+
+    for modality, n in data_count.items():
+        modality_data = mm_data.get(modality)
+        assert modality_data is not None
+        assert isinstance(modality_data, list) and len(modality_data) == n
 
 
 def test_parse_chat_messages_single_image(
@@ -635,6 +712,277 @@ def test_parse_chat_messages_multiple_images_uncommon_input(
         "<|image_1|>\n<|image_2|>\nWhat's in these images?"
     }]
     _assert_mm_data_is_image_input(mm_data, 2)
+
+
+def test_parse_chat_messages_multiple_images_interleave(
+    phi3v_model_config_mm_interleaved,
+    phi3v_tokenizer,
+    image_url,
+):
+    conversation, mm_data = parse_chat_messages(
+        [{
+            "role":
+            "user",
+            "content": [{
+                "type": "text",
+                "text": "I need you to compare this image"
+            }, {
+                "type": "image_url",
+                "image_url": {
+                    "url": image_url
+                }
+            }, {
+                "type": "text",
+                "text": "and this one"
+            }, {
+                "type": "image_url",
+                "image_url": {
+                    "url": image_url
+                }
+            }, {
+                "type": "text",
+                "text": "Do they have differences?"
+            }]
+        }],
+        phi3v_model_config_mm_interleaved,
+        phi3v_tokenizer,
+        content_format="string",
+    )
+
+    assert conversation == [{
+        "role":
+        "user",
+        "content":
+        "I need you to compare this image\n<|image_1|>\nand this one\n<|image_2|>\n"  # noqa: E501
+        "Do they have differences?"
+    }]
+    _assert_mm_data_is_image_input(mm_data, 2)
+
+
+@pytest.mark.asyncio
+async def test_parse_chat_messages_multiple_images_interleave_async(
+    phi3v_model_config_mm_interleaved,
+    phi3v_tokenizer,
+    image_url,
+):
+    conversation, mm_data = parse_chat_messages_futures(
+        [{
+            "role":
+            "user",
+            "content": [{
+                "type": "text",
+                "text": "I need you to compare this image"
+            }, {
+                "type": "image_url",
+                "image_url": {
+                    "url": image_url
+                }
+            }, {
+                "type": "text",
+                "text": "and this one"
+            }, {
+                "type": "image_url",
+                "image_url": {
+                    "url": image_url
+                }
+            }, {
+                "type": "text",
+                "text": "Do they have differences?"
+            }]
+        }],
+        phi3v_model_config_mm_interleaved,
+        phi3v_tokenizer,
+        content_format="string",
+    )
+
+    assert conversation == [{
+        "role":
+        "user",
+        "content":
+        "I need you to compare this image\n<|image_1|>\nand this one\n<|image_2|>\n"  # noqa: E501
+        "Do they have differences?"
+    }]
+    _assert_mm_data_is_image_input(await mm_data, 2)
+
+
+def test_parse_chat_messages_multiple_images_multiple_messages_interleave(
+    phi3v_model_config_mm_interleaved,
+    phi3v_tokenizer,
+    image_url,
+):
+    conversation, mm_data = parse_chat_messages(
+        [{
+            "role":
+            "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "What's on this image?"
+                },
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": image_url
+                    }
+                },
+                {
+                    "type": "text",
+                    "text": "Be accurate."
+                },
+            ]
+        }, {
+            "role": "assistant",
+            "content": "Some stuff."
+        }, {
+            "role":
+            "user",
+            "content": [{
+                "type": "text",
+                "text": "What's on this image?"
+            }, {
+                "type": "image_url",
+                "image_url": {
+                    "url": image_url
+                }
+            }]
+        }],
+        phi3v_model_config_mm_interleaved,
+        phi3v_tokenizer,
+        content_format="string",
+    )
+
+    assert conversation == [{
+        "role":
+        "user",
+        "content":
+        "What's on this image?\n<|image_1|>\nBe accurate."
+    }, {
+        "role": "assistant",
+        "content": "Some stuff."
+    }, {
+        "role": "user",
+        "content": "What's on this image?\n<|image_2|>"
+    }]
+    _assert_mm_data_is_image_input(mm_data, 2)
+
+
+def test_parse_chat_messages_multiple_modals_multiple_messages_interleave(
+        qwen25omni_model_config_mm_interleaved, qwen25omni_tokenizer,
+        image_url, video_url, audio_url):
+    conversation, mm_data = parse_chat_messages(
+        [{
+            "role":
+            "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "What's on this image?"
+                },
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": image_url
+                    }
+                },
+                {
+                    "type": "text",
+                    "text": "Now listen to this audio"
+                },
+                {
+                    "type": "audio_url",
+                    "audio_url": {
+                        "url": audio_url
+                    }
+                },
+            ]
+        }, {
+            "role": "assistant",
+            "content": "Some stuff."
+        }, {
+            "role":
+            "user",
+            "content": [{
+                "type": "text",
+                "text": "What's on this image?"
+            }, {
+                "type": "image_url",
+                "image_url": {
+                    "url": image_url
+                }
+            }, {
+                "type": "text",
+                "text": "And what's in the video?"
+            }, {
+                "type": "video_url",
+                "video_url": {
+                    "url": video_url
+                }
+            }]
+        }],
+        qwen25omni_model_config_mm_interleaved,
+        qwen25omni_tokenizer,
+        content_format="string",
+    )
+
+    assert conversation == [{
+        "role":
+        "user",
+        "content":
+        "What's on this image?\n<|vision_start|><|IMAGE|><|vision_end|>\n"
+        "Now listen to this audio\nAudio 1: <|audio_bos|><|AUDIO|><|audio_eos|>"
+    }, {
+        "role": "assistant",
+        "content": "Some stuff."
+    }, {
+        "role":
+        "user",
+        "content":
+        "What's on this image?\n<|vision_start|><|IMAGE|><|vision_end|>\n"
+        "And what's in the video?\n<|vision_start|><|VIDEO|><|vision_end|>"
+    }]
+
+    _assert_mm_data_inputs(mm_data, {"image": 2, "video": 1, "audio": 1})
+
+
+def test_parse_chat_messages_multiple_images_interleave_with_placeholders(
+    phi3v_model_config_mm_interleaved,
+    phi3v_tokenizer,
+    image_url,
+):
+    with pytest.raises(
+            ValueError,
+            match=r"Found more '<|image_1|>' placeholders in input prompt "
+            "than actual multimodal data items."):
+        parse_chat_messages(
+            [{
+                "role":
+                "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": image_url
+                        }
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": image_url
+                        }
+                    },
+                    {
+                        "type":
+                        "text",
+                        "text":
+                        "I need you to compare this image\n<|image_1|>\nand this one\n<|image_2|>\n"  # noqa: E501
+                        "Do they have differences?"
+                    },
+                ]
+            }],
+            phi3v_model_config_mm_interleaved,
+            phi3v_tokenizer,
+            content_format="string",
+        )
 
 
 ### Mllama currently wraps images / texts as interleaved dictionaries
