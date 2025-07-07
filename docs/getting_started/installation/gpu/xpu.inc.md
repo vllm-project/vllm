@@ -14,6 +14,8 @@ vLLM initially supports basic model inference and serving on Intel GPU platform.
 # --8<-- [end:requirements]
 # --8<-- [start:set-up-using-python]
 
+There is no extra information on creating a new Python environment for this device.
+
 # --8<-- [end:set-up-using-python]
 # --8<-- [start:pre-built-wheels]
 
@@ -43,9 +45,6 @@ VLLM_TARGET_DEVICE=xpu python setup.py install
       type is supported on Intel Data Center GPU, not supported on Intel Arc GPU yet.
 
 # --8<-- [end:build-wheel-from-source]
-# --8<-- [start:set-up-using-docker]
-
-# --8<-- [end:set-up-using-docker]
 # --8<-- [start:pre-built-images]
 
 Currently, there are no pre-built XPU images.
@@ -86,4 +85,3 @@ By default, a ray instance will be launched automatically if no existing one is 
 XPU platform uses **torch-ccl** for torch<2.8 and **xccl** for torch>=2.8 as distributed backend, since torch 2.8 supports **xccl** as built-in backend for XPU.
 
 # --8<-- [end:distributed-backend]
-# --8<-- [end:extra-information]
