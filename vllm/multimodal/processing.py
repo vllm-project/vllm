@@ -1525,6 +1525,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         for modality, cache_items in mm_cache_items.items():
             for cache_item in cache_items:
                 if cache_item.value is None:
+                    # FIXME RuntimeError: `get_item` is not supported when MultiModalKwargs is not initialized with `items`
                     kw_item = mm_missing_kwargs.get_item(
                         modality,
                         mm_missing_next_idx[modality],

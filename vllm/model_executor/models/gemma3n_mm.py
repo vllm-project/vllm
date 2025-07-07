@@ -25,7 +25,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalKwargs)
-from vllm.multimodal.parse import ImageProcessorItems, MultiModalDataItems
+from vllm.multimodal.parse import ImageProcessorItems, MultiModalDataItems, MultiModalDataParser
 # yapf: disable
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, BoundPromptUpdate,
@@ -158,6 +158,10 @@ class Gemma3nDummyInputsBuilder(BaseDummyInputsBuilder[Gemma3nProcessingInfo]):
 class Gemma3MultiModalProcessor(BaseMultiModalProcessor[Gemma3nProcessingInfo]
                                 ):
 
+    def _get_data_parser(self) -> MultiModalDataParser:
+        feature_extractor = self.info.get_hf_processor().feature_extractor
+        return MultiModalDataParser(target_sr=feature_extractor.sampling_rate)
+
     def _call_hf_processor(
         self,
         prompt: str,
@@ -180,7 +184,7 @@ class Gemma3MultiModalProcessor(BaseMultiModalProcessor[Gemma3nProcessingInfo]
         return dict(
             pixel_values=MultiModalFieldConfig.batched("image"),
             input_features=MultiModalFieldConfig.batched("audio"),
-            input_features_mask=MultiModalFieldConfig.batched("audio"),
+            # input_features_mask=MultiModalFieldConfig.batched("audio"),
         )
 
     def _get_prompt_updates(
@@ -532,6 +536,8 @@ class Gemma3nForConditionalGeneration(nn.Module, SupportsMultiModal):
                 inputs_embeds,
                 multimodal_embeddings,
                 self.config.image_token_id,
+                # TODO
+                # self.config.audio_token_id,
             )
         return inputs_embeds
 
