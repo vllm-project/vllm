@@ -177,7 +177,7 @@ class ServingScores(OpenAIServing):
         else:
             # `llm as reranker` models defaults to not using pad_token.
             tokenized_prompts = await asyncio.gather(
-                *(tokenize_async(text=t1+t2, **tokenization_kwargs)
+                *(tokenize_async(text=t1 + t2, **tokenization_kwargs)
                   for t1, t2 in input_pairs))
 
         for prompt_inputs, (t1, t2) in zip(tokenized_prompts, input_pairs):
