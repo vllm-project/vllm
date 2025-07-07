@@ -8,8 +8,13 @@ import torch
 from weight_shapes import WEIGHT_SHAPES
 
 from vllm import _custom_ops as ops
+from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.triton_utils import triton
+
+if not current_platform.has_device_capability(100):
+    raise RuntimeError("NVFP4 requires compute capability of 10.0 (Blackwell)")
+
 
 FLOAT4_E2M1_MAX = scalar_types.float4_e2m1f.max()
 FLOAT8_E4M3_MAX = torch.finfo(torch.float8_e4m3fn).max
