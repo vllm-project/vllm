@@ -250,7 +250,9 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         super().__init__(kv_cache_config, max_model_len, use_eagle,
                          enable_caching, caching_hash_fn,
                          enable_kv_cache_events)
-        self.verify_and_split_kv_cache_groups()
+        # attention free models are initialized with 0 kv_cache_groups
+        if len(self.kv_cache_config.kv_cache_groups) > 0:
+            self.verify_and_split_kv_cache_groups()
 
     def verify_and_split_kv_cache_groups(self) -> None:
         """

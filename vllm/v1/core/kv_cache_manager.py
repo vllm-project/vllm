@@ -89,7 +89,7 @@ class KVCacheManager:
         self.prefix_cache_stats = PrefixCacheStats() if log_stats else None
 
         self.block_size: Optional[int] = None
-        if self.enable_caching:
+        if self.enable_caching and len(self.kv_cache_config.kv_cache_groups) > 0:
             assert len(
                 set(g.kv_cache_spec.block_size
                     for g in kv_cache_config.kv_cache_groups)
