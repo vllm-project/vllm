@@ -13,8 +13,8 @@ Ray Data provides functionality for:
 * Scale up the workload without code changes.
 * Automatic sharding, load-balancing, and autoscaling across a Ray cluster,
   with built-in fault-tolerance and retry semantics.
-* Continuous batching that keeps vLLM replicas saturated and maximises GPU
-  utilisation.
+* Continuous batching that keeps vLLM replicas saturated and maximizes GPU
+  utilization.
 * Compatible with tensor/pipeline parallel inference.
 
 Learn more about Ray Data's LLM integration:
