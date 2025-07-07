@@ -36,7 +36,6 @@ if TYPE_CHECKING:
 
 Transfer = tuple[int, float]  # (xfer_handle, start_time)
 GET_META_MSG = b"get_meta_msg"
-NIXL_MAX_DESCS = 1000
 
 logger = init_logger(__name__)
 
@@ -861,12 +860,9 @@ class NixlConnectorWorker:
 
             # Done.
             if len(new_handles) == 0:
-                start = time.perf_counter()
                 self.nixl_wrapper.send_notif(agent_name, notif_id)
                 del transfers[req_id]
                 done_req_ids.add(req_id)
-                end = time.perf_counter()
-                print(f"========= SEND NOTIF TIME: {end - start} =========")
             else:
                 transfers[req_id] = (new_handles, agent_name, notif_id)
 
