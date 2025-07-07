@@ -54,9 +54,6 @@ If the build has error like the following snippet where standard C++ headers can
 ```
 
 # --8<-- [end:build-wheel-from-source]
-# --8<-- [start:set-up-using-docker]
-
-# --8<-- [end:set-up-using-docker]
 # --8<-- [start:pre-built-images]
 
 # --8<-- [end:pre-built-images]
