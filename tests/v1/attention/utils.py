@@ -1,0 +1,132 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Utility functions for attention-related v1 tests."""
+
+from dataclasses import dataclass
+
+import pytest
+import torch
+
+from vllm.config import VllmConfig
+from vllm.v1.attention.backends.utils import CommonAttentionMetadata
+from vllm.v1.kv_cache_interface import FullAttentionSpec
+
+
+@dataclass
+class BatchSpec:
+    """Specification for a batch configuration (workload shape only)."""
+    batch_size: int
+    seq_lens: list[int]
+    query_lens: list[int]
+
+    name: str = "unnamed"
+
+    def __post_init__(self):
+        assert len(self.seq_lens) == self.batch_size
+        assert len(self.query_lens) == self.batch_size
+
+    def compute_num_tokens(self):
+        return sum(self.seq_lens)
+
+
+def create_common_attn_metadata(
+        batch_spec: BatchSpec,
+        block_size: int,
+        device: torch.device,
+        max_block_idx: int = 1000) -> CommonAttentionMetadata:
+    """Create CommonAttentionMetadata from a BatchSpec and ModelParams."""
+    # Create query start locations
+    query_start_loc = torch.zeros(batch_spec.batch_size + 1,
+                                  dtype=torch.int32,
+                                  device=device)
+    query_start_loc[1:] = torch.tensor(batch_spec.query_lens,
+                                       dtype=torch.int32,
+                                       device=device).cumsum(0)
+    query_start_loc_cpu = query_start_loc.cpu()
+    num_tokens = batch_spec.compute_num_tokens()
+
+    # Create sequence lengths
+    seq_lens = torch.tensor(batch_spec.seq_lens,
+                            dtype=torch.int32,
+                            device=device)
+    seq_lens_cpu = seq_lens.cpu()
+
+    # Create computed tokens (assume all tokens are computed for simplicity)
+    num_computed_tokens_cpu = seq_lens_cpu.clone()
+
+    # Create block table (random for testing)
+    max_blocks = max(batch_spec.seq_lens) // block_size + 1
+    block_table_tensor = torch.randint(0,
+                                       max_block_idx,
+                                       (batch_spec.batch_size, max_blocks),
+                                       dtype=torch.int32,
+                                       device=device)
+
+    # Create slot mapping
+    slot_mapping = torch.randint(0,
+                                 max_block_idx, (num_tokens, ),
+                                 dtype=torch.int64,
+                                 device=device)
+
+    # Calculate max query length
+    max_query_len = max(batch_spec.query_lens)
+
+    return CommonAttentionMetadata(
+        query_start_loc=query_start_loc,
+        query_start_loc_cpu=query_start_loc_cpu,
+        seq_lens=seq_lens,
+        seq_lens_cpu=seq_lens_cpu,
+        num_computed_tokens_cpu=num_computed_tokens_cpu,
+        num_reqs=batch_spec.batch_size,
+        num_actual_tokens=num_tokens,
+        max_query_len=max_query_len,
+        block_table_tensor=block_table_tensor,
+        slot_mapping=slot_mapping,
+    )
+
+
+def get_attention_backend(backend_name: str):
+    """Set up attention backend classes for testing.
+    
+    Args:
+        backend_name: Name of the backend ("flash_attn", "flashinfer", etc.)
+        vllm_config: VllmConfig instance
+        
+    Returns:
+        Tuple of (backend_builder_class, backend_impl_class)
+    """
+    backend_map = {
+        "flash_attn":
+        ("vllm.v1.attention.backends.flash_attn", "FlashAttentionBackend"),
+        "flashinfer":
+        ("vllm.v1.attention.backends.flashinfer", "FlashInferBackend"),
+        "flex_attention":
+        ("vllm.v1.attention.backends.flex_attention", "FlexAttentionBackend"),
+    }
+
+    if backend_name not in backend_map:
+        raise ValueError(f"Unknown backend: {backend_name}")
+
+    module_name, backend_class_name = backend_map[backend_name]
+
+    try:
+        import importlib
+        module = importlib.import_module(module_name)
+        backend_class = getattr(module, backend_class_name)
+        return backend_class.get_builder_cls(), backend_class.get_impl_cls()
+    except ImportError as e:
+        pytest.skip(f"{backend_name} not available: {e}")
+
+
+def create_standard_kv_cache_spec(
+        vllm_config: VllmConfig) -> FullAttentionSpec:
+    """Create a FullAttentionSpec from ModelParams only."""
+    return FullAttentionSpec(
+        block_size=vllm_config.cache_config.block_size,
+        num_kv_heads=vllm_config.model_config.get_num_attention_heads(
+            vllm_config.parallel_config),
+        head_size=vllm_config.model_config.get_head_size(),
+        dtype=vllm_config.model_config.dtype,
+        use_mla=vllm_config.model_config.use_mla,
+        sliding_window=vllm_config.model_config.get_sliding_window(),
+    )
