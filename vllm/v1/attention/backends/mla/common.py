@@ -202,6 +202,7 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionLayer,
 from vllm.attention.backends.utils import get_mla_dims
 from vllm.attention.ops.merge_attn_states import merge_attn_states
 from vllm.attention.utils.fa_utils import get_flash_attn_version
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearBase,
@@ -215,7 +216,6 @@ from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
                                               reoder_batch_to_split_decodes_and_prefills,
                                               split_decodes_and_prefills)
 from vllm.v1.kv_cache_interface import AttentionSpec
-from vllm.v1.worker.block_table import BlockTable
 
 try:
     from vllm.vllm_flash_attn import flash_attn_varlen_func
@@ -237,7 +237,6 @@ except ImportError:
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.worker.gpu_input_batch import InputBatch
-    from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 logger = init_logger(__name__)
 
@@ -408,22 +407,23 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
     """
 
     def __init__(self,
-                 runner: "GPUModelRunner",
                  kv_cache_spec: AttentionSpec,
-                 block_table: BlockTable,
+                 vllm_config: VllmConfig,
+                 device: torch.device,
                  metadata_cls: Optional[type[M]] = None):
         self.metadata_cls = metadata_cls \
             if metadata_cls is not None else MLACommonMetadata
-        self.runner = runner
-        scheduler_config = runner.scheduler_config
-        model_config = runner.model_config
-        cache_config = runner.cache_config
-        self.chunked_prefill_enabled = scheduler_config.chunked_prefill_enabled
-        self.num_heads = model_config.get_num_attention_heads(
-            runner.parallel_config)
-        self.mla_dims = get_mla_dims(model_config)
-        self.aot_schedule = current_platform.is_cuda()
         self.kv_cache_spec = kv_cache_spec
+        self.device = device
+        scheduler_config = vllm_config.scheduler_config
+        self.model_config = vllm_config.model_config
+        cache_config = vllm_config.cache_config
+        parallel_config = vllm_config.parallel_config
+        self.chunked_prefill_enabled = scheduler_config.chunked_prefill_enabled
+        self.num_heads = self.model_config.get_num_attention_heads(
+            parallel_config)
+        self.mla_dims = get_mla_dims(self.model_config)
+        self.aot_schedule = current_platform.is_cuda()
 
         # Dont try to access the runner on AMD
         if self.aot_schedule:
@@ -434,7 +434,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 # Max sure there is enough for 8 full length request or at least
                 # 4 pages of cache per request
                 max(
-                    8 * model_config.max_model_len, 4 *
+                    8 * self.model_config.max_model_len, 4 *
                     scheduler_config.max_num_seqs * cache_config.block_size),
                 # For long-context models try not to over-allocate limiting
                 # kv-cache space, limiting it to 64k tokens,
@@ -449,12 +449,10 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 scheduler_config.max_num_seqs * cache_config.block_size
             self.chunked_prefill_workspace = torch.empty(
                 (self.chunked_prefill_workspace_size,
-                 model_config.get_head_size()),
-                dtype=model_config.dtype,
-                device=runner.device,
+                 self.model_config.get_head_size()),
+                dtype=self.model_config.dtype,
+                device=device,
             )
-
-        self.block_table = block_table
 
         self._use_cudnn_prefill = use_cudnn_prefill()
         self._use_fi_prefill = use_flashinfer_prefill()
@@ -600,7 +598,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         # Note(simon): be careful about the CPU <> GPU memory movement in this
         # function. We should avoid GPU -> CPU sync as much as possible because
         # it blocks on all previous kernels.
-        device = self.runner.device
+        device = self.device
         block_table_tensor = common_attn_metadata.block_table_tensor
         slot_mapping = common_attn_metadata.slot_mapping
 
@@ -723,7 +721,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             num_actual_tokens=num_tokens,
             query_start_loc=query_start_loc,
             slot_mapping=slot_mapping,
-            head_dim=self.runner.model_config.get_head_size(),
+            head_dim=self.model_config.get_head_size(),
             # MLACommonMetadata Chunk prefill specific
             num_decodes=num_decodes,
             num_decode_tokens=num_decode_tokens,
