@@ -18,6 +18,7 @@ from vllm.scalar_type import scalar_types
 
 logger = init_logger(__name__)
 
+
 def run_cutlass_moe_fp8(
     output: torch.Tensor,
     hidden_states: torch.Tensor,
@@ -643,6 +644,7 @@ def run_cutlass_block_scaled_fused_experts(
     return (c2[c_map].view(m, topk, k) *
             topk_weights.view(m, topk, 1).to(out_dtype)).sum(dim=1)
 
+
 def run_blocked_cutlass_moe_fp8(
     output: torch.Tensor,
     hidden_states: torch.Tensor,
@@ -721,7 +723,9 @@ def run_blocked_cutlass_moe_fp8(
 
     if a1q_scale is None:
         a1q, a1q_scale = _fp8_quantize(
-            a, A_scale=None, per_act_token=False,
+            a,
+            A_scale=None,
+            per_act_token=False,
             block_shape=[128, 128] if per_act_block else None)
 
     if expert_map is not None:
@@ -767,8 +771,9 @@ def run_blocked_cutlass_moe_fp8(
     c3 = _resize_cache(workspace13, (M * topk, K))
 
     if per_act_block:
-        a1q_scale = ops.transpose_cutlass_moe_a_scales(
-            a1q_scale, expert_offsets, problem_sizes1)
+        a1q_scale = ops.transpose_cutlass_moe_a_scales(a1q_scale,
+                                                       expert_offsets,
+                                                       problem_sizes1)
     else:
         a1q_scale = a1q_scale.repeat(a1q.shape[1] // 128, a1q.shape[0])
 
@@ -783,11 +788,14 @@ def run_blocked_cutlass_moe_fp8(
     activation_callable(c2, c1)
 
     a2q, a2q_scale = _fp8_quantize(
-        c2, A_scale=None, per_act_token=False,
+        c2,
+        A_scale=None,
+        per_act_token=False,
         block_shape=[128, 128] if per_act_block else None)
     if per_act_block:
-        a2q_scale = ops.transpose_cutlass_moe_a_scales(
-            a2q_scale, expert_offsets, problem_sizes2)
+        a2q_scale = ops.transpose_cutlass_moe_a_scales(a2q_scale,
+                                                       expert_offsets,
+                                                       problem_sizes2)
     else:
         a2q_scale = a2q_scale.repeat(a2q.shape[1] // 128, a2q.shape[0])
 
@@ -809,7 +817,7 @@ class CutlassExpertsBlockedFp8(mk.FusedMoEPermuteExpertsUnpermute):
         max_experts_per_worker: int,
         out_dtype: torch.dtype,
         per_act_block: bool,
-        block_shape: list[int] = [128, 128],
+        block_shape: list[int],
     ):
         super().__init__(
             FusedMoEQuantConfig(
@@ -894,13 +902,13 @@ def cutlass_moe_blocked_fp8(
     topk_ids: torch.Tensor,
     w1_scale: torch.Tensor,
     w2_scale: torch.Tensor,
+    block_shape: list[int],
     activation: str = "silu",
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
     apply_router_weight_on_input: bool = False,
     global_num_experts: int = -1,
     per_act_block: bool = True,
-    block_shape: list[int] = [128, 128],
 ) -> torch.Tensor:
     """
     This function computes a a8w8-blockwise quantized Mixture of Experts (MoE)

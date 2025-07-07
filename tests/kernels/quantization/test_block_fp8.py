@@ -7,9 +7,7 @@ import itertools
 import pytest
 import torch
 
-from tests.kernels.quant_utils import (native_per_token_group_quant_fp8,
-                                       native_w8a8_block_matmul,
-                                       per_block_cast_to_fp8)
+from tests.kernels.quant_utils import native_w8a8_block_matmul
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     native_per_token_group_quant_fp8, per_block_cast_to_fp8,

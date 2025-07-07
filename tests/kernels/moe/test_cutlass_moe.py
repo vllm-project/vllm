@@ -320,6 +320,7 @@ def run_blocked_8_bit(moe_tensors: MOETensors8Bit, topk_weights: torch.Tensor,
         'a1_scale': moe_tensors.a_scale,
         'global_num_experts': moe_tensors.w1.size(0),
         'per_act_block': per_act_block,
+        'block_shape': [128, 128],
     }
 
     return cutlass_moe_blocked_fp8(**kwargs)

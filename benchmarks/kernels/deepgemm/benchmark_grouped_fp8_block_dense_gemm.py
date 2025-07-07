@@ -2,30 +2,25 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # fmt: off
 # ruff: noqa: E501
-import time
 import dataclasses
+import time
 from typing import Optional
 
 # Import DeepGEMM functions
-import deep_gemm
 import torch
-from deep_gemm import calc_diff, ceil_div, get_col_major_tma_aligned_tensor
-from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
+from deep_gemm import calc_diff, ceil_div
 
 # Import vLLM functions
 from vllm import _custom_ops as ops
-from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    per_token_group_quant_fp8,
-    w8a8_block_fp8_matmul,
-)
-from vllm.model_executor.layers.fused_moe.cutlass_moe import (
-    cutlass_moe_blocked_fp8)
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    scaled_dequantize)
-from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
+from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import fused_experts
-
+from vllm.model_executor.layers.fused_moe.cutlass_moe import cutlass_moe_blocked_fp8
+from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    per_token_group_quant_fp8,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import scaled_dequantize
 from vllm.triton_utils import triton
 
 vllm_config = VllmConfig(parallel_config=ParallelConfig(
@@ -256,7 +251,7 @@ def benchmark_shape(e: int,
     score = torch.randn((m, e), device="cuda", dtype=torch.bfloat16)
     topk_weights, topk_ids, _ = fused_topk(a, score, topk, renormalize=False)
 
-    C_ref = torch_moe(a_d, mt.w1_d, mt.w2_d, score, topk)
+    C_ref = torch_moe(a_d, w1_d, w2_d, score, topk)
 
     # === DeepGEMM Implementation ===
     def deepgemm_gemm():
@@ -302,6 +297,7 @@ def benchmark_shape(e: int,
                 topk_ids,
                 w1_scale,
                 w2_scale,
+                [128, 128],
                 a1_scale=a1_scale,
                 per_act_block=True,
             )

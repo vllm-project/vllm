@@ -909,6 +909,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         elif self.cutlass_block_fp8_supported:
             from vllm.model_executor.layers.fused_moe.cutlass_moe import (
                 cutlass_moe_blocked_fp8)
+            block_shape = self.quant_config.weight_block_size
+            assert block_shape is not None, "block_shape must not be None for blockwise MoE"  #noqa: E501
             return cutlass_moe_blocked_fp8(
                 x,
                 layer.w13_weight,
@@ -919,6 +921,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                  if self.block_quant else layer.w13_weight_scale),
                 (layer.w2_weight_scale_inv
                  if self.block_quant else layer.w2_weight_scale),
+                block_shape,
                 activation,
                 layer.w13_input_scale,
                 layer.w2_input_scale,
