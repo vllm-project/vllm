@@ -1205,8 +1205,6 @@ class LLM:
         input_pairs = [(t1, t2) for t1, t2 in zip(text_1, text_2)]
 
         pooling_params = PoolingParams()
-        use_pad_token = getattr(self.llm_engine.model_config.hf_config,
-                                "use_pad_token", True)
 
         tokenization_kwargs: dict[str, Any] = {}
         _validate_truncation_size(self.llm_engine.model_config.max_model_len,
@@ -1215,12 +1213,9 @@ class LLM:
         parsed_prompts = []
 
         for q, t in input_pairs:
-            if use_pad_token:
-                prompt_inputs = tokenizer(text=q,
-                                          text_pair=t,
-                                          **tokenization_kwargs)
-            else:
-                prompt_inputs = tokenizer(text=q + t, **tokenization_kwargs)
+            prompt_inputs = tokenizer(text=q,
+                                      text_pair=t,
+                                      **tokenization_kwargs)
             engine_prompt = TokensPrompt(
                 prompt_token_ids=prompt_inputs["input_ids"],
                 token_type_ids=prompt_inputs.get("token_type_ids"))
