@@ -11,6 +11,7 @@ from vllm.config import VllmConfig
 from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 from vllm.logger import init_logger
 from vllm.model_executor.utils import set_random_seed
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import ModelRunnerOutput
@@ -58,7 +59,8 @@ class CPUWorker(Worker):
         # Initialize the distributed environment.
         init_worker_distributed_environment(self.vllm_config, self.rank,
                                             self.distributed_init_method,
-                                            self.local_rank, "gloo")
+                                            self.local_rank,
+                                            current_platform.dist_backend)
         # Set random seed.
         set_random_seed(self.model_config.seed)
 
