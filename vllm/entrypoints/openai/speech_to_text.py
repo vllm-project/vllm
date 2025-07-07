@@ -9,6 +9,9 @@ from functools import cached_property
 from math import ceil
 from typing import Callable, Literal, Optional, TypeVar, Union, cast
 
+from mistral_common.audio import Audio
+from mistral_common.protocol.transcription.request import TranscriptionRequest
+from mistral_common.protocol.instruct.messages import AudioChunk
 import numpy as np
 from fastapi import Request
 
@@ -29,6 +32,7 @@ from vllm.model_executor.model_loader import get_model_cls
 from vllm.model_executor.models import SupportsTranscription
 from vllm.outputs import RequestOutput
 from vllm.transformers_utils.processor import cached_get_processor
+from vllm.transformers_utils.tokenizers.mistral import MistralTokenizer
 from vllm.utils import PlaceholderModule
 
 try:
@@ -71,12 +75,22 @@ class OpenAISpeechToText(OpenAIServing):
 
         self.default_sampling_params = (
             self.model_config.get_diff_sampling_param())
-        processor = cached_get_processor(model_config.model)
-        self.max_audio_clip_s = processor.feature_extractor.chunk_length \
-            if hasattr(processor.feature_extractor, 'chunk_length') \
-            else MAX_AUDIO_CLIP_SECONDS
-        self.model_sr = processor.feature_extractor.sampling_rate
-        self.hop_length = processor.feature_extractor.hop_length
+
+        self.tokenizer = engine_client.processor.input_preprocessor.tokenizer.tokenizer
+        if isinstance(self.tokenizer, MistralTokenizer):
+            audio_encoder = self.tokenizer.instruct.audio_encoder
+            self.max_audio_clip_s = None
+            self.model_sr = audio_encoder.audio_config.sampling_rate
+            self.hop_length = None
+        else:
+            processor = cached_get_processor(model_config.model)
+            self.audio_encoder = None
+            self.max_audio_clip_s = processor.feature_extractor.chunk_length \
+                if hasattr(processor.feature_extractor, 'chunk_length') \
+                else MAX_AUDIO_CLIP_SECONDS
+            self.model_sr = processor.feature_extractor.sampling_rate
+            self.hop_length = processor.feature_extractor.hop_length
+
         self.task_type = task_type
 
         if self.default_sampling_params:
@@ -105,29 +119,44 @@ class OpenAISpeechToText(OpenAIServing):
         if len(audio_data) / 1024**2 > MAX_AUDIO_CLIP_FILESIZE_MB:
             raise ValueError("Maximum file size exceeded.")
 
-        with io.BytesIO(audio_data) as bytes_:
-            # NOTE resample to model SR here for efficiency. This is also a
-            # pre-requisite for chunking, as it assumes Whisper SR.
-            y, sr = librosa.load(bytes_, sr=self.model_sr)
-
-        duration = librosa.get_duration(y=y, sr=sr)
-        chunks = [y
-                  ] if duration < self.max_audio_clip_s else self._split_audio(
-                      y, int(sr))
         prompts = []
-        for chunk in chunks:
-            prompt = {
-                "encoder_prompt": {
-                    "prompt": "",
-                    "multi_modal_data": {
-                        "audio": (chunk, sr),
+        if not isinstance(self.tokenizer, MistralTokenizer):
+            with io.BytesIO(audio_data) as bytes_:
+                # NOTE resample to model SR here for efficiency. This is also a
+                # pre-requisite for chunking, as it assumes Whisper SR.
+                y, sr = librosa.load(bytes_, sr=self.model_sr)
+
+            duration = librosa.get_duration(y=y, sr=sr)
+
+            chunks = [y
+                    ] if duration < self.max_audio_clip_s else self._split_audio(
+                        y, int(sr))
+            for chunk in chunks:
+                prompt = {
+                    "encoder_prompt": {
+                        "prompt": "",
+                        "multi_modal_data": {
+                            "audio": (chunk, sr),
+                        },
                     },
-                },
-                "decoder_prompt":
-                model_cls.get_decoder_prompt(lang, self.task_type,
-                                             request.prompt)
-            }
-            prompts.append(cast(PromptType, prompt))
+                    "decoder_prompt":
+                    model_cls.get_decoder_prompt(lang, self.task_type,
+                                                request.prompt)
+                }
+                prompts.append(cast(PromptType, prompt))
+        else:
+            oai_request_dict = request.model_dump()
+            with io.BytesIO(audio_data) as bytes_:
+                oai_request_dict["file"] = bytes_
+                req = TranscriptionRequest.from_openai(oai_request_dict)
+
+            duration = req.audio.input_audio.duration
+            tokenized = self.tokenizer.instruct.encode_transcription(req)
+            audio = (tokenized.audios[0].audio_array, self.model_sr)
+            prompts_dict = {"multi_modal_data": {"audio": audio}}
+            prompts_dict["prompt_token_ids"] = tokenized.tokens
+            prompts = [cast(PromptType, prompts_dict)]
+
         return prompts, duration
 
     async def _create_speech_to_text(
@@ -194,12 +223,13 @@ class OpenAISpeechToText(OpenAIServing):
             sampling_params = request.to_sampling_params(
                 default_max_tokens, self.default_sampling_params)
 
-            self._log_inputs(
-                request_id,
-                prompts[0]['decoder_prompt'],  # type: ignore
-                params=sampling_params,
-                lora_request=None,
-                prompt_adapter_request=None)
+            if "decoder_prompt" in prompts[0]:
+                self._log_inputs(
+                    request_id,
+                    prompts[0]['decoder_prompt'],  # type: ignore
+                    params=sampling_params,
+                    lora_request=None,
+                    prompt_adapter_request=None)
 
             list_result_generator = [
                 self.engine_client.generate(

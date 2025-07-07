@@ -8,6 +8,8 @@ from functools import cached_property
 from math import ceil
 from typing import Optional, Union, cast
 from vllm.multimodal.parse import MultiModalDataItems, MultiModalDataParser
+from .interfaces import (MultiModalEmbeddings, SupportsMultiModal,
+                         SupportsTranscription, SupportsV0Only)
 
 import numpy as np
 import torch
@@ -295,7 +297,7 @@ class VoxtralMultiModalProcessor(
     info=VoxtralProcessingInfo,
     dummy_inputs=VoxtralDummyInputsBuilder)
 class VoxtralForConditionalGeneration(nn.Module, SupportsMultiModal,
-                                       SupportsPP):
+                                       SupportsPP, SupportsTranscription):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
