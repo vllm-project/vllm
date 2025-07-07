@@ -505,6 +505,7 @@ def load_mistral3(question: str, image_urls: list[str]) -> ModelRequestData:
         max_num_seqs=2,
         tensor_parallel_size=2,
         limit_mm_per_prompt={"image": len(image_urls)},
+        ignore_patterns=["consolidated.safetensors"],
     )
 
     placeholders = "[IMG]" * len(image_urls)
