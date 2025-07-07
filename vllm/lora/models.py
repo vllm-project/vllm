@@ -805,7 +805,7 @@ def create_lora_manager(
         lora_manager_cls: type[LoRAModelManager] = LoRAModelManager,
         **kwargs) -> LoRAModelManager:
     """Create a LoRA adapter for a given model."""
-    if not hasattr(model, "packed_modules_mapping"):
+    if not isinstance(model, SupportsLoRA):
         raise ValueError(f"Model {type(model)} is not supported for LoRA.")
     lora_manager = lora_manager_cls(
         model=model,

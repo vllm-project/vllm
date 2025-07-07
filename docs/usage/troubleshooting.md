@@ -212,7 +212,7 @@ if __name__ == '__main__':
 
 ## `torch.compile` Error
 
-vLLM heavily depends on `torch.compile` to optimize the model for better performance, which introduces the dependency on the `torch.compile` functionality and the `triton` library. By default, we use `torch.compile` to [optimize some functions](https://github.com/vllm-project/vllm/pull/10406) in the model. Before running vLLM, you can check if `torch.compile` is working as expected by running the following script:
+vLLM heavily depends on `torch.compile` to optimize the model for better performance, which introduces the dependency on the `torch.compile` functionality and the `triton` library. By default, we use `torch.compile` to [optimize some functions](gh-pr:10406) in the model. Before running vLLM, you can check if `torch.compile` is working as expected by running the following script:
 
 ??? Code
 
@@ -231,7 +231,7 @@ vLLM heavily depends on `torch.compile` to optimize the model for better perform
     print(f(x))
     ```
 
-If it raises errors from `torch/_inductor` directory, usually it means you have a custom `triton` library that is not compatible with the version of PyTorch you are using. See [this issue](https://github.com/vllm-project/vllm/issues/12219) for example.
+If it raises errors from `torch/_inductor` directory, usually it means you have a custom `triton` library that is not compatible with the version of PyTorch you are using. See <gh-issue:12219> for example.
 
 ## Model failed to be inspected
 
@@ -272,6 +272,27 @@ But you are sure that the model is in the [list of supported models][supported-m
 ## Failed to infer device type
 
 If you see an error like `RuntimeError: Failed to infer device type`, it means that vLLM failed to infer the device type of the runtime environment. You can check [the code](gh-file:vllm/platforms/__init__.py) to see how vLLM infers the device type and why it is not working as expected. After [this PR](gh-pr:14195), you can also set the environment variable `VLLM_LOGGING_LEVEL=DEBUG` to see more detailed logs to help debug the issue.
+
+## NCCL error: unhandled system error during `ncclCommInitRank`
+
+If your serving workload uses GPUDirect RDMA for distributed serving across multiple nodes and encounters an error during `ncclCommInitRank`, with no clear error message even with `NCCL_DEBUG=INFO` set, it might look like this:
+
+```text
+Error executing method 'init_device'. This might cause deadlock in distributed execution.
+Traceback (most recent call last):
+...
+   File "/usr/local/lib/python3.12/dist-packages/vllm/distributed/device_communicators/pynccl.py", line 99, in __init__
+     self.comm: ncclComm_t = self.nccl.ncclCommInitRank(
+                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   File "/usr/local/lib/python3.12/dist-packages/vllm/distributed/device_communicators/pynccl_wrapper.py", line 277, in ncclCommInitRank
+     self.NCCL_CHECK(self._funcs["ncclCommInitRank"](ctypes.byref(comm),
+   File "/usr/local/lib/python3.12/dist-packages/vllm/distributed/device_communicators/pynccl_wrapper.py", line 256, in NCCL_CHECK
+     raise RuntimeError(f"NCCL error: {error_str}")
+ RuntimeError: NCCL error: unhandled system error (run with NCCL_DEBUG=INFO for details)
+...
+```
+
+This indicates vLLM failed to initialize the NCCL communicator, possibly due to a missing `IPC_LOCK` linux capability  or an unmounted `/dev/shm`. Refer to [Distributed Inference and Serving](../serving/distributed_serving.md#running-vllm-on-multiple-nodes) for guidance on properly configuring the environment for distributed serving.
 
 ## Known Issues
 
