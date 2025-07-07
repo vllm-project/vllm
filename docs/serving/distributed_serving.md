@@ -78,7 +78,7 @@ bash run_cluster.sh \
                 -e VLLM_HOST_IP=<this_node_ip>
 ```
 
-Keep the shells running these commands open; closing a shell terminates the cluster. Ensure that all nodes can communicate to each through through their IP addresses. Set `VLLM_HOST_IP` on each worker to its unique IP address.
+Keep the shells running these commands open; closing a shell terminates the cluster. Ensure that all nodes can communicate with each other through their IP addresses. Set `VLLM_HOST_IP` on each worker to its unique IP address.
 
 !!! warning
     For security, set `VLLM_HOST_IP` to an address on a private network segment. Traffic sent over this network is unencrypted, and the endpoints exchange data in a format that can be exploited to execute arbitrary code if an adversary gains network access. Ensure that untrusted parties cannot reach the network.
