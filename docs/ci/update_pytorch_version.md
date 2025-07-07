@@ -7,9 +7,8 @@ release in CI/CD. It is standard practice to submit a PR to update the
 PyTorch version as early as possible when a new [PyTorch stable
 release](https://github.com/pytorch/pytorch/blob/main/RELEASE.md#release-cadence) becomes available.
 This process is non-trivial due to the gap between PyTorch
-releases. Using [#16859](https://github.com/vllm-project/vllm/pull/16859) as
-an example, this document outlines common steps to achieve this update along with
-a list of potential issues and how to address them.
+releases. Using <gh-pr:16859> as an example, this document outlines common steps to achieve this
+update along with a list of potential issues and how to address them.
 
 ## Test PyTorch release candidates (RCs)
 
@@ -68,7 +67,7 @@ and timeout. Additionally, since vLLM's fastcheck pipeline runs in read-only mod
 it doesn't populate the cache, so re-running it to warm up the cache
 is ineffective.
 
-While ongoing efforts like [#17419](https://github.com/vllm-project/vllm/issues/17419)
+While ongoing efforts like [#17419](gh-issue:17419)
 address the long build time at its source, the current workaround is to set VLLM_CI_BRANCH
 to a custom branch provided by @khluu (`VLLM_CI_BRANCH=khluu/use_postmerge_q`)
 when manually triggering a build on Buildkite. This branch accomplishes two things:
@@ -129,6 +128,5 @@ to handle some platforms separately. The separation of requirements and Dockerfi
 for different platforms in vLLM CI/CD allows us to selectively choose
 which platforms to update. For instance, updating XPU requires the corresponding
 release from https://github.com/intel/intel-extension-for-pytorch by Intel.
-While https://github.com/vllm-project/vllm/pull/16859 updated vLLM to PyTorch
-2.7.0 on CPU, CUDA, and ROCm, https://github.com/vllm-project/vllm/pull/17444
-completed the update for XPU.
+While <gh-pr:16859> updated vLLM to PyTorch 2.7.0 on CPU, CUDA, and ROCm,
+<gh-pr:17444> completed the update for XPU.
