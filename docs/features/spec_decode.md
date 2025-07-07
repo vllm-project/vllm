@@ -217,8 +217,8 @@ an [EAGLE (Extrapolation Algorithm for Greater Language-model Efficiency)](https
 A few important things to consider when using the EAGLE based draft models:
 
 1. The EAGLE draft models available in the [HF repository for EAGLE models](https://huggingface.co/yuhuili) should
-   be able to be loaded and used directly by vLLM after [PR 12304](https://github.com/vllm-project/vllm/pull/12304).
-   If you are using vllm version before [PR 12304](https://github.com/vllm-project/vllm/pull/12304), please use the
+   be able to be loaded and used directly by vLLM after <gh-pr:12304>.
+   If you are using vllm version before <gh-pr:12304>, please use the
    [script](https://gist.github.com/abhigoyal1997/1e7a4109ccb7704fbc67f625e86b2d6d) to convert the speculative model,
    and specify `"model": "path/to/modified/eagle/model"` in `speculative_config`. If weight-loading problems still occur when using the latest version of vLLM, please leave a comment or raise an issue.
 
@@ -228,7 +228,7 @@ A few important things to consider when using the EAGLE based draft models:
 
 3. When using EAGLE-based speculators with vLLM, the observed speedup is lower than what is
    reported in the reference implementation [here](https://github.com/SafeAILab/EAGLE). This issue is under
-   investigation and tracked here: [https://github.com/vllm-project/vllm/issues/9565](https://github.com/vllm-project/vllm/issues/9565).
+   investigation and tracked here: <gh-issue:9565>.
 
 A variety of EAGLE draft models are available on the Hugging Face hub:
 

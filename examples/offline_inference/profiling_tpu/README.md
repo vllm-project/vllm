@@ -57,7 +57,10 @@ Once you have collected your profiles with this script, you can visualize them u
 Here are most likely the dependencies you need to install:
 
 ```bash
-pip install tensorflow-cpu tensorboard-plugin-profile etils importlib_resources
+pip install tensorflow-cpu \
+    tensorboard-plugin-profile \
+    etils \
+    importlib_resources
 ```
 
 Then you just need to point TensorBoard to the directory where you saved the profiles and visit `http://localhost:6006/` in your browser:

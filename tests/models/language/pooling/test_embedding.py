@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
+from typing import Optional
 
 import pytest
 
@@ -74,6 +75,13 @@ def test_models(
         vllm_extra_kwargs["override_pooler_config"] = \
             PoolerConfig(pooling_type="MEAN", normalize=False)
 
+    max_model_len: Optional[int] = 512
+    if model in [
+            "sentence-transformers/all-MiniLM-L12-v2",
+            "sentence-transformers/stsb-roberta-base-v2"
+    ]:
+        max_model_len = None
+
     # The example_prompts has ending "\n", for example:
     # "Write a short story about a robot that dreams for the first time.\n"
     # sentence_transformers will strip the input texts, see:
@@ -87,7 +95,7 @@ def test_models(
 
     with vllm_runner(model,
                      task="embed",
-                     max_model_len=512,
+                     max_model_len=max_model_len,
                      **vllm_extra_kwargs) as vllm_model:
         vllm_outputs = vllm_model.embed(example_prompts)
 

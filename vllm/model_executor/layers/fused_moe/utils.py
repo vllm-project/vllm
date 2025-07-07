@@ -99,9 +99,20 @@ def _fp8_perm(m: torch.Tensor, idx: torch.Tensor) -> torch.Tensor:
         return m[idx, ...]
 
 
-# TODO(bnell): better name
-def maybe_fix_scales(scales: Optional[torch.Tensor],
-                     num_experts: int) -> Optional[torch.Tensor]:
+def normalize_scales_shape(
+        scales: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+    if scales is not None:
+        if scales.numel() == 1:
+            scales = scales.view(1, 1)
+        else:
+            scales = scales.view(-1, scales.size(-1))
+    return scales
+
+
+def normalize_batched_scales_shape(
+    scales: Optional[torch.Tensor],
+    num_experts: int,
+) -> Optional[torch.Tensor]:
     if scales is not None and scales.ndim < 3:
         if scales.numel() == 1:
             scales = scales.view(1)
@@ -111,3 +122,23 @@ def maybe_fix_scales(scales: Optional[torch.Tensor],
             scales = scales.view(num_experts, -1, scales.size(-1))
 
     return scales
+
+
+def _validate_scale_shape(
+    a: torch.Tensor,
+    a_scale: Optional[torch.Tensor],
+    per_act_token_quant: bool,
+    block_shape: Optional[list[int]],
+) -> None:
+    if a_scale is None:
+        return
+
+    if not per_act_token_quant and block_shape is None:
+        assert a_scale.numel() == 1, f"{a_scale.shape}"
+    elif per_act_token_quant:
+        assert a_scale.shape[0] == a.shape[0] and a_scale.shape[1] == 1, (
+            f"{a_scale.shape[0]} == {a.shape[0]} and {a_scale.shape[1]} == 1")
+    else:
+        assert block_shape is not None
+        expected = (a.shape[0], cdiv(a.shape[1], block_shape[1]))
+        assert a_scale.shape == expected, f"{a_scale.shape} == {expected}"

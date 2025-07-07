@@ -18,6 +18,7 @@ from vllm.distributed import (ensure_model_parallel_initialized,
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
+from vllm.platforms import current_platform
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, cdiv
 from vllm.v1.attention.backends.pallas import TPU_HEAD_SIZE_ALIGNMENT
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -300,7 +301,7 @@ class TPUWorker:
             rank=rank,
             local_rank=local_rank,
             distributed_init_method=distributed_init_method,
-            backend="gloo",
+            backend=current_platform.dist_backend,
         )
         ensure_model_parallel_initialized(
             parallel_config.tensor_parallel_size,

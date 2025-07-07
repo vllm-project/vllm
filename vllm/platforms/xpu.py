@@ -29,6 +29,7 @@ class XPUPlatform(Platform):
     # Intel XPU's device key is "GPU" for Ray.
     # see https://github.com/ray-project/ray/blob/6a5eb5865eeb9ccf058a79b44f107e327e360673/python/ray/_private/accelerators/intel_gpu.py#L20 # noqa: E501
     ray_device_key: str = "GPU"
+    dist_backend: str = "ccl"  # ccl | xccl
     device_control_env_var: str = "ONEAPI_DEVICE_SELECTOR"
 
     @classmethod
@@ -36,15 +37,13 @@ class XPUPlatform(Platform):
                              dtype: torch.dtype, kv_cache_dtype: Optional[str],
                              block_size: int, use_v1: bool,
                              use_mla: bool) -> str:
-        if selected_backend != _Backend.IPEX:
+        if selected_backend is not None and selected_backend != _Backend.IPEX:
             logger.info("Cannot use %s backend on XPU.", selected_backend)
         use_v1 = envs.VLLM_USE_V1
-        if use_v1:
-            logger.info("Using Flash Attention backend on V1 engine.")
-            return "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"
-        else:
-            logger.info("Using IPEX attention backend.")
-            return "vllm.attention.backends.ipex_attn.IpexAttnBackend"
+        if not use_v1:
+            raise ValueError("XPU backend only supports V1.")
+        logger.info("Using Flash Attention backend on V1 engine.")
+        return "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"
 
     @classmethod
     def get_device_capability(
@@ -77,10 +76,7 @@ class XPUPlatform(Platform):
         cache_config = vllm_config.cache_config
         # in V1(or with ipex chunked prefill) block_size is 64
         if cache_config and cache_config.block_size is None:
-            if envs.VLLM_USE_V1:
-                cache_config.block_size = 64
-            else:
-                cache_config.block_size = 16
+            cache_config.block_size = 64
 
         # Instances created using VllmConfig() typically have model_config as
         # None by default. The modification involves adding a check to prevent
@@ -97,20 +93,12 @@ class XPUPlatform(Platform):
                     "mode.")
                 model_config.enforce_eager = True
 
-        if vllm_config.speculative_config is not None:
-            raise NotImplementedError(
-                "XPU does not support speculative decoding")
-
         if vllm_config.device_config is not None:
             assert vllm_config.device_config.device_type == "xpu"
 
         # check and update parallel config
         parallel_config = vllm_config.parallel_config
-        if envs.VLLM_USE_V1:
-            parallel_config.worker_cls =\
-                "vllm.v1.worker.xpu_worker.XPUWorker"
-        else:
-            parallel_config.worker_cls = "vllm.worker.xpu_worker.XPUWorker"
+        parallel_config.worker_cls = "vllm.v1.worker.xpu_worker.XPUWorker"
 
         if parallel_config.distributed_executor_backend is None:
             if parallel_config.world_size > 1:
@@ -145,8 +133,7 @@ class XPUPlatform(Platform):
 
     @classmethod
     def is_pin_memory_available(cls):
-        logger.warning("Pin memory is not supported on XPU.")
-        return False
+        return True
 
     @classmethod
     def get_current_memory_usage(cls,

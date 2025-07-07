@@ -450,7 +450,8 @@ def test_multi_query_kv_attention(
             start += seq_len
         # xformers.AttentionBias to Tensor for use in reference impl.
         alibi_bias = [
-            b.materialize(b.shape, device=device).squeeze() for b in attn_bias
+            b.materialize((1, num_query_heads, i, i), device=device).squeeze()
+            for b, i in zip(attn_bias, seq_lens)
         ]
     else:
         attn_bias = BlockDiagonalCausalMask.from_seqlens(seq_lens)

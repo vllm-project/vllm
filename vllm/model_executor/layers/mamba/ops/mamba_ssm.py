@@ -108,7 +108,7 @@ def _selective_scan_update_kernel(
     # is the same as the batch id.
     if HAS_STATE_BATCH_INDICES:
         state_batch_indices_ptr += pid_b
-        state_batch_idx = tl.load(state_batch_indices_ptr)
+        state_batch_idx = tl.load(state_batch_indices_ptr).to(tl.int64)
         state_ptr += (state_batch_idx * stride_state_batch +
                       pid_h * stride_state_head)
     else:

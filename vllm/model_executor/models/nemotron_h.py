@@ -23,6 +23,7 @@ from typing import Optional
 import torch
 from torch import nn
 
+from vllm import envs
 from vllm.attention.layer import Attention
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
@@ -44,8 +45,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import (HasInnerState, IsHybrid,
                                                    SupportsLoRA, SupportsPP,
-                                                   SupportsQuant,
-                                                   SupportsV0Only)
+                                                   SupportsQuant)
 from vllm.model_executor.models.mamba_cache import (MambaCacheManager,
                                                     MambaCacheParams)
 from vllm.model_executor.models.utils import (
@@ -153,6 +153,8 @@ class NemotronHMambaDecoderLayer(nn.Module):
             rms_norm_eps=config.rms_norm_eps,
             activation=config.mamba_hidden_act,
             quant_config=quant_config,
+            prefix=f"{prefix}.mixer",
+            chunk_size=config.chunk_size,
         )
 
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -348,10 +350,14 @@ class NemotronHModel(nn.Module):
 
         attn_metadata = get_forward_context().attn_metadata
 
-        mamba2_metadata = prepare_mamba2_metadata(
-            chunk_size=self.config.chunk_size,
-            attn_metadata=attn_metadata,
-        )
+        if not envs.VLLM_USE_V1:
+            mamba2_metadata = prepare_mamba2_metadata(
+                chunk_size=self.config.chunk_size,
+                attn_metadata=attn_metadata,
+            )
+        else:
+            # v1 get mamba2_metadata from forward_context
+            mamba2_metadata = None
 
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
@@ -369,7 +375,8 @@ class NemotronHModel(nn.Module):
         for i in range(len(self.layers)):
             layer = self.layers[i]
             layer_mamba_cache_params = None
-            if isinstance(layer, NemotronHMambaDecoderLayer):
+            if isinstance(layer,
+                          NemotronHMambaDecoderLayer) and mamba_cache_params:
                 layer_mamba_cache_params = mamba_cache_params.at_layer_idx(
                     i - num_non_mamba_layers)
             else:
@@ -437,7 +444,7 @@ class NemotronHModel(nn.Module):
 
 
 class NemotronHForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
-                           IsHybrid, SupportsV0Only, SupportsQuant):
+                           IsHybrid, SupportsQuant):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -499,15 +506,23 @@ class NemotronHForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
                 intermediate_tensors: Optional[IntermediateTensors] = None,
                 inputs_embeds: Optional[torch.Tensor] = None,
                 **kwargs):
-        if self.mamba_cache is None:
 
-            num_mamba_layers = self.model_config.get_num_layers_by_block_type(
-                self.vllm_config.parallel_config, LayerBlockType.mamba)
+        mamba_cache_params = None
+        if not envs.VLLM_USE_V1:
+            if self.mamba_cache is None:
 
-            self.mamba_cache = MambaCacheManager(
-                self.vllm_config, self.lm_head.weight.dtype, num_mamba_layers,
-                *self._get_mamba_cache_shape())
-        mamba_cache_params = self.mamba_cache.current_run_tensors(**kwargs)
+                num_mamba_layers = \
+                    self.model_config.get_num_layers_by_block_type(
+                        self.vllm_config.parallel_config,
+                        LayerBlockType.mamba
+                    )
+
+                self.mamba_cache = MambaCacheManager(
+                    self.vllm_config, self.lm_head.weight.dtype,
+                    num_mamba_layers, *self._get_mamba_cache_shape())
+
+            mamba_cache_params = self.mamba_cache.current_run_tensors(**kwargs)
+
         hidden_states = self.model(input_ids, positions, mamba_cache_params,
                                    intermediate_tensors, inputs_embeds)
 

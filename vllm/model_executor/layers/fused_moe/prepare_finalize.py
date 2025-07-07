@@ -24,6 +24,9 @@ class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
     def topk_indices_dtype(self) -> Optional[torch.dtype]:
         return None
 
+    def num_dispatchers(self) -> int:
+        return 1
+
     def prepare(
         self,
         a1: torch.Tensor,
