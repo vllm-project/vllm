@@ -2,6 +2,9 @@
 
 vLLM supports AMD GPUs with ROCm 6.3.
 
+!!! tip
+    [Docker](#set-up-using-docker) is the recommended way to use vLLM on ROCm.
+
 !!! warning
     There are no pre-built wheels for this device, so you must either use the pre-built Docker image or build vLLM from source.
 
@@ -125,9 +128,7 @@ Currently, there are no pre-built ROCm wheels.
     - For MI300x (gfx942) users, to achieve optimal performance, please refer to [MI300x tuning guide](https://rocm.docs.amd.com/en/latest/how-to/tuning-guides/mi300x/index.html) for performance optimization and tuning tips on system and workflow level.
       For vLLM, please refer to [vLLM performance optimization](https://rocm.docs.amd.com/en/latest/how-to/tuning-guides/mi300x/workload.html#vllm-performance-optimization).
 
-## Set up using Docker (Recommended)
-
-# --8<-- [end:set-up-using-docker]
+# --8<-- [end:build-wheel-from-source]
 # --8<-- [start:pre-built-images]
 
 The [AMD Infinity hub for vLLM](https://hub.docker.com/r/rocm/vllm/tags) offers a prebuilt, optimized
