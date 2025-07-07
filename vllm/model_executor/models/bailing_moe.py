@@ -29,30 +29,30 @@ from typing import Optional, Union
 import torch
 from torch import nn
 
-from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.attention import Attention
 from vllm.config import CacheConfig, VllmConfig
-from vllm.model_executor.layers.fused_moe import FusedMoE
-from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
-                                               ReplicatedLinear,
-                                               QKVParallelLinear,
-                                               RowParallelLinear)
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
-from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.vocab_parallel_embedding import (
-    ParallelLMHead, VocabParallelEmbedding)
 from vllm.distributed import (get_pp_group,
                               get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
-from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
+                                               QKVParallelLinear,
+                                               ReplicatedLinear,
+                                               RowParallelLinear)
+from vllm.model_executor.layers.logits_processor import LogitsProcessor                                               
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig)
+from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    ParallelLMHead, VocabParallelEmbedding)
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.bailing_moe import BailingMoeConfig
-from vllm.model_executor.layers.logits_processor import LogitsProcessor
 
 from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (PPMissingLayer,
@@ -84,7 +84,8 @@ class BailingAttention(nn.Module):
         assert self.total_num_heads >= self.total_kv_heads
 
         self.num_heads = self.total_num_heads // tp_size
-        self.head_dim = config.head_dim or (self.hidden_size // self.total_num_heads)
+        self.head_dim = config.head_dim or (self.hidden_size // 
+                                            self.total_num_heads)
         self.q_size_per_rank = self.head_dim * self.num_heads
 
         self.num_kv_heads = self.total_kv_heads // tp_size
@@ -115,7 +116,6 @@ class BailingAttention(nn.Module):
                               cache_config=cache_config,
                               prefix=f"{prefix}.attn")
 
-
         self.rotary_emb = get_rope(
             self.head_dim,
             rotary_dim=self.head_dim,
@@ -136,7 +136,6 @@ class BailingAttention(nn.Module):
             [self.q_size_per_rank, self.kv_size_per_rank, self.kv_size_per_rank],
             dim=-1
         )
-
 
         q, k = self.rotary_emb(position_ids, q, k)
 
@@ -162,7 +161,7 @@ class BailingMLP(nn.Module):
     ) -> None:
         super().__init__()
         self.gate_up_proj = MergedColumnParallelLinear(
-            config.hidden_size, 
+            config.hidden_size,
             [intermediate_size] * 2,
             bias=config.use_bias,
             quant_config=quant_config,
@@ -183,6 +182,7 @@ class BailingMLP(nn.Module):
         x = self.act_fn(x)
         x, _ = self.down_proj(x)
         return x
+
 
 class BailingMoE(nn.Module):
 
@@ -265,9 +265,9 @@ class BailingMoeBlock(nn.Module):
         intermediate_size = config.intermediate_size
         self.input_layernorm = RMSNorm(hidden_size, eps=config.rms_norm_eps)
         self.attention = BailingAttention(config,
-                                      cache_config,
-                                      quant_config,
-                                      prefix=f"{prefix}.attention")
+                                          cache_config,
+                                          quant_config,
+                                          prefix=f"{prefix}.attention")
         self.post_attention_layernorm = RMSNorm(hidden_size, eps=config.rms_norm_eps)
         self.mlp = BailingMoE(intermediate_size, config, quant_config, True, prefix=f"{prefix}.mlp")
 
@@ -299,7 +299,7 @@ class BailingMoeModel(nn.Module):
 
     def __init__(
         self,
-        *, 
+        *,
         vllm_config: VllmConfig,
         prefix: str = "",
     ):
@@ -451,7 +451,7 @@ class BailingMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         model_output = self.model(input_ids, positions, intermediate_tensors,
-                                         inputs_embeds)
+                                  inputs_embeds)
         return model_output
 
     def compute_logits(
@@ -486,7 +486,7 @@ class BailingMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             if (("v_head" in name) or ("inv_freq" in name) or
-                    (self.config.tie_word_embeddings and "lm_head" in name)):
+                (self.config.tie_word_embeddings and "lm_head" in name)):
                 continue
             if self.config.norm_head and "lm_head.weight" in name:
                 import torch.nn.functional as F
