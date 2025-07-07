@@ -170,7 +170,7 @@ repos:
   # Keep `suggestion` last
   - id: suggestion
     name: Suggestion
-    entry: bash -c 'echo "To bypass pre-commit hooks, add --no-verify to git commit."'
+    entry: bash -c 'echo "To bypass all the pre-commit hooks, add --no-verify to git commit. To skip a specific hook, prefix the commit command with SKIP=<hook-id>."'
     language: system
     verbose: true
     pass_filenames: false
