@@ -232,9 +232,6 @@ pip install -e .
 ```
 
 # --8<-- [end:build-wheel-from-source]
-# --8<-- [start:set-up-using-docker]
-
-# --8<-- [end:set-up-using-docker]
 # --8<-- [start:pre-built-images]
 
 See [deployment-docker-pre-built-image][deployment-docker-pre-built-image] for instructions on using the official Docker image.

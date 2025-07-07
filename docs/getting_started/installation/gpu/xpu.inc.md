@@ -43,9 +43,6 @@ VLLM_TARGET_DEVICE=xpu python setup.py install
       type is supported on Intel Data Center GPU, not supported on Intel Arc GPU yet.
 
 # --8<-- [end:build-wheel-from-source]
-# --8<-- [start:set-up-using-docker]
-
-# --8<-- [end:set-up-using-docker]
 # --8<-- [start:pre-built-images]
 
 Currently, there are no pre-built XPU images.
