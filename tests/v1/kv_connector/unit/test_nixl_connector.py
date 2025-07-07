@@ -44,9 +44,9 @@ def test_basic_interface():
     assert kv_connector_metadata is not None
     assert isinstance(kv_connector_metadata, NixlConnectorMetadata)
 
-    assert len(kv_connector_metadata.requests) == 1
-    assert request_id in kv_connector_metadata.requests
-    req_meta = kv_connector_metadata.requests[request_id]
+    assert len(kv_connector_metadata.reqs_to_recv) == 1
+    assert request_id in kv_connector_metadata.reqs_to_recv
+    req_meta = kv_connector_metadata.reqs_to_recv[request_id]
 
     for block_id, block in zip(
             req_meta.local_block_ids, scheduler.kv_cache_manager.coordinator.
@@ -81,7 +81,7 @@ def test_prompt_less_than_block_size():
     kv_connector_metadata = scheduler_output.kv_connector_metadata
     assert kv_connector_metadata is not None
     assert isinstance(kv_connector_metadata, NixlConnectorMetadata)
-    assert len(kv_connector_metadata.requests) == 0
+    assert len(kv_connector_metadata.reqs_to_recv) == 0
 
     # This request should be scheduled regularly.
     assert len(scheduler_output.scheduled_new_reqs) == 1
