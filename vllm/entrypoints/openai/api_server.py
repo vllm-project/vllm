@@ -1409,11 +1409,6 @@ async def init_app_state(
 
     enable_serving_reranking = (model_config.task == "classify" and getattr(
         model_config.hf_config, "num_labels", 0) == 1)
-    state.jinaai_serving_reranking = ServingScores(
-        engine_client,
-        model_config,
-        state.openai_serving_models,
-        request_logger=request_logger) if enable_serving_reranking else None
     state.openai_serving_scores = ServingScores(
         engine_client,
         model_config,
