@@ -128,7 +128,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.max_model_len = model_config.max_model_len
         self.max_num_tokens = scheduler_config.max_num_batched_tokens
         self.max_num_reqs = scheduler_config.max_num_seqs
-        self.async_scheduling = scheduler_config.async_scheduling
 
         # Model-related.
         self.num_query_heads = model_config.get_num_attention_heads(
