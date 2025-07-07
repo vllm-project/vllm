@@ -239,91 +239,91 @@ class Gemma3MultiModalProcessor(BaseMultiModalProcessor[Gemma3nProcessingInfo]
 
         return prompt_updates
 
-    def _apply_token_matches(
-        self,
-        prompt: list[int],
-        mm_matches: Mapping[str, Sequence[PromptTargetMatch]],
-        mm_item_counts: Mapping[str, int],
-    ) -> list[int]:
-        token_ids = super()._apply_token_matches(
-            prompt,
-            mm_matches,
-            mm_item_counts,
-        )
+    # def _apply_token_matches(
+    #     self,
+    #     prompt: list[int],
+    #     mm_matches: Mapping[str, Sequence[PromptTargetMatch]],
+    #     mm_item_counts: Mapping[str, int],
+    # ) -> list[int]:
+    #     token_ids = super()._apply_token_matches(
+    #         prompt,
+    #         mm_matches,
+    #         mm_item_counts,
+    #     )
 
-        # "\n\n\n" and "\n\n\n\n" are single tokens
-        # Since our replacement can insert "\n\n" next to "\n"
-        # tokens, we have to combine them to be consistent with
-        # the output of the tokenizer
-        tokenizer = self.info.get_tokenizer()
-        vocab = tokenizer.get_vocab()
-        newline_1 = vocab["\n"]
-        newline_2 = vocab["\n\n"]
-        newline_3 = vocab["\n\n\n"]
-        newline_4 = vocab["\n\n\n\n"]
+    #     # "\n\n\n" and "\n\n\n\n" are single tokens
+    #     # Since our replacement can insert "\n\n" next to "\n"
+    #     # tokens, we have to combine them to be consistent with
+    #     # the output of the tokenizer
+    #     tokenizer = self.info.get_tokenizer()
+    #     vocab = tokenizer.get_vocab()
+    #     newline_1 = vocab["\n"]
+    #     newline_2 = vocab["\n\n"]
+    #     newline_3 = vocab["\n\n\n"]
+    #     newline_4 = vocab["\n\n\n\n"]
 
-        token_ids = replace_token_matches(
-            token_ids,
-            [newline_1, newline_2],
-            [newline_3],
-        )
-        token_ids = replace_token_matches(
-            token_ids,
-            [newline_2, newline_1],
-            [newline_3],
-        )
-        token_ids = replace_token_matches(
-            token_ids,
-            [newline_2, newline_2],
-            [newline_4],
-        )
+    #     token_ids = replace_token_matches(
+    #         token_ids,
+    #         [newline_1, newline_2],
+    #         [newline_3],
+    #     )
+    #     token_ids = replace_token_matches(
+    #         token_ids,
+    #         [newline_2, newline_1],
+    #         [newline_3],
+    #     )
+    #     token_ids = replace_token_matches(
+    #         token_ids,
+    #         [newline_2, newline_2],
+    #         [newline_4],
+    #     )
 
-        return token_ids
+    #     return token_ids
 
-    def _find_mm_placeholders(
-        self,
-        mm_prompt_updates: Mapping[str, Sequence[BoundPromptUpdate]],
-        new_token_ids: list[int],
-        mm_item_counts: Mapping[str, int],
-    ) -> Mapping[str, list[PlaceholderFeaturesInfo]]:
-        # We need to detect "\n\n" inside "\n\n\n" and "\n\n\n\n"
-        tokenizer = self.info.get_tokenizer()
-        vocab = tokenizer.get_vocab()
-        newline_1 = vocab["\n"]
-        newline_2 = vocab["\n\n"]
-        newline_3 = vocab["\n\n\n"]
-        newline_4 = vocab["\n\n\n\n"]
+    # def _find_mm_placeholders(
+    #     self,
+    #     mm_prompt_updates: Mapping[str, Sequence[BoundPromptUpdate]],
+    #     new_token_ids: list[int],
+    #     mm_item_counts: Mapping[str, int],
+    # ) -> Mapping[str, list[PlaceholderFeaturesInfo]]:
+    #     # We need to detect "\n\n" inside "\n\n\n" and "\n\n\n\n"
+    #     tokenizer = self.info.get_tokenizer()
+    #     vocab = tokenizer.get_vocab()
+    #     newline_1 = vocab["\n"]
+    #     newline_2 = vocab["\n\n"]
+    #     newline_3 = vocab["\n\n\n"]
+    #     newline_4 = vocab["\n\n\n\n"]
 
-        def get_repl_toks(tok: int) -> list[int]:
-            if tok == newline_3:
-                return [newline_1, newline_2]
-            if tok == newline_4:
-                return [newline_2, newline_2]
+    #     def get_repl_toks(tok: int) -> list[int]:
+    #         if tok == newline_3:
+    #             return [newline_1, newline_2]
+    #         if tok == newline_4:
+    #             return [newline_2, newline_2]
 
-            return [tok]
+    #         return [tok]
 
-        repl_token_ids = list[int]()
-        repl_orig_idxs = list[int]()
-        for orig_idx, orig_tok in enumerate(new_token_ids):
-            repl_toks = get_repl_toks(orig_tok)
-            repl_token_ids.extend(repl_toks)
-            repl_orig_idxs.extend(orig_idx for _ in range(len(repl_toks)))
+    #     repl_token_ids = list[int]()
+    #     repl_orig_idxs = list[int]()
+    #     for orig_idx, orig_tok in enumerate(new_token_ids):
+    #         repl_toks = get_repl_toks(orig_tok)
+    #         repl_token_ids.extend(repl_toks)
+    #         repl_orig_idxs.extend(orig_idx for _ in range(len(repl_toks)))
 
-        repls = find_mm_placeholders(mm_prompt_updates, repl_token_ids,
-                                     mm_item_counts)
+    #     repls = find_mm_placeholders(mm_prompt_updates, repl_token_ids,
+    #                                  mm_item_counts)
 
-        return {
-            modality: [
-                PlaceholderFeaturesInfo(
-                    modality=p.modality,
-                    item_idx=p.item_idx,
-                    start_idx=repl_orig_idxs[p.start_idx],
-                    tokens=p.tokens,
-                    is_embed=p.is_embed,
-                ) for p in placeholders
-            ]
-            for modality, placeholders in repls.items()
-        }
+    #     return {
+    #         modality: [
+    #             PlaceholderFeaturesInfo(
+    #                 modality=p.modality,
+    #                 item_idx=p.item_idx,
+    #                 start_idx=repl_orig_idxs[p.start_idx],
+    #                 tokens=p.tokens,
+    #                 is_embed=p.is_embed,
+    #             ) for p in placeholders
+    #         ]
+    #         for modality, placeholders in repls.items()
+    #     }
 
 
 class Gemma3nMultimodalEmbedder(nn.Module):
@@ -550,7 +550,7 @@ class Gemma3nForConditionalGeneration(nn.Module, SupportsMultiModal):
         print("input_features", input_features.shape, "\n")
         print("input_features_mask", input_features_mask.shape, "\n")
         audio_outputs, audio_mask = self.audio_tower(input_features,
-                                                     input_features_mask)
+                                                     ~input_features_mask)
         audio_features = self.embed_audio(inputs_embeds=audio_outputs)
 
         # The Gemma3nProcessor expects all audio will be 30s in length and inserts 188 audio soft tokens into the
