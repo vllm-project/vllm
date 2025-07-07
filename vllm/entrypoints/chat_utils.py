@@ -902,6 +902,8 @@ MM_PARSER_MAP: dict[
 ] = {
     "text":
     lambda part: _TextParser(part).get("text", None),
+    "input_text":
+    lambda part: _TextParser(part).get("text", None),
     "image_url":
     lambda part: _ImageParser(part).get("image_url", {}).get("url", None),
     "image_embeds":
@@ -1040,7 +1042,7 @@ def _parse_chat_message_content_part(
             "with empty / unparsable content.", part, part_type)
         return None
 
-    if part_type in ("text", "refusal"):
+    if part_type in ("text", "input_text", "refusal"):
         str_content = cast(str, content)
         if wrap_dicts:
             return {'type': 'text', 'text': str_content}
