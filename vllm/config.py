@@ -1449,6 +1449,12 @@ class ModelConfig:
     def matryoshka_dimensions(self):
         return getattr(self.hf_config, "matryoshka_dimensions", None)
 
+    @property
+    def use_pad_token(self) -> bool:
+        # cross_encoder models defaults to using pad_token.
+        # `llm as reranker` models defaults to not using pad_token.
+        return getattr(self.hf_config, "use_pad_token", True)
+
     def get_and_verify_max_len(self, max_model_len: int):
         # For pooling models, the tokenizer's `model_max_length` is often a
         # reliable source for the maximum sequence length. However, for
