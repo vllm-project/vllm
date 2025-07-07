@@ -3,11 +3,14 @@
 """Utility functions for attention-related v1 tests."""
 
 from dataclasses import dataclass
+from typing import Union
 
 import pytest
 import torch
 
-from vllm.config import VllmConfig
+from vllm.config import (CacheConfig, CompilationConfig, DeviceConfig,
+                         LoadConfig, ModelConfig, ModelDType, ParallelConfig,
+                         SchedulerConfig, VllmConfig)
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 
@@ -130,3 +133,89 @@ def create_standard_kv_cache_spec(
         use_mla=vllm_config.model_config.use_mla,
         sliding_window=vllm_config.model_config.get_sliding_window(),
     )
+
+
+def create_vllm_config(model_name: str = "meta-llama/Meta-Llama-3-8B",
+                       tensor_parallel_size: int = 1,
+                       max_model_len: int = 1024,
+                       dtype: Union[ModelDType, torch.dtype] = "auto",
+                       block_size: int = 16,
+                       max_num_seqs: int = 256,
+                       max_num_batched_tokens: int = 8192,
+                       add_mock_model_methods: bool = True) -> VllmConfig:
+    """Create a VllmConfig for testing with reasonable defaults."""
+
+    model_config = ModelConfig(
+        model=model_name,
+        tokenizer=model_name,
+        trust_remote_code=False,
+        dtype=dtype,
+        seed=0,
+        max_model_len=max_model_len,
+    )
+
+    cache_config = CacheConfig(
+        block_size=block_size,
+        cache_dtype="auto",
+        swap_space=0,
+    )
+    # Set cache blocks for testing
+    #   (these may be set during initialization normally)
+    cache_config.num_gpu_blocks = 1000
+    cache_config.num_cpu_blocks = 0
+
+    parallel_config = ParallelConfig(
+        tensor_parallel_size=tensor_parallel_size, )
+
+    scheduler_config = SchedulerConfig(
+        max_num_seqs=max_num_seqs,
+        max_num_batched_tokens=max_num_batched_tokens,
+    )
+
+    device_config = DeviceConfig()
+    load_config = LoadConfig()
+    compilation_config = CompilationConfig()
+
+    if add_mock_model_methods:
+        # Add mock methods to satisfy backends that need them
+        # This is a workaround because tests don't build full, real models,
+        # but some backends expect to query the model for layer-specific
+        # parameters
+        import types
+        model_config.get_num_layers = types.MethodType(lambda self: 1,
+                                                       model_config)
+        model_config.get_sliding_window_for_layer = types.MethodType(
+            lambda self, i: None, model_config)
+        model_config.get_logits_soft_cap_for_layer = types.MethodType(
+            lambda self, i: 0.0, model_config)
+        model_config.get_sm_scale_for_layer = types.MethodType(
+            lambda self, i: 1.0 / model_config.get_head_size()**0.5,
+            model_config)
+
+    return VllmConfig(
+        model_config=model_config,
+        cache_config=cache_config,
+        parallel_config=parallel_config,
+        scheduler_config=scheduler_config,
+        device_config=device_config,
+        load_config=load_config,
+        compilation_config=compilation_config,
+    )
+
+
+def create_dummy_kv_cache(block_size: int,
+                          num_kv_heads: int,
+                          head_size: int,
+                          dtype: torch.dtype,
+                          device: torch.device,
+                          num_blocks: int = 100) -> torch.Tensor:
+    """Create a dummy KV cache tensor for testing."""
+    kv_cache = torch.randn(
+        num_blocks,
+        2,  # K and V
+        block_size,
+        num_kv_heads,
+        head_size,
+        dtype=dtype,
+        device=device)
+    return kv_cache
