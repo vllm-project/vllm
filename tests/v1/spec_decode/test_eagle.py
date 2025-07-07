@@ -6,6 +6,9 @@ from unittest import mock
 import pytest
 import torch
 
+from tests.v1.attention.utils import (BatchSpec, create_common_attn_metadata,
+                                      create_standard_kv_cache_spec,
+                                      get_attention_backend)
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, SpeculativeConfig,
                          VllmConfig)
@@ -90,13 +93,20 @@ def test_prepare_inputs():
     """
     device = torch.device(current_platform.device_type)
 
-    # a = 4, b = 7, c = 5
+    # q1 = 4, q2 = 7, q3 = 5
     # n1 = 1, n2 = 3, n3 = 2
 
-    # Cumulative lengths: [0, 4, 11, 16]
-    cu_target_query_lens = torch.tensor([0, 4, 11, 16],
-                                        dtype=torch.int32,
-                                        device=device)
+    batch_spec = BatchSpec(
+        batch_size=4,
+        seq_lens=[4, 7, 5],
+        query_lens=[4, 7, 5],
+    )
+
+    common_attn_metadata = create_common_attn_metadata(
+        batch_spec,
+        block_size=16,
+        device=device,
+    )
 
     # Rejected tokens per request: [1, 3, 2]
     num_rejected_tokens = torch.tensor([1, 3, 2],
@@ -130,18 +140,10 @@ def test_prepare_inputs():
         ],
         dtype=torch.int32,
         device=device)
-
-    # n1 + n2 + n3 - a - b -c
-    num_tokens = int(cu_target_query_lens[-1].item() -
-                     num_rejected_tokens.sum().item())
-
-    # Create CommonAttentionMetadata for new API
-    common_attn_metadata = _create_common_attn_metadata(
-        cu_target_query_lens, device)
     proposer = _create_proposer("eagle", 1)
 
     updated_metadata, token_indices = proposer.prepare_inputs(
-        common_attn_metadata, num_rejected_tokens.cpu(), num_tokens)
+        common_attn_metadata, num_rejected_tokens.cpu())
 
     assert torch.equal(updated_metadata.query_start_loc,
                        expected_cu_num_tokens)
@@ -324,25 +326,24 @@ def test_propose(num_speculative_tokens):
 
     # Create CommonAttentionMetadata for new API
     common_attn_metadata = _create_common_attn_metadata(cu_num_tokens, device)
+    attn_metadata_builder_cls, _ = get_attention_backend("flash_attn")
+    attn_metadata_builder = attn_metadata_builder_cls(
+        kv_cache_spec=create_standard_kv_cache_spec(proposer.vllm_config),
+        vllm_config=proposer.vllm_config,
+        device=device,
+    )
 
     # Mock runner for attention metadata building
     proposer.runner = mock.MagicMock()
     proposer.runner.attn_metadata_builders = [mock.MagicMock()]
+    proposer.runner.attn_metadata_builders[0] = attn_metadata_builder
 
-    # Create mock with required attributes for multi-token tests
-    attn_metadata_mock = mock.MagicMock()
-    attn_metadata_mock.max_seq_len = 10
-    attn_metadata_mock.seq_lens = torch.tensor([5, 3], device=device)
-    proposer.runner.attn_metadata_builders[
-        0].build.return_value = attn_metadata_mock
-
-    with mock.patch('vllm.v1.spec_decode.eagle.isinstance', return_value=True):
-        result = proposer.propose(target_token_ids=target_token_ids,
-                                  target_positions=target_positions,
-                                  target_hidden_states=target_hidden_states,
-                                  next_token_ids=next_token_ids,
-                                  common_attn_metadata=common_attn_metadata,
-                                  sampling_metadata=sampling_metadata)
+    result = proposer.propose(target_token_ids=target_token_ids,
+                              target_positions=target_positions,
+                              target_hidden_states=target_hidden_states,
+                              next_token_ids=next_token_ids,
+                              common_attn_metadata=common_attn_metadata,
+                              sampling_metadata=sampling_metadata)
 
     assert result.shape == (batch_size, num_speculative_tokens)
 
