@@ -802,7 +802,7 @@ class Scheduler(SchedulerInterface):
             new_token_ids = generated_token_ids
             kv_transfer_params = None
 
-            new_token_ids, stopped = self.update_request(
+            new_token_ids, stopped = self._update_request(
                 request, new_token_ids)
 
             pooler_output = None
@@ -900,26 +900,7 @@ class Scheduler(SchedulerInterface):
 
         return engine_core_outputs
 
-    def _free_encoder_inputs(self, request: Request) -> None:
-        cached_encoder_input_ids = (
-            self.encoder_cache_manager.get_cached_input_ids(request))
-        # OPTIMIZATION: Avoid list(set) if the set is empty.
-        if not cached_encoder_input_ids:
-            return
-
-        # Here, we use list(set) to avoid modifying the set while iterating
-        # over it.
-        for input_id in list(cached_encoder_input_ids):
-            mm_positions = request.mm_positions[input_id]
-            start_pos = mm_positions.offset
-            num_tokens = mm_positions.length
-            if start_pos + num_tokens <= request.num_computed_tokens:
-                # The encoder output is already processed and stored
-                # in the decoder's KV cache.
-                self.encoder_cache_manager.free_encoder_input(
-                    request, input_id)
-
-    def update_request(
+    def _update_request(
         self,
         request: Request,
         new_token_ids: list[int],
@@ -938,6 +919,25 @@ class Scheduler(SchedulerInterface):
                 del new_token_ids[num_new:]  # Trim new tokens if needed.
                 break
         return new_token_ids, stopped
+
+    def _free_encoder_inputs(self, request: Request) -> None:
+        cached_encoder_input_ids = (
+            self.encoder_cache_manager.get_cached_input_ids(request))
+        # OPTIMIZATION: Avoid list(set) if the set is empty.
+        if not cached_encoder_input_ids:
+            return
+
+        # Here, we use list(set) to avoid modifying the set while iterating
+        # over it.
+        for input_id in list(cached_encoder_input_ids):
+            mm_positions = request.mm_positions[input_id]
+            start_pos = mm_positions.offset
+            num_tokens = mm_positions.length
+            if start_pos + num_tokens <= request.num_computed_tokens:
+                # The encoder output is already processed and stored
+                # in the decoder's KV cache.
+                self.encoder_cache_manager.free_encoder_input(
+                    request, input_id)
 
     def get_request_counts(self) -> tuple[int, int]:
         """Returns (num_running_reqs, num_waiting_reqs)."""

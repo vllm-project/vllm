@@ -34,7 +34,7 @@ class AsyncScheduler(Scheduler):
                 # Pre-allocate.
                 request.append_output_token_ids(-1)
 
-    def update_request(
+    def _update_request(
         self,
         request: Request,
         new_token_ids: list[int],
