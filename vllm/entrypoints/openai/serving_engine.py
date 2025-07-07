@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import asyncio
 import base64
 import io
 import json
 import sys
 import time
-from collections.abc import (AsyncGenerator, Iterable, Iterator, Mapping,
-                             Sequence)
-from concurrent.futures.thread import ThreadPoolExecutor
+from collections.abc import AsyncGenerator, Iterable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from http import HTTPStatus
 from typing import (Annotated, Any, Callable, ClassVar, Generic, Optional,
                     TypeVar, Union, cast, overload)
@@ -79,8 +79,8 @@ from vllm.sequence import Logprob, PromptLogprobs
 from vllm.tracing import (contains_trace_headers, extract_trace_headers,
                           log_tracing_disabled_warning)
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
-from vllm.utils import (is_list_of, make_async, merge_async_iterators,
-                        random_uuid)
+from vllm.utils import (AsyncMicrobatchTokenizer, is_list_of,
+                        merge_async_iterators, random_uuid)
 
 logger = init_logger(__name__)
 
@@ -226,11 +226,19 @@ class OpenAIServing:
 
         self._tokenizer_executor = ThreadPoolExecutor(max_workers=1)
 
-        self._tokenize_prompt_input_async = make_async(
-            self._tokenize_prompt_input, executor=self._tokenizer_executor)
-        self._tokenize_prompt_input_or_inputs_async = make_async(
-            self._tokenize_prompt_input_or_inputs,
-            executor=self._tokenizer_executor)
+        self._async_tokenizer_pool: dict[AnyTokenizer,
+                                         AsyncMicrobatchTokenizer] = {}
+
+    def _get_async_tokenizer(self, tokenizer) -> AsyncMicrobatchTokenizer:
+        """
+        Return (and cache) an `AsyncMicrobatchTokenizer` bound to the 
+        given tokenizer.
+        """
+        async_tokenizer = self._async_tokenizer_pool.get(tokenizer)
+        if async_tokenizer is None:
+            async_tokenizer = AsyncMicrobatchTokenizer(tokenizer)
+            self._async_tokenizer_pool[tokenizer] = async_tokenizer
+        return async_tokenizer
 
     async def _preprocess(
         self,
@@ -467,7 +475,7 @@ class OpenAIServing:
         # if _check_model has been called earlier, this will be unreachable
         raise ValueError(f"The model `{request.model}` does not exist.")
 
-    def _normalize_prompt_text_to_input(
+    async def _normalize_prompt_text_to_input(
         self,
         request: AnyRequest,
         tokenizer: AnyTokenizer,
@@ -475,38 +483,44 @@ class OpenAIServing:
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]],
         add_special_tokens: bool,
     ) -> TextTokensPrompt:
+        async_tokenizer = self._get_async_tokenizer(tokenizer)
+
         if (self.model_config.encoder_config is not None
                 and self.model_config.encoder_config.get(
                     "do_lower_case", False)):
             prompt = prompt.lower()
 
         if truncate_prompt_tokens is None:
-            encoded = tokenizer(prompt, add_special_tokens=add_special_tokens)
+            encoded = await async_tokenizer(
+                prompt, add_special_tokens=add_special_tokens)
         elif truncate_prompt_tokens < 0:
             # Negative means we cap at the model's max length
-            encoded = tokenizer(prompt,
-                                add_special_tokens=add_special_tokens,
-                                truncation=True,
-                                max_length=self.max_model_len)
+            encoded = await async_tokenizer(
+                prompt,
+                add_special_tokens=add_special_tokens,
+                truncation=True,
+                max_length=self.max_model_len)
         else:
-            encoded = tokenizer(prompt,
-                                add_special_tokens=add_special_tokens,
-                                truncation=True,
-                                max_length=truncate_prompt_tokens)
+            encoded = await async_tokenizer(
+                prompt,
+                add_special_tokens=add_special_tokens,
+                truncation=True,
+                max_length=truncate_prompt_tokens)
 
         input_ids = encoded.input_ids
-
         input_text = prompt
 
         return self._validate_input(request, input_ids, input_text)
 
-    def _normalize_prompt_tokens_to_input(
+    async def _normalize_prompt_tokens_to_input(
         self,
         request: AnyRequest,
         tokenizer: AnyTokenizer,
         prompt_ids: list[int],
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]],
     ) -> TextTokensPrompt:
+        async_tokenizer = self._get_async_tokenizer(tokenizer)
+
         if truncate_prompt_tokens is None:
             input_ids = prompt_ids
         elif truncate_prompt_tokens < 0:
@@ -514,7 +528,7 @@ class OpenAIServing:
         else:
             input_ids = prompt_ids[-truncate_prompt_tokens:]
 
-        input_text = tokenizer.decode(input_ids)
+        input_text = await async_tokenizer.decode(input_ids)
 
         return self._validate_input(request, input_ids, input_text)
 
@@ -578,7 +592,7 @@ class OpenAIServing:
 
         return TextTokensPrompt(prompt=input_text, prompt_token_ids=input_ids)
 
-    def _tokenize_prompt_input(
+    async def _tokenize_prompt_input_async(
         self,
         request: AnyRequest,
         tokenizer: AnyTokenizer,
@@ -591,23 +605,24 @@ class OpenAIServing:
         [`_tokenize_prompt_input_or_inputs`][vllm.entrypoints.openai.serving_engine.OpenAIServing._tokenize_prompt_input_or_inputs]
         that assumes single input.
         """
-        return next(
-            self._tokenize_prompt_inputs(
+        async for result in self._tokenize_prompt_inputs_async(
                 request,
                 tokenizer,
-                [prompt_input],
+            [prompt_input],
                 truncate_prompt_tokens=truncate_prompt_tokens,
                 add_special_tokens=add_special_tokens,
-            ))
+        ):
+            return result
+        raise ValueError("No results yielded from tokenization")
 
-    def _tokenize_prompt_inputs(
+    async def _tokenize_prompt_inputs_async(
         self,
         request: AnyRequest,
         tokenizer: AnyTokenizer,
         prompt_inputs: Iterable[Union[str, list[int]]],
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None,
         add_special_tokens: bool = True,
-    ) -> Iterator[TextTokensPrompt]:
+    ) -> AsyncGenerator[TextTokensPrompt, None]:
         """
         A simpler implementation of
         [`_tokenize_prompt_input_or_inputs`][vllm.entrypoints.openai.serving_engine.OpenAIServing._tokenize_prompt_input_or_inputs]
@@ -615,7 +630,7 @@ class OpenAIServing:
         """
         for text in prompt_inputs:
             if isinstance(text, str):
-                yield self._normalize_prompt_text_to_input(
+                yield await self._normalize_prompt_text_to_input(
                     request,
                     tokenizer,
                     prompt=text,
@@ -623,14 +638,14 @@ class OpenAIServing:
                     add_special_tokens=add_special_tokens,
                 )
             else:
-                yield self._normalize_prompt_tokens_to_input(
+                yield await self._normalize_prompt_tokens_to_input(
                     request,
                     tokenizer,
                     prompt_ids=text,
                     truncate_prompt_tokens=truncate_prompt_tokens,
                 )
 
-    def _tokenize_prompt_input_or_inputs(
+    async def _tokenize_prompt_input_or_inputs_async(
         self,
         request: AnyRequest,
         tokenizer: AnyTokenizer,
@@ -664,21 +679,31 @@ class OpenAIServing:
         # VSCode Pyright extension should still work properly
         # "is False" is required for Pyright to perform type narrowing
         # See: https://github.com/microsoft/pyright/issues/7672
-        inputs_text.extend([
-            self._normalize_prompt_text_to_input(
-                request,
-                tokenizer,
-                prompt=prompt_input["content"],
-                truncate_prompt_tokens=truncate_prompt_tokens,
-                add_special_tokens=add_special_tokens)
-            if prompt_input["is_tokens"] is False else
-            self._normalize_prompt_tokens_to_input(
-                request,
-                tokenizer,
-                prompt_ids=prompt_input["content"],
-                truncate_prompt_tokens=truncate_prompt_tokens)
-            for prompt_input in parse_and_batch_prompt(input_or_inputs)
-        ])
+
+        # Parse and batch the input prompts
+        batch_inputs = parse_and_batch_prompt(input_or_inputs)
+
+        # Process each input in the batch concurrently
+        tasks = []
+        for prompt_input in batch_inputs:
+            if prompt_input["is_tokens"] is False:
+                task = self._normalize_prompt_text_to_input(
+                    request,
+                    tokenizer,
+                    prompt_input["content"],
+                    truncate_prompt_tokens=truncate_prompt_tokens,
+                    add_special_tokens=add_special_tokens)
+            else:
+                task = self._normalize_prompt_tokens_to_input(
+                    request,
+                    tokenizer,
+                    prompt_input["content"],
+                    truncate_prompt_tokens=truncate_prompt_tokens)
+            tasks.append(task)
+
+        # Wait for all tokenization tasks to complete
+        results = await asyncio.gather(*tasks)
+        inputs_text.extend(results)
 
         return inputs_text, inputs_embeds
 
