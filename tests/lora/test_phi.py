@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-
-import pytest
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import vllm
 from vllm.lora.request import LoRARequest
@@ -8,14 +7,6 @@ from vllm.lora.request import LoRARequest
 MODEL_PATH = "microsoft/phi-2"
 
 PROMPT_TEMPLATE = "### Instruct: {sql_prompt}\n\n### Context: {context}\n\n### Output:"  # noqa: E501
-
-
-@pytest.fixture(autouse=True)
-def v1(run_with_both_engines_lora):
-    # Simple autouse wrapper to run both engines for each test
-    # This can be promoted up to conftest.py to run for every
-    # test in a package
-    pass
 
 
 def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> list[str]:
@@ -56,9 +47,6 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> list[str]:
     return generated_texts
 
 
-# Skipping for V1 for now as we are hitting,
-# "Head size 80 is not supported by FlashAttention." error.
-@pytest.mark.skip_v1
 def test_phi2_lora(phi2_lora_files):
     # We enable enforce_eager=True here to reduce VRAM usage for lora-test CI,
     # Otherwise, the lora-test will fail due to CUDA OOM.

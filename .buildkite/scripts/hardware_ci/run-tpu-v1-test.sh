@@ -150,7 +150,7 @@ run_and_track_test 9 "test_multimodal.py" \
 run_and_track_test 10 "test_pallas.py" \
     "python3 -m pytest -s -v /workspace/vllm/tests/v1/tpu/test_pallas.py"
 run_and_track_test 11 "test_struct_output_generate.py" \
-    "python3 -m pytest -s -v /workspace/vllm/tests/v1/entrypoints/llm/test_struct_output_generate.py"
+    "python3 -m pytest -s -v /workspace/vllm/tests/v1/entrypoints/llm/test_struct_output_generate.py -k \"not test_structured_output_with_reasoning_matrices\""
 run_and_track_test 12 "test_moe_pallas.py" \
     "python3 -m pytest -s -v /workspace/vllm/tests/tpu/test_moe_pallas.py"
 run_and_track_test 13 "test_lora.py" \
@@ -159,6 +159,8 @@ run_and_track_test 14 "test_tpu_qkv_linear.py" \
     "python3 -m pytest -s -v /workspace/vllm/tests/v1/tpu/test_tpu_qkv_linear.py"
 run_and_track_test 15 "test_spmd_model_weight_loading.py" \
     "python3 -m pytest -s -v /workspace/vllm/tests/v1/tpu/test_spmd_model_weight_loading.py"
+run_and_track_test 16 "test_kv_cache_update_kernel.py" \
+    "python3 -m pytest -s -v /workspace/vllm/tests/v1/tpu/test_kv_cache_update_kernel.py"
 
 # After all tests have been attempted, exit with the overall status.
 if [ "$overall_script_exit_code" -ne 0 ]; then

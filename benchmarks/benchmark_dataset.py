@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 This module defines a framework for sampling benchmark requests from various
 datasets. Each dataset subclass of BenchmarkDataset must implement sample
@@ -348,11 +349,12 @@ class RandomDataset(BenchmarkDataset):
             # [1650, 939, 486] -> ['Ġcall', 'sh', 'ere']
             # To avoid uncontrolled change of the prompt length,
             # the encoded sequence is truncated before being decode again.
+            total_input_len = prefix_len + int(input_lens[i])
             re_encoded_sequence = tokenizer.encode(prompt, add_special_tokens=False)[
-                : input_lens[i]
+                :total_input_len
             ]
             prompt = tokenizer.decode(re_encoded_sequence)
-            total_input_len = prefix_len + int(input_lens[i])
+            total_input_len = len(re_encoded_sequence)
             requests.append(
                 SampleRequest(
                     prompt=prompt,
@@ -864,7 +866,15 @@ class InstructCoderDataset(HuggingFaceDataset):
         for item in self.data:
             if len(sampled_requests) >= num_requests:
                 break
-            prompt = f"{item['instruction']}:\n{item['input']}"
+            prompt = f"{item['input']}\n\n{item['instruction']} Just output \
+            the code, do not include any explanation."
+
+            # apply template
+            prompt = tokenizer.apply_chat_template(
+                [{"role": "user", "content": prompt}],
+                add_generation_prompt=True,
+                tokenize=False,
+            )
             prompt_len = len(tokenizer(prompt).input_ids)
             sampled_requests.append(
                 SampleRequest(

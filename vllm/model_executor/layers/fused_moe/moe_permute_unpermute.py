@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Optional
 
 import torch
@@ -17,14 +18,14 @@ def _moe_permute(
     expert_map: Optional[torch.Tensor],
     block_m: int,
 ) -> tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor, torch.Tensor,
-           Optional[torch.Tensor]]:
+           torch.Tensor]:
     """
     Determine the sorted_token_ids, expert_ids for the given problem size.
     Permute the hidden states and scales according to `sorted_token_ids`.
     """
     top_k_num = curr_topk_ids.size(1)
 
-    tokens_in_chunk = curr_hidden_states.sizze(0)
+    tokens_in_chunk = curr_hidden_states.size(0)
 
     sorted_token_ids, expert_ids, num_tokens_post_padded = (
         moe_align_block_size(curr_topk_ids,
@@ -36,11 +37,12 @@ def _moe_permute(
     inv_perm: Optional[torch.Tensor] = None
 
     num_tokens = top_k_num * tokens_in_chunk
-    sorted_token_ids = sorted_token_ids.clamp(max=num_tokens - 1)
     expert_ids = torch.repeat_interleave(expert_ids, block_m, dim=0)
     inv_perm = torch.argsort(sorted_token_ids)[:num_tokens]
 
     # Permute according to sorted token ids.
+    sorted_token_ids = sorted_token_ids.clamp(max=num_tokens - 1)
+
     curr_hidden_states = _fp8_perm(curr_hidden_states,
                                    sorted_token_ids // top_k_num)
 

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 Example to deploy DeepSeek R1 or V3 with Ray Serve LLM.
 See more details at:

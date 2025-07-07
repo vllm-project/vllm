@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Copyright 2023 The vLLM team.
 # Copyright (c) Google Inc.
@@ -42,6 +43,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
+from .adapters import as_seq_cls_model
 from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (AutoWeightsLoader, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
@@ -280,7 +282,9 @@ class GemmaModel(nn.Module):
         # data type such as bfloat16, not float32.
         # See https://github.com/huggingface/transformers/pull/29402
         normalizer = self.config.hidden_size**0.5
-        self.register_buffer("normalizer", torch.tensor(normalizer))
+        self.register_buffer("normalizer",
+                             torch.tensor(normalizer),
+                             persistent=False)
         self.make_empty_intermediate_tensors = (
             make_empty_intermediate_tensors_factory(
                 ["hidden_states", "residual"], config.hidden_size))
@@ -422,3 +426,6 @@ class GemmaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                            if self.config.tie_word_embeddings else None),
         )
         return loader.load_weights(weights)
+
+
+GemmaForSequenceClassification = as_seq_cls_model(GemmaForCausalLM)

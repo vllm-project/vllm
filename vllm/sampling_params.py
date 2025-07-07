@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Sampling parameters for text generation."""
 import copy
 from dataclasses import dataclass
@@ -197,8 +198,8 @@ class SamplingParams(
             processor which only retains scores for the given token ids.
             Defaults to None.
         extra_args: Arbitrary additional args, that can be used by custom
-            sampling implementations. Not used by any in-tree sampling
-            implementations.
+            sampling implementations, plugins, etc. Not used by any in-tree
+            sampling implementations.
     """
 
     n: int = 1
@@ -389,6 +390,17 @@ class SamplingParams(
                              f"type {type(self.n)}")
         if self.n < 1:
             raise ValueError(f"n must be at least 1, got {self.n}.")
+        if self.best_of is not None:
+            if not isinstance(self.best_of, int):
+                raise ValueError(
+                    f"best_of must be an integer, got {type(self.best_of)}")
+            if self.best_of < 1:
+                raise ValueError(
+                    f"best_of must be at least 1, got {self.best_of}")
+            if self.best_of < self.n:
+                raise ValueError(
+                    f"best_of must be greater than or equal to n, "
+                    f"got n={self.n} and best_of={self.best_of}.")
         if not -2.0 <= self.presence_penalty <= 2.0:
             raise ValueError("presence_penalty must be in [-2, 2], got "
                              f"{self.presence_penalty}.")

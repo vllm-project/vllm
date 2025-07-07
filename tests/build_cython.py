@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import Cython.Compiler.Options
 from Cython.Build import cythonize
 from setuptools import setup
@@ -24,7 +25,7 @@ infiles += [
 infiles += [
     "vllm/model_executor/layers/sampler.py",
     "vllm/sampling_params.py",
-    "vllm/utils.py",
+    "vllm/utils/__init__.py",
 ]
 
 setup(ext_modules=cythonize(infiles,

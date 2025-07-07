@@ -1,5 +1,5 @@
 ---
-title: Writing Unit Tests
+title: Unit Testing
 ---
 [](){ #new-model-tests }
 
@@ -15,7 +15,7 @@ Without them, the CI for your PR will fail.
 Include an example HuggingFace repository for your model in <gh-file:tests/models/registry.py>.
 This enables a unit test that loads dummy weights to ensure that the model can be initialized in vLLM.
 
-!!! warning
+!!! important
     The list of models in each section should be maintained in alphabetical order.
 
 !!! tip

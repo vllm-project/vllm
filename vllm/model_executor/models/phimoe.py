@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Adapted from
 # https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/llama/modeling_llama.py
@@ -67,6 +68,7 @@ class PhiMoEConfig(PretrainedConfig):
         num_hidden_layers=32,
         num_attention_heads=32,
         num_key_value_heads=8,
+        head_dim=None,
         hidden_act="silu",
         max_position_embeddings=4096 * 32,
         initializer_range=0.02,
@@ -100,8 +102,11 @@ class PhiMoEConfig(PretrainedConfig):
         # for backward compatibility
         if num_key_value_heads is None:
             num_key_value_heads = num_attention_heads
+        if head_dim is None:
+            head_dim = hidden_size // num_attention_heads
 
         self.num_key_value_heads = num_key_value_heads
+        self.head_dim = head_dim
         self.hidden_act = hidden_act
         self.initializer_range = initializer_range
         self.rms_norm_eps = rms_norm_eps
@@ -146,15 +151,15 @@ class mp(torch.autograd.Function):
 
         grad_at_output = grad_at_output * multiplier
 
-        grad_at_scores_expaned = masked_gates * grad_at_output.mul(-1)
-        grad_at_scores_expaned.scatter_add_(
+        grad_at_scores_expanded = masked_gates * grad_at_output.mul(-1)
+        grad_at_scores_expanded.scatter_add_(
             dim=-1,
             index=selected_experts,
             src=grad_at_output,
         )
 
         return (
-            grad_at_scores_expaned,
+            grad_at_scores_expanded,
             None,
             None,
             None,
@@ -293,6 +298,7 @@ class PhiMoEAttention(nn.Module):
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
+        head_dim: Optional[int] = None,
         max_position: int = 4096 * 32,
         rope_theta: float = 10000,
         cache_config: Optional[CacheConfig] = None,
@@ -316,7 +322,9 @@ class PhiMoEAttention(nn.Module):
             # the KV heads across multiple tensor parallel GPUs.
             assert tp_size % self.total_num_kv_heads == 0
         self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
-        self.head_dim = hidden_size // self.total_num_heads
+        if head_dim is None:
+            head_dim = hidden_size // num_heads
+        self.head_dim = head_dim
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
@@ -386,6 +394,8 @@ class PhiMoEDecoderLayer(nn.Module):
             num_heads=config.num_attention_heads,
             max_position=config.max_position_embeddings,
             num_kv_heads=config.num_key_value_heads,
+            head_dim=getattr(config, "head_dim",
+                             self.hidden_size // config.num_attention_heads),
             rope_theta=rope_theta,
             cache_config=cache_config,
             quant_config=quant_config,
