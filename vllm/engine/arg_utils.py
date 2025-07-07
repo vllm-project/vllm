@@ -36,6 +36,7 @@ from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationMethods
+from vllm.platforms import CpuArchEnum, current_platform
 from vllm.plugins import load_general_plugins
 from vllm.reasoning import ReasoningParserManager
 from vllm.test_utils import MODEL_WEIGHTS_S3_BUCKET, MODELS_ON_S3
@@ -43,7 +44,6 @@ from vllm.transformers_utils.utils import check_gguf_file
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import (STR_DUAL_CHUNK_FLASH_ATTN_VAL, FlexibleArgumentParser,
                         GiB_bytes, get_ip, is_in_ray_actor)
-from vllm.platforms import current_platform, CpuArchEnum
 
 # yapf: enable
 
@@ -1060,7 +1060,6 @@ class EngineArgs:
         If VLLM_USE_V1 is specified by the user but the VllmConfig
         is incompatible, we raise an error.
         """
-        from vllm.platforms import current_platform
         current_platform.pre_register_and_update()
 
         device_config = DeviceConfig(
@@ -1088,10 +1087,11 @@ class EngineArgs:
         if use_v1:
             self._set_default_args_v1(usage_context, model_config)
             # Disable chunked prefill for POWER (ppc64le) CPUs in V1
-            if current_platform.is_cpu() and current_platform.get_cpu_architecture() == CpuArchEnum.POWERPC:
-                logger.info(
-                    "Chunked prefill is not supported for POWER CPUs; "
-                    "disabling it for V1 backend.")
+            if current_platform.is_cpu(
+            ) and current_platform.get_cpu_architecture(
+            ) == CpuArchEnum.POWERPC:
+                logger.info("Chunked prefill is not supported for POWER CPUs; "
+                            "disabling it for V1 backend.")
                 self.enable_chunked_prefill = False
         else:
             self._set_default_args_v0(model_config)
@@ -1211,7 +1211,6 @@ class EngineArgs:
             if self.enable_chunked_prefill and self.pipeline_parallel_size > 1:
                 raise ValueError("Multi-Step Chunked-Prefill is not supported "
                                  "for pipeline-parallel-size > 1")
-            from vllm.platforms import current_platform
             if current_platform.is_cpu():
                 logger.warning("Multi-Step (--num-scheduler-steps > 1) is "
                                "currently not supported for CPUs and has been "
@@ -1360,7 +1359,6 @@ class EngineArgs:
         # Skip this check if we are running on a non-GPU platform,
         # or if the device capability is not available
         # (e.g. in a Ray actor without GPUs).
-        from vllm.platforms import current_platform
         if (current_platform.is_cuda()
                 and current_platform.get_device_capability()
                 and current_platform.get_device_capability().major < 8):
@@ -1621,7 +1619,6 @@ class EngineArgs:
         # as the platform that vLLM is running on (e.g. the case of scaling
         # vLLM with Ray) and has no GPUs. In this case we use the default
         # values for non-H100/H200 GPUs.
-        from vllm.platforms import current_platform
         try:
             device_memory = current_platform.get_device_total_memory()
             device_name = current_platform.get_device_name().lower()
@@ -1724,7 +1721,6 @@ class AsyncEngineArgs(EngineArgs):
         parser.add_argument('--disable-log-requests',
                             action='store_true',
                             help='Disable logging requests.')
-        from vllm.platforms import current_platform
         current_platform.pre_register_and_update(parser)
         return parser
 

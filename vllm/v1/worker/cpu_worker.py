@@ -3,7 +3,6 @@
 import os
 from importlib import util
 from typing import Optional
-import platform
 
 import torch
 
@@ -12,7 +11,7 @@ from vllm.config import VllmConfig
 from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 from vllm.logger import init_logger
 from vllm.model_executor.utils import set_random_seed
-from vllm.platforms import current_platform
+from vllm.platforms import CpuArchEnum, current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import ModelRunnerOutput
@@ -44,8 +43,7 @@ class CPUWorker(Worker):
         omp_cpuids = envs.VLLM_CPU_OMP_THREADS_BIND
         self.local_omp_cpuid = "all"
         if omp_cpuids == "auto":
-            arch = platform.machine()
-            if arch == "ppc64le":
+            if current_platform.get_cpu_architecture() == CpuArchEnum.POWERPC:
                 self.local_omp_cpuid = (
                     self.get_cpus_id_binding_based_on_numa_nodes_ppc64le())
             else:
@@ -159,7 +157,6 @@ class CPUWorker(Worker):
                 "fallback to no thread-binding. To get better performance,"
                 "please try to manually bind threads.")
         return rank_to_cpus
-
 
     def get_cpus_id_binding_based_on_numa_nodes_ppc64le(self) -> str:
         """
