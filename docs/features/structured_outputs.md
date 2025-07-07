@@ -200,7 +200,7 @@ Note that you can use reasoning with any provided structured outputs feature. Th
     print("content: ", completion.choices[0].message.content)
     ```
 
-See also: [full example](../examples/online_serving/structured_outputs.html)
+See also: [full example](../examples/online_serving/structured_outputs.md)
 
 ## Experimental Automatic Parsing (OpenAI API)
 
@@ -325,4 +325,4 @@ shown below:
     print(outputs[0].outputs[0].text)
     ```
 
-See also: [full example](../examples/online_serving/structured_outputs.html)
+See also: [full example](../examples/online_serving/structured_outputs.md)
