@@ -11,7 +11,7 @@ and runs it in vLLM using the default configuration.
 ```python
 from vllm import LLM
 
-# Initalize the vLLM engine.
+# Initialize the vLLM engine.
 llm = LLM(model="facebook/opt-125m")
 ```
 
