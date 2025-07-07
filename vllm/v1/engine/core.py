@@ -65,7 +65,7 @@ class EngineCore:
         from vllm.plugins import load_general_plugins
         from vllm.v1.sample.logits_processor.load import load_logitsprocs
         load_general_plugins()
-        load_logitsprocs(vllm_config.allowed_logitsprocs)
+        load_logitsprocs(vllm_config.logits_processors)
 
         self.vllm_config = vllm_config
         logger.info("Initializing a V1 LLM engine (v%s) with config: %s",
