@@ -21,10 +21,8 @@ def get_local_sizes():
         sizes.append((cu_sizes[i] - cu_sizes[i - 1]).item())
     return sizes
 
-#should be mk.FusedMoEPrepareAndFinalize chk pplx
-class FlashInferCutlassMoEPrepareAndFinalize(MoEPrepareAndFinalizeNoEP
-                                                 ):
 
+class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     def __init__(
         self,
         quant_dtype: Optional[torch.dtype] = None,
@@ -35,6 +33,10 @@ class FlashInferCutlassMoEPrepareAndFinalize(MoEPrepareAndFinalizeNoEP
         self.per_channel_quant = per_channel_quant
         self.block_shape = block_shape
         self.quant_dtype = quant_dtype
+
+    @property
+    def activation_format(self) -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.Standard
 
     def max_num_tokens_per_rank(self) -> Optional[int]:
         return None

@@ -109,20 +109,17 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         - Workspace type: The dtype to use for the workspace tensors.
         - Note: in order for activation chunking to work, the first dimension
           of each tuple must be the number of tokens.
-        """        
-        # num_experts = global_num_experts
-        # block_m = self.block_shape[0]
-        # M_sum = (M * topk) + num_experts * (block_m - 1)
-        # M_sum = round_up(M_sum, block_m)
-        # workspace1 = ()
-        # TODO(shuw): This is nvfp4 specialized, add branch for other quant type.
-        aq_m, aq_n = aq.shape
-        workspace2 = ()
-        output_shape = (aq_m, aq_n * 2)
-        workspace_dtype = a.dtype
-        workspace1 = output_shape
-        # determined by aq, since aq is the one after possible communication op and participate in experts computation.
-        return (workspace1, workspace2, output_shape, workspace_dtype)
+        """
+        if self.use_nvfp4_w4a4:
+            aq_m, aq_n = aq.shape
+            workspace2 = ()
+            output_shape = (aq_m, aq_n * 2)
+            workspace_dtype = a.dtype
+            workspace1 = output_shape
+            # determined by aq, since aq is the one after possible communication op and participate in experts computation.
+            return (workspace1, workspace2, output_shape, workspace_dtype)
+        else:
+            raise ValueError("Only nvfp4 quantization is currently supported.")
 
     def apply(
         self,
@@ -160,7 +157,7 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
                 w2_scale.view(torch.int32),
                 g2_alphas,
             ]
-            out = flashinfer_cutlass_fused_moe(
+            _ = flashinfer_cutlass_fused_moe(
                 hidden_states,
                 topk_ids.to(torch.int),
                 topk_weights,
@@ -174,8 +171,7 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
                 tp_rank=self.tp_rank,
                 ep_size=self.ep_size,
                 ep_rank=self.ep_rank,
-            )[0]
-            # TODO(shuw): Handle the allocation from FlashInfer to framework
-            output.copy_(out)
+                output=output,
+            )
         else:
             raise ValueError("Only nvfp4 quantization is currently supported.")
