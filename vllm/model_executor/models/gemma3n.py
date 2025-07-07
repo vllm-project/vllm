@@ -627,7 +627,6 @@ class Gemma3nTextModel(nn.Module, SupportsQuant):
         # Deal with the fact that vocab_size_per_layer_input < vocab_size
         # which causes us to have some out of vocab tokens by setting
         # those token ids to 0. This matches the HF implementation.
-        # TODO should be moved to before input_embeds is generated
         per_layer_inputs_mask = torch.logical_and(
             input_ids >= 0, input_ids < self.config.vocab_size_per_layer_input)
         per_layer_inputs_tokens = torch.where(per_layer_inputs_mask, input_ids,
@@ -648,12 +647,6 @@ class Gemma3nTextModel(nn.Module, SupportsQuant):
             hidden_states_0 = self.get_input_embeddings(input_ids)
 
         # Per layer inputs.
-        # FIXME
-        if input_ids is not None:
-            per_layer_inputs = self.get_per_layer_input_embeddings(input_ids)
-            per_layer_inputs = per_layer_inputs.reshape(
-                -1, self.config.num_hidden_layers,
-                self.config.hidden_size_per_layer_input)
         per_layer_projection = self.per_layer_model_projection(hidden_states_0)
         per_layer_projection = per_layer_projection.reshape(
             *hidden_states_0.shape[:-1],
@@ -662,8 +655,16 @@ class Gemma3nTextModel(nn.Module, SupportsQuant):
         )
         per_layer_projection = self.per_layer_projection_norm(
             per_layer_projection)
-        per_layer_inputs = per_layer_projection + per_layer_inputs
-        per_layer_inputs *= self.per_layer_input_scale
+
+        if input_ids is not None:
+            per_layer_inputs = self.get_per_layer_input_embeddings(input_ids)
+            per_layer_inputs = per_layer_inputs.reshape(
+                -1, self.config.num_hidden_layers,
+                self.config.hidden_size_per_layer_input)
+            per_layer_inputs = per_layer_projection + per_layer_inputs
+            per_layer_inputs *= self.per_layer_input_scale
+        else:
+            per_layer_inputs = per_layer_projection
 
         # Altup embed.
         hidden_states = [hidden_states_0] * self.config.altup_num_inputs
