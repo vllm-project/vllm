@@ -26,15 +26,15 @@
 # node and thereby shuts down the entire cluster.
 # Every machine must be reachable at the supplied IP address.
 #
-# The container is named "node". To open a shell inside the container after
+# The container is named "node-<random_suffix>". To open a shell inside the container after
 # launch, use:
-#       docker exec -it node /bin/bash
+#       docker exec -it node-<random_suffix> /bin/bash
 #
 # Then, you can execute vLLM commands on the Ray cluster as if it were a
 # single machine, e.g. vllm serve ...
 #
 # To stop the container, use:
-#       docker stop node
+#       docker stop node-<random_suffix>
 
 # Check for minimum number of required arguments.
 if [ $# -lt 4 ]; then
@@ -58,10 +58,14 @@ if [ "${NODE_TYPE}" != "--head" ] && [ "${NODE_TYPE}" != "--worker" ]; then
     exit 1
 fi
 
+# Generate a unique container name with random suffix.
+CONTAINER_NAME="node-${RANDOM}"
+
 # Define a cleanup routine that removes the container when the script exits.
 cleanup() {
-    docker stop node
-    docker rm node
+    docker stop "${CONTAINER_NAME}"
+    docker rm "${CONTAINER_NAME}"
+    echo "Container ${CONTAINER_NAME} stopped and removed."
 }
 trap cleanup EXIT
 
@@ -73,11 +77,13 @@ else
     RAY_START_CMD+=" --address=${HEAD_NODE_ADDRESS}:6379"
 fi
 
+echo "Starting container: ${CONTAINER_NAME}"
+
 # Launch the container with the assembled parameters.
 docker run \
     --entrypoint /bin/bash \
     --network host \
-    --name node \
+    --name "${CONTAINER_NAME}" \
     --shm-size 10.24g \
     --gpus all \
     -v "${PATH_TO_HF_HOME}:/root/.cache/huggingface" \
