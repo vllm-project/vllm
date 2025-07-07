@@ -284,6 +284,17 @@ class Qwen2Model(nn.Module):
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
 
+        self.register_buffer(
+            'query_buffer',
+            torch.zeros(
+                # 3584 hidden_size = 28 heads * 128 head dim
+                (config.num_hidden_layers, 1, config.hidden_size),
+                dtype=getattr(torch, config.torch_dtype),
+                device=torch.cuda.current_device(),
+            ),
+            persistent=False,
+        )
+
         # TODO (@robertgshaw2): see if this can be moved out
         if (cache_config.sliding_window is not None
                 and hasattr(config, "max_window_layers")):
@@ -356,6 +367,8 @@ class Qwen2Model(nn.Module):
                 hidden_states,
                 residual,
             )
+            self.query_buffer[i] = q
+
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
                 "hidden_states": hidden_states,
@@ -436,15 +449,6 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        self.register_buffer(
-            'query_buffer',
-            torch.zeros(
-                (28, 1, 3584),  # 3584 = 28 heads * 128 head dim
-                dtype=torch.bfloat16,
-                device=torch.cuda.current_device(),
-            ),
-            persistent=False,
-        )
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
