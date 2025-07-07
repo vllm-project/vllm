@@ -51,10 +51,6 @@ class XPUPlatform(Platform):
         Set the device for the current platform.
         """
         torch.xpu.set_device(device)
-        # With this trick we can force the device to be set eagerly
-        # see https://github.com/pytorch/pytorch/issues/155668
-        # for why and when it is needed
-        _ = torch.zeros(1, device=device)
 
     @classmethod
     def get_device_capability(
