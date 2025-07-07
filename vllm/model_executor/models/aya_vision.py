@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project Adapted from
-# https://github.com/huggingface/transformers/tree/main/src/transformers/models/aya_vision
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# Adapted from https://github.com/huggingface/transformers/tree/main/src/transformers/models/aya_vision
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Literal, Optional, TypedDict, Union, cast
 
@@ -32,8 +32,9 @@ from vllm.sequence import IntermediateTensors
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .siglip import SiglipVisionModel
-from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
-                    maybe_prefix, merge_multimodal_embeddings)
+from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
+                    init_vllm_registered_model, maybe_prefix,
+                    merge_multimodal_embeddings)
 
 
 class AyaVisionImagePixelInputs(TypedDict):
@@ -184,11 +185,13 @@ class AyaVisionMultiModalProcessor(
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         processed_outputs = super()._call_hf_processor(
             prompt,
             mm_data,
             mm_kwargs,
+            tok_kwargs,
         )
         hf_processor = self.info.get_hf_processor(**mm_kwargs)
         image_processor = hf_processor.image_processor
@@ -292,6 +295,22 @@ def _get_layer_index(feature_layer_index: int, num_hidden_layers: int) -> int:
 class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal,
                                         SupportsPP):
 
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={
+            # mapping for new names in checkpoint saved after transformers v4.52
+            "model.language_model.": "language_model.model.",
+            "model.vision_tower.": "vision_tower.",
+            "model.multi_modal_projector.": "multi_modal_projector.",
+            "lm_head.": "language_model.lm_head.",
+        })
+
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+        if modality.startswith("image"):
+            return "<image>"
+
+        raise ValueError("Only image modality is supported")
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config: AyaVisionConfig = vllm_config.model_config.hf_config
@@ -323,7 +342,7 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal,
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def _image_pixels_to_features(self, vision_tower: SiglipVisionModel,
                                   pixel_values: torch.Tensor,
@@ -406,11 +425,11 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal,
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def get_multimodal_embeddings(
-            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
+    def get_multimodal_embeddings(self,
+                                  **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
-            return None
+            return []
 
         return self._process_image_input(image_input, **kwargs)
 
@@ -420,7 +439,8 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal,
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
-        if multimodal_embeddings is not None:
+        if multimodal_embeddings is not None \
+            and len(multimodal_embeddings) != 0:
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids=input_ids,
                 inputs_embeds=inputs_embeds,

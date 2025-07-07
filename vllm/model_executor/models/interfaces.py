@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Iterable, MutableSequence
 from typing import (TYPE_CHECKING, ClassVar, Literal, Optional, Protocol,
                     Union, overload, runtime_checkable)
 
@@ -17,6 +18,7 @@ from .interfaces_base import is_pooling_model
 
 if TYPE_CHECKING:
     from vllm.attention import AttentionMetadata
+    from vllm.model_executor.models.utils import WeightsMapper
     from vllm.sequence import IntermediateTensors
 
 logger = init_logger(__name__)
@@ -44,8 +46,15 @@ class SupportsMultiModal(Protocol):
         MRO of your model class.
     """
 
-    def get_multimodal_embeddings(
-            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+        """
+        Get the placeholder text for the `i`th `modality` item in the prompt.
+        """
+        ...
+
+    def get_multimodal_embeddings(self,
+                                  **kwargs: object) -> MultiModalEmbeddings:
         """
         Returns multimodal embeddings generated from multimodal kwargs 
         to be merged with text embeddings.
@@ -427,6 +436,73 @@ def is_hybrid(
 
 
 @runtime_checkable
+class MixtureOfExperts(Protocol):
+    """
+    Check if the model is a mixture of experts (MoE) model.
+    """
+
+    expert_weights: MutableSequence[Iterable[Tensor]]
+    """
+    Expert weights saved in this rank.
+
+    The first dimension is the layer, and the second dimension is different
+    parameters in the layer, e.g. up/down projection weights.
+    """
+
+    num_moe_layers: int
+    """Number of MoE layers in this model."""
+
+    num_expert_groups: int
+    """Number of expert groups in this model."""
+
+    num_logical_experts: int
+    """Number of logical experts in this model."""
+
+    num_physical_experts: int
+    """Number of physical experts in this model."""
+
+    num_local_physical_experts: int
+    """Number of local physical experts in this model."""
+
+    num_routed_experts: int
+    """Number of routed experts in this model."""
+
+    num_shared_experts: int
+    """Number of shared experts in this model."""
+
+    num_redundant_experts: int
+    """Number of redundant experts in this model."""
+
+    def set_eplb_state(
+        self,
+        expert_load_view: Tensor,
+        logical_to_physical_map: Tensor,
+        logical_replica_count: Tensor,
+    ) -> None:
+        """
+        Register the EPLB state in the MoE model.
+        
+        Since these are views of the actual EPLB state, any changes made by
+        the EPLB algorithm are automatically reflected in the model's behavior
+        without requiring additional method calls to set new states.
+
+        You should also collect model's `expert_weights` here instead of in
+        the weight loader, since after initial weight loading, further
+        processing like quantization may be applied to the weights.
+
+        Args:
+            expert_load_view: A view of the expert load metrics tensor.
+            logical_to_physical_map: Mapping from logical to physical experts.
+            logical_replica_count: Count of replicas for each logical expert.
+        """
+        ...
+
+
+def is_mixture_of_experts(model: object) -> TypeIs[MixtureOfExperts]:
+    return isinstance(model, MixtureOfExperts)
+
+
+@runtime_checkable
 class HasNoOps(Protocol):
     has_noops: ClassVar[Literal[True]] = True
 
@@ -489,23 +565,45 @@ def supports_cross_encoding(
     return is_pooling_model(model) and _supports_cross_encoding(model)
 
 
+def has_step_pooler(model: Union[type[object], object]) -> bool:
+    """Check if the model uses step pooler."""
+    return is_pooling_model(model) and any(
+        type(module).__name__ == "StepPool" for module in model.modules())
+
+
 class SupportsQuant:
     """The interface required for all models that support quantization."""
 
-    packed_modules_mapping: ClassVar[dict[str, list[str]]] = {}
+    hf_to_vllm_mapper: ClassVar[Optional["WeightsMapper"]] = None
+    packed_modules_mapping: ClassVar[Optional[dict[str, list[str]]]] = None
     quant_config: Optional[QuantizationConfig] = None
 
     def __new__(cls, *args, **kwargs) -> Self:
         instance = super().__new__(cls)
+
+        # find config passed in arguments
         quant_config = cls._find_quant_config(*args, **kwargs)
         if quant_config is not None:
+
+            # attach config to model for general use
             instance.quant_config = quant_config
-            instance.quant_config.packed_modules_mapping.update(
-                cls.packed_modules_mapping)
+
+            # apply model mappings to config for proper config-model matching
+            # NOTE: `TransformersForCausalLM` is not supported due to how this
+            # class defines `hf_to_vllm_mapper` as a post-init `@property`.
+            # After this is fixed, get `instance.hf_to_vllm_mapper` directly
+            if getattr(instance, "hf_to_vllm_mapper", None) is not None:
+                instance.quant_config.apply_vllm_mapper(
+                    instance.hf_to_vllm_mapper)
+            if getattr(instance, "packed_modules_mapping", None) is not None:
+                instance.quant_config.packed_modules_mapping.update(
+                    instance.packed_modules_mapping)
+
         return instance
 
     @staticmethod
     def _find_quant_config(*args, **kwargs) -> Optional[QuantizationConfig]:
+        """Find quant config passed through model constructor args"""
         from vllm.config import VllmConfig  # avoid circular import
 
         args_values = list(args) + list(kwargs.values())
@@ -524,6 +622,17 @@ class SupportsTranscription(Protocol):
     """The interface required for all models that support transcription."""
 
     supports_transcription: ClassVar[Literal[True]] = True
+
+    @classmethod
+    def get_decoder_prompt(cls, language: str, task_type: str,
+                           prompt: str) -> str:
+        """Get the decoder prompt for the ASR model."""
+        ...
+
+    @classmethod
+    def validate_language(cls, language: str) -> bool:
+        """Check if the model supports a specific ISO639_1 language."""
+        ...
 
 
 @overload

@@ -40,35 +40,40 @@ class StructuredOutputManager:
         self._grammar_bitmask: Optional[torch.Tensor] = None
         self._full_mask = torch.tensor(-1, dtype=torch.int32)
 
-        # The default max_workers if not specified is the number of CPUs * 5,
-        # which is way too high since these tasks are CPU-bound, not I/O bound.
-        # We also know we would never dominate CPU usage with just grammar
-        # compilation, so we set it to half the number of CPUs.
-        max_workers = max(1, (multiprocessing.cpu_count() + 1) // 2)
-        self.executor = ThreadPoolExecutor(max_workers=max_workers)
-        self.tokenizer = init_tokenizer_from_configs(
-            model_config=self.vllm_config.model_config,
-            scheduler_config=self.vllm_config.scheduler_config,
-            lora_config=self.vllm_config.lora_config,
-        ).get_lora_tokenizer(None)
-        reasoning_backend = vllm_config.decoding_config.reasoning_backend
-        if reasoning_backend:
-            reasoner_cls = ReasoningParserManager.get_reasoning_parser(
-                reasoning_backend)
-            self.reasoner = reasoner_cls(tokenizer=self.tokenizer)
+        if not self.vllm_config.model_config.skip_tokenizer_init:
+            # The default max_workers if not specified is the number of
+            # CPUs * 5, which is way too high since these tasks are CPU-bound,
+            # not I/O bound. We also know we would never dominate CPU usage
+            # with just grammar compilation, so we set it to half the number
+            # of CPUs.
+            max_workers = max(1, (multiprocessing.cpu_count() + 1) // 2)
+            self.executor = ThreadPoolExecutor(max_workers=max_workers)
+            self.tokenizer = init_tokenizer_from_configs(
+                model_config=self.vllm_config.model_config,
+                scheduler_config=self.vllm_config.scheduler_config,
+                lora_config=self.vllm_config.lora_config,
+            ).get_lora_tokenizer(None)
+            reasoning_backend = \
+                    self.vllm_config.decoding_config.reasoning_backend
+            if reasoning_backend:
+                reasoner_cls = ReasoningParserManager.get_reasoning_parser(
+                    reasoning_backend)
+                self.reasoner = reasoner_cls(tokenizer=self.tokenizer)
 
     def grammar_init(self, request: Request) -> None:
         if request.structured_output_request is None:
             return
 
         if TYPE_CHECKING:
-            assert request.sampling_params.guided_decoding is not None
+            assert request.sampling_params is not None and \
+                request.sampling_params.guided_decoding is not None
 
         # Initialize the backend the first time it is needed.
         #
         # NOTE: We only support a single backend. We do NOT support different
         # backends on a per-request basis in V1 (for now, anyway...).
         if self.backend is None:
+            assert request.sampling_params is not None
             backend = request.sampling_params.guided_decoding.backend
             vocab_size = self.vllm_config.model_config.get_vocab_size()
             if backend == "xgrammar":

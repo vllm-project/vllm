@@ -302,17 +302,14 @@ class TransformersModel(nn.Module):
                                     self.pp_rank, self.pp_size)
 
         attention_instances = {}
-        if hasattr(self.config, "global_attention_layers") and isinstance(
-                self.config.global_attention_layers, list):
-            global_attention_layers = self.config.global_attention_layers
-        else:
-            global_attention_layers = []
-
         for i in range(start, end):
+            # Handle interleaved sliding window attention
             sliding_window = None
-            if i not in global_attention_layers:
-                assert self.config.interleaved_sliding_window is not None
+            if (hasattr(self.config, "interleaved_sliding_window")
+                    and hasattr(self.config, "sliding_window_pattern")
+                    and ((i + 1) % self.config.sliding_window_pattern > 0)):
                 sliding_window = self.config.interleaved_sliding_window
+
             attention_instances[i] = Attention(
                 num_heads=num_heads,
                 head_size=head_size,
@@ -479,6 +476,7 @@ class TransformersForCausalLM(nn.Module, SupportsQuant, SupportsLoRA,
     # FIXME(Isotr0py): Don't use any weights mapper for Transformers backend,
     # this makes thing complicated. We need to remove this mapper after refactor
     # `TransformersModel` in the future.
+    # NOTE: `SupportsQuant` can be updated after property decorator is removed
     @property
     def hf_to_vllm_mapper(self):
         prefix_mapper = {

@@ -475,7 +475,7 @@ class MQLLMEngineClient(EngineClient):
         """
         return cast(
             AsyncGenerator[RequestOutput, None],
-            self._process_request(prompt, sampling_params, request_id, streaming_params,
+            self._process_request(prompt, sampling_params, request_id,
                                   lora_request, trace_headers,
                                   prompt_adapter_request, priority))
 

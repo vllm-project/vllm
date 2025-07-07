@@ -1,15 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
 import argparse
 import multiprocessing
 import time
 import weakref
 from collections import defaultdict
 from collections.abc import Sequence
-from dataclasses import dataclass
-from enum import Enum, auto
-from multiprocessing import Process, connection
+from multiprocessing import connection
 from multiprocessing.process import BaseProcess
 from typing import (TYPE_CHECKING, Any, Callable, Generic, Optional, TypeVar,
                     Union, overload)
@@ -23,15 +20,16 @@ from vllm.logger import init_logger
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
                                   usage_message)
-from vllm.utils import (get_mp_context, get_open_port, get_open_zmq_ipc_path,
-                        get_tcp_uri, kill_process_tree)
-from vllm.v1.executor.abstract import Executor
+from vllm.utils import (get_open_port, get_open_zmq_ipc_path, get_tcp_uri,
+                        kill_process_tree)
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
 
     from vllm.attention.layer import Attention
     from vllm.v1.engine.coordinator import DPCoordinator
+    from vllm.v1.engine.utils import (CoreEngineActorManager,
+                                      CoreEngineProcManager)
 
 logger = init_logger(__name__)
 
@@ -111,47 +109,16 @@ class ConstantList(Generic[T], Sequence):
 def get_engine_client_zmq_addr(local_only: bool,
                                host: str,
                                port: int = 0) -> str:
+    """Assign a new ZMQ socket address.
+
+    If local_only is True, participants are colocated and so a unique IPC
+    address will be returned.
+
+    Otherwise, the provided host and port will be used to construct a TCP
+    address (port == 0 means assign an available port)."""
+
     return get_open_zmq_ipc_path() if local_only else (get_tcp_uri(
         host, port or get_open_port()))
-
-
-class CoreEngineState(Enum):
-    NEW = auto()
-    CONNECTED = auto()
-    READY = auto()
-
-
-class CoreEngine:
-    """One per data parallel rank."""
-
-    def __init__(self, index: int = 0, local: bool = True):
-        self.local = local
-        self.index = index
-        self.identity = index.to_bytes(2, "little")
-
-        self.state = CoreEngineState.NEW
-
-
-@dataclass
-class EngineZmqAddresses:
-    # ZMQ input socket addresses for each front-end client (requests)
-    inputs: list[str]
-    # ZMQ output socket addresses for each front-end client (responses)
-    outputs: list[str]
-    # ZMQ input socket address of DP coordinator if applicable
-    coordinator_input: Optional[str] = None
-    # ZMQ output socket address of DP coordinator if applicable
-    coordinator_output: Optional[str] = None
-
-
-@dataclass
-class EngineHandshakeMetadata:
-    """Metadata sent to each engine process during startup handshake,
-    including addresses of the front-end ZMQ queues that they should
-    connect to.
-    """
-    addresses: EngineZmqAddresses
-    parallel_config: dict[str, Union[int, str]]
 
 
 class APIServerProcessManager:
@@ -216,60 +183,6 @@ class APIServerProcessManager:
         self._finalizer = weakref.finalize(self, shutdown, self.processes)
 
     def close(self) -> None:
-        self._finalizer()
-
-
-class CoreEngineProcManager:
-    """
-    Utility class to handle creation, readiness, and shutdown
-    of background processes used by the AsyncLLM and LLMEngine.
-    """
-
-    def __init__(
-        self,
-        target_fn: Callable,
-        local_engine_count: int,
-        start_index: int,
-        local_start_index: int,
-        vllm_config: VllmConfig,
-        on_head_node: bool,
-        handshake_address: str,
-        executor_class: type[Executor],
-        log_stats: bool,
-    ):
-        context = get_mp_context()
-        common_kwargs = {
-            "vllm_config": vllm_config,
-            "on_head_node": on_head_node,
-            "handshake_address": handshake_address,
-            "executor_class": executor_class,
-            "log_stats": log_stats,
-        }
-
-        self.processes: list[BaseProcess] = []
-        for index in range(local_engine_count):
-            local_index = local_start_index + index
-            global_index = start_index + index
-            # Start EngineCore in background process.
-            self.processes.append(
-                context.Process(target=target_fn,
-                                name=f"EngineCore_{global_index}",
-                                kwargs=common_kwargs | {
-                                    "dp_rank": global_index,
-                                    "local_dp_rank": local_index,
-                                }))
-
-        self._finalizer = weakref.finalize(self, shutdown, self.processes)
-        try:
-            for proc in self.processes:
-                proc.start()
-        finally:
-            # Kill other procs if not all are running.
-            if self.finished_procs():
-                self.close()
-
-    def close(self):
-        """Shutdown all procs."""
         self._finalizer()
 
     def join_first(self):
@@ -564,6 +477,80 @@ def wait_for_completion_or_failure(
             if CoreEngineActorManager, it manages all engines.
         coordinator: The coordinator for data parallel.
     """
+
+    try:
+        logger.info("Waiting for API servers to complete ...")
+        # Create a mapping of sentinels to their corresponding processes
+        # for efficient lookup
+        sentinel_to_proc: dict[Any, BaseProcess] = {
+            proc.sentinel: proc
+            for proc in api_server_manager.processes
+        }
+
+        if coordinator:
+            sentinel_to_proc[coordinator.proc.sentinel] = coordinator.proc
+
+        actor_run_refs = []
+        if isinstance(engine_manager, CoreEngineProcManager):
+            for proc in engine_manager.processes:
+                sentinel_to_proc[proc.sentinel] = proc
+        elif isinstance(engine_manager, CoreEngineActorManager):
+            actor_run_refs = engine_manager.get_run_refs()
+
+        # Check if any process terminates
+        while sentinel_to_proc or actor_run_refs:
+            # Wait for any process to terminate
+            ready_sentinels: list[Any] = connection.wait(sentinel_to_proc,
+                                                         timeout=5)
+
+            # Process any terminated processes
+            for sentinel in ready_sentinels:
+                proc = sentinel_to_proc.pop(sentinel)
+
+                # Check if process exited with error
+                if proc.exitcode != 0:
+                    raise RuntimeError(
+                        f"Process {proc.name} (PID: {proc.pid}) "
+                        f"died with exit code {proc.exitcode}")
+
+            if actor_run_refs:
+                import ray
+                _, actor_run_refs = ray.wait(actor_run_refs, timeout=5)
+
+    except KeyboardInterrupt:
+        logger.info("Received KeyboardInterrupt, shutting down API servers...")
+    except Exception as e:
+        logger.exception("Exception occurred while running API servers: %s",
+                         str(e))
+        raise
+    finally:
+        logger.info("Terminating remaining processes ...")
+        api_server_manager.close()
+        if coordinator:
+            coordinator.close()
+        if engine_manager:
+            engine_manager.close()
+
+
+def wait_for_completion_or_failure(
+        api_server_manager: APIServerProcessManager,
+        engine_manager: Optional[Union["CoreEngineProcManager",
+                                       "CoreEngineActorManager"]] = None,
+        coordinator: Optional["DPCoordinator"] = None) -> None:
+    """Wait for all processes to complete or detect if any fail.
+    
+    Raises an exception if any process exits with a non-zero status.
+
+    Args:
+        api_server_manager: The manager for API servers.
+        engine_manager: The manager for engine processes.
+            If CoreEngineProcManager, it manages local engines;
+            if CoreEngineActorManager, it manages all engines.
+        coordinator: The coordinator for data parallel.
+    """
+
+    from vllm.v1.engine.utils import (CoreEngineActorManager,
+                                      CoreEngineProcManager)
 
     try:
         logger.info("Waiting for API servers to complete ...")

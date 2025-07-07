@@ -3,76 +3,22 @@
 """ Attention layer with torch scaled_dot_product_attention
     and PagedAttention."""
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple, Type
+from typing import Any, Dict, List, Optional
 
 import torch
 from torch.nn.functional import scaled_dot_product_attention
 
 # yapf conflicts with isort for this block
 # yapf: disable
-from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionLayer,
-                                              AttentionMetadata,
-                                              AttentionMetadataBuilder,
-                                              AttentionType,
+from vllm.attention.backends.abstract import (AttentionImpl, AttentionLayer,
+                                              AttentionMetadata, AttentionType,
                                               is_quantized_kv_cache)
 # yapf: enable
-from vllm.attention.backends.utils import CommonAttentionState
 from vllm.attention.ops.ipex_attn import PagedAttention, _use_ipex
 from vllm.attention.ops.paged_attn import PagedAttentionMetadata
 from vllm.logger import init_logger
-from vllm.utils import make_tensor_with_pad
-from vllm.worker.cpu_model_runner import ModelInputForCPUBuilder
 
 logger = init_logger(__name__)
-
-
-class TorchSDPABackend(AttentionBackend):
-
-    @staticmethod
-    def get_name() -> str:
-        return "TORCH_SDPA"
-
-    @staticmethod
-    def get_impl_cls() -> Type["TorchSDPABackendImpl"]:
-        return TorchSDPABackendImpl
-
-    @staticmethod
-    def get_metadata_cls() -> Type["AttentionMetadata"]:
-        return TorchSDPAMetadata
-
-    @staticmethod
-    def get_state_cls() -> Type["CommonAttentionState"]:
-        return CommonAttentionState
-
-    @staticmethod
-    def get_builder_cls() -> Type["TorchSDPAMetadataBuilder"]:
-        return TorchSDPAMetadataBuilder
-
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-    ) -> Tuple[int, ...]:
-        return PagedAttention.get_kv_cache_shape(num_blocks, block_size,
-                                                 num_kv_heads, head_size)
-
-    @staticmethod
-    def swap_blocks(
-        src_kv_cache: torch.Tensor,
-        dst_kv_cache: torch.Tensor,
-        src_to_dst: torch.Tensor,
-    ) -> None:
-        PagedAttention.swap_blocks(src_kv_cache, dst_kv_cache, src_to_dst)
-
-    @staticmethod
-    def copy_blocks(
-        kv_caches: List[torch.Tensor],
-        src_to_dists: torch.Tensor,
-    ) -> None:
-        PagedAttention.copy_blocks(kv_caches, src_to_dists)
 
 
 @dataclass
@@ -287,113 +233,6 @@ class TorchSDPAMetadata(AttentionMetadata, PagedAttentionMetadata):
             raise AttributeError(f"Invalid attention type {str(attn_type)}")
 
 
-class TorchSDPAMetadataBuilder(AttentionMetadataBuilder[TorchSDPAMetadata]):
-
-    def __init__(self, input_builder: ModelInputForCPUBuilder) -> None:
-        self.chunked_prefill = input_builder.chunked_prefill
-        self.input_builder = input_builder
-
-    def prepare(self):
-        self.input_data = self.input_builder.input_data
-
-    def build(self, seq_lens: List[int], query_lens: List[int],
-              cuda_graph_pad_size: int, batch_size: int) -> TorchSDPAMetadata:
-        input_data = self.input_data
-        prefill_seq_lens = seq_lens[0:input_data.num_prefills]
-        prefill_query_lens = query_lens[0:input_data.num_prefills]
-        slot_mapping = torch.tensor(input_data.slot_mapping,
-                                    dtype=torch.long,
-                                    device="cpu")
-
-        # For chunked-prefill
-        if self.chunked_prefill and input_data.num_prefill_tokens != 0:
-            prefill_block_tables = make_tensor_with_pad(
-                self.input_data.prefill_block_tables,
-                pad=0,
-                dtype=torch.int32,
-                device="cpu",
-            )
-            query_lens_tensor = torch.tensor(prefill_query_lens,
-                                             dtype=torch.int32,
-                                             device="cpu")
-            kv_lens_tensor = torch.tensor(prefill_seq_lens,
-                                          dtype=torch.int32,
-                                          device="cpu")
-            query_start_loc = torch.zeros(input_data.num_prefills + 1,
-                                          dtype=torch.int32,
-                                          device="cpu")
-            kv_start_loc = torch.zeros(input_data.num_prefills + 1,
-                                       dtype=torch.int32,
-                                       device="cpu")
-            torch.cumsum(query_lens_tensor,
-                         dim=0,
-                         dtype=torch.int32,
-                         out=query_start_loc[1:])
-            torch.cumsum(kv_lens_tensor,
-                         dim=0,
-                         dtype=torch.int32,
-                         out=kv_start_loc[1:])
-            max_query_len = max(prefill_query_lens)
-            max_kv_len = max(prefill_seq_lens)
-        else:
-            prefill_block_tables = None
-            query_start_loc = None
-            kv_start_loc = None
-            max_query_len = None
-            max_kv_len = None
-
-        # For paged attention
-        if input_data.num_decode_tokens != 0:
-            seq_lens_tensor = torch.tensor(
-                input_data.seq_lens[input_data.num_prefills:],
-                dtype=torch.int32,
-                device="cpu",
-            )
-            block_tables = make_tensor_with_pad(
-                self.input_data.decode_block_tables,
-                pad=0,
-                dtype=torch.int32,
-                device="cpu",
-            )
-        else:
-            block_tables = torch.tensor([])
-            seq_lens_tensor = torch.tensor(
-                input_data.seq_lens[:input_data.num_prefills],
-                dtype=torch.int32,
-                device="cpu",
-            )
-
-        # For multi-modal models
-        placeholder_index_maps = None
-        if len(input_data.multi_modal_inputs_list) != 0:
-            placeholder_index_maps = {
-                modality: placeholder_map.index_map()
-                for modality, placeholder_map in
-                input_data.multi_modal_placeholder_maps.items()
-            }
-
-        attn_metadata = TorchSDPAMetadata(
-            chunked_prefill=self.chunked_prefill,
-            seq_lens=prefill_seq_lens,
-            seq_lens_tensor=seq_lens_tensor,
-            max_query_len=max_query_len,
-            max_kv_len=max_kv_len,
-            prefill_query_start_loc=query_start_loc,
-            kv_start_loc=kv_start_loc,
-            max_decode_seq_len=input_data.max_decode_seq_len,
-            num_prefills=input_data.num_prefills,
-            num_prefill_tokens=input_data.num_prefill_tokens,
-            num_decode_tokens=input_data.num_decode_tokens,
-            block_tables=block_tables,
-            prefill_block_tables=prefill_block_tables,
-            slot_mapping=slot_mapping,
-            multi_modal_placeholder_index_maps=placeholder_index_maps,
-            enable_kv_scales_calculation=False,
-        )
-
-        return attn_metadata
-
-
 class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
 
     def __init__(
@@ -433,7 +272,6 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
         self.sliding_window = sliding_window
         self.kv_cache_dtype = kv_cache_dtype
 
-        assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
         self.need_mask = (self.alibi_slopes is not None
                           or self.sliding_window is not None)
@@ -459,6 +297,7 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
         kv_cache: torch.Tensor,
         attn_metadata: TorchSDPAMetadata,  # type: ignore
         output: Optional[torch.Tensor] = None,
+        output_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with torch SDPA and PagedAttention.
 
@@ -473,6 +312,10 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
+        if output_scale is not None:
+            raise NotImplementedError(
+                "fused output quantization is not yet supported"
+                " for TorchSDPABackendImpl")
 
         # For warming-up
         if attn_metadata is None:
