@@ -488,6 +488,13 @@ Specified using `--task score`.
 | `XLMRobertaForSequenceClassification` | XLM-RoBERTa-based | `BAAI/bge-reranker-v2-m3`, etc. | |
 
 !!! note
+    Load the official original `BAAI/bge-reranker-v2-gemma` by using the following command.
+
+    ```bash
+    vllm serve BAAI/bge-reranker-v2-gemma --hf_overrides '{"architectures": ["GemmaForSequenceClassification"],"classifier_from_token": ["Yes"],"method": "no_post_processing"}'
+    ```
+
+!!! note
     Load the official original `mxbai-rerank-v2` by using the following command.
 
     ```bash
