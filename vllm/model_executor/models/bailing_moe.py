@@ -422,8 +422,15 @@ class BailingMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                                     prefix=maybe_prefix(prefix, "model")
         )
         if get_pp_group().is_last_rank:
-            self.lm_head = self.word_embeddings if config.tie_word_embeddings \
-                else ParallelLMHead(config.vocab_size, config.hidden_size, quant_config=quant_config)
+            self.lm_head = (
+                self.word_embeddings
+                if config.tie_word_embeddings
+                else ParallelLMHead(
+                    config.vocab_size,
+                    config.hidden_size,
+                    quant_config=quant_config
+                )
+            )
             self.logits_processor = LogitsProcessor(config.vocab_size)
         else:
             self.lm_head = PPMissingLayer()
