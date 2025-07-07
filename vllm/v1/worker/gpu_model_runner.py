@@ -1365,7 +1365,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_tokens_across_dp=num_tokens_across_dp,
                 skip_cuda_graphs=skip_cuda_graphs,
         ):
-            self.maybe_setup_kv_connector(scheduler_output, gpu_model_runner=self)
+            self.maybe_setup_kv_connector(scheduler_output,
+                                          gpu_model_runner=self)
 
             model_output = self.model(
                 input_ids=input_ids,
@@ -1686,7 +1687,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self, scheduler_output: "SchedulerOutput") -> ModelRunnerOutput:
         # KV send/recv even if no work to do.
         with set_forward_context(None, self.vllm_config):
-            self.maybe_setup_kv_connector(scheduler_output, gpu_model_runner=self)
+            self.maybe_setup_kv_connector(scheduler_output,
+                                          gpu_model_runner=self)
             finished_sending, finished_recving = (
                 self.get_finished_kv_transfers(scheduler_output))
 
@@ -1699,7 +1701,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         return output
 
     @staticmethod
-    def maybe_setup_kv_connector(scheduler_output: "SchedulerOutput", **kwargs):
+    def maybe_setup_kv_connector(scheduler_output: "SchedulerOutput",
+                                 **kwargs):
         # Update KVConnector with the KVConnector metadata forward().
         if has_kv_transfer_group():
             kv_connector = get_kv_transfer_group()
