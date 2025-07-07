@@ -73,10 +73,16 @@ class Executor(ExecutorBase):
         pass
 
     def determine_available_memory(self) -> list[int]:  # in bytes
+        if self.vllm_config.model_config.is_attention_free:
+            return [0]
+
         output = self.collective_rpc("determine_available_memory")
         return output
 
     def get_kv_cache_specs(self) -> list[dict[str, KVCacheSpec]]:
+        if self.vllm_config.model_config.is_attention_free:
+            return [{}]
+
         output = self.collective_rpc("get_kv_cache_spec")
         return output
 
