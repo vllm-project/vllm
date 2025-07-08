@@ -43,7 +43,7 @@ llm = LLM(
 
 ## Read gptq format checkpoint
 
-??? Code
+??? code
 
     ```python
     from vllm import LLM
