@@ -94,7 +94,6 @@ def moe_align_block_size_stage4(
 
 # Triton implementation based on:
 # https://github.com/sgl-project/sglang/commit/ba5112ff691d791a9e38c6c71f59324a5fcb49d0
-# TODO(wentao): Deprecated this function in the future.
 def moe_align_block_size_triton(
     topk_ids: torch.Tensor,
     num_experts: int,

@@ -10,6 +10,7 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, SpeculativeConfig,
                          VllmConfig)
 from vllm.model_executor.models.llama import LlamaForCausalLM
+from vllm.platforms import current_platform
 from vllm.v1.spec_decode.eagle import EagleProposer
 
 llama3_model_dir = "meta-llama/Llama-3.1-8B-Instruct"
@@ -39,15 +40,17 @@ def _create_proposer(method: str, model_dir: str, draft_model_dir: str,
         num_speculative_tokens=k,
     )
 
-    vllm_config = VllmConfig(model_config=model_config,
-                             cache_config=CacheConfig(),
-                             speculative_config=speculative_config,
-                             device_config=DeviceConfig(device="cuda"),
-                             parallel_config=ParallelConfig(),
-                             load_config=LoadConfig(),
-                             scheduler_config=SchedulerConfig())
+    vllm_config = VllmConfig(
+        model_config=model_config,
+        cache_config=CacheConfig(),
+        speculative_config=speculative_config,
+        device_config=DeviceConfig(device=current_platform.device_type),
+        parallel_config=ParallelConfig(),
+        load_config=LoadConfig(),
+        scheduler_config=SchedulerConfig())
 
-    return EagleProposer(vllm_config=vllm_config, device='cuda')
+    return EagleProposer(vllm_config=vllm_config,
+                         device=current_platform.device_type)
 
 
 def test_prepare_inputs():
@@ -60,7 +63,7 @@ def test_prepare_inputs():
                     a, a + 1, ..., a + b - n2 - 1,
                     a + b, a + b + 1, ..., a + b + c - n3 - 1]
     """
-    device = torch.device('cuda')
+    device = torch.device(current_platform.device_type)
 
     # a = 4, b = 7, c = 5
     # n1 = 1, n2 = 3, n3 = 2
@@ -210,7 +213,7 @@ def test_propose(num_speculative_tokens, model_and_draft_model):
     model_dir = model_and_draft_model[0]
     draft_model_dir = model_and_draft_model[1]
     # Use GPU device
-    device = torch.device('cuda')
+    device = torch.device(current_platform.device_type)
 
     # Setup test parameters
     batch_size = 2
