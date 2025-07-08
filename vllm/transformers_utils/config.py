@@ -838,9 +838,9 @@ def _maybe_retrieve_max_pos_from_hf(model, revision, **kwargs) -> int:
     try:
         trust_remote_code_val = kwargs.get("trust_remote_code", False)
         hf_config = get_config(model=model,
-                        trust_remote_code=trust_remote_code_val,
-                        revision=revision,
-                        config_format=ConfigFormat.HF)
+                                trust_remote_code=trust_remote_code_val,
+                                revision=revision,
+                                config_format=ConfigFormat.HF)
         if hf_value := hf_config.get_text_config().max_position_embeddings:
             max_position_embeddings = hf_value
     except Exception as e:
