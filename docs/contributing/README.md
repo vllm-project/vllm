@@ -207,7 +207,7 @@ The PR needs to meet the following code quality standards:
 
 ### Adding or Changing Kernels
 
-- When actively developing or modifying kernels, using the [Incremental Compilation Workflow](./incremental_build.md) is highly recommended for faster build times.
+When actively developing or modifying kernels, using the [Incremental Compilation Workflow](./incremental_build.md) is highly recommended for faster build times.
 Each custom kernel needs a schema and one or more implementations to be registered with PyTorch.
 
 - Make sure custom ops are registered following PyTorch guidelines:
