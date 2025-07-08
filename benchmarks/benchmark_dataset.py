@@ -701,7 +701,7 @@ class HuggingFaceDataset(BenchmarkDataset):
         self,
         dataset_path: str,
         dataset_split: str,
-        load_stream: bool = False,
+        no_stream: bool = False,
         dataset_subset: Optional[str] = None,
         **kwargs,
     ) -> None:
@@ -709,7 +709,7 @@ class HuggingFaceDataset(BenchmarkDataset):
 
         self.dataset_split = dataset_split
         self.dataset_subset = dataset_subset
-        self.load_stream = load_stream
+        self.load_stream = not no_stream
         self.load_data()
 
     def load_data(self) -> None:

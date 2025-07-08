@@ -482,7 +482,7 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         help="Name of the dataset to benchmark on.",
     )
     parser.add_argument(
-        "--load-stream",
+        "--no-stream",
         action="store_true",
         help="Load the dataset in streaming mode.",
     )
@@ -679,7 +679,7 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
             dataset_subset=args.hf_subset,
             dataset_split=args.hf_split,
             random_seed=args.seed,
-            load_stream=args.load_stream,
+            no_stream=args.no_stream,
         ).sample(
             num_requests=args.num_prompts,
             tokenizer=tokenizer,
@@ -977,7 +977,7 @@ class HuggingFaceDataset(BenchmarkDataset):
         self,
         dataset_path: str,
         dataset_split: str,
-        load_stream: bool = False,
+        no_stream: bool = False,
         dataset_subset: Optional[str] = None,
         **kwargs,
     ) -> None:
@@ -985,7 +985,7 @@ class HuggingFaceDataset(BenchmarkDataset):
 
         self.dataset_split = dataset_split
         self.dataset_subset = dataset_subset
-        self.load_stream = load_stream
+        self.load_stream = not no_stream
         self.load_data()
 
     def load_data(self) -> None:

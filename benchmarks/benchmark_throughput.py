@@ -356,7 +356,7 @@ def get_requests(args, tokenizer):
     elif args.dataset_name == "burstgpt":
         dataset_cls = BurstGPTDataset
     elif args.dataset_name == "hf":
-        common_kwargs["load_stream"] = args.load_stream
+        common_kwargs["no_stream"] = args.no_stream
         if args.dataset_path in VisionArenaDataset.SUPPORTED_DATASET_PATHS:
             dataset_cls = VisionArenaDataset
             common_kwargs["dataset_subset"] = None
@@ -612,7 +612,7 @@ def create_argument_parser():
         default="sharegpt",
     )
     parser.add_argument(
-        "--load-stream",
+        "--no-stream",
         action="store_true",
         help="Load the dataset in streaming mode.",
     )
