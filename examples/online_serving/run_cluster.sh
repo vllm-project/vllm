@@ -70,7 +70,6 @@ CONTAINER_NAME="node-${RANDOM}"
 cleanup() {
     docker stop "${CONTAINER_NAME}"
     docker rm "${CONTAINER_NAME}"
-    echo "Container ${CONTAINER_NAME} stopped and removed."
 }
 trap cleanup EXIT
 
@@ -83,8 +82,6 @@ if [ "${NODE_TYPE}" == "--head" ]; then
 else
     RAY_START_CMD+=" --address=${HEAD_NODE_ADDRESS}:6379"
 fi
-
-echo "Starting container: ${CONTAINER_NAME}"
 
 # Launch the container with the assembled parameters.
 # --network host: Allows Ray nodes to communicate directly via host networking
