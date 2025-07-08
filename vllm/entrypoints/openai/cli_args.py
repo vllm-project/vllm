@@ -295,6 +295,13 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         help=
         "If set to True, enable tracking server_load_metrics in the app state."
     )
+    parser.add_argument(
+        "--enable-tokenizer-info-endpoint",
+        action='store_true',
+        default=False,
+        help="Enable the /get_tokenizer_info endpoint. May expose chat "
+        "templates and other tokenizer configuration."
+    )
 
     return parser
 
