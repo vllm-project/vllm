@@ -48,21 +48,22 @@ class DPMetadata:
         return num_tokens_tensor
 
     @staticmethod
-    def should_ubatch_across_dp(should_ubatch: bool, dp_size: int, dp_rank: int) -> bool:
+    def should_ubatch_across_dp(should_ubatch: bool, dp_size: int,
+                                dp_rank: int) -> bool:
         should_ubatch_across_dp = [0] * dp_size
         should_ubatch_across_dp[dp_rank] = 1 if should_ubatch else 0
         should_ubatch_tensor = torch.tensor(should_ubatch_across_dp,
-                                         device="cpu",
-                                         dtype=torch.int32)
+                                            device="cpu",
+                                            dtype=torch.int32)
         from vllm.distributed.parallel_state import get_dp_group
         dist.all_reduce(should_ubatch_tensor, group=get_dp_group().cpu_group)
 
-        # This function uses the same ProcessGroup for all reduce as 
-        # num_tokens_across_dp. If there's an incorrect ordering of ARs 
-        # across DP ranks, this tensor can end up containing the number 
+        # This function uses the same ProcessGroup for all reduce as
+        # num_tokens_across_dp. If there's an incorrect ordering of ARs
+        # across DP ranks, this tensor can end up containing the number
         # of padded tokens for a DP rank.
-
-        assert torch.all((should_ubatch_tensor == 0) | (should_ubatch_tensor == 1))
+        assert torch.all((should_ubatch_tensor == 0)
+                         | (should_ubatch_tensor == 1))
 
         result: bool = bool(torch.all(should_ubatch_tensor == 1).item())
         return result
@@ -183,7 +184,7 @@ def set_forward_context(
         forward_start_time = time.perf_counter()
 
     forward_context = create_forward_context(attn_metadata, vllm_config,
-                                             virtual_engine, num_tokens, 
+                                             virtual_engine, num_tokens,
                                              num_tokens_across_dp,
                                              skip_cuda_graphs)
 

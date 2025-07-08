@@ -27,7 +27,7 @@ from vllm.logger import init_logger
 from vllm.utils import cdiv
 from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder, CommonAttentionMetadata, get_kv_cache_layout,
-    make_local_attention_virtual_batches)
+    make_local_attention_virtual_batches, slice_query_start_locs)
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.block_table import BlockTable
 

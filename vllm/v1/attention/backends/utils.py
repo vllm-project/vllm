@@ -60,6 +60,20 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
         """
         raise NotImplementedError
 
+    def build_slice(
+        self,
+        req_slice: slice,
+        token_slice: slice,
+        max_query_len: int,
+        common_prefix_len: int,
+        common_attn_metadata: CommonAttentionMetadata,
+    ) -> M:
+        """
+        Should only be called on builders that support attention slicing 
+        for micro batching
+        """
+        raise NotImplementedError
+
     def can_run_in_cudagraph(
             self, common_attn_metadata: CommonAttentionMetadata) -> bool:
         """
@@ -104,6 +118,7 @@ def slice_query_start_locs(
 ) -> torch.Tensor:
     return query_start_loc[req_slice.start: req_slice.stop + 1] -\
         query_start_loc[req_slice.start]
+
 
 def validate_kv_sharing_target(current_layer_name, target_layer_name,
                                static_forward_context):
