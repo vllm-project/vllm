@@ -83,7 +83,8 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
                 return CompressedTensorsWNA16MarlinMoEMethod(quant_config)
         elif quant_config._is_fp4a4_nvfp4(weight_quant, input_quant):
             return CompressedTensorsW4A4MoeMethod()
-        elif quant_config._is_fp8_w8a8_sm90(weight_quant, input_quant):
+        elif (quant_config._is_fp8_w8a8_sm90(weight_quant, input_quant)
+              or quant_config._is_fp8_w8a8_sm100(weight_quant, input_quant)):
             return CompressedTensorsW8A8Fp8MoECutlassMethod(quant_config)
         elif quant_config._is_fp8_w8a8(weight_quant, input_quant):
             return CompressedTensorsW8A8Fp8MoEMethod(quant_config)
@@ -929,9 +930,7 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
             num_expert_group=num_expert_group,
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
-            e_score_correction_bias=e_score_correction_bias,
-            indices_type=self.topk_indices_dtype,
-        )
+            e_score_correction_bias=e_score_correction_bias)
 
         return self.fused_experts(
             x,
@@ -939,6 +938,8 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
             layer.w2_weight,
             topk_weights,
             topk_ids,
+            per_act_token=self.input_quant.strategy ==
+            QuantizationStrategy.TOKEN,
             activation=activation,
             global_num_experts=global_num_experts,
             expert_map=None if self.disable_expert_map else expert_map,
