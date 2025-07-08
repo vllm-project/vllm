@@ -152,6 +152,11 @@ class Processor:
         if not params.guided_decoding or not self.decoding_config:
             return
 
+        if self.model_config.skip_tokenizer_init and params.guided_decoding:
+            raise ValueError(
+                "Structured outputs requires a tokenizer so it can't be used with 'skip_tokenizer_init'"  # noqa: E501
+            )
+
         engine_level_backend = self.decoding_config.backend
         if params.guided_decoding.backend:
             # Request-level backend selection is not supported in V1.
@@ -173,6 +178,12 @@ class Processor:
             params.guided_decoding.backend = engine_level_backend
 
         # Request content validation
+        if (isinstance(params.guided_decoding.choice, list)
+                and not params.guided_decoding.choice):
+            # It is invalid for choice to be an empty list
+            raise ValueError(f"Choice '{params.guided_decoding.choice}' "
+                             "cannot be an empty list")
+
         if engine_level_backend.startswith("xgrammar"):
             # xgrammar with no fallback
             validate_xgrammar_grammar(params)

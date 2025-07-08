@@ -29,7 +29,7 @@ We can now submit the prompts and call `llm.generate` with the `lora_request` pa
 of `LoRARequest` is a human identifiable name, the second parameter is a globally unique ID for the adapter and
 the third parameter is the path to the LoRA adapter.
 
-??? Code
+??? code
 
     ```python
     sampling_params = SamplingParams(
@@ -70,7 +70,7 @@ The server entrypoint accepts all other LoRA configuration parameters (`max_lora
 etc.), which will apply to all forthcoming requests. Upon querying the `/models` endpoint, we should see our LoRA along
 with its base model (if `jq` is not installed, you can follow [this guide](https://jqlang.org/download/) to install it.):
 
-??? Command
+??? console "Command"
 
     ```bash
     curl localhost:8000/v1/models | jq .
@@ -172,7 +172,7 @@ Alternatively, follow these example steps to implement your own plugin:
 
 1. Implement the LoRAResolver interface.
 
-    ??? Example of a simple S3 LoRAResolver implementation
+    ??? code "Example of a simple S3 LoRAResolver implementation"
 
         ```python
         import os
@@ -238,7 +238,7 @@ The new format of `--lora-modules` is mainly to support the display of parent mo
 - The `parent` field of LoRA model `sql-lora` now links to its base model `meta-llama/Llama-2-7b-hf`. This correctly reflects the hierarchical relationship between the base model and the LoRA adapter.
 - The `root` field points to the artifact location of the lora adapter.
 
-??? Command output
+??? console "Command output"
 
     ```bash
     $ curl http://localhost:8000/v1/models

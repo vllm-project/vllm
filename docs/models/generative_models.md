@@ -85,7 +85,7 @@ and automatically applies the model's [chat template](https://huggingface.co/doc
     In general, only instruction-tuned models have a chat template.
     Base models may perform poorly as they are not trained to respond to the chat conversation.
 
-??? Code
+??? code
 
     ```python
     from vllm import LLM
@@ -134,7 +134,7 @@ outputs = llm.chat(conversation, chat_template=custom_template)
 
 ## Online Serving
 
-Our [OpenAI-Compatible Server][openai-compatible-server] provides endpoints that correspond to the offline APIs:
+Our [OpenAI-Compatible Server][serving-openai-compatible-server] provides endpoints that correspond to the offline APIs:
 
 - [Completions API][completions-api] is similar to `LLM.generate` but only accepts text.
 - [Chat API][chat-api]  is similar to `LLM.chat`, accepting both text and [multi-modal inputs][multimodal-inputs] for models with a chat template.
