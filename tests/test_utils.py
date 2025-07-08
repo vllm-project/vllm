@@ -14,9 +14,12 @@ from unittest.mock import patch
 import pytest
 import torch
 import zmq
+from transformers import AutoTokenizer
 from vllm_test_utils.monitor import monitor
 
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
+from vllm.transformers_utils.detokenizer_utils import (
+    convert_ids_list_to_tokens)
 from vllm.utils import (CacheInfo, FlexibleArgumentParser, LRUCache,
                         MemorySnapshot, PlaceholderModule, StoreBoolean,
                         bind_kv_cache, common_broadcastable_dtype,
@@ -918,3 +921,14 @@ def test_split_host_port():
 def test_join_host_port():
     assert join_host_port("127.0.0.1", 5555) == "127.0.0.1:5555"
     assert join_host_port("::1", 5555) == "[::1]:5555"
+
+
+def test_convert_ids_list_to_tokens():
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-1.5B-Instruct")
+    token_ids = tokenizer.encode("Hello, world!")
+    # token_ids = [9707, 11, 1879, 0]
+    assert tokenizer.convert_ids_to_tokens(token_ids) == [
+        'Hello', ',', 'Ġworld', '!'
+    ]
+    tokens = convert_ids_list_to_tokens(tokenizer, token_ids)
+    assert tokens == ['Hello', ',', ' world', '!']
