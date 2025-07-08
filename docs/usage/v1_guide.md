@@ -83,7 +83,7 @@ based on assigned priority, with FCFS as a tie-breaker), configurable via the
 | **Decoder-only Models**     | <nobr>🚀 Optimized</nobr>                                                          |
 | **Encoder-Decoder Models**  | <nobr>🟠 Delayed</nobr>                                                            |
 | **Embedding Models**        | <nobr>🟢 Functional</nobr>                                                         |
-| **Mamba Models**            | <nobr>🚧 WIP (<gh-pr:19327>, <gh-pr:20016>)</nobr> |
+| **Mamba Models**            | <nobr>🟢 (Mamba-2), 🟡 (Mamba-1)</nobr>                                            |
 | **Multimodal Models**       | <nobr>🟢 Functional</nobr>                                                         |
 
 vLLM V1 currently excludes model architectures with the `SupportsV0Only` protocol.
