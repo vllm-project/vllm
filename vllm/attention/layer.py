@@ -196,7 +196,7 @@ class Attention(nn.Module):
                     "Failed to initialize attention q/k/v range "
                     "constants: %s", e)
                 logger.debug("CUDA device: %s", torch.cuda.current_device())
-                allocated_gb = torch.cuda.memory_allocated() / 1024**3
+                allocated_gb = torch.cuda.memory_allocated() / GiB_bytes
                 logger.debug("Allocated: %.2f GB", allocated_gb)
                 reserved_gb = torch.cuda.memory_reserved() / 1024**3
                 logger.debug("Reserved: %.2f GB", reserved_gb)
