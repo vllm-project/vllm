@@ -96,7 +96,7 @@ from vllm.entrypoints.openai.serving_tokenization import (
 from vllm.entrypoints.openai.serving_transcription import (
     OpenAIServingTranscription, OpenAIServingTranslation)
 from vllm.entrypoints.openai.tool_parsers import ToolParserManager
-from vllm.entrypoints.utils import (cli_env_setup, load_aware_call,
+from vllm.entrypoints.utils import (LoadTrackingMiddleware, cli_env_setup,
                                     with_cancellation)
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
@@ -622,7 +622,6 @@ async def cancel_responses(response_id: str, raw_request: Request):
                  }
              })
 @with_cancellation
-@load_aware_call
 async def create_chat_completion(request: ChatCompletionRequest,
                                  raw_request: Request):
     handler = chat(raw_request)
@@ -661,7 +660,6 @@ async def create_chat_completion(request: ChatCompletionRequest,
                  },
              })
 @with_cancellation
-@load_aware_call
 async def create_completion(request: CompletionRequest, raw_request: Request):
     handler = completion(raw_request)
     if handler is None:
@@ -697,7 +695,6 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
                  },
              })
 @with_cancellation
-@load_aware_call
 async def create_embedding(request: EmbeddingRequest, raw_request: Request):
     handler = embedding(raw_request)
     if handler is None:
@@ -726,7 +723,6 @@ async def create_embedding(request: EmbeddingRequest, raw_request: Request):
                  },
              })
 @with_cancellation
-@load_aware_call
 async def create_pooling(request: PoolingRequest, raw_request: Request):
     handler = pooling(raw_request)
     if handler is None:
@@ -745,7 +741,6 @@ async def create_pooling(request: PoolingRequest, raw_request: Request):
 
 @router.post("/classify", dependencies=[Depends(validate_json_request)])
 @with_cancellation
-@load_aware_call
 async def create_classify(request: ClassificationRequest,
                           raw_request: Request):
     handler = classify(raw_request)
@@ -775,7 +770,6 @@ async def create_classify(request: ClassificationRequest,
                  },
              })
 @with_cancellation
-@load_aware_call
 async def create_score(request: ScoreRequest, raw_request: Request):
     handler = score(raw_request)
     if handler is None:
@@ -803,7 +797,6 @@ async def create_score(request: ScoreRequest, raw_request: Request):
                  },
              })
 @with_cancellation
-@load_aware_call
 async def create_score_v1(request: ScoreRequest, raw_request: Request):
     logger.warning(
         "To indicate that Score API is not part of standard OpenAI API, we "
@@ -830,7 +823,6 @@ async def create_score_v1(request: ScoreRequest, raw_request: Request):
                  },
              })
 @with_cancellation
-@load_aware_call
 async def create_transcriptions(raw_request: Request,
                                 request: Annotated[TranscriptionRequest,
                                                    Form()]):
@@ -905,7 +897,6 @@ async def create_translations(request: Annotated[TranslationRequest,
                  },
              })
 @with_cancellation
-@load_aware_call
 async def do_rerank(request: RerankRequest, raw_request: Request):
     handler = rerank(raw_request)
     if handler is None:
@@ -1427,6 +1418,8 @@ def build_app(args: Namespace) -> FastAPI:
         else:
             raise ValueError(f"Invalid middleware {middleware}. "
                              f"Must be a function or a class.")
+    if args.enable_server_load_tracking:
+        app.add_middleware(LoadTrackingMiddleware)
 
     return app
 
@@ -1584,7 +1577,6 @@ async def init_app_state(
     ) if model_config.runner_type == "transcription" else None
     state.task = model_config.task
 
-    state.enable_server_load_tracking = args.enable_server_load_tracking
     state.server_load_metrics = 0
 
 
