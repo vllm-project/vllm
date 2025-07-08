@@ -1166,3 +1166,72 @@ class ASRDataset(HuggingFaceDataset):
             )
         self.maybe_oversample_requests(sampled_requests, num_requests)
         return sampled_requests
+
+
+# -----------------------------------------------------------------------------
+# Prefix Repetition Dataset Implementation
+# -----------------------------------------------------------------------------
+
+
+class PrefixRepetitionRandomDataset(BenchmarkDataset):
+    # Default values copied from benchmark_serving.py for the repeated prefix dataset.
+    DEFAULT_PROMPTS_PER_PREFIX = 200
+    DEFAULT_PREFIX_LEN = 256
+    DEFAULT_SUFFIX_LEN = 256
+    DEFAULT_NUM_PREFIXES = 10
+    DEFAULT_OUTPUT_LEN = 128
+
+    def __init__(
+        self,
+        **kwargs,
+    ) -> None:
+        super().__init__(**kwargs)
+
+    def sample(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        prompts_per_prefix: int = DEFAULT_PROMPTS_PER_PREFIX,
+        prefix_len: int = DEFAULT_PREFIX_LEN,
+        suffix_len: int = DEFAULT_SUFFIX_LEN,
+        num_prefixes: int = DEFAULT_NUM_PREFIXES,
+        output_len: int = DEFAULT_OUTPUT_LEN,
+        **kwargs,
+    ) -> list[SampleRequest]:
+        vocab_size = tokenizer.vocab_size
+
+        requests = []
+        for _ in range(num_prefixes):
+            prefix_token_ids = (
+                np.random.randint(0, vocab_size, size=prefix_len).tolist()
+                if prefix_len > 0
+                else []
+            )
+            decoded_prefix = tokenizer.decode(prefix_token_ids)
+            re_encoded_prefix = tokenizer.encode(
+                decoded_prefix, add_special_tokens=False
+            )[:prefix_len]
+            decoded_prefix = tokenizer.decode(re_encoded_prefix)
+
+            for _ in range(prompts_per_prefix):
+                suffix_token_ids = (
+                    np.random.randint(0, vocab_size, size=suffix_len).tolist()
+                    if suffix_len > 0
+                    else []
+                )
+                decoded_suffix = tokenizer.decode(suffix_token_ids)
+                re_encoded_suffix = tokenizer.encode(
+                    decoded_suffix, add_special_tokens=False
+                )[:suffix_len]
+                decoded_suffix = tokenizer.decode(re_encoded_suffix)
+
+                prompt = decoded_prefix + decoded_suffix
+                prompt_len = len(re_encoded_prefix) + len(re_encoded_suffix)
+                requests.append(
+                    SampleRequest(
+                        prompt=prompt,
+                        prompt_len=prompt_len,
+                        expected_output_len=output_len,
+                    )
+                )
+
+        return requests

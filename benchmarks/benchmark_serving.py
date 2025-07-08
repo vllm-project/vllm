@@ -66,6 +66,7 @@ from benchmark_dataset import (
     InstructCoderDataset,
     MTBenchDataset,
     NextEditPredictionDataset,
+    PrefixRepetitionRandomDataset,
     RandomDataset,
     SampleRequest,
     ShareGPTDataset,
@@ -852,6 +853,16 @@ def main(args: argparse.Namespace):
                 output_len=args.random_output_len,
                 range_ratio=args.random_range_ratio,
             ),
+            "prefix_repetition": lambda: PrefixRepetitionRandomDataset(
+                random_seed=args.seed, dataset_path=args.dataset_path
+            ).sample(
+                tokenizer=tokenizer,
+                prompts_per_prefix=args.repeated_prefix_prompts_per_prefix,
+                prefix_len=args.repeated_prefix_prefix_len,
+                suffix_len=args.repeated_prefix_suffix_len,
+                num_prefixes=args.repeated_prefix_num_prefixes,
+                output_len=args.repeated_prefix_output_len,
+            ),
         }
 
         try:
@@ -1023,7 +1034,15 @@ def create_argument_parser():
         "--dataset-name",
         type=str,
         default="sharegpt",
-        choices=["sharegpt", "burstgpt", "sonnet", "random", "hf", "custom"],
+        choices=[
+            "sharegpt",
+            "burstgpt",
+            "sonnet",
+            "random",
+            "hf",
+            "custom",
+            "prefix_repetition",
+        ],
         help="Name of the dataset to benchmark on.",
     )
     parser.add_argument(
@@ -1269,6 +1288,42 @@ def create_argument_parser():
             "context length sampled from [input_len * (1 - range_ratio), "
             "input_len * (1 + range_ratio)]."
         ),
+    )
+
+    repeated_prefix_group = parser.add_argument_group("repeated prefix dataset options")
+    repeated_prefix_group.add_argument(
+        "--repeated-prefix-prompts-per-prefix",
+        type=int,
+        default=200,
+        help="Number of prompts per prefix, used only for repeated prefix dataset.",
+    )
+    repeated_prefix_group.add_argument(
+        "--repeated-prefix-prefix-len",
+        type=int,
+        default=256,
+        help="Number of prefix tokens per request, used only for repeated "
+        "prefix dataset.",
+    )
+    repeated_prefix_group.add_argument(
+        "--repeated-prefix-suffix-len",
+        type=int,
+        default=256,
+        help="Number of suffix tokens per request, used only for repeated "
+        "prefix dataset. Total input length is prefix_len + suffix_len.",
+    )
+    repeated_prefix_group.add_argument(
+        "--repeated-prefix-num-prefixes",
+        type=int,
+        default=10,
+        help="Number of prefixes to generate, used only for repeated prefix "
+        "dataset. Total number of requests is prompts_per_prefix * num_prefixes.",
+    )
+    repeated_prefix_group.add_argument(
+        "--repeated-prefix-output-len",
+        type=int,
+        default=128,
+        help="Number of output tokens per request, used only for repeated "
+        "prefix dataset.",
     )
 
     hf_group = parser.add_argument_group("hf dataset options")
