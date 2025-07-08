@@ -857,7 +857,7 @@ def main(args: argparse.Namespace):
                 random_seed=args.seed, dataset_path=args.dataset_path
             ).sample(
                 tokenizer=tokenizer,
-                prompts_per_prefix=args.repeated_prefix_prompts_per_prefix,
+                num_requests=args.num_prompts,
                 prefix_len=args.repeated_prefix_prefix_len,
                 suffix_len=args.repeated_prefix_suffix_len,
                 num_prefixes=args.repeated_prefix_num_prefixes,
@@ -1292,12 +1292,6 @@ def create_argument_parser():
 
     repeated_prefix_group = parser.add_argument_group("repeated prefix dataset options")
     repeated_prefix_group.add_argument(
-        "--repeated-prefix-prompts-per-prefix",
-        type=int,
-        default=200,
-        help="Number of prompts per prefix, used only for repeated prefix dataset.",
-    )
-    repeated_prefix_group.add_argument(
         "--repeated-prefix-prefix-len",
         type=int,
         default=256,
@@ -1316,7 +1310,7 @@ def create_argument_parser():
         type=int,
         default=10,
         help="Number of prefixes to generate, used only for repeated prefix "
-        "dataset. Total number of requests is prompts_per_prefix * num_prefixes.",
+        "dataset. Prompts per prefix is num_requests // num_prefixes.",
     )
     repeated_prefix_group.add_argument(
         "--repeated-prefix-output-len",
