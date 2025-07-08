@@ -8,7 +8,7 @@ OCP_MX_BLOCK_SIZE = 32
 
 
 def _dequant_mxfp4(x: torch.Tensor, scale: torch.Tensor,
-                  float_dtype: torch.dtype) -> torch.Tensor:
+                   float_dtype: torch.dtype) -> torch.Tensor:
     try:
         from quark.torch.kernel import mx
     except ImportError as err:
@@ -18,12 +18,16 @@ def _dequant_mxfp4(x: torch.Tensor, scale: torch.Tensor,
 
     return mx.dq_mxfp4(x, scale, float_dtype)
 
+
 def _dequant_mxfp4_fake(x: torch.Tensor, scale: torch.Tensor,
-                  float_dtype: torch.dtype) -> torch.Tensor:
-    return torch.empty((*x.shape[:-1], x.shape[-1] * 2), dtype=float_dtype, device=x.device)
+                        float_dtype: torch.dtype) -> torch.Tensor:
+    return torch.empty((*x.shape[:-1], x.shape[-1] * 2),
+                       dtype=float_dtype,
+                       device=x.device)
+
 
 def _quant_dequant_mxfp4(x: torch.Tensor,
-                        scale_calculation_mode: str = "even") -> torch.Tensor:
+                         scale_calculation_mode: str = "even") -> torch.Tensor:
     try:
         from quark.torch.kernel import mx
     except ImportError as err:
@@ -33,8 +37,12 @@ def _quant_dequant_mxfp4(x: torch.Tensor,
 
     return mx.qdq_mxfp4(x, scale_calculation_mode)
 
-def _quant_dequant_mxfp4_fake(x: torch.Tensor, scale_calculation_mode: str = "even") -> torch.Tensor:
+
+def _quant_dequant_mxfp4_fake(x: torch.Tensor,
+                              scale_calculation_mode: str = "even"
+                              ) -> torch.Tensor:
     return torch.empty_like(x)
+
 
 try:
     direct_register_custom_op(
