@@ -448,7 +448,7 @@ elements of the entire head for all context tokens. However, overall,
 all results for output have been calculated but are just stored in
 different thread register memory.
 
-??? Code
+??? code
 
     ```cpp
     float* out_smem = reinterpret_cast<float*>(shared_mem);

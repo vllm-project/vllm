@@ -35,7 +35,7 @@ Studies have shown that FP8 E4M3 quantization typically only minimally degrades 
 
 Here is an example of how to enable FP8 quantization:
 
-??? Code
+??? code
 
     ```python
     # To calculate kv cache scales on the fly enable the calculate_kv_scales
@@ -73,7 +73,7 @@ pip install llmcompressor
 
 Here's a complete example using `meta-llama/Llama-3.1-8B-Instruct` (most models can use this same pattern):
 
-??? Code
+??? code
 
     ```python
     from datasets import load_dataset

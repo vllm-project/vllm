@@ -27,7 +27,7 @@ All vLLM modules within the model must include a `prefix` argument in their cons
 
 The initialization code should look like this:
 
-??? Code
+??? code
 
     ```python
     from torch import nn

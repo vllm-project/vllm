@@ -76,7 +76,7 @@ Currently, there are no pre-built CPU wheels.
 
 ### Build image from source
 
-??? Commands
+??? console "Commands"
 
     ```bash
     docker build -f docker/Dockerfile.cpu \
@@ -149,7 +149,7 @@ vllm serve facebook/opt-125m
 
 - If using vLLM CPU backend on a machine with hyper-threading, it is recommended to bind only one OpenMP thread on each physical CPU core using `VLLM_CPU_OMP_THREADS_BIND` or using auto thread binding feature by default. On a hyper-threading enabled platform with 16 logical CPU cores / 8 physical CPU cores:
 
-??? Commands
+??? console "Commands"
 
     ```console
     $ lscpu -e # check the mapping between logical CPU cores and physical CPU cores

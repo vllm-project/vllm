@@ -60,7 +60,7 @@ To identify the particular CUDA operation that causes the error, you can add `--
 
 If GPU/CPU communication cannot be established, you can use the following Python script and follow the instructions below to confirm whether the GPU/CPU communication is working correctly.
 
-??? Code
+??? code
 
     ```python
     # Test PyTorch NCCL
@@ -170,7 +170,7 @@ WARNING 12-11 14:50:37 multiproc_worker_utils.py:281] CUDA was previously
 
 or an error from Python that looks like this:
 
-??? Logs
+??? console "Logs"
 
     ```console
     RuntimeError:
@@ -214,7 +214,7 @@ if __name__ == '__main__':
 
 vLLM heavily depends on `torch.compile` to optimize the model for better performance, which introduces the dependency on the `torch.compile` functionality and the `triton` library. By default, we use `torch.compile` to [optimize some functions](gh-pr:10406) in the model. Before running vLLM, you can check if `torch.compile` is working as expected by running the following script:
 
-??? Code
+??? code
 
     ```python
     import torch

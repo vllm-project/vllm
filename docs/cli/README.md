@@ -16,7 +16,7 @@ vllm {chat,complete,serve,bench,collect-env,run-batch}
 
 Start the vLLM OpenAI Compatible API server.
 
-??? Examples
+??? console "Examples"
 
     ```bash
     # Start with a model

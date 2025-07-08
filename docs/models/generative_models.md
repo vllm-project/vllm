@@ -85,7 +85,7 @@ and automatically applies the model's [chat template](https://huggingface.co/doc
     In general, only instruction-tuned models have a chat template.
     Base models may perform poorly as they are not trained to respond to the chat conversation.
 
-??? Code
+??? code
 
     ```python
     from vllm import LLM
