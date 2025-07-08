@@ -151,7 +151,8 @@ class XPUWorker(Worker):
 
         init_worker_distributed_environment(self.vllm_config, self.rank,
                                             self.distributed_init_method,
-                                            self.local_rank, current_platform.dist_backend)
+                                            self.local_rank,
+                                            current_platform.dist_backend)
 
         # global all_reduce needed for overall oneccl warm up
         torch.distributed.all_reduce(torch.zeros(1).xpu())
