@@ -876,10 +876,6 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         return (mk.FusedMoEActivationFormat.BatchedExperts,
                 mk.FusedMoEActivationFormat.BatchedExperts)
 
-        if use_mxfp4_w4a4:
-            raise ValueError("BatchedTritonExperts does not "
-                             "support use_mxfp4_w4a4=True for now.")
-
     def supports_chunking(self) -> bool:
         return False
 
