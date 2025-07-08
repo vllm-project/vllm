@@ -1,7 +1,6 @@
 ---
 title: Benchmark Suites
 ---
-[](){ #benchmarks }
 
 vLLM contains two sets of benchmarks:
 

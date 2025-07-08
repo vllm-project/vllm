@@ -33,7 +33,7 @@ Quantized models take less memory at the cost of lower precision.
 Statically quantized models can be downloaded from HF Hub (some popular ones are available at [Red Hat AI](https://huggingface.co/RedHatAI))
 and used directly without extra configuration.
 
-Dynamic quantization is also supported via the `quantization` option -- see [here][quantization-index] for more details.
+Dynamic quantization is also supported via the `quantization` option -- see [here](../features/quantization/README.md) for more details.
 
 ## Context length and batch size
 

@@ -1,11 +1,10 @@
 ---
 title: OpenAI-Compatible Server
 ---
-[](){ #serving-openai-compatible-server }
 
 vLLM provides an HTTP server that implements OpenAI's [Completions API](https://platform.openai.com/docs/api-reference/completions), [Chat API](https://platform.openai.com/docs/api-reference/chat), and more! This functionality lets you serve models and interact with them using an HTTP client.
 
-In your terminal, you can [install](../getting_started/installation/README.md) vLLM, then start the server with the [`vllm serve`][serve-args] command. (You can also use our [Docker][deployment-docker] image.)
+In your terminal, you can [install](../getting_started/installation/README.md) vLLM, then start the server with the [`vllm serve`](../configuration/serve_args.md) command. (You can also use our [Docker](../deployment/docker.md) image.)
 
 ```bash
 vllm serve NousResearch/Meta-Llama-3-8B-Instruct \
@@ -208,7 +207,7 @@ you can use the [official OpenAI Python client](https://github.com/openai/openai
 
 We support both [Vision](https://platform.openai.com/docs/guides/vision)- and
 [Audio](https://platform.openai.com/docs/guides/audio?audio-generation-quickstart-example=audio-in)-related parameters;
-see our [Multimodal Inputs][multimodal-inputs] guide for more information.
+see our [Multimodal Inputs](../features/multimodal_inputs.md) guide for more information.
 - *Note: `image_url.detail` parameter is not supported.*
 
 Code example: <gh-file:examples/online_serving/openai_chat_completion_client.py>
