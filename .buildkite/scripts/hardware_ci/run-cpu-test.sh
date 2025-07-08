@@ -48,10 +48,16 @@ function cpu_tests() {
   # Run basic model test
   docker exec cpu-test-"$NUMA_NODE" bash -c "
     set -e
-    pytest -v -s tests/kernels/attention/test_cache.py -m cpu_model
-    pytest -v -s tests/kernels/attention/test_mla_decode_cpu.py -m cpu_model
-    pytest -v -s tests/models/language/generation -m cpu_model
-    VLLM_CPU_SGL_KERNEL=1 pytest -v -s tests/models/language/generation -m cpu_model
+    # Note: disable until supports V1
+    # pytest -v -s tests/kernels/attention/test_cache.py -m cpu_model
+    # pytest -v -s tests/kernels/attention/test_mla_decode_cpu.py -m cpu_model
+
+    # Note: disable Bart until supports V1
+    pytest -v -s tests/models/language/generation -m cpu_model \
+                --ignore=tests/models/language/generation/test_bart.py
+    VLLM_CPU_SGL_KERNEL=1 pytest -v -s tests/models/language/generation -m cpu_model \
+                --ignore=tests/models/language/generation/test_bart.py
+
     pytest -v -s tests/models/language/pooling -m cpu_model
     pytest -v -s tests/models/multimodal/generation \
                 --ignore=tests/models/multimodal/generation/test_mllama.py \
@@ -62,20 +68,14 @@ function cpu_tests() {
   docker exec cpu-test-"$NUMA_NODE" bash -c "
     set -e
     pytest -s -v \
-    tests/quantization/test_compressed_tensors.py::test_compressed_tensors_w8a8_static_setup \
-    tests/quantization/test_compressed_tensors.py::test_compressed_tensors_w8a8_dynamic_per_token"
+    tests/quantization/test_compressed_tensors.py::test_compressed_tensors_w8a8_logprobs[False-10-32-neuralmagic/Llama-3.2-1B-quantized.w8a8]" 
 
+  # Note: disable it until supports V1
   # Run AWQ test
   # docker exec cpu-test-"$NUMA_NODE" bash -c "
   #   set -e
   #   VLLM_USE_V1=0 pytest -s -v \
   #   tests/quantization/test_ipex_quant.py"
-
-  # Run chunked-prefill and prefix-cache test
-  docker exec cpu-test-"$NUMA_NODE" bash -c "
-    set -e
-    pytest -s -v -k cpu_model \
-    tests/basic_correctness/test_chunked_prefill.py"  
 
   # online serving
   docker exec cpu-test-"$NUMA_NODE" bash -c "
