@@ -14,7 +14,7 @@ import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    scaled_dequantize)
+    group_broadcast)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     CUTLASS_BLOCK_FP8_SUPPORTED)
 from vllm.platforms import current_platform
@@ -235,7 +235,7 @@ def block_quant_to_tensor_quant(
     The outputs are tensor-wise quantization tensor and tensor-wise
     quantization scale. Note only float8 is supported for now.
     """
-    x_dq_block = scaled_dequantize(x_q_block, x_s)
+    x_dq_block = group_broadcast(x_q_block, x_s)
     x_q_tensor, scale = input_to_float8(x_dq_block, dtype=x_q_block.dtype)
     return x_q_tensor, scale
 
@@ -740,8 +740,6 @@ def requant_weight_ue8m0_inplace(
         raise ValueError("Expected *weight* to be torch.float8_e4m3fn, got "
                          f"{weight.dtype} instead.")
 
-    from vllm.model_executor.layers.quantization.utils.quant_utils import (
-        scaled_dequantize)
     from vllm.utils.deep_gemm import per_block_cast_to_fp8
 
     block_m, block_k = int(block_size[0]), int(block_size[1])
@@ -760,10 +758,14 @@ def requant_weight_ue8m0_inplace(
         w_q = w_view[idx]
         s_old = s_view[idx]
 
-        # De-quantise with the *old* scaling factors.
-        w_dq = scaled_dequantize(w_q, s_old, group_shape=(block_m, block_k))
-        """scale_broadcast = group_broadcast(s_old.to(torch.float32), w_q.shape)
-        w_dq = (w_q.to(torch.float32) * scale_broadcast).to(w_q.dtype)"""
+        # De-quantise with the *old* scaling factors (float32).
+        m_cur, k_cur = w_q.shape
+        s_float = s_old.to(torch.float32)
+        # Expand scales along rows and cols by block size, then crop.
+        s_exp_r = torch.repeat_interleave(s_float, block_m, dim=0)
+        s_exp = torch.repeat_interleave(s_exp_r, block_k, dim=1)
+        s_exp = s_exp[:m_cur, :k_cur]
+        w_dq = w_q.to(torch.float32) * s_exp
         # Re-quantise using power-of-two scaling (UE8M0).
         w_requant, s_requant = per_block_cast_to_fp8(w_dq, [block_m, block_k])
 
