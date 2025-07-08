@@ -14,11 +14,9 @@ from vllm.platforms import current_platform
 
 
 @pytest.fixture(scope="function", autouse=True)
-def use_v0_only(monkeypatch):
-    """
-    This module relies on V0 internals, so set VLLM_USE_V1=0.
-    """
-    monkeypatch.setenv('VLLM_USE_V1', '0')
+def enable_pickle(monkeypatch):
+    """`LLM.apply_model` requires pickling a function."""
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
 
 @pytest.mark.parametrize('kv_cache_dtype', ['auto', 'fp8'])
@@ -78,13 +76,12 @@ def test_quark_fp8_parity(vllm_runner):
     }
     with (vllm_runner(quark_model_id, **llm_kwargs) as
           quark_handle, vllm_runner(fp8_model_id, **llm_kwargs) as fp8_handle):
-        quark_model = (quark_handle.model.llm_engine.model_executor.
-                       driver_worker.model_runner.model)
-        quark_state_dict = quark_model.state_dict()
 
-        fp8_model = (fp8_handle.model.llm_engine.model_executor.driver_worker.
-                     model_runner.model)
-        fp8_state_dict = fp8_model.state_dict()
+        def get_state_dict(model):
+            return {k: v.cpu() for k, v in model.state_dict().items()}
+
+        quark_state_dict, = quark_handle.apply_model(get_state_dict)
+        fp8_state_dict, = fp8_handle.apply_model(get_state_dict)
 
     assert fp8_state_dict.keys() == quark_state_dict.keys()
 
