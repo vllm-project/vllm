@@ -12,8 +12,8 @@ components.
 
 The script shows how to do the following:
 
-* Configure environment variables (``VLLM_RAY_PER_WORKER_GPUS`` and
-  ``VLLM_RAY_BUNDLE_INDICES``) so that vLLM workers land on the desired
+* Configure environment variables (`VLLM_RAY_PER_WORKER_GPUS` and
+  `VLLM_RAY_BUNDLE_INDICES`) so that vLLM workers land on the desired
   devices.
 * Exchange tensors between processes by means of CUDA inter-process
   communication (IPC). CUDA IPC sidesteps NCCL limitations that occur
@@ -46,10 +46,10 @@ class MyLLM(LLM):
     indices assigned by the placement group.
 
     Args:
-        *args: Positional arguments forwarded to ``vllm.LLM``.
+        *args: Positional arguments forwarded to `vllm.LLM`.
         bundle_indices (list[int]): Placement-group bundle indices
             assigned to this worker.
-        **kwargs: Keyword arguments forwarded to ``vllm.LLM``.
+        **kwargs: Keyword arguments forwarded to `vllm.LLM`.
     """
 
     def __init__(self, *args, bundle_indices: list, **kwargs):
@@ -64,7 +64,7 @@ class MyLLM(LLM):
 
 
 class RayTrainingActor:
-    """Training actor that hosts a HuggingFace OPT-125M model.
+    """Training actor that hosts a Facebook OPT-125M model from Hugging Face.
 
     The model is loaded onto the first GPU assigned to this actor, and expose
     the CUDA IPC handles so that colocated vLLM workers can map tensors
@@ -81,7 +81,7 @@ class RayTrainingActor:
         for name, p in self.model.named_parameters():
             p.data.zero_()
         torch.cuda.synchronize()
-        # The argument for ``get_device_uuid`` is the index of the GPU in the
+        # The argument for `get_device_uuid` is the index of the GPU in the
         # list of visible devices.
         from vllm.platforms import current_platform
 
