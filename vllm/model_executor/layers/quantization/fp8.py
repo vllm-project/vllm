@@ -14,10 +14,9 @@ from vllm import _custom_ops as ops
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
-    BatchedTritonOrDeepGemmExperts, FusedMoE, FusedMoEActivationFormat,
-    FusedMoEConfig, FusedMoEMethodBase, FusedMoEPermuteExpertsUnpermute,
-    FusedMoEPrepareAndFinalize, FusedMoeWeightScaleSupported,
-    TritonOrDeepGemmExperts)
+    FusedMoE, FusedMoEActivationFormat, FusedMoEConfig, FusedMoEMethodBase,
+    FusedMoEPermuteExpertsUnpermute, FusedMoEPrepareAndFinalize,
+    FusedMoeWeightScaleSupported)
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -474,12 +473,30 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 logger.warning_once(
                     "DeepGemm not supported on the current platform.")
 
+        # Check for CutlassBlockScaledGroupedGemm support.
+        self.allow_cutlass_block_scaled_grouped_gemm = False
+        if not self.block_quant:
+            logger.warning_once("Model is not block quantized. Not using "
+                                "CutlassBlockScaledGroupedGemm kernels")
+        elif (current_platform.is_cuda()
+              and current_platform.has_device_capability(100)):
+            logger.info_once(
+                "Using CutlassBlockScaledGroupedGemm kernels for Fp8MoEMethod."
+            )
+            self.allow_cutlass_block_scaled_grouped_gemm = True
+        else:
+            logger.warning_once(
+                "CutlassBlockScaledGroupedGemm not supported on the current "
+                "platform.")
+
         self.topk_indices_dtype = None
         self.fused_experts = functools.partial(  # type: ignore
             fused_experts,
             use_fp8_w8a8=True,
             block_shape=self.quant_config.weight_block_size,
-            allow_deep_gemm=self.allow_deep_gemm)
+            allow_deep_gemm=self.allow_deep_gemm,
+            allow_cutlass_block_scaled_grouped_gemm=(
+                self.allow_cutlass_block_scaled_grouped_gemm))
 
     def create_weights(self, layer: Module, num_experts: int, hidden_size: int,
                        intermediate_size_per_partition: int,
@@ -785,6 +802,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         prepare_finalize: FusedMoEPrepareAndFinalize,
         moe: FusedMoEConfig,
     ) -> FusedMoEPermuteExpertsUnpermute:
+        from vllm.model_executor.layers.fused_moe import (
+            BatchedTritonOrDeepGemmExperts, TritonOrDeepGemmExperts)
+
         assert not self.use_marlin and not self.rocm_aiter_moe_enabled, (
             "Marlin and ROCm AITER are not supported with all2all yet.")
 
@@ -800,10 +820,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 self.quant_config.weight_block_size, False)
             return BatchedTritonOrDeepGemmExperts(
                 max_num_tokens=max_num_tokens_per_rank,
-                world_size=prepare_finalize.
-                world_size,  # type: ignore [attr-defined]
-                dp_size=prepare_finalize.
-                dp_size,  # type: ignore [attr-defined]
+                num_dispatchers=prepare_finalize.num_dispatchers(),
                 use_fp8_w8a8=True,
                 block_shape=self.quant_config.weight_block_size,
                 per_act_token_quant=False,
@@ -890,8 +907,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         elif self.use_marlin:
             assert activation == "silu", (
                 f"{activation} not supported for Marlin MoE.")
-            assert not apply_router_weight_on_input, (
-                "Apply router weight on input not supported for Marlin MoE.")
             return torch.ops.vllm.fused_marlin_moe(
                 x,
                 layer.w13_weight,
@@ -902,6 +917,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 topk_weights,
                 topk_ids,
                 quant_type_id=scalar_types.float8_e4m3fn.id,
+                apply_router_weight_on_input=apply_router_weight_on_input,
                 global_num_experts=global_num_experts,
                 expert_map=expert_map)
         else:

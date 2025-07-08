@@ -19,8 +19,6 @@ from vllm.model_executor.models.bert import BertEmbeddingModel, BertModel
 from vllm.model_executor.models.utils import WeightsMapper, maybe_prefix
 from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.sequence import IntermediateTensors, PoolerOutput
-from vllm.transformers_utils.config import (
-    get_cross_encoder_activation_function)
 
 from .bert_with_rope import BertWithRope, JinaRobertaModel
 from .interfaces import SupportsCrossEncoding
@@ -178,9 +176,6 @@ class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding):
         super().__init__()
         config = vllm_config.model_config.hf_config
         self.padding_idx = vllm_config.model_config.hf_config.pad_token_id
-
-        self.default_activation_function = \
-            get_cross_encoder_activation_function(config)
 
         self.num_labels = config.num_labels
         self.roberta = BertModel(vllm_config=vllm_config,
