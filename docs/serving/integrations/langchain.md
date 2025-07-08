@@ -13,7 +13,7 @@ pip install langchain langchain_community -q
 
 To run inference on a single or multiple GPUs, use `VLLM` class from `langchain`.
 
-??? Code
+??? code
 
     ```python
     from langchain_community.llms import VLLM

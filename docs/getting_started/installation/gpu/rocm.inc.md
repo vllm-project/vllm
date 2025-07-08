@@ -95,7 +95,7 @@ Currently, there are no pre-built ROCm wheels.
 
 4. Build vLLM. For example, vLLM on ROCM 6.3 can be built with the following steps:
 
-    ??? Commands
+    ??? console "Commands"
 
         ```bash
         pip install --upgrade pip
@@ -206,7 +206,7 @@ DOCKER_BUILDKIT=1 docker build \
 
 To run the above docker image `vllm-rocm`, use the below command:
 
-??? Command
+??? console "Command"
 
     ```bash
     docker run -it \

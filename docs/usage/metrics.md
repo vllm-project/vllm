@@ -12,7 +12,7 @@ vllm serve unsloth/Llama-3.2-1B-Instruct
 
 Then query the endpoint to get the latest metrics from the server:
 
-??? Output
+??? console "Output"
 
     ```console
     $ curl http://0.0.0.0:8000/metrics
@@ -33,7 +33,7 @@ Then query the endpoint to get the latest metrics from the server:
 
 The following metrics are exposed:
 
-??? Code
+??? code
 
     ```python
     --8<-- "vllm/engine/metrics.py:metrics-definitions"

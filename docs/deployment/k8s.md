@@ -29,7 +29,7 @@ Alternatively, you can deploy vLLM to Kubernetes using any of the following:
 
 First, create a Kubernetes PVC and Secret for downloading and storing Hugging Face model:
 
-??? Config
+??? console "Config"
 
     ```bash
     cat <<EOF |kubectl apply -f -
@@ -57,7 +57,7 @@ First, create a Kubernetes PVC and Secret for downloading and storing Hugging Fa
 
 Next, start the vLLM server as a Kubernetes Deployment and Service:
 
-??? Config
+??? console "Config"
 
     ```bash
     cat <<EOF |kubectl apply -f -

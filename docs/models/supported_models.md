@@ -642,7 +642,7 @@ Specified using `--task generate`.
 
     For the best results, we recommend using the following dependency versions (tested on A10 and L40):
 
-    ??? Dependency versions
+    ??? code "Dependency versions"
 
         ```text
         # Core vLLM-compatible dependencies with Molmo accuracy setup (tested on L40)
