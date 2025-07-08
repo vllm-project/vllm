@@ -266,4 +266,4 @@ class CpuPlatform(Platform):
         """
         arch = cls.get_cpu_architecture()
         return (cls.supports_v1(model_config)
-                and arch in (CpuArchEnum.X86, CpuArchEnum.POWERPC))
+                and arch in (CpuArchEnum.X86, CpuArchEnum.POWERPC, CpuArchEnum.ARM))
