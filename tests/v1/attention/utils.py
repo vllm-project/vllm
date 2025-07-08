@@ -29,7 +29,7 @@ class BatchSpec:
         assert len(self.query_lens) == self.batch_size
 
     def compute_num_tokens(self):
-        return sum(self.seq_lens)
+        return sum(self.query_lens)
 
 
 def create_common_attn_metadata(
