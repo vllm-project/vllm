@@ -1003,8 +1003,6 @@ class CompletionRequest(OpenAIBaseModel):
             self.stream_options.stream_n is not None:
             stream_n = self.stream_options.stream_n
         return StreamingParams(stream_n=stream_n)
-            allowed_token_ids=self.allowed_token_ids,
-        )
 
     @model_validator(mode="before")
     @classmethod
