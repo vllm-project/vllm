@@ -134,7 +134,7 @@ typename Config::Gemm::Arguments args_from_options(
   using ElementB = typename Config::Gemm::ElementB;
   using ElementSFA = cutlass::float_ue4m3_t;
   using ElementSFB = cutlass::float_ue4m3_t;
-  using ElementD = typename Config::ElementD;
+  using ElementD = typename Config::Gemm::ElementD;
   using ElementCompute = float;
   using StrideA = typename Config::StrideA;
   using StrideB = typename Config::StrideB;
