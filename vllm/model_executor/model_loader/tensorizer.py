@@ -509,9 +509,6 @@ def deserialize_tensorizer_model(model: nn.Module,
             f"S3, HTTP or HTTPS scheme.")
     before_mem = get_mem_usage()
     start = time.perf_counter()
-    logger.info(
-        f"Using deserlization kwargs: {tensorizer_args.deserialization_kwargs}"
-    )
     with open_stream(
             tensorizer_config.tensorizer_uri,
             mode="rb",
