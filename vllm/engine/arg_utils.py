@@ -1017,8 +1017,8 @@ class EngineArgs:
 
         if self.load_format == "tensorizer":
             if hasattr(self.model_loader_extra_config, "to_serializable"):
-                self.model_loader_extra_config = self.model_loader_extra_config.to_serializable(
-                )
+                self.model_loader_extra_config = (
+                    self.model_loader_extra_config.to_serializable())
             self.model_loader_extra_config["tensorizer_config"] = {}
             self.model_loader_extra_config["tensorizer_config"][
                 "tensorizer_dir"] = self.model
