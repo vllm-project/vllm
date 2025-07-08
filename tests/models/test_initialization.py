@@ -8,15 +8,12 @@ from transformers import PretrainedConfig
 
 from vllm import LLM
 from vllm.engine.llm_engine import LLMEngine as V0LLMEngine
-from vllm.logger import init_logger
 from vllm.utils import GiB_bytes
 from vllm.v1.core.kv_cache_utils import get_kv_cache_config
 from vllm.v1.engine.core import EngineCore as V1EngineCore
-
+from vllm.logger import init_logger
 from .registry import HF_EXAMPLE_MODELS
-
 logger = init_logger(__name__)
-
 
 @pytest.mark.parametrize("model_arch", HF_EXAMPLE_MODELS.get_supported_archs())
 def test_can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch):
@@ -79,7 +76,7 @@ def test_can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch):
             kv_cache_specs[0],
             10 * GiB_bytes,
         )
-
+        logger.debug("Using the patch function.........")
         # gpu_blocks (> 0), cpu_blocks, scheduler_kv_cache_config
         return 1, 0, scheduler_kv_cache_config
 

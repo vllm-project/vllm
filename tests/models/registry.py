@@ -460,14 +460,15 @@ _TRANSFORMERS_MODELS = {
     "TransformersForCausalLM": _HfExamplesInfo("ArthurZ/Ilama-3.2-1B", trust_remote_code=True),  # noqa: E501
 }
 
-_EXAMPLE_MODELS = {
-    **_TEXT_GENERATION_EXAMPLE_MODELS,
-    **_EMBEDDING_EXAMPLE_MODELS,
-    **_CROSS_ENCODER_EXAMPLE_MODELS,
-    **_MULTIMODAL_EXAMPLE_MODELS,
-    **_SPECULATIVE_DECODING_EXAMPLE_MODELS,
-    **_TRANSFORMERS_MODELS,
-}
+# _EXAMPLE_MODELS = {
+#     **_TEXT_GENERATION_EXAMPLE_MODELS,
+#     **_EMBEDDING_EXAMPLE_MODELS,
+#     **_CROSS_ENCODER_EXAMPLE_MODELS,
+#     **_MULTIMODAL_EXAMPLE_MODELS,
+#     **_SPECULATIVE_DECODING_EXAMPLE_MODELS,
+#     **_TRANSFORMERS_MODELS,
+# }
+_EXAMPLE_MODELS={"Qwen2_5_VLForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen2.5-VL-3B-Instruct"),  }# noqa: E501
 
 
 class HfExampleModels:
