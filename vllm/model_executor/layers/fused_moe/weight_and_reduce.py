@@ -1,0 +1,91 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+from typing import Optional
+
+import torch
+
+import vllm._custom_ops as ops
+import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+
+
+class WeightAndReduceNoOP(mk.WeightAndReduce):
+
+    def apply(self, output: Optional[torch.Tensor],
+              fused_expert_output: torch.Tensor, topk_weights: torch.Tensor,
+              topk_ids: torch.Tensor,
+              apply_router_weight_on_input: bool) -> torch.Tensor:
+        # Relax this if an explicit copy is necessary. Note that,
+        # if a copy is employed we have to make sure that the
+        # tensors don't overlap
+        assert output is None
+        return fused_expert_output
+
+
+class ContiguousWeightAndReduce(mk.WeightAndReduce):
+
+    def apply(self, output: Optional[torch.Tensor],
+              fused_expert_output: torch.Tensor, topk_weights: torch.Tensor,
+              topk_ids: torch.Tensor,
+              apply_router_weight_on_input: bool) -> torch.Tensor:
+
+        m, num_topk = topk_ids.size()
+        k = fused_expert_output.size(-1)
+        if fused_expert_output.ndim == 2:
+            fused_expert_output = fused_expert_output.view(m, num_topk, k)
+
+        assert fused_expert_output.size() == (m, num_topk, k), (
+            f"Expected fused_expert_output size {(m, num_topk, k)}. But got "
+            f"{fused_expert_output.size()}")
+
+        if not apply_router_weight_on_input:
+            fused_expert_output.mul_(topk_weights.view(m, -1, 1))
+
+        if output is None:
+            output = torch.empty((m, k),
+                                 device=fused_expert_output.device,
+                                 dtype=fused_expert_output.dtype)
+        assert output.size() == (m, k), (
+            f"Expected output size {(m, k)}. But got {output.size()}")
+
+        ops.moe_sum(fused_expert_output, output)
+        return output
+
+
+class NaiveBatchedWeightAndReduce(mk.WeightAndReduce):
+
+    def __init__(self, rank: int):
+        self.rank = rank
+
+    def apply(self, output: Optional[torch.Tensor],
+              fused_expert_output: torch.Tensor, topk_weights: torch.Tensor,
+              topk_ids: torch.Tensor,
+              apply_router_weight_on_input: bool) -> torch.Tensor:
+        assert fused_expert_output.ndim == 3
+        num_tokens = topk_ids.size(0)
+        num_local_experts = fused_expert_output.size(0)
+        K = fused_expert_output.size(-1)
+
+        if output is None:
+            output = torch.zeros((num_tokens, K),
+                                 device=fused_expert_output.device,
+                                 dtype=fused_expert_output.dtype)
+        else:
+            output.fill_(0)
+
+        assert output.size() == (num_tokens, K), (
+            f"Expected output size {(num_tokens, K)}, but got {output.size()}")
+
+        first_expert = num_local_experts * self.rank
+        last_expert = first_expert + num_local_experts
+
+        for expert_id in range(first_expert, last_expert):
+            matching_tokens = topk_ids == expert_id
+            topks = torch.any(matching_tokens, dim=1).flatten()
+            rows = torch.count_nonzero(topks)
+            rhs = fused_expert_output[expert_id - first_expert, :rows, :]
+            if not apply_router_weight_on_input:
+                rhs.mul_(topk_weights[matching_tokens].view(rhs.size(0), 1))
+            output[topks] = output[topks] + rhs
+
+        return output

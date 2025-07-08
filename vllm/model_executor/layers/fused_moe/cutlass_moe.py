@@ -255,6 +255,10 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
     def supports_expert_map(self) -> bool:
         return not self.use_batched_format
 
+    def weight_and_reduce_impl(self) -> Optional[mk.WeightAndReduce]:
+        # Let PrepareAndFinalize::finalize() decide the impl.
+        return None
+
     def workspace_shapes(
         self,
         a: torch.Tensor,

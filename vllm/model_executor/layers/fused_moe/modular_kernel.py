@@ -22,7 +22,7 @@ from vllm.utils import cdiv
 #
 # [Router] → [Quantize-Dispatch] → [Permute-Experts-Unpermute] → [Combine]
 #
-# Each component will be independent of the others except for
+# Each component will be independent of (but may inform) the others except for
 # [Quantize-Dispatch] and `[Combine] (see below). The components can then be
 # mixed and matched with so that DP+EP can be supported easily for multiple
 # MoE kernel implementations.
@@ -31,13 +31,19 @@ from vllm.utils import cdiv
 # * FusedMoEPrepareAndFinalize - an abstract base class for preparation of MoE
 #   inputs (e.g. quantization, distribution) and finalization of Moe outputs.
 #   The prepare method must take care of any needed quantization and the
-#   finalize method must apply weights and do the final reduction of the output.
+#   finalize method, informed by the FusedMoEPermuteExpertsUnpermute method,
+#   may apply weights and/or do the final reduction of the output.
 # * FusedMoEPermuteExpertsUnpermute - an abstract base class for the main fused
-#   MoE operation. One important feature to note is that this class does not
-#   apply topk weights or reduce the final output.
+#   MoE operation, i.e matmul + act_mul + optionally quant + matmul.
+#   Some FusedMoEPermuteExpertsUnpermute implementations may choose to do
+#   the weight application and/or reduction. The class communicates this
+#   to [Finalize] via a WeightAndReduce object.
 # * FusedMoEModularKernel - an interface class that combines a
 #   FusedMoEPrepareAndFinalize and a FusedMoEPermuteExpertsUnpermute to
 #   provide the standard fused MoE kernel interface.
+# * WeightAndReduce - A WeightAndReduce implementation chosen
+#   by the FusedMoEPermuteExpertsUnpermute implementation that is passed
+#   on to [Finalize].
 #
 # [Quantize-Prepare] and [Finalize] functionality are bundled into a single
 # class `FusedMoEPrepareAndFinalize` since they could use collective
@@ -115,6 +121,23 @@ class ExpertTokensMetadata:
                                                        non_blocking=True),
             expert_num_tokens_cpu=expert_num_tokens_cpu)
 
+class WeightAndReduce(ABC):
+    """
+    An abstract base class for Weight application and reduction implementations.
+    """
+
+    @abstractmethod
+    def apply(self, output: Optional[torch.Tensor],
+              fused_expert_output: torch.Tensor, topk_weights: torch.Tensor,
+              topk_ids: torch.Tensor,
+              apply_router_weight_on_input: bool) -> torch.Tensor:
+        """
+        Apply topk_weights to the fused_experts_outputs and/or reduce.
+        If an output tensor is not passed, it will be created in the
+        function.
+        """
+        raise NotImplementedError
+
 
 # TODO: pass FusedMoEParallelConfig in as ctor parameter?
 class FusedMoEPrepareAndFinalize(ABC):
@@ -172,6 +195,7 @@ class FusedMoEPrepareAndFinalize(ABC):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
+        weight_and_reduce_impl: Optional[WeightAndReduce],
     ) -> None:
         """
         Perform any combine plus apply weights and perform a reduction on the
@@ -183,6 +207,7 @@ class FusedMoEPrepareAndFinalize(ABC):
         - topk_ids: The topk_ids.
         - apply_router_weight_on_input: When False, apply the weights to
           fused_expert_output.
+        - weight_and_reduce_impl: An optional WeightAndReduce implementation.
         """
         raise NotImplementedError
 
@@ -321,6 +346,9 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
     def enable_chunking(self):
         return envs.VLLM_ENABLE_FUSED_MOE_ACTIVATION_CHUNKING and \
           self.supports_chunking()
+
+    def weight_and_reduce_impl(self) -> Optional[WeightAndReduce]:
+        raise NotImplementedError
 
     @abstractmethod
     def apply(
@@ -617,7 +645,9 @@ class FusedMoEModularKernel(torch.nn.Module):
                         expert_tokens_meta=expert_tokens_meta,
                     )
 
-        self.prepare_finalize.finalize(output, fused_out, topk_weights,
-                                       topk_ids, apply_router_weight_on_input)
+        self.prepare_finalize.finalize(
+            output, fused_out, topk_weights, topk_ids,
+            apply_router_weight_on_input,
+            self.fused_experts.weight_and_reduce_impl())
 
         return output

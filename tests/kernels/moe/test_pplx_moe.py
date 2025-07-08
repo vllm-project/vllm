@@ -371,6 +371,7 @@ def pplx_prepare_finalize(
         chunk_topk_weight,
         chunk_topk_ids,
         False,
+        weight_and_reduce_impl=None,
     )
 
     torch.cuda.synchronize()

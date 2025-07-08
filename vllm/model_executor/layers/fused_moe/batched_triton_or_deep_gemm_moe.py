@@ -88,6 +88,10 @@ class BatchedTritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         return ((bdge is None or bdge.supports_expert_map())
                 and (bte is None or bte.supports_expert_map()))
 
+    def weight_and_reduce_impl(self) -> Optional[mk.WeightAndReduce]:
+        # Let PrepareAndFinalize::finalize() decide the impl.
+        return None
+
     def workspace_shapes(
         self,
         a: torch.Tensor,

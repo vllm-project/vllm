@@ -85,6 +85,10 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def supports_expert_map(self) -> bool:
         return True
 
+    def weight_and_reduce_impl(self) -> Optional[mk.WeightAndReduce]:
+        # Let PrepareAndFinalize::finalize() decide the impl.
+        return None
+
     def workspace_shapes(
         self, a: torch.Tensor, aq: torch.Tensor, M: int, N: int, K: int,
         topk: int, global_num_experts: int, local_num_experts: int

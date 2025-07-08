@@ -213,7 +213,11 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
+        weight_and_reduce_impl: Optional[mk.WeightAndReduce],
     ) -> None:
+        # The weight application and reduction happens in the combine kernel.
+        assert weight_and_reduce_impl is None
+
         # This argument is optional
         # There's not much point setting this unless it is != topk_ids.size(0)
         bound_m: Optional[torch.Tensor] = None

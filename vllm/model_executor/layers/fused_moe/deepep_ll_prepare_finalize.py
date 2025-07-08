@@ -166,8 +166,10 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
     def finalize(self, output: torch.Tensor, fused_expert_output: torch.Tensor,
                  topk_weights: torch.Tensor, topk_ids: torch.Tensor,
-                 apply_router_weight_on_input: bool) -> None:
-
+                 apply_router_weight_on_input: bool,
+                 weight_and_reduce_impl: Optional[mk.WeightAndReduce]) -> None:
+        # The weight application and reduction happens in the combine kernel.
+        assert weight_and_reduce_impl is None
         assert self.handle is not None
 
         combine_topk_weights = topk_weights
