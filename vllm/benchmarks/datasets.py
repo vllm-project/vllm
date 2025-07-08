@@ -320,6 +320,8 @@ class RandomDataset(BenchmarkDataset):
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
+        random.seed(self.random_seed)
+        np.random.seed(self.random_seed)
 
     def sample(
         self,
@@ -376,10 +378,11 @@ class RandomDataset(BenchmarkDataset):
             # [1650, 939, 486] -> ['Ġcall', 'sh', 'ere']
             # To avoid uncontrolled change of the prompt length,
             # the encoded sequence is truncated before being decode again.
-            re_encoded_sequence = tokenizer.encode(
-                prompt, add_special_tokens=False)[:input_lens[i]]
-            prompt = tokenizer.decode(re_encoded_sequence)
             total_input_len = prefix_len + int(input_lens[i])
+            re_encoded_sequence = tokenizer.encode(
+                prompt, add_special_tokens=False)[:total_input_len]
+            prompt = tokenizer.decode(re_encoded_sequence)
+            total_input_len = len(re_encoded_sequence)
             requests.append(
                 SampleRequest(
                     prompt=prompt,
@@ -692,7 +695,8 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
                                     dataset_path=args.dataset_path).
             sample(tokenizer=tokenizer, num_requests=args.num_prompts),
             "random":
-            lambda: RandomDataset(dataset_path=args.dataset_path).sample(
+            lambda: RandomDataset(random_seed=args.seed,
+                                  dataset_path=args.dataset_path).sample(
                 tokenizer=tokenizer,
                 num_requests=args.num_prompts,
                 prefix_len=args.random_prefix_len,

@@ -144,6 +144,7 @@ class UltravoxMultiModalProcessor(
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         # Text-only input not supported in composite processor
         if not mm_data.get("audios", []):
@@ -165,10 +166,15 @@ class UltravoxMultiModalProcessor(
 
         item_processor_data = dict(**mm_data, audios=audios)
 
+        # some tokenizer kwargs are incompatible with UltravoxProcessor
+        tok_kwargs.pop("padding", None)
+        tok_kwargs.pop("truncation", None)
+
         output = super()._call_hf_processor(
             prompt=prompt,
             mm_data=item_processor_data,
             mm_kwargs=mm_kwargs,
+            tok_kwargs=tok_kwargs,
         )
         output['audio_features'] = output.pop('audio_values')
 
@@ -400,6 +406,13 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={"audio_tower.model.encoder.": "audio_tower."})
+
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+        if modality.startswith("audio"):
+            return "<|audio|>"
+
+        raise ValueError("Only audio modality is supported")
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()

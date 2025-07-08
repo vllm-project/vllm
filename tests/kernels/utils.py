@@ -13,8 +13,11 @@ import pytest
 import torch
 from torch._prims_common import TensorLikeType
 
+from tests.kernels.quant_utils import native_w8a8_block_matmul
 from vllm.attention import AttentionBackend, AttentionMetadata, AttentionType
 from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.fused_moe.utils import (
+    moe_kernel_quantize_input)
 from vllm.platforms.interface import _Backend
 from vllm.utils import (STR_BACKEND_ENV_VAR, STR_FLASH_ATTN_VAL,
                         STR_XFORMERS_ATTN_VAL, make_tensor_with_pad)
@@ -1054,23 +1057,92 @@ def compute_max_diff(output, output_ref):
         torch.abs(output_ref))
 
 
-def torch_moe(a, w1, w2, score, topk, expert_map):
-    B, D = a.shape
-    a = a.view(B, -1, D).repeat(1, topk, 1).reshape(-1, D)
-    out = torch.zeros(B * topk, w2.shape[1], dtype=a.dtype, device=a.device)
-    score = torch.softmax(score, dim=-1, dtype=torch.float32)
-    topk_weight, topk_ids = torch.topk(score, topk)
-    topk_weight = topk_weight.view(-1)
+def torch_experts(
+    a: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk_weight: torch.Tensor,
+    topk_ids: torch.Tensor,
+    global_num_experts: int = -1,
+    expert_map: Optional[torch.Tensor] = None,
+    w1_scale: Optional[torch.Tensor] = None,
+    w2_scale: Optional[torch.Tensor] = None,
+    a1_scale: Optional[torch.Tensor] = None,
+    a2_scale: Optional[torch.Tensor] = None,
+    quant_dtype: Optional[torch.dtype] = None,
+    per_act_token_quant=False,
+    block_shape: Optional[list[int]] = None,
+) -> torch.Tensor:
+    assert (global_num_experts == -1
+            or (global_num_experts == w1.shape[0] and expert_map is None)
+            or (expert_map is not None
+                and global_num_experts == expert_map.shape[0]))
+
+    M, K = a.shape
+    topk = topk_ids.shape[1]
+
+    a = a.view(M, -1, K).repeat(1, topk, 1).reshape(-1, K)
+
+    out = torch.zeros(M * topk, w2.shape[1], dtype=a.dtype, device=a.device)
+
+    a, a_scale = moe_kernel_quantize_input(a, None, quant_dtype,
+                                           per_act_token_quant, block_shape)
+
+    num_experts = w1.shape[0]
+
     topk_ids = topk_ids.view(-1)
     if expert_map is not None:
         topk_ids = expert_map[topk_ids]
-    for i in range(w1.shape[0]):
+
+    f32 = torch.float32
+
+    for i in range(num_experts):
         mask = topk_ids == i
         if mask.sum():
-            out[mask] = SiluAndMul()(
-                a[mask] @ w1[i].transpose(0, 1)) @ w2[i].transpose(0, 1)
-    return (out.view(B, -1, w2.shape[1]) *
-            topk_weight.view(B, -1, 1).to(out.dtype)).sum(dim=1)
+            if quant_dtype is None:
+                tmp1 = a[mask] @ w1[i].transpose(0, 1)
+                tmp2 = SiluAndMul()(tmp1)
+                out[mask] = tmp2 @ w2[i].transpose(0, 1)
+            elif block_shape is not None:
+                assert (a_scale is not None and w1_scale is not None
+                        and w2_scale is not None)
+                tmp1 = native_w8a8_block_matmul(a[mask], w1[i], a_scale[mask],
+                                                w1_scale[i], block_shape,
+                                                out.dtype)
+                tmp2 = SiluAndMul()(tmp1)
+                tmp2, b_scale = moe_kernel_quantize_input(
+                    tmp2, a2_scale, quant_dtype, per_act_token_quant,
+                    block_shape)
+
+                out[mask] = native_w8a8_block_matmul(tmp2, w2[i], b_scale,
+                                                     w2_scale[i], block_shape,
+                                                     out.dtype)
+            else:
+                assert (a_scale is not None and w1_scale is not None
+                        and w2_scale is not None)
+                scales = a_scale if a_scale.numel() == 1 else a_scale[mask]
+                tmp1 = a[mask].to(f32) * scales
+                w1_dq = (w1[i].to(f32) * w1_scale[i]).transpose(0, 1)
+                tmp1 = tmp1 @ w1_dq
+                tmp2 = SiluAndMul()(tmp1)
+                w2_dq = (w2[i].to(f32) * w2_scale[i]).transpose(0, 1)
+                out[mask] = (tmp2 @ w2_dq).to(out.dtype)
+
+    return (out.view(M, -1, w2.shape[1]).to(f32) *
+            topk_weight.view(M, -1, 1)).sum(dim=1).to(out.dtype)
+
+
+def torch_moe(a: torch.Tensor,
+              w1: torch.Tensor,
+              w2: torch.Tensor,
+              score: torch.Tensor,
+              topk: int,
+              global_num_experts: int = -1,
+              expert_map: Optional[torch.Tensor] = None) -> torch.Tensor:
+    score = torch.softmax(score, dim=-1, dtype=torch.float32)
+    topk_weight, topk_ids = torch.topk(score, topk)
+    return torch_experts(a, w1, w2, topk_weight, topk_ids, global_num_experts,
+                         expert_map)
 
 
 def torch_moe_single(a, w, score, topk):

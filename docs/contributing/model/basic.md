@@ -1,5 +1,5 @@
 ---
-title: Implementing a Basic Model
+title: Basic Model
 ---
 [](){ #new-model-basic }
 
@@ -27,7 +27,7 @@ All vLLM modules within the model must include a `prefix` argument in their cons
 
 The initialization code should look like this:
 
-??? Code
+??? code
 
     ```python
     from torch import nn

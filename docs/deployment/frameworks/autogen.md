@@ -30,7 +30,7 @@ python -m vllm.entrypoints.openai.api_server \
 
 - Call it with AutoGen:
 
-??? Code
+??? code
 
     ```python
     import asyncio
