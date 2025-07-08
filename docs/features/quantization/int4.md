@@ -1,6 +1,4 @@
----
-title: INT4 W4A16
----
+# INT4 W4A16
 
 vLLM supports quantizing weights to INT4 for memory savings and inference acceleration. This quantization method is particularly useful for reducing model size and maintaining low latency in workloads with low queries per second (QPS).
 

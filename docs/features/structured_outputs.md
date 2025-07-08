@@ -1,6 +1,4 @@
----
-title: Structured Outputs
----
+# Structured Outputs
 
 vLLM supports the generation of structured outputs using
 [xgrammar](https://github.com/mlc-ai/xgrammar) or

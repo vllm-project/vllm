@@ -1,6 +1,4 @@
----
-title: Speculative Decoding
----
+# Speculative Decoding
 
 !!! warning
     Please note that speculative decoding in vLLM is not yet optimized and does

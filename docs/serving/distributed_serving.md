@@ -1,6 +1,4 @@
----
-title: Distributed Inference and Serving
----
+# Distributed Inference and Serving
 
 ## How to decide the distributed inference strategy?
 

@@ -1,6 +1,4 @@
----
-title: vLLM Paged Attention
----
+# vLLM Paged Attention
 
 Currently, vLLM utilizes its own implementation of a multi-head query
 attention kernel (`csrc/attention/attention_kernels.cu`).
