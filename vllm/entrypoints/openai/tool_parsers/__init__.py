@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from .abstract_tool_parser import ToolParser, ToolParserManager
+from .command_tool_parser import CommandJsonToolParser
 from .deepseekv3_tool_parser import DeepSeekV3ToolParser
 from .granite_20b_fc_tool_parser import Granite20bFCToolParser
 from .granite_tool_parser import GraniteToolParser
@@ -21,5 +22,6 @@ __all__ = [
     "GraniteToolParser", "Hermes2ProToolParser", "MistralToolParser",
     "Internlm2ToolParser", "Llama3JsonToolParser", "JambaToolParser",
     "Llama4PythonicToolParser", "PythonicToolParser", "Phi4MiniJsonToolParser",
-    "DeepSeekV3ToolParser", "xLAMToolParser", "MinimaxToolParser"
+    "DeepSeekV3ToolParser", "xLAMToolParser", "MinimaxToolParser",
+    "CommandJsonToolParser"
 ]
