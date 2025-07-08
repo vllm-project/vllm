@@ -112,3 +112,6 @@ class MoEPrepareAndFinalizeNoEPDeepGEMM(mk.FusedMoEPrepareAndFinalize):
     ) -> None:
         _moe_unpermute_and_reduce(output, fused_expert_output, None,
                                   topk_weights, apply_router_weight_on_input)
+
+    def num_dispatchers(self) -> int:
+        return 1
