@@ -84,11 +84,10 @@ class XPUPlatform(Platform):
 
         # FIXME: Temporarily forcing eager mode
         # remove after t.compile support stabilizes.
-        if envs.VLLM_USE_V1 and vllm_config.model_config is not None and \
-            not vllm_config.model_config.enforce_eager:
+        if (envs.VLLM_USE_V1 and vllm_config.model_config is not None
+                and not vllm_config.model_config.enforce_eager):
             from vllm.config import CompilationLevel
-            vllm_config.compilation_config.level = \
-                CompilationLevel.NO_COMPILATION
+            vllm_config.compilation_config.level = CompilationLevel.NO_COMPILATION  # noqa: E501
 
         # Instances created using VllmConfig() typically have model_config as
         # None by default. The modification involves adding a check to prevent
