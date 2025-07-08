@@ -56,8 +56,9 @@ from vllm.v1.kv_cache_interface import (AttentionSpec, FullAttentionSpec,
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
                              ModelRunnerOutput)
 from vllm.v1.pool.metadata import PoolingMetadata
-from vllm.v1.sample.logits_processor.load import build_logitsprocs
-from vllm.v1.sample.logits_processor.utils import LogitProcessorCtorArgs
+from vllm.v1.sample.logits_processor import (LogitProcessorCtorArgs,
+                                             LogitsProcessorsManager,
+                                             build_logitsprocs)
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.sample.sampler import Sampler
@@ -70,7 +71,6 @@ from vllm.v1.worker.block_table import BlockTable
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
-from ..sample.logits_processor import LogitsProcessorsManager
 from .utils import (gather_mm_placeholders, initialize_kv_cache_for_kv_sharing,
                     sanity_check_mm_encoder_outputs, scatter_mm_placeholders)
 
