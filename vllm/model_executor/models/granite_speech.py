@@ -141,6 +141,7 @@ class GraniteSpeechMultiModalProcessor(
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         mm_data = dict(mm_data)
         audios = mm_data.pop("audios", [])
@@ -153,6 +154,7 @@ class GraniteSpeechMultiModalProcessor(
             prompt=prompt,
             mm_data=mm_data,
             mm_kwargs=mm_kwargs,
+            tok_kwargs=tok_kwargs,
         )
 
         if "audio" in mm_data:
@@ -530,6 +532,13 @@ class GraniteSpeechForConditionalGeneration(
             "up_proj",
         ],
     }
+
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+        if modality.startswith("audio"):
+            return "<|audio|>"
+
+        raise ValueError("Only audio modality is supported")
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str):
         super().__init__()

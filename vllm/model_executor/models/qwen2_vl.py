@@ -1027,11 +1027,13 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor[Qwen2VLProcessingInfo]
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
+        mm_kwargs = self.info._get_image_processor_kwargs(**mm_kwargs)
         return self.info.ctx.call_hf_processor(
             self.info.get_hf_processor(**mm_kwargs),
             dict(text=prompt, **mm_data),
-            self.info._get_image_processor_kwargs(**mm_kwargs),
+            dict(**mm_kwargs, **tok_kwargs),
         )
 
     def _get_prompt_updates(
@@ -1093,6 +1095,15 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             "lm_head.": "language_model.lm_head.",
             "model.": "language_model.model.",
         })
+
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+        if modality.startswith("image"):
+            return "<|vision_start|><|image_pad|><|vision_end|>"
+        if modality.startswith("video"):
+            return "<|vision_start|><|video_pad|><|vision_end|>"
+
+        raise ValueError("Only image or video modality is supported")
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()

@@ -326,6 +326,7 @@ class Idefics3MultiModalProcessor(
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         # Text-only input not supported in composite processor
         if not (images := mm_data.get("images", [])):
@@ -337,6 +338,7 @@ class Idefics3MultiModalProcessor(
             prompt,
             mm_data,
             mm_kwargs,
+            tok_kwargs,
         )
 
         parsed_images = (self._get_data_parser().parse_mm_data({
@@ -588,6 +590,13 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal,
             "up_proj",
         ],
     }
+
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+        if modality.startswith("image"):
+            return "<image>"
+
+        raise ValueError("Only image modality is supported")
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()

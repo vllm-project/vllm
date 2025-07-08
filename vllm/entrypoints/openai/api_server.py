@@ -14,13 +14,14 @@ import socket
 import tempfile
 import uuid
 from argparse import Namespace
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
 from functools import partial
 from http import HTTPStatus
 from typing import Annotated, Any, Optional
 
 import prometheus_client
+import pydantic
 import regex as re
 import uvloop
 from fastapi import APIRouter, Depends, FastAPI, Form, HTTPException, Request
@@ -30,8 +31,9 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from prometheus_client import make_asgi_app
 from prometheus_fastapi_instrumentator import Instrumentator
 from starlette.concurrency import iterate_in_threadpool
-from starlette.datastructures import State
+from starlette.datastructures import URL, Headers, MutableHeaders, State
 from starlette.routing import Mount
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from typing_extensions import assert_never
 
 import vllm.envs as envs
@@ -68,8 +70,9 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               PoolingCompletionRequest,
                                               PoolingRequest, PoolingResponse,
                                               RerankRequest, RerankResponse,
-                                              ScoreRequest, ScoreResponse,
-                                              TokenizeRequest,
+                                              ResponsesRequest,
+                                              ResponsesResponse, ScoreRequest,
+                                              ScoreResponse, TokenizeRequest,
                                               TokenizeResponse,
                                               TranscriptionRequest,
                                               TranscriptionResponse,
@@ -86,6 +89,7 @@ from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import (BaseModelPath,
                                                     OpenAIServingModels)
 from vllm.entrypoints.openai.serving_pooling import OpenAIServingPooling
+from vllm.entrypoints.openai.serving_responses import OpenAIServingResponses
 from vllm.entrypoints.openai.serving_score import ServingScores
 from vllm.entrypoints.openai.serving_tokenization import (
     OpenAIServingTokenization)
@@ -367,6 +371,10 @@ def models(request: Request) -> OpenAIServingModels:
     return request.app.state.openai_serving_models
 
 
+def responses(request: Request) -> Optional[OpenAIServingResponses]:
+    return request.app.state.openai_serving_responses
+
+
 def chat(request: Request) -> Optional[OpenAIServingChat]:
     return request.app.state.openai_serving_chat
 
@@ -528,6 +536,71 @@ async def show_available_models(raw_request: Request):
 async def show_version():
     ver = {"version": VLLM_VERSION}
     return JSONResponse(content=ver)
+
+
+@router.post("/v1/responses",
+             dependencies=[Depends(validate_json_request)],
+             responses={
+                 HTTPStatus.OK.value: {
+                     "content": {
+                         "text/event-stream": {}
+                     }
+                 },
+                 HTTPStatus.BAD_REQUEST.value: {
+                     "model": ErrorResponse
+                 },
+                 HTTPStatus.NOT_FOUND.value: {
+                     "model": ErrorResponse
+                 },
+                 HTTPStatus.INTERNAL_SERVER_ERROR.value: {
+                     "model": ErrorResponse
+                 },
+             })
+@with_cancellation
+async def create_responses(request: ResponsesRequest, raw_request: Request):
+    handler = responses(raw_request)
+    if handler is None:
+        return base(raw_request).create_error_response(
+            message="The model does not support Responses API")
+
+    generator = await handler.create_responses(request, raw_request)
+
+    if isinstance(generator, ErrorResponse):
+        return JSONResponse(content=generator.model_dump(),
+                            status_code=generator.code)
+    elif isinstance(generator, ResponsesResponse):
+        return JSONResponse(content=generator.model_dump())
+    return StreamingResponse(content=generator, media_type="text/event-stream")
+
+
+@router.get("/v1/responses/{response_id}")
+async def retrieve_responses(response_id: str, raw_request: Request):
+    handler = responses(raw_request)
+    if handler is None:
+        return base(raw_request).create_error_response(
+            message="The model does not support Responses API")
+
+    response = await handler.retrieve_responses(response_id)
+
+    if isinstance(response, ErrorResponse):
+        return JSONResponse(content=response.model_dump(),
+                            status_code=response.code)
+    return JSONResponse(content=response.model_dump())
+
+
+@router.post("/v1/responses/{response_id}/cancel")
+async def cancel_responses(response_id: str, raw_request: Request):
+    handler = responses(raw_request)
+    if handler is None:
+        return base(raw_request).create_error_response(
+            message="The model does not support Responses API")
+
+    response = await handler.cancel_responses(response_id)
+
+    if isinstance(response, ErrorResponse):
+        return JSONResponse(content=response.model_dump(),
+                            status_code=response.code)
+    return JSONResponse(content=response.model_dump())
 
 
 @router.post("/v1/chat/completions",
@@ -909,6 +982,8 @@ TASK_HANDLERS: dict[str, dict[str, tuple]] = {
 }
 
 if envs.VLLM_SERVER_DEV_MODE:
+    logger.warning("SECURITY WARNING: Development endpoints are enabled! "
+                   "This should NOT be used in production!")
 
     @router.get("/server_info")
     async def show_server_info(raw_request: Request):
@@ -1061,6 +1136,210 @@ def load_log_config(log_config_file: Optional[str]) -> Optional[dict]:
         return None
 
 
+class AuthenticationMiddleware:
+    """
+    Pure ASGI middleware that authenticates each request by checking
+    if the Authorization header exists and equals "Bearer {api_key}".
+
+    Notes
+    -----
+    There are two cases in which authentication is skipped:
+        1. The HTTP method is OPTIONS.
+        2. The request path doesn't start with /v1 (e.g. /health).
+    """
+
+    def __init__(self, app: ASGIApp, api_token: str) -> None:
+        self.app = app
+        self.api_token = api_token
+
+    def __call__(self, scope: Scope, receive: Receive,
+                 send: Send) -> Awaitable[None]:
+        if scope["type"] not in ("http",
+                                 "websocket") or scope["method"] == "OPTIONS":
+            # scope["type"] can be "lifespan" or "startup" for example,
+            # in which case we don't need to do anything
+            return self.app(scope, receive, send)
+        root_path = scope.get("root_path", "")
+        url_path = URL(scope=scope).path.removeprefix(root_path)
+        headers = Headers(scope=scope)
+        # Type narrow to satisfy mypy.
+        if url_path.startswith("/v1") and headers.get(
+                "Authorization") != f"Bearer {self.api_token}":
+            response = JSONResponse(content={"error": "Unauthorized"},
+                                    status_code=401)
+            return response(scope, receive, send)
+        return self.app(scope, receive, send)
+
+
+class XRequestIdMiddleware:
+    """
+    Middleware the set's the X-Request-Id header for each response
+    to a random uuid4 (hex) value if the header isn't already
+    present in the request, otherwise use the provided request id.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    def __call__(self, scope: Scope, receive: Receive,
+                 send: Send) -> Awaitable[None]:
+        if scope["type"] not in ("http", "websocket"):
+            return self.app(scope, receive, send)
+
+        # Extract the request headers.
+        request_headers = Headers(scope=scope)
+
+        async def send_with_request_id(message: Message) -> None:
+            """
+            Custom send function to mutate the response headers
+            and append X-Request-Id to it.
+            """
+            if message["type"] == "http.response.start":
+                response_headers = MutableHeaders(raw=message["headers"])
+                request_id = request_headers.get("X-Request-Id",
+                                                 uuid.uuid4().hex)
+                response_headers.append("X-Request-Id", request_id)
+            await send(message)
+
+        return self.app(scope, receive, send_with_request_id)
+
+
+def _extract_content_from_chunk(chunk_data: dict) -> str:
+    """Extract content from a streaming response chunk."""
+    try:
+        from vllm.entrypoints.openai.protocol import (
+            ChatCompletionStreamResponse, CompletionStreamResponse)
+
+        # Try using Completion types for type-safe parsing
+        if chunk_data.get('object') == 'chat.completion.chunk':
+            chat_response = ChatCompletionStreamResponse.model_validate(
+                chunk_data)
+            if chat_response.choices and chat_response.choices[0].delta.content:
+                return chat_response.choices[0].delta.content
+        elif chunk_data.get('object') == 'text_completion':
+            completion_response = CompletionStreamResponse.model_validate(
+                chunk_data)
+            if completion_response.choices and completion_response.choices[
+                    0].text:
+                return completion_response.choices[0].text
+    except pydantic.ValidationError:
+        # Fallback to manual parsing
+        if 'choices' in chunk_data and chunk_data['choices']:
+            choice = chunk_data['choices'][0]
+            if 'delta' in choice and choice['delta'].get('content'):
+                return choice['delta']['content']
+            elif choice.get('text'):
+                return choice['text']
+    return ""
+
+
+class SSEDecoder:
+    """Robust Server-Sent Events decoder for streaming responses."""
+
+    def __init__(self):
+        self.buffer = ""
+        self.content_buffer = []
+
+    def decode_chunk(self, chunk: bytes) -> list[dict]:
+        """Decode a chunk of SSE data and return parsed events."""
+        import json
+
+        try:
+            chunk_str = chunk.decode('utf-8')
+        except UnicodeDecodeError:
+            # Skip malformed chunks
+            return []
+
+        self.buffer += chunk_str
+        events = []
+
+        # Process complete lines
+        while '\n' in self.buffer:
+            line, self.buffer = self.buffer.split('\n', 1)
+            line = line.rstrip('\r')  # Handle CRLF
+
+            if line.startswith('data: '):
+                data_str = line[6:].strip()
+                if data_str == '[DONE]':
+                    events.append({'type': 'done'})
+                elif data_str:
+                    try:
+                        event_data = json.loads(data_str)
+                        events.append({'type': 'data', 'data': event_data})
+                    except json.JSONDecodeError:
+                        # Skip malformed JSON
+                        continue
+
+        return events
+
+    def extract_content(self, event_data: dict) -> str:
+        """Extract content from event data."""
+        return _extract_content_from_chunk(event_data)
+
+    def add_content(self, content: str) -> None:
+        """Add content to the buffer."""
+        if content:
+            self.content_buffer.append(content)
+
+    def get_complete_content(self) -> str:
+        """Get the complete buffered content."""
+        return ''.join(self.content_buffer)
+
+
+def _log_streaming_response(response, response_body: list) -> None:
+    """Log streaming response with robust SSE parsing."""
+    from starlette.concurrency import iterate_in_threadpool
+
+    sse_decoder = SSEDecoder()
+    chunk_count = 0
+
+    def buffered_iterator():
+        nonlocal chunk_count
+
+        for chunk in response_body:
+            chunk_count += 1
+            yield chunk
+
+            # Parse SSE events from chunk
+            events = sse_decoder.decode_chunk(chunk)
+
+            for event in events:
+                if event['type'] == 'data':
+                    content = sse_decoder.extract_content(event['data'])
+                    sse_decoder.add_content(content)
+                elif event['type'] == 'done':
+                    # Log complete content when done
+                    full_content = sse_decoder.get_complete_content()
+                    if full_content:
+                        # Truncate if too long
+                        if len(full_content) > 2048:
+                            full_content = full_content[:2048] + ""
+                            "...[truncated]"
+                        logger.info(
+                            "response_body={streaming_complete: " \
+                            "content='%s', chunks=%d}",
+                            full_content, chunk_count)
+                    else:
+                        logger.info(
+                            "response_body={streaming_complete: " \
+                            "no_content, chunks=%d}",
+                            chunk_count)
+                    return
+
+    response.body_iterator = iterate_in_threadpool(buffered_iterator())
+    logger.info("response_body={streaming_started: chunks=%d}",
+                len(response_body))
+
+
+def _log_non_streaming_response(response_body: list) -> None:
+    """Log non-streaming response."""
+    try:
+        decoded_body = response_body[0].decode()
+        logger.info("response_body={%s}", decoded_body)
+    except UnicodeDecodeError:
+        logger.info("response_body={<binary_data>}")
+
+
 def build_app(args: Namespace) -> FastAPI:
     if args.disable_fastapi_docs:
         app = FastAPI(openapi_url=None,
@@ -1108,33 +1387,10 @@ def build_app(args: Namespace) -> FastAPI:
 
     # Ensure --api-key option from CLI takes precedence over VLLM_API_KEY
     if token := args.api_key or envs.VLLM_API_KEY:
-
-        @app.middleware("http")
-        async def authentication(request: Request, call_next):
-            if request.method == "OPTIONS":
-                return await call_next(request)
-            url_path = request.url.path
-            if app.root_path and url_path.startswith(app.root_path):
-                url_path = url_path[len(app.root_path):]
-            if not url_path.startswith("/v1"):
-                return await call_next(request)
-            if request.headers.get("Authorization") != "Bearer " + token:
-                return JSONResponse(content={"error": "Unauthorized"},
-                                    status_code=401)
-            return await call_next(request)
+        app.add_middleware(AuthenticationMiddleware, api_token=token)
 
     if args.enable_request_id_headers:
-        logger.warning(
-            "CAUTION: Enabling X-Request-Id headers in the API Server. "
-            "This can harm performance at high QPS.")
-
-        @app.middleware("http")
-        async def add_request_id(request: Request, call_next):
-            request_id = request.headers.get(
-                "X-Request-Id") or uuid.uuid4().hex
-            response = await call_next(request)
-            response.headers["X-Request-Id"] = request_id
-            return response
+        app.add_middleware(XRequestIdMiddleware)
 
     if envs.VLLM_DEBUG_LOG_API_SERVER_RESPONSE:
         logger.warning("CAUTION: Enabling log response in the API Server. "
@@ -1148,8 +1404,17 @@ def build_app(args: Namespace) -> FastAPI:
                 section async for section in response.body_iterator
             ]
             response.body_iterator = iterate_in_threadpool(iter(response_body))
-            logger.info("response_body={%s}",
-                        response_body[0].decode() if response_body else None)
+            # Check if this is a streaming response by looking at content-type
+            content_type = response.headers.get("content-type", "")
+            is_streaming = content_type == "text/event-stream; charset=utf-8"
+
+            # Log response body based on type
+            if not response_body:
+                logger.info("response_body={<empty>}")
+            elif is_streaming:
+                _log_streaming_response(response, response_body)
+            else:
+                _log_non_streaming_response(response_body)
             return response
 
     for middleware in args.middleware:
@@ -1224,6 +1489,22 @@ async def init_app_state(
         prompt_adapters=args.prompt_adapters,
     )
     await state.openai_serving_models.init_static_loras()
+    state.openai_serving_responses = OpenAIServingResponses(
+        engine_client,
+        model_config,
+        state.openai_serving_models,
+        request_logger=request_logger,
+        chat_template=resolved_chat_template,
+        chat_template_content_format=args.chat_template_content_format,
+        return_tokens_as_token_ids=args.return_tokens_as_token_ids,
+        enable_auto_tools=args.enable_auto_tool_choice,
+        expand_tools_even_if_tool_choice_none=args.
+        expand_tools_even_if_tool_choice_none,
+        tool_parser=args.tool_call_parser,
+        reasoning_parser=args.reasoning_parser,
+        enable_prompt_tokens_details=args.enable_prompt_tokens_details,
+        enable_force_include_usage=args.enable_force_include_usage,
+    ) if model_config.runner_type == "generate" else None
     state.openai_serving_chat = OpenAIServingChat(
         engine_client,
         model_config,
@@ -1234,6 +1515,8 @@ async def init_app_state(
         chat_template_content_format=args.chat_template_content_format,
         return_tokens_as_token_ids=args.return_tokens_as_token_ids,
         enable_auto_tools=args.enable_auto_tool_choice,
+        expand_tools_even_if_tool_choice_none=args.
+        expand_tools_even_if_tool_choice_none,
         tool_parser=args.tool_call_parser,
         reasoning_parser=args.reasoning_parser,
         enable_prompt_tokens_details=args.enable_prompt_tokens_details,
@@ -1263,24 +1546,22 @@ async def init_app_state(
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
     ) if model_config.task == "embed" else None
-    state.openai_serving_scores = ServingScores(
-        engine_client,
-        model_config,
-        state.openai_serving_models,
-        request_logger=request_logger) if model_config.task in (
-            "score", "embed", "pooling") else None
     state.openai_serving_classification = ServingClassification(
         engine_client,
         model_config,
         state.openai_serving_models,
         request_logger=request_logger,
     ) if model_config.task == "classify" else None
-    state.jinaai_serving_reranking = ServingScores(
+
+    enable_serving_reranking = (model_config.task == "classify" and getattr(
+        model_config.hf_config, "num_labels", 0) == 1)
+    state.openai_serving_scores = ServingScores(
         engine_client,
         model_config,
         state.openai_serving_models,
-        request_logger=request_logger
-    ) if model_config.task == "score" else None
+        request_logger=request_logger) if (
+            model_config.task == "embed" or enable_serving_reranking) else None
+
     state.openai_serving_tokenization = OpenAIServingTokenization(
         engine_client,
         model_config,
