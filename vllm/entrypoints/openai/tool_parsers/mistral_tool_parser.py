@@ -78,14 +78,16 @@ class MistralToolParser(ToolParser):
         self.tools_parsing_finished: bool = False
 
         self.current_tool_id: int = -1
+        self.current_element_streaming: Union[Literal["name", "arguments"],
+                                              None] = None
+
+        # For pre v11 tokenizer tool calls
         self.current_tool_start_index: int = -1
         # index in the `self.raw_tool_calls` string
         self.current_attribute_start_index: int = -1
         # index in the `self.raw_current_tool_call` string
         self.previous_attribute_end_index: int = 0
         # index in the `self.raw_current_tool_call` string
-        self.current_element_streaming: Union[Literal["name", "arguments"],
-                                              None] = None
         self.current_tool_name_finished: bool = False
         self.current_tool_arguments_finished: bool = False
 
@@ -201,13 +203,128 @@ class MistralToolParser(ToolParser):
         request: ChatCompletionRequest,
     ) -> Union[DeltaMessage, None]:
 
-        # if the tool call token is not in the tokens generated so far, append
-        # output to contents since it's not a tool
         if self.bot_token not in current_text:
+            # if the tool call token is not in the tokens generated so far,
+            # append output to contents since it's not a tool
             return DeltaMessage(content=delta_text)
 
         # if the tool call token ID IS in the tokens generated so far, that
         # means we're parsing as tool calls now
+        if _is_fn_name_regex_support(self.model_tokenizer):
+            return self._extract_tool_calls_streaming(
+                previous_text=previous_text,
+                current_text=current_text,
+                delta_text=delta_text,
+                previous_token_ids=previous_token_ids,
+                current_token_ids=current_token_ids,
+                delta_token_ids=delta_token_ids,
+                request=request,
+            )
+        else:
+            return self._extract_tool_calls_streaming_pre_v11_tokenizer(
+                previous_text=previous_text,
+                current_text=current_text,
+                delta_text=delta_text,
+                previous_token_ids=previous_token_ids,
+                current_token_ids=current_token_ids,
+                delta_token_ids=delta_token_ids,
+                request=request,
+            )
+
+    def _extract_tool_calls_streaming(
+        self,
+        previous_text: str,
+        current_text: str,
+        delta_text: str,
+        previous_token_ids: Sequence[int],
+        current_token_ids: Sequence[int],
+        delta_token_ids: Sequence[int],
+        request: ChatCompletionRequest,
+    ) -> Union[DeltaMessage, None]:
+        additional_content: str = ""
+        if self.current_tool_id == -1:
+            # this is the first tool call
+            assert self.bot_token in delta_text
+            if not delta_text.startswith(self.bot_token):
+                additional_content += delta_text.split(self.bot_token)[0]
+                delta_text = self.bot_token + "".join(
+                    delta_text.split(self.bot_token)[1:])
+
+        delta_tool_calls = self._generate_delta_tool_call(delta_text)
+        delta = DeltaMessage(
+            content=additional_content,
+            tool_calls=delta_tool_calls,
+        )
+        return delta
+
+    def _generate_delta_tool_call(self,
+                                  delta_text: str) -> list[DeltaToolCall]:
+        if delta_text == "" or delta_text is None:
+            return []
+        delta_function_name = None
+        tool_id = None
+        if self.current_element_streaming is None and delta_text.startswith(
+                self.bot_token):
+            self.current_tool_id += 1
+            tool_id = MistralToolCall.generate_random_id()
+            self.current_element_streaming = 'name'
+            delta_text = delta_text.replace(self.bot_token, "", 1)
+        if self.current_element_streaming == 'name':
+            if "{" in delta_text:
+                delta_function_name = delta_text.split("{")[0]
+                delta_text = delta_text[len(delta_function_name):]
+                self.current_element_streaming = 'arguments'
+            else:
+                delta_function_name = delta_text
+                return [
+                    DeltaToolCall(
+                        index=self.current_tool_id,
+                        type="function",
+                        id=tool_id,
+                        function=DeltaFunctionCall(
+                            name=delta_function_name).model_dump(
+                                exclude_none=True),
+                    )
+                ]
+        if self.current_element_streaming == 'arguments':
+            next_function_text = None
+            if self.bot_token in delta_text:
+                # current tool call is over
+                if delta_text.startswith(self.bot_token):
+                    delta_arguments = ""
+                else:
+                    delta_arguments = delta_text.split(self.bot_token)[0]
+                next_function_text = delta_text[len(delta_arguments):]
+                self.current_element_streaming = None
+            else:
+                delta_arguments = delta_text
+            ret = []
+            if delta_function_name or delta_arguments:
+                ret += [
+                    DeltaToolCall(
+                        index=self.current_tool_id,
+                        type="function",
+                        id=tool_id,
+                        function=DeltaFunctionCall(
+                            name=delta_function_name,
+                            arguments=delta_arguments).model_dump(
+                                exclude_none=True),
+                    )
+                ]
+            if next_function_text:
+                ret += self._generate_delta_tool_call(next_function_text)
+            return ret
+
+    def _extract_tool_calls_streaming_pre_v11_tokenizer(
+        self,
+        previous_text: str,
+        current_text: str,
+        delta_text: str,
+        previous_token_ids: Sequence[int],
+        current_token_ids: Sequence[int],
+        delta_token_ids: Sequence[int],
+        request: ChatCompletionRequest,
+    ) -> Union[DeltaMessage, None]:
         additional_content: str = ""
         if self.bot_token in delta_text:
             self.raw_tool_calls += (delta_text.split(
