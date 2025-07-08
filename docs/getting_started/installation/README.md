@@ -1,7 +1,6 @@
 ---
 title: Installation
 ---
-[](){ #installation-index }
 
 vLLM supports the following hardware platforms:
 

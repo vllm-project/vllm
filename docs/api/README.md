@@ -64,7 +64,7 @@ vLLM provides experimental support for multi-modal models through the [vllm.mult
 Multi-modal inputs can be passed alongside text and token prompts to [supported models][supported-mm-models]
 via the `multi_modal_data` field in [vllm.inputs.PromptType][].
 
-Looking to add your own multi-modal model? Please follow the instructions listed [here][supports-multimodal].
+Looking to add your own multi-modal model? Please follow the instructions listed [here](../contributing/model/multimodal.md).
 
 - [vllm.multimodal.MULTIMODAL_REGISTRY][]
 

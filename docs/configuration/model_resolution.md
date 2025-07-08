@@ -20,4 +20,4 @@ model = LLM(
 )
 ```
 
-Our [list of supported models][supported-models] shows the model architectures that are recognized by vLLM.
+Our [list of supported models](../models/supported_models.md) shows the model architectures that are recognized by vLLM.

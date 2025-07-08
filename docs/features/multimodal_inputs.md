@@ -1,7 +1,6 @@
 ---
 title: Multimodal Inputs
 ---
-[](){ #multimodal-inputs }
 
 This page teaches you how to pass multi-modal inputs to [multi-modal models][supported-mm-models] in vLLM.
 

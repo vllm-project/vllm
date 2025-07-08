@@ -1,7 +1,6 @@
 ---
 title: Helm
 ---
-[](){ #deployment-helm }
 
 A Helm chart to deploy vLLM for Kubernetes
 

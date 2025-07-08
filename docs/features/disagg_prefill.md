@@ -1,7 +1,6 @@
 ---
 title: Disaggregated Prefilling (experimental)
 ---
-[](){ #disagg-prefill }
 
 This page introduces you the disaggregated prefilling feature in vLLM.
 
