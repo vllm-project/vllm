@@ -10,8 +10,13 @@ prompts = [
     "The capital of France is",
     "The future of AI is",
 ]
-# Create a sampling params object.
-sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
+# Create a mixture of requests which do and don't utilize the dummy logitproc
+sampling_params_list = [
+    SamplingParams(temperature=0.8, top_p=0.95, extra_args={"target_token": 128}),
+    SamplingParams(temperature=0.8, top_p=0.95),
+    SamplingParams(temperature=0.8, top_p=0.95, extra_args={"target_token": 67}),
+    SamplingParams(temperature=0.8, top_p=0.95),
+]
 
 
 def main():
@@ -26,7 +31,7 @@ def main():
     # Generate texts from the prompts.
     # The output is a list of RequestOutput objects
     # that contain the prompt, generated text, and other information.
-    outputs = llm.generate(prompts, sampling_params)
+    outputs = llm.generate(prompts, sampling_params_list)
     # Print the outputs.
     print("\nGenerated Outputs:\n" + "-" * 60)
     for output in outputs:

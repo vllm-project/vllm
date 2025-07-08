@@ -277,83 +277,45 @@ class MinTokensLogitsProcessor(LogitsProcessor):
 
 class DummyLogitsProcessor(LogitsProcessor):
 
-    def __init__(self, args: LogitProcessorCtorArgs):
+    def __init__(self, _):
         super().__init__()
-        max_num_reqs = args.vllm_config.scheduler_config.max_num_seqs
-        self.min_p_count: int = 0
-
-        self.min_p_cpu_tensor = torch.zeros((max_num_reqs, ),
-                                            dtype=torch.float32,
-                                            device="cpu",
-                                            pin_memory=args.is_pin_memory)
-        self.min_p_cpu = self.min_p_cpu_tensor.numpy()
-        # Pre-allocated device tensor
-        self.min_p_device: torch.Tensor = torch.empty((max_num_reqs, ),
-                                                      dtype=torch.float32,
-                                                      device=args.device)
-        # Current slice of the device tensor
-        self.min_p: torch.Tensor = self.min_p_device[:0]
+        self.req_info = {}
 
     def is_argmax_invariant(self) -> bool:
-        """Min-p never impacts greedy sampling"""
-        return True
-
-    def get_min_p_by_index(self, index: int) -> float:
-        return float(self.min_p_cpu[index])
+        """Never impacts greedy sampling"""
+        return False
 
     def update_state(self, batch_update: Optional[BatchUpdate]):
         if not batch_update:
             return
 
-        needs_update = False
         # Process added requests.
         for index, params, _ in batch_update.added:
-            min_p = params.min_p if isinstance(params, SamplingParams) else 0.0
-            if self.min_p_cpu[index] != min_p:
-                needs_update = True
-                self.min_p_cpu[index] = min_p
-            if min_p:
-                self.min_p_count += 1
+            if isinstance(params, SamplingParams) and params.extra_args:
+                target_token = params.extra_args.get("target_token", None)
+            else:
+                target_token = None
+            self.req_info[index] = target_token
 
-        if self.min_p_count:
+        if self.req_info:
             # Process removed requests.
-            needs_update |= bool(batch_update.removed)
             for index in batch_update.removed:
-                if self.min_p_cpu[index]:
-                    self.min_p_count -= 1
+                self.req_info.pop(index, None)
 
             # Process moved requests, unidirectional (a->b) and swap (a<->b)
             for adx, bdx, direct in batch_update.moved:
-                change = (min_p_a :=
-                          self.min_p_cpu[adx]) != (min_p_b :=
-                                                   self.min_p_cpu[bdx])
-                needs_update |= change
-                if change:
-                    self.min_p_cpu[bdx] = min_p_a
-                    if direct == MoveDirectionality.SWAP:
-                        self.min_p_cpu[adx] = min_p_b
-
-        # Update tensors if needed.
-        size = batch_update.batch_size
-        if self.min_p_count and (needs_update or self.min_p.shape[0] != size):
-            self.min_p = self.min_p_device[:size]
-            self.min_p.copy_(self.min_p_cpu_tensor[:size], non_blocking=True)
-            self.min_p.unsqueeze_(1)
+                if direct == MoveDirectionality.SWAP:
+                    (self.req_info[adx],
+                     self.req_info[bdx]) = (self.req_info[bdx],
+                                            self.req_info[adx])
+                else:
+                    self.req_info[bdx] = self.req_info[adx]
 
     def apply(self, logits: torch.Tensor) -> torch.Tensor:
-        if not self.min_p_count:
-            return logits
+        for bdx in range(logits.shape[0]):
+            if (target_token := self.req_info[bdx]) is not None:
+                mask = torch.ones_like(logits[bdx, :], dtype=torch.bool)
+                mask[target_token] = False
+                logits[bdx, mask] = float('-inf')
 
-        # Convert logits to probability distribution
-        probability_values = torch.nn.functional.softmax(logits, dim=-1)
-        # Calculate maximum probabilities per sequence
-        max_probabilities = torch.amax(probability_values,
-                                       dim=-1,
-                                       keepdim=True)
-        # Adjust min_p
-        adjusted_min_p = max_probabilities.mul_(self.min_p)
-        # Identify valid tokens using threshold comparison
-        invalid_token_mask = probability_values < adjusted_min_p
-        # Apply mask using boolean indexing
-        logits[invalid_token_mask] = -float('inf')
         return logits
