@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from typing import List
 
@@ -19,17 +20,21 @@ logger = init_logger(__name__)
 def single_step_process_prompt_logprob(
         sg_output_proc: SequenceGroupOutputProcessor, seq_group: SequenceGroup,
         output: CompletionSequenceGroupOutput) -> None:
-    """Process prompt logprobs associated with the :class:`SequenceGroupOutput`
-    for a given step.
+    """Process prompt logprobs associated with the
+    [`SequenceGroupOutput`][vllm.sequence.SequenceGroupOutput] for a given step.
 
     Do nothing if the output has no prompt logprobs.
 
     Account for the fact that transformers do not compute first-token logprobs.
     
     Args:
-      sg_output_proc: :class:`SequenceGroupOutputProcessor` instance
-      seq_group: the output is associated with this :class:`SequenceGroup`
-      output: the :class:`SequenceGroupOutput` for a single scheduler step
+      sg_output_proc:
+          [`SequenceGroupOutputProcessor`][vllm.engine.output_processor.interfaces.SequenceGroupOutputProcessor]
+          instance
+      seq_group: the output is associated with this
+          [`SequenceGroup`][vllm.sequence.SequenceGroup]
+      output: the [`SequenceGroupOutput`][vllm.sequence.SequenceGroupOutput]
+          for a single scheduler step
     """
     prompt_logprobs = output.prompt_logprobs
 
@@ -103,8 +108,11 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
         scheduled computation.
         
         Args:
-          seq_group: the output is associated with this :class:`SequenceGroup`
-          outputs: the :class:`SequenceGroupOutput` for a single scheduler step
+          seq_group: the output is associated with this
+              [`SequenceGroup`][vllm.sequence.SequenceGroup]
+          outputs: the
+              [`SequenceGroupOutput`][vllm.sequence.SequenceGroupOutput]
+              for a single scheduler step
         """
         assert len(outputs) == 1, "Single step should only have 1 output."
         output = outputs[0]
@@ -119,7 +127,8 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
         sample = outputs.samples[0]
         seq = seq_group.first_seq
         if not is_async:
-            seq.append_token_id(sample.output_token, sample.logprobs)
+            seq.append_token_id(sample.output_token, sample.logprobs,
+                                sample.output_embed)
         if sampling_params.detokenize and self.detokenizer:
             new_char_count = self.detokenizer.decode_sequence_inplace(
                 seq, sampling_params)

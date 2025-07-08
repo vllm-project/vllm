@@ -8,6 +8,8 @@
 
 #include <ATen/cuda/CUDAContext.h>
 
+#include "cuda_utils.h"
+
 #include "cutlass/cutlass.h"
 
 #include "cutlass/gemm/device/gemm_universal_adapter.h"
@@ -77,7 +79,8 @@ struct cutlass_sparse_3x_gemm {
   // These are the minimum alignments needed for the kernels to compile
   static constexpr int AlignmentAB =
       128 / cutlass::sizeof_bits<ElementAB>::value;
-  static constexpr int AlignmentCD = 4;
+  static constexpr int AlignmentCD =
+      128 / cutlass::sizeof_bits<ElementD>::value;
 
   using CollectiveEpilogue =
       typename cutlass::epilogue::collective::CollectiveBuilder<
@@ -95,9 +98,9 @@ struct cutlass_sparse_3x_gemm {
   // clang-format off
   using CollectiveMainloop =
       typename cutlass::gemm::collective::CollectiveBuilder<
-          cutlass::arch::Sm90, cutlass::arch::OpClassSparseTensorOp, 
-          ElementAB, cutlass::layout::RowMajor, AlignmentAB, 
-          ElementAB, cutlass::layout::ColumnMajor, AlignmentAB, 
+          cutlass::arch::Sm90, cutlass::arch::OpClassSparseTensorOp,
+          ElementAB, cutlass::layout::RowMajor, AlignmentAB,
+          ElementAB, cutlass::layout::ColumnMajor, AlignmentAB,
           ElementAcc, TileShape, ClusterShape,
           Stages,
           KernelSchedule>::CollectiveOp;

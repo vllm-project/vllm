@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from __future__ import annotations
 
@@ -103,7 +104,7 @@ async def get_guided_decoding_logits_processor(
         reasoning_backend: str | None = None) -> LogitsProcessor | None:
 
     reasoner = None
-    if reasoning_backend is not None:
+    if reasoning_backend:
         reasoner_class = ReasoningParserManager.get_reasoning_parser(
             reasoning_backend)
         reasoner = reasoner_class(tokenizer)
@@ -146,7 +147,7 @@ def get_local_guided_decoding_logits_processor(
     guided_params = maybe_backend_fallback(guided_params)
 
     reasoner = None
-    if reasoning_backend is not None:
+    if reasoning_backend:
         reasoner_class = ReasoningParserManager.get_reasoning_parser(
             reasoning_backend)
         reasoner = reasoner_class(tokenizer)

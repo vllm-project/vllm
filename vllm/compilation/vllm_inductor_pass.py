@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import time
 
 import torch
+from torch._dynamo.utils import lazy_format_graph_code
 
-from vllm.config import CompilationConfig, VllmConfig
+from vllm.config import PassConfig, VllmConfig
 # yapf: disable
 from vllm.distributed import get_tensor_model_parallel_rank as get_tp_rank
 from vllm.distributed import (
@@ -26,12 +28,15 @@ class VllmInductorPass(InductorPass):
 
     def __init__(self, config: VllmConfig):
         self.pass_config = config.compilation_config.pass_config
-        self.dtype = config.model_config.dtype if config.model_config else None
+        self.model_dtype = config.model_config.dtype if config.model_config \
+            else None
         self.device = config.device_config.device if config.device_config \
             else None
         self.pass_name = self.__class__.__name__
 
     def dump_graph(self, graph: torch.fx.Graph, stage: str, always=False):
+        lazy_format_graph_code(stage, graph.owning_module)
+
         if stage in self.pass_config.dump_graph_stages or always:
             # Make sure filename includes rank in the distributed setting
             parallel = p_is_init() and get_tp_world_size() > 1
@@ -56,10 +61,7 @@ class VllmInductorPass(InductorPass):
 
 class PrinterInductorPass(VllmInductorPass):
 
-    def __init__(self,
-                 name: str,
-                 config: CompilationConfig.PassConfig,
-                 always=False):
+    def __init__(self, name: str, config: PassConfig, always=False):
         super().__init__(config)
         self.name = name
         self.always = always

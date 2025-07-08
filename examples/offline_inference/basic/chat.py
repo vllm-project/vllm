@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from vllm import LLM, EngineArgs
 from vllm.utils import FlexibleArgumentParser
@@ -7,9 +8,8 @@ from vllm.utils import FlexibleArgumentParser
 def create_parser():
     parser = FlexibleArgumentParser()
     # Add engine args
-    engine_group = parser.add_argument_group("Engine arguments")
-    EngineArgs.add_cli_args(engine_group)
-    engine_group.set_defaults(model="meta-llama/Llama-3.2-1B-Instruct")
+    EngineArgs.add_cli_args(parser)
+    parser.set_defaults(model="meta-llama/Llama-3.2-1B-Instruct")
     # Add sampling params
     sampling_group = parser.add_argument_group("Sampling parameters")
     sampling_group.add_argument("--max-tokens", type=int)
@@ -57,22 +57,12 @@ def main(args: dict):
 
     # In this script, we demonstrate how to pass input to the chat method:
     conversation = [
-        {
-            "role": "system",
-            "content": "You are a helpful assistant"
-        },
-        {
-            "role": "user",
-            "content": "Hello"
-        },
-        {
-            "role": "assistant",
-            "content": "Hello! How can I assist you today?"
-        },
+        {"role": "system", "content": "You are a helpful assistant"},
+        {"role": "user", "content": "Hello"},
+        {"role": "assistant", "content": "Hello! How can I assist you today?"},
         {
             "role": "user",
-            "content":
-            "Write an essay about the importance of higher education.",
+            "content": "Write an essay about the importance of higher education.",
         },
     ]
     outputs = llm.chat(conversation, sampling_params, use_tqdm=False)

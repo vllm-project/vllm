@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import List, Optional
+from typing import Optional
 
 from vllm.config import LoRAConfig, ModelConfig, SchedulerConfig
 from vllm.lora.request import LoRARequest
@@ -32,7 +33,7 @@ class TokenizerGroup:
         return self.max_input_length
 
     def _raise_if_input_too_long(self,
-                                 encoded_tokens: List[int],
+                                 encoded_tokens: list[int],
                                  lora_request: Optional[LoRARequest] = None):
         input_length = len(encoded_tokens)
         if lora_request:
@@ -45,11 +46,16 @@ class TokenizerGroup:
 
     def encode(self,
                prompt: str,
+               max_length: Optional[int] = None,
+               truncation: Optional[bool] = None,
                lora_request: Optional[LoRARequest] = None,
-               add_special_tokens: Optional[bool] = None) -> List[int]:
+               add_special_tokens: Optional[bool] = None) -> list[int]:
+
         tokenizer = self.get_lora_tokenizer(lora_request)
         ret = encode_tokens(tokenizer,
                             prompt,
+                            max_length=max_length,
+                            truncation=truncation,
                             add_special_tokens=add_special_tokens)
         self._raise_if_input_too_long(ret, lora_request)
         return ret
@@ -57,11 +63,15 @@ class TokenizerGroup:
     async def encode_async(
             self,
             prompt: str,
+            max_length: Optional[int] = None,
+            truncation: Optional[bool] = None,
             lora_request: Optional[LoRARequest] = None,
-            add_special_tokens: Optional[bool] = None) -> List[int]:
+            add_special_tokens: Optional[bool] = None) -> list[int]:
         tokenizer = await self.get_lora_tokenizer_async(lora_request)
         ret = encode_tokens(tokenizer,
                             prompt,
+                            max_length=max_length,
+                            truncation=truncation,
                             add_special_tokens=add_special_tokens)
         self._raise_if_input_too_long(ret, lora_request)
         return ret

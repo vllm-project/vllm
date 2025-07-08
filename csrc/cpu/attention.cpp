@@ -137,8 +137,8 @@ FORCE_INLINE std::pair<T, T> reduceSoftmaxAlibi(T* data, const int size,
 }
 
 template <typename T>
-FORCE_INLINE void reducePartitonSoftmax(const T* max_data, T* sum_data,
-                                        const int size) {
+FORCE_INLINE void reducePartitionSoftmax(const T* max_data, T* sum_data,
+                                         const int size) {
   T max = max_data[0];
   for (int i = 1; i < size; ++i) {
     max = max >= max_data[i] ? max : max_data[i];
@@ -634,7 +634,7 @@ struct paged_attention_v2_impl {
 
         if (partition_num == 1) continue;
 
-        reducePartitonSoftmax(
+        reducePartitionSoftmax(
             max_logits + seq_idx * num_heads * max_num_partitions +
                 head_idx * max_num_partitions,
             exp_sums + seq_idx * num_heads * max_num_partitions +

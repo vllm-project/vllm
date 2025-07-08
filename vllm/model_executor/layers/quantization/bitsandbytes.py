@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 import torch
 
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                UnquantizedLinearMethod,
                                                set_weight_attrs)
+from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.utils import direct_register_custom_op
@@ -28,7 +30,7 @@ class BitsAndBytesConfig(QuantizationConfig):
         bnb_4bit_use_double_quant: bool = False,
         llm_int8_enable_fp32_cpu_offload: bool = False,
         llm_int8_has_fp16_weight: bool = False,
-        llm_int8_skip_modules: Optional[List[str]] = None,
+        llm_int8_skip_modules: Optional[list[str]] = None,
         llm_int8_threshold: float = 6.0,
     ) -> None:
         super().__init__()
@@ -56,11 +58,11 @@ class BitsAndBytesConfig(QuantizationConfig):
                 f"llm_int8_skip_modules={self.llm_int8_skip_modules})")
 
     @classmethod
-    def get_name(self) -> str:
+    def get_name(self) -> QuantizationMethods:
         return "bitsandbytes"
 
     @classmethod
-    def get_supported_act_dtypes(self) -> List[torch.dtype]:
+    def get_supported_act_dtypes(self) -> list[torch.dtype]:
         return [torch.float32, torch.float16, torch.bfloat16]
 
     @classmethod
@@ -68,13 +70,11 @@ class BitsAndBytesConfig(QuantizationConfig):
         return 70
 
     @staticmethod
-    def get_config_filenames() -> List[str]:
-        return [
-            "adapter_config.json",
-        ]
+    def get_config_filenames() -> list[str]:
+        return []
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "BitsAndBytesConfig":
+    def from_config(cls, config: dict[str, Any]) -> "BitsAndBytesConfig":
 
         def get_safe_value(config, keys, default_value=None):
             try:
@@ -129,7 +129,7 @@ class BitsAndBytesConfig(QuantizationConfig):
         return None
 
 
-def is_layer_skipped_bnb(prefix: str, llm_int8_skip_modules: List[str]):
+def is_layer_skipped_bnb(prefix: str, llm_int8_skip_modules: list[str]):
     # Split the prefix into its dot-separated components
     components = prefix.split('.')
 
@@ -156,19 +156,19 @@ class BitsAndBytesLinearMethod(LinearMethodBase):
     def __init__(self, quant_config: BitsAndBytesConfig):
         try:
             import bitsandbytes
-            if bitsandbytes.__version__ < "0.45.3":
+            if bitsandbytes.__version__ < "0.46.1":
                 raise ImportError("bitsandbytes version is wrong. Please "
-                                  "install bitsandbytes>=0.45.3.")
+                                  "install bitsandbytes>=0.46.1.")
         except ImportError as err:
-            raise ImportError("Please install bitsandbytes>=0.45.3 via "
-                              "`pip install bitsandbytes>=0.45.3` to use "
+            raise ImportError("Please install bitsandbytes>=0.46.1 via "
+                              "`pip install bitsandbytes>=0.46.1` to use "
                               "bitsandbytes quantizer.") from err
 
         self.quant_config = quant_config
 
     def create_weights(self, layer: torch.nn.Module,
                        input_size_per_partition: int,
-                       output_partition_sizes: List[int], input_size: int,
+                       output_partition_sizes: list[int], input_size: int,
                        output_size: int, params_dtype: torch.dtype,
                        **extra_weight_attrs):
         from bitsandbytes.nn import Int8Params

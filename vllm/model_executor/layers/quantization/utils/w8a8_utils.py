@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Callable, List, Optional, Tuple, Union
+from typing import Callable, Optional, Union
 
 import torch
 
@@ -81,7 +82,7 @@ def all_close_1d(x: torch.Tensor) -> bool:
 
 def convert_to_channelwise(
         weight_scale: torch.Tensor,
-        logical_widths: List[int]) -> Tuple[torch.Tensor, torch.Tensor]:
+        logical_widths: list[int]) -> tuple[torch.Tensor, torch.Tensor]:
     # Create channelwise buffer
     weight_scale_channel = torch.empty((sum(logical_widths), 1),
                                        dtype=torch.float32,
@@ -99,7 +100,7 @@ def convert_to_channelwise(
 
 def requantize_with_max_scale(
         weight: torch.Tensor, weight_scale: torch.Tensor,
-        logical_widths: List[int]) -> Tuple[torch.Tensor, torch.Tensor]:
+        logical_widths: list[int]) -> tuple[torch.Tensor, torch.Tensor]:
     # Max scale to be used for requanitzation.
     max_w_scale = weight_scale.max()
 
@@ -136,7 +137,7 @@ def maybe_create_device_identity():
 def cutlass_w8a8_scaled_mm(*, qinput: torch.Tensor, weight: torch.Tensor,
                            out_dtype: torch.dtype, scale_a: torch.Tensor,
                            scale_b: torch.Tensor, bias: torch.Tensor,
-                           output_shape: List, **kwargs) -> torch.Tensor:
+                           output_shape: list, **kwargs) -> torch.Tensor:
 
     # Fused GEMM_DQ
     output = ops.cutlass_scaled_mm(qinput,
@@ -154,9 +155,9 @@ def rocm_per_tensor_w8a8_scaled_mm(*, qinput: torch.Tensor,
                                    scale_a: torch.Tensor,
                                    scale_b: torch.Tensor, bias: torch.Tensor,
                                    input_2d: torch.Tensor,
-                                   output_shape: List) -> torch.Tensor:
-    from vllm.platforms.rocm import on_mi250_mi300
-    if envs.VLLM_ROCM_USE_SKINNY_GEMM and on_mi250_mi300(
+                                   output_shape: list) -> torch.Tensor:
+    from vllm.platforms.rocm import on_mi3xx
+    if envs.VLLM_ROCM_USE_SKINNY_GEMM and on_mi3xx(
     ) and qinput.shape[0] == 1 and qinput.shape[1] % 16 == 0:
         output = ops.wvSplitKQ(weight.t(), qinput, out_dtype, scale_a, scale_b,
                                current_platform.get_cu_count())
@@ -177,7 +178,7 @@ def torch_per_tensor_w8a8_scaled_mm(*, qinput: torch.Tensor,
                                     scale_a: torch.Tensor,
                                     scale_b: torch.Tensor, bias: torch.Tensor,
                                     input_2d: torch.Tensor,
-                                    output_shape: List) -> torch.Tensor:
+                                    output_shape: list) -> torch.Tensor:
     output = torch._scaled_mm(qinput,
                               weight,
                               out_dtype=out_dtype,
@@ -198,7 +199,7 @@ def torch_per_token_w8a8_scaled_mm(*, qinput: torch.Tensor,
                                    scale_a: torch.Tensor,
                                    scale_b: torch.Tensor, bias: torch.Tensor,
                                    input_2d: torch.Tensor,
-                                   output_shape: List) -> torch.Tensor:
+                                   output_shape: list) -> torch.Tensor:
     # Note: Callers of this function should check USE_ROWWISE_TORCH_SCALED_MM
     #  when using it.
     #  For now it has only been validated on ROCm platform.
@@ -228,7 +229,7 @@ def torch_channelwise_w8a8_scaled_mm(*, qinput: torch.Tensor,
                                      scale_a: torch.Tensor,
                                      scale_b: torch.Tensor, bias: torch.Tensor,
                                      input_2d: torch.Tensor,
-                                     output_shape: List,
+                                     output_shape: list,
                                      **kwargs) -> torch.Tensor:
     # Use unfused DQ due to limitations with scaled_mm
 
@@ -384,7 +385,7 @@ def normalize_e4m3fn_to_e4m3fnuz(
     weight: torch.Tensor,
     weight_scale: torch.Tensor,
     input_scale: Optional[torch.Tensor] = None
-) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
     assert weight.dtype == torch.float8_e4m3fn
     # The bits pattern 10000000(-128) represents zero in e4m3fn
     # but NaN in e4m3fnuz. So here we set it to 0.

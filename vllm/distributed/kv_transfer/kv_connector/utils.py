@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 KV cache helper for store.
 """
@@ -6,7 +7,7 @@ import torch
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -44,8 +45,9 @@ class model_aware_kv_ops_helper:
             head_size = model_config.qk_nope_head_dim + \
                 model_config.qk_rope_head_dim
         else:
-            head_size = getattr(model_config, "head_dim",
-                                int(hidden_size // num_attention_heads))
+            head_size = getattr(model_config, "head_dim", None)
+            if head_size is None:
+                head_size = int(hidden_size // num_attention_heads)
 
         return num_heads, head_size
 
@@ -88,3 +90,20 @@ class model_aware_kv_ops_helper:
                 layer.self_attn.attn._k_scale,
                 layer.self_attn.attn._v_scale,
             )
+
+
+def get_kv_connector_cache_layout():
+    # NOTE (NickLucche) When running disaggregated PD with NIXL, HND layout is
+    # used for faster transfer.
+    vllm_config = get_current_vllm_config()
+    kv_config = vllm_config.kv_transfer_config
+    if kv_config is not None and vllm_config.model_config is None:
+        logger.warning_once("Unable to detect current VLLM config. " \
+        "Defaulting to NHD kv cache layout.")
+    elif kv_config is not None:
+        use_mla = vllm_config.model_config.use_mla
+        if not use_mla and kv_config.kv_connector == "NixlConnector":
+            logger.info_once("NixlConnector detected. Setting KV cache " \
+            "layout to HND for better xfer performance.")
+            return "HND"
+    return "NHD"

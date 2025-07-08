@@ -1,11 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple, Optional, Union
 
+import torch
+from packaging.version import Version
 from transformers import BatchFeature, PretrainedConfig, ProcessorMixin
+from transformers import __version__ as TRANSFORMERS_VERSION
 from typing_extensions import TypeVar
 
+from vllm.jsontree import JSONTree, json_map_leaves
+from vllm.logger import init_logger
 from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import resolve_mm_processor_kwargs
@@ -19,6 +25,8 @@ if TYPE_CHECKING:
 _T = TypeVar("_T")
 _C = TypeVar("_C", bound=PretrainedConfig, default=PretrainedConfig)
 _P = TypeVar("_P", bound=ProcessorMixin, default=ProcessorMixin)
+
+logger = init_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -38,7 +46,7 @@ class InputContext:
     ) -> _C:
         """
         Get the HuggingFace configuration
-        (:class:`transformers.PretrainedConfig`) of the model,
+        (`transformers.PretrainedConfig`) of the model,
         additionally checking its type.
 
         Raises:
@@ -79,7 +87,7 @@ class InputContext:
     ) -> _P:
         """
         Get the HuggingFace processor
-        (:class:`transformers.ProcessorMixin`) of the model,
+        (`transformers.ProcessorMixin`) of the model,
         additionally checking its type.
 
         Raises:
@@ -122,9 +130,13 @@ class InputProcessingContext(InputContext):
         /,
         **kwargs: object,
     ) -> _P:
+        # Transformers 4.53.0 has issue with passing tokenizer to
+        # initialize processor. We disable it for this version.
+        # See: https://github.com/vllm-project/vllm/issues/20224
+        if Version(TRANSFORMERS_VERSION) != Version("4.53.0"):
+            kwargs["tokenizer"] = self.tokenizer
         return super().get_hf_processor(
             typ,
-            tokenizer=self.tokenizer,
             **kwargs,
         )
 
@@ -133,10 +145,10 @@ class InputProcessingContext(InputContext):
         hf_processor: ProcessorMixin,
         data: Mapping[str, object],
         kwargs: Mapping[str, object] = {},
-    ) -> BatchFeature:
+    ) -> Union[BatchFeature, JSONTree]:
         """
-        Call :code:`hf_processor` on the prompt :code:`data`
-        (text, image, audio...) with configurable options :code:`kwargs`.
+        Call `hf_processor` on the prompt `data`
+        (text, image, audio...) with configurable options `kwargs`.
         """
         assert callable(hf_processor)
 
@@ -153,13 +165,32 @@ class InputProcessingContext(InputContext):
             allow_var_kwargs=True,
         )
 
+        def maybe_cast_dtype(x):
+            # This mimics the behavior of transformers.BatchFeature
+            if isinstance(x, torch.Tensor) and x.is_floating_point():
+                return x.to(dtype=self.model_config.dtype)
+            return x
+
         try:
-            return hf_processor(**data, **merged_kwargs, return_tensors="pt")
+            output = hf_processor(**data, **merged_kwargs, return_tensors="pt")
+            # this emulates output.to(dtype=self.model_config.dtype)
+            if isinstance(output, BatchFeature):
+                cast_output = json_map_leaves(maybe_cast_dtype, output.data)
+                return BatchFeature(cast_output)
+
+            cast_output = json_map_leaves(maybe_cast_dtype, output)
+
+            logger.warning_once(
+                f"{type(hf_processor).__name__} did not return `BatchFeature`. "
+                "Make sure to match the behaviour of `ProcessorMixin` when "
+                "implementing custom processors.")
+            return cast_output
+
         except Exception as exc:
             msg = (f"Failed to apply {type(hf_processor).__name__} "
                    f"on data={data} with kwargs={merged_kwargs}")
 
-            raise RuntimeError(msg) from exc
+            raise ValueError(msg) from exc
 
 
 class DummyData(NamedTuple):

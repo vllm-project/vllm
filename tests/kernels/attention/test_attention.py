@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import random
 from typing import Optional
@@ -9,6 +10,7 @@ import torch
 from tests.kernels.allclose_default import get_default_atol, get_default_rtol
 from tests.kernels.utils import opcheck
 from vllm import _custom_ops as ops
+from vllm.attention.layer import Attention, MultiHeadAttention
 from vllm.platforms import current_platform
 from vllm.utils import get_max_shared_memory_bytes
 
@@ -148,6 +150,11 @@ def test_paged_attention(
             or (version == "rocm" and head_size not in (64, 128))):
         pytest.skip()
 
+    if (version == "rocm" and current_platform.is_navi()
+            and (kv_cache_dtype == "fp8" or head_size != 128
+                 or block_size != 16 or use_alibi)):
+        pytest.skip()
+
     global PARTITION_SIZE
 
     current_platform.seed_everything(seed)
@@ -275,6 +282,7 @@ def test_paged_attention(
                 scale,
                 block_tables,
                 seq_lens,
+                None,
                 block_size,
                 max_seq_len,
                 alibi_slopes,
@@ -286,7 +294,7 @@ def test_paged_attention(
             opcheck(torch.ops._rocm_C.paged_attention,
                     (output, exp_sums, max_logits, tmp_output, query,
                      key_cache, value_cache, num_kv_heads, scale, block_tables,
-                     seq_lens, block_size, max_seq_len, alibi_slopes,
+                     seq_lens, None, block_size, max_seq_len, alibi_slopes,
                      kv_cache_dtype, k_scale, v_scale),
                     cond=(head_size == HEAD_SIZES[0]
                           and block_size == BLOCK_SIZES[0]))
@@ -442,7 +450,8 @@ def test_multi_query_kv_attention(
             start += seq_len
         # xformers.AttentionBias to Tensor for use in reference impl.
         alibi_bias = [
-            b.materialize(b.shape, device=device).squeeze() for b in attn_bias
+            b.materialize((1, num_query_heads, i, i), device=device).squeeze()
+            for b, i in zip(attn_bias, seq_lens)
         ]
     else:
         attn_bias = BlockDiagonalCausalMask.from_seqlens(seq_lens)
@@ -499,3 +508,18 @@ def test_multi_query_kv_attention_with_alibi(
         device,
         use_alibi=True,
     )
+
+
+@pytest.mark.parametrize("attention_cls", [Attention, MultiHeadAttention])
+def test_num_heads_not_divisble_by_num_kv_heads(attention_cls: type) -> None:
+    head_size = 64
+    scale = float(1.0 / (head_size**0.5))
+    num_heads = 16
+    num_kv_heads = 5
+    with pytest.raises(AssertionError):
+        _ = attention_cls(
+            num_heads=num_heads,
+            head_size=head_size,
+            scale=scale,
+            num_kv_heads=num_kv_heads,
+        )
