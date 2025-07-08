@@ -1,6 +1,4 @@
----
-title: Multi-Modal Data Processing
----
+# Multi-Modal Data Processing
 
 To enable various optimizations in vLLM such as [chunked prefill][chunked-prefill] and [prefix caching](../features/automatic_prefix_caching.md), we use [BaseMultiModalProcessor][vllm.multimodal.processing.BaseMultiModalProcessor] to provide the correspondence between placeholder feature tokens (e.g. `<image>`) and multi-modal inputs (e.g. the raw input image) based on the outputs of HF processor.
 

@@ -1,6 +1,4 @@
----
-title: Offline Inference
----
+# Offline Inference
 
 Offline inference is possible in your own code using vLLM's [`LLM`][vllm.LLM] class.
 
@@ -23,7 +21,7 @@ The available APIs depend on the model type:
 !!! info
     [API Reference][offline-inference-api]
 
-### Ray Data LLM API
+## Ray Data LLM API
 
 Ray Data LLM is an alternative offline inference API that uses vLLM as the underlying engine.
 This API adds several batteries-included capabilities that simplify large-scale, GPU-efficient inference:

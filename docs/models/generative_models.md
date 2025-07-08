@@ -1,6 +1,4 @@
----
-title: Generative Models
----
+# Generative Models
 
 vLLM provides first-class support for generative models, which covers most of LLMs.
 

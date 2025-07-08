@@ -1,6 +1,4 @@
----
-title: AMD Quark
----
+# AMD Quark
 
 Quantization can effectively reduce memory and bandwidth usage, accelerate computation and improve
 throughput while with minimal accuracy loss. vLLM can leverage [Quark](https://quark.docs.amd.com/latest/),

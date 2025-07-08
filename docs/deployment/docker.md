@@ -1,6 +1,4 @@
----
-title: Using Docker
----
+# Using Docker
 
 [](){ #deployment-docker-pre-built-image }
 

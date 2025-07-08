@@ -1,6 +1,5 @@
----
-title: Anyscale
----
+# Anyscale
+
 [](){ #deployment-anyscale }
 
 [Anyscale](https://www.anyscale.com) is a managed, multi-cloud platform developed by the creators of Ray.

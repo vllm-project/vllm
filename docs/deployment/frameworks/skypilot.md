@@ -1,6 +1,4 @@
----
-title: SkyPilot
----
+# SkyPilot
 
 <p align="center">
   <img src="https://imgur.com/yxtzPEu.png" alt="vLLM"/>

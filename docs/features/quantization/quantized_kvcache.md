@@ -1,6 +1,4 @@
----
-title: Quantized KV Cache
----
+# Quantized KV Cache
 
 ## FP8 KV Cache
 
