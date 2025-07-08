@@ -36,7 +36,9 @@ def load_logitsprocs_fqns(
     if not fqns:
         return []
 
-    logger.info("Attempting to load the following logits processors via FQNs:")
+    logger.info(
+        "Attempting to load the following logits processors via FQNs: %s",
+        fqns)
 
     constructors: list[Callable[[], LogitsProcessor]] = []
     for fqn in fqns:
@@ -107,7 +109,7 @@ def load_logitsprocs_entrypoints(
 def load_logitsprocs(
     logits_processors_fqns: Optional[list[str]],
     logits_processors_entrypoints: Optional[list[str]],
-) -> None:
+) -> list[LogitprocCtor]:
     """WARNING: logitsprocs can be loaded for multiple times in different
     processes. They should be designed in a way that they can be loaded
     multiple times without causing issues.
@@ -116,17 +118,18 @@ def load_logitsprocs(
     global logitsprocs_ctors
     if logitsprocs_loaded:
         # Idempotent after first load in a process
-        return
+        return logitsprocs_ctors
     logitsprocs_loaded = True
     from vllm.platforms import current_platform
     if current_platform.is_tpu():
         # No logitsprocs specified by caller
         # TODO(andy) - vLLM V1 on TPU does not support custom logitsprocs
-        return
+        return []
 
     logitsprocs_ctors = (
         load_logitsprocs_entrypoints(logits_processors_entrypoints) +
         load_logitsprocs_fqns(logits_processors_fqns))
+    return logitsprocs_ctors
 
 
 def init_builtin_logitsprocs(pin_memory_available: bool, max_num_reqs: int,

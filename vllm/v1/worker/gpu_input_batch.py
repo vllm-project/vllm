@@ -17,8 +17,7 @@ from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.pool.metadata import PoolingMetadata
 from vllm.v1.sample.logits_processor import (BatchUpdateBuilder,
                                              MoveDirectionality,
-                                             init_builtin_logitsprocs,
-                                             logitsprocs_ctors)
+                                             init_builtin_logitsprocs)
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.utils import is_spec_decode_unsupported
 from vllm.v1.utils import copy_slice
@@ -70,9 +69,15 @@ class InputBatch:
         pin_memory: bool,
         vocab_size: int,
         block_sizes: list[int],  # The block_size of each kv cache group
+        logits_processors_fqns: Optional[list[str]] = None,
+        logits_processors_entrypoints: Optional[list[str]] = None,
         is_spec_decode: bool = False,
         logits_processing_needs_token_ids: bool = False,
     ):
+        from vllm.v1.sample.logits_processor.load import load_logitsprocs
+        logitsprocs_ctors = load_logitsprocs(logits_processors_fqns,
+                                             logits_processors_entrypoints)
+
         self.is_spec_decode = is_spec_decode
         self.max_num_reqs = max_num_reqs
         self.max_model_len = max_model_len

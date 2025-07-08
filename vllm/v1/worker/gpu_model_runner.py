@@ -213,6 +213,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             vocab_size=self.model_config.get_vocab_size(),
             block_sizes=[self.cache_config.block_size],
             is_spec_decode=bool(self.vllm_config.speculative_config),
+            logits_processors_fqns=vllm_config.logits_processors_fqns,
+            logits_processors_entrypoints=vllm_config.
+            logits_processors_entrypoints,
         )
 
         self.use_cuda_graph = (

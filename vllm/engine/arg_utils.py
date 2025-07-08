@@ -43,7 +43,6 @@ from vllm.transformers_utils.utils import check_gguf_file
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import (STR_DUAL_CHUNK_FLASH_ATTN_VAL, FlexibleArgumentParser,
                         GiB_bytes, get_ip, is_in_ray_actor)
-from vllm.v1.sample.logits_processor import logitsprocs_package_pattern
 
 # yapf: enable
 
@@ -303,12 +302,12 @@ def comma_separated_list(
       Parsed list of string values
     """
     items = value.split(',')
-    if pattern:
-        for item in items:
-            if not pattern.fullmatch(item):
-                raise argparse.ArgumentTypeError(
-                    f"Invalid item '{item}'. Each item must match the "
-                    f"pattern: {pattern.pattern}")
+    # if pattern:
+    #     for item in items:
+    #         if not pattern.fullmatch(item):
+    #             raise argparse.ArgumentTypeError(
+    #                 f"Invalid item '{item}'. Each item must match the "
+    #                 f"pattern: {pattern.pattern}")
     return items
 
 
@@ -942,8 +941,7 @@ class EngineArgs:
         )
         logitsprocs_group.add_argument(
             "--logits-processors-entrypoints",
-            type=lambda x: comma_separated_list(x, logitsprocs_package_pattern
-                                                ),
+            type=lambda x: comma_separated_list(x, None),
             default=[],
             help="Comma-separated list of allowed logits processor "
             "entrypoints (acceptable entrypoint formats: "
