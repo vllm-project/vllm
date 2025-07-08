@@ -7,7 +7,6 @@ import sys
 from importlib.util import find_spec
 from typing import TYPE_CHECKING, Optional
 
-import psutil
 import torch
 
 from vllm.logger import init_logger
@@ -73,6 +72,7 @@ class CpuPlatform(Platform):
 
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
+        import psutil
         return psutil.virtual_memory().total
 
     @classmethod
