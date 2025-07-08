@@ -18,11 +18,8 @@ EMBEDDING_MODELS = [
 ]
 
 RERANK_MODELS = [
-    RerankModelInfo(
-        "jinaai/jina-reranker-v2-base-multilingual",
-        architecture="XLMRobertaForSequenceClassification",
-        dtype="float32",
-    )
+    RerankModelInfo("jinaai/jina-reranker-v2-base-multilingual",
+                    architecture="XLMRobertaForSequenceClassification")
 ]
 
 

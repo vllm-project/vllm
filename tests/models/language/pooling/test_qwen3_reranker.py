@@ -12,11 +12,9 @@ from .mteb_utils import RerankModelInfo, mteb_test_rerank_models
 RERANK_MODELS = [
     RerankModelInfo("Qwen/Qwen3-Reranker-0.6B",
                     architecture="Qwen3ForSequenceClassification",
-                    dtype="float32",
                     enable_test=True),
     RerankModelInfo("Qwen/Qwen3-Reranker-4B",
                     architecture="Qwen3ForSequenceClassification",
-                    dtype="float32",
                     enable_test=False)
 ]
 
