@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
-from enum import Enum
 from dataclasses import dataclass
+from enum import Enum
 from math import prod
 from typing import Optional, final
 
@@ -114,6 +114,7 @@ class ExpertTokensMetadata:
             expert_num_tokens=expert_num_tokens_cpu.to(device,
                                                        non_blocking=True),
             expert_num_tokens_cpu=expert_num_tokens_cpu)
+
 
 # TODO: pass FusedMoEParallelConfig in as ctor parameter?
 class FusedMoEPrepareAndFinalize(ABC):
