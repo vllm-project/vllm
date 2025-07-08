@@ -348,6 +348,7 @@ class BambaModel(nn.Module):
                 mamba_cache_params=layer_mamba_cache_params,
                 mamba2_metadata=mamba2_metadata,
             )
+
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
                 "hidden_states": hidden_states,

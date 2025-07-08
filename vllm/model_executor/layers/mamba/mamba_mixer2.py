@@ -462,7 +462,8 @@ class MambaMixer2(CustomOp):
                 mamba2_metadata = attn_metadata
                 assert isinstance(attn_metadata, Mamba2AttentionMetadata)
                 self_kv_cache = self.kv_cache[forward_context.virtual_engine]
-                conv_state = self_kv_cache[0]
+                # conv_state = (..., dim, width-1) yet contiguous along 'dim'
+                conv_state = self_kv_cache[0].transpose(-1, -2)
                 ssm_state = self_kv_cache[1]
                 state_indices_tensor = attn_metadata.state_indices_tensor
                 has_initial_states = attn_metadata.has_initial_states
@@ -552,7 +553,7 @@ class MambaMixer2(CustomOp):
                 bias=self.conv1d.bias,
                 activation=self.activation,
                 conv_states=conv_state,
-                has_initial_states=has_initial_states,
+                has_initial_state=has_initial_states,
                 cache_indices=state_indices_tensor,
                 metadata=mamba2_metadata,
                 query_start_loc=attn_metadata.query_start_loc).transpose(
@@ -754,9 +755,10 @@ class MambaMixer2(CustomOp):
         # - heads and n_groups are TP-ed
         conv_dim = (self.intermediate_size +
                     2 * n_groups * self.ssm_state_size)
+        # contiguous along 'dim' axis
         conv_state_shape = (
-            divide(conv_dim, world_size),
             self.conv_kernel_size - 1,
+            divide(conv_dim, world_size),
         )
 
         # These are not TP-ed as they depend on A, dt_bias, D

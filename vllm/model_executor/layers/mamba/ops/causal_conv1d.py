@@ -360,11 +360,11 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
 def causal_conv1d_fn(
     x: torch.Tensor,
     weight: torch.Tensor,
+    bias: Union[torch.Tensor|None],
     conv_states: torch.Tensor,
     query_start_loc: torch.Tensor,
     cache_indices: Optional[torch.Tensor] = None,
-    has_initial_states: Optional[torch.Tensor] = None,
-    bias: Optional[torch.Tensor] = None,
+    has_initial_state: Optional[torch.Tensor] = None,
     activation: Optional[str] = "silu",
     pad_slot_id: int = PAD_SLOT_ID,
     metadata=None,
@@ -380,7 +380,7 @@ def causal_conv1d_fn(
         updated inplace if provided
         [it use `cache_indices` to get the index to the cache of conv_state for that sequence
 
-        conv_state[cache_indices[i]] for seq-i - to be used as initial_state when has_initial_states[i] = True
+        conv_state[cache_indices[i]] for seq-i - to be used as initial_state when has_initial_state[i] = True
              and after that conv_state[cache_indices[i]] need to be shift-left and updated with values from 'x'
         ]
     query_start_loc: (batch + 1) int32
@@ -397,7 +397,7 @@ def causal_conv1d_fn(
     cache_indices: (batch)  int32
         indicates the corresponding state index,
         like so: conv_state = conv_states[cache_indices[batch_id]]
-    has_initial_states: (batch) bool
+    has_initial_state: (batch) bool
         indicates whether should the kernel take the current state as initial
         state for the calculations
         [single boolean for each sequence in the batch: True or False]
@@ -490,9 +490,9 @@ def causal_conv1d_fn(
         if cache_indices is not None:
             assert cache_indices.dim() == 1
             assert padded_batch == cache_indices.size(0)
-        if has_initial_states is not None:
-            assert has_initial_states.size() == (padded_batch, )
-            assert conv_states is not None, "ERROR: `has_initial_states` is used, which needs also `conv_states`"
+        if has_initial_state is not None:
+            assert has_initial_state.size() == (padded_batch, )
+            assert conv_states is not None, "ERROR: `has_initial_state` is used, which needs also `conv_states`"
         assert weight.stride(1) == 1
         assert (dim, width) == weight.shape
         assert is_channel_last, "Need to run in channel-last layout"
@@ -574,7 +574,7 @@ def causal_conv1d_fn(
         bias,
         conv_states,
         cache_indices,
-        has_initial_states,
+        has_initial_state,
         query_start_loc,
         batch_ptr,
         token_chunk_offset_ptr,
@@ -602,7 +602,7 @@ def causal_conv1d_fn(
         HAS_BIAS=bias is not None,
         KERNEL_WIDTH=width,
         SILU_ACTIVATION=activation in ["silu", "swish"],
-        HAS_INITIAL_STATES=has_initial_states is not None,
+        HAS_INITIAL_STATES=has_initial_state is not None,
         HAS_CACHE=conv_states is not None,
         IS_CONTINUOUS_BATCHING=cache_indices is not None,
         USE_PAD_SLOT=pad_slot_id is not None,
