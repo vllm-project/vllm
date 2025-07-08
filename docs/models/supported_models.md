@@ -1,7 +1,6 @@
 ---
 title: Supported Models
 ---
-[](){ #supported-models }
 
 vLLM supports [generative](./generative_models.md) and [pooling](./pooling_models.md) models across various tasks.
 If a model supports more than one task, you can set the task via the `--task` argument.
@@ -34,7 +33,7 @@ llm.apply_model(lambda model: print(type(model)))
 If it is `TransformersForCausalLM` then it means it's based on Transformers!
 
 !!! tip
-    You can force the use of `TransformersForCausalLM` by setting `model_impl="transformers"` for [offline-inference][offline-inference] or `--model-impl transformers` for the [openai-compatible-server][serving-openai-compatible-server].
+    You can force the use of `TransformersForCausalLM` by setting `model_impl="transformers"` for [offline-inference](../serving/offline_inference.md) or `--model-impl transformers` for the [openai-compatible-server](../serving/openai_compatible_server.md).
 
 !!! note
     vLLM may not fully optimise the Transformers implementation so you may see degraded performance if comparing a native model to a Transformers model in vLLM.
@@ -53,8 +52,8 @@ For a model to be compatible with the Transformers backend for vLLM it must:
 
 If the compatible model is:
 
-- on the Hugging Face Model Hub, simply set `trust_remote_code=True` for [offline-inference][offline-inference] or `--trust-remote-code` for the [openai-compatible-server][serving-openai-compatible-server].
-- in a local directory, simply pass directory path to `model=<MODEL_DIR>` for [offline-inference][offline-inference] or `vllm serve <MODEL_DIR>` for the [openai-compatible-server][serving-openai-compatible-server].
+- on the Hugging Face Model Hub, simply set `trust_remote_code=True` for [offline-inference](../serving/offline_inference.md) or `--trust-remote-code` for the [openai-compatible-server](../serving/openai_compatible_server.md).
+- in a local directory, simply pass directory path to `model=<MODEL_DIR>` for [offline-inference](../serving/offline_inference.md) or `vllm serve <MODEL_DIR>` for the [openai-compatible-server](../serving/openai_compatible_server.md).
 
 This means that, with the Transformers backend for vLLM, new models can be used before they are officially supported in Transformers or vLLM!
 
@@ -171,7 +170,7 @@ The [Transformers backend][transformers-backend] enables you to run models direc
 
     If vLLM successfully returns text (for generative models) or hidden states (for pooling models), it indicates that your model is supported.
 
-Otherwise, please refer to [Adding a New Model][new-model] for instructions on how to implement your model in vLLM.
+Otherwise, please refer to [Adding a New Model](../contributing/model/README.md) for instructions on how to implement your model in vLLM.
 Alternatively, you can [open an issue on GitHub](https://github.com/vllm-project/vllm/issues/new/choose) to request vLLM support.
 
 #### Download a model
@@ -308,13 +307,13 @@ print(output)
 
 ### Generative Models
 
-See [this page][generative-models] for more information on how to use generative models.
+See [this page](generative_models.md) for more information on how to use generative models.
 
 #### Text Generation
 
 Specified using `--task generate`.
 
-| Architecture | Models | Example HF Models | [LoRA][lora-adapter] | [PP][distributed-serving] | [V1](gh-issue:8779) |
+| Architecture | Models | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/distributed_serving.md) | [V1](gh-issue:8779) |
 |--------------|--------|-------------------|----------------------|---------------------------|---------------------|
 | `AquilaForCausalLM` | Aquila, Aquila2 | `BAAI/Aquila-7B`, `BAAI/AquilaChat-7B`, etc. | ✅︎ | ✅︎ | ✅︎ |
 | `ArcticForCausalLM` | Arctic | `Snowflake/snowflake-arctic-base`, `Snowflake/snowflake-arctic-instruct`, etc. | | ✅︎ | ✅︎ |
@@ -412,7 +411,7 @@ See [this page](./pooling_models.md) for more information on how to use pooling 
 
 Specified using `--task embed`.
 
-| Architecture | Models | Example HF Models | [LoRA][lora-adapter] | [PP][distributed-serving] | [V1](gh-issue:8779) |
+| Architecture | Models | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/distributed_serving.md) | [V1](gh-issue:8779) |
 |--------------|--------|-------------------|----------------------|---------------------------|---------------------|
 | `BertModel` | BERT-based | `BAAI/bge-base-en-v1.5`, `Snowflake/snowflake-arctic-embed-xs`, etc. | | | |
 | `Gemma2Model` | Gemma 2-based | `BAAI/bge-multilingual-gemma2`, etc. | ✅︎ | | ✅︎ |
@@ -448,7 +447,7 @@ of the whole prompt are extracted from the normalized hidden state corresponding
 
 Specified using `--task reward`.
 
-| Architecture | Models | Example HF Models | [LoRA][lora-adapter] | [PP][distributed-serving] | [V1](gh-issue:8779) |
+| Architecture | Models | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/distributed_serving.md) | [V1](gh-issue:8779) |
 |--------------|--------|-------------------|----------------------|---------------------------|---------------------|
 | `InternLM2ForRewardModel` | InternLM2-based | `internlm/internlm2-1_8b-reward`, `internlm/internlm2-7b-reward`, etc. | ✅︎ | ✅︎ | ✅︎ |
 | `LlamaForCausalLM` | Llama-based | `peiyi9979/math-shepherd-mistral-7b-prm`, etc. | ✅︎ | ✅︎ | ✅︎ |
@@ -466,7 +465,7 @@ If your model is not in the above list, we will try to automatically convert the
 
 Specified using `--task classify`.
 
-| Architecture | Models | Example HF Models | [LoRA][lora-adapter] | [PP][distributed-serving] | [V1](gh-issue:8779) |
+| Architecture | Models | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/distributed_serving.md) | [V1](gh-issue:8779) |
 |--------------|--------|-------------------|----------------------|---------------------------|---------------------|
 | `JambaForSequenceClassification` | Jamba | `ai21labs/Jamba-tiny-reward-dev`, etc. | ✅︎ | ✅︎ | |
 | `GPT2ForSequenceClassification` | GPT2 | `nie3e/sentiment-polish-gpt2-small` | | | ✅︎ |
@@ -527,7 +526,7 @@ On the other hand, modalities separated by `/` are mutually exclusive.
 
 - e.g.: `T / I` means that the model supports text-only and image-only inputs, but not text-with-image inputs.
 
-See [this page][multimodal-inputs] on how to pass multi-modal inputs to the model.
+See [this page](../features/multimodal_inputs.md) on how to pass multi-modal inputs to the model.
 
 !!! important
     **To enable multiple multi-modal items per text prompt in vLLM V0**, you have to set `limit_mm_per_prompt` (offline inference)
@@ -557,13 +556,13 @@ See [this page][multimodal-inputs] on how to pass multi-modal inputs to the mode
 
 ### Generative Models
 
-See [this page][generative-models] for more information on how to use generative models.
+See [this page](generative_models.md) for more information on how to use generative models.
 
 #### Text Generation
 
 Specified using `--task generate`.
 
-| Architecture | Models | Inputs | Example HF Models | [LoRA][lora-adapter] | [PP][distributed-serving] | [V1](gh-issue:8779) |
+| Architecture | Models | Inputs | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/distributed_serving.md) | [V1](gh-issue:8779) |
 |--------------|--------|--------|-------------------|----------------------|---------------------------|---------------------|
 | `AriaForConditionalGeneration` | Aria | T + I<sup>+</sup> | `rhymes-ai/Aria` | | | ✅︎ |
 | `AyaVisionForConditionalGeneration` | Aya Vision | T + I<sup>+</sup> | `CohereForAI/aya-vision-8b`, `CohereForAI/aya-vision-32b`, etc. | | ✅︎ | ✅︎ |
@@ -685,7 +684,7 @@ Specified using `--task transcription`.
 
 Speech2Text models trained specifically for Automatic Speech Recognition.
 
-| Architecture | Models | Example HF Models | [LoRA][lora-adapter] | [PP][distributed-serving] | [V1](gh-issue:8779) |
+| Architecture | Models | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/distributed_serving.md) | [V1](gh-issue:8779) |
 |--------------|--------|-------------------|----------------------|---------------------------|---------------------|
 | `WhisperForConditionalGeneration` | Whisper | `openai/whisper-small`, `openai/whisper-large-v3-turbo`, etc. | | | |
 
@@ -708,7 +707,7 @@ Any text generation model can be converted into an embedding model by passing `-
 
 The following table lists those that are tested in vLLM.
 
-| Architecture | Models | Inputs | Example HF Models | [LoRA][lora-adapter] | [PP][distributed-serving] | [V1](gh-issue:8779) |
+| Architecture | Models | Inputs | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/distributed_serving.md) | [V1](gh-issue:8779) |
 |--------------|--------|--------|-------------------|----------------------|---------------------------|---------------------|
 | `LlavaNextForConditionalGeneration` | LLaVA-NeXT-based | T / I | `royokong/e5-v` | | | |
 | `Phi3VForCausalLM` | Phi-3-Vision-based | T + I | `TIGER-Lab/VLM2Vec-Full` | 🚧 | ✅︎ | |

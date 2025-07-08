@@ -1,7 +1,6 @@
 ---
 title: Dify
 ---
-[](){ #deployment-dify }
 
 [Dify](https://github.com/langgenius/dify) is an open-source LLM app development platform. Its intuitive interface combines agentic AI workflow, RAG pipeline, agent capabilities, model management, observability features, and more, allowing you to quickly move from prototype to production.
 

@@ -1,7 +1,6 @@
 ---
 title: Supported Hardware
 ---
-[](){ #quantization-supported-hardware }
 
 The table below shows the compatibility of various quantization implementations with different hardware platforms in vLLM:
 

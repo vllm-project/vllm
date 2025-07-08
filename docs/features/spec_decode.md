@@ -1,7 +1,6 @@
 ---
 title: Speculative Decoding
 ---
-[](){ #spec-decode }
 
 !!! warning
     Please note that speculative decoding in vLLM is not yet optimized and does
@@ -269,7 +268,7 @@ speculative decoding, breaking down the guarantees into three key areas:
 3. **vLLM Logprob Stability**
    \- vLLM does not currently guarantee stable token log probabilities (logprobs). This can result in different outputs for the
    same request across runs. For more details, see the FAQ section
-   titled *Can the output of a prompt vary across runs in vLLM?* in the [FAQs][faq].
+   titled *Can the output of a prompt vary across runs in vLLM?* in the [FAQs](../usage/faq.md).
 
 While vLLM strives to ensure losslessness in speculative decoding, variations in generated outputs with and without speculative decoding
 can occur due to following factors:
@@ -278,7 +277,7 @@ can occur due to following factors:
 - **Batch Size and Numerical Stability**: Changes in batch size may cause variations in logprobs and output probabilities, potentially
   due to non-deterministic behavior in batched operations or numerical instability.
 
-For mitigation strategies, please refer to the FAQ entry *Can the output of a prompt vary across runs in vLLM?* in the [FAQs][faq].
+For mitigation strategies, please refer to the FAQ entry *Can the output of a prompt vary across runs in vLLM?* in the [FAQs](../usage/faq.md).
 
 ## Resources for vLLM contributors
 

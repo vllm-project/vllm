@@ -1,7 +1,6 @@
 ---
 title: Architecture Overview
 ---
-[](){ #arch-overview }
 
 This document provides an overview of the vLLM architecture.
 
@@ -74,7 +73,7 @@ python -m vllm.entrypoints.openai.api_server --model <model>
 
 That code can be found in <gh-file:vllm/entrypoints/openai/api_server.py>.
 
-More details on the API server can be found in the [OpenAI-Compatible Server][serving-openai-compatible-server] document.
+More details on the API server can be found in the [OpenAI-Compatible Server](../serving/openai_compatible_server.md) document.
 
 ## LLM Engine
 
@@ -132,7 +131,7 @@ input tensors and capturing cudagraphs.
 ## Model
 
 Every model runner object has one model object, which is the actual
-`torch.nn.Module` instance. See [huggingface_integration][huggingface-integration] for how various
+`torch.nn.Module` instance. See [huggingface_integration](huggingface_integration.md) for how various
 configurations affect the class we ultimately get.
 
 ## Class Hierarchy

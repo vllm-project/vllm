@@ -1,7 +1,6 @@
 ---
 title: INT8 W8A8
 ---
-[](){ #int8 }
 
 vLLM supports quantizing weights and activations to INT8 for memory savings and inference acceleration.
 This quantization method is particularly useful for reducing model size while maintaining good performance.
