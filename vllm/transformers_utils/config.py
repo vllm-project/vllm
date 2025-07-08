@@ -7,7 +7,7 @@ import os
 import time
 from functools import cache, partial
 from pathlib import Path
-from typing import Any, Callable, Literal, Optional, TypeVar, Union
+from typing import Any, Callable, Optional, TypeVar, Union
 
 import huggingface_hub
 from huggingface_hub import get_safetensors_metadata, hf_hub_download
@@ -398,20 +398,22 @@ def get_config(
         # This function loads a params.json config which
         # should be used when loading models in mistral format
         config_dict = _download_mistral_config_file(model, revision)
-        if (max_position_embeddings := config_dict.get("max_position_embeddings")) is None:
-            max_position_embeddings = _maybe_retrieve_max_pos_from_hf(model, revision, **kwargs)
+        if (max_position_embeddings :=
+                config_dict.get("max_position_embeddings")) is None:
+            max_position_embeddings = _maybe_retrieve_max_pos_from_hf(
+                model, revision, **kwargs)
             config_dict["max_position_embeddings"] = max_position_embeddings
 
-            config = adapt_config_dict(config_dict)
-        else:
-            supported_formats = [
-                fmt.value for fmt in ConfigFormat if fmt != ConfigFormat.AUTO
-            ]
-            raise ValueError(
-                f"Unsupported config format: {config_format}. "
-                f"Supported formats are: {', '.join(supported_formats)}. "
-                f"Ensure your model uses one of these configuration formats "
-                f"or specify the correct format explicitly.")
+        config = adapt_config_dict(config_dict)
+    else:
+        supported_formats = [
+            fmt.value for fmt in ConfigFormat if fmt != ConfigFormat.AUTO
+        ]
+        raise ValueError(
+            f"Unsupported config format: {config_format}. "
+            f"Supported formats are: {', '.join(supported_formats)}. "
+            f"Ensure your model uses one of these configuration formats "
+            f"or specify the correct format explicitly.")
 
     # Special architecture mapping check for GGUF models
     if is_gguf:
@@ -830,7 +832,7 @@ def _download_mistral_config_file(model, revision) -> dict:
     assert isinstance(config_dict, dict)
     return config_dict
 
-def _maybe_retrieve_max_pos_from_hf(model, revision, **kwargs) -> Optional[int]:
+def _maybe_retrieve_max_pos_from_hf(model, revision, **kwargs) -> int:
     max_position_embeddings = 128_000
     try:
         trust_remote_code_val = kwargs.get("trust_remote_code", False)

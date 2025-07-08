@@ -58,7 +58,8 @@ def parse_type(return_type: Callable[[str], T]) -> Callable[[str], T]:
 
     def _parse_type(val: str) -> T:
         try:
-            if return_type is json.loads and not re.match("^{.*}$", val):
+            if return_type is json.loads and not re.match(
+                    r"(?s)^\s*{.*}\s*$", val):
                 return cast(T, nullable_kvs(val))
             return return_type(val)
         except ValueError as e:
@@ -80,7 +81,7 @@ def optional_type(
 
 
 def union_dict_and_str(val: str) -> Optional[Union[str, dict[str, str]]]:
-    if not re.match("^{.*}$", val):
+    if not re.match(r"(?s)^\s*{.*}\s*$", val):
         return str(val)
     return optional_type(json.loads)(val)
 
@@ -370,6 +371,7 @@ class EngineArgs:
         get_field(TokenizerPoolConfig, "extra_config")
     limit_mm_per_prompt: dict[str, int] = \
         get_field(MultiModalConfig, "limit_per_prompt")
+    interleave_mm_strings: bool = MultiModalConfig.interleave_mm_strings
     media_io_kwargs: dict[str, dict[str,
                                     Any]] = get_field(MultiModalConfig,
                                                       "media_io_kwargs")
@@ -763,6 +765,9 @@ class EngineArgs:
         multimodal_group.add_argument(
             "--disable-mm-preprocessor-cache",
             **multimodal_kwargs["disable_mm_preprocessor_cache"])
+        multimodal_group.add_argument(
+            "--interleave-mm-strings",
+            **multimodal_kwargs["interleave_mm_strings"])
 
         # LoRA related configs
         lora_kwargs = get_kwargs(LoRAConfig)
@@ -981,6 +986,7 @@ class EngineArgs:
             enable_prompt_embeds=self.enable_prompt_embeds,
             served_model_name=self.served_model_name,
             limit_mm_per_prompt=self.limit_mm_per_prompt,
+            interleave_mm_strings=self.interleave_mm_strings,
             media_io_kwargs=self.media_io_kwargs,
             use_async_output_proc=not self.disable_async_output_proc,
             config_format=self.config_format,
@@ -996,10 +1002,41 @@ class EngineArgs:
             override_attention_dtype=self.override_attention_dtype,
         )
 
+    def valid_tensorizer_config_provided(self) -> bool:
+        """
+        Checks if a parseable TensorizerConfig was passed to
+        self.model_loader_extra_config. It first checks if the config passed
+        is a dict or a TensorizerConfig object directly, and if the latter is
+        true (by checking that the object has TensorizerConfig's
+        .to_serializable() method), converts it in to a serializable dict
+        format
+        """
+        if self.model_loader_extra_config:
+            if hasattr(self.model_loader_extra_config, "to_serializable"):
+                self.model_loader_extra_config = (
+                    self.model_loader_extra_config.to_serializable())
+            for allowed_to_pass in ["tensorizer_uri", "tensorizer_dir"]:
+                try:
+                    self.model_loader_extra_config[allowed_to_pass]
+                    return False
+                except KeyError:
+                    pass
+        return True
+
     def create_load_config(self) -> LoadConfig:
 
         if self.quantization == "bitsandbytes":
             self.load_format = "bitsandbytes"
+
+        if (self.load_format == "tensorizer"
+                and self.valid_tensorizer_config_provided()):
+            logger.info("Inferring Tensorizer args from %s", self.model)
+            self.model_loader_extra_config = {"tensorizer_dir": self.model}
+        else:
+            logger.info(
+                "Using Tensorizer args from --model-loader-extra-config. "
+                "Note that you can now simply pass the S3 directory in the "
+                "model tag instead of providing the JSON string.")
 
         return LoadConfig(
             load_format=self.load_format,

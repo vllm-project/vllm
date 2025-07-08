@@ -1,7 +1,9 @@
-from pathlib import Path
-from typing import Any, Literal, Optional, Union
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import Any
 
 from transformers import PretrainedConfig, WhisperConfig
+
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -10,40 +12,41 @@ logger = init_logger(__name__)
 def adapt_config_dict(config_dict: dict[str, Any],
                       **kwargs) -> PretrainedConfig:
     config_dict.update(kwargs)
-
-    is_quant = bool(config_dict.get("quantization"))
-    is_vision = bool(
-        (config_dict.get("multimodal") or {}).get("vision_encoder_args")
-        or config_dict.get("vision_encoder"))
-    is_audio = bool(
-        ((config_dict.get("multimodal") or {}).get("whisper_model_args")
-         or {}).get("encoder_args"))
-    is_moe = bool(config_dict.get("moe"))
-    is_yarn = bool(config_dict.get("yarn"))
-    assert not (is_vision and is_audio), \
-        "Vision and audio are mutually exclusive"
-
     config_dict = _remap_general_mistral_args(config_dict)
-    if is_quant:
+
+    if bool(config_dict.get("quantization")):
         config_dict = _remap_mistral_quantization_args(config_dict)
 
-    if is_moe:
+    if bool(config_dict.get("moe")):
         config_dict["architectures"] = ["MixtralForCausalLM"]
     else:
         config_dict["architectures"] = ["MistralForCausalLM"]
 
-    if is_yarn:
+
+
+    if bool(config_dict.get("yarn")):
         config_dict = _remap_mistral_yarn_args(config_dict)
+
+    is_vision = ((config_dict.get("multimodal") or {}).get("vision_encoder_args")
+            or config_dict.get("vision_encoder"))
+    is_audio = bool(
+        ((config_dict.get("multimodal") or {}).get("whisper_model_args")
+         or {}).get("encoder_args"))
+
+    assert not (is_vision and is_audio), \
+        "Vision and audio are mutually exclusive"
+
     if is_vision:
         config_dict = _remap_mistral_vision_args(config_dict)
-    elif is_audio:
+    if is_audio:
         config_dict = _remap_mistral_audio_args(config_dict)
 
     config = PretrainedConfig.from_dict(config_dict)
 
-    logger.info(f"Initialized config {config}")
+    logger.debug("Initialized config", config)
 
     return config
+
 
 def _remap_mistral_vision_args(config: dict) -> dict:
     if config.get("multimodal"):
@@ -63,58 +66,20 @@ def _remap_mistral_vision_args(config: dict) -> dict:
     return config
 
 
-def _remap_mistral_audio_args(config: dict) -> dict:
-    whisper_args = config["multimodal"].pop("whisper_model_args")
-    encoder_args = whisper_args["encoder_args"]
-    downsample_args = whisper_args["downsample_args"]
-
-    quant_config = config.get("quantization_config")
-    config = {
-        "model_type":
-        "whixtral",
-        "architectures": ["VoxtralForConditionalGeneration"],
-        "text_config":
-        PretrainedConfig.from_dict(config),
-        "audio_config":
-        WhisperConfig(
-            num_mel_bins=encoder_args["audio_encoding_args"]["num_mel_bins"],
-            window_size=encoder_args["audio_encoding_args"]["window_size"],
-            sampling_rate=encoder_args["audio_encoding_args"]["sampling_rate"],
-            hop_length=encoder_args["audio_encoding_args"]["hop_length"],
-            downsample_factor=downsample_args["downsample_factor"],
-            d_model=encoder_args["dim"],
-            encoder_layers=encoder_args["n_layers"],
-            encoder_ffn_dim=encoder_args["hidden_dim"],
-            encoder_attention_heads=encoder_args["n_heads"],
-            vocab_size=encoder_args["vocab_size"],
-            max_source_positions=encoder_args["max_source_positions"],
-        )
-    }
-    if quant_config:
-        config["quantization_config"] = quant_config
-    return config
-
-
 def _remap_mistral_yarn_args(config: dict) -> dict:
     # Direct remaps: yarn.X -> rope_scaling.Y
     # Source keys are from mistral.model.args.YarnArgs
-    yarn_config_map = {
-        "factor": "factor",
-        "original_max_position_embeddings": "original_max_position_embeddings",
+    _map = {
         "beta": "beta_fast",
         "alpha": "beta_slow",
     }
     yarn_config = config.get("yarn") or {}
+    renamed_yarn_config = {_map.get(k, k): v for k, v in yarn_config.items()}
     config["rope_scaling"] = {
         "rope_type": "yarn",
         "mscale_all_dim": 1,  # We hardcoded this to 1
+        **renamed_yarn_config
     }
-    for old_name, new_name in yarn_config_map.items():
-        if old_name in yarn_config:
-            config["rope_scaling"][new_name] = yarn_config.pop(old_name)
-
-    assert len(yarn_config) == 0, f"Unparsed yarn config: {yarn_config}"
-
     return config
 
 
@@ -165,4 +130,36 @@ def _remap_mistral_quantization_args(config: dict) -> dict:
 
     config["quantization_config"] = quantization_config
 
+    return config
+
+
+def _remap_mistral_audio_args(config: dict) -> dict:
+    whisper_args = config["multimodal"].pop("whisper_model_args")
+    encoder_args = whisper_args["encoder_args"]
+    downsample_args = whisper_args["downsample_args"]
+
+    quant_config = config.get("quantization_config")
+    config = {
+        "model_type":
+        "whixtral",
+        "architectures": ["VoxtralForConditionalGeneration"],
+        "text_config":
+        PretrainedConfig.from_dict(config),
+        "audio_config":
+        WhisperConfig(
+            num_mel_bins=encoder_args["audio_encoding_args"]["num_mel_bins"],
+            window_size=encoder_args["audio_encoding_args"]["window_size"],
+            sampling_rate=encoder_args["audio_encoding_args"]["sampling_rate"],
+            hop_length=encoder_args["audio_encoding_args"]["hop_length"],
+            downsample_factor=downsample_args["downsample_factor"],
+            d_model=encoder_args["dim"],
+            encoder_layers=encoder_args["n_layers"],
+            encoder_ffn_dim=encoder_args["hidden_dim"],
+            encoder_attention_heads=encoder_args["n_heads"],
+            vocab_size=encoder_args["vocab_size"],
+            max_source_positions=encoder_args["max_source_positions"],
+        )
+    }
+    if quant_config:
+        config["quantization_config"] = quant_config
     return config
