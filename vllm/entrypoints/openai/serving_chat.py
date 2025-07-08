@@ -1060,6 +1060,7 @@ class OpenAIServingChat(OpenAIServing):
             # if the request doesn't use tool choice
             # OR specifies to not use a tool
             elif not request.tool_choice or request.tool_choice == "none":
+
                 message = ChatMessage(role=role,
                                       reasoning_content=reasoning_content,
                                       content=content)
@@ -1069,6 +1070,7 @@ class OpenAIServingChat(OpenAIServing):
                     request.tool_choice == "auto"
                     or request.tool_choice is None) and self.enable_auto_tools \
                     and self.tool_parser:
+
                 try:
                     tool_parser = self.tool_parser(tokenizer)
                 except RuntimeError as e:

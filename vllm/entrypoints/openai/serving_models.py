@@ -65,13 +65,12 @@ class OpenAIServingModels:
         super().__init__()
 
         self.base_model_paths = base_model_paths
-
         self.max_model_len = model_config.max_model_len
         self.engine_client = engine_client
         self.model_config = model_config
 
         self.static_lora_modules = lora_modules
-        self.lora_requests: dict[str, LoRARequest] = {}
+        self.lora_requests: list[LoRARequest] = []
         self.lora_id_counter = AtomicCounter(0)
 
         self.lora_resolvers: list[LoRAResolver] = []
@@ -139,7 +138,7 @@ class OpenAIServingModels:
                       parent=lora.base_model_name if lora.base_model_name else
                       self.base_model_paths[0].name,
                       permission=[ModelPermission()])
-            for lora in self.lora_requests.values()
+            for lora in self.lora_requests
         ]
         prompt_adapter_cards = [
             ModelCard(id=prompt_adapter.prompt_adapter_name,
@@ -183,7 +182,7 @@ class OpenAIServingModels:
                                          err_type=error_type,
                                          status_code=status_code)
 
-        self.lora_requests[lora_name] = lora_request
+        self.lora_requests.append(lora_request)
         logger.info("Loaded new LoRA adapter: name '%s', path '%s'", lora_name,
                     lora_path)
         return f"Success: LoRA adapter '{lora_name}' added successfully."
@@ -197,7 +196,10 @@ class OpenAIServingModels:
             return error_check_ret
 
         lora_name = request.lora_name
-        del self.lora_requests[lora_name]
+        self.lora_requests = [
+            lora_request for lora_request in self.lora_requests
+            if lora_request.lora_name != lora_name
+        ]
         logger.info("Removed LoRA adapter: name '%s'", lora_name)
         return f"Success: LoRA adapter '{lora_name}' removed successfully."
 
@@ -211,7 +213,8 @@ class OpenAIServingModels:
                 status_code=HTTPStatus.BAD_REQUEST)
 
         # Check if the lora adapter with the given name already exists
-        if request.lora_name in self.lora_requests:
+        if any(lora_request.lora_name == request.lora_name
+               for lora_request in self.lora_requests):
             return create_error_response(
                 message=
                 f"The lora adapter '{request.lora_name}' has already been "
@@ -233,7 +236,8 @@ class OpenAIServingModels:
                 status_code=HTTPStatus.BAD_REQUEST)
 
         # Check if the lora adapter with the given name exists
-        if request.lora_name not in self.lora_requests:
+        if not any(lora_request.lora_name == request.lora_name
+                   for lora_request in self.lora_requests):
             return create_error_response(
                 message=
                 f"The lora adapter '{request.lora_name}' cannot be found.",
@@ -256,8 +260,9 @@ class OpenAIServingModels:
         """
         async with self.lora_resolver_lock[lora_name]:
             # First check if this LoRA is already loaded
-            if lora_name in self.lora_requests:
-                return self.lora_requests[lora_name]
+            for existing in self.lora_requests:
+                if existing.lora_name == lora_name:
+                    return existing
 
             base_model_name = self.model_config.model
             unique_id = self.lora_id_counter.inc(1)
@@ -274,7 +279,7 @@ class OpenAIServingModels:
 
                     try:
                         await self.engine_client.add_lora(lora_request)
-                        self.lora_requests[lora_name] = lora_request
+                        self.lora_requests.append(lora_request)
                         logger.info(
                             "Resolved and loaded LoRA adapter '%s' using %s",
                             lora_name, resolver.__class__.__name__)
