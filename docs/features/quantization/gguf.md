@@ -41,7 +41,7 @@ vllm serve ./tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf \
 
 You can also use the GGUF model directly through the LLM entrypoint:
 
-??? Code
+??? code
 
       ```python
       from vllm import LLM, SamplingParams

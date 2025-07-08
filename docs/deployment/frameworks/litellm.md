@@ -34,7 +34,7 @@ vllm serve qwen/Qwen1.5-0.5B-Chat
 
 - Call it with litellm:
 
-??? Code
+??? code
 
     ```python
     import litellm 

@@ -60,7 +60,7 @@ And then you can send out a query to the OpenAI-compatible API to check the avai
 curl -o- http://localhost:30080/models
 ```
 
-??? Output
+??? console "Output"
 
     ```json
     {
@@ -89,7 +89,7 @@ curl -X POST http://localhost:30080/completions \
   }'
 ```
 
-??? Output
+??? console "Output"
 
     ```json
     {
@@ -121,7 +121,7 @@ sudo helm uninstall vllm
 
 The core vLLM production stack configuration is managed with YAML. Here is the example configuration used in the installation above:
 
-??? Yaml
+??? code "Yaml"
 
     ```yaml
     servingEngineSpec:

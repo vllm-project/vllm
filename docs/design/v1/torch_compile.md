@@ -28,7 +28,7 @@ A unique aspect of vLLM's `torch.compile` integration, is that we guarantee all 
 
 In the very verbose logs, we can see:
 
-??? Logs
+??? console "Logs"
 
       ```text
       DEBUG 03-07 03:06:52 [decorators.py:203] Start compiling function <code object forward at 0x7f08acf40c90, file "xxx/vllm/model_executor/models/llama.py", line 339>
@@ -110,7 +110,7 @@ Then it will also compile a specific kernel just for batch size `1, 2, 4, 8`. At
 
 When all the shapes are known, `torch.compile` can compare different configs, and often find some better configs to run the kernel. For example, we can see the following log:
 
-??? Logs
+??? console "Logs"
 
     ```
     AUTOTUNE mm(8x2048, 2048x3072)
