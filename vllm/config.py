@@ -346,6 +346,9 @@ class ModelConfig:
     limit_mm_per_prompt: dict[str, int] = field(default_factory=dict)
     """Maximum number of data items per modality per prompt. Only applicable
     for multimodal models."""
+    interleave_mm_strings: bool = False
+    """Enable fully interleaved support for multimodal prompts, while using 
+    --chat-template-content-format=string. Defaults to False."""
     media_io_kwargs: dict[str, dict[str, Any]] = field(default_factory=dict)
     """Additional args passed to process media inputs, keyed by modalities. 
     For example, to set num_frames for video, set 
@@ -466,6 +469,9 @@ class ModelConfig:
                     "affect the random state of the Python process that "
                     "launched vLLM.", self.seed)
 
+        # Keep set served_model_name before maybe_model_redirect(self.model)
+        self.served_model_name = get_served_model_name(self.model,
+                                                       self.served_model_name)
         self.model = maybe_model_redirect(self.model)
         # The tokenizer is consistent with the model by default.
         if self.tokenizer is None:
@@ -609,8 +615,6 @@ class ModelConfig:
 
         self.original_max_model_len = self.max_model_len
         self.max_model_len = self.get_and_verify_max_len(self.max_model_len)
-        self.served_model_name = get_served_model_name(self.model,
-                                                       self.served_model_name)
         self.multimodal_config = self._init_multimodal_config()
         if not self.skip_tokenizer_init:
             self._verify_tokenizer_mode()
@@ -682,8 +686,11 @@ class ModelConfig:
 
             # If tokenizer is same as model, download to same directory
             if model == tokenizer:
-                s3_model.pull_files(
-                    model, ignore_pattern=["*.pt", "*.safetensors", "*.bin"])
+                s3_model.pull_files(model,
+                                    ignore_pattern=[
+                                        "*.pt", "*.safetensors", "*.bin",
+                                        "*.tensors"
+                                    ])
                 self.tokenizer = s3_model.dir
                 return
 
@@ -691,7 +698,8 @@ class ModelConfig:
         if is_s3(tokenizer):
             s3_tokenizer = S3Model()
             s3_tokenizer.pull_files(
-                model, ignore_pattern=["*.pt", "*.safetensors", "*.bin"])
+                model,
+                ignore_pattern=["*.pt", "*.safetensors", "*.bin", "*.tensors"])
             self.tokenizer = s3_tokenizer.dir
 
     def _init_multimodal_config(self) -> Optional["MultiModalConfig"]:
@@ -701,7 +709,8 @@ class ModelConfig:
                 media_io_kwargs=self.media_io_kwargs,
                 mm_processor_kwargs=self.mm_processor_kwargs,
                 disable_mm_preprocessor_cache=self.
-                disable_mm_preprocessor_cache)
+                disable_mm_preprocessor_cache,
+                interleave_mm_strings=self.interleave_mm_strings)
 
         if self.limit_mm_per_prompt:
             raise ValueError("`limit_mm_per_prompt` is only supported for "
@@ -711,6 +720,9 @@ class ModelConfig:
                              "multimodal models.")
         if self.disable_mm_preprocessor_cache:
             raise ValueError("`disable_mm_preprocessor_cache` is only "
+                             "supported for multimodal models.")
+        if self.interleave_mm_strings:
+            raise ValueError("`interleave_mm_strings` is only "
                              "supported for multimodal models.")
 
         return None
@@ -1420,7 +1432,7 @@ class ModelConfig:
 
     @property
     def is_cross_encoder(self) -> bool:
-        return self.registry.is_cross_encoder_model(self.architectures)
+        return self.task == "classify"
 
     @property
     def use_mla(self) -> bool:
@@ -1447,6 +1459,12 @@ class ModelConfig:
     @property
     def matryoshka_dimensions(self):
         return getattr(self.hf_config, "matryoshka_dimensions", None)
+
+    @property
+    def use_pad_token(self) -> bool:
+        # cross_encoder models defaults to using pad_token.
+        # `llm as reranker` models defaults to not using pad_token.
+        return getattr(self.hf_config, "use_pad_token", True)
 
     def get_and_verify_max_len(self, max_model_len: int):
         # For pooling models, the tokenizer's `model_max_length` is often a
@@ -2318,7 +2336,7 @@ class SchedulerConfig:
 
         if self.max_num_batched_tokens > self.max_num_seqs * self.max_model_len:
             logger.warning(
-                "max_num_batched_tokens (%d) exceeds max_num_seqs"
+                "max_num_batched_tokens (%d) exceeds max_num_seqs "
                 "* max_model_len (%d). This may lead to unexpected behavior.",
                 self.max_num_batched_tokens,
                 self.max_num_seqs * self.max_model_len)
@@ -3117,6 +3135,11 @@ class MultiModalConfig:
     disable_mm_preprocessor_cache: bool = False
     """
     If `True`, disable caching of the processed multi-modal inputs.
+    """
+
+    interleave_mm_strings: bool = False
+    """
+    Enable fully interleaved support for multimodal prompts.
     """
 
     def compute_hash(self) -> str:
@@ -4761,6 +4784,12 @@ class VllmConfig:
         cls = MODELS_CONFIG_MAP.get(architecture, None)
         if cls is not None:
             cls.verify_and_update_config(self)
+
+        if self.model_config.task == "classify":
+            # Maybe convert ForCausalLM into ForSequenceClassification model.
+            from vllm.model_executor.models.adapters import (
+                SequenceClassificationConfig)
+            SequenceClassificationConfig.verify_and_update_config(self)
 
     def __str__(self):
         return (
