@@ -1,7 +1,6 @@
 ---
 title: Quantized KV Cache
 ---
-[](){ #quantized-kvcache }
 
 ## FP8 KV Cache
 

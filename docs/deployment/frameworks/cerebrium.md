@@ -1,7 +1,6 @@
 ---
 title: Cerebrium
 ---
-[](){ #deployment-cerebrium }
 
 <p align="center">
     <img src="https://i.ibb.co/hHcScTT/Screenshot-2024-06-13-at-10-14-54.png" alt="vLLM_plus_cerebrium"/>

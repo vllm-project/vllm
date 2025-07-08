@@ -1,7 +1,6 @@
 ---
 title: AutoAWQ
 ---
-[](){ #auto-awq }
 
 To create a new 4-bit quantized model, you can leverage [AutoAWQ](https://github.com/casper-hansen/AutoAWQ).
 Quantization reduces the model's precision from BF16/FP16 to INT4 which effectively reduces the total model memory footprint.

@@ -1,7 +1,6 @@
 ---
 title: Structured Outputs
 ---
-[](){ #structured-outputs }
 
 vLLM supports the generation of structured outputs using
 [xgrammar](https://github.com/mlc-ai/xgrammar) or
@@ -21,7 +20,7 @@ The following parameters are supported, which must be added as extra parameters:
 - `guided_grammar`: the output will follow the context free grammar.
 - `structural_tag`: Follow a JSON schema within a set of specified tags within the generated text.
 
-You can see the complete list of supported parameters on the [OpenAI-Compatible Server][serving-openai-compatible-server] page.
+You can see the complete list of supported parameters on the [OpenAI-Compatible Server](../serving/openai_compatible_server.md) page.
 
 Structured outputs are supported by default in the OpenAI-Compatible Server. You
 may choose to specify the backend to use by setting the

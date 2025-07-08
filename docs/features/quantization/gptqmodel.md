@@ -1,7 +1,6 @@
 ---
 title: GPTQModel
 ---
-[](){ #gptqmodel }
 
 To create a new 4-bit or 8-bit GPTQ quantized model, you can leverage [GPTQModel](https://github.com/ModelCloud/GPTQModel) from ModelCloud.AI.
 

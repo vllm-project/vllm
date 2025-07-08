@@ -1,7 +1,6 @@
 ---
 title: Meetups
 ---
-[](){ #meetups }
 
 We host regular meetups in San Francisco Bay Area every 2 months. We will share the project updates from the vLLM team and have guest speakers from the industry to share their experience and insights. Please find the materials of our previous meetups below:
 
