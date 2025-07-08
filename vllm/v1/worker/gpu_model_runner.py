@@ -197,6 +197,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Request states.
         self.requests: dict[str, CachedRequestState] = {}
 
+        # Build logits processors. If specified by user, load custom
+        # logitsprocs constructors.
+        self.logitsprocs: LogitsProcessorsManager = build_logitsprocs(
+            LogitProcessorCtorArgs(
+                vllm_config=vllm_config,
+                device=self.device,
+                is_pin_memory=self.pin_memory,
+            ))
+
         # Input Batch
         # NOTE(Chen): Ideally, we should initialize the input batch inside
         # `initialize_kv_cache` based on the kv cache config. However, as in
@@ -319,15 +328,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # means this layer will perform attention using the keys and values
         # from the KV cache of `shared_kv_cache_layers[layer_name]`.
         self.shared_kv_cache_layers: dict[str, str] = {}
-
-        # Build logits processors. If specified by user, load custom
-        # logitsprocs constructors.
-        self.logitsprocs: LogitsProcessorsManager = build_logitsprocs(
-            LogitProcessorCtorArgs(
-                vllm_config=vllm_config,
-                device=self.device,
-                is_pin_memory=self.pin_memory,
-            ))
 
     def _may_reorder_batch(self, scheduler_output: "SchedulerOutput") -> None:
         """
