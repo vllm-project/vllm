@@ -307,9 +307,16 @@ schema. Example: ``[{"type": "text", "text": "Hello world!"}]``"""
 
         frontend_group.add_argument("--tool-parser-plugin",
                                     **frontend_kwargs["tool_parser_plugin"])
+        # Special case for expand-tools-even-if-tool-choice-none because of the
+        # deprecation field
         frontend_group.add_argument(
             "--expand-tools-even-if-tool-choice-none",
-            **frontend_kwargs["expand_tools_even_if_tool_choice_none"])
+            action="store_true",
+            deprecated=True,
+            default=frontend_kwargs["expand_tools_even_if_tool_choice_none"]
+            ["default"],
+            help=frontend_kwargs["expand_tools_even_if_tool_choice_none"]
+            ["help"])
         frontend_group.add_argument("--log-config-file",
                                     **frontend_kwargs["log_config_file"])
         frontend_group.add_argument("--max-log-len",
