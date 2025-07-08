@@ -466,24 +466,23 @@ class MambaMixer2(CustomOp):
                 conv_state = self_kv_cache[0].transpose(-1, -2)
                 ssm_state = self_kv_cache[1]
                 state_indices_tensor = attn_metadata.state_indices_tensor
-                has_initial_states = attn_metadata.has_initial_states
+                has_initial_states_p = attn_metadata.has_initial_states
                 prep_initial_states = attn_metadata.prep_initial_states
                 chunk_size = attn_metadata.chunk_size
-                seq_idx = attn_metadata.seq_idx
-                chunk_indices = attn_metadata.chunk_indices
-                chunk_offsets = attn_metadata.chunk_offsets
+                seq_idx_p = attn_metadata.seq_idx
+                chunk_indices_p = attn_metadata.chunk_indices
+                chunk_offsets_p = attn_metadata.chunk_offsets
         else:
             conv_state = mamba_cache_params.conv_state
             ssm_state = mamba_cache_params.ssm_state
             state_indices_tensor = mamba_cache_params.state_indices_tensor
-            has_initial_states = mamba2_metadata.has_initial_states
+            has_initial_states_p = mamba2_metadata.has_initial_states
             prep_initial_states = mamba2_metadata.prep_initial_states
             chunk_size = mamba2_metadata.chunk_size
-            seq_idx = mamba2_metadata.seq_idx
-            chunk_indices = mamba2_metadata.chunk_indices
-            chunk_offsets = mamba2_metadata.chunk_offsets
+            seq_idx_p = mamba2_metadata.seq_idx
+            chunk_indices_p = mamba2_metadata.chunk_indices
+            chunk_offsets_p = mamba2_metadata.chunk_offsets
 
-        seq_len, _ = hidden_states.shape
         groups_time_state_size = self.n_groups * self.ssm_state_size
 
         # 1. Gated MLP's linear projection
@@ -501,6 +500,10 @@ class MambaMixer2(CustomOp):
             ],
             dim=-1,
         )
+
+        conv_weights = self.conv1d.weight.view(self.conv1d.weight.size(0),
+                                               self.conv1d.weight.size(2))
+
         # - get hidden_states, B and C after depthwise convolution.
         split_hidden_states_B_C_fn = lambda hidden_states_B_C: torch.split(
             hidden_states_B_C,
@@ -511,6 +514,7 @@ class MambaMixer2(CustomOp):
             ],
             dim=-1,
         )
+
         if envs.VLLM_USE_V1 and attn_metadata is None:
             # V1 profile run
             hidden_states_B_C = (hidden_states_B_C.transpose(
@@ -527,78 +531,13 @@ class MambaMixer2(CustomOp):
         has_prefill = num_prefills > 0
         has_decode = num_decodes > 0
 
-        # 2. Convolution sequence transformation
-        conv_weights = self.conv1d.weight.view(self.conv1d.weight.size(0),
-                                               self.conv1d.weight.size(2))
-        # causal_conv1d_fn deals with both prefill and decode if input
-        # has prefill requests.
-        if has_prefill:
-            # |---------- N-1 iteration --------|
-            # |---------------- N iteration ---------------------|
-            # |- tokenA -|......................|-- newTokens ---|
-            # |---------- context_len ----------|
-            # |-------------------- seq_len ---------------------|
-            #                                   |-- query_len ---|
-
-            # - "cache_indices" updates the conv_state cache in positions
-            #   pointed to by "state_indices_tensor"
-            x = hidden_states_B_C.transpose(
-                0, 1)  # this is the form that causal-conv see
-            if mamba2_metadata.cu_seqlen is None:
-                mamba2_metadata = update_metadata(
-                    x, attn_metadata.query_start_loc, mamba2_metadata)
-            hidden_states_B_C = causal_conv1d_fn(
-                x,
-                conv_weights,
-                bias=self.conv1d.bias,
-                activation=self.activation,
-                conv_states=conv_state,
-                has_initial_state=has_initial_states,
-                cache_indices=state_indices_tensor,
-                metadata=mamba2_metadata,
-                query_start_loc=attn_metadata.query_start_loc).transpose(
-                    0, 1)[:seq_len]
-
-        else:
-            x = hidden_states_B_C
-            unsqueeze = x.dim() == 2
-            if unsqueeze:
-                # make it (batch, dim, seqlen) with seqlen == 1
-                x = x.unsqueeze(-1)
-            if mamba2_metadata.cu_seqlen is None:
-                mamba2_metadata.cu_seqlen = 1
-            hidden_states_B_C = causal_conv1d_update(
-                x,
-                conv_state,
-                conv_weights,
-                self.conv1d.bias,
-                self.activation,
-                conv_state_indices=state_indices_tensor,
-                metadata=mamba2_metadata,
-            )
-            if unsqueeze:
-                hidden_states_B_C = hidden_states_B_C.squeeze(-1)
-
-        # - get hidden_states, B and C after depthwise convolution.
-        hidden_states, B, C = split_hidden_states_B_C_fn(hidden_states_B_C)
-
-        # 3. State Space Model sequence transformation
+        # NOTE: V0 put prefill before decode, v1 puts decode before prefill
         # Separate prefill and decode by splitting varlen input
         # Split along token dimension
         # NOTE: V0 put prefill before decode, v1 puts decode before prefill
         if envs.VLLM_USE_V1:
-            hidden_states_d, hidden_states_p = torch.split(
-                hidden_states,
-                [num_decodes, num_prefill_tokens],
-                dim=0,
-            )
-            B_d, B_p = torch.split(
-                B,
-                [num_decodes, num_prefill_tokens],
-                dim=0,
-            )
-            C_d, C_p = torch.split(
-                C,
+            hidden_states_B_C_d, hidden_states_B_C_p = torch.split(
+                hidden_states_B_C,
                 [num_decodes, num_prefill_tokens],
                 dim=0,
             )
@@ -607,6 +546,7 @@ class MambaMixer2(CustomOp):
                 [num_decodes, num_prefill_tokens],
                 dim=0,
             )
+            # Split along batch dimension
             state_indices_tensor_d, state_indices_tensor_p = torch.split(
                 state_indices_tensor,
                 [num_decodes, num_prefills],
@@ -616,18 +556,8 @@ class MambaMixer2(CustomOp):
                 attn_metadata.query_start_loc[-num_prefills - 1:] -
                 num_decodes if has_prefill else None)
         else:
-            hidden_states_p, hidden_states_d = torch.split(
-                hidden_states,
-                [num_prefill_tokens, num_decodes],
-                dim=0,
-            )
-            B_p, B_d = torch.split(
-                B,
-                [num_prefill_tokens, num_decodes],
-                dim=0,
-            )
-            C_p, C_d = torch.split(
-                C,
+            hidden_states_B_C_p, hidden_states_B_C_d = torch.split(
+                hidden_states_B_C,
                 [num_prefill_tokens, num_decodes],
                 dim=0,
             )
@@ -636,6 +566,7 @@ class MambaMixer2(CustomOp):
                 [num_prefill_tokens, num_decodes],
                 dim=0,
             )
+            # Split along batch dimension
             state_indices_tensor_p, state_indices_tensor_d = torch.split(
                 state_indices_tensor,
                 [num_prefills, num_decodes],
@@ -649,11 +580,34 @@ class MambaMixer2(CustomOp):
 
         # Process prefill requests
         if has_prefill:
+            # 2. Convolution sequence transformation
+            # - "cache_indices" updates the conv_state cache in positions
+            #   pointed to by "state_indices_tensor"
+            x = hidden_states_B_C_p.transpose(
+                0, 1)  # this is the form that causal-conv see
+            if mamba2_metadata.cu_seqlen is None:
+                mamba2_metadata = update_metadata(
+                    x, attn_metadata.query_start_loc, mamba2_metadata)
+            hidden_states_B_C_p = causal_conv1d_fn(
+                x,
+                conv_weights,
+                self.conv1d.bias,
+                activation=self.activation,
+                conv_states=conv_state,
+                has_initial_state=has_initial_states_p,
+                cache_indices=state_indices_tensor_p,
+                query_start_loc=query_start_loc_p).transpose(
+                    0, 1)[:num_prefill_tokens]
+
+            hidden_states_p, B_p, C_p = split_hidden_states_B_C_fn(
+                hidden_states_B_C_p)
+
+            # 3. State Space Model sequence transformation
             initial_states = None
-            if (has_initial_states is not None and prep_initial_states):
+            if (has_initial_states_p is not None and prep_initial_states):
                 # making a copy of the states
                 initial_states = torch.where(
-                    has_initial_states[:, None, None, None],
+                    has_initial_states_p[:, None, None, None],
                     ssm_state[state_indices_tensor_p], 0)
 
             scan_output, varlen_state = mamba_chunk_scan_combined(
@@ -670,9 +624,9 @@ class MambaMixer2(CustomOp):
                 D=self.D,
                 z=None,
                 dt_bias=self.dt_bias,
-                seq_idx=seq_idx,
-                chunk_indices=chunk_indices,
-                chunk_offsets=chunk_offsets,
+                seq_idx=seq_idx_p,
+                chunk_indices=chunk_indices_p,
+                chunk_offsets=chunk_offsets_p,
                 cu_seqlens=query_start_loc_p,
                 initial_states=initial_states,
                 return_varlen_states=True,
@@ -690,6 +644,19 @@ class MambaMixer2(CustomOp):
 
         # Process decode requests
         if has_decode:
+            # 2. Convolution sequence transformation
+            hidden_states_B_C_d = causal_conv1d_update(
+                hidden_states_B_C_d,
+                conv_state,
+                conv_weights,
+                self.conv1d.bias,
+                self.activation,
+                conv_state_indices=state_indices_tensor_d)
+
+            hidden_states_d, B_d, C_d = split_hidden_states_B_C_fn(
+                hidden_states_B_C_d)
+
+            # 3. State Space Model sequence transformation
             n_groups = self.n_groups // self.tp_size
             A_d = self.A[:, None, ...][:, :, None].expand(
                 -1, self.head_dim, self.ssm_state_size).to(dtype=torch.float32)
