@@ -527,7 +527,7 @@ def _valid_cutlass_block_scaled_grouped_gemm(hidden_states: torch.Tensor,
                                              w2: torch.Tensor) -> bool:
 
     def _valid_cutlass_block_scaled_grouped_gemm_shape(M: int, N: int, K: int):
-        return M >= 128 and N % 128 == 0 and K % 128 == 0
+        return N % 128 == 0 and K % 128 == 0
 
     m = hidden_states.size(0)
     _, K, N = w2.size()
