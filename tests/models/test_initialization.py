@@ -68,7 +68,7 @@ def test_can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch):
     def _initialize_kv_caches_v0(self) -> None:
         self.cache_config.num_gpu_blocks = 0
         self.cache_config.num_cpu_blocks = 0
-        logger.debug("V0:Using the patch function.........")
+        print("V0:Using the patch function.........")
 
     def _initialize_kv_caches_v1(self, vllm_config):
         kv_cache_specs = self.model_executor.get_kv_cache_specs()
@@ -77,17 +77,17 @@ def test_can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch):
             kv_cache_specs[0],
             10 * GiB_bytes,
         )
-        logger.debug("V1:Using the patch function.........")
+        print("V1:Using the patch function.........")
         # gpu_blocks (> 0), cpu_blocks, scheduler_kv_cache_config
         return 1, 0, scheduler_kv_cache_config
-    logger.debug("Do llm init...")
+    print("Do llm init...")
     with (patch.object(V0LLMEngine, "_initialize_kv_caches",
                        _initialize_kv_caches_v0),
           patch.object(V1EngineCore, "_initialize_kv_caches",
                        _initialize_kv_caches_v1), monkeypatch.context() as m):
         # if model_info.v0_only:
         m.setenv("VLLM_USE_V1", "0")
-        logger.debug("LLM init begin....")
+        print("LLM init begin....")
         LLM(
             model_info.default,
             tokenizer=model_info.tokenizer,
@@ -104,4 +104,4 @@ def test_can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch):
             load_format="dummy",
             hf_overrides=hf_overrides,
         )
-        logger.debug("LLM init done....")
+        print("LLM init done....")
