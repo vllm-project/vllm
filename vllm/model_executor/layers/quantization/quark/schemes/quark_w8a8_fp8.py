@@ -6,8 +6,9 @@ from typing import Any, Callable, Optional, cast
 import torch
 from torch.nn import Parameter
 
-from vllm.compilation.fusion import GroupShape
 from vllm.model_executor.layers.quantization.quark.schemes import QuarkScheme
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     Fp8LinearOp, normalize_e4m3fn_to_e4m3fnuz, requantize_with_max_scale)
 from vllm.model_executor.parameter import (ChannelQuantScaleParameter,

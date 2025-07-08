@@ -5,11 +5,12 @@ import torch
 
 import vllm.envs as envs
 from vllm.compilation.activation_quant_fusion import ActivationQuantFusionPass
-from vllm.compilation.fusion import GroupShape
 from vllm.compilation.fx_utils import find_auto_fn, find_auto_fn_maybe
 from vllm.compilation.noop_elimination import NoOpEliminationPass
 from vllm.config import CompilationConfig, PassConfig, VllmConfig
 from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     CUTLASS_FP8_SUPPORTED, Fp8LinearOp)
 from vllm.platforms import current_platform

@@ -7,7 +7,6 @@ import torch
 from torch.nn.parameter import Parameter
 
 from vllm import _custom_ops as ops
-from vllm.compilation.fusion import GroupShape
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
@@ -18,7 +17,7 @@ from vllm.model_executor.layers.quantization.fp8 import (Fp8Config,
                                                          Fp8KVCacheMethod,
                                                          Fp8LinearMethod)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    is_layer_skipped)
+    GroupShape, is_layer_skipped)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     Fp8LinearOp)
 from vllm.platforms import current_platform

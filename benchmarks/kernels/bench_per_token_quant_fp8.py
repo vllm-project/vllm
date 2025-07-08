@@ -5,9 +5,9 @@ from typing import Callable
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.compilation.fusion import GroupShape
 from vllm.config import CompilationConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fp8_quantization import QuantFP8
+from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.triton_utils import triton
 
 

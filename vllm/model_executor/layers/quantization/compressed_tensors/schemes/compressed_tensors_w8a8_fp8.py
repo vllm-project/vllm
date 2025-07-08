@@ -7,9 +7,10 @@ import torch
 from compressed_tensors.quantization import QuantizationStrategy
 from torch.nn import Parameter
 
-from vllm.compilation.fusion import GroupShape
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     Fp8LinearOp, maybe_create_device_identity, normalize_e4m3fn_to_e4m3fnuz,
     requantize_with_max_scale)

@@ -5,8 +5,9 @@ import torch
 import torch.nn.functional as F
 
 from vllm import _custom_ops as ops
-from vllm.compilation.fusion import GroupShape
 from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape)
 from vllm.platforms import current_platform
 
 # Using the default value (240.0) from pytorch will cause accuracy
