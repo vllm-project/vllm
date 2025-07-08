@@ -143,19 +143,20 @@ class MistralToolParser(ToolParser):
             # jsons is difficult
             try:
                 if self.fn_name_regex:
-                    matches = self.fn_name_regex.findall(tool_content)
-
                     function_call_arr = []
-                    for match in matches:
-                        fn_name = match[0]
-                        args = match[1]
+                    for single_tool_content in model_output.split(self.bot_token):
+                        matches = self.fn_name_regex.findall(single_tool_content)
 
-                        # fn_name is encoded outside serialized json dump
-                        # only arguments are serialized
-                        function_call_arr.append({
-                            "name": fn_name,
-                            "arguments": json.loads(args)
-                        })
+                        for match in matches:
+                            fn_name = match[0]
+                            args = match[1]
+
+                            # fn_name is encoded outside serialized json dump
+                            # only arguments are serialized
+                            function_call_arr.append({
+                                "name": fn_name,
+                                "arguments": json.loads(args)
+                            })
                 else:
                     function_call_arr = json.loads(tool_content)
             except json.JSONDecodeError:

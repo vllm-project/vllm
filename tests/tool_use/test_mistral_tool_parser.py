@@ -211,7 +211,7 @@ def test_extract_tool_callspre_v11_tokenizer(mistral_tool_parser, model_output,
     ids=[
         "single_tool_add",
         "single_tool_weather",
-        # "multiple_tool_calls", # Was already broken
+        "multiple_tool_calls",
     ],
     argnames=["model_output", "expected_tool_calls", "expected_content"],
     argvalues=[
@@ -242,21 +242,21 @@ def test_extract_tool_callspre_v11_tokenizer(mistral_tool_parser, model_output,
             ],
             None,
         ),
-        # (
-        #     '''[TOOL_CALLS]add{"a": 3.5, "b": 4}[TOOL_CALLS]multiply{"a": 3, "b": 6}''',  # noqa: E501
-        #     [
-        #         ToolCall(function=FunctionCall(name="add",
-        #                                        arguments=json.dumps({
-        #                                            "a": 3.5,
-        #                                            "b": 4
-        #                                        }))),
-        #         ToolCall(function=FunctionCall(name="multiply",
-        #                                        arguments=json.dumps({
-        #                                            "a": 3,
-        #                                            "b": 6
-        #                                        })))
-        #     ],
-        #     None) # Was already broken
+        (
+            '''[TOOL_CALLS]add{"a": 3.5, "b": 4}[TOOL_CALLS]multiply{"a": 3, "b": 6}''',  # noqa: E501
+            [
+                ToolCall(function=FunctionCall(name="add",
+                                               arguments=json.dumps({
+                                                   "a": 3.5,
+                                                   "b": 4
+                                               }))),
+                ToolCall(function=FunctionCall(name="multiply",
+                                               arguments=json.dumps({
+                                                   "a": 3,
+                                                   "b": 6
+                                               })))
+            ],
+            None)
     ],
 )
 def test_extract_tool_calls(mistral_v11_tool_parser, model_output,
