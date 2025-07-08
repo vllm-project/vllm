@@ -432,7 +432,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                                          trust_remote_code=True),  # noqa: E501
     "MllamaForConditionalGeneration": _HfExamplesInfo("meta-llama/Llama-3.2-11B-Vision-Instruct"),  # noqa: E501
     "WhisperForConditionalGeneration": _HfExamplesInfo("openai/whisper-large-v3"),  # noqa: E501
-    "JinaVLForSequenceClassification": _HfExamplesInfo("jinaai/jina-reranker-m0"),   # noqa: E501
+    "JinaVLForRanking": _HfExamplesInfo("jinaai/jina-reranker-m0"),   # noqa: E501
 }
 
 _SPECULATIVE_DECODING_EXAMPLE_MODELS = {

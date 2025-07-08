@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 This example shows how to use vLLM for running offline inference with
-the correct prompt format on vision language models for multimodal embedding and scoring.
+the correct prompt format on vision language models for multimodal pooling.
 
 For most models, the prompt format should follow corresponding examples
 on HuggingFace model repository.
@@ -240,7 +240,7 @@ model_example_map = {
 def parse_args():
     parser = FlexibleArgumentParser(
         description="Demo on using vLLM for offline inference with "
-        "vision language models for multimodal embedding and scoring tasks."
+        "vision language models for multimodal pooling tasks."
     )
     parser.add_argument(
         "--model-name",

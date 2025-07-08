@@ -537,7 +537,7 @@ The following extra parameters are supported:
 
 ### Score API
 
-Our Score API can apply a cross-encoder model or an embedding model to predict scores for sentence pairs or multimodal pairs. When using an embedding model the score corresponds to the cosine similarity between each embedding pair.
+Our Score API can apply a cross-encoder model or an embedding model to predict scores for sentence or multimodal pairs. When using an embedding model the score corresponds to the cosine similarity between each embedding pair.
 Usually, the score for a sentence pair refers to the similarity between two sentences, on a scale of 0 to 1.
 
 You can find the documentation for cross encoder models at [sbert.net](https://www.sbert.net/docs/package_reference/cross_encoder/cross_encoder.html).
@@ -677,7 +677,7 @@ The total number of pairs is `len(text_2)`.
     ```
 #### Multi-modal inputs
 
-You can pass multi-modal inputs to scoring models by passing `content` including a list of multi-modal input(image, etc.) in the request. Refer to the examples below for illustration.
+You can pass multi-modal inputs to scoring models by passing `content` including a list of multi-modal input (image, etc.) in the request. Refer to the examples below for illustration.
 
 === "JinaVL-Reranker"
 
@@ -698,7 +698,7 @@ You can pass multi-modal inputs to scoring models by passing `content` including
             "http://localhost:8000/v1/score",
             json={
                 "model": "jinaai/jina-reranker-m0",
-                "text_1":"slm markdown",
+                "text_1": "slm markdown",
                 "text_2": {
                   "content": [
                           {
@@ -743,7 +743,7 @@ The following extra parameters are supported:
 ### Re-rank API
 
 Our Re-rank API can apply an embedding model or a cross-encoder model to predict relevant scores between a single query, and
-each of a list of documents. Usually, the score for a sentence pair refers to the similarity between two sentences or multi-modal inputs(image, etc.), on a scale of 0 to 1.
+each of a list of documents. Usually, the score for a sentence pair refers to the similarity between two sentences or multi-modal inputs (image, etc.), on a scale of 0 to 1.
 
 You can find the documentation for cross encoder models at [sbert.net](https://www.sbert.net/docs/package_reference/cross_encoder/cross_encoder.html).
 
