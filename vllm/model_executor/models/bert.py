@@ -33,8 +33,6 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors, PoolerOutput
-from vllm.transformers_utils.config import (
-    get_cross_encoder_activation_function)
 
 from .interfaces import (MultiModalEmbeddings, SupportsCrossEncoding,
                          SupportsMultiModal, SupportsQuant)
@@ -618,9 +616,6 @@ class BertForSequenceClassification(nn.Module, SupportsCrossEncoding,
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
-
-        self.default_activation_function = \
-            get_cross_encoder_activation_function(config)
 
         self.num_labels = config.num_labels
         self.bert = BertModel(vllm_config=vllm_config,

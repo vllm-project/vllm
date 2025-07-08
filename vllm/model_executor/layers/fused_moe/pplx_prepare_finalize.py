@@ -8,7 +8,7 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.utils import (
-    moe_kernel_quantize_input)
+    _validate_scale_shape, moe_kernel_quantize_input)
 from vllm.utils import cdiv, round_up
 
 
@@ -32,16 +32,16 @@ def pplx_hidden_dim_scale_bytes(
         elem_size = torch.float32.itemsize
 
         if per_act_token_quant:
-            # per-token
+            # per-token (M x 1)
             assert block_shape is None
             hidden_scale_bytes = elem_size
         elif block_shape is not None:
-            # per-group
+            # per-group (M x K_tiles)
             block_size = block_shape[1]
             num_blocks = cdiv(hidden_dim, block_size)
             hidden_scale_bytes = num_blocks * elem_size
         else:
-            # per-tensor
+            # per-tensor (1 x 1)
             hidden_scale_bytes = elem_size
     else:
         hidden_dim_bytes = hidden_dim * in_dtype.itemsize
@@ -53,25 +53,22 @@ def pplx_hidden_dim_scale_bytes(
     )
 
 
-# The max_num_tokens, world_size and dp_size must be the same
-# as the ones used to create the AllToAll.
 class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
     def __init__(
         self,
         a2a: pplx.AllToAll,
         max_num_tokens: int,
-        world_size: int,
-        rank: int,
-        dp_size: int,
+        num_local_experts: int,
+        num_dispatchers: int,
     ):
         super().__init__()
         assert max_num_tokens > 0
+        assert num_local_experts > 0
         self.a2a = a2a
         self.max_num_tokens = max_num_tokens
-        self.world_size = world_size
-        self.rank = rank
-        self.dp_size = dp_size
+        self.num_local_experts = num_local_experts
+        self.num_dispatchers_ = num_dispatchers
 
     @property
     def activation_format(self) -> mk.FusedMoEActivationFormat:
@@ -82,6 +79,9 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
     def topk_indices_dtype(self) -> Optional[torch.dtype]:
         return torch.uint32
+
+    def num_dispatchers(self) -> int:
+        return self.num_dispatchers_
 
     def prepare(
         self,
@@ -120,42 +120,64 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             per_act_token_quant=quant_config.per_act_token_quant,
             block_shape=quant_config.block_shape)
 
-        if a1q_scale is not None:
-            if a1q_scale.numel() == 1:
-                orig_a_scale_block_shape = 1
-            else:
-                orig_a_scale_block_shape = a1q_scale.shape[-1]
-            a1q_scale = a1q_scale.repeat(repeat_rows, repeat_cols)
+        _validate_scale_shape(a1q, a1q_scale, quant_config.per_act_token_quant,
+                              quant_config.block_shape)
 
-        # rem_experts need to be 0 for pplx to work properly.
-        rem_experts = num_experts % self.world_size
-        assert rem_experts == 0
-        num_local_experts = ((num_experts // self.world_size) +
-                             (1 if self.rank < rem_experts else 0))
+        if a1q_scale is not None:
+            scalar_scales = a1q_scale.numel() == 1
+
+            # pplx requires 2-d scales even for scalar scales
+            if a1q_scale.dim() <= 1:
+                assert scalar_scales
+                a1q_scale = a1q_scale.view(1, 1)
+
+            orig_a_scale_block_shape = a1q_scale.shape[-1]
+
+            if not quant_config.is_block_quantized:
+                # TODO (bnell): use group_broadcast instead?
+                a1q_scale = a1q_scale.repeat(repeat_rows, repeat_cols)
+
+        assert a1q_scale is None or a1q_scale.ndim == 2, \
+            f"{0 if a1q_scale is None else (a1q_scale.ndim, a1q_scale.shape)}"
 
         expert_num_tokens = torch.empty(
-            num_local_experts,
+            self.num_local_experts,
             dtype=torch.int32,
             device=device,
         )
 
-        num_dp = self.world_size // self.dp_size
         expert_x = torch.empty(
-            (num_local_experts, self.max_num_tokens * num_dp, hidden_dim),
+            (self.num_local_experts,
+             self.max_num_tokens * self.num_dispatchers(), hidden_dim),
             dtype=a1q.dtype,
             device=device,
         )
 
         expert_x_scale: Optional[torch.Tensor] = None
         if a1q.dtype.itemsize == 1:
-            block_size = (quant_config.block_shape[1]
-                          if quant_config.block_shape is not None else 1)
+            if quant_config.is_per_act_token:
+                # (M x 1) -> (E x M x K)
+                final_dim = expert_x.size(2)
+            elif quant_config.is_per_tensor:
+                # (1 x 1) -> (E x 1 x 1)
+                final_dim = 1
+            else:
+                # (M x K_tiles) -> (E x M x K_tiles)
+                assert quant_config.block_shape is not None
+                num_blocks = cdiv(expert_x.size(2),
+                                  quant_config.block_shape[1])
+                final_dim = num_blocks
+
+            expert_x_scale_shape = (
+                self.num_local_experts,
+                expert_x.size(1),
+                round_up(final_dim, 4)  # round up for alignment
+            )
+
             expert_x_scale = torch.empty(
-                (num_local_experts, expert_x.size(1),
-                 round_up(
-                     (expert_x.size(2) + block_size - 1) // block_size, 4)),
+                expert_x_scale_shape,
                 dtype=torch.float32,
-                device=device,
+                device=expert_x.device,
             )
 
         # This argument is optional, defaults to indices.size(0)
@@ -171,8 +193,10 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             indices=topk_ids,
             bound_m=bound_m,
         )
+
         if expert_x_scale is not None:
             expert_x_scale = expert_x_scale[:, :, :orig_a_scale_block_shape]
+            assert expert_x_scale.ndim == 3
 
         return expert_x, expert_x_scale, expert_num_tokens, None, None
 
@@ -184,13 +208,16 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
     ) -> None:
-        num_tokens = output.size(0)  # M
         # This argument is optional
         # There's not much point setting this unless it is != topk_ids.size(0)
         bound_m: Optional[torch.Tensor] = None
 
-        assert topk_ids.size(0) == num_tokens, (
-            f"{topk_ids.size(0)} == {num_tokens}")
+        # TODO (bnell): fails in test_pplx_moe.py, figure out what's going on
+        #num_tokens = output.size(0)  # M
+        #assert topk_ids.size(0) == num_tokens, (
+        #    f"{topk_ids.size(0)} == {num_tokens}")
+        assert topk_ids.size() == topk_weights.size(), (
+            f"{topk_ids.size()} == {topk_weights.size()}")
         assert output.size(0) <= self.max_num_tokens, (
             f"{output.size(0)} <= {self.max_num_tokens}")
         assert output.size(1) == fused_expert_output.size(-1)

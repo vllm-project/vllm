@@ -1,7 +1,4 @@
----
-title: Production stack
----
-[](){ #deployment-production-stack }
+# Production stack
 
 Deploying vLLM on Kubernetes is a scalable and efficient way to serve machine learning models. This guide walks you through deploying vLLM using the [vLLM production stack](https://github.com/vllm-project/production-stack). Born out of a Berkeley-UChicago collaboration, [vLLM production stack](https://github.com/vllm-project/production-stack) is an officially released, production-optimized codebase under the [vLLM project](https://github.com/vllm-project), designed for LLM deployment with:
 
@@ -60,7 +57,7 @@ And then you can send out a query to the OpenAI-compatible API to check the avai
 curl -o- http://localhost:30080/models
 ```
 
-??? Output
+??? console "Output"
 
     ```json
     {
@@ -89,7 +86,7 @@ curl -X POST http://localhost:30080/completions \
   }'
 ```
 
-??? Output
+??? console "Output"
 
     ```json
     {
@@ -121,7 +118,7 @@ sudo helm uninstall vllm
 
 The core vLLM production stack configuration is managed with YAML. Here is the example configuration used in the installation above:
 
-??? Yaml
+??? code "Yaml"
 
     ```yaml
     servingEngineSpec:

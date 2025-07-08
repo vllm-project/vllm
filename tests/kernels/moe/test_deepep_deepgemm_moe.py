@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 Test DeepEP + DeepGEMM integration
 DeepGEMM are gemm kernels specialized for the
@@ -148,8 +149,7 @@ def make_ll_modular_kernel(pg: ProcessGroup, pgi: ProcessGroupInfo,
 
     fused_experts = BatchedDeepGemmExperts(
         max_num_tokens=max_tokens_per_rank,
-        world_size=pgi.world_size,
-        dp_size=dp_size,
+        num_dispatchers=pgi.world_size // dp_size,
         block_shape=test_config.block_size,
         per_act_token_quant=test_config.per_act_token_quant)
     mk = FusedMoEModularKernel(prepare_finalize=a2a,

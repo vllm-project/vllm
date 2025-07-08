@@ -46,8 +46,10 @@ class ServeSubcommand(CLISubcommand):
             run_headless(args)
         else:
             if args.data_parallel_start_rank:
-                raise ValueError("data_parallel_start_rank is only "
-                                 "applicable in headless mode")
+                raise ValueError(
+                    "data_parallel_start_rank is only applicable "
+                    "in headless mode. "
+                    "Add --headless flag to enable headless mode.")
             if args.api_server_count > 1:
                 run_multi_api_server(args)
             else:
@@ -81,7 +83,8 @@ class ServeSubcommand(CLISubcommand):
             '-dpr',
             type=int,
             default=0,
-            help='Starting data parallel rank for secondary nodes.')
+            help="Starting data parallel rank for secondary nodes. "
+            "Requires --headless.")
         serve_parser.add_argument('--api-server-count',
                                   '-asc',
                                   type=int,
@@ -97,7 +100,7 @@ class ServeSubcommand(CLISubcommand):
             "https://docs.vllm.ai/en/latest/configuration/serve_args.html")
 
         serve_parser = make_arg_parser(serve_parser)
-        show_filtered_argument_or_group_from_help(serve_parser, "serve")
+        show_filtered_argument_or_group_from_help(serve_parser, ["serve"])
         serve_parser.epilog = VLLM_SUBCMD_PARSER_EPILOG
         return serve_parser
 
@@ -119,15 +122,15 @@ def run_headless(args: argparse.Namespace):
     if not envs.VLLM_USE_V1:
         raise ValueError("Headless mode is only supported for V1")
 
+    if engine_args.data_parallel_rank is not None:
+        raise ValueError("data_parallel_rank is not applicable in "
+                         "headless mode")
+
     parallel_config = vllm_config.parallel_config
     local_engine_count = parallel_config.data_parallel_size_local
 
     if local_engine_count <= 0:
         raise ValueError("data_parallel_size_local must be > 0 in "
-                         "headless mode")
-
-    if parallel_config.data_parallel_rank is not None:
-        raise ValueError("data_parallel_rank is not applicable in "
                          "headless mode")
 
     host = parallel_config.data_parallel_master_ip
