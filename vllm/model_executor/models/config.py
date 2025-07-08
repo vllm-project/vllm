@@ -339,27 +339,28 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
         attn_block_size = 16 * cdiv(mamba_page_size,
                                     16 * attn_page_size_1_token)
 
-        logger.info(
-            "Setting default attention block size to %d tokens "
-            "to ensure that attention page size is >= mamba page size.",
-            attn_block_size)
-
-        mamba_page_size_padded = attn_block_size * attn_page_size_1_token
-
-        mamba_padding_pct = 100 * (mamba_page_size_padded -
-                                   mamba_page_size) / mamba_page_size
-
-        logger.info(
-            "Padding mamba page size by %.2f%% to ensure "
-            "that mamba page size and attention page size are "
-            "exactly equal.", mamba_padding_pct)
-
         # override attention block size if either (a) the
         # user has not set it or (b) the user has set it
         # too small.
-        if (cache_config.block_size is not None
-                and cache_config.block_size < attn_block_size):
+        if (cache_config.block_size is None
+                or cache_config.block_size < attn_block_size):
             cache_config.block_size = attn_block_size
+            logger.info(
+                "Setting attention block size to %d tokens "
+                "to ensure that attention page size is >= mamba page size.",
+                attn_block_size)
+
+        # mamba page size will be padded up to match attention page size
+        mamba_page_size_padded = \
+            cache_config.block_size * attn_page_size_1_token
+
+        if mamba_page_size_padded > mamba_page_size:
+            mamba_padding_pct = 100 * (mamba_page_size_padded -
+                                       mamba_page_size) / mamba_page_size
+            logger.info(
+                "Padding mamba page size by %.2f%% to ensure "
+                "that mamba page size and attention page size are "
+                "exactly equal.", mamba_padding_pct)
 
 
 MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
