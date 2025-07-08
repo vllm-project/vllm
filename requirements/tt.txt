@@ -5,3 +5,5 @@
 torch==2.5.0+cpu
 torchvision==0.20.0
 torchaudio==2.5.0
+# Pinned down in https://github.com/tenstorrent/vllm/pull/127 to match tt-metal's requirements
+numpy>=1.24.4,<2
