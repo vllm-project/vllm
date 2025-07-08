@@ -14,7 +14,8 @@ This describes how to set up your environment to run vLLM on Neuron.
 - Python: 3.9 or newer
 - Pytorch 2.5/2.6
 - Accelerator: NeuronCore-v2 (in trn1/inf2 chips) or NeuronCore-v3 (in trn2 chips)
-- AWS Neuron SDK 2.23
+- AWS Neuron SDK 2.23.0 or greater
+Note: The latest AWS Neuron SDK 2.24.0 may only be installed via the AWS Neuron Fork. See details [below][installing-aws-fork].
 
 ## Configure a new environment
 
@@ -54,12 +55,15 @@ pip install -U -r requirements/neuron.txt
 VLLM_TARGET_DEVICE="neuron" pip install -e .
 ```
 
-AWS Neuron maintains a [Github fork of vLLM](https://github.com/aws-neuron/upstreaming-to-vllm/tree/neuron-2.23-vllm-v0.7.2) at
-<https://github.com/aws-neuron/upstreaming-to-vllm/tree/neuron-2.23-vllm-v0.7.2>, which contains several features in addition to what's
-available on vLLM V0. Please utilize the AWS Fork for the following features:
+All features up to Neuron 2.23.0 have been upstreamed to vLLM. To install Neuron 2.23.0, please refer to [Neuron 2.23 release artifacts](https://awsdocs-neuron.readthedocs-hosted.com/en/latest/release-notes/prev/content.html#neuron-2-23-0-05-20-2025).
 
-- Llama-3.2 multi-modal support
-- Multi-node distributed inference
+[](){ #installing-aws-fork }
+
+Alternatively, the latest Neuron 2.24 features are supported on an AWS Neuron maintained [Github fork of vLLM](https://github.com/aws-neuron/upstreaming-to-vllm/tree/neuron-2.24-vllm-v0.7.2) at
+<https://github.com/aws-neuron/upstreaming-to-vllm/tree/neuron-2.24-vllm-v0.7.2>. Please utilize the AWS fork for the following features:
+
+- [Prefix caching](https://awsdocs-neuron.readthedocs-hosted.com/en/latest/libraries/nxd-inference/developer_guides/feature-guide.html#prefix-caching-support)
+- Disaggregated inference
 
 Refer to [vLLM User Guide for NxD Inference](https://awsdocs-neuron.readthedocs-hosted.com/en/latest/libraries/nxd-inference/developer_guides/vllm-user-guide.html)
     for more details and usage examples.
@@ -67,9 +71,9 @@ Refer to [vLLM User Guide for NxD Inference](https://awsdocs-neuron.readthedocs-
 To install the AWS Neuron fork, run the following:
 
 ```bash
-git clone -b neuron-2.23-vllm-v0.7.2 https://github.com/aws-neuron/upstreaming-to-vllm.git
+git clone -b neuron-2.24-vllm-v0.7.2 https://github.com/aws-neuron/upstreaming-to-vllm.git
 cd upstreaming-to-vllm
-pip install -r requirements/neuron.txt
+pip install -r requirements-neuron.txt
 VLLM_TARGET_DEVICE="neuron" pip install -e .
 ```
 
@@ -112,7 +116,7 @@ or when launching vLLM from the CLI, pass
 --override-neuron-config "{\"enable_bucketing\":false}"
 ```
 
-Alternatively, users can directly call the NxDI library to trace and compile your model, then load the pre-compiled artifacts
+Alternatively, users can directly call the NxD Inference library to trace and compile your model, then load the pre-compiled artifacts
 (via `NEURON_COMPILED_ARTIFACTS` environment variable) in vLLM to run inference workloads.
 
 ### Known limitations
@@ -125,11 +129,6 @@ Alternatively, users can directly call the NxDI library to trace and compile you
   to quantize and compile your model using NxD Inference, and then load the compiled artifacts into vLLM.
 - Multi-LoRA serving: NxD Inference only supports loading of LoRA adapters at server startup. Dynamic loading of LoRA adapters at
   runtime is not currently supported. Refer to [multi-lora example](https://github.com/aws-neuron/upstreaming-to-vllm/blob/neuron-2.23-vllm-v0.7.2/examples/offline_inference/neuron_multi_lora.py)
-- Multi-modal support: multi-modal support is only available through the AWS Neuron fork. This feature has not been upstreamed
-  to vLLM main because NxD Inference currently relies on certain adaptations to the core vLLM logic to support this feature.
-- Multi-node support: distributed inference across multiple Trainium/Inferentia instances is only supported on the AWS Neuron fork. Refer
-  to this [multi-node example](https://github.com/aws-neuron/upstreaming-to-vllm/tree/neuron-2.23-vllm-v0.7.2/examples/neuron/multi_node)
-  to run. Note that tensor parallelism (distributed inference across NeuronCores) is available in vLLM main.
 - Known edge case bug in speculative decoding: An edge case failure may occur in speculative decoding when sequence length approaches
   max model length (e.g. when requesting max tokens up to the max model length and ignoring eos). In this scenario, vLLM may attempt
   to allocate an additional block to ensure there is enough memory for number of lookahead slots, but since we do not have good support
