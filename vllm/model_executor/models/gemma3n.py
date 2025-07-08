@@ -785,10 +785,9 @@ class Gemma3nForCausalLM(nn.Module):
         self.config = config
         self.cache_config = vllm_config.cache_config
         self.model = Gemma3nTextModel(vllm_config=vllm_config,
-                                  prefix=maybe_prefix(prefix, "model"))
+                                      prefix=maybe_prefix(prefix, "model"))
         self.logits_processor = LogitsProcessor(
-            config.vocab_size,
-            soft_cap=config.final_logit_softcapping)
+            config.vocab_size, soft_cap=config.final_logit_softcapping)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
@@ -810,8 +809,8 @@ class Gemma3nForCausalLM(nn.Module):
         hidden_states: torch.Tensor,
         sampling_metadata: Optional[SamplingMetadata],
     ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.model.embed_tokens,
-                                       hidden_states, sampling_metadata)
+        logits = self.logits_processor(self.model.embed_tokens, hidden_states,
+                                       sampling_metadata)
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str,
