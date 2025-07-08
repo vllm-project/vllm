@@ -1089,7 +1089,7 @@ class EngineArgs:
             # Disable chunked prefill for POWER (ppc64le) CPUs in V1
             if current_platform.is_cpu(
             ) and current_platform.get_cpu_architecture(
-            ) == CpuArchEnum.POWERPC:
+            ) in (CpuArchEnum.POWERPC, CpuArchEnum.ARM):
                 logger.info("Chunked prefill is not supported for POWER CPUs; "
                             "disabling it for V1 backend.")
                 self.enable_chunked_prefill = False
