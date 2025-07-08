@@ -14,6 +14,7 @@ from tests.v1.sample.utils import (LogitsprocsTestFakes, create_fake_logits,
                                    create_prompt_tokens_tensor,
                                    fake_apply_logitsprocs,
                                    fake_update_logitsprocs_state)
+from vllm.config import VllmConfig
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.utils import is_pin_memory_available
@@ -23,9 +24,10 @@ from vllm.v1.sample.logits_processor import (BatchUpdate, BatchUpdateBuilder,
                                              LogitsProcessor,
                                              MinPLogitsProcessor,
                                              MinTokensLogitsProcessor,
-                                             MoveDirectionality,
-                                             init_builtin_logitsprocs)
+                                             MoveDirectionality)
 # yapf: enable
+from vllm.v1.sample.logits_processor.load import build_logitsprocs
+from vllm.v1.sample.logits_processor.utils import LogitProcessorCtorArgs
 from vllm.v1.sample.metadata import SamplingMetadata
 
 PIN_MEMORY_AVAILABLE = is_pin_memory_available()
@@ -71,6 +73,15 @@ class LogitsProcsRequestParams:
         return f"MyClass({summ})"
 
 
+def _generate_fake_logitsprocs_args(
+        device: torch.device) -> LogitProcessorCtorArgs:
+    return LogitProcessorCtorArgs(
+        vllm_config=VllmConfig(max_num_reqs=MAX_NUM_REQS),
+        device=device,
+        is_pin_memory=PIN_MEMORY_AVAILABLE,
+    )
+
+
 def _generate_fake_sampling_metadata(
     num_output_tokens: int,
     batch_size: int,
@@ -88,10 +99,8 @@ def _generate_fake_sampling_metadata(
                               vocab_size,
                               size=np.random.randint(
                                   1, MAX_NUM_PROMPT_TOKENS)).tolist())
-    logitsprocs = init_builtin_logitsprocs(
-        pin_memory_available=PIN_MEMORY_AVAILABLE,
-        max_num_reqs=MAX_NUM_REQS + 1,
-        device=device)
+    logitsprocs = build_logitsprocs(
+        _generate_fake_logitsprocs_args(device=device))
 
     fake_sampling_metadata = SamplingMetadata(
         temperature=torch.full((batch_size, ), 0.0),

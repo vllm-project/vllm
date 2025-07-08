@@ -178,6 +178,8 @@ class LogitsProcessorsManager:
     def __init__(
             self,
             logitsprocs: Optional[Iterator["LogitsProcessor"]] = None) -> None:
+        self.argmax_invariant = []
+        self.non_argmax_invariant = []
         if logitsprocs:
             for logitproc in logitsprocs:
                 (self.argmax_invariant if logitproc.is_argmax_invariant() else
