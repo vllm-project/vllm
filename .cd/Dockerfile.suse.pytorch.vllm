@@ -42,9 +42,8 @@ RUN pip3 install datasets pandas
 RUN mkdir -p /root/scripts/
 COPY templates /root/scripts/templates/
 COPY entrypoints /root/scripts/entrypoints/
-COPY server_autoconfig /root/scripts/server_autoconfig/
-COPY benchmark_configurations /root/scripts/benchmark_configurations/
-COPY server_configurations /root/scripts/server_configurations/
+COPY server /root/scripts/server/
+COPY benchmark /root/scripts/benchmark/
 WORKDIR /root/scripts
 
 # Set entrypoint script
