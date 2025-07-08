@@ -40,17 +40,20 @@ def load_logitsprocs_fqns(
 
     constructors: list[Callable[[], LogitsProcessor]] = []
     for fqn in fqns:
-        logger.info(" - Loading logits processor %s", fqn)
-        module_path, qualname = fqn.split(":")
-        # Load module
-        module = importlib.import_module(module_path)
-        # Walk down dotted path to get logitproc constructor
-        obj = module
-        for attr in qualname.split("."):
-            obj = getattr(obj, attr)
-        if not callable(obj):
-            raise ValueError(f"{fqn} does not point to a Callable.")
-        constructors.append(obj)
+        logger.info("Loading logits processor %s", fqn)
+        try:
+            module_path, qualname = fqn.split(":")
+            # Load module
+            module = importlib.import_module(module_path)
+            # Walk down dotted name to get logitproc constructor
+            obj = module
+            for attr in qualname.split("."):
+                obj = getattr(obj, attr)
+            if not callable(obj):
+                raise ValueError(f"{fqn} is not a Callable.")
+            constructors.append(obj)
+        except Exception:
+            logger.exception("Failed to load logits processor %s", fqn)
 
     return constructors
 
@@ -89,8 +92,7 @@ def load_logitsprocs_entrypoints(
     for entrypoint in entrypoints:
         if entrypoint not in installed_logitsprocs_plugins:
             raise ValueError(
-                f"Logit processor entrypoint string {entrypoint} does not "
-                "name a valid entrypoint.")
+                f"Invalid logit processor entrypoint string {entrypoint}.")
         log_level("Loading plugin %s", entrypoint)
 
         try:
