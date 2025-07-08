@@ -3843,6 +3843,11 @@ class KVTransferConfig:
         if self.kv_connector is not None and self.kv_role is None:
             raise ValueError("Please specify kv_disagg_role when kv_connector "
                              f"is set, supported roles are {get_args(KVRole)}")
+        ktcs = self.kv_connector_extra_config.get("connectors")
+        if ktcs is not None:
+            for i, ktc in enumerate(ktcs):
+                temp_config = KVTransferConfig(**ktc)
+                ktcs[i] = asdict(temp_config)
 
     @property
     def is_kv_transfer_instance(self) -> bool:
