@@ -23,7 +23,6 @@ def main():
     # Create an LLM.
     llm = LLM(
         model="facebook/opt-125m",
-        # logits_processors_entrypoints=["register_lp"],
         logits_processors_fqns=[
             "vllm.v1.sample.logits_processor.impls:DummyLogitsProcessor"
         ],
