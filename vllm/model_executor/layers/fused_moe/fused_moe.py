@@ -27,6 +27,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils import direct_register_custom_op
+from vllm.utils.deep_gemm import is_new_deep_gemm_api_on_b200
 
 from .rocm_aiter_fused_moe import is_rocm_aiter_moe_enabled
 
@@ -1153,8 +1154,9 @@ def fused_experts(hidden_states: torch.Tensor,
     # For now, disable DeepGemm for small N (<= 512) until better
     # permute/unpermute ops are available.
     N = w1.size(1)
-    if (allow_deep_gemm and use_fp8_w8a8 and N > 512
-            and _valid_deep_gemm(hidden_states, w1, w2)):
+    if (allow_deep_gemm and use_fp8_w8a8 and
+        (N > 512 and _valid_deep_gemm(hidden_states, w1, w2))
+            or is_new_deep_gemm_api_on_b200()):
         assert apply_router_weight_on_input is False
         return deep_gemm_moe_fp8(
             hidden_states=hidden_states,
