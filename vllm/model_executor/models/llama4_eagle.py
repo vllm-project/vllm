@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable
 from typing import Optional
@@ -177,10 +178,8 @@ class EagleLlama4ForCausalLM(Llama4ForCausalLM):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return self.model(input_ids, positions, hidden_states)
 
-    def load_weights(
-        self,
-        weights: Iterable[tuple[str, torch.Tensor]]
-    ) -> None:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> None:
         loader = AutoWeightsLoader(
             self,
             # lm_head is tied with target model (Llama4ForCausalLM)
