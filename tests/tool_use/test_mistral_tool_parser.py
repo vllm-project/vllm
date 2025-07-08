@@ -471,7 +471,7 @@ def test_extract_tool_calls_streaming_pre_v11_tokenizer(
         ),
         (
             [("add_two_strings", '{"a": "3", "b": "4"}')],
-            # [TOOL_CALLS]add{"a": "3", "b": "4"}
+            # [TOOL_CALLS]add_two_strings{"a": "3", "b": "4"}
             [
                 ToolCall(function=FunctionCall(
                     name="add_two_strings",
