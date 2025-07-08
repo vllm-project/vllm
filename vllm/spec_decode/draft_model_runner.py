@@ -137,7 +137,6 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
             1. Only decodes
             2. Only flash-attn
             3. No LORA
-            4. No prompt_adapter_config
         """
         if not allow_gpu_advance_step:
             return False
@@ -152,11 +151,7 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
             return False
 
         # TODO: Add support for LORA
-        if self.lora_config:
-            return False
-
-        # TODO: Add soft-tuning prompt adapter support
-        return not self.prompt_adapter_config
+        return not self.lora_config
 
     def set_indices_of_seq_with_bonus_tokens(self,
                                              indices_of_seq_with_bonus_tokens):
@@ -199,9 +194,6 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
             # Sanity
             if self.lora_config is not None:
                 raise ValueError("TP1DraftModelRunner has no support for LORA")
-            if self.prompt_adapter_config is not None:
-                raise ValueError("TP1DraftModelRunner has no support for "
-                                 "prompt_adapter_config")
             if model_input.inputs_embeds is not None:
                 raise ValueError("TP1DraftModelRunner has no support for "
                                  "inputs_embeds")
@@ -215,13 +207,6 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
                 assert model_input.lora_mapping is not None
                 self.set_active_loras(model_input.lora_requests,
                                       model_input.lora_mapping)
-
-            if self.prompt_adapter_config:
-                assert model_input.prompt_adapter_requests is not None
-                assert model_input.prompt_adapter_mapping is not None
-                self.set_active_prompt_adapters(
-                    model_input.prompt_adapter_requests,
-                    model_input.prompt_adapter_mapping)
 
             self.attn_state.begin_forward(model_input)
 

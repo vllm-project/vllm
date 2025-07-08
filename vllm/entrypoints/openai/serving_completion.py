@@ -113,10 +113,7 @@ class OpenAIServingCompletion(OpenAIServing):
             raw_request.state.request_metadata = request_metadata
 
         try:
-            (
-                lora_request,
-                prompt_adapter_request,
-            ) = self._maybe_get_adapters(request)
+            lora_request = self._maybe_get_adapters(request)
 
             tokenizer = await self.engine_client.get_tokenizer(lora_request)
 
@@ -184,8 +181,7 @@ class OpenAIServingCompletion(OpenAIServing):
                 self._log_inputs(request_id_item,
                                  request_prompts[i],
                                  params=sampling_params,
-                                 lora_request=lora_request,
-                                 prompt_adapter_request=prompt_adapter_request)
+                                 lora_request=lora_request)
 
                 trace_headers = (None if raw_request is None else await
                                  self._get_trace_headers(raw_request.headers))
@@ -208,7 +204,6 @@ class OpenAIServingCompletion(OpenAIServing):
                         sampling_params,
                         request_id_item,
                         lora_request=lora_request,
-                        prompt_adapter_request=prompt_adapter_request,
                         trace_headers=trace_headers,
                         priority=request.priority,
                     )

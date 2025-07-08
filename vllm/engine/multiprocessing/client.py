@@ -45,7 +45,6 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.outputs import PoolingRequestOutput, RequestOutput
-from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.utils import Device
@@ -448,7 +447,6 @@ class MQLLMEngineClient(EngineClient):
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
     ) -> AsyncGenerator[RequestOutput, None]:
         """Generate outputs for a request.
@@ -465,8 +463,6 @@ class MQLLMEngineClient(EngineClient):
             request_id: The unique id of the request.
             lora_request: LoRA request to use for generation, if any.
             trace_headers: OpenTelemetry trace headers.
-            prompt_adapter_request: Prompt Adapter request to use
-                                            for generation, if any.
             priority: Priority of the request (lower means earlier handling).
                 Any priority other than 0 will lead to an error if the
                 scheduling policy is not "priority".
@@ -474,8 +470,7 @@ class MQLLMEngineClient(EngineClient):
         return cast(
             AsyncGenerator[RequestOutput, None],
             self._process_request(prompt, sampling_params, request_id,
-                                  lora_request, trace_headers,
-                                  prompt_adapter_request, priority))
+                                  lora_request, trace_headers, priority))
 
     def encode(
         self,
@@ -521,7 +516,6 @@ class MQLLMEngineClient(EngineClient):
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
     ) -> Union[AsyncGenerator[RequestOutput, None], AsyncGenerator[
             PoolingRequestOutput, None]]:
@@ -575,7 +569,6 @@ class MQLLMEngineClient(EngineClient):
                     request_id=request_id,
                     lora_request=lora_request,
                     trace_headers=trace_headers,
-                    prompt_adapter_request=prompt_adapter_request,
                     priority=priority,
                 ))
 

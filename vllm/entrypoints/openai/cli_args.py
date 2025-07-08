@@ -16,8 +16,7 @@ import vllm.envs as envs
 from vllm.engine.arg_utils import AsyncEngineArgs, optional_type
 from vllm.entrypoints.chat_utils import (ChatTemplateContentFormatOption,
                                          validate_chat_template)
-from vllm.entrypoints.openai.serving_models import (LoRAModulePath,
-                                                    PromptAdapterPath)
+from vllm.entrypoints.openai.serving_models import LoRAModulePath
 from vllm.entrypoints.openai.tool_parsers import ToolParserManager
 from vllm.logger import init_logger
 from vllm.utils import FlexibleArgumentParser
@@ -59,27 +58,6 @@ class LoRAParserAction(argparse.Action):
                         f"Invalid fields for --lora-modules: {item} - {str(e)}"
                     )
         setattr(namespace, self.dest, lora_list)
-
-
-class PromptAdapterParserAction(argparse.Action):
-
-    def __call__(
-        self,
-        parser: argparse.ArgumentParser,
-        namespace: argparse.Namespace,
-        values: Optional[Union[str, Sequence[str]]],
-        option_string: Optional[str] = None,
-    ):
-        if values is None:
-            values = []
-        if isinstance(values, str):
-            raise TypeError("Expected values to be a list")
-
-        adapter_list: list[PromptAdapterPath] = []
-        for item in values:
-            name, path = item.split('=')
-            adapter_list.append(PromptAdapterPath(name, path))
-        setattr(namespace, self.dest, adapter_list)
 
 
 def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
@@ -129,14 +107,6 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         "Example (new format): "
         "``{\"name\": \"name\", \"path\": \"lora_path\", "
         "\"base_model_name\": \"id\"}``")
-    parser.add_argument(
-        "--prompt-adapters",
-        type=optional_type(str),
-        default=None,
-        nargs='+',
-        action=PromptAdapterParserAction,
-        help="Prompt adapter configurations in the format name=path. "
-        "Multiple adapters can be specified.")
     parser.add_argument("--chat-template",
                         type=optional_type(str),
                         default=None,
@@ -311,9 +281,6 @@ def validate_parsed_serve_args(args: argparse.Namespace):
     if args.enable_auto_tool_choice and not args.tool_call_parser:
         raise TypeError("Error: --enable-auto-tool-choice requires "
                         "--tool-call-parser")
-    if args.enable_prompt_embeds and args.enable_prompt_adapter:
-        raise ValueError(
-            "Cannot use prompt embeds and prompt adapter at the same time.")
 
 
 def log_non_default_args(args: argparse.Namespace):
