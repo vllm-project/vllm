@@ -23,7 +23,8 @@ def test_can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch):
 
     # FIXME: Possible memory leak in the previous tests?
     if model_arch in ("GraniteSpeechForConditionalGeneration",
-                      "KimiVLForConditionalGeneration"):
+                      "KimiVLForConditionalGeneration",
+                      "EagleLlama4ForCausalLM"):
         pytest.skip("Avoid OOM")
 
     # Avoid OOM and reduce initialization time by only using 1 layer
