@@ -50,8 +50,8 @@ class CompressedTensors24(CompressedTensorsScheme):
             and self.model_compressor.sparsity_config.format
             == CompressionFormat.sparse_24_bitmask.value)
 
-        FP8_DTYPE = current_platform.fp8_dtype()
-        if quantized and self._get_quant_dtype() == FP8_DTYPE:
+        if quantized and input_quant is not None and \
+                self._get_quant_dtype() == current_platform.fp8_dtype():
             static = not input_quant.dynamic
             g_shape = GroupShape.PER_TENSOR if static else GroupShape.PER_TOKEN
             self.quant_fp8 = QuantFP8(static, g_shape)
