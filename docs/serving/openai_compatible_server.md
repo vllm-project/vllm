@@ -448,7 +448,7 @@ curl -v "http://127.0.0.1:8000/classify" \
 
 ??? console "Response"
 
-    ```bash
+    ```json
     {
       "id": "classify-7c87cac407b749a6935d8c7ce2a8fba2",
       "object": "list",
@@ -496,7 +496,7 @@ curl -v "http://127.0.0.1:8000/classify" \
 
 ??? console "Response"
 
-    ```bash
+    ```json
     {
       "id": "classify-9bf17f2847b046c7b2d5495f4b4f9682",
       "object": "list",
@@ -566,7 +566,7 @@ curl -X 'POST' \
 
 ??? console "Response"
 
-    ```bash
+    ```json
     {
       "id": "score-request-id",
       "object": "list",
@@ -608,7 +608,7 @@ The total number of pairs is `len(text_2)`.
 
 ??? console "Response"
 
-    ```bash
+    ```json
     {
       "id": "score-request-id",
       "object": "list",
@@ -657,7 +657,7 @@ The total number of pairs is `len(text_2)`.
 
 ??? console "Response"
 
-    ```bash
+    ```json
     {
       "id": "score-request-id",
       "object": "list",
@@ -736,7 +736,7 @@ Result documents will be sorted by relevance, and the `index` property can be us
 
 ??? console "Response"
 
-    ```bash
+    ```json
     {
       "id": "rerank-fae51b2b664d4ed38f5969b612edff77",
       "model": "BAAI/bge-reranker-base",
