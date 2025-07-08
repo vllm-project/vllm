@@ -156,50 +156,60 @@ class OpenAIServingModels:
             request: LoadLoRAAdapterRequest,
             base_model_name: Optional[str] = None
     ) -> Union[ErrorResponse, str]:
-        error_check_ret = await self._check_load_lora_adapter_request(request)
-        if error_check_ret is not None:
-            return error_check_ret
+        lora_name = request.lora_name
 
-        lora_name, lora_path = request.lora_name, request.lora_path
-        unique_id = self.lora_id_counter.inc(1)
-        lora_request = LoRARequest(lora_name=lora_name,
-                                   lora_int_id=unique_id,
-                                   lora_path=lora_path)
-        if base_model_name is not None and self.is_base_model(base_model_name):
-            lora_request.base_model_name = base_model_name
+        # Ensure atomicity based on the lora name
+        async with self.lora_resolver_lock[lora_name]:
+            error_check_ret = await self._check_load_lora_adapter_request(
+                request)
+            if error_check_ret is not None:
+                return error_check_ret
 
-        # Validate that the adapter can be loaded into the engine
-        # This will also pre-load it for incoming requests
-        try:
-            await self.engine_client.add_lora(lora_request)
-        except BaseException as e:
-            error_type = "BadRequestError"
-            status_code = HTTPStatus.BAD_REQUEST
-            if "No adapter found" in str(e):
-                error_type = "NotFoundError"
-                status_code = HTTPStatus.NOT_FOUND
+            lora_path = request.lora_path
+            unique_id = self.lora_id_counter.inc(1)
+            lora_request = LoRARequest(lora_name=lora_name,
+                                       lora_int_id=unique_id,
+                                       lora_path=lora_path)
+            if base_model_name is not None and self.is_base_model(
+                    base_model_name):
+                lora_request.base_model_name = base_model_name
 
-            return create_error_response(message=str(e),
-                                         err_type=error_type,
-                                         status_code=status_code)
+            # Validate that the adapter can be loaded into the engine
+            # This will also pre-load it for incoming requests
+            try:
+                await self.engine_client.add_lora(lora_request)
+            except BaseException as e:
+                error_type = "BadRequestError"
+                status_code = HTTPStatus.BAD_REQUEST
+                if "No adapter found" in str(e):
+                    error_type = "NotFoundError"
+                    status_code = HTTPStatus.NOT_FOUND
 
-        self.lora_requests[lora_name] = lora_request
-        logger.info("Loaded new LoRA adapter: name '%s', path '%s'", lora_name,
-                    lora_path)
-        return f"Success: LoRA adapter '{lora_name}' added successfully."
+                return create_error_response(message=str(e),
+                                             err_type=error_type,
+                                             status_code=status_code)
+
+            self.lora_requests[lora_name] = lora_request
+            logger.info("Loaded new LoRA adapter: name '%s', path '%s'",
+                        lora_name, lora_path)
+            return f"Success: LoRA adapter '{lora_name}' added successfully."
 
     async def unload_lora_adapter(
             self,
             request: UnloadLoRAAdapterRequest) -> Union[ErrorResponse, str]:
-        error_check_ret = await self._check_unload_lora_adapter_request(request
-                                                                        )
-        if error_check_ret is not None:
-            return error_check_ret
-
         lora_name = request.lora_name
-        del self.lora_requests[lora_name]
-        logger.info("Removed LoRA adapter: name '%s'", lora_name)
-        return f"Success: LoRA adapter '{lora_name}' removed successfully."
+
+        # Ensure atomicity based on the lora name
+        async with self.lora_resolver_lock[lora_name]:
+            error_check_ret = await self._check_unload_lora_adapter_request(
+                request)
+            if error_check_ret is not None:
+                return error_check_ret
+
+            # Safe to delete now since we hold the lock
+            del self.lora_requests[lora_name]
+            logger.info("Removed LoRA adapter: name '%s'", lora_name)
+            return f"Success: LoRA adapter '{lora_name}' removed successfully."
 
     async def _check_load_lora_adapter_request(
             self, request: LoadLoRAAdapterRequest) -> Optional[ErrorResponse]:
