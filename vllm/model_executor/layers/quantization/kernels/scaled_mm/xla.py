@@ -99,6 +99,8 @@ class XLAScaledMMLinearKernel(ScaledMMLinearKernel):
             quantize_activation=True,
             vmem_limit_bytes=96 * 1024 * 1024,
         )
+        if out.dtype != x.dtype:
+            out = out.to(x.dtype)
 
         # Explicitly capture control flow to make dynamo happy.
         # https://pytorch.org/docs/main/generated/exportdb/index.html#cond-branch-class-method # noqa: E501
