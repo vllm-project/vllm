@@ -25,7 +25,6 @@ def assert_scheduler_empty(scheduler: Scheduler):
     assert len(scheduler.running) == 0
     assert len(scheduler.finished_req_ids) == 0
     assert len(scheduler.finished_recving_kv_req_ids) == 0
-    assert len(scheduler._cached_reqs_data) == 0
 
     # EncoderCacheManager.
     assert len(scheduler.encoder_cache_manager.freed) == 0
@@ -150,6 +149,7 @@ def create_request(
         request_id=f"id-{request_id}",
         prompt_token_ids=prompt_token_ids,
         sampling_params=sampling_params,
+        pooling_params=None,
         multi_modal_inputs=None,
         multi_modal_placeholders=None,
         multi_modal_hashes=None,
@@ -183,6 +183,7 @@ def create_model_runner_output(
         spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
+        pooler_output=None,
         finished_sending=finished_sending,
         finished_recving=finished_recving,
     )

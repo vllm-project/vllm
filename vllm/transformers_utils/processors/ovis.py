@@ -68,7 +68,7 @@ class OvisProcessor(ProcessorMixin):
     """
 
     attributes = ["image_processor", "tokenizer"]
-    valid_kwargs = ["chat_template", "image_pad_token", "image_segement_len"]
+    valid_kwargs = ["chat_template", "image_pad_token", "image_segment_len"]
 
     image_processor_class = "AutoImageProcessor"
     tokenizer_class = "AutoTokenizer"

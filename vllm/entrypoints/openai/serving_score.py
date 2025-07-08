@@ -25,9 +25,7 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.outputs import PoolingRequestOutput, ScoringRequestOutput
 from vllm.prompt_adapter.request import PromptAdapterRequest
-from vllm.transformers_utils.tokenizer import (AnyTokenizer, MistralTokenizer,
-                                               PreTrainedTokenizer,
-                                               PreTrainedTokenizerFast)
+from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
 from vllm.utils import make_async, merge_async_iterators
 
 logger = init_logger(__name__)
@@ -50,7 +48,7 @@ class ServingScores(OpenAIServing):
 
     async def _embedding_score(
         self,
-        tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
+        tokenizer: AnyTokenizer,
         texts_1: list[str],
         texts_2: list[str],
         request: Union[RerankRequest, ScoreRequest],
@@ -141,7 +139,7 @@ class ServingScores(OpenAIServing):
 
     async def _cross_encoding_score(
         self,
-        tokenizer: Union[AnyTokenizer],
+        tokenizer: AnyTokenizer,
         texts_1: list[str],
         texts_2: list[str],
         request: Union[RerankRequest, ScoreRequest],
@@ -174,8 +172,8 @@ class ServingScores(OpenAIServing):
               for t1, t2 in input_pairs))
 
         for prompt_inputs, (t1, t2) in zip(tokenized_prompts, input_pairs):
-
-            request_prompt = f"{t1}{tokenizer.sep_token}{t2}"
+            sep_token = tokenizer.sep_token if tokenizer.sep_token else ''
+            request_prompt = f"{t1}{sep_token}{t2}"
 
             input_ids = prompt_inputs["input_ids"]
             text_token_prompt = \
@@ -190,7 +188,7 @@ class ServingScores(OpenAIServing):
         # Schedule the request and get the result generator.
         generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
 
-        pooling_params = request.to_pooling_params()
+        pooling_params = request.to_pooling_params(use_cross_encoder=True)
 
         for i, engine_prompt in enumerate(engine_prompts):
             request_id_item = f"{request_id}-{i}"

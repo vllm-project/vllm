@@ -26,18 +26,14 @@ import warnings
 from collections.abc import AsyncGenerator, Iterable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 import numpy as np
 from tqdm.asyncio import tqdm
 from transformers import PreTrainedTokenizerBase
 
-from vllm.benchmarks.datasets import (AIMODataset, ASRDataset, BurstGPTDataset,
-                                      ConversationDataset, HuggingFaceDataset,
-                                      InstructCoderDataset, MTBenchDataset,
-                                      NextEditPredictionDataset, RandomDataset,
-                                      SampleRequest, ShareGPTDataset,
-                                      SonnetDataset, VisionArenaDataset)
+from vllm.benchmarks.datasets import (SampleRequest, add_dataset_parser,
+                                      get_samples)
 from vllm.benchmarks.endpoint_request_func import (ASYNC_REQUEST_FUNCS,
                                                    OPENAI_COMPATIBLE_BACKENDS,
                                                    RequestFuncInput,
@@ -79,14 +75,39 @@ class BenchmarkMetrics:
     percentiles_e2el_ms: list[tuple[float, float]]
 
 
+def _get_current_request_rate(
+    ramp_up_strategy: Optional[Literal["linear", "exponential"]],
+    ramp_up_start_rps: Optional[int],
+    ramp_up_end_rps: Optional[int],
+    request_index: int,
+    total_requests: int,
+    request_rate: float,
+) -> float:
+    if (ramp_up_strategy and ramp_up_start_rps is not None
+            and ramp_up_end_rps is not None):
+        progress = request_index / max(total_requests - 1, 1)
+        if ramp_up_strategy == "linear":
+            increase = (ramp_up_end_rps - ramp_up_start_rps) * progress
+            return ramp_up_start_rps + increase
+        elif ramp_up_strategy == "exponential":
+            ratio = ramp_up_end_rps / ramp_up_start_rps
+            return ramp_up_start_rps * (ratio**progress)
+        else:
+            raise ValueError(f"Unknown ramp-up strategy: {ramp_up_strategy}")
+    return request_rate
+
+
 async def get_request(
     input_requests: list[SampleRequest],
     request_rate: float,
     burstiness: float = 1.0,
-) -> AsyncGenerator[SampleRequest, None]:
+    ramp_up_strategy: Optional[Literal["linear", "exponential"]] = None,
+    ramp_up_start_rps: Optional[int] = None,
+    ramp_up_end_rps: Optional[int] = None,
+) -> AsyncGenerator[tuple[SampleRequest, float], None]:
     """
     Asynchronously generates requests at a specified rate
-    with OPTIONAL burstiness.
+    with OPTIONAL burstiness and OPTIONAL ramp-up strategy.
 
     Args:
         input_requests:
@@ -101,20 +122,41 @@ async def get_request(
             A lower burstiness value (0 < burstiness < 1) results
             in more bursty requests, while a higher burstiness value
             (burstiness > 1) results in a more uniform arrival of requests.
+         ramp_up_strategy (optional):
+            The ramp-up strategy. Can be "linear" or "exponential".
+            If None, uses constant request rate (specified by request_rate).
+        ramp_up_start_rps (optional):
+            The starting request rate for ramp-up.
+        ramp_up_end_rps (optional):
+            The ending request rate for ramp-up.
     """
-    input_requests: Iterable[SampleRequest] = iter(input_requests)
-
-    # Calculate scale parameter theta to maintain the desired request_rate.
     assert burstiness > 0, (
         f"A positive burstiness factor is expected, but given {burstiness}.")
-    theta = 1.0 / (request_rate * burstiness)
+    # Convert to list to get length for ramp-up calculations
+    if isinstance(input_requests, Iterable) and not isinstance(
+            input_requests, list):
+        input_requests = list(input_requests)
+
+    total_requests = len(input_requests)
+    request_index = 0
 
     for request in input_requests:
-        yield request
+        current_request_rate = _get_current_request_rate(ramp_up_strategy,
+                                                      ramp_up_start_rps,
+                                                      ramp_up_end_rps,
+                                                      request_index,
+                                                      total_requests,
+                                                      request_rate)
 
-        if request_rate == float("inf"):
+        yield request, current_request_rate
+        
+        request_index += 1
+
+        if current_request_rate == float("inf"):
             # If the request rate is infinity, then we don't need to wait.
             continue
+
+        theta = 1.0 / (current_request_rate * burstiness)
 
         # Sample the request interval from the gamma distribution.
         # If burstiness is 1, it follows exponential distribution.
@@ -263,6 +305,9 @@ async def benchmark(
     max_concurrency: Optional[int],
     lora_modules: Optional[Iterable[str]],
     extra_body: Optional[dict],
+    ramp_up_strategy: Optional[Literal["linear", "exponential"]] = None,
+    ramp_up_start_rps: Optional[int] = None,
+    ramp_up_end_rps: Optional[int] = None,
 ):
     if endpoint_type in ASYNC_REQUEST_FUNCS:
         request_func = ASYNC_REQUEST_FUNCS[endpoint_type]
@@ -320,12 +365,16 @@ async def benchmark(
         if profile_output.success:
             print("Profiler started")
 
-    if burstiness == 1.0:
-        distribution = "Poisson process"
-    else:
-        distribution = "Gamma distribution"
+    distribution = ("Poisson process" if burstiness == 1.0 
+                   else "Gamma distribution")
 
-    print(f"Traffic request rate: {request_rate}")
+    if ramp_up_strategy is not None:
+        print(f"Traffic ramp-up strategy: {ramp_up_strategy}.")
+        print(f"Will increase RPS from {ramp_up_start_rps} to "
+              f"{ramp_up_end_rps} RPS over the duration of the benchmark.")
+    else:
+        print(f"Traffic request rate: {request_rate}")
+
     print(f"Burstiness factor: {burstiness} ({distribution})")
     print(f"Maximum request concurrency: {max_concurrency}")
 
@@ -348,7 +397,29 @@ async def benchmark(
 
     benchmark_start_time = time.perf_counter()
     tasks: list[asyncio.Task] = []
-    async for request in get_request(input_requests, request_rate, burstiness):
+
+    rps_change_events = []
+    last_int_rps = -1
+    if ramp_up_strategy is not None and ramp_up_start_rps is not None:
+        last_int_rps = ramp_up_start_rps
+        rps_change_events.append({
+            "rps": last_int_rps,
+            "timestamp": datetime.now().isoformat(),
+        })
+
+    async for request, current_request_rate in get_request(
+            input_requests, request_rate, burstiness, ramp_up_strategy,
+            ramp_up_start_rps, ramp_up_end_rps):
+        if ramp_up_strategy is not None:
+            current_int_rps = int(current_request_rate)
+            if current_int_rps > last_int_rps:
+                timestamp = datetime.now().isoformat()
+                for rps_val in range(last_int_rps + 1, current_int_rps + 1):
+                    rps_change_events.append({
+                        "rps": rps_val,
+                        "timestamp": timestamp
+                    })
+                last_int_rps = current_int_rps
         prompt, prompt_len, output_len, mm_content = (
             request.prompt,
             request.prompt_len,
@@ -427,7 +498,7 @@ async def benchmark(
         "total_input_tokens": metrics.total_input,
         "total_output_tokens": metrics.total_output,
         "request_throughput": metrics.request_throughput,
-        "request_goodput:":
+        "request_goodput":
         metrics.request_goodput if goodput_config_dict else None,
         "output_throughput": metrics.output_throughput,
         "total_token_throughput": metrics.total_token_throughput,
@@ -438,6 +509,9 @@ async def benchmark(
         "generated_texts": [output.generated_text for output in outputs],
         "errors": [output.error for output in outputs],
     }
+
+    if rps_change_events:
+        result["rps_change_events"] = rps_change_events
 
     def process_one_metric(
         # E.g., "ttft"
@@ -543,6 +617,7 @@ def save_to_pytorch_benchmark_format(args: argparse.Namespace,
 
 
 def add_cli_args(parser: argparse.ArgumentParser):
+    add_dataset_parser(parser)
     parser.add_argument(
         "--endpoint-type",
         type=str,
@@ -555,6 +630,12 @@ def add_cli_args(parser: argparse.ArgumentParser):
         default=None,
         help="The label (prefix) of the benchmark results. If not specified, "
         "the endpoint type will be used as the label.",
+    )
+    parser.add_argument(
+        "--backend",
+        type=str,
+        default="vllm",
+        choices=list(ASYNC_REQUEST_FUNCS.keys()),
     )
     parser.add_argument(
         "--base-url",
@@ -570,20 +651,6 @@ def add_cli_args(parser: argparse.ArgumentParser):
         type=str,
         default="/v1/completions",
         help="API endpoint.",
-    )
-    parser.add_argument(
-        "--dataset-name",
-        type=str,
-        default="random",
-        choices=["sharegpt", "burstgpt", "sonnet", "random", "hf"],
-        help="Name of the dataset to benchmark on.",
-    )
-    parser.add_argument(
-        "--dataset-path",
-        type=str,
-        default=None,
-        help="Path to the sharegpt/sonnet dataset. "
-        "Or the huggingface dataset ID if using HF dataset.",
     )
     parser.add_argument(
         "--max-concurrency",
@@ -611,12 +678,6 @@ def add_cli_args(parser: argparse.ArgumentParser):
         "Name or path of the tokenizer, if not using the default tokenizer.",  # noqa: E501
     )
     parser.add_argument("--use-beam-search", action="store_true")
-    parser.add_argument(
-        "--num-prompts",
-        type=int,
-        default=1000,
-        help="Number of prompts to process.",
-    )
     parser.add_argument(
         "--logprobs",
         type=int,
@@ -648,7 +709,6 @@ def add_cli_args(parser: argparse.ArgumentParser):
         "bursty requests. A higher burstiness value (burstiness > 1) "
         "results in a more uniform arrival of requests.",
     )
-    parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
         "--trust-remote-code",
         action="store_true",
@@ -739,89 +799,6 @@ def add_cli_args(parser: argparse.ArgumentParser):
         "and the blog: https://hao-ai-lab.github.io/blogs/distserve",
     )
 
-    # group for dataset specific arguments
-    sonnet_group = parser.add_argument_group("sonnet dataset options")
-    sonnet_group.add_argument(
-        "--sonnet-input-len",
-        type=int,
-        default=550,
-        help=
-        "Number of input tokens per request, used only for sonnet dataset.",
-    )
-    sonnet_group.add_argument(
-        "--sonnet-output-len",
-        type=int,
-        default=150,
-        help=
-        "Number of output tokens per request, used only for sonnet dataset.",
-    )
-    sonnet_group.add_argument(
-        "--sonnet-prefix-len",
-        type=int,
-        default=200,
-        help=
-        "Number of prefix tokens per request, used only for sonnet dataset.",
-    )
-
-    sharegpt_group = parser.add_argument_group("sharegpt dataset options")
-    sharegpt_group.add_argument(
-        "--sharegpt-output-len",
-        type=int,
-        default=None,
-        help="Output length for each request. Overrides the output length "
-        "from the ShareGPT dataset.",
-    )
-
-    random_group = parser.add_argument_group("random dataset options")
-    random_group.add_argument(
-        "--random-input-len",
-        type=int,
-        default=1024,
-        help=
-        "Number of input tokens per request, used only for random sampling.",
-    )
-    random_group.add_argument(
-        "--random-output-len",
-        type=int,
-        default=128,
-        help=
-        "Number of output tokens per request, used only for random sampling.",
-    )
-    random_group.add_argument(
-        "--random-range-ratio",
-        type=float,
-        default=0.0,
-        help="Range ratio for sampling input/output length, "
-        "used only for random sampling. Must be in the range [0, 1) to define "
-        "a symmetric sampling range"
-        "[length * (1 - range_ratio), length * (1 + range_ratio)].",
-    )
-    random_group.add_argument(
-        "--random-prefix-len",
-        type=int,
-        default=0,
-        help="Number of fixed prefix tokens before random "
-        " context. The length range of context in a random "
-        " request is [random-prefix-len, "
-        " random-prefix-len + random-prefix-len * random-range-ratio).")
-
-    hf_group = parser.add_argument_group("hf dataset options")
-    hf_group.add_argument("--hf-subset",
-                          type=str,
-                          default=None,
-                          help="Subset of the HF dataset.")
-    hf_group.add_argument("--hf-split",
-                          type=str,
-                          default=None,
-                          help="Split of the HF dataset.")
-    hf_group.add_argument(
-        "--hf-output-len",
-        type=int,
-        default=None,
-        help="Output length for each request. Overrides the output lengths "
-        "from the sampled HF dataset.",
-    )
-
     sampling_group = parser.add_argument_group("sampling parameters")
     sampling_group.add_argument(
         "--top-p",
@@ -878,11 +855,58 @@ def add_cli_args(parser: argparse.ArgumentParser):
                         "launching the server. For each request, the "
                         "script chooses a LoRA module at random.")
 
+    parser.add_argument(
+        "--ramp-up-strategy",
+        type=str,
+        default=None,
+        choices=["linear", "exponential"],
+        help="The ramp-up strategy. This would be used to "
+        "ramp up the request rate from initial RPS to final "
+        "RPS rate (specified by --ramp-up-start-rps and "
+        "--ramp-up-end-rps.) over the duration of the benchmark."
+    )
+    parser.add_argument(
+        "--ramp-up-start-rps",
+        type=int,
+        default=None,
+        help="The starting request rate for ramp-up (RPS). "
+        "Needs to be specified when --ramp-up-strategy is used.",
+    )
+    parser.add_argument(
+        "--ramp-up-end-rps",
+        type=int,
+        default=None,
+        help="The ending request rate for ramp-up (RPS). "
+        "Needs to be specified when --ramp-up-strategy is used.",
+    )
+
 
 def main(args: argparse.Namespace):
     print(args)
     random.seed(args.seed)
     np.random.seed(args.seed)
+
+    # Validate ramp-up arguments
+    if args.ramp_up_strategy is not None:
+        if args.request_rate != float("inf"):
+            raise ValueError(
+                "When using ramp-up, do not specify --request-rate. "
+                "The request rate will be controlled by ramp-up parameters. "
+                "Please remove the --request-rate argument."
+            )
+        if args.ramp_up_start_rps is None or args.ramp_up_end_rps is None:
+            raise ValueError(
+                "When using --ramp-up-strategy, both --ramp-up-start-rps and "
+                "--ramp-up-end-rps must be specified"
+            )
+        if args.ramp_up_start_rps < 0 or args.ramp_up_end_rps < 0:
+            raise ValueError("Ramp-up start and end RPS must be non-negative")
+        if args.ramp_up_start_rps > args.ramp_up_end_rps:
+            raise ValueError("Ramp-up start RPS must be less than end RPS")
+        if (args.ramp_up_strategy == "exponential"
+                and args.ramp_up_start_rps == 0):
+            raise ValueError(
+                "For exponential ramp-up, the start RPS cannot be 0.")
 
     endpoint_type = args.endpoint_type
     label = args.label
@@ -907,115 +931,8 @@ def main(args: argparse.Namespace):
             "Please specify '--dataset-name' and the corresponding "
             "'--dataset-path' if required.")
 
-    if args.dataset_name == "sonnet":
-        dataset = SonnetDataset(dataset_path=args.dataset_path)
-        # For the "sonnet" dataset, formatting depends on the backend.
-        if args.backend == "openai-chat":
-            input_requests = dataset.sample(
-                num_requests=args.num_prompts,
-                input_len=args.sonnet_input_len,
-                output_len=args.sonnet_output_len,
-                prefix_len=args.sonnet_prefix_len,
-                tokenizer=tokenizer,
-                return_prompt_formatted=False,
-            )
-        else:
-            assert tokenizer.chat_template or tokenizer.default_chat_template, (
-                "Tokenizer/model must have chat template for sonnet dataset.")
-            input_requests = dataset.sample(
-                num_requests=args.num_prompts,
-                input_len=args.sonnet_input_len,
-                output_len=args.sonnet_output_len,
-                prefix_len=args.sonnet_prefix_len,
-                tokenizer=tokenizer,
-                return_prompt_formatted=True,
-            )
-
-    elif args.dataset_name == "hf":
-        # all following datasets are implemented from the
-        # HuggingFaceDataset base class
-        if args.dataset_path in VisionArenaDataset.SUPPORTED_DATASET_PATHS:
-            dataset_class = VisionArenaDataset
-            args.hf_split = "train"
-            args.hf_subset = None
-        elif args.dataset_path in InstructCoderDataset.SUPPORTED_DATASET_PATHS:
-            dataset_class = InstructCoderDataset
-            args.hf_split = "train"
-        elif args.dataset_path in MTBenchDataset.SUPPORTED_DATASET_PATHS:
-            dataset_class = MTBenchDataset
-            args.hf_split = "train"
-        elif args.dataset_path in ConversationDataset.SUPPORTED_DATASET_PATHS:
-            dataset_class = ConversationDataset
-            args.hf_split = "train"
-        elif args.dataset_path in AIMODataset.SUPPORTED_DATASET_PATHS:
-            dataset_class = AIMODataset
-            args.hf_split = "train"
-        elif args.dataset_path in NextEditPredictionDataset.SUPPORTED_DATASET_PATHS:  # noqa: E501
-            dataset_class = NextEditPredictionDataset
-            args.hf_split = "train"
-        elif args.dataset_path in ASRDataset.SUPPORTED_DATASET_PATHS:
-            dataset_class = ASRDataset
-            args.hf_split = "train"
-        else:
-            supported_datasets = set([
-                dataset_name for cls in HuggingFaceDataset.__subclasses__()
-                for dataset_name in cls.SUPPORTED_DATASET_PATHS
-            ])
-            raise ValueError(
-                f"Unsupported dataset path: {args.dataset_path}. "
-                "Huggingface dataset only supports dataset_path"
-                f" from one of following: {supported_datasets}. "
-                "Please consider contributing if you would "
-                "like to add support for additional dataset formats.")
-
-        if dataset_class.IS_MULTIMODAL and endpoint_type not in [
-                "openai-chat",
-                "openai-audio",
-        ]:
-            # multi-modal benchmark is only available on OpenAI Chat backend.
-            raise ValueError(
-                "Multi-modal content is only supported on 'openai-chat' and "
-                "'openai-audio' backend.")
-        input_requests = dataset_class(
-            dataset_path=args.dataset_path,
-            dataset_subset=args.hf_subset,
-            dataset_split=args.hf_split,
-            random_seed=args.seed,
-        ).sample(
-            num_requests=args.num_prompts,
-            tokenizer=tokenizer,
-            output_len=args.hf_output_len,
-        )
-
-    else:
-        # For datasets that follow a similar structure, use a mapping.
-        dataset_mapping = {
-            "sharegpt":
-            lambda: ShareGPTDataset(random_seed=args.seed,
-                                    dataset_path=args.dataset_path).sample(
-                                        tokenizer=tokenizer,
-                                        num_requests=args.num_prompts,
-                                        output_len=args.sharegpt_output_len,
-                                    ),
-            "burstgpt":
-            lambda: BurstGPTDataset(random_seed=args.seed,
-                                    dataset_path=args.dataset_path).
-            sample(tokenizer=tokenizer, num_requests=args.num_prompts),
-            "random":
-            lambda: RandomDataset(dataset_path=args.dataset_path).sample(
-                tokenizer=tokenizer,
-                num_requests=args.num_prompts,
-                prefix_len=args.random_prefix_len,
-                input_len=args.random_input_len,
-                output_len=args.random_output_len,
-                range_ratio=args.random_range_ratio,
-            ),
-        }
-
-        try:
-            input_requests = dataset_mapping[args.dataset_name]()
-        except KeyError as err:
-            raise ValueError(f"Unknown dataset: {args.dataset_name}") from err
+    # Load the dataset.
+    input_requests = get_samples(args, tokenizer)
     goodput_config_dict = check_goodput_args(args)
 
     # Collect the sampling parameters.
@@ -1043,7 +960,7 @@ def main(args: argparse.Namespace):
 
     benchmark_result = asyncio.run(
         benchmark(
-            endpoint_type=endpoint_type,
+            endpoint_type=args.endpoint_type,
             api_url=api_url,
             base_url=base_url,
             model_id=model_id,
@@ -1064,6 +981,9 @@ def main(args: argparse.Namespace):
             max_concurrency=args.max_concurrency,
             lora_modules=args.lora_modules,
             extra_body=sampling_params,
+            ramp_up_strategy=args.ramp_up_strategy,
+            ramp_up_start_rps=args.ramp_up_start_rps,
+            ramp_up_end_rps=args.ramp_up_end_rps,
         ))
 
     # Save config and results to json
@@ -1073,7 +993,7 @@ def main(args: argparse.Namespace):
         # Setup
         current_dt = datetime.now().strftime("%Y%m%d-%H%M%S")
         result_json["date"] = current_dt
-        result_json["endpoint_type"] = endpoint_type
+        result_json["endpoint_type"] = args.endpoint_type
         result_json["label"] = label
         result_json["model_id"] = model_id
         result_json["tokenizer_id"] = tokenizer_id
@@ -1095,6 +1015,11 @@ def main(args: argparse.Namespace):
                                        < float("inf") else "inf")
         result_json["burstiness"] = args.burstiness
         result_json["max_concurrency"] = args.max_concurrency
+
+        if args.ramp_up_strategy is not None:
+            result_json["ramp_up_strategy"] = args.ramp_up_strategy
+            result_json["ramp_up_start_rps"] = args.ramp_up_start_rps
+            result_json["ramp_up_end_rps"] = args.ramp_up_end_rps
 
         # Merge with benchmark result
         result_json = {**result_json, **benchmark_result}
@@ -1119,7 +1044,10 @@ def main(args: argparse.Namespace):
         max_concurrency_str = (f"-concurrency{args.max_concurrency}"
                                if args.max_concurrency is not None else "")
         label = label or endpoint_type
-        file_name = f"{label}-{args.request_rate}qps{max_concurrency_str}-{base_model_id}-{current_dt}.json"  #noqa
+        if args.ramp_up_strategy is not None:
+            file_name = f"{label}-ramp-up-{args.ramp_up_strategy}-{args.ramp_up_start_rps}qps-{args.ramp_up_end_rps}qps{max_concurrency_str}-{base_model_id}-{current_dt}.json" # noqa
+        else:
+            file_name = f"{label}-{args.request_rate}qps{max_concurrency_str}-{base_model_id}-{current_dt}.json"  # noqa
         if args.result_filename:
             file_name = args.result_filename
         if args.result_dir:

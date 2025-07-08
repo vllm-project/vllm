@@ -146,11 +146,11 @@ class Qwen2_5OmniThinkerProcessingInfo(Qwen2AudioProcessingInfo,
             kwargs["fps"] = fps
         processor = self.ctx.get_hf_processor(
             Qwen2_5OmniProcessor,
-            image_processor=self.get_image_processor(
-                min_pixels=min_pixels,
-                max_pixels=max_pixels,
-                size=size,
-                use_fast=kwargs.get("use_fast")),
+            image_processor=self.get_image_processor(min_pixels=min_pixels,
+                                                     max_pixels=max_pixels,
+                                                     size=size,
+                                                     use_fast=kwargs.get(
+                                                         "use_fast", True)),
             **kwargs,
         )
         if not hasattr(processor, "audio_token"):
@@ -244,6 +244,7 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         mm_data = dict(mm_data)
         audios = mm_data.pop("audios", [])
@@ -258,6 +259,7 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
             prompt=prompt,
             mm_data=mm_data,
             mm_kwargs=mm_kwargs,
+            tok_kwargs=tok_kwargs,
         )
 
         input_features = hf_inputs.pop('input_features', None)
@@ -453,6 +455,7 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
         prompt: Union[str, list[int]],
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
+        tokenization_kwargs: Mapping[str, object],
         *,
         enable_hf_prompt_update: bool,
     ) -> tuple[list[int], MultiModalKwargs, bool]:
@@ -465,6 +468,7 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
                     prompt_text=prompt,
                     mm_items=mm_items,
                     hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+                    tokenization_kwargs=tokenization_kwargs,
                 )
             tokenizer = self.info.get_tokenizer()
             prompt_ids = encode_tokens(tokenizer, prompt)
@@ -474,6 +478,7 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
         mm_kwargs = self._apply_hf_processor_mm_only(
             mm_items=mm_items,
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+            tokenization_kwargs=tokenization_kwargs,
         )
 
         return prompt_ids, mm_kwargs, False
@@ -482,6 +487,7 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
+        tokenization_kwargs: Mapping[str, object],
     ) -> MultiModalKwargs:
         """
         Qwen2.5-Omni reimplements this function to handle `use_audio_in_video`.
@@ -498,6 +504,7 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
             prompt_text=self.dummy_inputs.get_dummy_text(mm_counts),
             mm_items=mm_items,
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+            tokenization_kwargs=tokenization_kwargs,
         )
 
         return mm_kwargs
@@ -710,6 +717,17 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
             "thinker.": "",
         })
 
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+        if modality.startswith("image"):
+            return "<|vision_start|><|IMAGE|><|vision_end|>"
+        if modality.startswith("video"):
+            return "<|vision_start|><|VIDEO|><|vision_end|>"
+        if modality.startswith("audio"):
+            return f"Audio {i}: <|audio_bos|><|AUDIO|><|audio_eos|>"
+
+        raise ValueError("Only image, video or audio modality is supported")
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         thinker_config: Qwen2_5OmniThinkerConfig = (
@@ -772,13 +790,13 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def get_multimodal_embeddings(
-            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
+    def get_multimodal_embeddings(self,
+                                  **kwargs: object) -> MultiModalEmbeddings:
 
         mm_input_by_modality = self._parse_and_validate_multimodal_inputs(
             **kwargs)
         if not mm_input_by_modality:
-            return None
+            return []
 
         # The result multimodal_embeddings is tuple of tensors, with each
         # tensor correspoending to a multimodal data item (image or video).
@@ -805,7 +823,8 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
-        if multimodal_embeddings is not None:
+        if multimodal_embeddings is not None \
+            and len(multimodal_embeddings) != 0:
 
             # TODO (ywang96): support overlapping modalitiy embeddings so that
             # `use_audio_in_video` will work on V1.
@@ -845,7 +864,7 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
         multimodal_embeddings: Optional[NestedTensors] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
-        if multimodal_embeddings is None:
+        if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
             return inputs_embeds
 
         for embeddings, modality in multimodal_embeddings:

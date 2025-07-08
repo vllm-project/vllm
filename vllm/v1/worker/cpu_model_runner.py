@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from contextlib import contextmanager
 from typing import Any
 
@@ -7,6 +8,7 @@ import torch
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
+from vllm.model_executor.models.interfaces import has_step_pooler
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 logger = init_logger(__name__)
@@ -52,6 +54,9 @@ class CPUModelRunner(GPUModelRunner):
         logger.info("Starting to load model %s...", self.model_config.model)
         self.model = get_model(vllm_config=self.vllm_config)
 
+        if has_step_pooler(self.model):
+            self.input_batch.logits_processing_needs_token_ids = True
+
         if self.lora_config:
             self.model = self.load_lora_model(self.model, self.model_config,
                                               self.scheduler_config,
@@ -60,7 +65,8 @@ class CPUModelRunner(GPUModelRunner):
     def warming_up_model(self) -> None:
         logger.info("Warming up model for the compilation...")
         # Only generate graph for the generic shape
-        self._dummy_run(max(16, self.max_num_reqs))
+        with _set_global_compilation_settings(self.vllm_config):
+            self._dummy_run(max(16, self.max_num_reqs))
         logger.info("Warming up done.")
 
     def _init_device_properties(self) -> None:
@@ -71,16 +77,15 @@ class CPUModelRunner(GPUModelRunner):
 
 
 @contextmanager
-def _set_global_compilation_settings():
+def _set_global_compilation_settings(config: VllmConfig):
     import torch._inductor.config
 
-    # Note: The CPPGEMM backend requires freezing parameters.
-    freezing_value = torch._inductor.config.freezing
-    torch._inductor.config.freezing = True
-    # Note: workaround for "ValueError: fast mode: can't pickle cyclic objects
-    # including object type dict"
-    force_disable_caches = torch._inductor.config.force_disable_caches
-    torch._inductor.config.force_disable_caches = True
-    yield
-    torch._inductor.config.freezing = freezing_value
-    torch._inductor.config.force_disable_caches = force_disable_caches
+    inductor_config = config.compilation_config.inductor_compile_config
+    try:
+        # Note: The MKLDNN and CPPGEMM backend requires freezing parameters.
+        freezing_value = torch._inductor.config.freezing
+        if inductor_config.get("max_autotune", False):
+            torch._inductor.config.freezing = True
+        yield
+    finally:
+        torch._inductor.config.freezing = freezing_value
