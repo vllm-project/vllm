@@ -52,7 +52,7 @@ class MyLLM(LLM):
         **kwargs: Keyword arguments forwarded to `vllm.LLM`.
     """
 
-    def __init__(self, *args, bundle_indices: list, **kwargs):
+    def __init__(self, *args, bundle_indices: list[int], **kwargs):
         # Prevent Ray from manipulating the top-level CUDA_VISIBLE_DEVICES variable
         # so that vLLM can its own device placement inside the worker.
         os.environ.pop("CUDA_VISIBLE_DEVICES", None)
