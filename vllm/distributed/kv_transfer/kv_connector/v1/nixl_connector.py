@@ -93,7 +93,9 @@ class ReqMeta:
 class NixlConnectorMetadata(KVConnectorMetadata):
 
     def __init__(self):
-        self.requests: dict[ReqId, ReqMeta] = {}
+        self.reqs_to_recv: dict[ReqId, ReqMeta] = {}
+        self.reqs_to_save: dict[ReqId, ReqMeta] = {}
+        self.reqs_to_send: dict[ReqId, float] = {}
 
     def add_new_req(
         self,
@@ -103,7 +105,9 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         load_remote_cache: bool = True,
         save_to_host: bool = False,
     ):
-        self.requests[request_id] = ReqMeta(
+        # save and load are mutually exclusive
+        assert load_remote_cache ^ save_to_host
+        _req = ReqMeta(
             local_block_ids=local_block_ids,
             remote_block_ids=kv_transfer_params["remote_block_ids"],
             remote_engine_id=kv_transfer_params["remote_engine_id"],
@@ -114,6 +118,10 @@ class NixlConnectorMetadata(KVConnectorMetadata):
             load_remote_cache=load_remote_cache,
             save_to_host=save_to_host,
         )
+        if save_to_host:
+            self.reqs_to_save[request_id] = _req
+        else:
+            self.reqs_to_recv[request_id] = _req
 
 
 class NixlConnector(KVConnectorBase_V1):
@@ -220,11 +228,13 @@ class NixlConnectorScheduler:
             vllm_config.kv_transfer_config.kv_buffer_device == "cpu"
         logger.info("Initializing NIXL Scheduler %s", engine_id)
 
-        # Requests that need to start recv.
+        # Requests that need to start recv/send.
         # New requests are added by update_state_after_alloc in
         # the scheduler. Used to make metadata passed to Worker.
         self._reqs_need_recv: dict[ReqId, tuple[Request, list[int]]] = {}
         self._reqs_need_save: dict[ReqId, tuple[Request, list[int]]] = {}
+        # Reqs to send and their expiration time
+        self._reqs_need_send: dict[ReqId, float] = {}
 
     def get_num_new_matched_tokens(
             self, request: "Request",
@@ -337,9 +347,12 @@ class NixlConnectorScheduler:
                 save_to_host=True,
             )
 
+        meta.reqs_to_send = self._reqs_need_send
+
         # Clear the list once workers start the transfers
         self._reqs_need_recv.clear()
         self._reqs_need_save.clear()
+        self._reqs_need_send = {}
 
         return meta
 
@@ -381,6 +394,11 @@ class NixlConnectorScheduler:
 
         # If prompt < block_size, no xfer so free blocks immediately.
         delay_free_blocks = len(computed_block_ids) > 0
+
+        if delay_free_blocks:
+            # Prefill request on remote. It will be read from D upon completion
+            self._reqs_need_send[request.request_id] = time.perf_counter(
+            ) + envs.VLLM_NIXL_ABORT_REQUEST_TIMEOUT
 
         return delay_free_blocks, dict(
             do_remote_prefill=True,
@@ -479,6 +497,8 @@ class NixlConnectorWorker:
         # [req_id -> list[handle]]
         self._recving_metadata: dict[ReqId, ReqMeta] = {}
         self._recving_transfers = defaultdict[ReqId, list[Transfer]](list)
+        # Track the expiration time of requests that are waiting to be sent.
+        self._reqs_to_send: dict[ReqId, float] = {}
 
         # Complete transfer tracker. Used by the rank 0 to track finished
         # transactions on ranks 1 to N-1.
@@ -975,7 +995,7 @@ class NixlConnectorWorker:
         assert self.use_host_buffer
         assert self.copy_blocks is not None
 
-        for req_id, meta in metadata.requests.items():
+        for req_id, meta in metadata.reqs_to_save.items():
             if not meta.save_to_host:
                 continue
             if logger.isEnabledFor(logging.DEBUG):
@@ -1013,6 +1033,16 @@ class NixlConnectorWorker:
                 assert meta, (f"{req_id} not found in recving_metadata list")
                 self.sync_recved_kv_to_device(req_id, meta)
 
+        # Handle timeout to avoid stranding blocks on remote.
+        now = time.perf_counter()
+        while self._reqs_to_send:
+            req_id, expires = next(iter(self._reqs_to_send.items()))
+            # Sorted dict, oldest requests are put first so we can exit early.
+            if now < expires:
+                break
+            del self._reqs_to_send[req_id]
+            done_sending.add(req_id)
+
         if self.world_size == 1:
             return done_sending, done_recving
 
@@ -1044,7 +1074,7 @@ class NixlConnectorWorker:
 
             all_done_sending: set[str] = set()
             for req_id in list(self._done_sending_count.keys()):
-                if self._done_sending_count[req_id] == self.world_size:
+                if self._done_sending_count[req_id] >= self.world_size:
                     del self._done_sending_count[req_id]
                     all_done_sending.add(req_id)
 
@@ -1074,6 +1104,7 @@ class NixlConnectorWorker:
                         tp_ratio):
                     notified_req_ids.add(req_id)
                     del self.consumer_notification_counts_by_req[req_id]
+                    del self._reqs_to_send[req_id]
         return notified_req_ids
 
     def _pop_done_transfers(
@@ -1108,7 +1139,7 @@ class NixlConnectorWorker:
         Start loading by triggering non-blocking nixl_xfer.
         We check for these trnxs to complete in each step().
         """
-        for req_id, meta in metadata.requests.items():
+        for req_id, meta in metadata.reqs_to_recv.items():
             if not meta.load_remote_cache:
                 continue
             remote_engine_id = meta.remote_engine_id
@@ -1133,6 +1164,9 @@ class NixlConnectorWorker:
         # Start transfers for requests whose handshakes have now finished.
         while not self._ready_requests.empty():
             self._read_blocks_for_req(*self._ready_requests.get_nowait())
+
+        # Add to requests that are waiting to be read and track expiration.
+        self._reqs_to_send.update(metadata.reqs_to_send)
 
     def _read_blocks_for_req(self, req_id: str, meta: ReqMeta):
         logger.debug(

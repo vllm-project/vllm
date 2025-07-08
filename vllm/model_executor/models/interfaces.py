@@ -46,6 +46,13 @@ class SupportsMultiModal(Protocol):
         MRO of your model class.
     """
 
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+        """
+        Get the placeholder text for the `i`th `modality` item in the prompt.
+        """
+        ...
+
     def get_multimodal_embeddings(self,
                                   **kwargs: object) -> MultiModalEmbeddings:
         """
@@ -82,11 +89,22 @@ class SupportsMultiModal(Protocol):
     ) -> Tensor:
         ...
 
+    # TODO: Remove this overload once v0 is deprecated
     @overload
     def get_input_embeddings(
         self,
         input_ids: Tensor,
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
+    ) -> Tensor:
+        ...
+
+    def get_input_embeddings(
+        self,
+        input_ids: Tensor,
+        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
+        # Only necessary so that the v0 overload is valid
+        # TODO: Remove attn_metadata once v0 is deprecated
+        attn_metadata: Optional["AttentionMetadata"] = None,
     ) -> Tensor:
         """
         Returns the input embeddings merged from the text embeddings from 

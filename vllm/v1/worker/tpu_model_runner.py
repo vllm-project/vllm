@@ -717,8 +717,10 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 self.device)
         block_tables = block_tables.to(self.device)
 
+        # Calculate the slot mapping
         slot_mapping_metadata = self._get_slot_mapping_metadata(
             num_reqs, num_scheduled_tokens_per_req)
+        num_kv_update_slices = slot_mapping_metadata.shape[0]
         padded_num_slices = _get_padded_num_kv_cache_update_slices(
             padded_total_num_scheduled_tokens, self.max_num_reqs,
             self.block_size)
@@ -749,6 +751,9 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             num_seqs=torch.tensor([num_reqs],
                                   dtype=torch.int32,
                                   device=self.device),
+            num_kv_update_slices=torch.tensor([num_kv_update_slices],
+                                              dtype=torch.int32,
+                                              device=self.device),
             num_slices_per_kv_cache_update_block=
             NUM_SLICES_PER_KV_CACHE_UPDATE_BLOCK,
         )
@@ -1198,6 +1203,8 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                    dtype=torch.int32).to(self.device)
         padded_num_slices = _get_padded_num_kv_cache_update_slices(
             num_tokens, self.max_num_reqs, self.block_size)
+        num_kv_update_slices = torch.tensor([padded_num_slices],
+                                            dtype=torch.int32).to(self.device)
         slot_mapping = torch.zeros((3, padded_num_slices),
                                    dtype=torch.int32).to(self.device)
         block_tables = torch.zeros((num_reqs, num_blocks),
@@ -1217,6 +1224,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             context_lens=context_lens,
             query_start_loc=query_start_loc,
             num_seqs=num_seqs,
+            num_kv_update_slices=num_kv_update_slices,
             num_slices_per_kv_cache_update_block=
             NUM_SLICES_PER_KV_CACHE_UPDATE_BLOCK,
         )

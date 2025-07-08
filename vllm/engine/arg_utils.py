@@ -58,7 +58,8 @@ def parse_type(return_type: Callable[[str], T]) -> Callable[[str], T]:
 
     def _parse_type(val: str) -> T:
         try:
-            if return_type is json.loads and not re.match("^{.*}$", val):
+            if return_type is json.loads and not re.match(
+                    r"(?s)^\s*{.*}\s*$", val):
                 return cast(T, nullable_kvs(val))
             return return_type(val)
         except ValueError as e:
@@ -80,7 +81,7 @@ def optional_type(
 
 
 def union_dict_and_str(val: str) -> Optional[Union[str, dict[str, str]]]:
-    if not re.match("^{.*}$", val):
+    if not re.match(r"(?s)^\s*{.*}\s*$", val):
         return str(val)
     return optional_type(json.loads)(val)
 
@@ -318,6 +319,7 @@ class EngineArgs:
     pipeline_parallel_size: int = ParallelConfig.pipeline_parallel_size
     tensor_parallel_size: int = ParallelConfig.tensor_parallel_size
     data_parallel_size: int = ParallelConfig.data_parallel_size
+    data_parallel_rank: Optional[int] = None
     data_parallel_size_local: Optional[int] = None
     data_parallel_address: Optional[str] = None
     data_parallel_rpc_port: Optional[int] = None
@@ -369,6 +371,10 @@ class EngineArgs:
         get_field(TokenizerPoolConfig, "extra_config")
     limit_mm_per_prompt: dict[str, int] = \
         get_field(MultiModalConfig, "limit_per_prompt")
+    interleave_mm_strings: bool = MultiModalConfig.interleave_mm_strings
+    media_io_kwargs: dict[str, dict[str,
+                                    Any]] = get_field(MultiModalConfig,
+                                                      "media_io_kwargs")
     mm_processor_kwargs: Optional[Dict[str, Any]] = \
         MultiModalConfig.mm_processor_kwargs
     disable_mm_preprocessor_cache: bool = \
@@ -650,6 +656,12 @@ class EngineArgs:
                                     **parallel_kwargs["tensor_parallel_size"])
         parallel_group.add_argument("--data-parallel-size", "-dp",
                                     **parallel_kwargs["data_parallel_size"])
+        parallel_group.add_argument(
+            '--data-parallel-rank',
+            '-dpn',
+            type=int,
+            help='Data parallel rank of this instance. '
+            'When set, enables external load balancer mode.')
         parallel_group.add_argument('--data-parallel-size-local',
                                     '-dpl',
                                     type=int,
@@ -745,12 +757,17 @@ class EngineArgs:
         )
         multimodal_group.add_argument("--limit-mm-per-prompt",
                                       **multimodal_kwargs["limit_per_prompt"])
+        multimodal_group.add_argument("--media-io-kwargs",
+                                      **multimodal_kwargs["media_io_kwargs"])
         multimodal_group.add_argument(
             "--mm-processor-kwargs",
             **multimodal_kwargs["mm_processor_kwargs"])
         multimodal_group.add_argument(
             "--disable-mm-preprocessor-cache",
             **multimodal_kwargs["disable_mm_preprocessor_cache"])
+        multimodal_group.add_argument(
+            "--interleave-mm-strings",
+            **multimodal_kwargs["interleave_mm_strings"])
 
         # LoRA related configs
         lora_kwargs = get_kwargs(LoRAConfig)
@@ -969,6 +986,8 @@ class EngineArgs:
             enable_prompt_embeds=self.enable_prompt_embeds,
             served_model_name=self.served_model_name,
             limit_mm_per_prompt=self.limit_mm_per_prompt,
+            interleave_mm_strings=self.interleave_mm_strings,
+            media_io_kwargs=self.media_io_kwargs,
             use_async_output_proc=not self.disable_async_output_proc,
             config_format=self.config_format,
             mm_processor_kwargs=self.mm_processor_kwargs,
@@ -983,10 +1002,41 @@ class EngineArgs:
             override_attention_dtype=self.override_attention_dtype,
         )
 
+    def valid_tensorizer_config_provided(self) -> bool:
+        """
+        Checks if a parseable TensorizerConfig was passed to
+        self.model_loader_extra_config. It first checks if the config passed
+        is a dict or a TensorizerConfig object directly, and if the latter is
+        true (by checking that the object has TensorizerConfig's
+        .to_serializable() method), converts it in to a serializable dict
+        format
+        """
+        if self.model_loader_extra_config:
+            if hasattr(self.model_loader_extra_config, "to_serializable"):
+                self.model_loader_extra_config = (
+                    self.model_loader_extra_config.to_serializable())
+            for allowed_to_pass in ["tensorizer_uri", "tensorizer_dir"]:
+                try:
+                    self.model_loader_extra_config[allowed_to_pass]
+                    return False
+                except KeyError:
+                    pass
+        return True
+
     def create_load_config(self) -> LoadConfig:
 
         if self.quantization == "bitsandbytes":
             self.load_format = "bitsandbytes"
+
+        if (self.load_format == "tensorizer"
+                and self.valid_tensorizer_config_provided()):
+            logger.info("Inferring Tensorizer args from %s", self.model)
+            self.model_loader_extra_config = {"tensorizer_dir": self.model}
+        else:
+            logger.info(
+                "Using Tensorizer args from --model-loader-extra-config. "
+                "Note that you can now simply pass the S3 directory in the "
+                "model tag instead of providing the JSON string.")
 
         return LoadConfig(
             load_format=self.load_format,
@@ -1114,10 +1164,17 @@ class EngineArgs:
             # but we should not do this here.
             placement_group = ray.util.get_current_placement_group()
 
-        # Local DP size defaults to global DP size if not set.
-        data_parallel_size_local = self.data_parallel_size if (
-            self.data_parallel_size_local
-            is None) else self.data_parallel_size_local
+        data_parallel_external_lb = self.data_parallel_rank is not None
+        if data_parallel_external_lb:
+            assert self.data_parallel_size_local in (1, None), (
+                "data_parallel_size_local must be 1 when data_parallel_rank "
+                "is set")
+            data_parallel_size_local = 1
+        elif self.data_parallel_size_local is not None:
+            data_parallel_size_local = self.data_parallel_size_local
+        else:
+            # Local DP size defaults to global DP size if not set.
+            data_parallel_size_local = self.data_parallel_size
 
         # DP address, used in multi-node case for torch distributed group
         # and ZMQ sockets.
@@ -1142,16 +1199,16 @@ class EngineArgs:
             self.data_parallel_rpc_port
             is not None) else ParallelConfig.data_parallel_rpc_port
 
-        data_parallel_backend = self.data_parallel_backend
-
         parallel_config = ParallelConfig(
             pipeline_parallel_size=self.pipeline_parallel_size,
             tensor_parallel_size=self.tensor_parallel_size,
             data_parallel_size=self.data_parallel_size,
+            data_parallel_rank=self.data_parallel_rank or 0,
+            data_parallel_external_lb=data_parallel_external_lb,
             data_parallel_size_local=data_parallel_size_local,
             data_parallel_master_ip=data_parallel_address,
             data_parallel_rpc_port=data_parallel_rpc_port,
-            data_parallel_backend=data_parallel_backend,
+            data_parallel_backend=self.data_parallel_backend,
             enable_expert_parallel=self.enable_expert_parallel,
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.num_redundant_experts,
@@ -1370,13 +1427,6 @@ class EngineArgs:
         # No text embedding inputs so far.
         if self.enable_prompt_embeds:
             _raise_or_fallback(feature_name="--enable-prompt-embeds",
-                               recommend_to_remove=False)
-            return False
-
-        # Only Fp16 and Bf16 dtypes since we only support FA.
-        V1_SUPPORTED_DTYPES = [torch.bfloat16, torch.float16]
-        if model_config.dtype not in V1_SUPPORTED_DTYPES:
-            _raise_or_fallback(feature_name=f"--dtype {model_config.dtype}",
                                recommend_to_remove=False)
             return False
 

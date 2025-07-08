@@ -259,7 +259,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   SET(CUTLASS_ENABLE_HEADERS_ONLY ON CACHE BOOL "Enable only the header library")
 
   # Set CUTLASS_REVISION. Used for FetchContent. Also fixes some bogus messages when building.
-  set(CUTLASS_REVISION "v3.9.2" CACHE STRING "CUTLASS revision to use")
+  set(CUTLASS_REVISION "v4.0.0" CACHE STRING "CUTLASS revision to use")
 
   # Use the specified CUTLASS source directory for compilation if VLLM_CUTLASS_SRC_DIR is provided
   if (DEFINED ENV{VLLM_CUTLASS_SRC_DIR})
@@ -419,6 +419,36 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
                      "in CUDA target architectures")
     endif()
   endif()
+
+
+  # The cutlass_scaled_mm kernels for Geforce Blackwell SM120 (c3x, i.e. CUTLASS 3.x) require
+  # CUDA 12.8 or later
+  cuda_archs_loose_intersection(SCALED_MM_ARCHS "12.0;12.0a" "${CUDA_ARCHS}")
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.8 AND SCALED_MM_ARCHS)
+    set(SRCS
+      "csrc/quantization/cutlass_w8a8/scaled_mm_c3x_sm120.cu"
+      "csrc/quantization/cutlass_w8a8/c3x/scaled_mm_sm120_fp8.cu"
+    )
+    set_gencode_flags_for_srcs(
+      SRCS "${SRCS}"
+      CUDA_ARCHS "${SCALED_MM_ARCHS}")
+    list(APPEND VLLM_EXT_SRC "${SRCS}")
+    list(APPEND VLLM_GPU_FLAGS "-DENABLE_SCALED_MM_SM120=1")
+    # Let scaled_mm_c2x know it doesn't need to build these arches
+    list(APPEND SCALED_MM_3X_ARCHS "${SCALED_MM_ARCHS}")
+    message(STATUS "Building scaled_mm_c3x_sm120 for archs: ${SCALED_MM_ARCHS}")
+  else()
+    if (NOT ${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.8 AND SCALED_MM_ARCHS)
+      message(STATUS "Not building scaled_mm_c3x_sm120 as CUDA Compiler version is "
+                     "not >= 12.8, we recommend upgrading to CUDA 12.8 or "
+                     "later if you intend on running FP8 quantized models on "
+                     "Blackwell.")
+    else()
+      message(STATUS "Not building scaled_mm_c3x_120 as no compatible archs found "
+                     "in CUDA target architectures")
+    endif()
+  endif()
+
 
   # The cutlass_scaled_mm kernels for Blackwell SM100 (c3x, i.e. CUTLASS 3.x)
   # require CUDA 12.8 or later
@@ -583,6 +613,26 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     else()
       message(STATUS "Not building moe_data as no compatible archs found "
                      "in CUDA target architectures.")
+    endif()
+  endif()
+  
+  cuda_archs_loose_intersection(SCALED_MM_ARCHS "10.0a" "${CUDA_ARCHS}")
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND SCALED_MM_ARCHS)
+    set(SRCS "csrc/quantization/cutlass_w8a8/moe/blockwise_scaled_group_mm_sm100.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${SRCS}"
+      CUDA_ARCHS "${SCALED_MM_ARCHS}")
+    list(APPEND VLLM_EXT_SRC "${SRCS}")
+    list(APPEND VLLM_GPU_FLAGS "-DENABLE_CUTLASS_MOE_SM100=1")
+    message(STATUS "Building blockwise_scaled_group_mm_sm100 for archs: ${SCALED_MM_ARCHS}")
+  else()
+    if (NOT ${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND SCALED_MM_ARCHS)
+      message(STATUS "Not building blockwise_scaled_group_mm_sm100 kernels as CUDA Compiler version is "
+                     "not >= 12.8, we recommend upgrading to CUDA 12.8 or later "
+                     "if you intend on running FP8 quantized MoE models on Blackwell.")
+    else()
+      message(STATUS "Not building blockwise_scaled_group_mm_sm100 as no compatible archs found "
+                     "in CUDA target architectures")
     endif()
   endif()
 
