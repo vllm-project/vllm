@@ -621,6 +621,7 @@ class Scheduler(SchedulerInterface):
         new_block_ids: list[tuple[list[int], ...]] = []
         num_computed_tokens: list[int] = []
 
+        use_connector = self.connector is not None
         for req in itertools.chain(running_reqs, resumed_reqs):
             req_id = req.request_id
             req_ids.append(req_id)
@@ -635,7 +636,10 @@ class Scheduler(SchedulerInterface):
                 token_ids = req.all_token_ids[req.num_computed_tokens:req.
                                               num_computed_tokens + num_tokens]
                 new_token_ids.append(token_ids)
-            else:
+            elif use_connector:
+                # When using a KVConnector, we add a placeholder to avoid index
+                # out of bounds errors. TODO: Remove this once the KVConnector
+                # is updated to handle token IDs properly.
                 new_token_ids.append([])
             new_block_ids.append(req_to_new_block_ids[req_id])
             num_computed_tokens.append(req.num_computed_tokens)
