@@ -136,8 +136,8 @@ class Processor:
         Should raise ValueError if unsupported for API Server.
         """
 
-        if not isinstance(params, SamplingParams):
-            raise ValueError("V1 does not yet support Pooling models.")
+        if isinstance(params, PoolingParams):
+            return
 
         self._validate_logprobs(params)
         self._validate_sampling_params(params, lora_request)
@@ -151,6 +151,11 @@ class Processor:
     def _validate_structured_output(self, params: SamplingParams) -> None:
         if not params.guided_decoding or not self.decoding_config:
             return
+
+        if self.model_config.skip_tokenizer_init and params.guided_decoding:
+            raise ValueError(
+                "Structured outputs requires a tokenizer so it can't be used with 'skip_tokenizer_init'"  # noqa: E501
+            )
 
         engine_level_backend = self.decoding_config.backend
         if params.guided_decoding.backend:
@@ -173,6 +178,12 @@ class Processor:
             params.guided_decoding.backend = engine_level_backend
 
         # Request content validation
+        if (isinstance(params.guided_decoding.choice, list)
+                and not params.guided_decoding.choice):
+            # It is invalid for choice to be an empty list
+            raise ValueError(f"Choice '{params.guided_decoding.choice}' "
+                             "cannot be an empty list")
+
         if engine_level_backend.startswith("xgrammar"):
             # xgrammar with no fallback
             validate_xgrammar_grammar(params)
@@ -219,8 +230,6 @@ class Processor:
         # TODO(woosuk): Support encoder-decoder models.
         self._validate_lora(lora_request)
         self._validate_params(params, lora_request)
-        if priority != 0:
-            raise ValueError("V1 does not support priority yet.")
         if trace_headers is not None:
             raise ValueError("V1 does not support tracing yet.")
         if prompt_adapter_request is not None:
@@ -263,18 +272,22 @@ class Processor:
         if encoder_inputs is not None:
             raise NotImplementedError
 
-        assert isinstance(params, SamplingParams)
-        # TODO: can we avoid cloning here in multiproc case?
-        sampling_params = params.clone()
-        # If unset max tokens, then generate up to the max_model_len.
-        if sampling_params.max_tokens is None:
-            sampling_params.max_tokens = (
-                self.model_config.max_model_len -
-                len(decoder_inputs["prompt_token_ids"]))
-        sampling_params.update_from_generation_config(
-            self.generation_config_fields, eos_token_id)
-        sampling_params.update_from_tokenizer(
-            self.tokenizer.get_lora_tokenizer(lora_request))
+        sampling_params = None
+        pooling_params = None
+        if isinstance(params, SamplingParams):
+            # TODO: can we avoid cloning here in multiproc case?
+            sampling_params = params.clone()
+            # If unset max tokens, then generate up to the max_model_len.
+            if sampling_params.max_tokens is None:
+                sampling_params.max_tokens = (
+                    self.model_config.max_model_len -
+                    len(decoder_inputs["prompt_token_ids"]))
+            sampling_params.update_from_generation_config(
+                self.generation_config_fields, eos_token_id)
+            sampling_params.update_from_tokenizer(
+                self.tokenizer.get_lora_tokenizer(lora_request))
+        else:
+            pooling_params = params.clone()
 
         # Multimodal related.
         sorted_mm_inputs: Optional[Sequence[Optional[MultiModalKwargs]]] = None
@@ -331,10 +344,12 @@ class Processor:
             mm_hashes=sorted_mm_hashes,
             mm_placeholders=sorted_mm_positions,
             sampling_params=sampling_params,
+            pooling_params=pooling_params,
             eos_token_id=eos_token_id,
             arrival_time=arrival_time,
             lora_request=lora_request,
             cache_salt=decoder_inputs.get("cache_salt"),
+            priority=priority,
             data_parallel_rank=data_parallel_rank,
         )
 

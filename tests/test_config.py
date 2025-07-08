@@ -2,47 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import MISSING, Field, asdict, dataclass, field
-from typing import Literal, Union
 
 import pytest
 
 from vllm.compilation.backends import VllmBackend
 from vllm.config import (LoadConfig, ModelConfig, PoolerConfig, VllmConfig,
-                         config, get_field)
+                         get_field)
 from vllm.model_executor.layers.pooler import PoolingType
 from vllm.platforms import current_platform
-
-
-class TestConfig1:
-    pass
-
-
-@dataclass
-class TestConfig2:
-    a: int
-    """docstring"""
-
-
-@dataclass
-class TestConfig3:
-    a: int = 1
-
-
-@dataclass
-class TestConfig4:
-    a: Union[Literal[1], Literal[2]] = 1
-    """docstring"""
-
-
-@pytest.mark.parametrize(("test_config", "expected_error"), [
-    (TestConfig1, "must be a dataclass"),
-    (TestConfig2, "must have a default"),
-    (TestConfig3, "must have a docstring"),
-    (TestConfig4, "must use a single Literal"),
-])
-def test_config(test_config, expected_error):
-    with pytest.raises(Exception, match=expected_error):
-        config(test_config)
 
 
 def test_compile_config_repr_succeeds():
@@ -57,23 +24,23 @@ def test_compile_config_repr_succeeds():
     assert 'inductor_passes' in val
 
 
+@dataclass
+class _TestConfigFields:
+    a: int
+    b: dict = field(default_factory=dict)
+    c: str = "default"
+
+
 def test_get_field():
-
-    @dataclass
-    class TestConfig:
-        a: int
-        b: dict = field(default_factory=dict)
-        c: str = "default"
-
     with pytest.raises(ValueError):
-        get_field(TestConfig, "a")
+        get_field(_TestConfigFields, "a")
 
-    b = get_field(TestConfig, "b")
+    b = get_field(_TestConfigFields, "b")
     assert isinstance(b, Field)
     assert b.default is MISSING
     assert b.default_factory is dict
 
-    c = get_field(TestConfig, "c")
+    c = get_field(_TestConfigFields, "c")
     assert isinstance(c, Field)
     assert c.default == "default"
     assert c.default_factory is MISSING
@@ -85,7 +52,7 @@ def test_get_field():
         ("distilbert/distilgpt2", "generate", "generate"),
         ("intfloat/multilingual-e5-small", "pooling", "embed"),
         ("jason9693/Qwen2.5-1.5B-apeach", "pooling", "classify"),
-        ("cross-encoder/ms-marco-MiniLM-L-6-v2", "pooling", "score"),
+        ("cross-encoder/ms-marco-MiniLM-L-6-v2", "pooling", "classify"),
         ("Qwen/Qwen2.5-Math-RM-72B", "pooling", "reward"),
         ("openai/whisper-small", "transcription", "transcription"),
     ],
@@ -94,6 +61,32 @@ def test_auto_task(model_id, expected_runner_type, expected_task):
     config = ModelConfig(
         model_id,
         task="auto",
+        tokenizer=model_id,
+        tokenizer_mode="auto",
+        trust_remote_code=False,
+        seed=0,
+        dtype="float16",
+    )
+
+    assert config.runner_type == expected_runner_type
+    assert config.task == expected_task
+
+
+@pytest.mark.parametrize(
+    ("model_id", "expected_runner_type", "expected_task"),
+    [
+        ("distilbert/distilgpt2", "pooling", "embed"),
+        ("intfloat/multilingual-e5-small", "pooling", "embed"),
+        ("jason9693/Qwen2.5-1.5B-apeach", "pooling", "classify"),
+        ("cross-encoder/ms-marco-MiniLM-L-6-v2", "pooling", "classify"),
+        ("Qwen/Qwen2.5-Math-RM-72B", "pooling", "embed"),
+        ("openai/whisper-small", "pooling", "embed"),
+    ],
+)
+def test_score_task(model_id, expected_runner_type, expected_task):
+    config = ModelConfig(
+        model_id,
+        task="score",
         tokenizer=model_id,
         tokenizer_mode="auto",
         trust_remote_code=False,
@@ -438,3 +431,33 @@ def test_load_config_pt_load_map_location(pt_load_map_location):
     config = VllmConfig(load_config=load_config)
 
     assert config.load_config.pt_load_map_location == pt_load_map_location
+
+
+@pytest.mark.parametrize(
+    ("model_id", "max_model_len", "expected_max_len", "should_raise"), [
+        ("BAAI/bge-reranker-base", None, 512, False),
+        ("BAAI/bge-reranker-base", 256, 256, False),
+        ("BAAI/bge-reranker-base", 513, 512, True),
+        ("deepseek-ai/DeepSeek-R1-Distill-Qwen-7B", None, 131072, False),
+        ("deepseek-ai/DeepSeek-R1-Distill-Qwen-7B", 131073, 131072, True),
+    ])
+def test_get_and_verify_max_len(model_id, max_model_len, expected_max_len,
+                                should_raise):
+    """Test get_and_verify_max_len with different configurations."""
+    model_config = ModelConfig(
+        model_id,
+        task="auto",
+        tokenizer=model_id,
+        tokenizer_mode="auto",
+        trust_remote_code=False,
+        seed=0,
+        dtype="float16",
+        revision=None,
+    )
+
+    if should_raise:
+        with pytest.raises(ValueError):
+            model_config.get_and_verify_max_len(max_model_len)
+    else:
+        actual_max_len = model_config.get_and_verify_max_len(max_model_len)
+        assert actual_max_len == expected_max_len

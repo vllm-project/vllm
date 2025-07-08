@@ -15,6 +15,9 @@ class CompilationCounter:
     # not including the splitting ops
     num_piecewise_capturable_graphs_seen: int = 0
     num_backend_compilations: int = 0
+    # Number of gpu_model_runner attempts to trigger CUDAGraphs capture
+    num_gpu_runner_capture_triggers: int = 0
+    # Number of CUDAGraphs captured
     num_cudagraph_captured: int = 0
     # InductorAdapter.compile calls
     num_inductor_compiles: int = 0

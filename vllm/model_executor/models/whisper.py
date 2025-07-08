@@ -41,6 +41,113 @@ from .utils import (AutoWeightsLoader, WeightsMapper, cast_overflow_tensors,
 
 logger = init_logger(__name__)
 
+# From https://platform.openai.com/docs/guides/speech-to-text/supported-languages
+
+ISO639_1_SUPPORTED_LANGS = {
+    "af": "Afrikaans",
+    "ar": "Arabic",
+    "hy": "Armenian",
+    "az": "Azerbaijani",
+    "be": "Belarusian",
+    "bs": "Bosnian",
+    "bg": "Bulgarian",
+    "ca": "Catalan",
+    "zh": "Chinese",
+    "hr": "Croatian",
+    "cs": "Czech",
+    "da": "Danish",
+    "nl": "Dutch",
+    "en": "English",
+    "et": "Estonian",
+    "fi": "Finnish",
+    "fr": "French",
+    "gl": "Galician",
+    "de": "German",
+    "el": "Greek",
+    "he": "Hebrew",
+    "hi": "Hindi",
+    "hu": "Hungarian",
+    "is": "Icelandic",
+    "id": "Indonesian",
+    "it": "Italian",
+    "ja": "Japanese",
+    "kn": "Kannada",
+    "kk": "Kazakh",
+    "ko": "Korean",
+    "lv": "Latvian",
+    "lt": "Lithuanian",
+    "mk": "Macedonian",
+    "ms": "Malay",
+    "mr": "Marathi",
+    "mi": "Maori",
+    "ne": "Nepali",
+    "no": "Norwegian",
+    "fa": "Persian",
+    "pl": "Polish",
+    "pt": "Portuguese",
+    "ro": "Romanian",
+    "ru": "Russian",
+    "sr": "Serbian",
+    "sk": "Slovak",
+    "sl": "Slovenian",
+    "es": "Spanish",
+    "sw": "Swahili",
+    "sv": "Swedish",
+    "tl": "Tagalog",
+    "ta": "Tamil",
+    "th": "Thai",
+    "tr": "Turkish",
+    "uk": "Ukrainian",
+    "ur": "Urdu",
+    "vi": "Vietnamese",
+    "cy": "Welsh"
+}
+ISO639_1_OTHER_LANGS = {
+    "lo": "Lao",
+    "jw": "Javanese",
+    "tk": "Turkmen",
+    "yi": "Yiddish",
+    "so": "Somali",
+    "bn": "Bengali",
+    "nn": "Norwegian Nynorsk",
+    "si": "Sinhala",
+    "yo": "Yoruba",
+    "sa": "Sanskrit",
+    "mi": "Māori",
+    "fo": "Faroese",  # codespell:ignore
+    "mt": "Maltese",
+    "tg": "Tajik",
+    "mg": "Malagasy",
+    "haw": "Hawaiian",
+    "km": "Khmer",
+    "br": "Breton",
+    "ps": "Pashto",
+    "ln": "Lingala",
+    "la": "Latin",
+    "ml": "Malayalam",
+    "sq": "Albanian",
+    "su": "Sundanese",
+    "eu": "Basque",
+    "ka": "Georgian",
+    "uz": "Uzbek",
+    "sn": "Shona",
+    "ht": "Haitian",
+    "as": "Assamese",
+    "mn": "Mongolian",
+    "te": "Telugu",
+    "pa": "Panjabi",
+    "tt": "Tatar",
+    "gu": "Gujarati",
+    "oc": "Occitan",
+    "ha": "Hausa",
+    "ba": "Bashkir",
+    "my": "Burmese",
+    "sd": "Sindhi",
+    "am": "Amharic",
+    "lb": "Luxembourgish",
+    "bo": "Tibetan"
+}
+
 
 class WhisperAudioInputs(TypedDict):
     input_features: NestedTensors
@@ -593,9 +700,10 @@ class WhisperMultiModalProcessor(
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         if mm_data:
-            feature_extractor = self.info.get_feature_extractor(**mm_kwargs)
+            feature_extractor = self.info.get_feature_extractor()
             mm_data = dict(audio=mm_data.pop("audios"))
             mm_kwargs = dict(
                 **mm_kwargs,
@@ -605,6 +713,7 @@ class WhisperMultiModalProcessor(
             prompt=prompt,
             mm_data=mm_data,
             mm_kwargs=mm_kwargs,
+            tok_kwargs=tok_kwargs,
         )
         if "labels" in processed_outputs:
             processed_outputs["input_ids"] = processed_outputs.pop("labels")
@@ -652,6 +761,36 @@ class WhisperForConditionalGeneration(nn.Module, SupportsTranscription,
         ".fc2.": ".mlp.fc2."
     })
 
+    @classmethod
+    def validate_language(cls, language: str) -> bool:
+        if language in ISO639_1_SUPPORTED_LANGS:
+            return True
+        elif language in ISO639_1_OTHER_LANGS:
+            logger.warning(
+                "The selected language %s has limited accuracy with"
+                " reported WER>=0.5. Results may be less accurate "
+                "for this choice.", language)
+            return True
+        else:
+            raise ValueError(f"Unsupported language: {language}."
+                             "Language should be one of:" +
+                             f" {list(ISO639_1_SUPPORTED_LANGS.values())}" +
+                             f"or {list(ISO639_1_OTHER_LANGS.values())}")
+
+    @classmethod
+    def get_decoder_prompt(cls, language: str, task_type: str,
+                           prompt: str) -> str:
+        return ((f"<|prev|>{prompt}" if prompt else "") +
+                f"<|startoftranscript|><|{language}|>" +
+                f"<|{task_type}|><|notimestamps|>")
+
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+        if modality.startswith("audio"):
+            return None
+
+        raise ValueError("Only audio modality is supported")
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
@@ -687,8 +826,8 @@ class WhisperForConditionalGeneration(nn.Module, SupportsTranscription,
     def get_language_model(self) -> torch.nn.Module:
         return self.model.decoder
 
-    def get_multimodal_embeddings(
-            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
+    def get_multimodal_embeddings(self,
+                                  **kwargs: object) -> MultiModalEmbeddings:
         # TODO: This method does not obey the interface for SupportsMultiModal.
         # Refactor this once encoder/decoder support is implemented in V1.
         audio_input = self._parse_and_validate_audio_input(**kwargs)

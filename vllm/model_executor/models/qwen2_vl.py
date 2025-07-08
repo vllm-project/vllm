@@ -32,12 +32,14 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange, repeat
-from transformers import BatchFeature
+from transformers import AutoConfig, BatchFeature
 from transformers.models.qwen2_vl import (Qwen2VLImageProcessor,
                                           Qwen2VLProcessor)
 from transformers.models.qwen2_vl.configuration_qwen2_vl import (
     Qwen2VLConfig, Qwen2VLVisionConfig)
 from transformers.models.qwen2_vl.image_processing_qwen2_vl import smart_resize
+from transformers.models.qwen2_vl.video_processing_qwen2_vl import (
+    Qwen2VLVideoProcessor)
 
 from vllm.config import VllmConfig
 from vllm.distributed import parallel_state, tensor_model_parallel_all_gather
@@ -69,6 +71,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.config import uses_mrope
 from vllm.transformers_utils.processor import (
     cached_image_processor_from_config)
+from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
                          SupportsMultiModal, SupportsPP)
@@ -759,11 +762,11 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
     ) -> Qwen2VLProcessor:
         return self.ctx.get_hf_processor(
             Qwen2VLProcessor,
-            image_processor=self.get_image_processor(
-                min_pixels=min_pixels,
-                max_pixels=max_pixels,
-                size=size,
-                use_fast=kwargs.get("use_fast")),
+            image_processor=self.get_image_processor(min_pixels=min_pixels,
+                                                     max_pixels=max_pixels,
+                                                     size=size,
+                                                     use_fast=kwargs.get(
+                                                         "use_fast", True)),
             **kwargs,
         )
 
@@ -808,6 +811,7 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         size: Optional[dict[str, int]] = None,
         **kwargs: object,
     ) -> Qwen2VLImageProcessor:
+        kwargs["use_fast"] = kwargs.get("use_fast", True)
         return cached_image_processor_from_config(
             self.ctx.model_config,
             **self._get_image_processor_kwargs(min_pixels=min_pixels,
@@ -818,6 +822,14 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None, "video": None}
+
+    def get_max_tokens_per_item(
+            self, seq_len: int,
+            mm_counts: Mapping[str, int]) -> Optional[Mapping[str, int]]:
+
+        max_image_tokens = self.get_max_image_tokens()
+        max_video_tokens = self.get_max_video_tokens(seq_len, mm_counts)
+        return {"image": max_image_tokens, "video": max_video_tokens}
 
     def _get_vision_info(
         self,
@@ -1015,11 +1027,13 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor[Qwen2VLProcessingInfo]
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
+        mm_kwargs = self.info._get_image_processor_kwargs(**mm_kwargs)
         return self.info.ctx.call_hf_processor(
             self.info.get_hf_processor(**mm_kwargs),
             dict(text=prompt, **mm_data),
-            self.info._get_image_processor_kwargs(**mm_kwargs),
+            dict(**mm_kwargs, **tok_kwargs),
         )
 
     def _get_prompt_updates(
@@ -1081,6 +1095,15 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             "lm_head.": "language_model.lm_head.",
             "model.": "language_model.model.",
         })
+
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+        if modality.startswith("image"):
+            return "<|vision_start|><|image_pad|><|vision_end|>"
+        if modality.startswith("video"):
+            return "<|vision_start|><|video_pad|><|vision_end|>"
+
+        raise ValueError("Only image or video modality is supported")
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -1208,9 +1231,9 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         assert grid_thw.ndim == 2
 
         if image_input["type"] == "image_embeds":
-            image_embeds = image_input["image_embeds"].type(self.visual.dtype)
+            image_embeds = image_input["image_embeds"]
         else:
-            pixel_values = image_input["pixel_values"].type(self.visual.dtype)
+            pixel_values = image_input["pixel_values"]
             image_embeds = self.visual(pixel_values, grid_thw=grid_thw)
 
         # Split concatenated embeddings for each image item.
@@ -1226,10 +1249,9 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         assert grid_thw.ndim == 2
 
         if video_input["type"] == "video_embeds":
-            video_embeds = video_input["video_embeds"].type(self.visual.dtype)
+            video_embeds = video_input["video_embeds"]
         else:
-            pixel_values_videos = video_input["pixel_values_videos"].type(
-                self.visual.dtype)
+            pixel_values_videos = video_input["pixel_values_videos"]
             video_embeds = self.visual(pixel_values_videos, grid_thw=grid_thw)
 
         # Split concatenated embeddings for each video item.
@@ -1258,11 +1280,12 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def get_multimodal_embeddings(
-            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
+    def get_multimodal_embeddings(self,
+                                  **kwargs: object) -> MultiModalEmbeddings:
 
         modalities = self._parse_and_validate_multimodal_inputs(**kwargs)
         if not modalities:
+            return []
             return None
 
         # The result multimodal_embeddings is tuple of tensors, with each
@@ -1289,7 +1312,8 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
-        if multimodal_embeddings is not None:
+        if multimodal_embeddings is not None \
+            and len(multimodal_embeddings) != 0:
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids, inputs_embeds, multimodal_embeddings,
                 [self.config.image_token_id, self.config.video_token_id])
@@ -1403,3 +1427,87 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             connector="visual.merger.",
             tower_model="visual.",
         )
+
+
+class Tarsier2MultiModalProcessor(Qwen2VLMultiModalProcessor):
+    pass
+
+
+class Tarsier2ImageProcessor(Qwen2VLImageProcessor):
+
+    def __init__(
+        self,
+        size: Optional[dict[str, int]] = None,
+        **kwargs,
+    ) -> None:
+        if size is not None and "min_pixels" in size and "max_pixels" in size:
+            # Remap if Tarsier2-specific format is provided
+            remapped_size = {
+                "shortest_edge": size["min_pixels"],
+                "longest_edge": size["max_pixels"]
+            }
+            super().__init__(size=remapped_size, **kwargs)
+        else:
+            super().__init__(size=size, **kwargs)
+
+
+class Tarsier2Processor(Qwen2VLProcessor):
+
+    def __init__(
+        self,
+        vision_config: dict,
+        tokenizer: AnyTokenizer,
+        **kwargs,
+    ):
+        self.image_processor = Tarsier2ImageProcessor(**vision_config)
+        super().__init__(image_processor=self.image_processor,
+                         tokenizer=tokenizer,
+                         video_processor=Qwen2VLVideoProcessor(),
+                         chat_template=None,
+                         **kwargs)
+
+
+class Tarsier2ProcessingInfo(Qwen2VLProcessingInfo):
+
+    def get_hf_config(self) -> Qwen2VLConfig:
+        model_path = self.ctx.model_config.model
+        original_config = AutoConfig.from_pretrained(model_path)
+        config_dict = original_config.to_dict()
+        correct_config = Qwen2VLConfig.from_dict(config_dict)
+
+        return correct_config
+
+    def get_hf_processor(self, **kwargs: object) -> Tarsier2Processor:
+        return Tarsier2Processor(
+            vision_config=self.ctx.get_hf_image_processor_config(),
+            tokenizer=self.get_tokenizer(),
+            **kwargs,
+        )
+
+    def get_image_processor(self) -> Tarsier2ImageProcessor:
+        return Tarsier2ImageProcessor(
+            **self.ctx.get_hf_image_processor_config())
+
+
+@MULTIMODAL_REGISTRY.register_processor(Tarsier2MultiModalProcessor,
+                                        info=Tarsier2ProcessingInfo,
+                                        dummy_inputs=Qwen2VLDummyInputsBuilder)
+class Tarsier2ForConditionalGeneration(Qwen2VLForConditionalGeneration):
+    hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={
+        "vision_tower.": "visual.",
+    })
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        # Tarsier2 uses llava as model_type, which will create a Qwen2VLConfig
+        # as text_config, we need to reconstruct Qwen2VLConfig from LlavaConfig.
+        config = vllm_config.model_config.hf_config
+        qwen2vl_config = config.text_config
+        qwen2vl_config.architectures = config.architectures
+        vllm_config.model_config.hf_config = qwen2vl_config
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
+
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
+
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

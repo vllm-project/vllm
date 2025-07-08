@@ -5,6 +5,8 @@ from typing import TYPE_CHECKING, Any, Optional
 
 import msgspec
 
+from vllm.sampling_params import RequestOutputKind
+
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
 
@@ -22,11 +24,14 @@ class PoolingParams(
     """
 
     dimensions: Optional[int] = None
+    use_cross_encoder: bool = False
     additional_data: Optional[Any] = None
+    output_kind: RequestOutputKind = RequestOutputKind.FINAL_ONLY
 
     def clone(self) -> "PoolingParams":
         """Returns a deep copy of the PoolingParams instance."""
         return PoolingParams(dimensions=self.dimensions,
+                             use_cross_encoder=self.use_cross_encoder,
                              additional_data=self.additional_data)
 
     def verify(self, model_config: "ModelConfig") -> None:
@@ -51,4 +56,9 @@ class PoolingParams(
     def __repr__(self) -> str:
         return (f"PoolingParams("
                 f"dimensions={self.dimensions}, "
+                f"use_cross_encoder={self.use_cross_encoder}, "
                 f"additional_metadata={self.additional_data})")
+
+    def __post_init__(self) -> None:
+        assert self.output_kind == RequestOutputKind.FINAL_ONLY,\
+            "For pooling output_kind has to be FINAL_ONLY"

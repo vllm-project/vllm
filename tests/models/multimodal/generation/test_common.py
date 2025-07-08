@@ -33,9 +33,6 @@ if current_platform.is_rocm():
     os.environ["VLLM_USE_TRITON_FLASH_ATTN"] = "0"
 
 REQUIRES_V0_MODELS = [
-    # V1 Test: no way to fall back for head_dim = 80
-    # https://github.com/vllm-project/vllm/issues/14524
-    "qwen_vl",
     # V1 Test: not enough KV cache space in C1.
     "fuyu",
 ]
@@ -107,6 +104,8 @@ VLM_TEST_SETTINGS = {
             ),
             limit_mm_per_prompt={"image": 4},
         )],
+        # TODO: Revert to "auto" when CPU backend can use torch > 2.6
+        dtype="bfloat16" if current_platform.is_cpu() else "auto",
         marks=[pytest.mark.core_model, pytest.mark.cpu_model],
     ),
     "paligemma": VLMTestInfo(
@@ -219,8 +218,7 @@ VLM_TEST_SETTINGS = {
         marks=[large_gpu_mark(min_gb=32)],
     ),
     "blip2": VLMTestInfo(
-        # TODO: Change back to 2.7b once head_dim = 80 is supported
-        models=["Salesforce/blip2-opt-6.7b"],
+        models=["Salesforce/blip2-opt-2.7b"],
         test_type=VLMTestType.IMAGE,
         prompt_formatter=lambda img_prompt: f"Question: {img_prompt} Answer:",
         img_idx_to_prompt=lambda idx: "",
@@ -307,11 +305,38 @@ VLM_TEST_SETTINGS = {
         num_logprobs=10,
         marks=[large_gpu_mark(min_gb=32)],
     ),
+    "glm4_1v": VLMTestInfo(
+        models=["THUDM/GLM-4.1V-9B-Thinking"],
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
+        prompt_formatter=lambda img_prompt: f"<|user|>\n{img_prompt}<|assistant|>",  # noqa: E501
+        img_idx_to_prompt=lambda idx: "<|begin_of_image|><|image|><|end_of_image|>", # noqa: E501
+        video_idx_to_prompt=lambda idx: "<|begin_of_video|><|video|><|end_of_video|>", # noqa: E501
+        max_model_len=2048,
+        max_num_seqs=2,
+        get_stop_token_ids=lambda tok: [151329, 151336, 151338],
+        num_logprobs=10,
+        image_size_factors=[(), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
+        auto_cls=AutoModelForImageTextToText,
+    ),
+    "glm4_1v-video": VLMTestInfo(
+        models=["THUDM/GLM-4.1V-9B-Thinking"],
+        # GLM4.1V require include video metadata for input
+        test_type=VLMTestType.CUSTOM_INPUTS,
+        max_model_len=4096,
+        max_num_seqs=2,
+        auto_cls=AutoModelForImageTextToText,
+        patch_hf_runner=model_utils.glm4_1v_patch_hf_runner,
+        custom_test_opts=[CustomTestOptions(
+            inputs=custom_inputs.video_with_metadata_glm4_1v(),
+            limit_mm_per_prompt={"video": 1},
+        )],
+        # This is needed to run on machine with 24GB VRAM
+        vllm_runner_kwargs={"gpu_memory_utilization": 0.95},
+    ),
     "h2ovl": VLMTestInfo(
         models = [
             "h2oai/h2ovl-mississippi-800m",
-            # TODO: Re-enable once head_dim = 80 is supported
-            # "h2oai/h2ovl-mississippi-2b",
+            "h2oai/h2ovl-mississippi-2b",
         ],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
         prompt_formatter=lambda img_prompt: f"<|prompt|>{img_prompt}<|end|><|answer|>", # noqa: E501

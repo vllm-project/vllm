@@ -660,6 +660,7 @@ def get_num_blocks(vllm_config: VllmConfig, num_layers: int,
         logger.info(
             "Overriding num_gpu_blocks=%d with "
             "num_gpu_blocks_override=%d", num_blocks, num_gpu_blocks_override)
+        num_blocks = num_gpu_blocks_override
     return num_blocks
 
 
@@ -863,9 +864,11 @@ def _get_kv_cache_config_uniform_page_size(
         kv_cache_groups=kv_cache_groups,
     )
 
+    min_block_size = min(
+        [group.kv_cache_spec.block_size for group in kv_cache_groups])
+
     # Print the KV cache size and maximum concurrency.
-    num_tokens = num_blocks // len(
-        grouped_layers) * vllm_config.cache_config.block_size
+    num_tokens = num_blocks // len(grouped_layers) * min_block_size
     num_tokens_str = f"{num_tokens:,}"
     logger.info("GPU KV cache size: %s tokens", num_tokens_str)
     max_model_len_str = f"{vllm_config.model_config.max_model_len:,}"

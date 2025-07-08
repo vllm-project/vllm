@@ -1,7 +1,4 @@
----
-title: Chatbox
----
-[](){ #deployment-chatbox }
+# Chatbox
 
 [Chatbox](https://github.com/chatboxai/chatbox) is a desktop client for LLMs, available on Windows, Mac, Linux.
 
@@ -15,7 +12,7 @@ It allows you to deploy a large language model (LLM) server with vLLM as the bac
 
 - Start the vLLM server with the supported chat completion model, e.g.
 
-```console
+```bash
 vllm serve qwen/Qwen1.5-0.5B-Chat
 ```
 
