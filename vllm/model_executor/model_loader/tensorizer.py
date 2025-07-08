@@ -223,9 +223,10 @@ class TensorizerConfig(MutableMapping):
             and re.search(r'%0\dd', self.tensorizer_uri) is not None
 
         if self.tensorizer_dir and self.tensorizer_uri:
-            raise ValueError(
-                "Either tensorizer_dir or tensorizer_uri must be provided, "
-                "not both.")
+            logger.info("Provided both tensorizer_dir and tensorizer_uri. "
+                        "Inferring tensorizer_dir from tensorizer_uri as the "
+                        "latter takes precedence.")
+            self.tensorizer_dir = os.path.dirname(self.tensorizer_uri)
         if self.tensorizer_dir and self.lora_dir:
             raise ValueError(
                 "Only one of tensorizer_dir or lora_dir may be specified. "
@@ -508,6 +509,9 @@ def deserialize_tensorizer_model(model: nn.Module,
             f"S3, HTTP or HTTPS scheme.")
     before_mem = get_mem_usage()
     start = time.perf_counter()
+    logger.info(
+        f"Using deserlization kwargs: {tensorizer_args.deserialization_kwargs}"
+    )
     with open_stream(
             tensorizer_config.tensorizer_uri,
             mode="rb",
