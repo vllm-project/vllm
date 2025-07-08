@@ -20,11 +20,14 @@
 #include <c10/cuda/CUDAGuard.h>
 
 #include "cutlass_extensions/common.hpp"
+
 #include "cutlass/cutlass.h"
+
 #include "cutlass/gemm/collective/collective_builder.hpp"
 #include "cutlass/epilogue/collective/collective_builder.hpp"
 #include "cutlass/gemm/device/gemm_universal_adapter.h"
 #include "cutlass/gemm/kernel/gemm_universal.hpp"
+
 #include "cutlass/util/packed_stride.hpp"
 
 #include "core/math.hpp"
@@ -61,7 +64,7 @@ struct sm100_fp4_config_M16 {
 };
 
 template <typename Config, typename OutType>
-struct Fp4GemmSm100Specialized {
+struct Fp4GemmSm100 {
   // A matrix configuration
   using ElementA = cutlass::nv_float4_t<cutlass::float_e2m1_t>;
   using LayoutATag = cutlass::layout::RowMajor;
@@ -111,8 +114,15 @@ struct Fp4GemmSm100Specialized {
       Shape<int, int, int, int>, CollectiveMainloop, CollectiveEpilogue, void>;
   using Gemm = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel>;
   using StrideA = typename Gemm::GemmKernel::StrideA;
+  using LayoutA = decltype(cute::make_layout(make_shape(0, 0, 0), StrideA{}));
+  using LayoutSFA = typename Gemm::GemmKernel::CollectiveMainloop::LayoutSFA;
   using StrideB = typename Gemm::GemmKernel::StrideB;
+  using LayoutB = decltype(cute::make_layout(make_shape(0, 0, 0), StrideB{}));
+  using LayoutSFB = typename Gemm::GemmKernel::CollectiveMainloop::LayoutSFB;
+  using StrideC = typename Gemm::GemmKernel::StrideC;
+  using LayoutC = decltype(cute::make_layout(make_shape(0, 0, 0), StrideC{}));
   using StrideD = typename Gemm::GemmKernel::StrideD;
+  using LayoutD = decltype(cute::make_layout(make_shape(0, 0, 0), StrideD{}));
 };
 
 template <typename Config>
@@ -120,7 +130,8 @@ typename Config::Gemm::Arguments args_from_options(
     at::Tensor& D, at::Tensor const& A, at::Tensor const& B,
     at::Tensor const& A_sf, at::Tensor const& B_sf, at::Tensor const& alpha,
     int64_t M, int64_t N, int64_t K) {
-  using ElementUnpacked = cutlass::float_e2m1_t;
+  using ElementA = typename Config::Gemm::ElementA;
+  using ElementB = typename Config::Gemm::ElementB;
   using ElementSFA = cutlass::float_ue4m3_t;
   using ElementSFB = cutlass::float_ue4m3_t;
   using ElementD = typename Config::ElementD;
@@ -147,8 +158,8 @@ typename Config::Gemm::Arguments args_from_options(
       cutlass::gemm::GemmUniversalMode::kGemm,
       {m, n, k, 1},
       {// Mainloop arguments
-       static_cast<ElementUnpacked const*>(A.data_ptr()), stride_A,
-       static_cast<ElementUnpacked const*>(B.data_ptr()), stride_B,
+       static_cast<ElementA const*>(A.data_ptr()), stride_A,
+       static_cast<ElementB const*>(B.data_ptr()), stride_B,
        static_cast<ElementSFA const*>(A_sf.data_ptr()), layout_SFA,
        static_cast<ElementSFB const*>(B_sf.data_ptr()), layout_SFB},
       {     // Epilogue arguments
@@ -196,15 +207,15 @@ void cutlass_fp4_gemm_dispatch(torch::Tensor& D, torch::Tensor const& A,
 
   if (mp2 <= 16) {
     // m in [1, 16]
-    runGemm<Fp4GemmSm100Specialized<sm100_fp4_config_M16, OutType>>(
+    runGemm<Fp4GemmSm100<sm100_fp4_config_M16, OutType>>(
         D, A, B, A_sf, B_sf, alpha, m, n, k, stream);
   } else if (mp2 <= 256) {
     // m in (16, 256]
-    runGemm<Fp4GemmSm100Specialized<sm100_fp4_config_M256, OutType>>(
+    runGemm<Fp4GemmSm100<sm100_fp4_config_M256, OutType>>(
         D, A, B, A_sf, B_sf, alpha, m, n, k, stream);
   } else {
     // m in (256, inf)
-    runGemm<Fp4GemmSm100Specialized<sm100_fp4_config_default, OutType>>(
+    runGemm<Fp4GemmSm100<sm100_fp4_config_default, OutType>>(
         D, A, B, A_sf, B_sf, alpha, m, n, k, stream);
   }
 }
