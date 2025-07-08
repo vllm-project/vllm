@@ -95,6 +95,16 @@ For additional features and advanced configurations, refer to the official [MkDo
 
 ```bash
 pip install -r requirements/dev.txt
+```
+
+!!! note
+    If you encounter errors installing torch (PyTorch) with the above command, you may need to specify an extra index URL for the torch wheels. For example:
+
+    ```bash
+    pip install --extra-index-url https://download.pytorch.org/whl/cu128 -r requirements/dev.txt
+    ```
+
+    Replace `cu128` with the appropriate CUDA version for your system. See [PyTorch Get Started](https://pytorch.org/get-started/locally/) for the correct URL and version.
 
 # Linting, formatting and static type checking
 pre-commit install --hook-type pre-commit --hook-type commit-msg
