@@ -204,12 +204,13 @@ class DeepseekVL2MultiModalProcessor(
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         if mm_data:
             processed_outputs = self.info.ctx.call_hf_processor(
                 self.info.get_hf_processor(**mm_kwargs),
                 dict(prompt=prompt, **mm_data),
-                mm_kwargs,
+                dict(**mm_kwargs, **tok_kwargs),
             )
             pixel_values = processed_outputs["pixel_values"]
             # split pixel values into patches corresponding to each image
@@ -278,6 +279,7 @@ class DeepseekVL2MultiModalProcessor(
         prompt: Union[str, list[int]],
         mm_data_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
+        tokenization_kwargs: Mapping[str, object],
         *,
         return_mm_hashes: bool,
     ) -> tuple[list[int], MultiModalKwargs, Optional[MultiModalHashes], bool]:
@@ -290,6 +292,7 @@ class DeepseekVL2MultiModalProcessor(
                 prompt=prompt,
                 mm_data_items=mm_data_items,
                 hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+                tokenization_kwargs=tokenization_kwargs,
                 return_mm_hashes=return_mm_hashes,
             )
 
@@ -297,6 +300,7 @@ class DeepseekVL2MultiModalProcessor(
             prompt=prompt,
             mm_data_items=mm_data_items,
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+            tokenization_kwargs=tokenization_kwargs,
             return_mm_hashes=return_mm_hashes,
         )
 
@@ -310,6 +314,13 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
     hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={
         "language.": "language_model.",
     })
+
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+        if modality.startswith("image"):
+            return "<image>"
+
+        raise ValueError("Only image modality is supported")
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -340,11 +351,11 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         embed_std = 1 / torch.sqrt(
             torch.tensor(self.projector_config.n_embed, dtype=torch.float32))
         if self.tile_tag == "2D":
-            # <|view_separator|>, <|\n|>
+            # <|view_seperator|>, <|\n|>
             self.image_newline = nn.Parameter(
                 torch.randn(self.projector_config.n_embed) * embed_std)
             # This is a typo in original implementation
-            self.view_separator = nn.Parameter(
+            self.view_seperator = nn.Parameter(
                 torch.randn(self.projector_config.n_embed) * embed_std)
         else:
             raise ValueError(
@@ -549,13 +560,13 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             if self.global_view_pos == "head":
                 global_local_features = torch.cat([
                     global_features,
-                    self.view_separator[None, :],
+                    self.view_seperator[None, :],
                     local_features,
                 ])
             else:
                 global_local_features = torch.cat([
                     local_features,
-                    self.view_separator[None, :],
+                    self.view_seperator[None, :],
                     global_features,
                 ])
 
