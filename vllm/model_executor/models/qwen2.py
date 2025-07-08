@@ -289,7 +289,7 @@ class Qwen2Model(nn.Module):
             torch.zeros(
                 # 3584 hidden_size = 28 heads * 128 head dim
                 (config.num_hidden_layers, 1, config.hidden_size),
-                dtype=getattr(torch, config.torch_dtype),
+                dtype=config.torch_dtype,
                 device=torch.cuda.current_device(),
             ),
             persistent=False,
