@@ -1,6 +1,4 @@
----
-title: dstack
----
+# dstack
 
 <p align="center">
     <img src="https://i.ibb.co/71kx6hW/vllm-dstack.png" alt="vLLM_plus_dstack"/>

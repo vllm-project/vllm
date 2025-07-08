@@ -1,6 +1,4 @@
----
-title: LiteLLM
----
+# LiteLLM
 
 [LiteLLM](https://github.com/BerriAI/litellm) call all LLM APIs using the OpenAI format [Bedrock, Huggingface, VertexAI, TogetherAI, Azure, OpenAI, Groq etc.]
 
