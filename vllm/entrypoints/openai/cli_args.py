@@ -299,9 +299,8 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         "--enable-tokenizer-info-endpoint",
         action='store_true',
         default=False,
-        help="Enable the /get_tokenizer_info endpoint. May expose chat "
-        "templates and other tokenizer configuration."
-    )
+        help="Enable the /tokenizer_info endpoint. May expose chat "
+        "templates and other tokenizer configuration.")
 
     return parser
 
