@@ -3,7 +3,11 @@
 from copy import deepcopy
 from typing import TYPE_CHECKING
 
+import vllm.envs as envs
+from vllm.distributed import divide
 from vllm.logger import init_logger
+from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, cdiv
+from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -191,10 +195,182 @@ class SnowflakeGteNewModelConfig(VerifyAndUpdateConfig):
         }
 
 
+class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
+
+    @classmethod
+    def extra_groups_for_head_shards(cls, ngroups: int, tp_size: int) -> int:
+        """Compute the increase in group numbers to account for
+        replication in order to accompany the head shards."""
+
+        # in the case ngoups % tp_size == 0, this will be zero
+        if ngroups % tp_size == 0:
+            return 0
+
+        # for n_groups == 1, this is exactly tp_size - n_groups
+        return tp_size - ngroups
+
+    @classmethod
+    def get_mamba_cache_shape(
+            cls, vllm_config: "VllmConfig"
+    ) -> tuple[tuple[int, int], tuple[int, int]]:
+
+        parallel_config = vllm_config.parallel_config
+        hf_config = vllm_config.model_config.hf_config
+
+        if hasattr(hf_config, "mamba_expand"):
+            mamba_expand = hf_config.mamba_expand
+        elif hasattr(hf_config, "expand"):
+            # nemotron-h
+            mamba_expand = hf_config.expand
+        else:
+            raise ValueError("Cannot find mamba_expand in config.")
+
+        if hasattr(hf_config, "mamba_n_groups"):
+            mamba_n_groups = hf_config.mamba_n_groups
+        elif hasattr(hf_config, "mamba_ngroups"):
+            # zamba2
+            mamba_n_groups = hf_config.mamba_ngroups
+        elif hasattr(hf_config, "n_groups"):
+            # nemotron-h
+            mamba_n_groups = hf_config.n_groups
+        else:
+            raise ValueError("Cannot find mamba n_groups in config.")
+
+        if hasattr(hf_config, "mamba_n_heads"):
+            mamba_n_heads = hf_config.mamba_n_heads
+        elif hasattr(hf_config, "n_mamba_heads"):
+            # zamba2
+            mamba_n_heads = hf_config.n_mamba_heads
+        elif hasattr(hf_config, "mamba_num_heads"):
+            # nemotron-h
+            mamba_n_heads = hf_config.mamba_num_heads
+        else:
+            raise ValueError("Cannot find mamba n_heads in config.")
+
+        if hasattr(hf_config, "mamba_d_head"):
+            mamba_d_head = hf_config.mamba_d_head
+        elif hasattr(hf_config, "mamba_headdim"):
+            # zamba2
+            mamba_d_head = hf_config.mamba_headdim
+        elif hasattr(hf_config, "mamba_head_dim"):
+            # nemotron-h
+            mamba_d_head = hf_config.mamba_head_dim
+        else:
+            raise ValueError("Cannot find mamba d_head in config.")
+
+        if hasattr(hf_config, "mamba_d_state"):
+            mamba_d_state = hf_config.mamba_d_state
+        elif hasattr(hf_config, "ssm_state_size"):
+            # nemotron-h
+            mamba_d_state = hf_config.ssm_state_size
+        else:
+            raise ValueError("Cannot find mamba d_state in config.")
+
+        if hasattr(hf_config, "mamba_d_conv"):
+            mamba_d_conv = hf_config.mamba_d_conv
+        elif hasattr(hf_config, "conv_kernel"):
+            # nemotron-h
+            mamba_d_conv = hf_config.conv_kernel
+        else:
+            raise ValueError("Cannot find mamba d_conv in config.")
+
+        world_size = parallel_config.tensor_parallel_size
+        hidden_size = hf_config.hidden_size
+        intermediate_size = mamba_expand * hidden_size
+
+        # if n_groups is not divisible by world_size, need to extend the shards
+        # to ensure all groups needed by a head is sharded along with it
+        n_groups = (
+            mamba_n_groups +
+            cls.extra_groups_for_head_shards(mamba_n_groups, world_size))
+
+        # - heads and n_groups are TP-ed
+        conv_dim = (intermediate_size + 2 * n_groups * mamba_d_state)
+        conv_state_shape = (
+            divide(conv_dim, world_size),
+            mamba_d_conv - 1,
+        )
+
+        # These are not TP-ed as they depend on A, dt_bias, D
+        # - they are typically small
+        #   e.g., (h_heads, d_head, d_state) = (128, 64, 128)
+        temporal_state_shape = (
+            divide(mamba_n_heads, world_size),
+            mamba_d_head,
+            mamba_d_state,
+        )
+
+        return conv_state_shape, temporal_state_shape
+
+    @classmethod
+    def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
+
+        if not envs.VLLM_USE_V1:
+            return
+
+        cache_config = vllm_config.cache_config
+        model_config = vllm_config.model_config
+        parallel_config = vllm_config.parallel_config
+
+        if cache_config.cache_dtype == "auto":
+            kv_cache_dtype = model_config.dtype
+        else:
+            kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
+
+        # get attention page size (for 1 token)
+        attn_page_size_1_token = FullAttentionSpec(
+            block_size=1,
+            num_kv_heads=model_config.get_num_kv_heads(parallel_config),
+            head_size=model_config.get_head_size(),
+            dtype=kv_cache_dtype,
+            use_mla=model_config.use_mla).page_size_bytes
+
+        # get mamba page size
+        mamba_page_size = MambaSpec(
+            shapes=cls.get_mamba_cache_shape(vllm_config),
+            dtype=kv_cache_dtype,
+            block_size=model_config.max_model_len,
+        ).page_size_bytes
+
+        # some attention backends (e.g. FA) only support setting
+        # block size to multiple of 16, so let's suggest a value
+        # that would work (note: FA is currently not compatible
+        # with mamba layers, use FlashInfer instead).
+        attn_block_size = 16 * cdiv(mamba_page_size,
+                                    16 * attn_page_size_1_token)
+
+        logger.info(
+            "Setting default attention block size to %d tokens "
+            "to ensure that attention page size is >= mamba page size.",
+            attn_block_size)
+
+        mamba_page_size_padded = attn_block_size * attn_page_size_1_token
+
+        mamba_padding_pct = 100 * (mamba_page_size_padded -
+                                   mamba_page_size) / mamba_page_size
+
+        logger.info(
+            "Padding mamba page size by %.2f%% to ensure "
+            "that mamba page size and attention page size are "
+            "exactly equal.", mamba_padding_pct)
+
+        # override attention block size if either (a) the
+        # user has not set it or (b) the user has set it
+        # too small.
+        if (cache_config.block_size is not None
+                and cache_config.block_size < attn_block_size):
+            cache_config.block_size = attn_block_size
+
+
 MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "GteModel": SnowflakeGteNewModelConfig,
     "GteNewModel": GteNewModelConfig,
     "NomicBertModel": NomicBertModelConfig,
     "Qwen3ForSequenceClassification": Qwen3ForSequenceClassificationConfig,
     "XLMRobertaModel": JinaRobertaModelConfig,
+    "FalconH1ForCausalLM": HybridAttentionMambaModelConfig,
+    "BambaForCausalLM": HybridAttentionMambaModelConfig,
+    "GraniteMoeHybridForCausalLM": HybridAttentionMambaModelConfig,
+    "NemotronHForCausalLM": HybridAttentionMambaModelConfig,
+    "Zamba2ForCausalLM": HybridAttentionMambaModelConfig,
 }
