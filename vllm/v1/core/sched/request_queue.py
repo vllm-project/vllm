@@ -144,15 +144,22 @@ class PrioritizedItem:
         self.aging_factor = aging_factor
         self.insert_time = request.arrival_time
 
-    def __lt__(self, other: PrioritizedItem) -> bool:
+    @property
+    def priority(self) -> float:
+        """Calculate the effective priority of the request, factoring in aging.
+        The effective priority decreases over time based on the aging factor.
+        """
+        # Aging is based on the time since the request was inserted 
+        # into the queue and the aging factor.
+        if self.aging_factor <= 0:
+            return self.request.priority
         now = time.time()
-        eff_self = self.request.priority - self.aging_factor * (
-            now - self.insert_time)
-        eff_other = other.request.priority - other.aging_factor * (
-            now - other.insert_time)
+        return self.request.priority - self.aging_factor * (now -
+                                                            self.insert_time)
 
-        if eff_self != eff_other:
-            return eff_self < eff_other
+    def __lt__(self, other: PrioritizedItem) -> bool:
+        if self.priority != other.priority:
+            return self.priority < other.priority
         return self.insert_time < other.insert_time
 
 
