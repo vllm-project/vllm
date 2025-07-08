@@ -36,7 +36,7 @@ QuantizationMethods = Literal[
     "torchao",
     "auto-round",
     "rtn",
-	"inc",
+    "inc",
 ]
 QUANTIZATION_METHODS: list[str] = list(get_args(QuantizationMethods))
 
@@ -147,7 +147,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "torchao": TorchAOConfig,
         "auto-round": AutoRoundConfig,
         "rtn": RTNConfig,
-		"inc": INCConfig,
+        "inc": INCConfig,
     }
     # Update the `method_to_config` with customized quantization methods.
     method_to_config.update(_CUSTOMIZED_METHOD_TO_QUANT_CONFIG)

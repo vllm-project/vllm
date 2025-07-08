@@ -1,4 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+#
+# Intel Gaudi supports quantization of various modules and functions,
+# including, but not limited to `Linear`, `KVCache`, `Matmul` and `Softmax`.
+# During model loading,
+# INC will patch layers with quantization/dequantization operators.
+# Meanwhile, INC will convert original weight to target datatype
+# and loading to target device.
+# static scaling should be provided through Quant_CONFIG:
+# `QUANT_CONFIG` is an environment variable,
+# that points to the measurement or quantization JSON config file.
+# The measurement configuration file is used during the calibration procedure,
+# to collect measurements for a given model.
+# The quantization configuration is used during inference.
+# For more information, please refer to:
+# https://docs.habana.ai/en/v1.21.1/PyTorch/vLLM_Inference/vLLM_FP8_Inference.html
 
 from typing import Any, Optional
 
