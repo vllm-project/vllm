@@ -144,8 +144,10 @@ class MistralToolParser(ToolParser):
             try:
                 if self.fn_name_regex:
                     function_call_arr = []
-                    for single_tool_content in model_output.split(self.bot_token):
-                        matches = self.fn_name_regex.findall(single_tool_content)
+                    for single_tool_content in model_output.split(
+                            self.bot_token):
+                        matches = self.fn_name_regex.findall(
+                            single_tool_content)
 
                         for match in matches:
                             fn_name = match[0]
@@ -154,8 +156,10 @@ class MistralToolParser(ToolParser):
                             # fn_name is encoded outside serialized json dump
                             # only arguments are serialized
                             function_call_arr.append({
-                                "name": fn_name,
-                                "arguments": json.loads(args)
+                                "name":
+                                fn_name,
+                                "arguments":
+                                json.loads(args)
                             })
                 else:
                     function_call_arr = json.loads(tool_content)
@@ -315,6 +319,8 @@ class MistralToolParser(ToolParser):
             if next_function_text:
                 ret += self._generate_delta_tool_call(next_function_text)
             return ret
+        # Should not happen
+        return []
 
     def _extract_tool_calls_streaming_pre_v11_tokenizer(
         self,
