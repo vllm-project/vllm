@@ -180,7 +180,11 @@ def run_cutlass_moe_fp8(
         c2 = _resize_cache(workspace2, (M * topk, N))
         c3 = _resize_cache(workspace13, (M * topk, K))
 
-    c1.fill_(0)
+    if not per_act_token and (expert_map is not None or use_batched_format):
+        # this is necessary to avoid imprecise scale calculation caused by
+        # random data in the unused workspace. The workspace is unused when
+        # this rank handles only partial tokens, or when it is batched .
+        c1.fill_(0)
 
     ops.cutlass_moe_mm(c1, a1q, w1, a1q_scale, w1_scale, expert_offsets,
                        problem_sizes1, ab_strides1, ab_strides1, c_strides1,
@@ -303,7 +307,7 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
     ):
         assert w1_zp is None, "w1_zp is not supported in CUTLASS MoE"
         assert w2_zp is None, "w2_zp is not supported in CUTLASS MoE"
-        activation_callable = lambda i, o: self.activation(activation, i, o)
+        activation_callable = lambda o, i: self.activation(activation, o, i)
         in_dtype = hidden_states.dtype
         run_cutlass_moe_fp8(
             output, hidden_states, w1, w2, topk_ids, activation_callable,
