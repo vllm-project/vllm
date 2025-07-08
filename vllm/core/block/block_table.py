@@ -161,7 +161,6 @@ class BlockTable:
             if end_block_idx > 0:
                 self._blocks[end_block_idx].prev_block = None
 
-
         # Ensure there are enough empty slots for the new tokens plus
         # lookahead slots
         self.ensure_num_empty_slots(num_empty_slots=len(token_ids) +
