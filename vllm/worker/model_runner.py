@@ -1246,6 +1246,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         TensorizerLoader.save_model(
             self.model,
             tensorizer_config=tensorizer_config,
+            model_config=self.model_config,
         )
 
     def get_max_block_per_batch(self) -> int:

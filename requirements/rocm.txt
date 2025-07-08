@@ -11,7 +11,7 @@ datasets
 ray>=2.10.0,<2.45.0
 peft
 pytest-asyncio
-tensorizer>=2.9.0
+tensorizer==2.10.1
 packaging>=24.2
 setuptools>=77.0.3,<80.0.0
 setuptools-scm>=8
