@@ -25,8 +25,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.sequence import IntermediateTensors, PoolerOutput
-from vllm.transformers_utils.config import (
-    get_cross_encoder_activation_function)
 
 from .interfaces import SupportsCrossEncoding, SupportsQuant, SupportsV0Only
 from .utils import WeightsMapper, maybe_prefix
@@ -414,15 +412,10 @@ class BertEmbeddingModel(nn.Module, SupportsV0Only, SupportsQuant):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        hidden_states = self.model(input_ids=input_ids,
-                                   position_ids=positions,
-                                   inputs_embeds=inputs_embeds,
-                                   intermediate_tensors=intermediate_tensors)
-
-        # convert the embedding output to float32,
-        # otherwise precision will be lost significantly
-        hidden_states = hidden_states.to(torch.float32)
-        return hidden_states
+        return self.model(input_ids=input_ids,
+                          position_ids=positions,
+                          inputs_embeds=inputs_embeds,
+                          intermediate_tensors=intermediate_tensors)
 
     def pooler(
         self,
@@ -451,8 +444,8 @@ class BertEmbeddingModel(nn.Module, SupportsV0Only, SupportsQuant):
                                                 softmax=False)
 
 
-class BertForSequenceClassification(nn.Module, SupportsCrossEncoding,
-                                    SupportsQuant):
+class BertForSequenceClassification(nn.Module, SupportsV0Only,
+                                    SupportsCrossEncoding, SupportsQuant):
     """A model that uses Bert to provide embedding functionalities.
 
    This class encapsulates the BertModel and provides an interface for
@@ -466,9 +459,6 @@ class BertForSequenceClassification(nn.Module, SupportsCrossEncoding,
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
-
-        self.default_activation_function = \
-            get_cross_encoder_activation_function(config)
 
         self.num_labels = config.num_labels
         self.bert = BertModel(vllm_config=vllm_config,

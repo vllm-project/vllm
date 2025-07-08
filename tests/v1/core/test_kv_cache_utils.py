@@ -43,6 +43,7 @@ def make_request(request_id,
         multi_modal_hashes=mm_hashes,
         multi_modal_placeholders=mm_positions,
         sampling_params=SamplingParams(max_tokens=17),
+        pooling_params=None,
         eos_token_id=100,
         lora_request=None,
         cache_salt=cache_salt,
@@ -900,3 +901,19 @@ def test_get_kv_cache_config():
     with pytest.raises(NotImplementedError):
         get_kv_cache_config(vllm_config, kv_cache_specs_hybrid,
                             mem_per_block_per_layer * 2 * 32)
+
+    # Test num_gpu_blocks_override
+    vllm_config.cache_config.num_gpu_blocks_override = 16
+    kv_cache_config_override_blocks = get_kv_cache_config(
+        vllm_config, kv_cache_specs_full, mem_per_block_per_layer * 2 * 32)
+    assert kv_cache_config_override_blocks == KVCacheConfig(
+        num_blocks=16,
+        kv_cache_tensors=[
+            KVCacheTensor(size=mem_per_block_per_layer * 16,
+                          shared_by=["layer_1"]),
+            KVCacheTensor(size=mem_per_block_per_layer * 16,
+                          shared_by=["layer_2"]),
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["layer_1", "layer_2"], new_kv_cache_spec())
+        ])

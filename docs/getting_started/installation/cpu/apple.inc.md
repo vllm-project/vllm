@@ -25,11 +25,11 @@ Currently the CPU implementation for macOS supports FP32 and FP16 datatypes.
 
 After installation of XCode and the Command Line Tools, which include Apple Clang, execute the following commands to build and install vLLM from the source.
 
-```console
+```bash
 git clone https://github.com/vllm-project/vllm.git
 cd vllm
 pip install -r requirements/cpu.txt
-pip install -e . 
+pip install -e .
 ```
 
 !!! note
@@ -54,9 +54,6 @@ If the build has error like the following snippet where standard C++ headers can
 ```
 
 # --8<-- [end:build-wheel-from-source]
-# --8<-- [start:set-up-using-docker]
-
-# --8<-- [end:set-up-using-docker]
 # --8<-- [start:pre-built-images]
 
 # --8<-- [end:pre-built-images]

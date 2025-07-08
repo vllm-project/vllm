@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Integration tests for FlexAttention backend vs default backend"""
 
 import random
@@ -51,7 +52,6 @@ def test_flex_attention_vs_default_backend(monkeypatch):
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
         m.setenv("VLLM_ATTENTION_BACKEND", "FLEX_ATTENTION")
-        m.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 
         set_seed(seed)
 
@@ -66,7 +66,6 @@ def test_flex_attention_vs_default_backend(monkeypatch):
     # Run with default backend
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
-        m.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
         set_seed(seed)
         llm_default = LLM(
             model_name,
