@@ -191,7 +191,6 @@ using Kernel_{{type_sig}} = MacheteKernelTemplate<
   {{DataTypeTag[t.b_group_zeropoint]}}, // GroupZeroT
   {{DataTypeTag[t.b_channel_scale]}}, // ChannelScaleT
   {{DataTypeTag[t.a_token_scale]}}, // TokenScaleT
-  // cutlass::gemm::KernelTmaWarpSpecializedCooperative, // moved to schedule config
   Sch>;
 
 {% for sch in schs %}
@@ -520,11 +519,12 @@ def generate():
     # Heuristic is currently tuned for H100s
     default_heuristic = [
         (
-            cond, ScheduleConfig(
+            cond,
+            ScheduleConfig(
                 *tile_config,
                 **sch_config_overrides.get(cond,
                                            sch_common_params)  # type: ignore
-        )) for cond, tile_config in default_tile_heuristic_config.items()
+            )) for cond, tile_config in default_tile_heuristic_config.items()
     ]
 
     def get_unique_schedules(heuristic: dict[str, ScheduleConfig]):
