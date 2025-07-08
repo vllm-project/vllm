@@ -1,6 +1,4 @@
----
-title: Loading models with CoreWeave's Tensorizer
----
+# Loading models with CoreWeave's Tensorizer
 
 vLLM supports loading models with [CoreWeave's Tensorizer](https://docs.coreweave.com/coreweave-machine-learning-and-ai/inference/tensorizer).
 vLLM model tensors that have been serialized to disk, an HTTP/HTTPS endpoint, or S3 endpoint can be deserialized

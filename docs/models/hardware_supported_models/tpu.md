@@ -1,6 +1,4 @@
----
-title: TPU
----
+# TPU
 
 # TPU Supported Models
 ## Text-only Language Models

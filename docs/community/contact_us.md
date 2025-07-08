@@ -1,5 +1,3 @@
----
-title: Contact Us
----
+# Contact Us
 
 --8<-- "README.md:contact-us"

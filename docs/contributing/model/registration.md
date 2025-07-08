@@ -1,6 +1,4 @@
----
-title: Registering a Model
----
+# Registering a Model
 
 vLLM relies on a model registry to determine how to run each model.
 A list of pre-registered architectures can be found [here](../../models/supported_models.md).

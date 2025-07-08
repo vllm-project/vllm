@@ -1,6 +1,4 @@
----
-title: Installation
----
+# Installation
 
 vLLM supports the following hardware platforms:
 
