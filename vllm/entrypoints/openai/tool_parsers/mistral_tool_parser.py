@@ -246,6 +246,11 @@ class MistralToolParser(ToolParser):
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
     ) -> Union[DeltaMessage, None]:
+        """
+        Extracts tool calls for Mistral models
+        doing tool calls of the following format:
+        `[TOOL_CALLS]add{"a": 3.5, "b": 4}`
+        """
         additional_content: str = ""
         if self.current_tool_id == -1:
             # this is the first tool call
@@ -332,6 +337,11 @@ class MistralToolParser(ToolParser):
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
     ) -> Union[DeltaMessage, None]:
+        """
+        Extracts tool calls for Mistral models
+        doing tool calls of the following format:
+        `[TOOL_CALLS][{"name": "add", "arguments":{"a": 3.5, "b": 4}}`
+        """
         additional_content: str = ""
         if self.bot_token in delta_text:
             self.raw_tool_calls += (delta_text.split(
