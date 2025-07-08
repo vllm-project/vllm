@@ -5,6 +5,7 @@ from typing import Any, Optional, TypedDict, Union, cast
 
 import torch
 from torch import nn
+
 from transformers import AutoModel, BatchFeature
 from transformers.models.gemma3n import (Gemma3nAudioConfig,
                                          Gemma3nAudioFeatureExtractor,
@@ -12,7 +13,6 @@ from transformers.models.gemma3n import (Gemma3nAudioConfig,
                                          Gemma3nTextConfig,
                                          Gemma3nVisionConfig)
 from transformers.models.siglip import SiglipImageProcessorFast
-
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -363,6 +363,7 @@ class Gemma3nForConditionalGeneration(nn.Module, SupportsMultiModal):
             architectures=["Gemma3nForCausalLM"],
         )
         self.language_model = cast(Gemma3nForCausalLM, self.language_model)
+        self.per_layer_inputs = None
 
     @property
     def dtype(self):
@@ -514,6 +515,14 @@ class Gemma3nForConditionalGeneration(nn.Module, SupportsMultiModal):
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
+        # TODO this breaks the interface, we need tokens but the runner will only give us embeddings
+        if input_ids is not None:
+            per_layer_inputs = self.language_model.model.get_per_layer_input_embeddings(
+                input_ids)
+            self.per_layer_inputs = per_layer_inputs.reshape(
+                -1, self.config.text_config.num_hidden_layers,
+                self.config.text_config.hidden_size_per_layer_input)
+
         if multimodal_embeddings is not None \
             and len(multimodal_embeddings) != 0:
             inputs_embeds = merge_multimodal_embeddings(
@@ -552,6 +561,7 @@ class Gemma3nForConditionalGeneration(nn.Module, SupportsMultiModal):
         hidden_states = self.language_model.model(
             input_ids,
             positions,
+            per_layer_inputs=self.per_layer_inputs,
             # TODO
             #   intermediate_tensors
             inputs_embeds=inputs_embeds,
