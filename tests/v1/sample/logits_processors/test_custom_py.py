@@ -4,25 +4,12 @@ import random
 
 import pytest
 
+from tests.v1.sample.logits_processors.utils import (
+    DUMMY_LOGITPROC_ARG, DUMMY_LOGITPROC_ENTRYPOINT, DUMMY_LOGITPROC_FQN,
+    LOGITPROC_SOURCE_ENTRYPOINT, LOGITPROC_SOURCE_FQN, MAX_TOKENS, MODEL_NAME,
+    TEMP_GREEDY, prompts)
 from vllm import LLM, SamplingParams
 
-MODEL = "facebook/opt-125m"
-DUMMY_LOGITPROC_ENTRYPOINT = "dummy_logitproc"
-DUMMY_LOGITPROC_FQN = (
-    "vllm.v1.sample.logits_processor.impls:DummyLogitsProcessor")
-DUMMY_LOGITPROC_ARG = "target_token"
-LOGITPROC_SOURCE_ENTRYPOINT = "entrypoint"
-LOGITPROC_SOURCE_FQN = "fqn"
-TEMP_GREEDY = 0.0
-MAX_TOKENS = 20
-
-# Sample prompts.
-prompts = [
-    "Hello, my name is",
-    "The president of the United States is",
-    "The capital of France is",
-    "The future of AI is",
-]
 # Create a mixture of requests which do and don't utilize the dummy logitproc
 sampling_params_list = [
     SamplingParams(temperature=TEMP_GREEDY,
@@ -38,7 +25,7 @@ sampling_params_list = [
 
 @pytest.mark.parametrize("logitproc_source",
                          [LOGITPROC_SOURCE_FQN, LOGITPROC_SOURCE_ENTRYPOINT])
-def test_custom_logitsprocs(logitproc_source: str):
+def test_custom_logitsprocs_py(logitproc_source: str):
     """Test Python interface for passing custom logitsprocs
     
     Construct an `LLM` instance which loads a custom logitproc that has a
@@ -69,13 +56,13 @@ def test_custom_logitsprocs(logitproc_source: str):
 
     # Create a vLLM instance and load custom logitproc
     llm_logitproc = LLM(
-        model=MODEL,
+        model=MODEL_NAME,
         gpu_memory_utilization=0.1,
         **kwargs,
     )
 
     # Create a reference vLLM instance without custom logitproc
-    llm_ref = LLM(model=MODEL, gpu_memory_utilization=0.1)
+    llm_ref = LLM(model=MODEL_NAME, gpu_memory_utilization=0.1)
 
     # Run inference with logitproc loaded
     outputs_logitproc = llm_logitproc.generate(prompts, sampling_params_list)
