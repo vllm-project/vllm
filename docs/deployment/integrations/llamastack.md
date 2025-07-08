@@ -1,13 +1,10 @@
----
-title: Llama Stack
----
-[](){ #deployment-llamastack }
+# Llama Stack
 
 vLLM is also available via [Llama Stack](https://github.com/meta-llama/llama-stack) .
 
 To install Llama Stack, run
 
-```console
+```bash
 pip install llama-stack -q
 ```
 

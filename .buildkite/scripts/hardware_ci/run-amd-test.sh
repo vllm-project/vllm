@@ -94,6 +94,10 @@ if [[ $commands == *"pytest -v -s compile/test_basic_correctness.py"* ]]; then
   commands=${commands//"pytest -v -s compile/test_basic_correctness.py"/"VLLM_USE_TRITON_FLASH_ATTN=0 pytest -v -s compile/test_basic_correctness.py"}
 fi
 
+if [[ $commands == *"pytest -v -s lora"* ]]; then
+  commands=${commands//"pytest -v -s lora"/"VLLM_ROCM_CUSTOM_PAGED_ATTN=0 pytest -v -s lora"}
+fi
+
 #ignore certain kernels tests
 if [[ $commands == *" kernels/core"* ]]; then
   commands="${commands} \
@@ -103,10 +107,9 @@ fi
 
 if [[ $commands == *" kernels/attention"* ]]; then
   commands="${commands} \
-  --ignore=kernels/attention/stest_attention_selector.py \
+  --ignore=kernels/attention/test_attention_selector.py \
   --ignore=kernels/attention/test_blocksparse_attention.py \
   --ignore=kernels/attention/test_encoder_decoder_attn.py \
-  --ignore=kernels/attention/test_attention_selector.py \
   --ignore=kernels/attention/test_flash_attn.py \
   --ignore=kernels/attention/test_flashinfer.py \
   --ignore=kernels/attention/test_prefix_prefill.py \

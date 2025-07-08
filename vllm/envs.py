@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import hashlib
 import os
@@ -14,7 +15,7 @@ if TYPE_CHECKING:
     VLLM_RINGBUFFER_WARNING_INTERVAL: int = 60
     VLLM_NCCL_SO_PATH: Optional[str] = None
     LD_LIBRARY_PATH: Optional[str] = None
-    VLLM_USE_TRITON_FLASH_ATTN: bool = False
+    VLLM_USE_TRITON_FLASH_ATTN: bool = True
     VLLM_V1_USE_PREFILL_DECODE_ATTENTION: bool = False
     VLLM_FLASH_ATTN_VERSION: Optional[int] = None
     LOCAL_RANK: int = 0
@@ -43,10 +44,13 @@ if TYPE_CHECKING:
     VLLM_PP_LAYER_PARTITION: Optional[str] = None
     VLLM_CPU_KVCACHE_SPACE: int = 0
     VLLM_CPU_OMP_THREADS_BIND: str = ""
+    VLLM_CPU_NUM_OF_RESERVED_CPU: int = 0
     VLLM_CPU_MOE_PREPACK: bool = True
+    VLLM_CPU_SGL_KERNEL: bool = False
     VLLM_XLA_CACHE_PATH: str = os.path.join(VLLM_CACHE_ROOT, "xla_cache")
     VLLM_XLA_CHECK_RECOMPILATION: bool = False
     VLLM_FUSED_MOE_CHUNK_SIZE: int = 64 * 1024
+    VLLM_ENABLE_FUSED_MOE_ACTIVATION_CHUNKING: bool = True
     VLLM_USE_RAY_SPMD_WORKER: bool = False
     VLLM_USE_RAY_COMPILED_DAG: bool = False
     VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE: str = "auto"
@@ -70,6 +74,7 @@ if TYPE_CHECKING:
     VERBOSE: bool = False
     VLLM_ALLOW_LONG_MAX_MODEL_LEN: bool = False
     VLLM_RPC_TIMEOUT: int = 10000  # ms
+    VLLM_HTTP_TIMEOUT_KEEP_ALIVE: int = 5  # seconds
     VLLM_PLUGINS: Optional[list[str]] = None
     VLLM_LORA_RESOLVER_CACHE_DIR: Optional[str] = None
     VLLM_TORCH_PROFILER_DIR: Optional[str] = None
@@ -84,6 +89,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_MOE: bool = True
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
     VLLM_ROCM_USE_AITER_MLA: bool = True
+    VLLM_ROCM_USE_AITER_MHA: bool = True
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
@@ -98,7 +104,6 @@ if TYPE_CHECKING:
     VLLM_SERVER_DEV_MODE: bool = False
     VLLM_V1_OUTPUT_PROC_CHUNK_SIZE: int = 128
     VLLM_MLA_DISABLE: bool = False
-    VLLM_ENABLE_MOE_ALIGN_BLOCK_SIZE_TRITON: bool = False
     VLLM_RAY_PER_WORKER_GPUS: float = 1.0
     VLLM_RAY_BUNDLE_INDICES: str = ""
     VLLM_CUDART_SO_PATH: Optional[str] = None
@@ -109,10 +114,13 @@ if TYPE_CHECKING:
     VLLM_DP_SIZE: int = 1
     VLLM_DP_MASTER_IP: str = ""
     VLLM_DP_MASTER_PORT: int = 0
+    VLLM_MOE_DP_CHUNK_SIZE: int = 256
+    VLLM_RANDOMIZE_DP_DUMMY_INPUTS: bool = False
     VLLM_MARLIN_USE_ATOMIC_ADD: bool = False
     VLLM_V0_USE_OUTLINES_CACHE: bool = False
     VLLM_V1_USE_OUTLINES_CACHE: bool = False
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
+    VLLM_TPU_MOST_MODEL_LEN: Optional[int] = None
     VLLM_USE_DEEP_GEMM: bool = False
     VLLM_XGRAMMAR_CACHE_MB: int = 0
     VLLM_MSGPACK_ZERO_COPY_THRESHOLD: int = 256
@@ -122,6 +130,16 @@ if TYPE_CHECKING:
     VLLM_ALL2ALL_BACKEND: str = "naive"
     VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE: int = 163840
     VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS: int = 1
+    VLLM_SLEEP_WHEN_IDLE: bool = False
+    VLLM_MQ_MAX_CHUNK_BYTES_MB: int = 16
+    VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: int = 300
+    VLLM_KV_CACHE_LAYOUT: Optional[str] = None
+    VLLM_COMPUTE_NANS_IN_LOGITS: bool = False
+    VLLM_USE_NVFP4_CT_EMULATIONS: bool = False
+    VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: str = "NONE"
+    VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16: bool = True
+    VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB: Optional[int] = None
+    VLLM_NIXL_ABORT_REQUEST_TIMEOUT: int = 120
 
 
 def get_default_cache_root():
@@ -418,13 +436,22 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # (CPU backend only) CPU core ids bound by OpenMP threads, e.g., "0-31",
     # "0,1,2", "0-31,33". CPU cores of different ranks are separated by '|'.
     "VLLM_CPU_OMP_THREADS_BIND":
-    lambda: os.getenv("VLLM_CPU_OMP_THREADS_BIND", "all"),
+    lambda: os.getenv("VLLM_CPU_OMP_THREADS_BIND", "auto"),
+
+    # (CPU backend only) CPU cores not used by OMP threads .
+    # Those CPU cores will not be used by OMP threads of a rank.
+    "VLLM_CPU_NUM_OF_RESERVED_CPU":
+    lambda: int(os.getenv("VLLM_CPU_NUM_OF_RESERVED_CPU", "0")),
 
     # (CPU backend only) whether to use prepack for MoE layer. This will be
     # passed to ipex.llm.modules.GatedMLPMOE. On unsupported CPUs, you might
     # need to set this to "0" (False).
     "VLLM_CPU_MOE_PREPACK":
     lambda: bool(int(os.getenv("VLLM_CPU_MOE_PREPACK", "1"))),
+
+    # (CPU backend only) whether to use SGL kernels, optimized for small batch.
+    "VLLM_CPU_SGL_KERNEL":
+    lambda: bool(int(os.getenv("VLLM_CPU_SGL_KERNEL", "0"))),
 
     # If the env var is set, then all workers will execute as separate
     # processes from the engine, and we use the same mechanism to trigger
@@ -521,6 +548,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: bool(int(os.getenv("VLLM_XLA_USE_SPMD", "0"))),
     "VLLM_FUSED_MOE_CHUNK_SIZE":
     lambda: int(os.getenv("VLLM_FUSED_MOE_CHUNK_SIZE", "32768")),
+    # Control whether to use fused MoE activation chunking. Current chunking
+    # logic is incompatible with torch.compile and causes IMA. See issue
+    # https://github.com/vllm-project/vllm/issues/19631.
+    "VLLM_ENABLE_FUSED_MOE_ACTIVATION_CHUNKING":
+    lambda: bool(
+        int(os.getenv("VLLM_ENABLE_FUSED_MOE_ACTIVATION_CHUNKING", "1"))),
 
     # If set, vllm will skip the deprecation warnings.
     "VLLM_NO_DEPRECATION_WARNING":
@@ -553,6 +586,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # server for simple data operations
     "VLLM_RPC_TIMEOUT":
     lambda: int(os.getenv("VLLM_RPC_TIMEOUT", "10000")),
+
+    # Timeout in seconds for keeping HTTP connections alive in API server
+    "VLLM_HTTP_TIMEOUT_KEEP_ALIVE":
+    lambda: int(os.environ.get("VLLM_HTTP_TIMEOUT_KEEP_ALIVE", "5")),
 
     # a list of plugin names to load, separated by commas.
     # if this is not set, it means all plugins will be loaded
@@ -637,6 +674,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_USE_AITER_MLA":
     lambda: (os.getenv("VLLM_ROCM_USE_AITER_MLA", "True").lower() in
              ("true", "1")),
+
+    # Whether to use aiter mha ops.
+    # By default is enabled.
+    "VLLM_ROCM_USE_AITER_MHA":
+    lambda: (os.getenv("VLLM_ROCM_USE_AITER_MHA", "True").lower() in
+             ("true", "1")),
+
     # use rocm skinny gemms
     "VLLM_ROCM_USE_SKINNY_GEMM":
     lambda: (os.getenv("VLLM_ROCM_USE_SKINNY_GEMM", "True").lower() in
@@ -654,6 +698,31 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_CUSTOM_PAGED_ATTN":
     lambda: (os.getenv("VLLM_ROCM_CUSTOM_PAGED_ATTN", "True").lower() in
              ("true", "1")),
+
+    # Custom quick allreduce kernel for MI3* cards
+    # Choice of quantization level: FP, INT8, INT6, INT4 or NONE
+    # Recommended for large models to get allreduce
+    "VLLM_ROCM_QUICK_REDUCE_QUANTIZATION":
+    lambda: os.getenv("VLLM_ROCM_QUICK_REDUCE_QUANTIZATION", "NONE").upper(),
+
+    # Custom quick allreduce kernel for MI3* cards
+    # Due to the lack of the bfloat16 asm instruction, bfloat16
+    # kernels are slower than fp16,
+    # If environment variable is set to 1, the input is converted to fp16
+    "VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16":
+    lambda:
+    (os.getenv("VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16", "True").lower() in
+     ("true", "1")),
+
+    # Custom quick allreduce kernel for MI3* cards.
+    # Controls the maximum allowed number of data bytes(MB) for custom quick
+    # allreduce communication.
+    # Default: 2048 MB.
+    # Data exceeding this size will use either custom allreduce or RCCL
+    # communication.
+    "VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB":
+    lambda: maybe_convert_int(
+        os.environ.get("VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB", None)),
 
     # If set, when running in Quark emulation mode, do not dequantize the
     # weights at load time. Instead, dequantize weights on-the-fly during
@@ -700,12 +769,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # If set, vLLM will disable the MLA attention optimizations.
     "VLLM_MLA_DISABLE":
     lambda: bool(int(os.getenv("VLLM_MLA_DISABLE", "0"))),
-
-    # If set, vLLM will use the Triton implementation of moe_align_block_size,
-    # i.e. moe_align_block_size_triton in fused_moe.py.
-    "VLLM_ENABLE_MOE_ALIGN_BLOCK_SIZE_TRITON":
-    lambda: bool(int(os.getenv("VLLM_ENABLE_MOE_ALIGN_BLOCK_SIZE_TRITON", "0"))
-                 ),
 
     # Number of GPUs per worker in Ray, if it is set to be a fraction,
     # it allows ray to schedule multiple actors on a single GPU,
@@ -759,6 +822,18 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DP_MASTER_PORT":
     lambda: int(os.getenv("VLLM_DP_MASTER_PORT", "0")),
 
+    # In the context of executing MoE models with Data-Parallel, Expert-Parallel
+    # and Batched All-to-All dispatch/combine kernels, VLLM_MOE_DP_CHUNK_SIZE
+    # dictates the quantum of tokens that can be dispatched from a DP
+    # rank. All DP ranks process the activations in VLLM_MOE_DP_CHUNK_SIZE
+    # units.
+    "VLLM_MOE_DP_CHUNK_SIZE":
+    lambda: int(os.getenv("VLLM_MOE_DP_CHUNK_SIZE", "256")),
+
+    # Randomize inputs during dummy runs when using Data Parallel
+    "VLLM_RANDOMIZE_DP_DUMMY_INPUTS":
+    lambda: os.environ.get("VLLM_RANDOMIZE_DP_DUMMY_INPUTS", "0") == "1",
+
     # Whether to use S3 path for model loading in CI via RunAI Streamer
     "VLLM_CI_USE_S3":
     lambda: os.environ.get("VLLM_CI_USE_S3", "0") == "1",
@@ -793,6 +868,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_TPU_BUCKET_PADDING_GAP":
     lambda: int(os.environ["VLLM_TPU_BUCKET_PADDING_GAP"])
     if "VLLM_TPU_BUCKET_PADDING_GAP" in os.environ else 0,
+    "VLLM_TPU_MOST_MODEL_LEN":
+    lambda: maybe_convert_int(os.environ.get("VLLM_TPU_MOST_MODEL_LEN", None)),
 
     # Allow use of DeepGemm kernels for fused moe ops.
     "VLLM_USE_DEEP_GEMM":
@@ -832,6 +909,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Available options:
     # - "naive": naive all2all implementation using all-reduce
     # - "pplx": use pplx kernels
+    # - "deepep_high_throughput", use deepep high-throughput kernels
+    # - "deepep_low_latency", use deepep low-latency kernels
     "VLLM_ALL2ALL_BACKEND":
     lambda: os.getenv("VLLM_ALL2ALL_BACKEND", "naive"),
 
@@ -845,6 +924,51 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Regex timeout for use by the vLLM tool parsing plugins.
     "VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS":
     lambda: int(os.getenv("VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS", "1")),
+
+    # Reduce CPU usage when vLLM is idle. Enabling this will incur small
+    # latency penalty when a request eventually comes.
+    "VLLM_SLEEP_WHEN_IDLE":
+    lambda: bool(int(os.getenv("VLLM_SLEEP_WHEN_IDLE", "0"))),
+
+    # Control the max chunk bytes (in MB) for the rpc message queue.
+    # Object larger than this threshold will be broadcast to worker
+    # processes via zmq.
+    "VLLM_MQ_MAX_CHUNK_BYTES_MB":
+    lambda: int(os.getenv("VLLM_MQ_MAX_CHUNK_BYTES_MB", "16")),
+
+    # Timeout in seconds for execute_model RPC calls in multiprocessing
+    # executor (only applies when TP > 1).
+    "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS":
+    lambda: int(os.getenv("VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS", "300")),
+
+    # KV Cache layout used throughout vllm.
+    # Some common values are:
+    # - NHD
+    # - HND
+    # Where N=num_blocks, H=num_heads and D=head_size. The default value will
+    # leave the layout choice to the backend. Mind that backends may only
+    # implement and support a subset of all possible layouts.
+    "VLLM_KV_CACHE_LAYOUT":
+    lambda: os.getenv("VLLM_KV_CACHE_LAYOUT", None),
+
+    # Enable checking whether the generated logits contain NaNs,
+    # indicating corrupted output. Useful for debugging low level bugs
+    # or bad hardware but it may add compute overhead.
+    "VLLM_COMPUTE_NANS_IN_LOGITS":
+    lambda: bool(int(os.getenv("VLLM_COMPUTE_NANS_IN_LOGITS", "0"))),
+
+    # Controls whether or not emulations are used for NVFP4
+    # generations on machines < 100 for compressed-tensors
+    # models
+    "VLLM_USE_NVFP4_CT_EMULATIONS":
+    lambda: bool(int(os.getenv("VLLM_USE_NVFP4_CT_EMULATIONS", "0"))),
+
+    # Time (in seconds) after which the KV cache on the producer side is
+    # automatically cleared if no READ notification is received from the
+    # consumer. This is only applicable when using NixlConnector in a
+    # disaggregated decode-prefill setup.
+    "VLLM_NIXL_ABORT_REQUEST_TIMEOUT":
+    lambda: int(os.getenv("VLLM_NIXL_ABORT_REQUEST_TIMEOUT", "120"))
 }
 
 # --8<-- [end:env-vars-definition]
@@ -908,6 +1032,7 @@ def compute_hash() -> str:
         "VLLM_DP_RANK",
         "VLLM_DP_SIZE",
         "VLLM_USE_STANDALONE_COMPILE",
+        "VLLM_FUSED_MOE_CHUNK_SIZE",
     ]
     for key in environment_variables_to_hash:
         if key in environment_variables:

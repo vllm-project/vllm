@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests which cover integration of the speculative decoding framework with
 other features, e.g. cuda graphs.
 """
@@ -13,10 +14,13 @@ MAIN_MODEL = "JackFram/llama-68m"
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
+        "model_name": "JackFram/llama-68m",
 
         # Verify equality when cuda graphs allowed.
         "enforce_eager": False,
-        "model_name": "JackFram/llama-68m",
+
+        # The original model is float32, keep it for numerical stability.
+        "dtype": "float32",
     }])
 @pytest.mark.parametrize(
     "per_test_common_llm_kwargs",
@@ -58,6 +62,9 @@ def test_spec_decode_cuda_graph(vllm_runner, common_llm_kwargs,
 
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
+
+        # The original model is float32, keep it for numerical stability.
+        "dtype": "float32",
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [])
 @pytest.mark.parametrize(
@@ -116,6 +123,9 @@ def test_speculative_model_quantization_config(vllm_runner, common_llm_kwargs,
 
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
+
+        # The original model is float32, keep it for numerical stability.
+        "dtype": "float32",
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])

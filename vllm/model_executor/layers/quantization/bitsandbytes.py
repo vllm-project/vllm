@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from typing import Any, Optional
 
@@ -70,9 +71,7 @@ class BitsAndBytesConfig(QuantizationConfig):
 
     @staticmethod
     def get_config_filenames() -> list[str]:
-        return [
-            "adapter_config.json",
-        ]
+        return []
 
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> "BitsAndBytesConfig":
@@ -157,12 +156,12 @@ class BitsAndBytesLinearMethod(LinearMethodBase):
     def __init__(self, quant_config: BitsAndBytesConfig):
         try:
             import bitsandbytes
-            if bitsandbytes.__version__ < "0.45.3":
+            if bitsandbytes.__version__ < "0.46.1":
                 raise ImportError("bitsandbytes version is wrong. Please "
-                                  "install bitsandbytes>=0.45.3.")
+                                  "install bitsandbytes>=0.46.1.")
         except ImportError as err:
-            raise ImportError("Please install bitsandbytes>=0.45.3 via "
-                              "`pip install bitsandbytes>=0.45.3` to use "
+            raise ImportError("Please install bitsandbytes>=0.46.1 via "
+                              "`pip install bitsandbytes>=0.46.1` to use "
                               "bitsandbytes quantizer.") from err
 
         self.quant_config = quant_config

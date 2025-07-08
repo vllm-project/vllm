@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
@@ -11,12 +12,12 @@ from vllm.distributed.kv_transfer.kv_connector.factory import (
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
 from vllm.logger import init_logger
+from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.forward_context import ForwardContext
-    from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
@@ -50,8 +51,9 @@ class MultiConnector(KVConnectorBase_V1):
             self._connectors.append(
                 KVConnectorFactory.create_connector_v1(temp_config, role))
 
-        # A mapping from request id to the connector that is assigned to it.
-        self._requests_to_connector: dict[str, KVConnectorBase_V1] = {}
+        # A mapping from request id to the index of the connector chosen to
+        # load the request from (if any).
+        self._requests_to_connector: dict[str, int] = {}
 
         # Keeps track of *additional* remaining async saves (beyond 1) to be
         # finished per request. Not needed for async loads since we only allow
@@ -135,25 +137,31 @@ class MultiConnector(KVConnectorBase_V1):
         request: "Request",
         num_computed_tokens: int,
     ) -> tuple[int, bool]:
-        for c in self._connectors:
+        to_return = (0, False)
+        for i, c in enumerate(self._connectors):
             toks, load_async = c.get_num_new_matched_tokens(
                 request, num_computed_tokens)
             # The first connector that has new matched tokens will be assigned
             # to this request.
-            if toks > 0:
-                self._requests_to_connector[request.request_id] = c
-                return toks, load_async
-        return 0, False
+            if to_return[0] == 0 and toks > 0:
+                self._requests_to_connector[request.request_id] = i
+                to_return = (toks, load_async)
+        return to_return
 
     def update_state_after_alloc(self, request: "Request",
                                  blocks: "KVCacheBlocks",
                                  num_external_tokens: int):
-        # If the request is not assigned to any connector, we do nothing.
-        if request.request_id not in self._requests_to_connector:
-            return
-        # We assume that the request is assigned to only one connector.
-        c = self._requests_to_connector.pop(request.request_id)
-        c.update_state_after_alloc(request, blocks, num_external_tokens)
+        chosen_connector = self._requests_to_connector.get(
+            request.request_id, -1)
+        empty_blocks = blocks.new_empty()
+        for i, c in enumerate(self._connectors):
+            if i == chosen_connector:
+                # Forward call to the chosen connector (if any).
+                c.update_state_after_alloc(request, blocks,
+                                           num_external_tokens)
+            else:
+                # Call with empty blocks for other connectors.
+                c.update_state_after_alloc(request, empty_blocks, 0)
 
     def build_connector_meta(
             self,
@@ -169,7 +177,7 @@ class MultiConnector(KVConnectorBase_V1):
     def request_finished(
         self,
         request: "Request",
-        blocks: "KVCacheBlocks",
+        blocks: list[int],
     ) -> tuple[bool, Optional[dict[str, Any]]]:
         async_saves = 0
         kv_txfer_params = None
@@ -186,4 +194,8 @@ class MultiConnector(KVConnectorBase_V1):
                 kv_txfer_params = txfer_params
         if async_saves > 1:
             self._extra_async_saves[request.request_id] = async_saves - 1
+
+        # Clean up other state for this request.
+        self._requests_to_connector.pop(request.request_id, None)
+
         return async_saves > 0, kv_txfer_params

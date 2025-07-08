@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from typing import Optional
 
@@ -37,7 +38,7 @@ def default_server_args():
                         ]])
 def server(default_server_args, request):
     if request.param:
-        default_server_args.extend(request.param)
+        default_server_args = default_server_args + request.param
     with RemoteOpenAIServer(MODEL_NAME, default_server_args) as remote_server:
         yield remote_server
 

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import dataclasses
 import gc
@@ -1245,6 +1246,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         TensorizerLoader.save_model(
             self.model,
             tensorizer_config=tensorizer_config,
+            model_config=self.model_config,
         )
 
     def get_max_block_per_batch(self) -> int:
@@ -1847,7 +1849,6 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                     intermediate_tensors=intermediate_tensors,
                     **MultiModalKwargs.as_kwargs(
                         multi_modal_kwargs,
-                        dtype=self.model_config.dtype,
                         device=self.device,
                     ),
                     **seqlen_agnostic_kwargs,

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
 import queue
 import signal
@@ -6,8 +7,9 @@ import sys
 import threading
 import time
 from collections import deque
+from collections.abc import Generator
 from concurrent.futures import Future
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from inspect import isclass, signature
 from logging import DEBUG
 from typing import Any, Callable, Optional, TypeVar, Union
@@ -32,6 +34,7 @@ from vllm.v1.core.sched.scheduler import Scheduler as V1Scheduler
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
                             EngineCoreRequestType, UtilityOutput)
 from vllm.v1.engine.mm_input_cache import MirroredProcessingCache
+from vllm.v1.engine.utils import EngineHandshakeMetadata, EngineZmqAddresses
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import SchedulerStats
@@ -39,7 +42,6 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 from vllm.v1.structured_output import StructuredOutputManager
-from vllm.v1.utils import EngineHandshakeMetadata, EngineZmqAddresses
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
@@ -58,7 +60,6 @@ class EngineCore:
                  executor_class: type[Executor],
                  log_stats: bool,
                  executor_fail_callback: Optional[Callable] = None):
-        assert vllm_config.model_config.runner_type != "pooling"
 
         # plugins need to be loaded at the engine/scheduler level too
         from vllm.plugins import load_general_plugins
@@ -82,6 +83,8 @@ class EngineCore:
 
         vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
         vllm_config.cache_config.num_cpu_blocks = num_cpu_blocks
+        self.collective_rpc("initialize_cache",
+                            args=(num_gpu_blocks, num_cpu_blocks))
 
         self.structured_output_manager = StructuredOutputManager(vllm_config)
 
@@ -207,11 +210,14 @@ class EngineCore:
     def execute_model(self, scheduler_output: SchedulerOutput):
         try:
             return self.model_executor.execute_model(scheduler_output)
-        except BaseException as err:
+        except Exception as err:
+            # We do not want to catch BaseException here since we're only
+            # interested in dumping info when the exception is due to an
+            # error from execute_model itself.
+
             # NOTE: This method is exception-free
             dump_engine_exception(self.vllm_config, scheduler_output,
                                   self.scheduler.make_stats())
-            # Re-raise exception
             raise err
 
     def step(self) -> tuple[dict[int, EngineCoreOutputs], bool]:
@@ -361,66 +367,51 @@ class EngineCoreProc(EngineCore):
     def __init__(
         self,
         vllm_config: VllmConfig,
-        on_head_node: bool,
+        local_client: bool,
         handshake_address: str,
         executor_class: type[Executor],
         log_stats: bool,
+        client_handshake_address: Optional[str] = None,
         engine_index: int = 0,
     ):
-        input_queue = queue.Queue[tuple[EngineCoreRequestType, Any]]()
-
-        executor_fail_callback = lambda: input_queue.put_nowait(
+        self.input_queue = queue.Queue[tuple[EngineCoreRequestType, Any]]()
+        self.output_queue = queue.Queue[Union[tuple[int, EngineCoreOutputs],
+                                              bytes]]()
+        executor_fail_callback = lambda: self.input_queue.put_nowait(
             (EngineCoreRequestType.EXECUTOR_FAILED, b''))
 
-        # Create input socket.
-        input_ctx = zmq.Context()
-        identity = engine_index.to_bytes(length=2, byteorder="little")
-        with make_zmq_socket(input_ctx,
-                             handshake_address,
-                             zmq.DEALER,
-                             identity=identity,
-                             linger=5000,
-                             bind=False) as handshake_socket:
+        self.engine_index = engine_index
+        identity = self.engine_index.to_bytes(length=2, byteorder="little")
+        self.engines_running = False
 
-            # Register engine with front-end.
-            addresses = self.startup_handshake(handshake_socket, on_head_node,
-                                               vllm_config.parallel_config)
+        with self._perform_handshakes(handshake_address, identity,
+                                      local_client, vllm_config,
+                                      client_handshake_address) as addresses:
             self.client_count = len(addresses.outputs)
-
-            # Update config which may have changed from the handshake.
-            vllm_config.__post_init__()
 
             # Set up data parallel environment.
             self.has_coordinator = addresses.coordinator_output is not None
+            self.frontend_stats_publish_address = (
+                addresses.frontend_stats_publish_address)
+            # Only publish request queue stats to coordinator for "internal"
+            # LB mode.
+            self.publish_dp_lb_stats = (
+                self.has_coordinator
+                and not vllm_config.parallel_config.data_parallel_external_lb)
+
             self._init_data_parallel(vllm_config)
 
-            # Initialize engine core and model.
             super().__init__(vllm_config, executor_class, log_stats,
                              executor_fail_callback)
 
-            self.engine_index = engine_index
-            self.step_fn = (self.step if self.batch_queue is None else
-                            self.step_with_batch_queue)
-            self.engines_running = False
-            self.last_counts = (0, 0)
-
-            # Send ready message.
-            num_gpu_blocks = vllm_config.cache_config.num_gpu_blocks
-            handshake_socket.send(
-                msgspec.msgpack.encode({
-                    "status": "READY",
-                    "local": on_head_node,
-                    "num_gpu_blocks": num_gpu_blocks,
-                }))
+        self.step_fn = (self.step if self.batch_queue is None else
+                        self.step_with_batch_queue)
 
         # Background Threads and Queues for IO. These enable us to
         # overlap ZMQ socket IO with GPU since they release the GIL,
         # and to overlap some serialization/deserialization with the
         # model forward pass.
         # Threads handle Socket <-> Queues and core_busy_loop uses Queue.
-        self.input_queue = input_queue
-        self.output_queue = queue.Queue[Union[tuple[int, EngineCoreOutputs],
-                                              bytes]]()
         threading.Thread(target=self.process_input_sockets,
                          args=(addresses.inputs, addresses.coordinator_input,
                                identity),
@@ -428,20 +419,107 @@ class EngineCoreProc(EngineCore):
         self.output_thread = threading.Thread(
             target=self.process_output_sockets,
             args=(addresses.outputs, addresses.coordinator_output,
-                  engine_index),
+                  self.engine_index),
             daemon=True)
         self.output_thread.start()
 
+    @contextmanager
+    def _perform_handshakes(
+        self,
+        handshake_address: str,
+        identity: bytes,
+        local_client: bool,
+        vllm_config: VllmConfig,
+        client_handshake_address: Optional[str],
+    ) -> Generator[EngineZmqAddresses, None, None]:
+        """
+        Perform startup handshakes.
+
+        For DP=1 or offline mode, this is with the colocated front-end process.
+
+        For DP>1 with internal loadbalancing this is with the shared front-end
+        process which may reside on a different node.
+
+        For DP>1 with external loadbalancing, two handshakes are performed:
+            - With the rank 0 front-end process which retrieves the
+              DP Coordinator ZMQ addresses and DP process group address.
+            - With the colocated front-end process which retrieves the
+              client input/output socket addresses.
+        with the exception of the rank 0 engine itself which doesn't require
+        the second handshake.
+
+        Here, "front-end" process can mean the process containing the engine
+        core client (which is the API server process in the case the API
+        server is not scaled out), OR the launcher process running the
+        run_multi_api_server() function in serve.py.
+        """
+        input_ctx = zmq.Context()
+        is_local = local_client and client_handshake_address is None
+        handshake = self._perform_handshake(input_ctx, handshake_address,
+                                            identity, is_local, vllm_config,
+                                            vllm_config.parallel_config)
+        if client_handshake_address is None:
+            with handshake as addresses:
+                yield addresses
+        else:
+            local_handshake = self._perform_handshake(
+                input_ctx, client_handshake_address, identity, local_client,
+                vllm_config)
+            with handshake as addresses, local_handshake as client_addresses:
+                addresses.inputs = client_addresses.inputs
+                addresses.outputs = client_addresses.outputs
+                yield addresses
+
+        # Update config which may have changed from the handshake
+        vllm_config.__post_init__()
+
+    @contextmanager
+    def _perform_handshake(
+        self,
+        ctx: zmq.Context,
+        handshake_address: str,
+        identity: bytes,
+        local_client: bool,
+        vllm_config: VllmConfig,
+        parallel_config_to_update: Optional[ParallelConfig] = None,
+    ) -> Generator[EngineZmqAddresses, None, None]:
+        with make_zmq_socket(ctx,
+                             handshake_address,
+                             zmq.DEALER,
+                             identity=identity,
+                             linger=5000,
+                             bind=False) as handshake_socket:
+            # Register engine with front-end.
+            addresses = self.startup_handshake(handshake_socket, local_client,
+                                               parallel_config_to_update)
+            yield addresses
+
+            # Send ready message.
+            num_gpu_blocks = vllm_config.cache_config.num_gpu_blocks
+            # We pass back the coordinator stats update address here for the
+            # external LB case for our colocated front-end to use (coordinator
+            # only runs with rank 0).
+            dp_stats_address = self.frontend_stats_publish_address
+            handshake_socket.send(
+                msgspec.msgpack.encode({
+                    "status": "READY",
+                    "local": local_client,
+                    "num_gpu_blocks": num_gpu_blocks,
+                    "dp_stats_address": dp_stats_address,
+                }))
+
     @staticmethod
     def startup_handshake(
-            handshake_socket: zmq.Socket, on_head_node: bool,
-            parallel_config: ParallelConfig) -> EngineZmqAddresses:
+        handshake_socket: zmq.Socket,
+        local_client: bool,
+        parallel_config: Optional[ParallelConfig] = None,
+    ) -> EngineZmqAddresses:
 
         # Send registration message.
         handshake_socket.send(
             msgspec.msgpack.encode({
                 "status": "HELLO",
-                "local": on_head_node,
+                "local": local_client,
             }))
 
         # Receive initialization message.
@@ -455,9 +533,9 @@ class EngineCoreProc(EngineCore):
             init_bytes, type=EngineHandshakeMetadata)
         logger.debug("Received init message: %s", init_message)
 
-        received_parallel_config = init_message.parallel_config
-        for key, value in received_parallel_config.items():
-            setattr(parallel_config, key, value)
+        if parallel_config is not None:
+            for key, value in init_message.parallel_config.items():
+                setattr(parallel_config, key, value)
 
         return init_message.addresses
 
@@ -738,11 +816,27 @@ class DPEngineCoreProc(EngineCoreProc):
     def __init__(
         self,
         vllm_config: VllmConfig,
-        on_head_node: bool,
+        local_client: bool,
         handshake_address: str,
         executor_class: type[Executor],
         log_stats: bool,
+        client_handshake_address: Optional[str] = None,
     ):
+        self._decorate_logs()
+
+        # Counts forward-passes of the model so that we can synchronize
+        # finished with DP peers every N steps.
+        self.counter = 0
+        self.current_wave = 0
+        self.last_counts = (0, 0)
+
+        # Initialize the engine.
+        dp_rank = vllm_config.parallel_config.data_parallel_rank
+        super().__init__(vllm_config, local_client, handshake_address,
+                         executor_class, log_stats, client_handshake_address,
+                         dp_rank)
+
+    def _decorate_logs(self):
         # Add process-specific prefix to stdout and stderr before
         # we initialize the engine.
         from multiprocessing import current_process
@@ -750,16 +844,6 @@ class DPEngineCoreProc(EngineCoreProc):
         pid = os.getpid()
         _add_prefix(sys.stdout, process_name, pid)
         _add_prefix(sys.stderr, process_name, pid)
-
-        # Counts forward-passes of the model so that we can synchronize
-        # finished with DP peers every N steps.
-        self.counter = 0
-        self.current_wave = 0
-
-        # Initialize the engine.
-        dp_rank = vllm_config.parallel_config.data_parallel_rank
-        super().__init__(vllm_config, on_head_node, handshake_address,
-                         executor_class, log_stats, dp_rank)
 
     def _init_data_parallel(self, vllm_config: VllmConfig):
 
@@ -783,10 +867,18 @@ class DPEngineCoreProc(EngineCoreProc):
         from vllm.platforms import current_platform
         device_control_env_var = current_platform.device_control_env_var
         world_size = vllm_config.parallel_config.world_size
-        os.environ[device_control_env_var] = ",".join(
-            str(current_platform.device_id_to_physical_device_id(i))
-            for i in range(local_dp_rank * world_size, (local_dp_rank + 1) *
-                           world_size))
+        # Set CUDA_VISIBLE_DEVICES or equivalent.
+        try:
+            os.environ[device_control_env_var] = ",".join(
+                str(current_platform.device_id_to_physical_device_id(i))
+                for i in range(local_dp_rank *
+                               world_size, (local_dp_rank + 1) * world_size))
+        except IndexError as e:
+            raise Exception(
+                f"Error setting {device_control_env_var}: "
+                f"local range: [{local_dp_rank * world_size}, "
+                f"{(local_dp_rank + 1) * world_size}) "
+                f"base value: \"{os.getenv(device_control_env_var)}\"") from e
 
         self.dp_rank = dp_rank
         self.dp_group = vllm_config.parallel_config.stateless_init_dp_group()
@@ -823,7 +915,7 @@ class DPEngineCoreProc(EngineCoreProc):
             super()._handle_client_request(request_type, request)
 
     def _maybe_publish_request_counts(self):
-        if not self.has_coordinator:
+        if not self.publish_dp_lb_stats:
             return
 
         # Publish our request counts (if they've changed).
@@ -861,22 +953,94 @@ class DPEngineCoreProc(EngineCoreProc):
                 local_unfinished_reqs)
 
             if not self.engines_running:
-                if self.dp_rank == 0:
+                if self.dp_rank == 0 or not self.has_coordinator:
                     # Notify client that we are pausing the loop.
                     logger.debug("Wave %d finished, pausing engine loop.",
                                  self.current_wave)
+                    # In the coordinator case, dp rank 0 sends updates to the
+                    # coordinator. Otherwise (offline spmd case), each rank
+                    # sends the update to its colocated front-end process.
+                    client_index = -1 if self.has_coordinator else 0
                     self.output_queue.put_nowait(
-                        (-1,
+                        (client_index,
                          EngineCoreOutputs(wave_complete=self.current_wave)))
                 self.current_wave += 1
 
     def _has_global_unfinished_reqs(self, local_unfinished: bool) -> bool:
 
-        # Optimization - only perform finish-sync all-reduce every 24 steps.
+        # Optimization - only perform finish-sync all-reduce every 32 steps.
         self.counter += 1
-        if self.counter != 24:
+        if self.counter != 32:
             return True
         self.counter = 0
 
         return ParallelConfig.has_unfinished_dp(self.dp_group,
                                                 local_unfinished)
+
+
+class DPEngineCoreActor(DPEngineCoreProc):
+    """
+    Ray actor for running EngineCore in a data parallel context
+    """
+
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        local_client: bool,
+        addresses: EngineZmqAddresses,
+        executor_class: type[Executor],
+        log_stats: bool,
+        dp_rank: int = 0,
+        local_dp_rank: int = 0,
+    ):
+        self.addresses = addresses
+        vllm_config.parallel_config.data_parallel_rank = dp_rank
+        vllm_config.parallel_config.data_parallel_rank_local = \
+            local_dp_rank
+
+        # Ray sets CUDA_VISIBLE_DEVICES to empty string,
+        # we clean this up to be able to properly initialize
+        # data parallel groups.
+        del os.environ['CUDA_VISIBLE_DEVICES']
+
+        super().__init__(vllm_config, local_client, "", executor_class,
+                         log_stats)
+
+    def _decorate_logs(self):
+        pass
+
+    @contextmanager
+    def _perform_handshakes(self, handshake_address: str, identity: bytes,
+                            local_client: bool, vllm_config: VllmConfig,
+                            client_handshake_address: Optional[str]):
+        """
+        For Ray, we don't need to actually perform handshake.
+        All addresses information is known before the actor creation.
+        Therefore, we simply yield these addresses.
+        """
+        yield self.addresses
+
+    def wait_for_init(self):
+        """
+        Wait until the engine core is initialized.
+
+        This is just an empty method. When ray.get() on this method
+        (or any other method of the actor) returns, it is guaranteed
+        that actor creation (i.e., __init__) is complete.
+        """
+        pass
+
+    def run(self):
+        """
+        Run the engine core busy loop.
+        """
+        try:
+            self.run_busy_loop()
+        except SystemExit:
+            logger.debug("EngineCore exiting.")
+            raise
+        except Exception:
+            logger.exception("EngineCore encountered a fatal error.")
+            raise
+        finally:
+            self.shutdown()

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Adapted from: https://github.com/huggingface/peft/blob/main/src/peft/tuners/lora/config.py
 
@@ -105,7 +106,7 @@ class PEFTHelper:
                                             "adapter_config.json")
             with open_stream(lora_config_path,
                              mode="rb",
-                             **tensorizer_args.stream_params) as f:
+                             **tensorizer_args.stream_kwargs) as f:
                 config = json.load(f)
 
             logger.info("Successfully deserialized LoRA config from %s",
