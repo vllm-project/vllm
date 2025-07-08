@@ -6,6 +6,10 @@ import json
 import os
 from typing import Any, Callable, Optional
 
+try:
+    import flashinfer.fused_moe as fi_fused_moe
+except ImportError:
+    fi_fused_moe = None
 import torch
 
 import vllm.envs as envs
@@ -28,7 +32,7 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize import (
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate)
 from vllm.model_executor.layers.fused_moe.utils import (
-    _resize_cache, moe_kernel_quantize_input)
+    _resize_cache, moe_kernel_quantize_input, per_token_group_quant_fp8)
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     dequant_mxfp4)
 from vllm.platforms import current_platform
@@ -1056,6 +1060,89 @@ direct_register_custom_op(
     op_func=inplace_fused_experts,
     mutates_args=["hidden_states"],
     fake_impl=inplace_fused_experts_fake,
+    tags=(torch.Tag.needs_fixed_stride_order, ),
+)
+
+
+def flashinfer_fused_moe_fp8(router_logits: torch.Tensor,
+                             e_score_correction_bias: torch.Tensor,
+                             x: torch.Tensor,
+                             w13_weight: torch.Tensor,
+                             w13_weight_scale_inv: torch.Tensor,
+                             w2_weight: torch.Tensor,
+                             w2_weight_scale_inv: torch.Tensor,
+                             global_num_experts: int,
+                             top_k: int,
+                             num_expert_group: int,
+                             topk_group: int,
+                             intermediate_size_per_partition: int,
+                             expert_offset: int,
+                             local_num_experts: int,
+                             block_shape: list[int],
+                             routed_scaling: float = 1.0,
+                             tile_tokens_dim: int = 8,
+                             routing_method_type: int = 2) -> torch.Tensor:
+    assert top_k <= global_num_experts
+    assert top_k <= 8
+    assert topk_group <= 4
+    assert global_num_experts > num_expert_group
+    assert global_num_experts % num_expert_group == 0
+    assert global_num_experts % 4 == 0
+    assert top_k < (topk_group * global_num_experts / num_expert_group)
+
+    output = torch.empty_like(x)
+    a_q, a_sf = per_token_group_quant_fp8(x, block_shape[1])
+    # NOTE: hidden states have to be transposed!
+    a_sf_t = a_sf.t().contiguous()
+    fi_fused_moe.trtllm_fp8_block_scale_moe(router_logits,
+                                            e_score_correction_bias,
+                                            a_q,
+                                            a_sf_t,
+                                            w13_weight,
+                                            w13_weight_scale_inv,
+                                            w2_weight,
+                                            w2_weight_scale_inv,
+                                            output,
+                                            global_num_experts,
+                                            top_k,
+                                            num_expert_group,
+                                            topk_group,
+                                            intermediate_size_per_partition,
+                                            expert_offset,
+                                            local_num_experts,
+                                            routed_scaling=1.0,
+                                            tile_tokens_dim=8,
+                                            routing_method_type=2)
+    return output
+
+
+def flashinfer_fused_moe_fp8_fake(
+        router_logits: torch.Tensor,
+        e_score_correction_bias: torch.Tensor,
+        x: torch.Tensor,
+        w13_weight: torch.Tensor,
+        w13_weight_scale_inv: torch.Tensor,
+        w2_weight: torch.Tensor,
+        w2_weight_scale_inv: torch.Tensor,
+        global_num_experts: int,
+        top_k: int,
+        num_expert_group: int,
+        topk_group: int,
+        intermediate_size_per_partition: int,
+        expert_offset: int,
+        local_num_experts: int,
+        block_shape: list[int],
+        routed_scaling: float = 1.0,
+        tile_tokens_dim: int = 8,
+        routing_method_type: int = 2) -> torch.Tensor:
+    return torch.empty_like(x)
+
+
+direct_register_custom_op(
+    op_name="flashinfer_fused_moe_fp8",
+    op_func=flashinfer_fused_moe_fp8,
+    mutates_args=[],
+    fake_impl=flashinfer_fused_moe_fp8_fake,
     tags=(torch.Tag.needs_fixed_stride_order, ),
 )
 
