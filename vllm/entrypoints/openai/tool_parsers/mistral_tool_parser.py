@@ -217,13 +217,7 @@ class MistralToolParser(ToolParser):
         # means we're parsing as tool calls now
         if _is_fn_name_regex_support(self.model_tokenizer):
             return self._extract_tool_calls_streaming(
-                previous_text=previous_text,
-                current_text=current_text,
-                delta_text=delta_text,
-                previous_token_ids=previous_token_ids,
-                current_token_ids=current_token_ids,
-                delta_token_ids=delta_token_ids,
-                request=request,
+                delta_text=delta_text
             )
         else:
             return self._extract_tool_calls_streaming_pre_v11_tokenizer(
@@ -238,13 +232,7 @@ class MistralToolParser(ToolParser):
 
     def _extract_tool_calls_streaming(
         self,
-        previous_text: str,
-        current_text: str,
         delta_text: str,
-        previous_token_ids: Sequence[int],
-        current_token_ids: Sequence[int],
-        delta_token_ids: Sequence[int],
-        request: ChatCompletionRequest,
     ) -> Union[DeltaMessage, None]:
         """
         Extracts tool calls for Mistral models
