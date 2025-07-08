@@ -57,8 +57,7 @@ async def test_load_lora_adapter_success():
     response = await serving_models.load_lora_adapter(request)
     assert response == LORA_LOADING_SUCCESS_MESSAGE.format(lora_name='adapter')
     assert len(serving_models.lora_requests) == 1
-    assert "adapter" in serving_models.lora_requests
-    assert serving_models.lora_requests["adapter"].lora_name == "adapter"
+    assert serving_models.lora_requests[0].lora_name == "adapter"
 
 
 @pytest.mark.asyncio
