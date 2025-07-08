@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from collections.abc import Iterable
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -22,7 +23,6 @@ from vllm.model_executor.models.llama4 import (Llama4DecoderLayer,
 from vllm.model_executor.models.utils import extract_layer_index
 
 from .utils import AutoWeightsLoader, maybe_prefix
-from typing import Optional
 
 logger = init_logger(__name__)
 
@@ -39,8 +39,8 @@ class LlamaModel(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
-        self.config = vllm_config. \
-            speculative_config.draft_model_config.hf_config
+        self.config = (
+            vllm_config.speculative_config.draft_model_config.hf_config)
         self.validate_and_update_config(start_layer_id, quant_config)
         self.vocab_size = self.config.vocab_size
         self.embed_tokens = VocabParallelEmbedding(
@@ -153,8 +153,8 @@ class EagleLlama4ForCausalLM(Llama4ForCausalLM):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
-        self.config = vllm_config. \
-            speculative_config.draft_model_config.hf_config
+        self.config = (
+            vllm_config.speculative_config.draft_model_config.hf_config)
         target_layer_num = vllm_config.model_config.get_num_layers(
             vllm_config.parallel_config)
         # draft model quantization config may differ from target model
@@ -177,7 +177,10 @@ class EagleLlama4ForCausalLM(Llama4ForCausalLM):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return self.model(input_ids, positions, hidden_states)
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
+    def load_weights(
+        self,
+        weights: Iterable[tuple[str, torch.Tensor]]
+    ) -> None:
         loader = AutoWeightsLoader(
             self,
             # lm_head is tied with target model (Llama4ForCausalLM)
