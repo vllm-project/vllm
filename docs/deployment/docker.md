@@ -1,7 +1,6 @@
 ---
 title: Using Docker
 ---
-[](){ #deployment-docker }
 
 [](){ #deployment-docker-pre-built-image }
 
@@ -32,7 +31,7 @@ podman run --gpus all \
   --model mistralai/Mistral-7B-v0.1
 ```
 
-You can add any other [engine-args][engine-args] you need after the image tag (`vllm/vllm-openai:latest`).
+You can add any other [engine-args](../configuration/engine_args.md) you need after the image tag (`vllm/vllm-openai:latest`).
 
 !!! note
     You can either use the `ipc=host` flag or `--shm-size` flag to allow the

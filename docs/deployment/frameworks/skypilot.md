@@ -1,7 +1,6 @@
 ---
 title: SkyPilot
 ---
-[](){ #deployment-skypilot }
 
 <p align="center">
   <img src="https://imgur.com/yxtzPEu.png" alt="vLLM"/>

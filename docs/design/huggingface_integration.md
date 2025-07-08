@@ -1,7 +1,6 @@
 ---
 title: Integration with HuggingFace
 ---
-[](){ #huggingface-integration }
 
 This document describes how vLLM integrates with HuggingFace libraries. We will explain step by step what happens under the hood when we run `vllm serve`.
 

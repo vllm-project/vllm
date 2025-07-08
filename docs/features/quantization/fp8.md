@@ -1,7 +1,6 @@
 ---
 title: FP8 W8A8
 ---
-[](){ #fp8 }
 
 vLLM supports FP8 (8-bit floating point) weight and activation quantization using hardware acceleration on GPUs such as Nvidia H100 and AMD MI300x.
 Currently, only Hopper and Ada Lovelace GPUs are officially supported for W8A8.
