@@ -39,14 +39,15 @@ from argparse import (Action, ArgumentDefaultsHelpFormatter, ArgumentParser,
 from asyncio import FIRST_COMPLETED, AbstractEventLoop, Task
 from collections import UserDict, defaultdict
 from collections.abc import (AsyncGenerator, Awaitable, Collection, Generator,
-                             Hashable, Iterable, Iterator, KeysView, Mapping)
+                             Hashable, Iterable, Iterator, KeysView, Mapping,
+                             Sequence)
+from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures.process import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from functools import cache, lru_cache, partial, wraps
 from types import MappingProxyType
 from typing import (TYPE_CHECKING, Any, Callable, Generic, Literal, NamedTuple,
-                    Optional, Sequence, Tuple, Type, TypeVar, Union, cast,
-                    overload)
+                    Optional, Tuple, TypeVar, Union, cast, overload)
 from urllib.parse import urlparse
 from uuid import uuid4
 
@@ -64,6 +65,7 @@ import zmq.asyncio
 from packaging import version
 from packaging.version import Version
 from torch.library import Library
+from transformers.tokenization_utils_base import BatchEncoding
 from typing_extensions import Never, ParamSpec, TypeIs, assert_never
 
 import vllm.envs as envs
@@ -507,6 +509,196 @@ def random_uuid() -> str:
     return str(uuid.uuid4().hex)
 
 
+class AsyncMicrobatchTokenizer:
+    """Asynchronous tokenizer with micro-batching.
+
+    Pulls pending encode/decode requests from a queue and batches them 
+    up to reduce overhead. A single-thread ThreadPoolExecutor is used 
+    so the event loop stays responsive.
+    """
+
+    def __init__(
+        self,
+        tokenizer,
+        max_batch_size: int = 32,
+        batch_wait_timeout_s: float = 0.002,
+    ) -> None:
+        self.tokenizer = tokenizer
+        self.max_batch_size = max_batch_size
+        self.batch_wait_timeout_s = batch_wait_timeout_s
+
+        self._loop = asyncio.get_running_loop()
+        self._queues: dict[tuple,
+                           asyncio.Queue[Union[tuple[str, dict,
+                                                     asyncio.Future],
+                                               tuple[list[int],
+                                                     asyncio.Future]]]] = {}
+        self._batcher_tasks: list[asyncio.Task] = []
+
+        # Single-thread executor for blocking tokenizer calls.
+        self._executor = ThreadPoolExecutor(max_workers=1)
+
+    # === Public async API ===
+    async def __call__(self, prompt, **kwargs):
+        result_future: asyncio.Future = self._loop.create_future()
+        key = self._queue_key("encode", kwargs)
+        queue = self._get_queue(self._loop, key)
+        await queue.put((prompt, kwargs, result_future))
+        return await result_future
+
+    async def decode(self, token_ids, **kwargs):
+        result_future: asyncio.Future = self._loop.create_future()
+        key = self._queue_key("decode", kwargs)
+        queue = self._get_queue(self._loop, key)
+        await queue.put((token_ids, result_future))
+        return await result_future
+
+    # === Internal helpers ===
+    def _get_queue(
+        self, loop: asyncio.AbstractEventLoop, key: tuple
+    ) -> asyncio.Queue[Union[tuple[str, dict, asyncio.Future], tuple[
+            list[int], asyncio.Future]]]:
+        """Get the request queue for the given operation key, creating a new
+        queue and batcher task if needed."""
+        queue = self._queues.get(key)
+        if queue is None:
+            self._queues[key] = queue = asyncio.Queue()
+            if key[0] == "encode":
+                can_batch = key[1] != "other"
+                coro = self._batch_encode_loop(queue, can_batch)
+            else:
+                assert key[0] == "decode", \
+                    f"Unknown operation type: {key[0]}."
+                coro = self._batch_decode_loop(queue)
+            self._batcher_tasks.append(loop.create_task(coro))
+        return queue
+
+    async def _batch_encode_loop(self, queue: asyncio.Queue, can_batch: bool):
+        """Batch incoming encode requests for efficiency."""
+        while True:
+            prompt, kwargs, result_future = await queue.get()
+            prompts = [prompt]
+            kwargs_list = [kwargs]
+            result_futures = [result_future]
+            deadline = self._loop.time() + self.batch_wait_timeout_s
+
+            while len(prompts) < self.max_batch_size:
+                timeout = deadline - self._loop.time()
+                if timeout <= 0:
+                    break
+                try:
+                    prompt, kwargs, result_future = await asyncio.wait_for(
+                        queue.get(), timeout)
+                    prompts.append(prompt)
+                    result_futures.append(result_future)
+                    if not can_batch:
+                        kwargs_list.append(kwargs)
+                except asyncio.TimeoutError:
+                    break
+
+            try:
+                # If every request uses identical kwargs we can run a single
+                # batched tokenizer call for a big speed-up.
+                if can_batch and len(prompts) > 1:
+                    encode_fn = partial(self.tokenizer, prompts, **kwargs)
+                    results = await self._loop.run_in_executor(
+                        self._executor, encode_fn)
+
+                    for i, fut in enumerate(result_futures):
+                        if not fut.done():
+                            data = {k: v[i] for k, v in results.items()}
+                            fut.set_result(BatchEncoding(data))
+                else:
+                    encode_fn = lambda prompts=prompts, kwargs=kwargs_list: [
+                        self.tokenizer(p, **kw)
+                        for p, kw in zip(prompts, kwargs)
+                    ]
+                    results = await self._loop.run_in_executor(
+                        self._executor, encode_fn)
+
+                    for fut, res in zip(result_futures, results):
+                        if not fut.done():
+                            fut.set_result(res)
+            except Exception as e:
+                for fut in result_futures:
+                    if not fut.done():
+                        fut.set_exception(e)
+
+    async def _batch_decode_loop(self, queue: asyncio.Queue):
+        """Batch incoming decode requests for efficiency."""
+        while True:
+            token_ids, result_future = await queue.get()
+            token_ids_list = [token_ids]
+            result_futures = [result_future]
+            deadline = self._loop.time() + self.batch_wait_timeout_s
+
+            while len(token_ids_list) < self.max_batch_size:
+                timeout = deadline - self._loop.time()
+                if timeout <= 0:
+                    break
+                try:
+                    token_ids, result_future = await asyncio.wait_for(
+                        queue.get(), timeout)
+                    token_ids_list.append(token_ids)
+                    result_futures.append(result_future)
+                except asyncio.TimeoutError:
+                    break
+
+            try:
+                # Perform a single batched decode call for all requests
+                results = await self._loop.run_in_executor(
+                    self._executor, self.tokenizer.batch_decode,
+                    token_ids_list)
+                for fut, res in zip(result_futures, results):
+                    if not fut.done():
+                        fut.set_result(res)
+            except Exception as e:
+                for fut in result_futures:
+                    if not fut.done():
+                        fut.set_exception(e)
+
+    def _queue_key(self, op: str, kwargs: dict) -> tuple:
+        """
+        Return a normalized key describing operation + kwargs.
+        
+        - `add_special_tokens`: {True/False}
+        - `truncation`: {True/False}
+          - If `truncation` is False (`max_length` is None), 
+            returns a key for a can_batch queue.
+          - If `truncation` is True and `max_length` is None or equals
+            `tokenizer.model_max_length`, returns a key for a can_batch queue.
+          - Otherwise, returns a key for a cannot_batch queue.
+        
+        Examples:
+          - Decode: ("decode",)
+          - Encode typical: 
+            ("encode", add_special_tokens, bool_truncation, max_length_label)
+          - Fallback: ("encode", "other")
+        """
+
+        if op == "decode":
+            return ("decode", )
+
+        add_special_tokens = kwargs.get("add_special_tokens", True)
+        truncation = kwargs.get("truncation", False)
+        max_length = kwargs.get("max_length")
+
+        if not truncation:
+            return ("encode", add_special_tokens, False, None)
+
+        model_max = getattr(self.tokenizer, "model_max_length", None)
+        if max_length is None or (model_max is not None
+                                  and max_length == model_max):
+            return ("encode", add_special_tokens, True, "model_max")
+
+        return ("encode", "other")
+
+    def __del__(self):
+        for task in self._batcher_tasks:
+            if not task.done():
+                task.cancel()
+
+
 def make_async(
     func: Callable[P, T],
     executor: Optional[concurrent.futures.Executor] = None
@@ -628,14 +820,34 @@ def is_valid_ipv6_address(address: str) -> bool:
         return False
 
 
+def split_host_port(host_port: str) -> Tuple[str, int]:
+    # ipv6
+    if host_port.startswith('['):
+        host, port = host_port.rsplit(']', 1)
+        host = host[1:]
+        port = port.split(':')[1]
+        return host, int(port)
+    else:
+        host, port = host_port.split(':')
+        return host, int(port)
+
+
+def join_host_port(host: str, port: int) -> str:
+    if is_valid_ipv6_address(host):
+        return f"[{host}]:{port}"
+    else:
+        return f"{host}:{port}"
+
+
 def get_distributed_init_method(ip: str, port: int) -> str:
     return get_tcp_uri(ip, port)
 
 
 def get_tcp_uri(ip: str, port: int) -> str:
-    # Brackets are not permitted in ipv4 addresses,
-    # see https://github.com/python/cpython/issues/103848
-    return f"tcp://[{ip}]:{port}" if ":" in ip else f"tcp://{ip}:{port}"
+    if is_valid_ipv6_address(ip):
+        return f"tcp://[{ip}]:{port}"
+    else:
+        return f"tcp://{ip}:{port}"
 
 
 def get_open_zmq_ipc_path() -> str:
@@ -1866,6 +2078,12 @@ def supports_dynamo() -> bool:
     return base_torch_version >= Version("2.4.0")
 
 
+# Supports xccl with PyTorch versions >= 2.8.0 for XPU platform
+def supports_xccl() -> bool:
+    return is_torch_equal_or_newer(
+        "2.8.0") and torch.distributed.is_xccl_available()
+
+
 # Some backends use pytorch version < 2.4.0 which doesn't
 # support `torch.library.custom_op`.
 def supports_custom_op() -> bool:
@@ -1921,9 +2139,9 @@ class LazyDict(Mapping[str, T], Generic[T]):
         return len(self._factory)
 
 
-class ClassRegistry(UserDict[Type[T], _V]):
+class ClassRegistry(UserDict[type[T], _V]):
 
-    def __getitem__(self, key: Type[T]) -> _V:
+    def __getitem__(self, key: type[T]) -> _V:
         for cls in key.mro():
             if cls in self.data:
                 return self.data[cls]
@@ -2234,7 +2452,7 @@ def direct_register_custom_op(
         fake_impl: Optional[Callable] = None,
         target_lib: Optional[Library] = None,
         dispatch_key: str = "CUDA",
-        tags: Tuple[torch.Tag, ...] = (),
+        tags: tuple[torch.Tag, ...] = (),
 ):
     """
     `torch.library.custom_op` can have significant overhead because it
@@ -2489,7 +2707,7 @@ def get_exception_traceback():
     return err_str
 
 
-def split_zmq_path(path: str) -> Tuple[str, str, str]:
+def split_zmq_path(path: str) -> tuple[str, str, str]:
     """Split a zmq path into its parts."""
     parsed = urlparse(path)
     if not parsed.scheme:
@@ -2779,7 +2997,7 @@ def warn_for_unimplemented_methods(cls: type[T]) -> type[T]:
         if unimplemented_methods:
             method_names = ','.join(unimplemented_methods)
             msg = (f"Methods {method_names} not implemented in {self}")
-            logger.warning(msg)
+            logger.debug(msg)
 
     @wraps(original_init)
     def wrapped_init(self, *args, **kwargs) -> None:

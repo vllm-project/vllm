@@ -101,6 +101,49 @@ To substitute multiple images inside the same text prompt, you can pass in a lis
 
 Full example: <gh-file:examples/offline_inference/vision_language_multi_image.py>
 
+If using the [LLM.chat](https://docs.vllm.ai/en/stable/models/generative_models.html#llmchat) method, you can pass images directly in the message content using various formats: image URLs, PIL Image objects, or pre-computed embeddings:
+
+```python
+from vllm import LLM
+from vllm.assets.image import ImageAsset
+
+llm = LLM(model="llava-hf/llava-1.5-7b-hf")
+image_url = "https://picsum.photos/id/32/512/512"
+image_pil = ImageAsset('cherry_blossom').pil_image
+image_embeds = torch.load(...)
+
+conversation = [
+    {"role": "system", "content": "You are a helpful assistant"},
+    {"role": "user", "content": "Hello"},
+    {"role": "assistant", "content": "Hello! How can I assist you today?"},
+    {
+        "role": "user",
+        "content": [{
+            "type": "image_url",
+            "image_url": {
+                "url": image_url
+            }
+        },{
+            "type": "image_pil",
+            "image_pil": image_pil
+        }, {
+            "type": "image_embeds",
+            "image_embeds": image_embeds
+        }, {
+            "type": "text",
+            "text": "What's in these images?"
+        }],
+    },
+]
+
+# Perform inference and log output.
+outputs = llm.chat(conversation)
+
+for o in outputs:
+    generated_text = o.outputs[0].text
+    print(generated_text)
+```
+
 Multi-image input can be extended to perform video captioning. We show this with [Qwen2-VL](https://huggingface.co/Qwen/Qwen2-VL-2B-Instruct) as it supports videos:
 
 ??? Code
@@ -228,7 +271,7 @@ Our OpenAI-compatible server accepts multi-modal data via the [Chat Completions 
     If no default chat template is available, we will first look for a built-in fallback in <gh-file:vllm/transformers_utils/chat_templates/registry.py>.
     If no fallback is available, an error is raised and you have to provide the chat template manually via the `--chat-template` argument.
 
-    For certain models, we provide alternative chat templates inside <gh-dir:vllm/examples>.
+    For certain models, we provide alternative chat templates inside <gh-dir:examples>.
     For example, VLM2Vec uses <gh-file:examples/template_vlm2vec.jinja> which is different from the default one for Phi-3-Vision.
 
 ### Image Inputs

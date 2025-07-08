@@ -177,6 +177,13 @@ schema. Example: ``[{"type": "text", "text": "Hello world!"}]``"""
     """If set to True, enable tracking server_load_metrics in the app state."""
     enable_force_include_usage: bool = False
     """If set to True, including usage on every request."""
+    expand_tools_even_if_tool_choice_none: bool = False
+    """Include tool definitions in prompts even when ``tool_choice='none'``.
+
+    This is a transitional option that will be removed in v0.10.0. In
+    v0.10.0, tool definitions will always be included regardless of
+    ``tool_choice`` setting. Use this flag to test the upcoming behavior
+    before the breaking change."""
 
     def __post_init__(self):
         # Set default values for list fields that should not be None
@@ -300,6 +307,9 @@ schema. Example: ``[{"type": "text", "text": "Hello world!"}]``"""
 
         frontend_group.add_argument("--tool-parser-plugin",
                                     **frontend_kwargs["tool_parser_plugin"])
+        frontend_group.add_argument(
+            "--expand-tools-even-if-tool-choice-none",
+            **frontend_kwargs["expand_tools_even_if_tool_choice_none"])
         frontend_group.add_argument("--log-config-file",
                                     **frontend_kwargs["log_config_file"])
         frontend_group.add_argument("--max-log-len",
@@ -320,7 +330,12 @@ schema. Example: ``[{"type": "text", "text": "Hello world!"}]``"""
 
 
 def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
+    """Create the CLI argument parser used by the OpenAI API server.
 
+    We rely on the helper methods of `FrontendArgs` and `AsyncEngineArgs` to
+    register all arguments instead of manually enumerating them here. This
+    avoids code duplication and keeps the argument definitions in one place.
+    """
     parser = FrontendArgs.add_cli_args(parser)
     parser = AsyncEngineArgs.add_cli_args(parser)
 

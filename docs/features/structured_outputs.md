@@ -21,7 +21,7 @@ The following parameters are supported, which must be added as extra parameters:
 - `guided_grammar`: the output will follow the context free grammar.
 - `structural_tag`: Follow a JSON schema within a set of specified tags within the generated text.
 
-You can see the complete list of supported parameters on the [OpenAI-Compatible Server][openai-compatible-server] page.
+You can see the complete list of supported parameters on the [OpenAI-Compatible Server][serving-openai-compatible-server] page.
 
 Structured outputs are supported by default in the OpenAI-Compatible Server. You
 may choose to specify the backend to use by setting the
@@ -157,7 +157,7 @@ As an example, we can use to define a specific format of simplified SQL queries:
     print(completion.choices[0].message.content)
     ```
 
-See also: [full example](https://docs.vllm.ai/en/latest/examples/online_serving/structured_outputs.html)
+See also: [full example](../examples/online_serving/structured_outputs.md)
 
 ## Reasoning Outputs
 
@@ -200,7 +200,7 @@ Note that you can use reasoning with any provided structured outputs feature. Th
     print("content: ", completion.choices[0].message.content)
     ```
 
-See also: [full example](https://docs.vllm.ai/en/latest/examples/online_serving/structured_outputs.html)
+See also: [full example](../examples/online_serving/structured_outputs.md)
 
 ## Experimental Automatic Parsing (OpenAI API)
 
@@ -325,4 +325,4 @@ shown below:
     print(outputs[0].outputs[0].text)
     ```
 
-See also: [full example](https://docs.vllm.ai/en/latest/examples/online_serving/structured_outputs.html)
+See also: [full example](../examples/online_serving/structured_outputs.md)
