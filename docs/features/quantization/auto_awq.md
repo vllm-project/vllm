@@ -1,7 +1,4 @@
----
-title: AutoAWQ
----
-[](){ #auto-awq }
+# AutoAWQ
 
 To create a new 4-bit quantized model, you can leverage [AutoAWQ](https://github.com/casper-hansen/AutoAWQ).
 Quantization reduces the model's precision from BF16/FP16 to INT4 which effectively reduces the total model memory footprint.
@@ -15,7 +12,7 @@ pip install autoawq
 
 After installing AutoAWQ, you are ready to quantize a model. Please refer to the [AutoAWQ documentation](https://casper-hansen.github.io/AutoAWQ/examples/#basic-quantization) for further details. Here is an example of how to quantize `mistralai/Mistral-7B-Instruct-v0.2`:
 
-??? Code
+??? code
 
     ```python
     from awq import AutoAWQForCausalLM
@@ -51,7 +48,7 @@ python examples/offline_inference/llm_engine_example.py \
 
 AWQ models are also supported directly through the LLM entrypoint:
 
-??? Code
+??? code
 
     ```python
     from vllm import LLM, SamplingParams
