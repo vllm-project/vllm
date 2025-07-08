@@ -10,7 +10,6 @@ from vllm import PoolingParams, SamplingParams
 
 if TYPE_CHECKING:
     from vllm.v1.sample.logits_processor.core import LogitsProcessor
-    from vllm.v1.sample.logits_processor.load import LogitprocCtor
 
 
 class MoveDirectionality(Enum):
@@ -169,19 +168,20 @@ class BatchUpdateBuilder:
 
 
 @dataclass
-class LogitsProcessorManager:
+class LogitsProcessorsManager:
     """Encapsulates initialized logitsproc objects."""
     argmax_invariant: list["LogitsProcessor"] = field(
-        default_factory=list)  # argmax-invariant logitsprocs
+        default_factory=list, init=False)  # argmax-invariant logitsprocs
     non_argmax_invariant: list["LogitsProcessor"] = field(
-        default_factory=list)  # non-argmax-invariant logitsprocs
+        default_factory=list, init=False)  # non-argmax-invariant logitsprocs
 
-    def add_logitsprocs_by_ctor(self,
-                                ctor_list: list["LogitprocCtor"]) -> None:
-        for ctor in ctor_list:
-            logitproc: LogitsProcessor = ctor()
-            (self.argmax_invariant if logitproc.is_argmax_invariant() else
-             self.non_argmax_invariant).append(logitproc)
+    def __init__(
+            self,
+            logitsprocs: Optional[Iterator["LogitsProcessor"]] = None) -> None:
+        if logitsprocs:
+            for logitproc in logitsprocs:
+                (self.argmax_invariant if logitproc.is_argmax_invariant() else
+                 self.non_argmax_invariant).append(logitproc)
 
     @property
     def all(self) -> Iterator["LogitsProcessor"]:

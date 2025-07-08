@@ -1,38 +1,31 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import importlib
+import itertools
 import logging
-from typing import Any, Callable, Optional, Union
-
-import torch
-from typing_extensions import TypedDict
+from typing import Callable, Optional
 
 from vllm.v1.sample.logits_processor import LogitsProcessor
 from vllm.v1.sample.logits_processor.impls import (LogitBiasLogitsProcessor,
                                                    MinPLogitsProcessor,
                                                    MinTokensLogitsProcessor)
-from vllm.v1.sample.logits_processor.state import LogitsProcessorManager
+from vllm.v1.sample.logits_processor.state import LogitsProcessorsManager
+from vllm.v1.sample.logits_processor.utils import LogitProcessorCtorArgs
 
 logger = logging.getLogger(__name__)
 
 LOGITSPROCS_GROUP = 'vllm.logits_processors'
-LogitprocCtor = Callable[[], LogitsProcessor]
-logitsprocs_ctors: list[LogitprocCtor] = []
-# make sure one process only loads logitsprocs once
-logitsprocs_loaded = False
+LogitprocCtor = Callable[[LogitProcessorCtorArgs], LogitsProcessor]
+
+_builtin_logitsprocs_ctors: list[LogitprocCtor] = [
+    MinTokensLogitsProcessor,
+    LogitBiasLogitsProcessor,
+    MinPLogitsProcessor,
+]
 
 
-class LogitProcessorEntrypoint(TypedDict):
-    package_name: str
-    entrypoint_name: str
-
-
-# Specify logitproc by qualname (str) or package and entrypoint name
-LogitsProcessorsSpec = Union[str, LogitProcessorEntrypoint]
-
-
-def load_logitsprocs_fqns(
-        fqns: Optional[list[str]]) -> list[Callable[[], LogitsProcessor]]:
+def _load_logitsprocs_ctors_by_fqns(
+        fqns: Optional[list[str]]) -> list[LogitprocCtor]:
     if not fqns:
         return []
 
@@ -40,7 +33,7 @@ def load_logitsprocs_fqns(
         "Attempting to load the following logits processors via FQNs: %s",
         fqns)
 
-    constructors: list[Callable[[], LogitsProcessor]] = []
+    constructors: list[LogitprocCtor] = []
     for fqn in fqns:
         logger.info("Loading logits processor %s", fqn)
         try:
@@ -60,8 +53,8 @@ def load_logitsprocs_fqns(
     return constructors
 
 
-def load_logitsprocs_entrypoints(
-        entrypoints: Optional[list[str]]) -> list[Callable[[], Any]]:
+def _load_logitsprocs_ctors_by_entrypoints(
+        entrypoints: Optional[list[str]]) -> list[LogitprocCtor]:
     if not entrypoints:
         return []
 
@@ -90,7 +83,7 @@ def load_logitsprocs_entrypoints(
     for plugin in installed_logitsprocs_plugins.values():
         log_level("- %s -> %s", plugin.name, plugin.value)
 
-    constructors: list[Callable[[], LogitsProcessor]] = []
+    constructors: list[LogitprocCtor] = []
     for entrypoint in entrypoints:
         if entrypoint not in installed_logitsprocs_plugins:
             raise ValueError(
@@ -106,7 +99,7 @@ def load_logitsprocs_entrypoints(
     return constructors
 
 
-def load_logitsprocs(
+def _load_custom_logitsprocs_ctors(
     logits_processors_fqns: Optional[list[str]],
     logits_processors_entrypoints: Optional[list[str]],
 ) -> list[LogitprocCtor]:
@@ -114,51 +107,22 @@ def load_logitsprocs(
     processes. They should be designed in a way that they can be loaded
     multiple times without causing issues.
     """
-    global logitsprocs_loaded
-    global logitsprocs_ctors
-    if logitsprocs_loaded:
-        # Idempotent after first load in a process
-        return logitsprocs_ctors
-    logitsprocs_loaded = True
     from vllm.platforms import current_platform
     if current_platform.is_tpu():
         # No logitsprocs specified by caller
         # TODO(andy) - vLLM V1 on TPU does not support custom logitsprocs
         return []
 
-    logitsprocs_ctors = (
-        load_logitsprocs_entrypoints(logits_processors_entrypoints) +
-        load_logitsprocs_fqns(logits_processors_fqns))
-    return logitsprocs_ctors
+    return (
+        _load_logitsprocs_ctors_by_entrypoints(logits_processors_entrypoints) +
+        _load_logitsprocs_ctors_by_fqns(logits_processors_fqns))
 
 
-def init_builtin_logitsprocs(pin_memory_available: bool, max_num_reqs: int,
-                             device: torch.device) -> LogitsProcessorManager:
-    """Construct 'builtin' vLLM logitsprocs which the engine
-    loads by default.
-
-    Args:
-      pin_memory_available: pinned memory is available for use
-                            for use by logitsproc
-      max_num_reqs: ceiling on request count in persistent batch
-      device: inference device
-
-    Returns:
-      Data structure encapsulating loaded logitsprocs
-    """
-    min_tokens_logitproc = MinTokensLogitsProcessor(
-        pin_memory=pin_memory_available, device=device)
-    logit_bias_logitproc = LogitBiasLogitsProcessor(
-        pin_memory=pin_memory_available, device=device)
-    min_p_logitproc = MinPLogitsProcessor(
-        pin_memory=pin_memory_available,
-        device=device,
-        # +1 for temporary swap space
-        max_num_reqs=max_num_reqs + 1)
-    return LogitsProcessorManager(
-        non_argmax_invariant=[
-            min_tokens_logitproc,
-            logit_bias_logitproc,
-        ],
-        argmax_invariant=[min_p_logitproc],
+def build_logitsprocs(args: LogitProcessorCtorArgs) -> LogitsProcessorsManager:
+    _custom_logitsprocs_ctors = _load_custom_logitsprocs_ctors(
+        args.vllm_config.logits_processors_fqns,
+        args.vllm_config.logits_processors_entrypoints,
     )
+    return LogitsProcessorsManager(
+        ctor(args) for ctor in itertools.chain(_builtin_logitsprocs_ctors,
+                                               _custom_logitsprocs_ctors))

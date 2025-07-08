@@ -16,8 +16,8 @@ from vllm.utils import swap_dict_values
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.pool.metadata import PoolingMetadata
 from vllm.v1.sample.logits_processor import (BatchUpdateBuilder,
-                                             MoveDirectionality,
-                                             init_builtin_logitsprocs)
+                                             MoveDirectionality)
+from vllm.v1.sample.logits_processor.state import LogitsProcessorsManager
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.utils import is_spec_decode_unsupported
 from vllm.v1.utils import copy_slice
@@ -69,15 +69,10 @@ class InputBatch:
         pin_memory: bool,
         vocab_size: int,
         block_sizes: list[int],  # The block_size of each kv cache group
-        logits_processors_fqns: Optional[list[str]] = None,
-        logits_processors_entrypoints: Optional[list[str]] = None,
+        logitsprocs: LogitsProcessorsManager,
         is_spec_decode: bool = False,
         logits_processing_needs_token_ids: bool = False,
     ):
-        from vllm.v1.sample.logits_processor.load import load_logitsprocs
-        logitsprocs_ctors = load_logitsprocs(logits_processors_fqns,
-                                             logits_processors_entrypoints)
-
         self.is_spec_decode = is_spec_decode
         self.max_num_reqs = max_num_reqs
         self.max_model_len = max_model_len
@@ -221,14 +216,6 @@ class InputBatch:
         # updates. Should reset each step.
         self.batch_update_builder = BatchUpdateBuilder()
 
-        # Init builtin logits processors
-        self.logitsprocs = init_builtin_logitsprocs(
-            pin_memory_available=pin_memory,
-            max_num_reqs=max_num_reqs + 1,
-            device=device)
-        # Init custom logits processors
-        self.logitsprocs.add_logitsprocs_by_ctor(logitsprocs_ctors)
-
         # TODO convert this to LogitsProcessor
         self.has_allowed_token_ids: set[str] = set()
         # NOTE(lufang): In the mask tensor, if the corresponding token allowed,
@@ -242,7 +229,7 @@ class InputBatch:
         self.req_output_token_ids: list[Optional[list[int]]] = []
 
         # This is updated each time the batch constituents change.
-        self.sampling_metadata = self._make_sampling_metadata()
+        self.sampling_metadata = self._make_sampling_metadata(logitsprocs)
 
         self.pooling_params: dict[str, PoolingParams] = {}
 
@@ -591,19 +578,30 @@ class InputBatch:
         del self._req_ids[self.num_reqs:]
         del self.req_output_token_ids[self.num_reqs:]
 
+    @property
+    def _logitsprocs(self) -> Optional[LogitsProcessorsManager]:
+        if not self.sampling_metadata:
+            return None
+        return self.sampling_metadata.logitsprocs
+
     def refresh_metadata(self):
         """Apply batch updates, reset input batch at end of step
         
         * Apply batch add/remove/permute to logits procs' states
         * If batch state is modified, update sampling metadata
         """
+        if not (old_logitsprocs := self._logitsprocs):
+            raise RuntimeError("Expected input batch sampling metadata "
+                               "to be initialized.")
         batch_update = self.batch_update_builder.get_and_reset(self.num_reqs)
-        for logit_proc in self.logitsprocs.all:
+        for logit_proc in old_logitsprocs.all:
             logit_proc.update_state(batch_update)
         if batch_update:
-            self.sampling_metadata = self._make_sampling_metadata()
+            self.sampling_metadata = self._make_sampling_metadata(
+                old_logitsprocs)
 
-    def _make_sampling_metadata(self) -> SamplingMetadata:
+    def _make_sampling_metadata(
+            self, logitsprocs: LogitsProcessorsManager) -> SamplingMetadata:
         num_reqs = self.num_reqs
         if not self.all_greedy:
             temperature = copy_slice(self.temperature_cpu_tensor,
@@ -661,7 +659,7 @@ class InputBatch:
             no_penalties=self.no_penalties,
             allowed_token_ids_mask=allowed_token_ids_mask,
             bad_words_token_ids=self.bad_words_token_ids,
-            logitsprocs=self.logitsprocs,
+            logitsprocs=logitsprocs,
         )
 
     @property

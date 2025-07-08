@@ -1,8 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from dataclasses import dataclass
 from typing import Optional
 
 import regex as re
+import torch
+
+from vllm.config import VllmConfig
 
 # <package name>.<entrypoint name> compiled regular expression
 package_name_regex = r'[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?'
@@ -17,3 +21,10 @@ def extract_package_and_function(s: str) -> Optional[tuple[str, str]]:
     if match:
         return match.group(1), match.group(2)
     return None
+
+
+@dataclass
+class LogitProcessorCtorArgs:
+    vllm_config: VllmConfig
+    device: torch.device
+    is_pin_memory: bool
