@@ -25,14 +25,12 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalKwargs)
-from vllm.multimodal.parse import ImageProcessorItems, MultiModalDataItems, MultiModalDataParser
+from vllm.multimodal.parse import (ImageProcessorItems, MultiModalDataItems,
+                                   MultiModalDataParser)
 # yapf: disable
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        BaseProcessingInfo, BoundPromptUpdate,
-                                        PlaceholderFeaturesInfo,
-                                        PromptReplacement, PromptTargetMatch,
-                                        PromptUpdate, find_mm_placeholders,
-                                        replace_token_matches)
+                                        BaseProcessingInfo, PromptReplacement,
+                                        PromptUpdate)
 # yapf: enable
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
@@ -196,9 +194,9 @@ class Gemma3MultiModalProcessor(BaseMultiModalProcessor[Gemma3nProcessingInfo]
         out_mm_kwargs: MultiModalKwargs,
     ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-        
+
         prompt_updates = []
-        
+
         # Handle image tokens
         if "image" in mm_items:
             image_token = hf_processor.image_token
@@ -217,113 +215,23 @@ class Gemma3MultiModalProcessor(BaseMultiModalProcessor[Gemma3nProcessingInfo]
                     modality="image",
                     target=image_token,
                     replacement=get_replacement_image,
-                )
-            )
-        
+                ))
+
         # Handle audio tokens
         if "audio" in mm_items:
             audio_token = hf_processor.audio_token
 
             def get_replacement_audio(item_idx: int):
-                return self.info.get_audio_repl(
-                    processor=hf_processor,
-                )
+                return self.info.get_audio_repl(processor=hf_processor, )
 
             prompt_updates.append(
                 PromptReplacement(
                     modality="audio",
                     target=audio_token,
                     replacement=get_replacement_audio,
-                )
-            )
+                ))
 
         return prompt_updates
-
-    # def _apply_token_matches(
-    #     self,
-    #     prompt: list[int],
-    #     mm_matches: Mapping[str, Sequence[PromptTargetMatch]],
-    #     mm_item_counts: Mapping[str, int],
-    # ) -> list[int]:
-    #     token_ids = super()._apply_token_matches(
-    #         prompt,
-    #         mm_matches,
-    #         mm_item_counts,
-    #     )
-
-    #     # "\n\n\n" and "\n\n\n\n" are single tokens
-    #     # Since our replacement can insert "\n\n" next to "\n"
-    #     # tokens, we have to combine them to be consistent with
-    #     # the output of the tokenizer
-    #     tokenizer = self.info.get_tokenizer()
-    #     vocab = tokenizer.get_vocab()
-    #     newline_1 = vocab["\n"]
-    #     newline_2 = vocab["\n\n"]
-    #     newline_3 = vocab["\n\n\n"]
-    #     newline_4 = vocab["\n\n\n\n"]
-
-    #     token_ids = replace_token_matches(
-    #         token_ids,
-    #         [newline_1, newline_2],
-    #         [newline_3],
-    #     )
-    #     token_ids = replace_token_matches(
-    #         token_ids,
-    #         [newline_2, newline_1],
-    #         [newline_3],
-    #     )
-    #     token_ids = replace_token_matches(
-    #         token_ids,
-    #         [newline_2, newline_2],
-    #         [newline_4],
-    #     )
-
-    #     return token_ids
-
-    # def _find_mm_placeholders(
-    #     self,
-    #     mm_prompt_updates: Mapping[str, Sequence[BoundPromptUpdate]],
-    #     new_token_ids: list[int],
-    #     mm_item_counts: Mapping[str, int],
-    # ) -> Mapping[str, list[PlaceholderFeaturesInfo]]:
-    #     # We need to detect "\n\n" inside "\n\n\n" and "\n\n\n\n"
-    #     tokenizer = self.info.get_tokenizer()
-    #     vocab = tokenizer.get_vocab()
-    #     newline_1 = vocab["\n"]
-    #     newline_2 = vocab["\n\n"]
-    #     newline_3 = vocab["\n\n\n"]
-    #     newline_4 = vocab["\n\n\n\n"]
-
-    #     def get_repl_toks(tok: int) -> list[int]:
-    #         if tok == newline_3:
-    #             return [newline_1, newline_2]
-    #         if tok == newline_4:
-    #             return [newline_2, newline_2]
-
-    #         return [tok]
-
-    #     repl_token_ids = list[int]()
-    #     repl_orig_idxs = list[int]()
-    #     for orig_idx, orig_tok in enumerate(new_token_ids):
-    #         repl_toks = get_repl_toks(orig_tok)
-    #         repl_token_ids.extend(repl_toks)
-    #         repl_orig_idxs.extend(orig_idx for _ in range(len(repl_toks)))
-
-    #     repls = find_mm_placeholders(mm_prompt_updates, repl_token_ids,
-    #                                  mm_item_counts)
-
-    #     return {
-    #         modality: [
-    #             PlaceholderFeaturesInfo(
-    #                 modality=p.modality,
-    #                 item_idx=p.item_idx,
-    #                 start_idx=repl_orig_idxs[p.start_idx],
-    #                 tokens=p.tokens,
-    #                 is_embed=p.is_embed,
-    #             ) for p in placeholders
-    #         ]
-    #         for modality, placeholders in repls.items()
-    #     }
 
 
 class Gemma3nMultimodalEmbedder(nn.Module):
@@ -426,7 +334,6 @@ class Gemma3nForConditionalGeneration(nn.Module, SupportsMultiModal):
             "model.multi_modal_projector.": "multi_modal_projector.",
             "lm_head.": "language_model.lm_head.",
             "model": "language_model.model",
-
         })
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -462,7 +369,7 @@ class Gemma3nForConditionalGeneration(nn.Module, SupportsMultiModal):
         return next(self.parameters()).dtype
 
     def _validate_pixel_values(self, data: torch.Tensor) -> torch.Tensor:
-        # TODO check if there are any 
+        # TODO check if there are any
         return data
 
     def _parse_and_validate_image_input(
@@ -482,24 +389,23 @@ class Gemma3nForConditionalGeneration(nn.Module, SupportsMultiModal):
         pixel_values = pixel_values.contiguous()
 
         return Gemma3nImagePixelInputs(
-            pixel_values=self._validate_pixel_values(pixel_values),
-        )
-    
+            pixel_values=self._validate_pixel_values(pixel_values), )
+
     def _parse_and_validate_audio_input(
             self, **kwargs: object) -> Optional[Gemma3nAudioInputs]:
         input_features = kwargs.pop("input_features", None)
         if input_features is None:
             return None
-        
+
         input_features_mask = kwargs.pop("input_features_mask", None)
         if input_features_mask is None:
             return None
-        
+
         return Gemma3nAudioInputs(
             input_features=input_features,
             input_features_mask=input_features_mask,
         )
-    
+
     def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict:
         mm_input_by_modality = {}
 
@@ -507,10 +413,11 @@ class Gemma3nForConditionalGeneration(nn.Module, SupportsMultiModal):
         # from the order of kwargs.
         for input_key in kwargs:
             if input_key in ("pixel_values", "image_embeds"
-                            ) and "image" not in mm_input_by_modality:
+                             ) and "image" not in mm_input_by_modality:
                 mm_input_by_modality[
                     "image"] = self._parse_and_validate_image_input(**kwargs)
-            if input_key =="input_features" and "audio" not in mm_input_by_modality:
+            if input_key == "input_features" \
+                and "audio" not in mm_input_by_modality:
                 mm_input_by_modality[
                     "audio"] = self._parse_and_validate_audio_input(**kwargs)
         return mm_input_by_modality
@@ -553,21 +460,27 @@ class Gemma3nForConditionalGeneration(nn.Module, SupportsMultiModal):
                                                      ~input_features_mask)
         audio_features = self.embed_audio(inputs_embeds=audio_outputs)
 
+        # ruff: noqa
         # The Gemma3nProcessor expects all audio will be 30s in length and inserts 188 audio soft tokens into the
         # text to account for this. However, the audio preprocessing and encoder do not gurarantee they will
         # produce 188 soft tokens; they will produce at most that many tokens, but they may produce fewer tokens
         # depending on the length of the longest audio input in the batch. When we encounter this situation, we pad
         # the audio feature out to 188 soft tokens with the emebedding of the last token in the embed_audio vocab.
         # TODO precompute and cache padding
-        audio_padding_toks = torch.tensor([[self.vocab_size - 1]], dtype=torch.long, device=audio_features.device)
+        audio_padding_toks = torch.tensor([[self.vocab_size - 1]],
+                                          dtype=torch.long,
+                                          device=audio_features.device)
         audio_padding_embs = self.embed_audio(input_ids=audio_padding_toks)
-        audio_features = torch.where(audio_mask.unsqueeze(-1), audio_padding_embs, audio_features)
+        audio_features = torch.where(audio_mask.unsqueeze(-1),
+                                     audio_padding_embs, audio_features)
 
         audio_batch_size, audio_seq_len, audio_embed_dim = audio_features.shape
-        extra_padding_tokens = self.config.audio_soft_tokens_per_image - audio_seq_len
-        extra_padding_features = audio_padding_embs.expand(audio_batch_size, extra_padding_tokens, audio_embed_dim)
+        extra_padding_tokens = self.config.audio_soft_tokens_per_image - audio_seq_len  # noqa: E501
+        extra_padding_features = audio_padding_embs.expand(
+            audio_batch_size, extra_padding_tokens, audio_embed_dim)
 
-        audio_features = torch.cat((audio_features, extra_padding_features), dim=1)
+        audio_features = torch.cat((audio_features, extra_padding_features),
+                                   dim=1)
         # Return a list of embeddings instead of a batched tensor
         return audio_features.unbind(0)
 
@@ -576,7 +489,8 @@ class Gemma3nForConditionalGeneration(nn.Module, SupportsMultiModal):
 
     def get_multimodal_embeddings(self,
                                   **kwargs: object) -> MultiModalEmbeddings:
-        mm_input_by_modality = self._parse_and_validate_multimodal_inputs(**kwargs)
+        mm_input_by_modality = self._parse_and_validate_multimodal_inputs(
+            **kwargs)
         if mm_input_by_modality is None:
             return []
 
@@ -607,8 +521,7 @@ class Gemma3nForConditionalGeneration(nn.Module, SupportsMultiModal):
                 inputs_embeds,
                 multimodal_embeddings,
                 # NOTE: this order of processing mm items is important
-                [self.config.image_token_id, self.config.audio_token_id]
-            )
+                [self.config.image_token_id, self.config.audio_token_id])
         return inputs_embeds
 
     def forward(self,
@@ -625,8 +538,7 @@ class Gemma3nForConditionalGeneration(nn.Module, SupportsMultiModal):
         elif inputs_embeds is None:
             mm_embeddings = self.get_multimodal_embeddings(**kwargs)
 
-            inputs_embeds = self.get_input_embeddings(input_ids,
-                                                      mm_embeddings)
+            inputs_embeds = self.get_input_embeddings(input_ids, mm_embeddings)
             # TODO check whether this is needed at all
             if mm_embeddings is not None:
                 kwargs = self.prepare_attn_masks(
@@ -637,12 +549,13 @@ class Gemma3nForConditionalGeneration(nn.Module, SupportsMultiModal):
                 )
             input_ids = None
 
-        hidden_states = self.language_model.model(input_ids,
-                                                  positions,
-                                                  # TODO
-                                                #   intermediate_tensors
-                                                  inputs_embeds=inputs_embeds,
-                                                  **kwargs)
+        hidden_states = self.language_model.model(
+            input_ids,
+            positions,
+            # TODO
+            #   intermediate_tensors
+            inputs_embeds=inputs_embeds,
+            **kwargs)
 
         return hidden_states
 
