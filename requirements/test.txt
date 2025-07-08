@@ -1214,7 +1214,7 @@ urllib3==2.2.3
     #   tritonclient
 uvicorn==0.35.0
     # via mlflow-skinny
-vector-quantize-pytorch==1.22.17
+vector-quantize-pytorch==1.21.2
     # via -r requirements/test.in
 virtualenv==20.31.2
     # via ray
