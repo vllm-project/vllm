@@ -65,8 +65,7 @@ class OpenAIServingModels:
         super().__init__()
 
         self.base_model_paths = base_model_paths
-        logger.info(f"[Kourosh] is_base_model, {self.base_model_paths=}")
-        
+
         self.max_model_len = model_config.max_model_len
         self.engine_client = engine_client
         self.model_config = model_config

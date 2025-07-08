@@ -1143,7 +1143,6 @@ def build_app(args: Namespace) -> FastAPI:
 
     mount_metrics(app)
 
-    print(f"[Kourosh] {args=}")
     app.add_middleware(
         CORSMiddleware,
         allow_origins=args.allowed_origins,
@@ -1223,8 +1222,6 @@ async def init_app_state(
         served_model_names = args.served_model_name
     else:
         served_model_names = [args.model]
-        
-    logger.info(f"[Kourosh] init_app_state, {served_model_names=}")
 
     if args.disable_log_requests:
         request_logger = None

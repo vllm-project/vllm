@@ -6,12 +6,12 @@ OpenAI-compatible server. It is kept in a separate file for documentation
 purposes.
 """
 
-from dataclasses import dataclass
 import argparse
 import json
 import ssl
 from collections.abc import Sequence
-from typing import Literal, Optional, Union, get_args
+from dataclasses import dataclass
+from typing import Literal, Optional, Union
 
 import vllm.envs as envs
 from vllm.engine.arg_utils import AsyncEngineArgs, optional_type
@@ -82,7 +82,7 @@ class PromptAdapterParserAction(argparse.Action):
             adapter_list.append(PromptAdapterPath(name, path))
         setattr(namespace, self.dest, adapter_list)
 
-        
+
 @dataclass
 class FrontendArgs:
     """Arguments for the OpenAI-compatible frontend server."""
@@ -90,7 +90,8 @@ class FrontendArgs:
     """Host name."""
     port: int = 8000
     """Port number."""
-    uvicorn_log_level: Literal["debug", "info", "warning", "error", "critical", "trace"] = "info"
+    uvicorn_log_level: Literal["debug", "info", "warning", "error", "critical",
+                               "trace"] = "info"
     """Log level for uvicorn."""
     disable_uvicorn_access_log: bool = False
     """Disable uvicorn access log."""
@@ -103,18 +104,25 @@ class FrontendArgs:
     allowed_headers: Optional[list[str]] = None
     """Allowed headers."""
     api_key: Optional[str] = None
-    """If provided, the server will require this key to be presented in the header."""
+    """If provided, the server will require this key to be presented in the
+    header."""
     lora_modules: Optional[list[LoRAModulePath]] = None
-    """LoRA modules configurations in either 'name=path' format or JSON format or JSON list format. Example (old format): ``'name=path'`` Example (new format): ``{\"name\": \"name\", \"path\": \"lora_path\", \"base_model_name\": \"id\"}``"""
+    """LoRA modules configurations in either 'name=path' format or JSON format
+    or JSON list format. Example (old format): ``'name=path'`` Example (new 
+    format): ``{\"name\": \"name\", \"path\": \"lora_path\", 
+    \"base_model_name\": \"id\"}``"""
     prompt_adapters: Optional[list[PromptAdapterPath]] = None
-    """Prompt adapter configurations in the format name=path. Multiple adapters can be specified."""
+    """Prompt adapter configurations in the format name=path. Multiple adapters 
+    can be specified."""
     chat_template: Optional[str] = None
-    """The file path to the chat template, or the template in single-line form for the specified model."""
+    """The file path to the chat template, or the template in single-line form 
+    for the specified model."""
     chat_template_content_format: ChatTemplateContentFormatOption = "auto"
     """The format to render message content within a chat template.
 
 * "string" will render the content as a string. Example: ``"Hello World"``
-* "openai" will render the content as a list of dictionaries, similar to OpenAI schema. Example: ``[{"type": "text", "text": "Hello world!"}]``"""
+* "openai" will render the content as a list of dictionaries, similar to OpenAI 
+schema. Example: ``[{"type": "text", "text": "Hello world!"}]``"""
     response_role: str = "assistant"
     """The role name to return if ``request.add_generation_prompt=true``."""
     ssl_keyfile: Optional[str] = None
@@ -130,23 +138,37 @@ class FrontendArgs:
     root_path: Optional[str] = None
     """FastAPI root_path when app is behind a path based routing proxy."""
     middleware: Optional[list[str]] = None
-    """Additional ASGI middleware to apply to the app. We accept multiple --middleware arguments. The value should be an import path. If a function is provided, vLLM will add it to the server using ``@app.middleware('http')``. If a class is provided, vLLM will add it to the server using ``app.add_middleware()``."""
+    """Additional ASGI middleware to apply to the app. We accept multiple 
+    --middleware arguments. The value should be an import path. If a function 
+    is provided, vLLM will add it to the server using 
+    ``@app.middleware('http')``. If a class is provided, vLLM will 
+    add it to the server using ``app.add_middleware()``."""
     return_tokens_as_token_ids: bool = False
-    """When ``--max-logprobs`` is specified, represents single tokens as strings of the form 'token_id:{token_id}' so that tokens that are not JSON-encodable can be identified."""
+    """When ``--max-logprobs`` is specified, represents single tokens as 
+    strings of the form 'token_id:{token_id}' so that tokens that are not 
+    JSON-encodable can be identified."""
     disable_frontend_multiprocessing: bool = False
-    """If specified, will run the OpenAI frontend server in the same process as the model serving engine."""
+    """If specified, will run the OpenAI frontend server in the same process as 
+    the model serving engine."""
     enable_request_id_headers: bool = False
-    """If specified, API server will add X-Request-Id header to responses. Caution: this hurts performance at high QPS."""
+    """If specified, API server will add X-Request-Id header to responses. 
+    Caution: this hurts performance at high QPS."""
     enable_auto_tool_choice: bool = False
-    """Enable auto tool choice for supported models. Use ``--tool-call-parser`` to specify which parser to use."""
+    """Enable auto tool choice for supported models. Use ``--tool-call-parser`` 
+    to specify which parser to use."""
     tool_call_parser: Optional[str] = None
-    """Select the tool call parser depending on the model that you're using. This is used to parse the model-generated tool call into OpenAI API format. Required for ``--enable-auto-tool-choice``."""
+    """Select the tool call parser depending on the model that you're using. 
+    This is used to parse the model-generated tool call into OpenAI API format. 
+    Required for ``--enable-auto-tool-choice``."""
     tool_parser_plugin: str = ""
-    """Special the tool parser plugin write to parse the model-generated tool into OpenAI API format, the name register in this plugin can be used in ``--tool-call-parser``."""
+    """Special the tool parser plugin write to parse the model-generated tool 
+    into OpenAI API format, the name register in this plugin can be used in 
+    ``--tool-call-parser``."""
     log_config_file: Optional[str] = envs.VLLM_LOGGING_CONFIG_PATH
     """Path to logging config JSON file for both vllm and uvicorn"""
     max_log_len: Optional[int] = None
-    """Max number of prompt characters or prompt ID numbers being printed in log. The default of None means unlimited."""
+    """Max number of prompt characters or prompt ID numbers being printed in 
+    log. The default of None means unlimited."""
     disable_fastapi_docs: bool = False
     """Disable FastAPI's OpenAPI schema, Swagger UI, and ReDoc endpoint."""
     enable_prompt_tokens_details: bool = False
@@ -155,7 +177,7 @@ class FrontendArgs:
     """If set to True, enable tracking server_load_metrics in the app state."""
     enable_force_include_usage: bool = False
     """If set to True, including usage on every request."""
-    
+
     def __post_init__(self):
         # Set default values for list fields that should not be None
         if self.allowed_origins is None:
@@ -166,39 +188,46 @@ class FrontendArgs:
             self.allowed_headers = ["*"]
         if self.middleware is None:
             self.middleware = []
-    
+
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         from vllm.engine.arg_utils import get_kwargs
-        
+
         frontend_kwargs = get_kwargs(FrontendArgs)
         frontend_group = parser.add_argument_group(
             title="Frontend",
             description=FrontendArgs.__doc__,
         )
-        
+
         frontend_group.add_argument("--host", **frontend_kwargs["host"])
         frontend_group.add_argument("--port", **frontend_kwargs["port"])
-        frontend_group.add_argument("--uvicorn-log-level", **frontend_kwargs["uvicorn_log_level"])
-        frontend_group.add_argument("--disable-uvicorn-access-log", **frontend_kwargs["disable_uvicorn_access_log"])
-        frontend_group.add_argument("--allow-credentials", **frontend_kwargs["allow_credentials"])
-        
+        frontend_group.add_argument("--uvicorn-log-level",
+                                    **frontend_kwargs["uvicorn_log_level"])
+        frontend_group.add_argument(
+            "--disable-uvicorn-access-log",
+            **frontend_kwargs["disable_uvicorn_access_log"])
+        frontend_group.add_argument("--allow-credentials",
+                                    **frontend_kwargs["allow_credentials"])
+
         # Special case: These need json.loads type and ["*"] default
-        frontend_group.add_argument("--allowed-origins",
-                                    type=json.loads,
-                                    default=["*"],
-                                    help=frontend_kwargs["allowed_origins"]["help"])
-        frontend_group.add_argument("--allowed-methods",
-                                    type=json.loads,
-                                    default=["*"],
-                                    help=frontend_kwargs["allowed_methods"]["help"])
-        frontend_group.add_argument("--allowed-headers",
-                                    type=json.loads,
-                                    default=["*"],
-                                    help=frontend_kwargs["allowed_headers"]["help"])
-        
+        frontend_group.add_argument(
+            "--allowed-origins",
+            type=json.loads,
+            default=["*"],
+            help=frontend_kwargs["allowed_origins"]["help"])
+        frontend_group.add_argument(
+            "--allowed-methods",
+            type=json.loads,
+            default=["*"],
+            help=frontend_kwargs["allowed_methods"]["help"])
+        frontend_group.add_argument(
+            "--allowed-headers",
+            type=json.loads,
+            default=["*"],
+            help=frontend_kwargs["allowed_headers"]["help"])
+
         frontend_group.add_argument("--api-key", **frontend_kwargs["api_key"])
-        
+
         # Special case: LoRA modules need custom parser action
         frontend_group.add_argument(
             "--lora-modules",
@@ -207,7 +236,7 @@ class FrontendArgs:
             nargs='+',
             action=LoRAParserAction,
             help=frontend_kwargs["lora_modules"]["help"])
-        
+
         # Special case: Prompt adapters need custom parser action
         frontend_group.add_argument(
             "--prompt-adapters",
@@ -216,54 +245,81 @@ class FrontendArgs:
             nargs='+',
             action=PromptAdapterParserAction,
             help=frontend_kwargs["prompt_adapters"]["help"])
-        
-        frontend_group.add_argument("--chat-template", **frontend_kwargs["chat_template"])
-        frontend_group.add_argument("--chat-template-content-format", **frontend_kwargs["chat_template_content_format"])
-        
-        frontend_group.add_argument("--response-role", **frontend_kwargs["response_role"])
-        frontend_group.add_argument("--ssl-keyfile", **frontend_kwargs["ssl_keyfile"])
-        frontend_group.add_argument("--ssl-certfile", **frontend_kwargs["ssl_certfile"])
-        frontend_group.add_argument("--ssl-ca-certs", **frontend_kwargs["ssl_ca_certs"])
-        frontend_group.add_argument("--enable-ssl-refresh", **frontend_kwargs["enable_ssl_refresh"])
-        frontend_group.add_argument("--ssl-cert-reqs", **frontend_kwargs["ssl_cert_reqs"])
-        frontend_group.add_argument("--root-path", **frontend_kwargs["root_path"])
-        
-        # Special case: Middleware needs append action
+
+        frontend_group.add_argument("--chat-template",
+                                    **frontend_kwargs["chat_template"])
         frontend_group.add_argument(
-            "--middleware",
-            type=optional_type(str),
-            action="append",
-            default=[],
-            help=frontend_kwargs["middleware"]["help"])
-        
-        frontend_group.add_argument("--return-tokens-as-token-ids", **frontend_kwargs["return_tokens_as_token_ids"])
-        frontend_group.add_argument("--disable-frontend-multiprocessing", **frontend_kwargs["disable_frontend_multiprocessing"])
-        frontend_group.add_argument("--enable-request-id-headers", **frontend_kwargs["enable_request_id_headers"])
-        frontend_group.add_argument("--enable-auto-tool-choice", **frontend_kwargs["enable_auto_tool_choice"])
-        
+            "--chat-template-content-format",
+            **frontend_kwargs["chat_template_content_format"])
+
+        frontend_group.add_argument("--response-role",
+                                    **frontend_kwargs["response_role"])
+        frontend_group.add_argument("--ssl-keyfile",
+                                    **frontend_kwargs["ssl_keyfile"])
+        frontend_group.add_argument("--ssl-certfile",
+                                    **frontend_kwargs["ssl_certfile"])
+        frontend_group.add_argument("--ssl-ca-certs",
+                                    **frontend_kwargs["ssl_ca_certs"])
+        frontend_group.add_argument("--enable-ssl-refresh",
+                                    **frontend_kwargs["enable_ssl_refresh"])
+        frontend_group.add_argument("--ssl-cert-reqs",
+                                    **frontend_kwargs["ssl_cert_reqs"])
+        frontend_group.add_argument("--root-path",
+                                    **frontend_kwargs["root_path"])
+
+        # Special case: Middleware needs append action
+        frontend_group.add_argument("--middleware",
+                                    type=optional_type(str),
+                                    action="append",
+                                    default=[],
+                                    help=frontend_kwargs["middleware"]["help"])
+
+        frontend_group.add_argument(
+            "--return-tokens-as-token-ids",
+            **frontend_kwargs["return_tokens_as_token_ids"])
+        frontend_group.add_argument(
+            "--disable-frontend-multiprocessing",
+            **frontend_kwargs["disable_frontend_multiprocessing"])
+        frontend_group.add_argument(
+            "--enable-request-id-headers",
+            **frontend_kwargs["enable_request_id_headers"])
+        frontend_group.add_argument(
+            "--enable-auto-tool-choice",
+            **frontend_kwargs["enable_auto_tool_choice"])
+
         # Special case: Tool call parser needs custom metavar
         valid_tool_parsers = ToolParserManager.tool_parsers.keys()
         frontend_group.add_argument(
             "--tool-call-parser",
             type=str,
-            metavar="{" + ",".join(valid_tool_parsers) + "} or name registered in "
+            metavar="{" + ",".join(valid_tool_parsers) +
+            "} or name registered in "
             "--tool-parser-plugin",
             default=frontend_kwargs["tool_call_parser"]["default"],
             help=frontend_kwargs["tool_call_parser"]["help"])
-        
-        frontend_group.add_argument("--tool-parser-plugin", **frontend_kwargs["tool_parser_plugin"])
-        frontend_group.add_argument("--log-config-file", **frontend_kwargs["log_config_file"])
-        frontend_group.add_argument("--max-log-len", **frontend_kwargs["max_log_len"])
-        frontend_group.add_argument("--disable-fastapi-docs", **frontend_kwargs["disable_fastapi_docs"])
-        frontend_group.add_argument("--enable-prompt-tokens-details", **frontend_kwargs["enable_prompt_tokens_details"])
-        frontend_group.add_argument("--enable-server-load-tracking", **frontend_kwargs["enable_server_load_tracking"])
-        frontend_group.add_argument("--enable-force-include-usage", **frontend_kwargs["enable_force_include_usage"])
+
+        frontend_group.add_argument("--tool-parser-plugin",
+                                    **frontend_kwargs["tool_parser_plugin"])
+        frontend_group.add_argument("--log-config-file",
+                                    **frontend_kwargs["log_config_file"])
+        frontend_group.add_argument("--max-log-len",
+                                    **frontend_kwargs["max_log_len"])
+        frontend_group.add_argument("--disable-fastapi-docs",
+                                    **frontend_kwargs["disable_fastapi_docs"])
+        frontend_group.add_argument(
+            "--enable-prompt-tokens-details",
+            **frontend_kwargs["enable_prompt_tokens_details"])
+        frontend_group.add_argument(
+            "--enable-server-load-tracking",
+            **frontend_kwargs["enable_server_load_tracking"])
+        frontend_group.add_argument(
+            "--enable-force-include-usage",
+            **frontend_kwargs["enable_force_include_usage"])
 
         return parser
 
 
 def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
-    
 
     parser = FrontendArgs.add_cli_args(parser)
     parser = AsyncEngineArgs.add_cli_args(parser)
