@@ -710,7 +710,7 @@ steps:
   - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s v1/shutdown
 
 - label: Plugin Tests (2 GPUs) # 40min
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdproduction]
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
   source_file_dependencies:
