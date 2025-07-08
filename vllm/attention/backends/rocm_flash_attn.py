@@ -31,7 +31,7 @@ _PARTITION_SIZE_ROCM = 256
 @cache
 def is_rocm_aiter_paged_attn_enabled() -> bool:
     return envs.VLLM_ROCM_USE_AITER_PAGED_ATTN \
-        and envs.VLLM_ROCM_USE_AITER \
+        and envs.VLLM_ROCM_USE_AITER
 
 
 @cache
@@ -571,7 +571,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                     "FA backend instead by setting the env var "
                     "`VLLM_USE_TRITON_FLASH_ATTN=0`")
 
-            if self.kv_cache_dtype in ["int8", "fp8_e4m3"]:
+            if not envs.VLLM_ROCM_USE_AITER:
                 from vllm.attention.ops.triton_flash_attention import (  # noqa: F401
                     triton_attention)
                 self.triton_attn_func = triton_attention
@@ -803,7 +803,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                             query.dtype,
                             seq_lens,
                             make_attn_mask=causal_mask)  # type: ignore
-                    if self.kv_cache_dtype in ["int8", "fp8_e4m3"]:
+                    if not envs.VLLM_ROCM_USE_AITER:
                         use_fp8_scales = (layer._q_scale is not None
                                           and layer._k_scale is not None
                                           and layer._v_scale is not None

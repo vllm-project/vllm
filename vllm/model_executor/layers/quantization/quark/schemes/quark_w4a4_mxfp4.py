@@ -13,15 +13,160 @@ from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
 from vllm.model_executor.parameter import (GroupQuantScaleParameter,
                                            PackedvLLMParameter)
 from vllm.platforms import current_platform
+from vllm.triton_utils import triton
 
 try:
     from aiter.ops.triton.gemm_afp4wfp4 import (
         gemm_afp4wfp4, gemm_afp4wfp4_preshuffled_scales)
     from aiter.ops.triton.quant import dynamic_mxfp4_quant
+
+    from vllm.utils import direct_register_custom_op
     if envs.VLLM_TRITON_FP4_GEMM_USE_ASM:
         from aiter import gemm_a4w4_asm
         from aiter.utility.fp4_utils import (
             dynamic_mxfp4_quant as dynamic_mxfp4_quant_asm)
+
+        def gemm_a4w4_asm_fake(
+            A: torch.Tensor,  # A:[M, K/2] f4x2
+            B: torch.Tensor,  # B:[N, K/2] f4x2
+            A_scale: torch.Tensor,  # A_scale:[M, K/32] e8m0 paded
+            B_scale: torch.Tensor,  # B_scale:[N, K/32] e8m0 paded
+            out: torch.Tensor,  # Out:[M, N] bf16
+            bias: torch.Tensor,  # bias:[1, N] f32
+            alpha: Optional[float] = 1.0,
+            beta: Optional[float] = 0.0,
+            bpreshuffle: Optional[bool] = True,
+        ) -> torch.Tensor:
+            pass
+
+        direct_register_custom_op(
+            op_name="gemm_a4w4_asm",
+            op_func=gemm_a4w4_asm,
+            mutates_args=["out"],
+            fake_impl=gemm_a4w4_asm_fake,
+            dispatch_key=current_platform.dispatch_key,
+        )
+
+    def dynamic_mxfp4_quant_fake(
+            x: torch.Tensor,
+            scaling_mode: str = "even",
+            shuffle: bool = False) -> tuple[torch.Tensor, torch.Tensor]:
+        M, N = x.shape
+        MXFP4_QUANT_BLOCK_SIZE = 32
+        x_fp4 = torch.empty((M, N // 2), dtype=torch.uint8, device=x.device)
+        scaleN_valid = triton.cdiv(N, MXFP4_QUANT_BLOCK_SIZE)
+        scaleN = triton.cdiv(scaleN_valid, 8) * 8
+        blockscale_e8m0 = torch.empty(
+            (
+                triton.cdiv(M, 256) * 256,
+                scaleN,
+            ),
+            dtype=torch.uint8,
+            device=x.device,
+        )
+        return (x_fp4, blockscale_e8m0)
+
+    direct_register_custom_op(
+        op_name="dynamic_mxfp4_quant_asm" \
+            if envs.VLLM_TRITON_FP4_GEMM_USE_ASM else \
+                "dynamic_mxfp4_quant",
+        op_func=dynamic_mxfp4_quant_asm \
+            if envs.VLLM_TRITON_FP4_GEMM_USE_ASM else \
+                dynamic_mxfp4_quant,
+        mutates_args=[],
+        fake_impl=dynamic_mxfp4_quant_fake,
+        dispatch_key=current_platform.dispatch_key,
+    )
+
+    def gemm_afp4wfp4_preshuffled_scales_proxy(
+        x: torch.Tensor,
+        w: torch.Tensor,
+        x_scales: torch.Tensor,
+        w_scales: torch.Tensor,
+        dtype: Optional[torch.dtype] = torch.bfloat16,
+        y: Optional[torch.Tensor] = None,
+        NUM_KSPLIT: Optional[int] = None,
+        BLOCK_SIZE_K: Optional[int] = None,
+        SPLITK_BLOCK_SIZE: Optional[int] = None,
+        BLOCK_SIZE_N: Optional[int] = None,
+    ) -> None:
+        config = None
+        if NUM_KSPLIT or BLOCK_SIZE_K or SPLITK_BLOCK_SIZE or BLOCK_SIZE_N:
+            config = {"NUM_KSPLIT": NUM_KSPLIT} if NUM_KSPLIT else {}
+            config = {"BLOCK_SIZE_K": BLOCK_SIZE_K} if BLOCK_SIZE_K else {}
+            config = {
+                "SPLITK_BLOCK_SIZE": SPLITK_BLOCK_SIZE
+            } if SPLITK_BLOCK_SIZE else {}
+            config = {"BLOCK_SIZE_N": BLOCK_SIZE_N} if BLOCK_SIZE_N else {}
+
+        gemm_afp4wfp4_preshuffled_scales(x, w, x_scales, w_scales, dtype, y,
+                                         config)
+
+    def gemm_afp4wfp4_preshuffled_scales_fake(
+        x: torch.Tensor,
+        w: torch.Tensor,
+        x_scales: torch.Tensor,
+        w_scales: torch.Tensor,
+        dtype: Optional[torch.dtype] = torch.bfloat16,
+        y: Optional[torch.Tensor] = None,
+        NUM_KSPLIT: Optional[int] = None,
+        BLOCK_SIZE_K: Optional[int] = None,
+        SPLITK_BLOCK_SIZE: Optional[int] = None,
+        BLOCK_SIZE_N: Optional[int] = None,
+    ):
+        pass
+
+    from vllm.utils import direct_register_custom_op
+    direct_register_custom_op(
+        op_name="gemm_afp4wfp4_preshuffled_scales_proxy",
+        op_func=gemm_afp4wfp4_preshuffled_scales_proxy,
+        mutates_args=["y"],
+        fake_impl=gemm_afp4wfp4_preshuffled_scales_fake,
+        dispatch_key=current_platform.dispatch_key,
+    )
+
+    def gemm_afp4wfp4_proxy(
+        x: torch.Tensor,
+        w: torch.Tensor,
+        x_scales: torch.Tensor,
+        w_scales: torch.Tensor,
+        dtype: Optional[torch.dtype] = torch.bfloat16,
+        y: Optional[torch.Tensor] = None,
+        NUM_KSPLIT: Optional[int] = None,
+        BLOCK_SIZE_K: Optional[int] = None,
+        SPLITK_BLOCK_SIZE: Optional[int] = None,
+    ) -> None:
+        config = None
+        if NUM_KSPLIT or BLOCK_SIZE_K or SPLITK_BLOCK_SIZE:
+            config = {"NUM_KSPLIT": NUM_KSPLIT} if NUM_KSPLIT else {}
+            config = {"BLOCK_SIZE_K": BLOCK_SIZE_K} if BLOCK_SIZE_K else {}
+            config = {
+                "SPLITK_BLOCK_SIZE": SPLITK_BLOCK_SIZE
+            } if SPLITK_BLOCK_SIZE else {}
+
+        gemm_afp4wfp4(x, w, x_scales, w_scales, dtype, y, config)
+
+    def gemm_afp4wfp4_fake(
+        x: torch.Tensor,
+        w: torch.Tensor,
+        x_scales: torch.Tensor,
+        w_scales: torch.Tensor,
+        dtype: Optional[torch.dtype] = torch.bfloat16,
+        y: Optional[torch.Tensor] = None,
+        NUM_KSPLIT: Optional[int] = None,
+        BLOCK_SIZE_K: Optional[int] = None,
+        SPLITK_BLOCK_SIZE: Optional[int] = None,
+    ) -> None:
+        pass
+
+    direct_register_custom_op(
+        op_name="gemm_afp4wfp4_proxy",
+        op_func=gemm_afp4wfp4_proxy,
+        mutates_args=["y"],
+        fake_impl=gemm_afp4wfp4_fake,
+        dispatch_key=current_platform.dispatch_key,
+    )
+
 except ImportError:
     dynamic_mxfp4_quant = gemm_afp4wfp4 = None
 
@@ -160,7 +305,8 @@ class QuarkW4A4MXFP4(QuarkScheme):
             M = x.shape[0]
             if envs.VLLM_TRITON_FP4_GEMM_USE_ASM and M > 128:
                 if x_scales is None:
-                    x_q, x_s = dynamic_mxfp4_quant_asm(x, shuffle=True)
+                    x_q, x_s = torch.ops.vllm.dynamic_mxfp4_quant_asm(
+                        x, shuffle=True)
                 else:
                     x_q = x
                     x_s = x_scales
@@ -170,18 +316,19 @@ class QuarkW4A4MXFP4(QuarkScheme):
                                 device=x_q.device,
                                 dtype=self.out_dtype)
                 #asm_bias = torch.empty_like(y)
-                gemm_a4w4_asm(x_q,
-                              layer.weight,
-                              x_s,
-                              layer.weight_scale,
-                              y,
-                              y,
-                              bpreshuffle=False)
+                torch.ops.vllm.gemm_a4w4_asm(x_q,
+                                             layer.weight,
+                                             x_s,
+                                             layer.weight_scale,
+                                             y,
+                                             y,
+                                             bpreshuffle=False)
 
                 return y[:M]
             elif envs.VLLM_TRITON_FP4_GEMM_USE_ASM:
                 if x_scales is None:
-                    x_q, x_s = dynamic_mxfp4_quant_asm(x, shuffle=(M >= 32))
+                    x_q, x_s = torch.ops.vllm.dynamic_mxfp4_quant_asm(
+                        x, shuffle=(M >= 32))
                     x_s = x_s.view(torch.uint8)
                 else:
                     x_q = x
@@ -195,14 +342,14 @@ class QuarkW4A4MXFP4(QuarkScheme):
                                 dtype=self.out_dtype)
 
                 smw, snw = layer.weight_scale.shape
-                gemm_afp4wfp4_preshuffled_scales(
+                torch.ops.vllm.gemm_afp4wfp4_preshuffled_scales_proxy(
                     x_q, layer.weight.T, x_s,
                     layer.weight_scale.view(smw // 32, snw * 32),
                     self.out_dtype, y)
                 return y
             else:
                 if x_scales is None:
-                    x_q, x_s = dynamic_mxfp4_quant(x)
+                    x_q, x_s = torch.ops.vllm.dynamic_mxfp4_quant(x)
                 else:
                     x_q = x
                     x_s = x_scales
@@ -211,7 +358,8 @@ class QuarkW4A4MXFP4(QuarkScheme):
                                 device=x_q.device,
                                 dtype=self.out_dtype)
 
-                gemm_afp4wfp4(x_q, layer.weight.T, x_s, layer.weight_scale.T,
-                              self.out_dtype, y)
+                torch.ops.vllm.gemm_afp4wfp4_proxy(x_q, layer.weight.T, x_s,
+                                                   layer.weight_scale.T,
+                                                   self.out_dtype, y)
 
                 return y
