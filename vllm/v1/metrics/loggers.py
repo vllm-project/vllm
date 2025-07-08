@@ -6,7 +6,6 @@ import time
 from abc import ABC, abstractmethod
 from typing import Callable, Optional
 
-
 import prometheus_client
 
 from vllm.config import SupportsMetricsInfo, VllmConfig
