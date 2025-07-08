@@ -115,6 +115,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         scheduler_config = self.scheduler_config
         parallel_config = self.parallel_config
         self.device = device
+        self.device = torch.device(self.device)
         self.pin_memory = is_pin_memory_available()
         self.dtype = self.model_config.dtype
         if cache_config.cache_dtype == "auto":
@@ -346,12 +347,32 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def _init_device_properties(self) -> None:
         """Initialize attributes from torch.cuda.get_device_properties
         """
-        self.device_properties = torch.cuda.get_device_properties(self.device)
-        self.num_sms = self.device_properties.multi_processor_count
+        if self.device.type == "cuda":
+            self.device_properties = torch.cuda.get_device_properties(
+                self.device)
+            self.num_sms = self.device_properties.multi_processor_count
+        elif self.device.type == "xpu":
+            if not hasattr(torch, 'xpu'):
+                raise ValueError(
+                    "torch.xpu is not available. Please install the PyTorch "
+                    "XPU version.")
+            self.device_properties = None
+            self.num_sms = None
+        else:
+            raise ValueError(f"Unsupported device type: {self.device.type}")
 
     # Note: used for model runner override.
     def _sync_device(self) -> None:
-        torch.cuda.synchronize()
+        if self.device.type == "cuda":
+            torch.cuda.synchronize()
+        elif self.device.type == "xpu":
+            if not hasattr(torch, 'xpu'):
+                raise ValueError(
+                    "torch.xpu is not available. Please install the PyTorch "
+                    "XPU version.")
+            torch.xpu.synchronize()
+        else:
+            raise ValueError(f"Unsupported device type: {self.device.type}")
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         """Update the cached states and the persistent batch with the scheduler
