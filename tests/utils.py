@@ -730,6 +730,11 @@ def fork_new_process_for_each_test(
 
     @functools.wraps(f)
     def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> None:
+        # To use XPU with multiprocessing, must use the 'spawn' start method via 'VLLM_WORKER_MULTIPROC_METHOD=spawn'
+        if current_platform.is_xpu():
+            f(*args, **kwargs)
+            return
+
         # Make the process the leader of its own process group
         # to avoid sending SIGTERM to the parent process
         os.setpgrp()
@@ -817,7 +822,7 @@ def create_new_process_for_each_test(
     """Creates a decorator that runs each test function in a new process.
 
     Args:
-        method: The process creation method. Can be either "spawn" or "fork". 
+        method: The process creation method. Can be either "spawn" or "fork".
                If not specified,
                it defaults to "spawn" on ROCm platforms and "fork" otherwise.
 
