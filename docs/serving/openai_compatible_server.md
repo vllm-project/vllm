@@ -15,7 +15,7 @@ vllm serve NousResearch/Meta-Llama-3-8B-Instruct \
 
 To call the server, in your preferred text editor, create a script that uses an HTTP client. Include any messages that you want to send to the model. Then run that script. Below is an example script using the [official OpenAI Python client](https://github.com/openai/openai-python).
 
-??? Code
+??? code
 
     ```python
     from openai import OpenAI
@@ -146,7 +146,7 @@ completion = client.chat.completions.create(
 Only `X-Request-Id` HTTP request header is supported for now. It can be enabled
 with `--enable-request-id-headers`.
 
-??? Code
+??? code
 
     ```python
     completion = client.chat.completions.create(
@@ -185,7 +185,7 @@ Code example: <gh-file:examples/online_serving/openai_completion_client.py>
 
 The following [sampling parameters][sampling-params] are supported.
 
-??? Code
+??? code
 
     ```python
     --8<-- "vllm/entrypoints/openai/protocol.py:completion-sampling-params"
@@ -193,7 +193,7 @@ The following [sampling parameters][sampling-params] are supported.
 
 The following extra parameters are supported:
 
-??? Code
+??? code
 
     ```python
     --8<-- "vllm/entrypoints/openai/protocol.py:completion-extra-params"
@@ -217,7 +217,7 @@ Code example: <gh-file:examples/online_serving/openai_chat_completion_client.py>
 
 The following [sampling parameters][sampling-params] are supported.
 
-??? Code
+??? code
 
     ```python
     --8<-- "vllm/entrypoints/openai/protocol.py:chat-completion-sampling-params"
@@ -225,7 +225,7 @@ The following [sampling parameters][sampling-params] are supported.
 
 The following extra parameters are supported:
 
-??? Code
+??? code
 
     ```python
     --8<-- "vllm/entrypoints/openai/protocol.py:chat-completion-extra-params"
@@ -268,7 +268,7 @@ and passing a list of `messages` in the request. Refer to the examples below for
 
     Since the request schema is not defined by OpenAI client, we post a request to the server using the lower-level `requests` library:
 
-    ??? Code
+    ??? code
 
         ```python
         import requests
@@ -327,7 +327,7 @@ The following [pooling parameters][pooling-params] are supported.
 
 The following extra parameters are supported by default:
 
-??? Code
+??? code
 
     ```python
     --8<-- "vllm/entrypoints/openai/protocol.py:embedding-extra-params"
@@ -335,7 +335,7 @@ The following extra parameters are supported by default:
 
 For chat-like input (i.e. if `messages` is passed), these extra parameters are supported instead:
 
-??? Code
+??? code
 
     ```python
     --8<-- "vllm/entrypoints/openai/protocol.py:chat-embedding-extra-params"
@@ -358,7 +358,7 @@ Code example: <gh-file:examples/online_serving/openai_transcription_client.py>
 
 The following [sampling parameters][sampling-params] are supported.
 
-??? Code
+??? code
 
     ```python
     --8<-- "vllm/entrypoints/openai/protocol.py:transcription-sampling-params"
@@ -366,7 +366,7 @@ The following [sampling parameters][sampling-params] are supported.
 
 The following extra parameters are supported:
 
-??? Code
+??? code
 
     ```python
     --8<-- "vllm/entrypoints/openai/protocol.py:transcription-extra-params"
@@ -446,7 +446,7 @@ curl -v "http://127.0.0.1:8000/classify" \
   }'
 ```
 
-??? Response
+??? console "Response"
 
     ```bash
     {
@@ -494,7 +494,7 @@ curl -v "http://127.0.0.1:8000/classify" \
   }'
 ```
 
-??? Response
+??? console "Response"
 
     ```bash
     {
@@ -564,7 +564,7 @@ curl -X 'POST' \
 }'
 ```
 
-??? Response
+??? console "Response"
 
     ```bash
     {
@@ -589,7 +589,7 @@ You can pass a string to `text_1` and a list to `text_2`, forming multiple sente
 where each pair is built from `text_1` and a string in `text_2`.
 The total number of pairs is `len(text_2)`.
 
-??? Request
+??? console "Request"
 
     ```bash
     curl -X 'POST' \
@@ -606,7 +606,7 @@ The total number of pairs is `len(text_2)`.
     }'
     ```
 
-??? Response
+??? console "Response"
 
     ```bash
     {
@@ -634,7 +634,7 @@ You can pass a list to both `text_1` and `text_2`, forming multiple sentence pai
 where each pair is built from a string in `text_1` and the corresponding string in `text_2` (similar to `zip()`).
 The total number of pairs is `len(text_2)`.
 
-??? Request
+??? console "Request"
 
     ```bash
     curl -X 'POST' \
@@ -655,7 +655,7 @@ The total number of pairs is `len(text_2)`.
     }'
     ```
 
-??? Response
+??? console "Response"
 
     ```bash
     {
@@ -716,7 +716,7 @@ Code example: <gh-file:examples/online_serving/jinaai_rerank_client.py>
 Note that the `top_n` request parameter is optional and will default to the length of the `documents` field.
 Result documents will be sorted by relevance, and the `index` property can be used to determine original order.
 
-??? Request
+??? console "Request"
 
     ```bash
     curl -X 'POST' \
@@ -734,7 +734,7 @@ Result documents will be sorted by relevance, and the `index` property can be us
     }'
     ```
 
-??? Response
+??? console "Response"
 
     ```bash
     {

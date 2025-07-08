@@ -13,7 +13,7 @@ Plugins are user-registered code that vLLM executes. Given vLLM's architecture (
 
 vLLM's plugin system uses the standard Python `entry_points` mechanism. This mechanism allows developers to register functions in their Python packages for use by other packages. An example of a plugin:
 
-??? Code
+??? code
 
     ```python
     # inside `setup.py` file

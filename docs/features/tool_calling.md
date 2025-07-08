@@ -15,7 +15,7 @@ vllm serve meta-llama/Llama-3.1-8B-Instruct \
 
 Next, make a request to the model that should result in it using the available tools:
 
-??? Code
+??? code
 
     ```python
     from openai import OpenAI
@@ -320,7 +320,7 @@ A tool parser plugin is a Python file containing one or more ToolParser implemen
 
 Here is a summary of a plugin file:
 
-??? Code
+??? code
 
     ```python
 
