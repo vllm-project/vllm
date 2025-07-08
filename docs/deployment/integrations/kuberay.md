@@ -1,12 +1,9 @@
 ---
 title: KubeRay
 ---
-[](){ #deployment-kuberay }
 
 [KubeRay](https://github.com/ray-project/kuberay) provides a Kubernetes-native way to run vLLM workloads on Ray clusters.
 A Ray cluster can be declared in YAML, and the operator then handles pod scheduling, networking configuration, restarts, and blue-green deployments — all while preserving the familiar Kubernetes experience.
-
----
 
 ## Why KubeRay instead of manual scripts?
 
@@ -18,8 +15,6 @@ A Ray cluster can be declared in YAML, and the operator then handles pod schedul
 | Declarative config | Bash flags & environment variables | Git-ops-friendly YAML CRDs (RayCluster/RayService) |
 
 Using KubeRay reduces the operational burden and simplifies integration of Ray + vLLM with existing Kubernetes workflows (CI/CD, secrets, storage classes, etc.).
-
----
 
 ## Learn more
 
