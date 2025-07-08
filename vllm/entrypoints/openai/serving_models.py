@@ -178,7 +178,7 @@ class OpenAIServingModels:
             # This will also pre-load it for incoming requests
             try:
                 await self.engine_client.add_lora(lora_request)
-            except BaseException as e:
+            except Exception as e:
                 error_type = "BadRequestError"
                 status_code = HTTPStatus.BAD_REQUEST
                 if "No adapter found" in str(e):
@@ -234,11 +234,11 @@ class OpenAIServingModels:
     async def _check_unload_lora_adapter_request(
             self,
             request: UnloadLoRAAdapterRequest) -> Optional[ErrorResponse]:
-        # Check if either 'lora_name' or 'lora_int_id' is provided
-        if not request.lora_name and not request.lora_int_id:
+        # Check if 'lora_name' is not provided return an error
+        if not request.lora_name:
             return create_error_response(
                 message=
-                "either 'lora_name' and 'lora_int_id' needs to be provided.",
+                "'lora_name' needs to be provided to unload a LoRA adapter.",
                 err_type="InvalidUserInput",
                 status_code=HTTPStatus.BAD_REQUEST)
 
