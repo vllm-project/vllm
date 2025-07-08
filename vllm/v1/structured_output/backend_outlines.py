@@ -1,4 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2025-present the Outlines developers
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from __future__ import annotations
 
 import ast
@@ -120,6 +122,7 @@ class OutlinesGrammar(StructuredOutputGrammar):
             # Advance cannot fail because we checked Guide.accepts_tokens()
             for t in tokens:
                 self.guide.advance(t)
+                self.num_processed_tokens += 1
             return True
         return False
 
