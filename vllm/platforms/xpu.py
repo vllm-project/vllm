@@ -29,6 +29,7 @@ class XPUPlatform(Platform):
     # Intel XPU's device key is "GPU" for Ray.
     # see https://github.com/ray-project/ray/blob/6a5eb5865eeb9ccf058a79b44f107e327e360673/python/ray/_private/accelerators/intel_gpu.py#L20 # noqa: E501
     ray_device_key: str = "GPU"
+    dist_backend: str = "ccl"  # ccl | xccl
     device_control_env_var: str = "ONEAPI_DEVICE_SELECTOR"
 
     @classmethod
@@ -36,7 +37,7 @@ class XPUPlatform(Platform):
                              dtype: torch.dtype, kv_cache_dtype: Optional[str],
                              block_size: int, use_v1: bool,
                              use_mla: bool) -> str:
-        if selected_backend != _Backend.IPEX:
+        if selected_backend is not None and selected_backend != _Backend.IPEX:
             logger.info("Cannot use %s backend on XPU.", selected_backend)
         use_v1 = envs.VLLM_USE_V1
         if not use_v1:
@@ -58,6 +59,10 @@ class XPUPlatform(Platform):
         return torch.xpu.get_device_name(device_id)
 
     @classmethod
+    def get_punica_wrapper(cls) -> str:
+        return "vllm.lora.punica_wrapper.punica_gpu.PunicaWrapperGPU"
+
+    @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
         device_props = torch.xpu.get_device_properties(device_id)
         return device_props.total_memory
@@ -77,6 +82,13 @@ class XPUPlatform(Platform):
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = 64
 
+        # FIXME: Temporarily forcing eager mode
+        # remove after t.compile support stabilizes.
+        if (envs.VLLM_USE_V1 and vllm_config.model_config is not None
+                and not vllm_config.model_config.enforce_eager):
+            from vllm.config import CompilationLevel
+            vllm_config.compilation_config.level = CompilationLevel.NO_COMPILATION  # noqa: E501
+
         # Instances created using VllmConfig() typically have model_config as
         # None by default. The modification involves adding a check to prevent
         # potential null exceptions check and update model config.
@@ -91,10 +103,6 @@ class XPUPlatform(Platform):
                     "CUDA graph is not supported on XPU, fallback to the eager "
                     "mode.")
                 model_config.enforce_eager = True
-
-        if vllm_config.speculative_config is not None:
-            raise NotImplementedError(
-                "XPU does not support speculative decoding")
 
         if vllm_config.device_config is not None:
             assert vllm_config.device_config.device_type == "xpu"
@@ -136,8 +144,7 @@ class XPUPlatform(Platform):
 
     @classmethod
     def is_pin_memory_available(cls):
-        logger.warning("Pin memory is not supported on XPU.")
-        return False
+        return True
 
     @classmethod
     def get_current_memory_usage(cls,

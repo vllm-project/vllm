@@ -1,7 +1,4 @@
----
-title: AMD Quark
----
-[](){ #quark }
+# AMD Quark
 
 Quantization can effectively reduce memory and bandwidth usage, accelerate computation and improve
 throughput while with minimal accuracy loss. vLLM can leverage [Quark](https://quark.docs.amd.com/latest/),
@@ -42,7 +39,7 @@ The Quark quantization process can be listed for 5 steps as below:
 Quark uses [Transformers](https://huggingface.co/docs/transformers/en/index)
 to fetch model and tokenizer.
 
-??? Code
+??? code
 
     ```python
     from transformers import AutoTokenizer, AutoModelForCausalLM
@@ -65,7 +62,7 @@ Quark uses the [PyTorch Dataloader](https://pytorch.org/tutorials/beginner/basic
 to load calibration data. For more details about how to use calibration datasets efficiently, please refer
 to [Adding Calibration Datasets](https://quark.docs.amd.com/latest/pytorch/calibration_datasets.html).
 
-??? Code
+??? code
 
     ```python
     from datasets import load_dataset
@@ -98,7 +95,7 @@ kv-cache and the quantization algorithm is AutoSmoothQuant.
     AutoSmoothQuant config file for Llama is
     `examples/torch/language_modeling/llm_ptq/models/llama/autosmoothquant_config.json`.
 
-??? Code
+??? code
 
     ```python
     from quark.torch.quantization import (Config, QuantizationConfig,
@@ -145,7 +142,7 @@ HuggingFace `safetensors`, you can refer to
 [HuggingFace format exporting](https://quark.docs.amd.com/latest/pytorch/export/quark_export_hf.html)
 for more exporting format details.
 
-??? Code
+??? code
 
     ```python
     import torch
@@ -176,7 +173,7 @@ for more exporting format details.
 
 Now, you can load and run the Quark quantized model directly through the LLM entrypoint:
 
-??? Code
+??? code
 
     ```python
     from vllm import LLM, SamplingParams
