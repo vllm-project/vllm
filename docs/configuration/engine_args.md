@@ -1,12 +1,11 @@
 ---
 title: Engine Arguments
 ---
-[](){ #engine-args }
 
 Engine arguments control the behavior of the vLLM engine.
 
-- For [offline inference][offline-inference], they are part of the arguments to [LLM][vllm.LLM] class.
-- For [online serving][serving-openai-compatible-server], they are part of the arguments to `vllm serve`.
+- For [offline inference](../serving/offline_inference.md), they are part of the arguments to [LLM][vllm.LLM] class.
+- For [online serving](../serving/openai_compatible_server.md), they are part of the arguments to `vllm serve`.
 
 You can look at [EngineArgs][vllm.engine.arg_utils.EngineArgs] and [AsyncEngineArgs][vllm.engine.arg_utils.AsyncEngineArgs] to see the available engine arguments.
 

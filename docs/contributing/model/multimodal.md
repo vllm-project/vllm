@@ -1,13 +1,12 @@
 ---
 title: Multi-Modal Support
 ---
-[](){ #supports-multimodal }
 
-This document walks you through the steps to extend a basic model so that it accepts [multi-modal inputs][multimodal-inputs].
+This document walks you through the steps to extend a basic model so that it accepts [multi-modal inputs](../../features/multimodal_inputs.md).
 
 ## 1. Update the base vLLM model
 
-It is assumed that you have already implemented the model in vLLM according to [these steps][new-model-basic].
+It is assumed that you have already implemented the model in vLLM according to [these steps](basic.md).
 Further update the model as follows:
 
 - Implement [get_placeholder_str][vllm.model_executor.models.interfaces.SupportsMultiModal.get_placeholder_str] to define the placeholder string which is used to represent the multi-modal item in the text prompt. This should be consistent with the chat template of the model.
@@ -483,7 +482,7 @@ Afterwards, create a subclass of [BaseMultiModalProcessor][vllm.multimodal.proce
 to fill in the missing details about HF processing.
 
 !!! info
-    [Multi-Modal Data Processing][mm-processing]
+    [Multi-Modal Data Processing](../../design/mm_processing.md)
 
 ### Multi-modal fields
 
@@ -846,7 +845,7 @@ Examples:
 
 ### Handling prompt updates unrelated to multi-modal data
 
-[_get_prompt_updates][vllm.multimodal.processing.BaseMultiModalProcessor._get_prompt_updates] assumes that each application of prompt update corresponds to one multi-modal item. If the HF processor performs additional processing regardless of how many multi-modal items there are, you should override [_apply_hf_processor_tokens_only][vllm.multimodal.processing.BaseMultiModalProcessor._apply_hf_processor_tokens_only] so that the processed token inputs are consistent with the result of applying the HF processor on text inputs. This is because token inputs bypass the HF processor according to [our design][mm-processing].
+[_get_prompt_updates][vllm.multimodal.processing.BaseMultiModalProcessor._get_prompt_updates] assumes that each application of prompt update corresponds to one multi-modal item. If the HF processor performs additional processing regardless of how many multi-modal items there are, you should override [_apply_hf_processor_tokens_only][vllm.multimodal.processing.BaseMultiModalProcessor._apply_hf_processor_tokens_only] so that the processed token inputs are consistent with the result of applying the HF processor on text inputs. This is because token inputs bypass the HF processor according to [our design](../../design/mm_processing.md).
 
 Examples:
 

@@ -90,7 +90,7 @@ vLLM V1 currently excludes model architectures with the `SupportsV0Only` protoco
 
 !!! tip
 
-    This corresponds to the V1 column in our [list of supported models][supported-models].
+    This corresponds to the V1 column in our [list of supported models](../models/supported_models.md).
 
 See below for the status of models that are not yet supported or have more features planned in V1.
 

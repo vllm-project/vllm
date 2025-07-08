@@ -1,7 +1,6 @@
 ---
 title: Pooling Models
 ---
-[](){ #pooling-models }
 
 vLLM also supports pooling models, including embedding, reranking and reward models.
 
@@ -11,7 +10,7 @@ before returning them.
 
 !!! note
     We currently support pooling models primarily as a matter of convenience.
-    As shown in the [Compatibility Matrix][compatibility-matrix], most vLLM features are not applicable to
+    As shown in the [Compatibility Matrix](../features/compatibility_matrix.md), most vLLM features are not applicable to
     pooling models as they only work on the generation or decode stage, so performance may not improve as much.
 
 For pooling models, we support the following `--task` options.
@@ -113,10 +112,10 @@ A code example can be found here: <gh-file:examples/offline_inference/basic/scor
 
 ## Online Serving
 
-Our [OpenAI-Compatible Server][serving-openai-compatible-server] provides endpoints that correspond to the offline APIs:
+Our [OpenAI-Compatible Server](../serving/openai_compatible_server.md) provides endpoints that correspond to the offline APIs:
 
 - [Pooling API][pooling-api] is similar to `LLM.encode`, being applicable to all types of pooling models.
-- [Embeddings API][embeddings-api] is similar to `LLM.embed`, accepting both text and [multi-modal inputs][multimodal-inputs] for embedding models.
+- [Embeddings API][embeddings-api] is similar to `LLM.embed`, accepting both text and [multi-modal inputs](../features/multimodal_inputs.md) for embedding models.
 - [Classification API][classification-api] is similar to `LLM.classify` and is applicable to sequence classification models.
 - [Score API][score-api] is similar to `LLM.score` for cross-encoder models.
 

@@ -1,7 +1,6 @@
 ---
 title: TPU
 ---
-[](){ #tpu-supported-models }
 
 # TPU Supported Models
 ## Text-only Language Models

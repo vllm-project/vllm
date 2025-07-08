@@ -1,7 +1,6 @@
 ---
 title: Llama Stack
 ---
-[](){ #deployment-llamastack }
 
 vLLM is also available via [Llama Stack](https://github.com/meta-llama/llama-stack) .
 
