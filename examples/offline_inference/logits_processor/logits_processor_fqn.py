@@ -12,10 +12,10 @@ prompts = [
 ]
 # Create a mixture of requests which do and don't utilize the dummy logitproc
 sampling_params_list = [
-    SamplingParams(temperature=0.8, top_p=0.95, extra_args={"target_token": 128}),
-    SamplingParams(temperature=0.8, top_p=0.95),
-    SamplingParams(temperature=0.8, top_p=0.95, extra_args={"target_token": 67}),
-    SamplingParams(temperature=0.8, top_p=0.95),
+    SamplingParams(temperature=0.0, extra_args={"target_token": 128}),
+    SamplingParams(temperature=0.0),
+    SamplingParams(temperature=0.0, extra_args={"target_token": 67}),
+    SamplingParams(temperature=0.0),
 ]
 
 
