@@ -1,7 +1,4 @@
----
-title: Compatibility Matrix
----
-[](){ #compatibility-matrix }
+# Compatibility Matrix
 
 The tables below show mutually exclusive features and the support on some hardware.
 
@@ -37,13 +34,13 @@ th:not(:first-child) {
 }
 </style>
 
-| Feature | [CP][chunked-prefill] | [APC][automatic-prefix-caching] | [LoRA][lora-adapter] | <abbr title="Prompt Adapter">prmpt adptr</abbr> | [SD][spec-decode] | CUDA graph | <abbr title="Pooling Models">pooling</abbr> | <abbr title="Encoder-Decoder Models">enc-dec</abbr> | <abbr title="Logprobs">logP</abbr> | <abbr title="Prompt Logprobs">prmpt logP</abbr> | <abbr title="Async Output Processing">async output</abbr> | multi-step | <abbr title="Multimodal Inputs">mm</abbr> | best-of | beam-search |
+| Feature | [CP][chunked-prefill] | [APC](automatic_prefix_caching.md) | [LoRA](lora.md) | <abbr title="Prompt Adapter">prmpt adptr</abbr> | [SD](spec_decode.md) | CUDA graph | <abbr title="Pooling Models">pooling</abbr> | <abbr title="Encoder-Decoder Models">enc-dec</abbr> | <abbr title="Logprobs">logP</abbr> | <abbr title="Prompt Logprobs">prmpt logP</abbr> | <abbr title="Async Output Processing">async output</abbr> | multi-step | <abbr title="Multimodal Inputs">mm</abbr> | best-of | beam-search |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | [CP][chunked-prefill] | ✅ | | | | | | | | | | | | | | |
-| [APC][automatic-prefix-caching] | ✅ | ✅ | | | | | | | | | | | | | |
-| [LoRA][lora-adapter] | ✅ | ✅ | ✅ | | | | | | | | | | | | |
+| [APC](automatic_prefix_caching.md) | ✅ | ✅ | | | | | | | | | | | | | |
+| [LoRA](lora.md) | ✅ | ✅ | ✅ | | | | | | | | | | | | |
 | <abbr title="Prompt Adapter">prmpt adptr</abbr> | ✅ | ✅ | ✅ | ✅ | | | | | | | | | | | |
-| [SD][spec-decode] | ✅ | ✅ | ❌ | ✅ | ✅ | | | | | | | | | | |
+| [SD](spec_decode.md) | ✅ | ✅ | ❌ | ✅ | ✅ | | | | | | | | | | |
 | CUDA graph | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | | | | | | | | | |
 | <abbr title="Pooling Models">pooling</abbr> | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | | | | | | | | |
 | <abbr title="Encoder-Decoder Models">enc-dec</abbr> | ❌ | [❌](gh-issue:7366) | ❌ | ❌ | [❌](gh-issue:7366) | ✅ | ✅ | ✅ | | | | | | | |
@@ -59,23 +56,23 @@ th:not(:first-child) {
 
 ## Feature x Hardware
 
-| Feature                                                   | Volta              | Turing   | Ampere   | Ada   | Hopper   | CPU                | AMD   |
-|-----------------------------------------------------------|--------------------|----------|----------|-------|----------|--------------------|-------|
-| [CP][chunked-prefill]                                     | [❌](gh-issue:2729) | ✅        | ✅        | ✅     | ✅        | ✅                  | ✅     |
-| [APC][automatic-prefix-caching]                           | [❌](gh-issue:3687) | ✅        | ✅        | ✅     | ✅        | ✅                  | ✅     |
-| [LoRA][lora-adapter]                                      | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ✅     |
-| <abbr title="Prompt Adapter">prmpt adptr</abbr>           | ✅                  | ✅        | ✅        | ✅     | ✅        | [❌](gh-issue:8475) | ✅     |
-| [SD][spec-decode]                                         | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ✅     |
-| CUDA graph                                                | ✅                  | ✅        | ✅        | ✅     | ✅        | ❌                  | ✅     |
-| <abbr title="Pooling Models">pooling</abbr>               | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ❔     |
-| <abbr title="Encoder-Decoder Models">enc-dec</abbr>       | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ❌     |
-| <abbr title="Multimodal Inputs">mm</abbr>                 | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ✅     |
-| <abbr title="Logprobs">logP</abbr>                        | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ✅     |
-| <abbr title="Prompt Logprobs">prmpt logP</abbr>           | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ✅     |
-| <abbr title="Async Output Processing">async output</abbr> | ✅                  | ✅        | ✅        | ✅     | ✅        | ❌                  | ❌     |
-| multi-step                                                | ✅                  | ✅        | ✅        | ✅     | ✅        | [❌](gh-issue:8477) | ✅     |
-| best-of                                                   | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ✅     |
-| beam-search                                               | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ✅     |
+| Feature                                                   | Volta               | Turing    | Ampere    | Ada    | Hopper     | CPU                | AMD    | TPU |
+|-----------------------------------------------------------|---------------------|-----------|-----------|--------|------------|--------------------|--------|-----|
+| [CP][chunked-prefill]                                     | [❌](gh-issue:2729) | ✅        | ✅        | ✅     | ✅        | ✅                  | ✅     | ✅ |
+| [APC](automatic_prefix_caching.md)                           | [❌](gh-issue:3687) | ✅        | ✅        | ✅     | ✅        | ✅                  | ✅     | ✅ |
+| [LoRA](lora.md)                                      | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ✅     | ✅ |
+| <abbr title="Prompt Adapter">prmpt adptr</abbr>           | ✅                  | ✅        | ✅        | ✅     | ✅        | [❌](gh-issue:8475) | ✅     | ❌ |
+| [SD](spec_decode.md)                                         | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ✅     | ❌ |
+| CUDA graph                                                | ✅                  | ✅        | ✅        | ✅     | ✅        | ❌                  | ✅     | ❌ |
+| <abbr title="Pooling Models">pooling</abbr>               | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ❔     | ❌ |
+| <abbr title="Encoder-Decoder Models">enc-dec</abbr>       | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ❌     | ❌ |
+| <abbr title="Multimodal Inputs">mm</abbr>                 | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ✅     | ❌ |
+| <abbr title="Logprobs">logP</abbr>                        | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ✅     | ❌ |
+| <abbr title="Prompt Logprobs">prmpt logP</abbr>           | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ✅     | ❌ |
+| <abbr title="Async Output Processing">async output</abbr> | ✅                  | ✅        | ✅        | ✅     | ✅        | ❌                  | ❌     | ❌ |
+| multi-step                                                | ✅                  | ✅        | ✅        | ✅     | ✅        | [❌](gh-issue:8477) | ✅     | ❌ |
+| best-of                                                   | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ✅     | ❌ |
+| beam-search                                               | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ✅     | ❌ |
 
 !!! note
     Please refer to [Feature support through NxD Inference backend][feature-support-through-nxd-inference-backend] for features supported on AWS Neuron hardware

@@ -32,6 +32,8 @@ class MarlinConfig(QuantizationConfig):
         group_size: int,
         lm_head_quantized: bool,
     ) -> None:
+        super().__init__()
+
         # Group size for the quantization.
         self.group_size = group_size
         self.lm_head_quantized = lm_head_quantized

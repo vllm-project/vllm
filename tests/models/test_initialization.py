@@ -22,7 +22,8 @@ def test_can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch):
     model_info.check_transformers_version(on_fail="skip")
 
     # FIXME: Possible memory leak in the previous tests?
-    if model_arch == "GraniteSpeechForConditionalGeneration":
+    if model_arch in ("GraniteSpeechForConditionalGeneration",
+                      "KimiVLForConditionalGeneration"):
         pytest.skip("Avoid OOM")
 
     # Avoid OOM and reduce initialization time by only using 1 layer
@@ -33,7 +34,8 @@ def test_can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch):
 
         # Ensure at least 2 expert per group
         # Since `grouped_topk` assums top-2
-        num_experts = getattr(text_config, 'n_group', 1) * 2
+        n_group = getattr(text_config, 'n_group', None)
+        num_experts = n_group * 2 if n_group is not None else 2
 
         text_config.update({
             "num_layers": 1,
