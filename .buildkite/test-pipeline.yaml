@@ -729,6 +729,7 @@ steps:
   - pytest -v -s entrypoints/openai/test_oot_registration.py # it needs a clean process
   - pytest -v -s models/test_oot_registration.py # it needs a clean process
   - pytest -v -s plugins/lora_resolvers # unit tests for in-tree lora resolver plugins
+  - pip uninstall vllm_add_dummy_model -y
 
 - label: Multi-step Tests (4 GPUs) # 36min
   mirror_hardwares: [amdexperimental, amdproduction]
@@ -792,7 +793,7 @@ steps:
     - bash weight_loading/run_model_weight_loading_test.sh -c weight_loading/models.txt
 
 - label: Weight Loading Multiple GPU Test - Large Models # optional
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdproduction]
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
   gpu: a100
