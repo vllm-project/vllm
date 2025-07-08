@@ -334,7 +334,7 @@ def test_causal_conv1d_varlen(batch, with_padding, dim, seqlen, width,
                            conv_states=final_states,
                            query_start_loc=cumsum.cuda(),
                            cache_indices=padded_state_indices,
-                           has_initial_states=has_initial_states,
+                           has_initial_state=has_initial_states,
                            activation=activation,
                            pad_slot_id=PAD_SLOT_ID)
 
