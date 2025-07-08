@@ -40,8 +40,6 @@ from vllm.platforms import current_platform
 
 # yapf conflicts with isort for this block
 
-# yapf conflicts with isort for this block
-
 logger = init_logger(__name__)
 
 
