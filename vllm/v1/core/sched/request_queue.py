@@ -149,7 +149,7 @@ class PrioritizedItem:
         """Calculate the effective priority of the request, factoring in aging.
         The effective priority decreases over time based on the aging factor.
         """
-        # Aging is based on the time since the request was inserted 
+        # Aging is based on the time since the request was inserted
         # into the queue and the aging factor.
         if self.aging_factor <= 0:
             return self.request.priority
