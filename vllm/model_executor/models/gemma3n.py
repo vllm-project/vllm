@@ -20,8 +20,8 @@ from typing import Optional, Union
 
 import torch
 from torch import nn
-from transformers.models.gemma3n.configuration_gemma3n import Gemma3nTextConfig
 
+from transformers.models.gemma3n.configuration_gemma3n import Gemma3nTextConfig
 from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -639,6 +639,7 @@ class Gemma3nTextModel(nn.Module, SupportsQuant):
         input_ids: Optional[torch.Tensor],
         positions: torch.Tensor,
         inputs_embeds: Optional[torch.Tensor] = None,
+        per_layer_inputs: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         if inputs_embeds is not None:
@@ -646,7 +647,6 @@ class Gemma3nTextModel(nn.Module, SupportsQuant):
         else:
             hidden_states_0 = self.get_input_embeddings(input_ids)
 
-        # Per layer inputs.
         per_layer_projection = self.per_layer_model_projection(hidden_states_0)
         per_layer_projection = per_layer_projection.reshape(
             *hidden_states_0.shape[:-1],
@@ -656,11 +656,8 @@ class Gemma3nTextModel(nn.Module, SupportsQuant):
         per_layer_projection = self.per_layer_projection_norm(
             per_layer_projection)
 
-        if input_ids is not None:
-            per_layer_inputs = self.get_per_layer_input_embeddings(input_ids)
-            per_layer_inputs = per_layer_inputs.reshape(
-                -1, self.config.num_hidden_layers,
-                self.config.hidden_size_per_layer_input)
+        if per_layer_inputs is not None:
+            # Profiling run does not compute per_layer_inputs
             per_layer_inputs = per_layer_projection + per_layer_inputs
             per_layer_inputs *= self.per_layer_input_scale
         else:
