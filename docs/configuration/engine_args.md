@@ -1,6 +1,4 @@
----
-title: Engine Arguments
----
+# Engine Arguments
 
 Engine arguments control the behavior of the vLLM engine.
 

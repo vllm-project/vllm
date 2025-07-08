@@ -1,6 +1,4 @@
----
-title: BitBLAS
----
+# BitBLAS
 
 vLLM now supports [BitBLAS](https://github.com/microsoft/BitBLAS) for more efficient and flexible model inference. Compared to other quantization frameworks, BitBLAS provides more precision combinations.
 

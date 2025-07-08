@@ -1,6 +1,4 @@
----
-title: Automatic Prefix Caching
----
+# Automatic Prefix Caching
 
 ## Introduction
 

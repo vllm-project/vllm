@@ -1,6 +1,4 @@
----
-title: Lobe Chat
----
+# Lobe Chat
 
 [Lobe Chat](https://github.com/lobehub/lobe-chat) is an open-source, modern-design ChatGPT/LLMs UI/Framework.
 

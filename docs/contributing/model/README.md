@@ -1,6 +1,4 @@
----
-title: Summary
----
+# Summary
 
 !!! important
     Many decoder language models can now be automatically loaded using the [Transformers backend][transformers-backend] without having to implement them in vLLM. See if `vllm serve <model>` works first!

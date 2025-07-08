@@ -1,6 +1,4 @@
----
-title: Open WebUI
----
+# Open WebUI
 
 1. Install the [Docker](https://docs.docker.com/engine/install/)
 

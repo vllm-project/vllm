@@ -1,6 +1,4 @@
----
-title: Server Arguments
----
+# Server Arguments
 
 The `vllm serve` command is used to launch the OpenAI-compatible server.
 

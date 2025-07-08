@@ -1,6 +1,4 @@
----
-title: vLLM's Plugin System
----
+# vLLM's Plugin System
 
 The community frequently requests the ability to extend vLLM with custom features. To facilitate this, vLLM includes a plugin system that allows users to add custom features without modifying the vLLM codebase. This document explains how plugins work in vLLM and how to create a plugin for vLLM.
 

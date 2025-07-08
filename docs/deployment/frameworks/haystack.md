@@ -1,6 +1,4 @@
----
-title: Haystack
----
+# Haystack
 
 # Haystack
 
