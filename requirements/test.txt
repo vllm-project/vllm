@@ -739,7 +739,7 @@ tenacity==9.0.0
     # via
     #   lm-eval
     #   plotly
-tensorizer==2.9.0
+tensorizer==2.10.1
     # via -r requirements/test.in
 threadpoolctl==3.5.0
     # via scikit-learn

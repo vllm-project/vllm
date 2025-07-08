@@ -106,7 +106,7 @@ class PEFTHelper:
                                             "adapter_config.json")
             with open_stream(lora_config_path,
                              mode="rb",
-                             **tensorizer_args.stream_params) as f:
+                             **tensorizer_args.stream_kwargs) as f:
                 config = json.load(f)
 
             logger.info("Successfully deserialized LoRA config from %s",
