@@ -36,7 +36,8 @@ def test_mxfp4_loading_and_execution_moe(vllm_runner, model_case: ModelCase):
                      tensor_parallel_size=model_case.tp,
                      load_format="dummy") as llm:
 
-        # TODO: llm.apply_model(check_model) currently relies on V0 internals. Re-enable this later.
+        # TODO: llm.apply_model(check_model) currently relies on V0 internals.
+        # Re-enable this later.
         # def check_model(model):
         #     layer = model.model.layers[0]
 
