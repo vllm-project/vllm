@@ -360,7 +360,7 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
 def causal_conv1d_fn(
     x: torch.Tensor,
     weight: torch.Tensor,
-    bias: Union[torch.Tensor | None],
+    bias: Union[torch.Tensor, None],
     conv_states: torch.Tensor,
     query_start_loc: torch.Tensor,
     cache_indices: Optional[torch.Tensor] = None,
