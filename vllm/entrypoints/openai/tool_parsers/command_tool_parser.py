@@ -23,8 +23,8 @@ from vllm.utils import random_uuid
 logger = init_logger(__name__)
 
 
-@ToolParserManager.register_module("command_json")
-class CommandJsonToolParser(ToolParser):
+@ToolParserManager.register_module("command")
+class CommandToolParser(ToolParser):
 
     def __init__(self, tokenizer: PreTrainedTokenizerBase):
         super().__init__(tokenizer)
@@ -47,7 +47,7 @@ class CommandJsonToolParser(ToolParser):
         if (self.tool_call_start_token_id is None
                 or self.tool_call_end_token_id is None):
             raise RuntimeError(
-                "CommandJsonToolParser cannot find start/end tokens in vocab")
+                "CommandToolParser cannot find start/end tokens in vocab")
 
     def extract_tool_calls(
             self, model_output: str,
