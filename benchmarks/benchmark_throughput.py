@@ -614,7 +614,7 @@ def create_argument_parser():
     parser.add_argument(
         "--no-stream",
         action="store_true",
-        help="Load the dataset in streaming mode.",
+        help="Do not load the dataset in streaming mode.",
     )
     parser.add_argument(
         "--dataset",
