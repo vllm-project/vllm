@@ -11,7 +11,6 @@ from vllm.v1.sample.logits_processor.state import (BatchUpdate,
                                                    BatchUpdateBuilder,
                                                    LogitsProcessorsManager,
                                                    MoveDirectionality)
-from vllm.v1.sample.logits_processor.utils import logitsprocs_package_pattern
 
 __all__ = [
     "LogitsProcessor",
@@ -23,7 +22,6 @@ __all__ = [
     "BatchUpdateBuilder",
     "MoveDirectionality",
     "LogitsProcessorsManager",
-    "logitsprocs_package_pattern",
     "build_logitsprocs",
     "LogitProcessorCtorArgs",
 ]

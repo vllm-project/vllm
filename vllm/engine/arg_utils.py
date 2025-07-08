@@ -286,29 +286,18 @@ def get_kwargs(cls: ConfigType) -> dict[str, Any]:
     return copy.deepcopy(_compute_kwargs(cls))
 
 
-def comma_separated_list(
-    value: str,
-    pattern: Optional[re.Pattern],
-) -> list[str]:
+def comma_separated_list(value: str) -> list[str]:
     """Argparse-compatible comma-separated list arg type.
     
     Expected format: "<val0>,<val1>,<val2>" or just "<val>".
-    Optionally validate that each value satisifies the `pattern` regex.
 
     Args:
       value: string comma-separate list representation
-      pattern: optional regex
 
     Returns:
       Parsed list of string values
     """
     items = value.split(',')
-    # if pattern:
-    #     for item in items:
-    #         if not pattern.fullmatch(item):
-    #             raise argparse.ArgumentTypeError(
-    #                 f"Invalid item '{item}'. Each item must match the "
-    #                 f"pattern: {pattern.pattern}")
     return items
 
 
@@ -942,14 +931,14 @@ class EngineArgs:
         )
         logitsprocs_group.add_argument(
             "--logits-processors-entrypoints",
-            type=lambda x: comma_separated_list(x, None),
+            type=lambda x: comma_separated_list(x),
             default=[],
             help="Comma-separated list of allowed logits processor "
             "entrypoints (acceptable entrypoint formats: "
             "package.entrypoint | package.*).")
         logitsprocs_group.add_argument(
             "--logits-processors-fqns",
-            type=lambda x: comma_separated_list(x, None),
+            type=lambda x: comma_separated_list(x),
             default=[],
             help="Comma-separated list of logits processor qualified names.")
 
