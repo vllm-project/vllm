@@ -1,6 +1,4 @@
----
-title: Disaggregated Prefilling (experimental)
----
+# Disaggregated Prefilling (experimental)
 
 This page introduces you the disaggregated prefilling feature in vLLM.
 

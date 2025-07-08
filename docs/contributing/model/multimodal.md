@@ -1,6 +1,4 @@
----
-title: Multi-Modal Support
----
+# Multi-Modal Support
 
 This document walks you through the steps to extend a basic model so that it accepts [multi-modal inputs](../../features/multimodal_inputs.md).
 

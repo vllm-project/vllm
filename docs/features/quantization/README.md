@@ -1,6 +1,4 @@
----
-title: Quantization
----
+# Quantization
 
 Quantization trades off model precision for smaller memory footprint, allowing large models to be run on a wider range of devices.
 

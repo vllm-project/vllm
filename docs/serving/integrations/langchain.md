@@ -1,6 +1,4 @@
----
-title: LangChain
----
+# LangChain
 
 vLLM is also available via [LangChain](https://github.com/langchain-ai/langchain) .
 

@@ -1,6 +1,4 @@
----
-title: Supported Models
----
+# Supported Models
 
 vLLM supports [generative](./generative_models.md) and [pooling](./pooling_models.md) models across various tasks.
 If a model supports more than one task, you can set the task via the `--task` argument.
