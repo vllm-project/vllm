@@ -92,11 +92,20 @@ class SchedulingBudget:
         self._num_batched_tokens += num_batched_tokens
         self._num_cached_tokens += num_cached_tokens
 
-    def subtract_num_batched_tokens(self, req_id: str,
-                                    num_batched_tokens: int):
-        if req_id in self._request_ids_num_batched_tokens:
-            self._request_ids_num_batched_tokens.remove(req_id)
-            self._num_batched_tokens -= num_batched_tokens
+    def subtract_num_batched_tokens(self,
+                                    req_id: str,
+                                    num_batched_tokens: int,
+                                    num_cached_tokens: int = 0):
+        if req_id not in self._request_ids_num_batched_tokens:
+            return
+        assert num_cached_tokens >= 0
+        assert num_batched_tokens >= 0
+
+        self._request_ids_num_batched_tokens.remove(req_id)
+        self._num_batched_tokens -= num_batched_tokens
+        self._num_cached_tokens -= num_cached_tokens
+        assert self._num_batched_tokens >= 0
+        assert self._num_cached_tokens >= 0
 
     def add_num_seqs(self, req_id: str, num_curr_seqs: int):
         if req_id in self._request_ids_num_curr_seqs:
