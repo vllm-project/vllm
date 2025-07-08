@@ -46,8 +46,10 @@ class ServeSubcommand(CLISubcommand):
             run_headless(args)
         else:
             if args.data_parallel_start_rank:
-                raise ValueError("data_parallel_start_rank is only "
-                                 "applicable in headless mode")
+                raise ValueError(
+                    "data_parallel_start_rank is only applicable "
+                    "in headless mode. "
+                    "Add --headless flag to enable headless mode.")
             if args.api_server_count > 1:
                 run_multi_api_server(args)
             else:
@@ -81,7 +83,8 @@ class ServeSubcommand(CLISubcommand):
             '-dpr',
             type=int,
             default=0,
-            help='Starting data parallel rank for secondary nodes.')
+            help="Starting data parallel rank for secondary nodes. "
+            "Requires --headless.")
         serve_parser.add_argument('--api-server-count',
                                   '-asc',
                                   type=int,
