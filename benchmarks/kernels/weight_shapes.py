@@ -96,9 +96,9 @@ WEIGHT_SHAPES = {
         ([1408, 2048], 0),
     ],
     "CohereLabs/c4ai-command-a-03-2025": [
-        ([12288, 36864*2], 1),  # gate_up_proj
+        ([12288, 73728], 1),    # gate_up_proj
         ([36864, 12288], 0),    # down_proj
         ([12288,  14336], 1),   # qkv_proj
         ([12288, 12288], 0),    # o_proj
-    ]
+    ],
 }

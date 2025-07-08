@@ -508,7 +508,8 @@ def generate():
 
     sch_config_overrides = {
         #### M = 1-16
-        None: dict(
+        None:
+        dict(
             kernel_schedule=MixedInputKernelScheduleType.TmaWarpSpecialized,
             epilogue_schedule=TmaCoop,
             tile_scheduler=TileSchedulerType.Default,
@@ -518,11 +519,12 @@ def generate():
     # For now we use the same heuristic for all types
     # Heuristic is currently tuned for H100s
     default_heuristic = [
-        (cond, ScheduleConfig(
-            *tile_config,
-            **sch_config_overrides.get(cond, sch_common_params)  # type: ignore
-        ))
-        for cond, tile_config in default_tile_heuristic_config.items()
+        (
+            cond, ScheduleConfig(
+                *tile_config,
+                **sch_config_overrides.get(cond,
+                                           sch_common_params)  # type: ignore
+        )) for cond, tile_config in default_tile_heuristic_config.items()
     ]
 
     def get_unique_schedules(heuristic: dict[str, ScheduleConfig]):
