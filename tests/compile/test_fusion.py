@@ -44,7 +44,9 @@ class TestModel(torch.nn.Module):
         ]
         self.fp8_linear = Fp8LinearOp(
             cutlass_fp8_supported=cutlass_fp8_enabled,
-            use_per_token_if_dynamic=True)
+            act_quant_static=static,
+            act_quant_group_shape=group_shape,
+        )
 
     def forward(self, x):
         resid = torch.sqrt(x)

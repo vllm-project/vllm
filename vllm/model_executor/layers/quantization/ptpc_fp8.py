@@ -7,6 +7,7 @@ import torch
 from torch.nn.parameter import Parameter
 
 from vllm import _custom_ops as ops
+from vllm.compilation.fusion import GroupShape
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
@@ -95,8 +96,10 @@ class PTPCFp8LinearMethod(Fp8LinearMethod):
         super().__init__(quant_config=quant_config)
         # Force weight quantization
         self.quant_config.is_checkpoint_fp8_serialized = False
-        self.fp8_linear = Fp8LinearOp(cutlass_fp8_supported=False,
-                                      use_per_token_if_dynamic=True)
+        self.fp8_linear = Fp8LinearOp(
+            act_quant_static=False,
+            cutlass_fp8_supported=False,
+            act_quant_group_shape=GroupShape.PER_TOKEN)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         layer.weight = torch.nn.Parameter(layer.weight.data,

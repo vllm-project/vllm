@@ -11,6 +11,7 @@ from torch.nn.parameter import Parameter
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
+from vllm.compilation.fusion import GroupShape
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
@@ -199,9 +200,17 @@ class Fp8LinearMethod(LinearMethodBase):
                                            and current_platform.is_fp8_fnuz())
 
         self.block_quant = self.quant_config.weight_block_size is not None
+        self.act_q_static = self.quant_config.activation_scheme == "static"
+        # Use per-token quantization for better perf if dynamic and cutlass
+        if not self.act_q_static and cutlass_fp8_supported():
+            self.act_q_group_shape = GroupShape.PER_TOKEN
+        else:
+            self.act_q_group_shape = GroupShape.PER_TENSOR
+
         self.fp8_linear = Fp8LinearOp(
-            # Default to using per_token quantization if cutlass is supported
-            use_per_token_if_dynamic=cutlass_fp8_supported())
+            act_quant_static=self.act_q_static,
+            act_quant_group_shape=self.act_q_group_shape,
+            cutlass_fp8_supported=cutlass_fp8_supported())
 
     def create_weights(
         self,

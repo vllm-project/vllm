@@ -102,7 +102,7 @@ class ModelOptFp8LinearMethod(LinearMethodBase):
 
     def __init__(self, quant_config: ModelOptFp8Config):
         self.quant_config = quant_config
-        self.fp8_linear = Fp8LinearOp()
+        self.fp8_linear = Fp8LinearOp(act_quant_static=True)
 
     def create_weights(
         self,

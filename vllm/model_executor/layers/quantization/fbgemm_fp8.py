@@ -7,6 +7,7 @@ import torch
 from torch.nn import Module
 from torch.nn.parameter import Parameter
 
+from vllm.compilation.fusion import GroupShape
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                UnquantizedLinearMethod)
@@ -37,7 +38,6 @@ class FBGEMMFp8Config(QuantizationConfig):
         # For GPUs that lack FP8 hardware support, we can leverage the Marlin
         # kernel for fast weight-only FP8 quantization
         self.use_marlin = not current_platform.has_device_capability(89)
-        self.fp8_linear = Fp8LinearOp()
 
     @classmethod
     def get_name(cls) -> QuantizationMethods:
@@ -76,7 +76,8 @@ class FBGEMMFp8LinearMethod(LinearMethodBase):
 
     def __init__(self, quant_config: FBGEMMFp8Config):
         self.quant_config = quant_config
-        self.fp8_linear = Fp8LinearOp(use_per_token_if_dynamic=True)
+        self.fp8_linear = Fp8LinearOp(
+            act_quant_static=False, act_quant_group_shape=GroupShape.PER_TOKEN)
         self.out_dtype = torch.get_default_dtype()
 
     def create_weights(

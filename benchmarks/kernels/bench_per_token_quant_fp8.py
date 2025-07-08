@@ -1,29 +1,42 @@
 # SPDX-License-Identifier: Apache-2.0
 import itertools
+from typing import Callable
 
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.platforms import current_platform
+from vllm.compilation.fusion import GroupShape
+from vllm.config import CompilationConfig, VllmConfig, set_current_vllm_config
+from vllm.model_executor.layers.fp8_quantization import QuantFP8
 from vllm.triton_utils import triton
 
 
-def torch_per_token_quant_fp8(
-    input: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    return ops.dynamic_per_token_quant_fp8(input)
+# TODO(luka): use standalone_compile utility
+def with_dyn_arg(callable: Callable, arg_index: int, dim_index: int):
+    def inner(*args):
+        torch._dynamo.mark_dynamic(args[arg_index], dim_index)
+        return callable(*args)
+
+    return inner
+
+
+torch._dynamo.config.recompile_limit = 8888
+compilation_config = CompilationConfig(custom_ops=["none"])
+with set_current_vllm_config(VllmConfig(compilation_config=compilation_config)):
+    torch_per_token_quant_fp8 = torch.compile(
+        QuantFP8(False, GroupShape.PER_TOKEN),
+        fullgraph=True,
+        dynamic=False,  # recompile for different shapes
+    )
+
+    # First dim is explicitly dynamic to simulate vLLM usage
+    torch_per_token_quant_fp8 = with_dyn_arg(torch_per_token_quant_fp8, 0, 0)
 
 
 def cuda_per_token_quant_fp8(
     input: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    scale = torch.empty((input.shape[0], 1), device=input.device, dtype=torch.float32)
-    # For ROCm on MI300, the output fp8 dtype is torch.float_e3m3fnuz
-    out_dtype: torch.dtype = current_platform.fp8_dtype()
-    output = torch.empty(input.shape, device=input.device, dtype=out_dtype)
-    scale_ub = None
-    torch.ops._C.dynamic_per_token_scaled_fp8_quant(output, input, scale, scale_ub)
-    return output, scale
+    return ops.scaled_fp8_quant(input)
 
 
 def calculate_diff(batch_size: int, seq_len: int):
