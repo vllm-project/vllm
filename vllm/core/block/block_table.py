@@ -157,7 +157,7 @@ class BlockTable:
                 if b is not null_block:
                     self._allocator.free(b)
                     self._blocks[idx] = null_block
-            # RRelease references to blocks that are already recycled.
+            # Release references to blocks that are already recycled.
             if end_block_idx > 0:
                 self._blocks[end_block_idx].prev_block = None
 

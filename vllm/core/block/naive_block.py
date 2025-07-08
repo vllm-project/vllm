@@ -454,11 +454,11 @@ class NaiveBlock(Block):
         return self._block_size
 
     @property
-    def prev_block(self) -> Optional["Block"]:
+    def prev_block(self) -> Optional[Block]:
         return self._prev_block
     
     @prev_block.setter
-    def prev_block(self, value: Optional["Block"]) -> None:
+    def prev_block(self, value: Optional[Block]) -> None:
         self._prev_block = value
 
     @property
