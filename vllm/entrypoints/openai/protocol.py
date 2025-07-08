@@ -707,13 +707,32 @@ class ChatCompletionRequest(OpenAIBaseModel):
                     "required": ["name", "parameters"]
                 }
 
+            def get_tool_schema_defs(
+                    tools: list[ChatCompletionToolsParam]) -> dict:
+                all_defs = dict[str, dict[str, Any]]()
+                for tool in tools:
+                    if tool.function.parameters is None:
+                        continue
+                    defs = tool.function.parameters.pop("$defs", {})
+                    for def_name, def_schema in defs.items():
+                        if def_name in all_defs and all_defs[
+                                def_name] != def_schema:
+                            raise ValueError(
+                                f"Tool definition '{def_name}' has "
+                                "multiple schemas, which is not "
+                                "supported.")
+                        else:
+                            all_defs[def_name] = def_schema
+                return all_defs
+
             json_schema = {
                 "type": "array",
                 "minItems": 1,
                 "items": {
                     "type": "object",
                     "anyOf": [get_tool_schema(tool) for tool in self.tools]
-                }
+                },
+                "$defs": get_tool_schema_defs(self.tools)
             }
             return json_schema
 
