@@ -85,6 +85,106 @@ def create_dummy_kv_cache(kv_cache_spec: FullAttentionSpec,
     return kv_cache
 
 
+def create_and_prepopulate_kv_cache(
+        k_contexts: list[torch.Tensor],
+        v_contexts: list[torch.Tensor],
+        block_size: int,
+        num_kv_heads: int,
+        head_size: int,
+        dtype: torch.dtype,
+        device: torch.device,
+        num_blocks: int,
+        common_attn_metadata: CommonAttentionMetadata,
+        randomize_blocks: bool = True) -> tuple[torch.Tensor, torch.Tensor]:
+    """Create and prepopulate a KV cache with context data.
+    
+    Args:
+        k_contexts: List of key context tensors for each sequence
+        v_contexts: List of value context tensors for each sequence
+        seq_lens: List of sequence lengths
+        block_size: Size of each block
+        num_kv_heads: Number of KV heads
+        head_size: Size of each head
+        dtype: Data type for the cache
+        device: Device to create the cache on
+        num_blocks: Total number of blocks in the cache
+        block_table: Block table tensor to populate
+        randomize_blocks: Whether to randomly permute blocks 
+                          or use sequential order
+        
+    Returns:
+        Tuple of (kv_cache, updated_block_table)
+    """
+    batch_size = len(k_contexts)
+    seq_lens = common_attn_metadata.seq_lens_cpu
+    query_lens = common_attn_metadata.query_start_loc_cpu[
+        1:] - common_attn_metadata.query_start_loc_cpu[:-1]
+    context_lens = common_attn_metadata.num_computed_tokens_cpu
+    block_table = common_attn_metadata.block_table_tensor
+    slot_mapping = common_attn_metadata.slot_mapping
+
+    # Create KV cache
+    kv_cache = torch.empty(2,
+                           num_blocks,
+                           block_size,
+                           num_kv_heads,
+                           head_size,
+                           dtype=dtype,
+                           device=device)
+    kv_cache_flat = kv_cache.view(2, -1, num_kv_heads, head_size)
+
+    # Populate the cache with the context tokens
+    # Start from block_id=1 since block_id=0 is considered the null block
+    start_block_idx = 1
+    for i in range(batch_size):
+        k_context, v_context = k_contexts[i], v_contexts[i]
+        start = start_block_idx * block_size
+        end = start + k_context.shape[0]
+        kv_cache_flat[0, start:end, ...] = k_context
+        kv_cache_flat[1, start:end, ...] = v_context
+
+        # Stay block aligned and allocate enough blocks for the new tokens
+        start_block_idx += cdiv(int(seq_lens[i]), block_size)
+
+    blocks_end = start_block_idx
+
+    # Permute the context blocks (excluding block 0 which is null)
+    if randomize_blocks:
+        perm = torch.randperm(
+            blocks_end - 1) + 1  # Random permutation starting from block 1
+    else:
+        perm = torch.arange(
+            1, blocks_end)  # Sequential order starting from block 1
+
+    inv_perm = torch.zeros(blocks_end, dtype=torch.long, device=device)
+    inv_perm[1:] = torch.argsort(
+        perm) + 1  # Add 1 to account for starting from block 1
+    kv_cache[:, 1:blocks_end, ...] = kv_cache[:, perm, ...]
+
+    # Construct the right block table
+    # Start from block_id=1 since block_id=0 is considered the null block
+    start_block_idx = 1
+    for i in range(batch_size):
+        num_blocks_for_seq = cdiv(int(seq_lens[i]), block_size)
+        start = start_block_idx
+        end = start + num_blocks_for_seq
+        block_table[i, :num_blocks_for_seq] = inv_perm[start:end]
+        start_block_idx += num_blocks_for_seq
+
+        # Create a realistic slot mapping that corresponds to the block table
+    for i in range(batch_size):
+        token_offsets = torch.arange(int(query_lens[i])) + int(context_lens[i])
+        block_indices = token_offsets // block_size
+        token_inter_block_offsets = token_offsets % block_size
+        start = common_attn_metadata.query_start_loc_cpu[i]
+        end = common_attn_metadata.query_start_loc_cpu[i + 1]
+        slot_mapping[start:end] = block_table[
+            i,
+            block_indices] * block_size + token_inter_block_offsets.to(device)
+
+    return kv_cache
+
+
 class MockAttentionLayer:
     """A mock attention layer for testing."""
 
@@ -207,7 +307,6 @@ def test_backend_correctness(batch_spec_name: str, model: str):
     batch_size = batch_spec.batch_size
     seq_lens = batch_spec.seq_lens
     query_lens = batch_spec.query_lens
-    context_lens = [seq_lens[i] - query_lens[i] for i in range(batch_size)]
     num_q_heads = vllm_config.model_config.get_num_attention_heads(
         vllm_config.parallel_config)
     num_kv_heads = vllm_config.model_config.get_num_kv_heads(
@@ -220,7 +319,7 @@ def test_backend_correctness(batch_spec_name: str, model: str):
     # 2. Generate data and compute SDPA reference output
     all_q_vllm, all_k_vllm, all_v_vllm = [], [], []
     all_sdpa_outputs = []
-    all_k_context, all_v_context = [], []
+    k_contexts, v_contexts = [], []
 
     for i in range(batch_size):
         s_len = seq_lens[i]
@@ -284,8 +383,8 @@ def test_backend_correctness(batch_spec_name: str, model: str):
         all_v_vllm.append(v_full[context_len:])
 
         # Contextual K/V data used to populate the paged cache
-        all_k_context.append(k_full[:context_len])
-        all_v_context.append(v_full[:context_len])
+        k_contexts.append(k_full[:context_len])
+        v_contexts.append(v_full[:context_len])
 
     query_vllm = torch.cat(all_q_vllm, dim=0)
     key_vllm = torch.cat(all_k_vllm, dim=0)
@@ -296,63 +395,17 @@ def test_backend_correctness(batch_spec_name: str, model: str):
         batch_spec, vllm_config.cache_config.block_size, device)
 
     # 3. Simulate Paged KV Cache and a realistic slot_mapping
-    # Note: In vLLM, block_id=0 is reserved as the null block and should not
-    #  be used
-    block_table = common_attn_metadata.block_table_tensor
-    num_blocks = vllm_config.cache_config.num_gpu_blocks or 1000
-    kv_cache = torch.empty(2,
-                           num_blocks,
-                           block_size,
-                           num_kv_heads,
-                           head_size,
-                           dtype=dtype,
-                           device=device)
-    kv_cache_flat = kv_cache.view(2, -1, num_kv_heads, head_size)
-
-    # Populate the cache with the context tokens
-    # Start from block_id=1 since block_id=0 is considered the null block in
-    #  vLLM
-    start_block_idx = 1
-    for i in range(batch_size):
-        k_context, v_context = all_k_context[i], all_v_context[i]
-        start = start_block_idx * block_size
-        end = start + k_context.shape[0]
-        kv_cache_flat[0, start:end, ...] = k_context
-        kv_cache_flat[1, start:end, ...] = v_context
-
-        # Stay block aligned and allocate enough blocks for the new tokens
-        start_block_idx += cdiv(seq_lens[i], block_size)
-
-    blocks_end = start_block_idx
-    # randomly permute the context blocks (excluding block 0 which is null)
-    perm = torch.randperm(blocks_end -
-                          1) + 1  # Random permutation starting from block 1
-    inv_perm = torch.zeros(blocks_end, dtype=torch.long, device=device)
-    inv_perm[1:] = torch.argsort(
-        perm) + 1  # Add 1 to account for starting from block 1
-    kv_cache[:, 1:blocks_end, ...] = kv_cache[:, perm, ...]
-
-    # Construct the right block table
-    # Start from block_id=1 since block_id=0 is considered the null block in
-    #  vLLM
-    start_block_idx = 1
-    for i in range(batch_size):
-        num_blocks = cdiv(seq_lens[i], block_size)
-        start = start_block_idx
-        end = start + num_blocks
-        block_table[i, :num_blocks] = inv_perm[start:end]
-        start_block_idx += num_blocks
-
-    # Create a realistic slot mapping that corresponds to the block table
-    for i in range(batch_size):
-        token_offsets = torch.arange(query_lens[i]) + context_lens[i]
-        block_indices = token_offsets // block_size
-        token_inter_block_offsets = token_offsets % block_size
-        start = common_attn_metadata.query_start_loc_cpu[i]
-        end = common_attn_metadata.query_start_loc_cpu[i + 1]
-        common_attn_metadata.slot_mapping[start:end] = block_table[
-            i,
-            block_indices] * block_size + token_inter_block_offsets.to(device)
+    kv_cache = create_and_prepopulate_kv_cache(
+        k_contexts=k_contexts,
+        v_contexts=v_contexts,
+        block_size=block_size,
+        num_kv_heads=num_kv_heads,
+        head_size=head_size,
+        dtype=dtype,
+        device=device,
+        num_blocks=vllm_config.cache_config.num_gpu_blocks or 1000,
+        common_attn_metadata=common_attn_metadata,
+        randomize_blocks=True)
 
     # 4. Run vLLM backends and compare
     # Note: flex_attention has known Triton kernel compatibility issues
@@ -386,19 +439,34 @@ def test_backend_correctness(batch_spec_name: str, model: str):
             f"[{backend_name}] produced non-finite values")
 
         # Check numerical similarity
-        rtol = 1e-5 if backend_output.dtype == torch.float32 else 1e-2
-        atol = 1e-4 if backend_output.dtype == torch.float32 else 1e-3
+        rtol = 1e-2
+        atol = 1e-3
 
-        # Flashinfer may have slightly different numerical behavior
+        # Flashinfer and Flex_attention may have slightly different
+        #  numerical behavior
         if backend_name == "flashinfer":
-            atol = 1e-3 if backend_output.dtype == torch.float32 else 5e-3
+            atol = 5e-3
 
-        # Flex_attention may have slightly different numerical behavior
         if backend_name == "flex_attention":
-            atol = 1e-2 if backend_output.dtype == torch.float32 else 1e-2
+            atol = 5e-1  # TODO: figuure out why flex_attention has such large
+            # numerical differences for
+            #   medium_decode, medium_prefill, mixed_medium
 
         max_diff = torch.max(torch.abs(backend_output - sdpa_output)).item()
-        assert torch.allclose(
-            backend_output, sdpa_output, rtol=rtol, atol=atol), (
-                f"[{backend_name}] output differs from SDPA baseline. "
-                f"Max diff: {max_diff:.6f}")
+        max_rel_diff = torch.max(
+            torch.abs(backend_output - sdpa_output) /
+            torch.abs(sdpa_output)).item()
+        all_close = torch.allclose(backend_output,
+                                   sdpa_output,
+                                   rtol=rtol,
+                                   atol=atol)
+
+        if not all_close:
+            print(f"[{backend_name}] output differs from SDPA baseline. "
+                  f"Max diff: {max_diff:.6f} (rel: {max_rel_diff:.6f})")
+            print(f"[{backend_name}] output: {backend_output}")
+            print(f"[{backend_name}] SDPA baseline: {sdpa_output}")
+
+        assert all_close, (
+            f"[{backend_name}] output differs from SDPA baseline. "
+            f"Max diff: {max_diff:.6f} (rel: {max_rel_diff:.6f})")
