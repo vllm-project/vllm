@@ -3,6 +3,8 @@
 """Test model set-up and weight loading for quark-quantized models.
 
 Run `pytest tests/quantization/test_quark.py`.
+
+See also `tests/kernels/moe/test_mxfp4_moe.py`.
 """
 
 import importlib
@@ -17,9 +19,7 @@ import torch
 from packaging import version
 
 from vllm.model_executor.layers.quantization.quark.quark import (  # noqa: E501
-    QuarkLinearMethod, QuarkW4A4MXFP4, QuarkW8A8Fp8, QuarkW8A8Int8)
-from vllm.model_executor.layers.quantization.quark.quark_moe import (
-    QuarkW4A4MXFp4MoEMethod)
+    QuarkLinearMethod, QuarkW8A8Fp8, QuarkW8A8Int8)
 from vllm.platforms import current_platform
 
 from .reference_mxfp4 import dq_mxfp4_torch, qdq_mxfp4_torch
@@ -125,41 +125,6 @@ def test_quark_fp8_parity(vllm_runner):
 class ModelCase:
     model_id: str
     tp: int
-
-
-@pytest.mark.parametrize('model_case', [
-    ModelCase("fxmarty/qwen_1.5-moe-a2.7b-mxfp4", tp=1),
-    ModelCase("fxmarty/deepseek_r1_3_layers_mxfp4", tp=8),
-    ModelCase("fxmarty/Llama-4-Scout-17B-16E-Instruct-2-layers-mxfp4", tp=1)
-])
-@pytest.mark.skipif(not QUARK_MXFP4_AVAILABLE,
-                    reason="amd-quark>=0.9 is not available")
-def test_mxfp4_loading_and_execution(vllm_runner, model_case: ModelCase):
-    if torch.cuda.device_count() < model_case.tp:
-        pytest.skip(f"This test requires >={model_case.tp} gpus, got only "
-                    f"{torch.cuda.device_count()}")
-
-    with vllm_runner(model_case.model_id,
-                     tensor_parallel_size=model_case.tp,
-                     load_format="dummy") as llm:
-
-        def check_model(model):
-            layer = model.model.layers[0]
-
-            qkv_proj = layer.self_attn.qkv_proj
-
-            assert isinstance(qkv_proj.quant_method, QuarkLinearMethod)
-            assert isinstance(qkv_proj.scheme, QuarkW4A4MXFP4)
-
-            assert isinstance(layer.mlp.experts.quant_method,
-                              QuarkW4A4MXFp4MoEMethod)
-
-        if model_case.model_id == "fxmarty/qwen_1.5-moe-a2.7b-mxfp4":
-            llm.apply_model(check_model)
-
-        output = llm.generate_greedy("Today I am in the French Alps and",
-                                     max_tokens=20)
-        assert output
 
 
 @dataclass

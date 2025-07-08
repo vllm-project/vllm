@@ -283,7 +283,7 @@ class QuarkW4A4MXFp4MoEMethod(QuarkMoEMethod):
         else:
             self.emulate = True
             logger.warning_once(
-                "The current platform support native MXFP4 "
+                "The current platform supports native MXFP4 "
                 "computation, but kernels are not yet integrated in vLLM. "
                 "Simulated weight dequantization and activation "
                 "QDQ (quantize and dequantize) will be used, with the linear "
@@ -403,5 +403,6 @@ class QuarkW4A4MXFp4MoEMethod(QuarkMoEMethod):
             a1_scale=None,
             a2_scale=None,
             block_shape=None,
+            per_channel_quant=True,
         )
         return out

@@ -80,10 +80,11 @@ def _int8_quantize(
 def _mxfp4_quantize(
     A: torch.Tensor,
     A_scale: Optional[torch.Tensor],
-    per_act_token: bool,
+    per_act_token_quant: bool,
     block_shape: Optional[list[int]] = None,
 ) -> tuple[torch.Tensor, None]:
     assert block_shape is None
+    assert per_act_token_quant
     if not current_platform.supports_mx():
         A = quant_dequant_mxfp4(A)
     else:
@@ -95,7 +96,7 @@ def _mxfp4_quantize(
 def moe_kernel_quantize_input(
     A: torch.Tensor,
     A_scale: Optional[torch.Tensor],
-    quant_dtype: Optional[torch.dtype],
+    quant_dtype: Union[None, torch.dtype, str],
     per_act_token_quant: bool,
     block_shape: Optional[list[int]] = None,
 ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
@@ -103,8 +104,8 @@ def moe_kernel_quantize_input(
         return _fp8_quantize(A, A_scale, per_act_token_quant, block_shape)
     elif quant_dtype == torch.int8:
         return _int8_quantize(A, A_scale, per_act_token_quant, block_shape)
-    elif qtype == "mxfp4":
-        return _mxfp4_quantize(A, A_scale, per_channel_quant, block_shape)
+    elif quant_dtype == "mxfp4":
+        return _mxfp4_quantize(A, A_scale, per_act_token_quant, block_shape)
     else:
         return A, A_scale
 

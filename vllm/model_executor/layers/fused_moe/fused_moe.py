@@ -1154,7 +1154,7 @@ def fused_experts(
         use_int8_w8a8: bool = False,
         use_int8_w8a16: bool = False,
         use_int4_w4a16: bool = False,
-      use_mxfp4_w4a4: bool = False,
+        use_mxfp4_w4a4: bool = False,
         per_channel_quant: bool = False,
         global_num_experts: int = -1,
         expert_map: Optional[torch.Tensor] = None,

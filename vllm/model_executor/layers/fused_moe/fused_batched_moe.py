@@ -632,6 +632,7 @@ class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         use_int8_w8a8: bool = False,
         use_int8_w8a16: bool = False,
         use_int4_w4a16: bool = False,
+        use_mxfp4_w4a4: bool = False,
         block_shape: Optional[list[int]] = None,
         per_act_token_quant: bool = False,
     ):
@@ -641,12 +642,14 @@ class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
                 use_int8_w8a8=use_int8_w8a8,
                 use_int8_w8a16=use_int8_w8a16,
                 use_int4_w4a16=use_int4_w4a16,
+                use_mxfp4_w4a4=use_mxfp4_w4a4,
                 per_act_token_quant=per_act_token_quant,
                 block_shape=block_shape,
             ))
         assert not use_int8_w8a8, "NYI"
         assert not use_int8_w8a16, "NYI"
         assert not use_int4_w4a16, "NYI"
+        assert not use_mxfp4_w4a4, "NYI"
         self.max_num_tokens = max_num_tokens
         self.num_dispatchers = num_dispatchers
 
@@ -848,12 +851,14 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
                 use_int8_w8a8=use_int8_w8a8,
                 use_int8_w8a16=use_int8_w8a16,
                 use_int4_w4a16=use_int4_w4a16,
+                use_mxfp4_w4a4=use_mxfp4_w4a4,
                 per_act_token_quant=per_act_token_quant,
                 block_shape=block_shape,
             ))
         assert not use_int8_w8a8, "NYI"
         assert not use_int8_w8a16, "NYI"
         assert not use_int4_w4a16, "NYI"
+        assert not use_mxfp4_w4a4, "NYI"
         assert max_num_tokens > 0
         assert num_dispatchers > 0
         self.use_fp8_w8a8 = use_fp8_w8a8

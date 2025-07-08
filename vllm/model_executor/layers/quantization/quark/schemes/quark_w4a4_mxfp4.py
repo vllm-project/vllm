@@ -45,7 +45,7 @@ class QuarkW4A4MXFP4(QuarkScheme):
         else:
             self.emulate = True
             logger.warning_once(
-                "The current platform support native MXFP4 "
+                "The current platform supports native MXFP4 "
                 "computation, but kernels are not yet integrated in vLLM. "
                 "Simulated weight dequantization and activation "
                 "QDQ (quantize and dequantize) will be used, with the linear "
