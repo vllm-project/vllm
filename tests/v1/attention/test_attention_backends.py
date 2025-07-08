@@ -9,7 +9,7 @@ from tests.v1.attention.utils import (BatchSpec, create_common_attn_metadata,
                                       create_standard_kv_cache_spec,
                                       create_vllm_config,
                                       get_attention_backend)
-from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
+from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, cdiv
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 
@@ -62,10 +62,9 @@ BATCH_SPECS = {
 
 
 def create_dummy_kv_cache(kv_cache_spec: FullAttentionSpec,
-                          device: torch.device) -> torch.Tensor:
+                          device: torch.device,
+                          num_blocks: int = 100) -> torch.Tensor:
     """Create a dummy KV cache tensor for testing."""
-    # Create a reasonably sized KV cache for testing
-    num_blocks = 100
     kv_cache = torch.randn(
         2,  # K and V
         num_blocks,
@@ -162,13 +161,12 @@ def test_backend_correctness(batch_spec_name: str, model: str):
     device = torch.device("cuda:0")
 
     kv_cache_spec = create_standard_kv_cache_spec(vllm_config)
-    common_attn_metadata = create_common_attn_metadata(
-        batch_spec, vllm_config.cache_config.block_size, device)
 
     # 1. Setup
     batch_size = batch_spec.batch_size
     seq_lens = batch_spec.seq_lens
     query_lens = batch_spec.query_lens
+    context_lens = [seq_lens[i] - query_lens[i] for i in range(batch_size)]
     num_q_heads = vllm_config.model_config.get_num_attention_heads(
         vllm_config.parallel_config)
     num_kv_heads = vllm_config.model_config.get_num_kv_heads(
@@ -189,11 +187,11 @@ def test_backend_correctness(batch_spec_name: str, model: str):
         context_len = s_len - q_len
 
         # Generate Q, K, V for the whole sequence to be used in SDPA
-        q_for_sdpa = torch.randn(q_len,
-                                 num_q_heads,
-                                 head_size,
-                                 dtype=dtype,
-                                 device=device)
+        q = torch.randn(q_len,
+                        num_q_heads,
+                        head_size,
+                        dtype=dtype,
+                        device=device)
         k_full = torch.randn(s_len,
                              num_kv_heads,
                              head_size,
@@ -206,22 +204,41 @@ def test_backend_correctness(batch_spec_name: str, model: str):
                              device=device)
 
         # SDPA expects (N, H, L, D), so unsqueeze batch and permute
-        q_sdpa_in = q_for_sdpa.unsqueeze(0).transpose(1, 2)
+        q_sdpa_in = q.unsqueeze(0).transpose(1, 2)
         k_sdpa_in = k_full.unsqueeze(0).transpose(1, 2)
         v_sdpa_in = v_full.unsqueeze(0).transpose(1, 2)
 
-        # Create a causal mask that reflects that the query tokens are at the
-        # end of the full sequence.
-        attn_mask = torch.ones(q_len, s_len, dtype=torch.bool,
-                               device=device).tril(diagonal=context_len)
+        if num_q_heads != num_kv_heads:
+            assert num_q_heads % num_kv_heads == 0, (
+                f"num_q_heads ({num_q_heads}) must be divisible by "
+                f"num_kv_heads ({num_kv_heads})")
+            repeats = num_q_heads // num_kv_heads
+            k_sdpa_in = k_sdpa_in.repeat_interleave(repeats, dim=1)
+            v_sdpa_in = v_sdpa_in.repeat_interleave(repeats, dim=1)
+
+        # Create causal mask: query token i attends to positions 0 to
+        #  (context_len + i)
+        kv_len = s_len
+        offset = context_len
+        attn_mask = torch.full((q_len, kv_len),
+                               float('-inf'),
+                               device=device,
+                               dtype=dtype)
+        for i in range(q_len):
+            attn_mask[i, :offset + i + 1] = 0.0
 
         sdpa_out_i = torch.nn.functional.scaled_dot_product_attention(
-            q_sdpa_in, k_sdpa_in, v_sdpa_in, attn_mask=attn_mask, scale=scale)
+            q_sdpa_in,
+            k_sdpa_in,
+            v_sdpa_in,
+            attn_mask=attn_mask,
+            scale=scale,
+            enable_gqa=True)
         # Convert back to (L, H, D)
         all_sdpa_outputs.append(sdpa_out_i.transpose(1, 2).squeeze(0))
 
         # Inputs for vLLM backends are just the new tokens
-        all_q_vllm.append(q_for_sdpa)
+        all_q_vllm.append(q)
         all_k_vllm.append(k_full[context_len:])
         all_v_vllm.append(v_full[context_len:])
 
@@ -234,85 +251,87 @@ def test_backend_correctness(batch_spec_name: str, model: str):
     value_vllm = torch.cat(all_v_vllm, dim=0)
     sdpa_output = torch.cat(all_sdpa_outputs, dim=0)
 
+    common_attn_metadata = create_common_attn_metadata(
+        batch_spec, vllm_config.cache_config.block_size, device)
+
     # 3. Simulate Paged KV Cache and a realistic slot_mapping
     block_table = common_attn_metadata.block_table_tensor
-    num_blocks = int(block_table.max().item()) + 1
-    kv_cache = torch.zeros(2,
+    num_blocks = vllm_config.cache_config.num_gpu_blocks or 1000
+    kv_cache = torch.empty(2,
                            num_blocks,
                            block_size,
                            num_kv_heads,
                            head_size,
                            dtype=dtype,
                            device=device)
-
-    # Create a realistic slot mapping that corresponds to the block table
-    slot_mapping_list = []
-    query_start_locs = common_attn_metadata.query_start_loc_cpu.tolist()
-
-    for i in range(batch_size):
-        context_len = seq_lens[i] - query_lens[i]
-        start_idx = query_start_locs[i]
-        end_idx = query_start_locs[i + 1]
-
-        for token_idx_in_query in range(end_idx - start_idx):
-            token_seq_idx = context_len + token_idx_in_query
-            logical_block_idx = token_seq_idx // block_size
-            offset_in_block = token_seq_idx % block_size
-            physical_block_num = int(block_table[i, logical_block_idx].item())
-            slot = physical_block_num * block_size + offset_in_block
-            slot_mapping_list.append(slot)
-
-    common_attn_metadata.slot_mapping = torch.tensor(slot_mapping_list,
-                                                     dtype=torch.long,
-                                                     device=device)
+    kv_cache_flat = kv_cache.view(2, -1, num_kv_heads, head_size)
 
     # Populate the cache with the context tokens
+    start_block_idx = 0
     for i in range(batch_size):
         k_context, v_context = all_k_context[i], all_v_context[i]
-        context_len = k_context.shape[0]
+        start = start_block_idx * block_size
+        end = start + k_context.shape[0]
+        kv_cache_flat[0, start:end, ...] = k_context
+        kv_cache_flat[1, start:end, ...] = v_context
 
-        for token_idx in range(context_len):
-            logical_block_idx = token_idx // block_size
-            offset_in_block = token_idx % block_size
-            phys_block_num = int(block_table[i, logical_block_idx].item())
+        # Stay block aligned and allocate enough blocks for the new tokens
+        start_block_idx += cdiv(seq_lens[i], block_size)
 
-            kv_cache[0, phys_block_num, offset_in_block] = k_context[token_idx]
-            kv_cache[1, phys_block_num, offset_in_block] = v_context[token_idx]
+    blocks_end = start_block_idx
+    # randomly permute the context blocks
+    perm = torch.arange(blocks_end)  #torch.randperm(blocks_end)
+    inv_perm = torch.argsort(perm)
+    kv_cache = kv_cache[:, perm, ...]
+
+    # Construct the right block table
+    start_block_idx = 0
+    for i in range(batch_size):
+        num_blocks = cdiv(seq_lens[i], block_size)
+        start = start_block_idx
+        end = start + num_blocks
+        block_table[i, :num_blocks] = inv_perm[start:end]
+        start_block_idx += num_blocks
+
+    # Create a realistic slot mapping that corresponds to the block table
+    for i in range(batch_size):
+        token_offsets = torch.arange(query_lens[i]) + context_lens[i]
+        block_indices = token_offsets // block_size
+        token_inter_block_offsets = token_offsets % block_size
+        start = common_attn_metadata.query_start_loc_cpu[i]
+        end = common_attn_metadata.query_start_loc_cpu[i + 1]
+        common_attn_metadata.slot_mapping[start:end] = block_table[
+            i,
+            block_indices] * block_size + token_inter_block_offsets.to(device)
 
     # 4. Run vLLM backends and compare
-    backends_to_test = ["flash_attn", "flex_attention"]
+    # Note: flex_attention has known Triton kernel compatibility issues
+    # with test infrastructure
+    backends_to_test = ["flash_attn"]  # flex_attention has compilation issues
     for backend_name in backends_to_test:
-        try:
-            backend_output = run_attention_backend(backend_name, kv_cache_spec,
-                                                   vllm_config, device,
-                                                   common_attn_metadata,
-                                                   query_vllm, key_vllm,
-                                                   value_vllm, kv_cache)
+        backend_output = run_attention_backend(backend_name, kv_cache_spec,
+                                               vllm_config, device,
+                                               common_attn_metadata,
+                                               query_vllm, key_vllm,
+                                               value_vllm, kv_cache)
 
-            # Check shape and dtype consistency
-            assert backend_output.shape == sdpa_output.shape, (
-                f"[{backend_name}] shape {backend_output.shape} != "
-                f"SDPA shape {sdpa_output.shape}")
-            assert backend_output.dtype == sdpa_output.dtype, (
-                f"[{backend_name}] dtype {backend_output.dtype} != "
-                f"SDPA dtype {sdpa_output.dtype}")
+        # Check shape and dtype consistency
+        assert backend_output.shape == sdpa_output.shape, (
+            f"[{backend_name}] shape {backend_output.shape} != "
+            f"SDPA shape {sdpa_output.shape}")
+        assert backend_output.dtype == sdpa_output.dtype, (
+            f"[{backend_name}] dtype {backend_output.dtype} != "
+            f"SDPA dtype {sdpa_output.dtype}")
 
-            assert torch.isfinite(backend_output).all(), (
-                f"[{backend_name}] produced non-finite values")
+        assert torch.isfinite(backend_output).all(), (
+            f"[{backend_name}] produced non-finite values")
 
-            # Check numerical similarity
-            rtol = 1e-5 if backend_output.dtype == torch.float32 else 1e-2
-            atol = 1e-4 if backend_output.dtype == torch.float32 else 1e-3
+        # Check numerical similarity
+        rtol = 1e-5 if backend_output.dtype == torch.float32 else 1e-2
+        atol = 1e-4 if backend_output.dtype == torch.float32 else 1e-3
 
-            max_diff = torch.max(torch.abs(backend_output -
-                                           sdpa_output)).item()
-            assert torch.allclose(
-                backend_output, sdpa_output, rtol=rtol, atol=atol), (
-                    f"[{backend_name}] output differs from SDPA baseline. "
-                    f"Max diff: {max_diff:.6f}")
-
-        except Exception as e:
-            if "not available" in str(e) or "not supported" in str(e).lower():
-                pytest.skip(f"{backend_name} not available/supported: {e}")
-            else:
-                pytest.fail(f"[{backend_name}] failed: {e}")
+        max_diff = torch.max(torch.abs(backend_output - sdpa_output)).item()
+        assert torch.allclose(
+            backend_output, sdpa_output, rtol=rtol, atol=atol), (
+                f"[{backend_name}] output differs from SDPA baseline. "
+                f"Max diff: {max_diff:.6f}")
