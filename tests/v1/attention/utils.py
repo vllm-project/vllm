@@ -54,8 +54,12 @@ def create_common_attn_metadata(
                             device=device)
     seq_lens_cpu = seq_lens.cpu()
 
-    # Create computed tokens (assume all tokens are computed for simplicity)
-    num_computed_tokens_cpu = seq_lens_cpu.clone()
+    # Create computed tokens (context length for each sequence)
+    context_lens = [
+        batch_spec.seq_lens[i] - batch_spec.query_lens[i]
+        for i in range(batch_spec.batch_size)
+    ]
+    num_computed_tokens_cpu = torch.tensor(context_lens, dtype=torch.int32)
 
     # Create block table (random for testing)
     max_blocks = max(batch_spec.seq_lens) // block_size + 1
@@ -126,7 +130,7 @@ def create_standard_kv_cache_spec(
     """Create a FullAttentionSpec from ModelParams only."""
     return FullAttentionSpec(
         block_size=vllm_config.cache_config.block_size,
-        num_kv_heads=vllm_config.model_config.get_num_attention_heads(
+        num_kv_heads=vllm_config.model_config.get_num_kv_heads(
             vllm_config.parallel_config),
         head_size=vllm_config.model_config.get_head_size(),
         dtype=vllm_config.model_config.dtype,
