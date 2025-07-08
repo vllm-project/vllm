@@ -4977,7 +4977,7 @@ class SpeechToTextConfig:
     Audio longer than this will be split into smaller chunks if
     `allow_audio_chunking` is enabled, otherwise it will be rejected."""
 
-    allow_audio_chunking: bool = False
+    allow_audio_chunking: bool = True
     """Whether to allow splitting long audio files into smaller chunks.
     When True, audio longer than `max_audio_clip_s` will be automatically
     split with overlapping segments. When False, long audio will be rejected.
