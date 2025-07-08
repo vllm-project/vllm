@@ -31,6 +31,7 @@ In v0, the following metrics are exposed via a Prometheus-compatible `/metrics` 
 - `vllm:prompt_tokens_total` (Counter)
 - `vllm:generation_tokens_total` (Counter)
 - `vllm:request_success_total` (Counter)
+- `vllm:request_failed_total` (Counter)
 - `vllm:request_prompt_tokens` (Histogram)
 - `vllm:request_generation_tokens` (Histogram)
 - `vllm:time_to_first_token_seconds` (Histogram)
@@ -75,6 +76,7 @@ The subset of metrics exposed in the Grafana dashboard gives us an indication of
 - `vllm:request_prompt_tokens` - Request prompt length
 - `vllm:request_generation_tokens` - request generation length
 - `vllm:request_success_total` - Number of finished requests by their finish reason: either an EOS token was generated or the max sequence length was reached
+- `vllm:request_failed_total` Number of failed requests including both engine-level failures (aborted/ignored by scheduler) and API-level failures (validation errors, invalid parameters, etc.)
 - `vllm:request_queue_time_seconds` - Queue Time
 - `vllm:request_prefill_time_seconds` - Requests Prefill Time
 - `vllm:request_decode_time_seconds` - Requests Decode Time
@@ -597,7 +599,7 @@ see:
 - [Inference
   Perf](https://github.com/kubernetes-sigs/wg-serving/tree/main/proposals/013-inference-perf)
 - <gh-issue:5041> and <gh-pr:12726>.
-  
+
 This is a non-trivial topic. Consider this comment from Rob:
 
 > I think this metric should focus on trying to estimate what the max
@@ -678,7 +680,7 @@ v0 has support for OpenTelemetry tracing:
   post](https://medium.com/@ronen.schaffer/follow-the-trail-supercharging-vllm-with-opentelemetry-distributed-tracing-aa655229b46f)
 - [IBM product
   docs](https://www.ibm.com/docs/en/instana-observability/current?topic=mgaa-monitoring-large-language-models-llms-vllm-public-preview)
-  
+
 OpenTelemetry has a [Gen AI Working
 Group](https://github.com/open-telemetry/community/blob/main/projects/gen-ai.md).
 
