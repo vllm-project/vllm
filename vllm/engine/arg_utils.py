@@ -948,7 +948,7 @@ class EngineArgs:
             "entrypoints (acceptable entrypoint formats: "
             "package.entrypoint | package.*).")
         logitsprocs_group.add_argument(
-            "--logits-processors-qualnames",
+            "--logits-processors-fqns",
             type=lambda x: comma_separated_list(x, None),
             default=[],
             help="Comma-separated list of logits processor qualified names.")
