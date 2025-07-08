@@ -147,7 +147,7 @@ curl http://localhost:8000/v1/completions \
 
 Since this server is compatible with OpenAI API, you can use it as a drop-in replacement for any applications using OpenAI API. For example, another way to query the server is via the `openai` Python package:
 
-??? Code
+??? code
 
     ```python
     from openai import OpenAI
@@ -186,7 +186,7 @@ curl http://localhost:8000/v1/chat/completions \
 
 Alternatively, you can use the `openai` Python package:
 
-??? Code
+??? code
 
     ```python
     from openai import OpenAI

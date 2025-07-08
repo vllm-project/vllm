@@ -54,7 +54,7 @@ When quantizing activations to INT8, you need sample data to estimate the activa
 It's best to use calibration data that closely matches your deployment data.
 For a general-purpose instruction-tuned model, you can use a dataset like `ultrachat`:
 
-??? Code
+??? code
 
     ```python
     from datasets import load_dataset
@@ -81,7 +81,7 @@ For a general-purpose instruction-tuned model, you can use a dataset like `ultra
 
 Now, apply the quantization algorithms:
 
-??? Code
+??? code
 
     ```python
     from llmcompressor.transformers import oneshot
