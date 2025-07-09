@@ -5,7 +5,6 @@ from typing import Any, Optional, TypedDict, Union, cast
 
 import torch
 from torch import nn
-
 from transformers import AutoModel, BatchFeature
 from transformers.models.gemma3n import (Gemma3nAudioConfig,
                                          Gemma3nAudioFeatureExtractor,
@@ -13,6 +12,7 @@ from transformers.models.gemma3n import (Gemma3nAudioConfig,
                                          Gemma3nTextConfig,
                                          Gemma3nVisionConfig)
 from transformers.models.siglip import SiglipImageProcessorFast
+
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -30,7 +30,7 @@ from vllm.multimodal.parse import (ImageProcessorItems, MultiModalDataItems,
 # yapf: disable
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement,
-                                        PromptUpdate)
+                                        PromptUpdate, PromptUpdateDetails)
 # yapf: enable
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
@@ -95,8 +95,8 @@ class Gemma3nProcessingInfo(BaseProcessingInfo):
         if processor is None:
             processor = self.get_hf_processor()
 
-        # Return the full image sequence as defined by the processor
-        return processor.full_image_sequence
+        return PromptUpdateDetails.select_token_id(
+            processor.full_image_sequence, processor.image_token_id)
 
     def get_audio_repl(
         self,
@@ -113,7 +113,8 @@ class Gemma3nProcessingInfo(BaseProcessingInfo):
             processor = self.get_hf_processor()
 
         # Return the full audio sequence as defined by the processor
-        return processor.full_audio_sequence
+        return PromptUpdateDetails.select_token_id(
+            processor.full_image_sequence, processor.audio_token_id)
 
 
 class Gemma3nDummyInputsBuilder(BaseDummyInputsBuilder[Gemma3nProcessingInfo]):
