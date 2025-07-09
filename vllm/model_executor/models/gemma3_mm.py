@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
+import os
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any, Literal, Optional, TypedDict
 
@@ -36,10 +37,13 @@ from vllm.sequence import IntermediateTensors
 from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
                          SupportsMultiModal, SupportsPP)
 from .siglip import SiglipVisionModel
-from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
-                    maybe_prefix, merge_multimodal_embeddings)
+from .utils import (AutoWeightsLoader, flatten_bn, greedy_plan,
+                    init_vllm_registered_model, maybe_prefix,
+                    merge_multimodal_embeddings)
 
 logger = init_logger(__name__)
+is_hpu = current_platform.is_hpu()
+is_lazy = os.environ.get('PT_HPU_LAZY_MODE', '0') == '1' if is_hpu else False
 
 is_hpu = current_platform.is_hpu()
 
@@ -502,6 +506,8 @@ class Gemma3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
+        if is_hpu:
+            self.graphed_multimodal_buckets = None
 
     @property
     def dtype(self):
@@ -554,9 +560,7 @@ class Gemma3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
         return vision_tower(pixel_values)
 
     def _process_image_input(
-        self,
-        image_input: Gemma3ImageInputs,
-    ) -> list[torch.Tensor]:
+            self, image_input: Gemma3ImageInputs) -> list[torch.Tensor]:
         assert self.vision_tower is not None
 
         pixel_values = image_input["pixel_values"]
@@ -566,8 +570,31 @@ class Gemma3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
             self.vision_tower,
             pixel_values,
         )
-        image_embeds = self.multi_modal_projector(image_features)
 
+        if is_hpu and len(self.graphed_multimodal_buckets) > 1:
+            batch_breakdown = greedy_plan(pixel_values.shape[0], \
+                    self.vision_buckets.multimodal_buckets)
+            start_idx = 0
+            image_embeds_multibatches = []
+
+            for i in batch_breakdown:
+                end_idx = start_idx + i
+                batch_sliced_image_features = \
+                        image_features[start_idx:end_idx, ...]
+                if is_lazy:
+                    image_embeds_multibatches += \
+                            [self.multi_modal_projector(
+                                batch_sliced_image_features,
+                                bypass_hpu_graphs=i
+                                not in self.graphed_multimodal_buckets)]
+                else:
+                    image_embeds_multibatches += \
+                            [self.multi_modal_projector( \
+                                batch_sliced_image_features)]
+                start_idx = end_idx
+            image_embeds = torch.cat(image_embeds_multibatches, dim=0)
+        else:
+            image_embeds = self.multi_modal_projector(image_features)
         return [
             e.flatten(0, 1) for e in image_embeds.split(num_patches.tolist())
         ]
@@ -577,6 +604,9 @@ class Gemma3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
 
     def get_multimodal_embeddings(
             self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
+        if is_hpu:
+            self.graphed_multimodal_buckets = kwargs.pop(
+                'graphed_multimodal_buckets', [])
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return None
@@ -610,6 +640,9 @@ class Gemma3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
         # NOTE: In v1, inputs_embeds is always generated at model runner, this
         # condition is for v0 compatibility.
         elif inputs_embeds is None:
+            if is_hpu:
+                raise AssertionError("hpu_model_runner should be computing \
+                        inputs_embeds")
             vision_embeddings = self.get_multimodal_embeddings(**kwargs)
 
             inputs_embeds = self.get_input_embeddings(input_ids,
