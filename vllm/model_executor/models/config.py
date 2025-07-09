@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from copy import deepcopy
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import vllm.envs as envs
@@ -10,6 +11,8 @@ from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, cdiv
 from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
 
 if TYPE_CHECKING:
+    from transformers.configuration_utils import PretrainedConfig
+
     from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
@@ -209,6 +212,26 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
         # for n_groups == 1, this is exactly tp_size - n_groups
         return tp_size - ngroups
 
+    @dataclass
+    class MambaConfig:
+        expand: int
+        n_groups: int
+        n_heads: int
+        d_head: int
+        d_state: int
+        d_conv: int
+
+    @classmethod
+    def parse_mamba_config(cls, config: "PretrainedConfig") -> MambaConfig:
+        return cls.MambaConfig(
+            expand=config.mamba_expand,
+            n_groups=config.mamba_n_groups,
+            n_heads=config.mamba_n_heads,
+            d_head=config.mamba_d_head,
+            d_state=config.mamba_d_state,
+            d_conv=config.mamba_d_conv,
+        )
+
     @classmethod
     def get_mamba_cache_shape(
             cls, vllm_config: "VllmConfig"
@@ -216,94 +239,47 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
 
         parallel_config = vllm_config.parallel_config
         hf_config = vllm_config.model_config.hf_config
-
-        if hasattr(hf_config, "mamba_expand"):
-            mamba_expand = hf_config.mamba_expand
-        elif hasattr(hf_config, "expand"):
-            # nemotron-h
-            mamba_expand = hf_config.expand
-        else:
-            raise ValueError("Cannot find mamba_expand in config.")
-
-        if hasattr(hf_config, "mamba_n_groups"):
-            mamba_n_groups = hf_config.mamba_n_groups
-        elif hasattr(hf_config, "mamba_ngroups"):
-            # zamba2
-            mamba_n_groups = hf_config.mamba_ngroups
-        elif hasattr(hf_config, "n_groups"):
-            # nemotron-h
-            mamba_n_groups = hf_config.n_groups
-        else:
-            raise ValueError("Cannot find mamba n_groups in config.")
-
-        if hasattr(hf_config, "mamba_n_heads"):
-            mamba_n_heads = hf_config.mamba_n_heads
-        elif hasattr(hf_config, "n_mamba_heads"):
-            # zamba2
-            mamba_n_heads = hf_config.n_mamba_heads
-        elif hasattr(hf_config, "mamba_num_heads"):
-            # nemotron-h
-            mamba_n_heads = hf_config.mamba_num_heads
-        else:
-            raise ValueError("Cannot find mamba n_heads in config.")
-
-        if hasattr(hf_config, "mamba_d_head"):
-            mamba_d_head = hf_config.mamba_d_head
-        elif hasattr(hf_config, "mamba_headdim"):
-            # zamba2
-            mamba_d_head = hf_config.mamba_headdim
-        elif hasattr(hf_config, "mamba_head_dim"):
-            # nemotron-h
-            mamba_d_head = hf_config.mamba_head_dim
-        else:
-            raise ValueError("Cannot find mamba d_head in config.")
-
-        if hasattr(hf_config, "mamba_d_state"):
-            mamba_d_state = hf_config.mamba_d_state
-        elif hasattr(hf_config, "ssm_state_size"):
-            # nemotron-h
-            mamba_d_state = hf_config.ssm_state_size
-        else:
-            raise ValueError("Cannot find mamba d_state in config.")
-
-        if hasattr(hf_config, "mamba_d_conv"):
-            mamba_d_conv = hf_config.mamba_d_conv
-        elif hasattr(hf_config, "conv_kernel"):
-            # nemotron-h
-            mamba_d_conv = hf_config.conv_kernel
-        else:
-            raise ValueError("Cannot find mamba d_conv in config.")
+        mamba_config = cls.parse_mamba_config(hf_config)
 
         world_size = parallel_config.tensor_parallel_size
         hidden_size = hf_config.hidden_size
-        intermediate_size = mamba_expand * hidden_size
+        intermediate_size = mamba_config.expand * hidden_size
 
         # if n_groups is not divisible by world_size, need to extend the shards
         # to ensure all groups needed by a head is sharded along with it
-        n_groups = (
-            mamba_n_groups +
-            cls.extra_groups_for_head_shards(mamba_n_groups, world_size))
+        n_groups = (mamba_config.n_groups + cls.extra_groups_for_head_shards(
+            mamba_config.n_groups, world_size))
 
         # - heads and n_groups are TP-ed
-        conv_dim = (intermediate_size + 2 * n_groups * mamba_d_state)
+        conv_dim = (intermediate_size + 2 * n_groups * mamba_config.d_state)
         conv_state_shape = (
             divide(conv_dim, world_size),
-            mamba_d_conv - 1,
+            mamba_config.d_conv - 1,
         )
 
         # These are not TP-ed as they depend on A, dt_bias, D
         # - they are typically small
         #   e.g., (h_heads, d_head, d_state) = (128, 64, 128)
         temporal_state_shape = (
-            divide(mamba_n_heads, world_size),
-            mamba_d_head,
-            mamba_d_state,
+            divide(mamba_config.n_heads, world_size),
+            mamba_config.d_head,
+            mamba_config.d_state,
         )
 
         return conv_state_shape, temporal_state_shape
 
     @classmethod
     def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
+        """
+        Ensure that page size of attention layers is greater than or
+        equal to the mamba layers. If not, automatically set the attention
+        block size to ensure that it is. If the attention page size is
+        strictly greater than the mamba page size, we pad the mamba page size
+        to make them equal.
+
+        Args:
+            vllm_config: vLLM Config
+        """
 
         if not envs.VLLM_USE_V1:
             return
@@ -350,17 +326,58 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
                 "to ensure that attention page size is >= mamba page size.",
                 attn_block_size)
 
-        # mamba page size will be padded up to match attention page size
-        mamba_page_size_padded = \
+        # compute new attention page size
+        attn_page_size = \
             cache_config.block_size * attn_page_size_1_token
 
-        if mamba_page_size_padded > mamba_page_size:
-            mamba_padding_pct = 100 * (mamba_page_size_padded -
+        assert attn_page_size >= mamba_page_size
+
+        if attn_page_size == mamba_page_size:
+            # don't need to pad mamba page size
+            return
+
+        # pad mamba page size to exactly match attention
+        if (cache_config.mamba_page_size_padded is None
+                or cache_config.mamba_page_size_padded != attn_page_size):
+            cache_config.mamba_page_size_padded = (attn_page_size)
+            mamba_padding_pct = 100 * (attn_page_size -
                                        mamba_page_size) / mamba_page_size
             logger.info(
                 "Padding mamba page size by %.2f%% to ensure "
                 "that mamba page size and attention page size are "
                 "exactly equal.", mamba_padding_pct)
+
+
+class NemotronHModelConfig(HybridAttentionMambaModelConfig):
+
+    @classmethod
+    def parse_mamba_config(
+        cls, config: "PretrainedConfig"
+    ) -> HybridAttentionMambaModelConfig.MambaConfig:
+        return HybridAttentionMambaModelConfig.MambaConfig(
+            expand=config.expand,
+            n_groups=config.n_groups,
+            n_heads=config.mamba_num_heads,
+            d_head=config.mamba_head_dim,
+            d_state=config.ssm_state_size,
+            d_conv=config.conv_kernel,
+        )
+
+
+class Zamba2ModelConfig(HybridAttentionMambaModelConfig):
+
+    @classmethod
+    def parse_mamba_config(
+        cls, config: "PretrainedConfig"
+    ) -> HybridAttentionMambaModelConfig.MambaConfig:
+        return HybridAttentionMambaModelConfig.MambaConfig(
+            expand=config.mamba_expand,
+            n_groups=config.mamba_ngroups,
+            n_heads=config.n_mamba_heads,
+            d_head=config.mamba_headdim,
+            d_state=config.mamba_d_state,
+            d_conv=config.mamba_d_conv,
+        )
 
 
 MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
@@ -372,6 +389,6 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "FalconH1ForCausalLM": HybridAttentionMambaModelConfig,
     "BambaForCausalLM": HybridAttentionMambaModelConfig,
     "GraniteMoeHybridForCausalLM": HybridAttentionMambaModelConfig,
-    "NemotronHForCausalLM": HybridAttentionMambaModelConfig,
-    "Zamba2ForCausalLM": HybridAttentionMambaModelConfig,
+    "NemotronHForCausalLM": NemotronHModelConfig,
+    "Zamba2ForCausalLM": Zamba2ModelConfig,
 }
