@@ -68,7 +68,7 @@ This complicates the process as we cannot use the out-of-the-box
 
 | Platform | `--extra-index-url` |
 |----------|-----------------|
-| CUDA 12.8      | [https://download.pytorch.org/whl/cu128](https://download.pytorch.org/whl/cu128)|
+| CUDA 12.8| [https://download.pytorch.org/whl/cu128](https://download.pytorch.org/whl/cu128)|
 | CPU      | [https://download.pytorch.org/whl/cpu](https://download.pytorch.org/whl/cpu)|
 | ROCm 6.2 | [https://download.pytorch.org/whl/rocm6.2.4](https://download.pytorch.org/whl/rocm6.2.4) |
 | ROCm 6.3 | [https://download.pytorch.org/whl/rocm6.3](https://download.pytorch.org/whl/rocm6.3) |
