@@ -9,13 +9,16 @@ regex
 ruff
 
 # Required for argparse hook only
-psutil
-cloudpickle
-cachetools
-pybase64
-pillow
-msgspec
-zmq
-transformers
 -f https://download.pytorch.org/whl/cpu
+cachetools
+cloudpickle
+fastapi
+msgspec
+openai
+pillow
+psutil
+pybase64
+pydantic
 torch
+transformers
+zmq

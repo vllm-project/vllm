@@ -11,6 +11,7 @@ ROOT_DIR = Path(__file__).parent.parent.parent.parent
 ARGPARSE_DOC_DIR = ROOT_DIR / "docs/argparse"
 
 sys.path.insert(0, str(ROOT_DIR))
+sys.modules["aiohttp"] = MagicMock()
 sys.modules["blake3"] = MagicMock()
 sys.modules["vllm._C"] = MagicMock()
 
