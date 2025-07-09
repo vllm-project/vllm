@@ -3,6 +3,7 @@ site_url: https://docs.vllm.ai
 repo_url: https://github.com/vllm-project/vllm
 edit_uri: edit/main/docs/
 exclude_docs: |
+  *.gen.md
   *.inc.md
   *.template.md
 theme:
