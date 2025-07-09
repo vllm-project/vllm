@@ -1644,16 +1644,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
         elif self.speculative_config.method == "mlp_speculator":
             assert isinstance(self.drafter, MLPSpeculatorProposer)
-
             is_sample_match = sample_hidden_states.shape[0] == len(
                 sampled_token_ids)
             # Get last token from each sequence
             draft_input_ids = torch.tensor(
-                sampled_token_ids[0] if is_sample_match else
                 [tokens[-1] for tokens in sampled_token_ids],
                 device=sample_hidden_states.device)
-
-            if is_sample_match:
+            if not is_sample_match:
                 # Calculate indices for hidden states
                 indices = []
                 offset = 0
@@ -1666,7 +1663,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 hidden_states = sample_hidden_states[indices]
             else:
                 hidden_states = sample_hidden_states
-
             spec_token_ids = self.drafter.propose(
                 input_ids=draft_input_ids,
                 previous_hidden_states=hidden_states,

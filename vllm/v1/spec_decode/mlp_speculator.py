@@ -31,7 +31,8 @@ class MLPSpeculatorProposer:
         self.hidden_size = vllm_config.speculative_config.\
             draft_model_config.get_hidden_size(
         )
-        self.num_speculative_tokens = vllm_config.speculative_config.num_speculative_tokens
+        self.num_speculative_tokens = vllm_config.speculative_config.\
+            num_speculative_tokens
         self.dtype = vllm_config.model_config.dtype
 
     def propose(
@@ -43,8 +44,7 @@ class MLPSpeculatorProposer:
     ) -> torch.Tensor:
         # Generate blocks and compute logits
         draft_tokens = self.model.generate_proposals(input_ids, previous_hidden_states, num_predict_tokens,sampling_metadata)
-        draft_tokens = list(map(lambda x: x[0], zip(*[i.sampled_token_ids.tolist() for i in draft_tokens])))
-        return draft_tokens
+        return list(map(lambda x: x[0], zip(*[i.sampled_token_ids.tolist() for i in draft_tokens])))
 
     def load_model(self, target_model: nn.Module) -> None:
         self.model = get_model(vllm_config=self.vllm_config,
