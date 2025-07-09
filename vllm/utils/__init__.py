@@ -1535,13 +1535,6 @@ def cuda_is_initialized() -> bool:
     return torch.cuda.is_initialized()
 
 
-def xpu_is_initialized() -> bool:
-    """Check if XPU is initialized."""
-    if not torch.xpu._is_compiled():
-        return False
-    return torch.xpu.is_initialized()
-
-
 def cuda_get_device_properties(device,
                                names: Sequence[str],
                                init_cuda=False) -> tuple[Any, ...]:
@@ -2088,7 +2081,7 @@ def supports_dynamo() -> bool:
 # Supports xccl with PyTorch versions >= 2.8.0 for XPU platform
 def supports_xccl() -> bool:
     return is_torch_equal_or_newer(
-        "2.8.0") and torch.distributed.is_xccl_available()
+        "2.8.0.dev") and torch.distributed.is_xccl_available()
 
 
 # Some backends use pytorch version < 2.4.0 which doesn't
@@ -2855,8 +2848,6 @@ def _maybe_force_spawn():
     reason = None
     if cuda_is_initialized():
         reason = "CUDA is initialized"
-    elif xpu_is_initialized():
-        reason = "XPU is initialized"
     elif is_in_ray_actor():
         # even if we choose to spawn, we need to pass the ray address
         # to the subprocess so that it knows how to connect to the ray cluster.
