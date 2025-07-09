@@ -534,15 +534,3 @@ def stateless_destroy_torch_distributed_process_group(
         _shutdown_backend(pg)
 
     _unregister_process_group(pg.group_name)
-
-
-def get_local_ip() -> str:
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        s.connect(('8.8.8.8', 1))
-        ip = s.getsockname()[0]
-    except Exception:
-        ip = '0.0.0.0'
-    finally:
-        s.close()
-    return ip

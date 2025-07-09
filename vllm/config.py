@@ -3842,7 +3842,8 @@ class KVEventsConfig:
     """
 
     port: Optional[int] = None
-    """The port on which the vLLM service listens."""
+    """The port on which the vLLM instance listens."""
+
 
 class CompilationLevel:
     # constants for the levels of the compilation process
