@@ -88,6 +88,7 @@ class SpeculatorsEagleConfig(EAGLEConfig):
             "model": transformer_config,
             "eagle_fc_bias": speculators_config.get("fusion_bias", False),
             "truncated_vocab_size": transformer_config.get("vocab_size"),
+            "method": "eagle",  # Required for V1 compatibility
         }
         
         # Preserve any additional fields that might be needed
