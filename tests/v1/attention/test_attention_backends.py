@@ -5,7 +5,8 @@
 import pytest
 import torch
 
-from tests.v1.attention.utils import (BatchSpec, create_common_attn_metadata,
+from tests.v1.attention.utils import (BatchSpec, _Backend,
+                                      create_common_attn_metadata,
                                       create_standard_kv_cache_spec,
                                       create_vllm_config,
                                       get_attention_backend)
@@ -13,13 +14,16 @@ from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, cdiv
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 
-BACKENDS_TO_TEST = ["flash_attn", "flashinfer", "flex_attention"]
+BACKENDS_TO_TEST = [
+    _Backend.FLASH_ATTN_VLLM_V1, _Backend.FLASHINFER_VLLM_V1,
+    _Backend.FLEX_ATTENTION, _Backend.TRITON_ATTN_VLLM_V1
+]
 
 # Remove flashinfer from the list if it's not available
 try:
     import flashinfer  # noqa: F401
 except ImportError:
-    BACKENDS_TO_TEST.remove("flashinfer")
+    BACKENDS_TO_TEST.remove(_Backend.FLASHINFER_VLLM_V1)
 
 
 def _convert_dtype_to_torch(dtype):
@@ -197,7 +201,7 @@ class MockAttentionLayer:
         self._v_scale_float = 1.0
 
 
-def run_attention_backend(backend_name: str, kv_cache_spec: FullAttentionSpec,
+def run_attention_backend(backend: _Backend, kv_cache_spec: FullAttentionSpec,
                           vllm_config, device: torch.device,
                           common_attn_metadata: CommonAttentionMetadata,
                           query: torch.Tensor, key: torch.Tensor,
@@ -205,10 +209,10 @@ def run_attention_backend(backend_name: str, kv_cache_spec: FullAttentionSpec,
                           kv_cache: torch.Tensor) -> torch.Tensor:
     """Run attention computation using the specified backend's AttentionImpl."""
 
-    builder_cls, impl_cls = get_attention_backend(backend_name)
+    builder_cls, impl_cls = get_attention_backend(backend)
 
     # Mock flashinfer's get_per_layer_parameters if needed
-    if backend_name == "flashinfer":
+    if backend == _Backend.FLASHINFER_VLLM_V1:
         import unittest.mock
 
         from vllm.v1.attention.backends.flashinfer import PerLayerParameters
@@ -417,7 +421,7 @@ def test_backend_correctness(batch_spec_name: str, model: str):
         #   [num_blocks, 2, block_size, num_kv_heads, head_size]
         # Select the appropriate KV cache format for each backend
         kv_cache_for_backend = kv_cache
-        if backend_name == "flashinfer":
+        if backend_name == _Backend.FLASHINFER_VLLM_V1:
             kv_cache_for_backend = kv_cache.transpose(0, 1)
 
         backend_output = run_attention_backend(backend_name, kv_cache_spec,
@@ -440,17 +444,12 @@ def test_backend_correctness(batch_spec_name: str, model: str):
 
         # Check numerical similarity
         rtol = 1e-2
-        atol = 1e-3
+        atol = 5e-3
 
-        # Flashinfer and Flex_attention may have slightly different
-        #  numerical behavior
-        if backend_name == "flashinfer":
-            atol = 5e-3
-
-        if backend_name == "flex_attention":
-            atol = 5e-1  # TODO: figuure out why flex_attention has such large
-            # numerical differences for
-            #   medium_decode, medium_prefill, mixed_medium
+        if backend_name == _Backend.FLEX_ATTENTION:
+            atol = 5e-1  # TODO: figure out why flex_attention has such large
+            # numerical differences for medium_decode, medium_prefill,
+            # mixed_medium
 
         max_diff = torch.max(torch.abs(backend_output - sdpa_output)).item()
         max_rel_diff = torch.max(

@@ -11,6 +11,8 @@ import torch
 from vllm.config import (CacheConfig, CompilationConfig, DeviceConfig,
                          LoadConfig, ModelConfig, ModelDType, ParallelConfig,
                          SchedulerConfig, VllmConfig)
+from vllm.platforms import _Backend
+from vllm.utils import resolve_obj_by_qualname
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 
@@ -92,7 +94,7 @@ def create_common_attn_metadata(
     )
 
 
-def get_attention_backend(backend_name: str):
+def get_attention_backend(backend_name: _Backend):
     """Set up attention backend classes for testing.
     
     Args:
@@ -103,23 +105,23 @@ def get_attention_backend(backend_name: str):
         Tuple of (backend_builder_class, backend_impl_class)
     """
     backend_map = {
-        "flash_attn":
-        ("vllm.v1.attention.backends.flash_attn", "FlashAttentionBackend"),
-        "flashinfer":
-        ("vllm.v1.attention.backends.flashinfer", "FlashInferBackend"),
-        "flex_attention":
-        ("vllm.v1.attention.backends.flex_attention", "FlexAttentionBackend"),
+        _Backend.FLASH_ATTN_VLLM_V1:
+        "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend",
+        _Backend.FLASHINFER_VLLM_V1:
+        "vllm.v1.attention.backends.flashinfer.FlashInferBackend",
+        _Backend.FLEX_ATTENTION:
+        "vllm.v1.attention.backends.flex_attention.FlexAttentionBackend",
+        _Backend.TRITON_ATTN_VLLM_V1:
+        "vllm.v1.attention.backends.triton_attn.TritonAttnBackend",
     }
 
     if backend_name not in backend_map:
         raise ValueError(f"Unknown backend: {backend_name}")
 
-    module_name, backend_class_name = backend_map[backend_name]
+    backend_class_name = backend_map[backend_name]
 
     try:
-        import importlib
-        module = importlib.import_module(module_name)
-        backend_class = getattr(module, backend_class_name)
+        backend_class = resolve_obj_by_qualname(backend_class_name)
         return backend_class.get_builder_cls(), backend_class.get_impl_cls()
     except ImportError as e:
         pytest.skip(f"{backend_name} not available: {e}")
