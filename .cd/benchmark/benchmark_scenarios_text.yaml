@@ -40,4 +40,11 @@ qwen25_72b_instruct:
 qwen25_7b_instruct:
   MODEL: Qwen/Qwen2.5-7B-Instruct
 
+granite_8b_code_instruct_4k:
+  MODEL: ibm-granite/granite-8b-code-instruct-4k
+
+granite_20b_code_instruct_8k:
+  MODEL: ibm-granite/granite-20b-code-instruct-8k
+   
+
 
