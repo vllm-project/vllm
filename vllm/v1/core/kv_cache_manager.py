@@ -285,14 +285,17 @@ class KVCacheManager:
         if not self.enable_caching or delay_cache_blocks:
             return KVCacheBlocks(new_blocks)
 
-        # Speculated tokens might be rejected in the future, so we does
-        # not cache any speculated tokens. We only cache blocks with
-        # generated (accepted) tokens.
-        # For the same reason, we do not cache the output placeholders,
-        # which is used in async scheduling.
+        # NOTE(woosuk): We want to commit (cache) up to num_computed_tokens +
+        # num_new_tokens, but must exclude "non-committable" tokens (e.g.,
+        # draft tokens that could be rejected). Therefore, we cap the number
+        # at `request.num_tokens`, ensuring only "finalized" tokens are cached.
+        num_tokens_to_cache = min(num_computed_tokens + num_new_tokens,
+                                  request.num_tokens)
         self.coordinator.cache_blocks(
-            request, self.req_to_block_hashes[request.request_id],
-            min(request.num_tokens, num_computed_tokens + num_new_tokens))
+            request,
+            self.req_to_block_hashes[request.request_id],
+            num_tokens_to_cache,
+        )
 
         return KVCacheBlocks(new_blocks)
 
