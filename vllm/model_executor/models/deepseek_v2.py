@@ -739,6 +739,7 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
         self.num_expert_groups = config.n_group
 
         self.moe_layers: list[FusedMoE] = []
+        example_moe = None
         for layer in self.model.layers:
             if isinstance(layer, PPMissingLayer):
                 continue
@@ -746,10 +747,11 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
             assert isinstance(layer, DeepseekV2DecoderLayer)
             if isinstance(layer.mlp, DeepseekV2MoE):
                 self.moe_layers.append(layer.mlp.experts)
+                example_moe = layer.mlp
 
-        # Pick last one layer since the first ones may be dense layers.
-        example_moe = typing.cast(
-            DeepseekV2MoE, self.model.layers[config.num_hidden_layers - 1].mlp)
+        if example_moe is None:
+            raise RuntimeError("No DeepseekV2MoE layer found in model.layers.")
+
         self.num_logical_experts = example_moe.n_logical_experts
         self.num_physical_experts = example_moe.n_physical_experts
         self.num_local_physical_experts = example_moe.n_local_physical_experts
