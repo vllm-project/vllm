@@ -20,15 +20,17 @@ from vllm.v1.kv_cache_interface import FullAttentionSpec
 @dataclass
 class BatchSpec:
     """Specification for a batch configuration (workload shape only)."""
-    batch_size: int
     seq_lens: list[int]
     query_lens: list[int]
 
     name: str = "unnamed"
 
+    @property
+    def batch_size(self):
+        return len(self.seq_lens)
+
     def __post_init__(self):
-        assert len(self.seq_lens) == self.batch_size
-        assert len(self.query_lens) == self.batch_size
+        assert len(self.seq_lens) == len(self.query_lens)
 
     def compute_num_tokens(self):
         return sum(self.query_lens)

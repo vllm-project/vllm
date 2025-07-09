@@ -6,7 +6,8 @@ from unittest import mock
 import pytest
 import torch
 
-from tests.v1.attention.utils import (BatchSpec, create_common_attn_metadata,
+from tests.v1.attention.utils import (BatchSpec, _Backend,
+                                      create_common_attn_metadata,
                                       create_standard_kv_cache_spec,
                                       get_attention_backend)
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, ModelConfig,
@@ -56,31 +57,6 @@ def _create_proposer(method: str, k: int) -> EagleProposer:
                          device=current_platform.device_type)
 
 
-def _create_common_attn_metadata(
-        cu_target_query_lens: torch.Tensor,
-        device: torch.device) -> CommonAttentionMetadata:
-    """Create minimal CommonAttentionMetadata for testing."""
-    batch_size = cu_target_query_lens.shape[0] - 1
-    num_tokens = cu_target_query_lens[-1].item()
-    seq_lens = cu_target_query_lens[1:] - cu_target_query_lens[:-1]
-
-    return CommonAttentionMetadata(
-        query_start_loc=cu_target_query_lens,
-        query_start_loc_cpu=cu_target_query_lens.cpu(),
-        seq_lens=seq_lens,
-        seq_lens_cpu=seq_lens.cpu(),
-        num_computed_tokens_cpu=seq_lens.cpu(),
-        num_reqs=batch_size,
-        num_actual_tokens=int(num_tokens),
-        max_query_len=int(seq_lens.max().item()),
-        block_table_tensor=torch.zeros((batch_size, 1),
-                                       dtype=torch.int32,
-                                       device=device),
-        slot_mapping=torch.arange(num_tokens, dtype=torch.int64,
-                                  device=device),
-    )
-
-
 def test_prepare_inputs():
     """
     cu_target_query_lens: [0, a, a + b, a + b + c]
@@ -97,7 +73,6 @@ def test_prepare_inputs():
     # n1 = 1, n2 = 3, n3 = 2
 
     batch_spec = BatchSpec(
-        batch_size=4,
         seq_lens=[4, 7, 5],
         query_lens=[4, 7, 5],
     )
@@ -324,9 +299,28 @@ def test_propose(num_speculative_tokens):
                                    device=device)
     sampling_metadata = mock.MagicMock()
 
-    # Create CommonAttentionMetadata for new API
-    common_attn_metadata = _create_common_attn_metadata(cu_num_tokens, device)
-    attn_metadata_builder_cls, _ = get_attention_backend("flash_attn")
+    batch_size = cu_num_tokens.shape[0] - 1
+    num_tokens = cu_num_tokens[-1].item()
+    seq_lens = cu_num_tokens[1:] - cu_num_tokens[:-1]
+
+    common_attn_metadata = CommonAttentionMetadata(
+        query_start_loc=cu_num_tokens,
+        query_start_loc_cpu=cu_num_tokens.cpu(),
+        seq_lens=seq_lens,
+        seq_lens_cpu=seq_lens.cpu(),
+        num_computed_tokens_cpu=seq_lens.cpu(),
+        num_reqs=batch_size,
+        num_actual_tokens=int(num_tokens),
+        max_query_len=int(seq_lens.max().item()),
+        block_table_tensor=torch.zeros((batch_size, 1),
+                                       dtype=torch.int32,
+                                       device=device),
+        slot_mapping=torch.arange(num_tokens, dtype=torch.int64,
+                                  device=device),
+    )
+
+    attn_metadata_builder_cls, _ = get_attention_backend(
+        _Backend.FLASH_ATTN_VLLM_V1)
     attn_metadata_builder = attn_metadata_builder_cls(
         kv_cache_spec=create_standard_kv_cache_spec(proposer.vllm_config),
         vllm_config=proposer.vllm_config,
@@ -335,8 +329,7 @@ def test_propose(num_speculative_tokens):
 
     # Mock runner for attention metadata building
     proposer.runner = mock.MagicMock()
-    proposer.runner.attn_metadata_builders = [mock.MagicMock()]
-    proposer.runner.attn_metadata_builders[0] = attn_metadata_builder
+    proposer.runner.attn_metadata_builders = [attn_metadata_builder]
 
     result = proposer.propose(target_token_ids=target_token_ids,
                               target_positions=target_positions,
