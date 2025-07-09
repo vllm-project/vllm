@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from math import prod
-from typing import Optional
+from typing import Optional, Union
 
 import torch
 
@@ -10,6 +10,9 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8)
 from vllm.model_executor.layers.quantization.utils.int8_utils import (
     per_token_group_quant_int8, per_token_quant_int8)
+from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+    quant_dequant_mxfp4)
+from vllm.platforms import current_platform
 from vllm.utils import cdiv
 
 
@@ -74,10 +77,25 @@ def _int8_quantize(
     return A, A_scale
 
 
+def _mxfp4_quantize(
+    A: torch.Tensor,
+    A_scale: Optional[torch.Tensor],
+    per_act_token_quant: bool,
+    block_shape: Optional[list[int]] = None,
+) -> tuple[torch.Tensor, None]:
+    assert block_shape is None
+    if not current_platform.supports_mx():
+        A = quant_dequant_mxfp4(A)
+    else:
+        raise NotImplementedError()
+
+    return A, None
+
+
 def moe_kernel_quantize_input(
     A: torch.Tensor,
     A_scale: Optional[torch.Tensor],
-    quant_dtype: Optional[torch.dtype],
+    quant_dtype: Union[None, torch.dtype, str],
     per_act_token_quant: bool,
     block_shape: Optional[list[int]] = None,
 ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
@@ -85,6 +103,8 @@ def moe_kernel_quantize_input(
         return _fp8_quantize(A, A_scale, per_act_token_quant, block_shape)
     elif quant_dtype == torch.int8:
         return _int8_quantize(A, A_scale, per_act_token_quant, block_shape)
+    elif quant_dtype == "mxfp4":
+        return _mxfp4_quantize(A, A_scale, per_act_token_quant, block_shape)
     else:
         return A, A_scale
 
@@ -99,9 +119,20 @@ def _fp8_perm(m: torch.Tensor, idx: torch.Tensor) -> torch.Tensor:
         return m[idx, ...]
 
 
-# TODO(bnell): better name
-def maybe_fix_scales(scales: Optional[torch.Tensor],
-                     num_experts: int) -> Optional[torch.Tensor]:
+def normalize_scales_shape(
+        scales: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+    if scales is not None:
+        if scales.numel() == 1:
+            scales = scales.view(1, 1)
+        else:
+            scales = scales.view(-1, scales.size(-1))
+    return scales
+
+
+def normalize_batched_scales_shape(
+    scales: Optional[torch.Tensor],
+    num_experts: int,
+) -> Optional[torch.Tensor]:
     if scales is not None and scales.ndim < 3:
         if scales.numel() == 1:
             scales = scales.view(1)
@@ -111,3 +142,23 @@ def maybe_fix_scales(scales: Optional[torch.Tensor],
             scales = scales.view(num_experts, -1, scales.size(-1))
 
     return scales
+
+
+def _validate_scale_shape(
+    a: torch.Tensor,
+    a_scale: Optional[torch.Tensor],
+    per_act_token_quant: bool,
+    block_shape: Optional[list[int]],
+) -> None:
+    if a_scale is None:
+        return
+
+    if not per_act_token_quant and block_shape is None:
+        assert a_scale.numel() == 1, f"{a_scale.shape}"
+    elif per_act_token_quant:
+        assert a_scale.shape[0] == a.shape[0] and a_scale.shape[1] == 1, (
+            f"{a_scale.shape[0]} == {a.shape[0]} and {a_scale.shape[1]} == 1")
+    else:
+        assert block_shape is not None
+        expected = (a.shape[0], cdiv(a.shape[1], block_shape[1]))
+        assert a_scale.shape == expected, f"{a_scale.shape} == {expected}"

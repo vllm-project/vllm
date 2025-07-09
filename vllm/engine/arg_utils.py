@@ -36,6 +36,7 @@ from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationMethods
+from vllm.platforms import CpuArchEnum, current_platform
 from vllm.plugins import load_general_plugins
 from vllm.reasoning import ReasoningParserManager
 from vllm.test_utils import MODEL_WEIGHTS_S3_BUCKET, MODELS_ON_S3
@@ -58,7 +59,8 @@ def parse_type(return_type: Callable[[str], T]) -> Callable[[str], T]:
 
     def _parse_type(val: str) -> T:
         try:
-            if return_type is json.loads and not re.match("^{.*}$", val):
+            if return_type is json.loads and not re.match(
+                    r"(?s)^\s*{.*}\s*$", val):
                 return cast(T, nullable_kvs(val))
             return return_type(val)
         except ValueError as e:
@@ -80,7 +82,7 @@ def optional_type(
 
 
 def union_dict_and_str(val: str) -> Optional[Union[str, dict[str, str]]]:
-    if not re.match("^{.*}$", val):
+    if not re.match(r"(?s)^\s*{.*}\s*$", val):
         return str(val)
     return optional_type(json.loads)(val)
 
@@ -370,11 +372,10 @@ class EngineArgs:
         get_field(TokenizerPoolConfig, "extra_config")
     limit_mm_per_prompt: dict[str, int] = \
         get_field(MultiModalConfig, "limit_per_prompt")
+    interleave_mm_strings: bool = MultiModalConfig.interleave_mm_strings
     media_io_kwargs: dict[str, dict[str,
                                     Any]] = get_field(MultiModalConfig,
                                                       "media_io_kwargs")
-    mm_placeholder_str_override: dict[str, str] = \
-        get_field(MultiModalConfig, "mm_placeholder_str_override")
     mm_processor_kwargs: Optional[Dict[str, Any]] = \
         MultiModalConfig.mm_processor_kwargs
     disable_mm_preprocessor_cache: bool = \
@@ -760,14 +761,14 @@ class EngineArgs:
         multimodal_group.add_argument("--media-io-kwargs",
                                       **multimodal_kwargs["media_io_kwargs"])
         multimodal_group.add_argument(
-            "--mm-placeholder-str-override",
-            **multimodal_kwargs["mm_placeholder_str_override"])
-        multimodal_group.add_argument(
             "--mm-processor-kwargs",
             **multimodal_kwargs["mm_processor_kwargs"])
         multimodal_group.add_argument(
             "--disable-mm-preprocessor-cache",
             **multimodal_kwargs["disable_mm_preprocessor_cache"])
+        multimodal_group.add_argument(
+            "--interleave-mm-strings",
+            **multimodal_kwargs["interleave_mm_strings"])
 
         # LoRA related configs
         lora_kwargs = get_kwargs(LoRAConfig)
@@ -986,8 +987,8 @@ class EngineArgs:
             enable_prompt_embeds=self.enable_prompt_embeds,
             served_model_name=self.served_model_name,
             limit_mm_per_prompt=self.limit_mm_per_prompt,
+            interleave_mm_strings=self.interleave_mm_strings,
             media_io_kwargs=self.media_io_kwargs,
-            mm_placeholder_str_override=self.mm_placeholder_str_override,
             use_async_output_proc=not self.disable_async_output_proc,
             config_format=self.config_format,
             mm_processor_kwargs=self.mm_processor_kwargs,
@@ -1002,10 +1003,27 @@ class EngineArgs:
             override_attention_dtype=self.override_attention_dtype,
         )
 
+    def validate_tensorizer_args(self):
+        from vllm.model_executor.model_loader.tensorizer import (
+            TensorizerConfig)
+        for key in self.model_loader_extra_config:
+            if key in TensorizerConfig._fields:
+                self.model_loader_extra_config["tensorizer_config"][
+                    key] = self.model_loader_extra_config[key]
+
     def create_load_config(self) -> LoadConfig:
 
         if self.quantization == "bitsandbytes":
             self.load_format = "bitsandbytes"
+
+        if self.load_format == "tensorizer":
+            if hasattr(self.model_loader_extra_config, "to_serializable"):
+                self.model_loader_extra_config = (
+                    self.model_loader_extra_config.to_serializable())
+            self.model_loader_extra_config["tensorizer_config"] = {}
+            self.model_loader_extra_config["tensorizer_config"][
+                "tensorizer_dir"] = self.model
+            self.validate_tensorizer_args()
 
         return LoadConfig(
             load_format=self.load_format,
@@ -1065,7 +1083,6 @@ class EngineArgs:
         If VLLM_USE_V1 is specified by the user but the VllmConfig
         is incompatible, we raise an error.
         """
-        from vllm.platforms import current_platform
         current_platform.pre_register_and_update()
 
         device_config = DeviceConfig(
@@ -1092,9 +1109,16 @@ class EngineArgs:
         # Set default arguments for V0 or V1 Engine.
         if use_v1:
             self._set_default_args_v1(usage_context, model_config)
+            # Disable chunked prefill for POWER (ppc64le)/ARM CPUs in V1
+            if current_platform.is_cpu(
+            ) and current_platform.get_cpu_architecture() in (
+                    CpuArchEnum.POWERPC, CpuArchEnum.ARM):
+                logger.info(
+                    "Chunked prefill is not supported for ARM and POWER CPUs; "
+                    "disabling it for V1 backend.")
+                self.enable_chunked_prefill = False
         else:
             self._set_default_args_v0(model_config)
-
         assert self.enable_chunked_prefill is not None
 
         if envs.VLLM_ATTENTION_BACKEND in [STR_DUAL_CHUNK_FLASH_ATTN_VAL]:
@@ -1211,7 +1235,6 @@ class EngineArgs:
             if self.enable_chunked_prefill and self.pipeline_parallel_size > 1:
                 raise ValueError("Multi-Step Chunked-Prefill is not supported "
                                  "for pipeline-parallel-size > 1")
-            from vllm.platforms import current_platform
             if current_platform.is_cpu():
                 logger.warning("Multi-Step (--num-scheduler-steps > 1) is "
                                "currently not supported for CPUs and has been "
@@ -1360,7 +1383,6 @@ class EngineArgs:
         # Skip this check if we are running on a non-GPU platform,
         # or if the device capability is not available
         # (e.g. in a Ray actor without GPUs).
-        from vllm.platforms import current_platform
         if (current_platform.is_cuda()
                 and current_platform.get_device_capability()
                 and current_platform.get_device_capability().major < 8):
@@ -1396,13 +1418,6 @@ class EngineArgs:
         # No text embedding inputs so far.
         if self.enable_prompt_embeds:
             _raise_or_fallback(feature_name="--enable-prompt-embeds",
-                               recommend_to_remove=False)
-            return False
-
-        # Only Fp16 and Bf16 dtypes since we only support FA.
-        V1_SUPPORTED_DTYPES = [torch.bfloat16, torch.float16]
-        if model_config.dtype not in V1_SUPPORTED_DTYPES:
-            _raise_or_fallback(feature_name=f"--dtype {model_config.dtype}",
                                recommend_to_remove=False)
             return False
 
@@ -1628,7 +1643,6 @@ class EngineArgs:
         # as the platform that vLLM is running on (e.g. the case of scaling
         # vLLM with Ray) and has no GPUs. In this case we use the default
         # values for non-H100/H200 GPUs.
-        from vllm.platforms import current_platform
         try:
             device_memory = current_platform.get_device_total_memory()
             device_name = current_platform.get_device_name().lower()
@@ -1731,7 +1745,6 @@ class AsyncEngineArgs(EngineArgs):
         parser.add_argument('--disable-log-requests',
                             action='store_true',
                             help='Disable logging requests.')
-        from vllm.platforms import current_platform
         current_platform.pre_register_and_update(parser)
         return parser
 

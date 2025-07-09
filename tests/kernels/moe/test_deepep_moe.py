@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 Test deepep dispatch-combine logic
 """
@@ -154,12 +155,13 @@ def make_modular_kernel(
                         deepep_ht_args = ht_args,
                         deepep_ll_args = ll_args)
 
+    num_dispatchers = pgi.world_size // dp_size
+
     if low_latency_mode:
         assert not per_act_token_quant, "not supported in ll mode"
         fused_experts = BatchedTritonExperts(
             max_num_tokens=MAX_TOKENS_PER_RANK,
-            world_size=pgi.world_size,
-            dp_size=dp_size,
+            num_dispatchers=num_dispatchers,
             use_fp8_w8a8=is_quantized,
             use_int8_w8a8=False,
             use_int8_w8a16=False,

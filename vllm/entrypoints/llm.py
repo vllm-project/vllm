@@ -1204,8 +1204,7 @@ class LLM:
 
         input_pairs = [(t1, t2) for t1, t2 in zip(text_1, text_2)]
 
-        pooling_params = PoolingParams()
-
+        pooling_params = PoolingParams(use_cross_encoder=True)
         tokenization_kwargs: dict[str, Any] = {}
         _validate_truncation_size(self.llm_engine.model_config.max_model_len,
                                   truncate_prompt_tokens, tokenization_kwargs)
@@ -1213,9 +1212,14 @@ class LLM:
         parsed_prompts = []
 
         for q, t in input_pairs:
-            prompt_inputs = tokenizer(text=q,
-                                      text_pair=t,
-                                      **tokenization_kwargs)
+            if self.llm_engine.model_config.use_pad_token:
+                # cross_encoder models defaults to using pad_token.
+                prompt_inputs = tokenizer(text=q,
+                                          text_pair=t,
+                                          **tokenization_kwargs)
+            else:
+                # `llm as reranker` models defaults to not using pad_token.
+                prompt_inputs = tokenizer(text=q + t, **tokenization_kwargs)
             engine_prompt = TokensPrompt(
                 prompt_token_ids=prompt_inputs["input_ids"],
                 token_type_ids=prompt_inputs.get("token_type_ids"))
@@ -1289,9 +1293,13 @@ class LLM:
 
             raise ValueError(" ".join(messages))
 
-        if self.llm_engine.model_config.task not in ("embed", "score"):
-            raise ValueError(
-                "Score API is only enabled for `--task embed or --task score`")
+        if self.llm_engine.model_config.task not in ("embed", "classify"):
+            raise ValueError("Score API is only enabled for "
+                             "`--task embed or --task classify`.")
+
+        if (self.llm_engine.model_config.task == "classify"
+                and self.llm_engine.model_config.hf_config.num_labels != 1):
+            raise ValueError("Score API is only enabled for num_labels == 1.")
 
         # the tokenizer for models such as
         # "cross-encoder/ms-marco-MiniLM-L-6-v2" doesn't support passing

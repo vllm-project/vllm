@@ -1,3 +1,4 @@
+
 # The vLLM Dockerfile is used to construct vLLM image that can be directly used
 # to run the OpenAI compatible server.
 
@@ -62,12 +63,16 @@ ARG PYTORCH_CUDA_NIGHTLY_INDEX_BASE_URL=https://download.pytorch.org/whl/nightly
 ARG PIP_KEYRING_PROVIDER=disabled
 ARG UV_KEYRING_PROVIDER=${PIP_KEYRING_PROVIDER}
 
+# Flag enables build-in KV-connector dependency libs into docker images
+ARG INSTALL_KV_CONNECTORS=false
+
 #################### BASE BUILD IMAGE ####################
 # prepare basic build environment
 FROM ${BUILD_BASE_IMAGE} AS base
 ARG CUDA_VERSION
 ARG PYTHON_VERSION
 ARG TARGETPLATFORM
+ARG INSTALL_KV_CONNECTORS=false
 ENV DEBIAN_FRONTEND=noninteractive
 
 ARG DEADSNAKES_MIRROR_URL
@@ -276,6 +281,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 FROM ${FINAL_BASE_IMAGE} AS vllm-base
 ARG CUDA_VERSION
 ARG PYTHON_VERSION
+ARG INSTALL_KV_CONNECTORS=false
 WORKDIR /vllm-workspace
 ENV DEBIAN_FRONTEND=noninteractive
 ARG TARGETPLATFORM
@@ -374,23 +380,44 @@ ARG FLASHINFER_CUDA128_INDEX_URL="https://download.pytorch.org/whl/cu128/flashin
 ARG FLASHINFER_CUDA128_WHEEL="flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl"
 ARG FLASHINFER_GIT_REPO="https://github.com/flashinfer-ai/flashinfer.git"
 ARG FLASHINFER_GIT_REF="v0.2.6.post1"
-RUN --mount=type=cache,target=/root/.cache/uv \
-. /etc/environment && \
-if [ "$TARGETPLATFORM" != "linux/arm64" ]; then \
-    # FlashInfer already has a wheel for PyTorch 2.7.0 and CUDA 12.8. This is enough for CI use
-    if [[ "$CUDA_VERSION" == 12.8* ]]; then \
-        uv pip install --system ${FLASHINFER_CUDA128_INDEX_URL}/${FLASHINFER_CUDA128_WHEEL} ; \
-    else \
-        export TORCH_CUDA_ARCH_LIST='7.5 8.0 8.9 9.0a 10.0a 12.0' && \
-        git clone ${FLASHINFER_GIT_REPO} --single-branch --branch ${FLASHINFER_GIT_REF} --recursive && \
-        # Needed to build AOT kernels
-        (cd flashinfer && \
-            python3 -m flashinfer.aot && \
-            uv pip install --system --no-build-isolation . \
-        ) && \
-        rm -rf flashinfer; \
-    fi \
-fi
+RUN --mount=type=cache,target=/root/.cache/uv bash - <<'BASH'
+  . /etc/environment
+  if [ "$TARGETPLATFORM" != "linux/arm64" ]; then
+      # FlashInfer already has a wheel for PyTorch 2.7.0 and CUDA 12.8. This is enough for CI use
+      if [[ "$CUDA_VERSION" == 12.8* ]]; then
+          uv pip install --system ${FLASHINFER_CUDA128_INDEX_URL}/${FLASHINFER_CUDA128_WHEEL}
+      else
+          export TORCH_CUDA_ARCH_LIST='7.5 8.0 8.9 9.0a 10.0a 12.0'
+          git clone ${FLASHINFER_GIT_REPO} --single-branch --branch ${FLASHINFER_GIT_REF} --recursive
+          # Needed to build AOT kernels
+          (cd flashinfer && \
+              python3 -m flashinfer.aot && \
+              uv pip install --system --no-build-isolation . \
+          )
+          rm -rf flashinfer
+
+          # Default arches (skipping 10.0a and 12.0 since these need 12.8)
+          # TODO: Update this to allow setting TORCH_CUDA_ARCH_LIST as a build arg.
+          TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9 9.0a"
+          if [[ "${CUDA_VERSION}" == 11.* ]]; then
+              TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9"
+          fi
+          echo "🏗️  Building FlashInfer for arches: ${TORCH_CUDA_ARCH_LIST}"
+
+          git clone --depth 1 --recursive --shallow-submodules \
+            --branch v0.2.6.post1 \
+            https://github.com/flashinfer-ai/flashinfer.git flashinfer
+
+          pushd flashinfer
+            python3 -m flashinfer.aot
+            TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST}" \
+              uv pip install --system --no-build-isolation .
+          popd
+
+          rm -rf flashinfer
+      fi \
+  fi
+BASH
 COPY examples examples
 COPY benchmarks benchmarks
 COPY ./vllm/collect_env.py .
@@ -464,6 +491,7 @@ RUN mv mkdocs.yaml test_docs/
 # base openai image with additional requirements, for any subsequent openai-style images
 FROM vllm-base AS vllm-openai-base
 ARG TARGETPLATFORM
+ARG INSTALL_KV_CONNECTORS=false
 
 ARG PIP_INDEX_URL UV_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
@@ -472,12 +500,17 @@ ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
 # Reference: https://github.com/astral-sh/uv/pull/1694
 ENV UV_HTTP_TIMEOUT=500
 
+COPY requirements/kv_connectors.txt requirements/kv_connectors.txt
+
 # install additional dependencies for openai api server
 RUN --mount=type=cache,target=/root/.cache/uv \
+    if [ "$INSTALL_KV_CONNECTORS" = "true" ]; then \
+        uv pip install --system -r requirements/kv_connectors.txt; \
+    fi; \
     if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
         uv pip install --system accelerate hf_transfer 'modelscope!=1.15.0' 'bitsandbytes>=0.42.0' 'timm==0.9.10' boto3 runai-model-streamer runai-model-streamer[s3]; \
     else \
-        uv pip install --system accelerate hf_transfer 'modelscope!=1.15.0' 'bitsandbytes>=0.45.3' 'timm==0.9.10' boto3 runai-model-streamer runai-model-streamer[s3]; \
+        uv pip install --system accelerate hf_transfer 'modelscope!=1.15.0' 'bitsandbytes>=0.46.1' 'timm==0.9.10' boto3 runai-model-streamer runai-model-streamer[s3]; \
     fi
 
 ENV VLLM_USAGE_SOURCE production-docker-image
