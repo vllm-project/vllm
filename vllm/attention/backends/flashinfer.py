@@ -7,15 +7,13 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Type
 
-from huggingface_hub import cached_assets_path
-
 from vllm.multimodal import MultiModalPlaceholderMap
 
 try:
     from flashinfer import BatchDecodeWithPagedKVCacheWrapper
-    from flashinfer.decode import CUDAGraphBatchDecodeWithPagedKVCacheWrapper
+    from flashinfer.decode import (CUDAGraphBatchDecodeWithPagedKVCacheWrapper,
+                                   trtllm_batch_decode_with_kv_cache)
     from flashinfer.prefill import BatchPrefillWithPagedKVCacheWrapper
-    from flashinfer.decode import trtllm_batch_decode_with_kv_cache
     from flashinfer.utils import is_sm100a_supported
 
     from vllm.vllm_flash_attn import flash_attn_varlen_func
@@ -29,7 +27,7 @@ except ImportError:
         trtllm_batch_decode_with_kv_cache = None
     FLASHINFER_WORKSPACE_BUFFER_SIZE = 0
     raise ImportError("FlashInfer is not installed. Please install it with "
-                      "`pip install flashinfer`.")
+                      "`pip install flashinfer`.") from None
 
 import torch
 
@@ -61,7 +59,7 @@ FLASHINFER_KV_CACHE_LAYOUT: str = envs.VLLM_KV_CACHE_LAYOUT or "NHD"
 
 class FlashInferBackend(AttentionBackend):
     cached_use_trtllm: Optional[bool] = None
-    
+
     @staticmethod
     def get_name() -> str:
         return "FLASHINFER"
@@ -126,30 +124,36 @@ class FlashInferBackend(AttentionBackend):
             return torch.float8_e5m2
         else:
             raise ValueError(f"Unrecognized FP8 dtype: {kv_cache_dtype}")
-    
+
     @staticmethod
-    def use_trtllm_decode_attention(batch_size: int, max_seq_len: int) -> bool:
+    def use_trtllm_decode_attention(batch_size: int,
+                                    max_seq_len: int,
+                                    kv_cache_dtype: str = "auto") -> bool:
         # Check if environment variable is explicitly set
         if FlashInferBackend.cached_use_trtllm is not None:
             return FlashInferBackend.cached_use_trtllm
         env_value = envs.VLLM_USE_TRTLLM_DECODE_ATTENTION
         if env_value is not None:
-            logger.info_once("VLLM_USE_TRTLLM_DECODE_ATTENTION is set to %s", env_value)
+            logger.info_once("VLLM_USE_TRTLLM_DECODE_ATTENTION is set to %s",
+                             env_value)
             # Environment variable is set - respect it
             no_use_trtllm = env_value == "0"
             if not no_use_trtllm:
-                logger.info_once("VLLM_USE_TRTLLM_DECODE_ATTENTION is set to 1, "
-                               "using TRTLLM decode attention.")
+                logger.info_once(
+                    "VLLM_USE_TRTLLM_DECODE_ATTENTION is set to 1, "
+                    "using TRTLLM decode attention.")
             FlashInferBackend.cached_use_trtllm = not no_use_trtllm
         else:
-        # Environment variable not set - use auto-detection
-            use_trtllm = (is_sm100a_supported(torch.device("cuda")) and 
-                           batch_size <= 256 and 
-                           max_seq_len < 131072)
+            # Environment variable not set - use auto-detection
+            use_trtllm = (is_sm100a_supported(torch.device("cuda"))
+                          and batch_size <= 256 and max_seq_len < 131072
+                          and kv_cache_dtype == "auto")
             FlashInferBackend.cached_use_trtllm = use_trtllm
             if use_trtllm:
-                logger.info_once("Using TRTLLM decode attention (auto-detected).")
+                logger.info_once(
+                    "Using TRTLLM decode attention (auto-detected).")
         return FlashInferBackend.cached_use_trtllm
+
 
 @dataclass
 class PerLayerParameters:
@@ -383,7 +387,7 @@ class FlashInferState(AttentionState):
         return {
             "block_tables": attn_metadata.block_tables,
             "seq_lens_tensor": attn_metadata.seq_lens_tensor,
-            "slot_mapping": attn_metadata.slot_mapping,            
+            "slot_mapping": attn_metadata.slot_mapping,
         }
 
     def prepare_graph_input_buffers(self,
@@ -397,7 +401,7 @@ class FlashInferState(AttentionState):
         input_buffers["seq_lens_tensor"][:num_total_blocks].copy_(
             attn_metadata.seq_lens_tensor, non_blocking=True)
         input_buffers["block_tables"][:num_total_blocks].copy_(
-            attn_metadata.block_tables, non_blocking=True) 
+            attn_metadata.block_tables, non_blocking=True)
 
     def begin_forward(self, model_input):
         assert not self._is_graph_capturing
@@ -1127,11 +1131,10 @@ class FlashInferImpl(AttentionImpl):
             assert decode_meta.decode_wrapper._logits_soft_cap == (
                 logits_soft_cap or 0.0)
             assert decode_meta.decode_wrapper._sm_scale == softmax_scale
-            # TODO: @pavanimajety Remove this once the switch happens inside flashinfer.
+            # TODO: @pavanimajety Remove this once the switch happens
+            # inside flashinfer.
             if not FlashInferBackend.use_trtllm_decode_attention(
-                    num_decode_tokens,
-                    attn_metadata.max_decode_seq_len
-                ):
+                    num_decode_tokens, attn_metadata.max_decode_seq_len):
                 decode_output = decode_meta.decode_wrapper.run(
                     decode_query,
                     kv_cache.permute(*stride_order),
@@ -1139,21 +1142,14 @@ class FlashInferImpl(AttentionImpl):
                     v_scale=layer._v_scale_float,
                 )
             else:
-                workspace_buffer = decode_meta.decode_wrapper._int_workspace_buffer
+                workspace_buffer = (
+                    decode_meta.decode_wrapper._int_workspace_buffer)
                 decode_output = trtllm_batch_decode_with_kv_cache(
-                    decode_query.contiguous(),
-                    kv_cache.permute(*stride_order),
-                    workspace_buffer,
-                    num_heads,
-                    num_kv_heads,
-                    softmax_scale,
-                    attn_metadata.block_tables,
-                    decode_meta.seq_lens_tensor,
-                    attn_metadata.page_size,
-                    attn_metadata.max_decode_seq_len,
-                    kv_cache_dtype,
-                    layer._k_scale_float,
-                    layer._v_scale_float)
+                    decode_query.contiguous(), kv_cache.permute(*stride_order),
+                    workspace_buffer, num_heads, num_kv_heads, softmax_scale,
+                    attn_metadata.block_tables, decode_meta.seq_lens_tensor,
+                    attn_metadata.page_size, attn_metadata.max_decode_seq_len,
+                    kv_cache_dtype, layer._k_scale_float, layer._v_scale_float)
 
         if prefill_output is None and decode_output is not None:
             # Decode only batch.
@@ -1171,4 +1167,3 @@ class FlashInferImpl(AttentionImpl):
             decode_output = decode_output.squeeze(1)
             output = torch.cat([prefill_output, decode_output], dim=0)
         return output.view(num_tokens, hidden_size)
-

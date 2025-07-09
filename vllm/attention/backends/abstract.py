@@ -84,11 +84,6 @@ class AttentionBackend(ABC):
 
     @staticmethod
     @abstractmethod
-    def get_kv_cache_stride_order() -> Tuple[int, ...]:
-        raise NotImplementedError
-
-    @staticmethod
-    @abstractmethod
     def swap_blocks(
         src_kv_cache: torch.Tensor,
         dst_kv_cache: torch.Tensor,

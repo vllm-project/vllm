@@ -96,29 +96,35 @@ class FlashInferBackend(AttentionBackend):
         return stride_order
 
     @staticmethod
-    def use_trtllm_decode_attention(batch_size: int, max_seq_len: int) -> bool:
+    def use_trtllm_decode_attention(batch_size: int,
+                                    max_seq_len: int,
+                                    kv_cache_dtype: str = "auto") -> bool:
         # Check if environment variable is explicitly set
         if FlashInferBackend.cached_use_trtllm is not None:
             return FlashInferBackend.cached_use_trtllm
         env_value = envs.VLLM_USE_TRTLLM_DECODE_ATTENTION
         if env_value is not None:
-            logger.info_once("VLLM_USE_TRTLLM_DECODE_ATTENTION is set to %s", env_value)
+            logger.info_once("VLLM_USE_TRTLLM_DECODE_ATTENTION is set to %s",
+                             env_value)
             # Environment variable is set - respect it
             no_use_trtllm = env_value == "0"
             if not no_use_trtllm:
-                logger.info_once("VLLM_USE_TRTLLM_DECODE_ATTENTION is set to 1, "
-                               "using TRTLLM decode attention.")
+                logger.info_once(
+                    "VLLM_USE_TRTLLM_DECODE_ATTENTION is set to 1, "
+                    "using TRTLLM decode attention.")
             FlashInferBackend.cached_use_trtllm = not no_use_trtllm
         else:
-        # Environment variable not set - use auto-detection
-            use_trtllm = (is_sm100a_supported(torch.device("cuda")) and 
-                           batch_size <= 256 and 
-                           max_seq_len < 131072)
+            # Environment variable not set - use auto-detection
+            use_trtllm = (is_sm100a_supported(torch.device("cuda"))
+                          and batch_size <= 256 and max_seq_len < 131072
+                          and kv_cache_dtype == "auto")
             FlashInferBackend.cached_use_trtllm = use_trtllm
             if use_trtllm:
-                logger.info_once("Using TRTLLM decode attention (auto-detected).")
+                logger.info_once(
+                    "Using TRTLLM decode attention (auto-detected).")
         return FlashInferBackend.cached_use_trtllm
-   
+
+
 @dataclass
 class PerLayerParameters:
     """
@@ -221,8 +227,8 @@ class FlashInferMetadata:
     q_data_type: torch.dtype
 
     slot_mapping: torch.Tensor
-    
-    # For flashinfer trtllm batch decode 
+
+    # For flashinfer trtllm batch decode
     max_seq_len: int
     seq_lens: torch.Tensor
     block_table_tensor: torch.Tensor
@@ -435,13 +441,12 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             if self._num_decodes > 0:
                 attn_metadata.decode_wrapper = self._get_decode_wrapper()
                 if not FlashInferBackend.use_trtllm_decode_attention(
-                    self._num_decodes,
-                    attn_metadata.max_seq_len
-                ):
+                        self._num_decodes, attn_metadata.max_seq_len):
                     attn_metadata.decode_wrapper.plan(
                         attn_metadata.paged_kv_indptr[:self._num_decodes + 1],
                         attn_metadata.paged_kv_indices,
-                        attn_metadata.paged_kv_last_page_len[:self._num_decodes],
+                        attn_metadata.paged_kv_last_page_len[:self.
+                                                             _num_decodes],
                         attn_metadata.num_qo_heads,
                         attn_metadata.num_kv_heads,
                         attn_metadata.head_dim,
@@ -455,7 +460,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         q_data_type=attn_metadata.q_data_type,
                         kv_data_type=attn_metadata.kv_data_type,
                     )
-
 
     def build(self, common_prefix_len: int,
               common_attn_metadata: CommonAttentionMetadata):
@@ -618,10 +622,12 @@ class FlashInferImpl(AttentionImpl):
         Args:
             query: shape = [num_tokens, num_heads, head_size]
             key: shape = [num_tokens, num_kv_heads, head_size]
-            value: shape = [num_tokens, num_kv_heads, head_size] 
-            kv_cache = [num_blocks, 2, block_size, num_kv_heads, head_size] #NHD
-            kv_cache = [num_blocks, 2,  num_kv_heads, block_size, head_size] #HND
+            value: shape = [num_tokens, num_kv_heads, head_size]
+            kv_cache: shape - 
+            # NHD: [num_blocks, 2, block_size, num_kv_heads, head_size]
+            # HND: [num_blocks, 2,  num_kv_heads, block_size, head_size]
             
+
             attn_metadata: Metadata for attention.
         Returns:
             shape = [num_tokens, num_heads * head_size]
@@ -708,39 +714,39 @@ class FlashInferImpl(AttentionImpl):
             decode_query = query[:num_decode_tokens]
             assert decode_query.shape[0] == num_decode_tokens
             if not FlashInferBackend.use_trtllm_decode_attention(
-                attn_metadata.num_decodes,
-                attn_metadata.max_seq_len
-            ):
+                    attn_metadata.num_decodes, attn_metadata.max_seq_len):
                 assert decode_wrapper is not None
                 assert decode_wrapper._window_left == window_left
                 assert decode_wrapper._logits_soft_cap == (self.logits_soft_cap
                                                            or 0.0)
                 assert decode_wrapper._sm_scale == self.scale
                 decode_wrapper.run(
-                   decode_query,
-                   kv_cache.permute(*stride_order),
-                   k_scale=layer._k_scale_float,
-                   v_scale=layer._v_scale_float,
-                   out=output[:num_decode_tokens],
+                    decode_query,
+                    kv_cache.permute(*stride_order),
+                    k_scale=layer._k_scale_float,
+                    v_scale=layer._v_scale_float,
+                    out=output[:num_decode_tokens],
                 )
             else:
-                # This path needs to be enabled with 
-                # VLLM_USE_TRTLLM_DECODE_ATTENTION = 1 and VLLM_KV_CACHE_LAYOUT = HND
+                # This path needs to be enabled with VLLM_KV_CACHE_LAYOUT = HND
                 if num_decode_tokens > 0:
                     contiguous_query = decode_query.contiguous()
-                    output[:num_decode_tokens] = trtllm_batch_decode_with_kv_cache(
-                        query=contiguous_query,
-                        kv_cache=kv_cache.permute(*stride_order),
-                        workspace_buffer=attn_metadata.workspace_buffer,
-                        num_heads=self.num_heads,
-                        num_kv_heads=self.num_kv_heads,
-                        scale=self.scale,
-                        block_tables=attn_metadata.block_table_tensor[:num_decode_tokens],
-                        seq_lens=attn_metadata.seq_lens[:num_decode_tokens],
-                        block_size=attn_metadata.page_size,
-                        max_seq_len=attn_metadata.max_seq_len,
-                        kv_cache_dtype=self.kv_cache_dtype,
-                        k_scale=layer._k_scale_float,
-                        v_scale=layer._v_scale_float,
-                    )
+                    output[:num_decode_tokens] = (
+                        trtllm_batch_decode_with_kv_cache(
+                            query=contiguous_query,
+                            kv_cache=kv_cache.permute(*stride_order),
+                            workspace_buffer=attn_metadata.workspace_buffer,
+                            num_heads=self.num_heads,
+                            num_kv_heads=self.num_kv_heads,
+                            scale=self.scale,
+                            block_tables=attn_metadata.
+                            block_table_tensor[:num_decode_tokens],
+                            seq_lens=attn_metadata.
+                            seq_lens[:num_decode_tokens],
+                            block_size=attn_metadata.page_size,
+                            max_seq_len=attn_metadata.max_seq_len,
+                            kv_cache_dtype=self.kv_cache_dtype,
+                            k_scale=layer._k_scale_float,
+                            v_scale=layer._v_scale_float,
+                        ))
         return output_padded

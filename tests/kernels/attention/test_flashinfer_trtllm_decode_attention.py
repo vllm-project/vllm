@@ -1,34 +1,31 @@
-from ast import Num
-import math
-import time
-import random
-import torch
-import flashinfer
-import pytest
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 import csv
 import os
+import random
 from datetime import datetime
-import nvtx
-
 from typing import Optional
-from vllm.utils import get_max_shared_memory_bytes
-from vllm.platforms import current_platform
 
+import flashinfer
+import pytest
+import torch
+
+from vllm.platforms import current_platform
 
 FLOAT32_BYTES = torch.finfo(torch.float).bits // 8
 
-# KV Cache Layout for TRT-LLM 
+# KV Cache Layout for TRT-LLM
 # kv_cache_shape = (num_blocks, 2, num_kv_heads, page_size, head_dim)
 
-# Only supports num_query_heads / num_kv_heads == 1 or num_query_heads / num_kv_heads == 8
-# NUM_HEADS = [(64, 8), (16,16)]
-NUM_HEADS = [(64, 8)]
-# HEAD_SIZES = [128, 256]
-HEAD_SIZES = [128]
+# Only supports - num_query_heads / num_kv_heads == 8 atm
+NUM_HEADS = [(64, 8), (16, 16)]
+HEAD_SIZES = [128, 256]
 BLOCK_SIZES = [16, 32]
 DTYPES = [torch.float16, torch.bfloat16]
 NUM_BLOCKS = 32768  # Large enough to test overflow in index calculation.
 SOFT_CAPS = [None, 30.0, 50.0]
+
 
 def to_float8(x, dtype=torch.float8_e4m3fn):
     finfo = torch.finfo(dtype)
@@ -38,41 +35,55 @@ def to_float8(x, dtype=torch.float8_e4m3fn):
     x_scl_sat = (x * scale).clamp(min=finfo.min, max=finfo.max)
     return x_scl_sat.to(dtype), scale.float().reciprocal()
 
+
 @torch.no_grad()
-def benchmark_decode(num_seqs, max_seq_len, page_size=16, dtype=torch.bfloat16,
-                     kv_layout="HND", num_kv_heads=8, kv_cache_dtype="auto",
-                     head_dim=128, warmup=10, trials=20):
-    
+def benchmark_decode(num_seqs,
+                     max_seq_len,
+                     page_size=16,
+                     dtype=torch.bfloat16,
+                     kv_layout="HND",
+                     num_kv_heads=8,
+                     kv_cache_dtype="auto",
+                     head_dim=128,
+                     warmup=10,
+                     trials=20):
+
     torch.set_default_device("cuda")
     device = "cuda"
     torch.manual_seed(0)
-    
+
     # Currently only HEAD_GRP_SIZE == 8 is supported
     HEAD_GRP_SIZE = 8
     MAX_SEQ_LEN = max_seq_len
-    
+
     # large number to reduce kv_cache reuse
-    NUM_BLOCKS =  int(256000 / page_size) 
-    
-    workspace_buffer = torch.empty(1024 * 1024 * 1024, dtype=torch.int8, device=device)
-   
+    NUM_BLOCKS = int(256000 / page_size)
+
+    workspace_buffer = torch.empty(1024 * 1024 * 1024,
+                                   dtype=torch.int8,
+                                   device=device)
+
     # For decode, batch_size is num_decode_token
     num_qo_heads = num_kv_heads * HEAD_GRP_SIZE
-    sm_scale  = float(1.0 / (head_dim**0.5))
-    q = torch.randn(num_seqs, num_qo_heads, head_dim, device=device, dtype=dtype)
-    kv_lens= [random.randint(1, MAX_SEQ_LEN) for _ in range(num_seqs)]
-    
+    sm_scale = float(1.0 / (head_dim**0.5))
+    q = torch.randn(num_seqs,
+                    num_qo_heads,
+                    head_dim,
+                    device=device,
+                    dtype=dtype)
+    kv_lens = [random.randint(1, MAX_SEQ_LEN) for _ in range(num_seqs)]
+
     max_kv_len = max(kv_lens)
     kv_lens_tensor = torch.tensor(kv_lens, dtype=torch.int, device=device)
     max_num_blocks_per_seq = (max_kv_len + page_size - 1) // page_size
-    
+
     block_tables = torch.randint(0,
                                  NUM_BLOCKS,
                                  (num_seqs, max_num_blocks_per_seq),
                                  dtype=torch.int32)
-   
+
     kv_cache_shape = (NUM_BLOCKS, 2, num_kv_heads, page_size, head_dim)
-    kv_cache = torch.randn(size=kv_cache_shape, device=device,dtype=dtype)
+    kv_cache = torch.randn(size=kv_cache_shape, device=device, dtype=dtype)
     k_scale = v_scale = 1.0
 
     if kv_cache_dtype.startswith("fp8"):
@@ -81,27 +92,28 @@ def benchmark_decode(num_seqs, max_seq_len, page_size=16, dtype=torch.bfloat16,
     # Benchmark TRT decode
     def trt_decode():
         return flashinfer.decode.trtllm_batch_decode_with_kv_cache(
-                q,
-                kv_cache,
-                workspace_buffer,
-                num_qo_heads,
-                num_kv_heads,
-                sm_scale,
-                block_tables,
-                kv_lens_tensor,
-                page_size,
-                max_kv_len,
-                kv_cache_dtype,
-                k_scale,
-                v_scale,
-            )
-        
+            q,
+            kv_cache,
+            workspace_buffer,
+            num_qo_heads,
+            num_kv_heads,
+            sm_scale,
+            block_tables,
+            kv_lens_tensor,
+            page_size,
+            max_kv_len,
+            kv_cache_dtype,
+            k_scale,
+            v_scale,
+        )
+
     def time_fn(fn, warmup=10, trials=20):
         torch.cuda.synchronize()
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
         times = []
-        for i in range(warmup): fn()
+        for i in range(warmup):
+            fn()
         for i in range(trials):
             start.record()
             fn()
@@ -111,10 +123,8 @@ def benchmark_decode(num_seqs, max_seq_len, page_size=16, dtype=torch.bfloat16,
         return sum(times) / len(times), torch.std(torch.tensor(times))
 
     # TRT Decode
-    output_trt = trt_decode()
     trt_mean, trt_std = time_fn(trt_decode)
-    
-    
+
     kv_indptr = [0]
     kv_indices = []
     kv_last_page_lens = []
@@ -148,19 +158,22 @@ def benchmark_decode(num_seqs, max_seq_len, page_size=16, dtype=torch.bfloat16,
                  page_size,
                  "NONE",
                  q_data_type=dtype,
-                 kv_data_type=torch.float8_e4m3fn if kv_cache_dtype.startswith("fp8") else dtype)
+                 kv_data_type=torch.float8_e4m3fn
+                 if kv_cache_dtype.startswith("fp8") else dtype)
 
     def baseline_decode():
         return wrapper.run(q, kv_cache, sm_scale, k_scale, v_scale)
-    output =  baseline_decode()
-    torch.cuda.synchronize()
+
     baseline_mean, baseline_std = time_fn(baseline_decode)
-    
+
     # Calculate percentage speedup (positive means TRT is faster)
     speedup_percent = ((baseline_mean - trt_mean) / baseline_mean)
-    
-    print(f"\t{num_seqs}\t{max_seq_len}\t{trt_mean:.3f}\t{trt_std.item():.3f}\t{baseline_mean:.3f}\t{baseline_std.item():.3f}\t{speedup_percent:.3f}")
-    
+
+    print(
+        f"\t{num_seqs}\t{max_seq_len}\t{trt_mean:.3f}\t{trt_std.item():.3f}"
+        f"\t{baseline_mean:.3f}\t{baseline_std.item():.3f}\t{speedup_percent:.3f}"
+    )
+
     # Return results for CSV writing
     return {
         'num_seqs': num_seqs,
@@ -177,13 +190,14 @@ def benchmark_decode(num_seqs, max_seq_len, page_size=16, dtype=torch.bfloat16,
         'max_seq_len': max_seq_len,
     }
 
+
 @pytest.mark.parametrize("kv_lens", [[1328, 18, 463], [1, 54, 293, 70]])
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
 @pytest.mark.parametrize("kv_layout", ["HND"])
 @pytest.mark.parametrize("dtype", DTYPES)
-@pytest.mark.parametrize("soft_cap", SOFT_CAPS) 
+@pytest.mark.parametrize("soft_cap", SOFT_CAPS)
 @torch.inference_mode
 def test_flashinfer_trtllm_decode_with_baseline(
     kv_lens: list[int],
@@ -199,7 +213,9 @@ def test_flashinfer_trtllm_decode_with_baseline(
     num_seqs = len(kv_lens)
     num_query_heads = num_heads[0]
     num_kv_heads = num_heads[1]
-    assert (num_query_heads / num_kv_heads == 8) or (num_query_heads / num_kv_heads == 1) or (num_query_heads / num_kv_heads == 5)
+    assert (num_query_heads / num_kv_heads
+            == 8) or (num_query_heads / num_kv_heads
+                      == 1) or (num_query_heads / num_kv_heads == 5)
     assert num_query_heads % num_kv_heads == 0
     max_kv_len = max(kv_lens)
     scale = head_size**-0.5
@@ -207,22 +223,12 @@ def test_flashinfer_trtllm_decode_with_baseline(
     query = torch.randn(num_seqs, num_query_heads, head_size, dtype=dtype)
     kv_cache_shape = None
     if kv_layout == "NHD":
-        kv_cache_shape = (NUM_BLOCKS,
-                          2,
-                          block_size,
-                          num_kv_heads,
-                          head_size)
+        kv_cache_shape = (NUM_BLOCKS, 2, block_size, num_kv_heads, head_size)
     elif kv_layout == "HND":
-        kv_cache_shape = (NUM_BLOCKS,
-                          2,
-                          num_kv_heads,
-                          block_size,
-                          head_size)
+        kv_cache_shape = (NUM_BLOCKS, 2, num_kv_heads, block_size, head_size)
     else:
         raise ValueError(f"Invalid kv_layout: {kv_layout}")
     key_value_cache = torch.randn(kv_cache_shape, dtype=dtype)
-    key_cache = key_value_cache[:, 0, :, :, :].squeeze(1)
-    value_cache = key_value_cache[:, 1, :, :, :].squeeze(1)
 
     max_num_blocks_per_seq = (max_kv_len + block_size - 1) // block_size
     block_tables = torch.randint(0,
@@ -270,23 +276,25 @@ def test_flashinfer_trtllm_decode_with_baseline(
 
     # TRTLLM Decode
     max_kv_len = max(kv_lens)
-    kv_lens_tensor = torch.tensor(kv_lens, dtype=torch.int, device=query.device)
+    kv_lens_tensor = torch.tensor(kv_lens,
+                                  dtype=torch.int,
+                                  device=query.device)
     output_trtllm = flashinfer.decode.trtllm_batch_decode_with_kv_cache(
-                query.contiguous(),
-                key_value_cache,
-                workspace_buffer,
-                num_query_heads,
-                num_kv_heads,
-                scale,
-                block_tables,
-                kv_lens_tensor,
-                block_size,
-                max_kv_len,
-                "auto",
-                k_scale,
-                v_scale,
-            )
-    
+        query.contiguous(),
+        key_value_cache,
+        workspace_buffer,
+        num_query_heads,
+        num_kv_heads,
+        scale,
+        block_tables,
+        kv_lens_tensor,
+        block_size,
+        max_kv_len,
+        "auto",
+        k_scale,
+        v_scale,
+    )
+
     torch.testing.assert_close(output, output_trtllm, atol=1e-2, rtol=1e-2), \
         f"{torch.max(torch.abs(output - output_trtllm))}"
 
@@ -296,45 +304,55 @@ def write_results_to_csv(results, filename=None):
     if filename is None:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"flashinfer_trtllm_benchmark_{timestamp}.csv"
-    
+
     fieldnames = [
-        'num_seqs', 'trt_mean', 'trt_std', 'baseline_mean', 'baseline_std', 
-        'speedup_percent', 'q_dtype', 'kv_cache_dtype', 'page_size', 
+        'num_seqs', 'trt_mean', 'trt_std', 'baseline_mean', 'baseline_std',
+        'speedup_percent', 'q_dtype', 'kv_cache_dtype', 'page_size',
         'num_kv_heads', 'head_dim', 'max_seq_len'
     ]
-    
+
     file_exists = os.path.exists(filename)
-    
+
     with open(filename, 'a', newline='') as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-        
+
         if not file_exists:
             writer.writeheader()
-        
+
         for result in results:
             writer.writerow(result)
-    
+
     print(f"Results written to {filename}")
 
 
 if __name__ == "__main__":
     num_seqs = [1, 4, 8, 16, 32, 64, 128, 256]
-    max_seq_lens =  [1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072]
+    max_seq_lens = [1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072]
     all_results = []
-    
-    print(f"Running benchmark for kv_cache_dtype: bfloat16")
-    print("\tnum_seqs\tmax_seq_len\ttrt_mean\ttrt_std\tbaseline_mean\tbaseline_std\tspeedup_percent")
+
+    print("Running benchmark for kv_cache_dtype: bfloat16")
+    print(
+        "\tnum_seqs\tmax_seq_len\ttrt_mean\ttrt_std\tbaseline_mean\tbaseline_std\tspeedup_percent"
+    )
     for max_seq_len in max_seq_lens:
         for bs in num_seqs:
-            result = benchmark_decode(bs, max_seq_len, dtype=torch.bfloat16, kv_cache_dtype="auto")
+            result = benchmark_decode(bs,
+                                      max_seq_len,
+                                      dtype=torch.bfloat16,
+                                      kv_cache_dtype="auto")
             all_results.append(result)
-    
-    print(f"Running benchmark for q_dtype = bfloat16, kv_cache_dtype: fp8")
-    print("\tnum_seqs\tmax_seq_len\ttrt_mean\ttrt_std\tbaseline_mean\tbaseline_std\tspeedup_percent")
+
+    print("Running benchmark for q_dtype = bfloat16, kv_cache_dtype: fp8")
+    print(
+        "\tnum_seqs\tmax_seq_len\ttrt_mean\ttrt_std\tbaseline_mean\tbaseline_std\tspeedup_percent"
+    )
     for max_seq_len in max_seq_lens:
         for bs in num_seqs:
-            result = benchmark_decode(bs, max_seq_len, dtype=torch.bfloat16, kv_cache_dtype="fp8")
+            result = benchmark_decode(bs,
+                                      max_seq_len,
+                                      dtype=torch.bfloat16,
+                                      kv_cache_dtype="fp8")
             all_results.append(result)
-    
+
     # Write all results to CSV
     write_results_to_csv(all_results)
