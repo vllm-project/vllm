@@ -187,9 +187,11 @@ class MLPSpeculator(nn.Module):
             # TODO: not yet supporting top_k_tokens_per_head
             states = states.flatten(0, 1)
 
-            logits = self.logits_processor(
-                self.head[head_index], states, sampling_metadata
-                if self.sampling_metadata_is_required else None)
+            if self.logits_processor:
+                logits = self.logits_processor(self.head[head_index], states,
+                                               sampling_metadata)
+            else:
+                logits = self.head[head_index](states)
 
             output = self.sampler(logits, sampling_metadata)
             last_tokens = output.sampled_token_ids
