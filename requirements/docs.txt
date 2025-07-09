@@ -15,6 +15,7 @@ cachetools
 pybase64
 pillow
 msgspec
+zmq
 transformers
 -f https://download.pytorch.org/whl/cpu
 torch
