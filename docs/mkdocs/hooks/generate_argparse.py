@@ -8,7 +8,6 @@ from typing import Literal
 from unittest.mock import MagicMock
 
 ROOT_DIR = Path(__file__).parent.parent.parent.parent
-ROOT_DIR_RELATIVE = '../../../../..'
 ARGPARSE_DOC_DIR = ROOT_DIR / "docs/argparse"
 
 sys.path.insert(0, str(ROOT_DIR))
