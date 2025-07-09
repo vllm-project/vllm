@@ -8,7 +8,6 @@ import json
 import logging
 import pickle
 import socket
-from argparse import BooleanOptionalAction
 from collections.abc import AsyncIterator
 from unittest.mock import patch
 
@@ -22,13 +21,13 @@ from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.transformers_utils.detokenizer_utils import (
     convert_ids_list_to_tokens)
 from vllm.utils import (CacheInfo, FlexibleArgumentParser, LRUCache,
-                        MemorySnapshot, PlaceholderModule, bind_kv_cache,
-                        common_broadcastable_dtype, deprecate_kwargs,
-                        get_open_port, get_tcp_uri, is_lossless_cast,
-                        join_host_port, make_zmq_path, make_zmq_socket,
-                        memory_profiling, merge_async_iterators, sha256,
-                        split_host_port, split_zmq_path, supports_kw,
-                        swap_dict_values)
+                        MemorySnapshot, PlaceholderModule, StoreBoolean,
+                        bind_kv_cache, common_broadcastable_dtype,
+                        deprecate_kwargs, get_open_port, get_tcp_uri,
+                        is_lossless_cast, join_host_port, make_zmq_path,
+                        make_zmq_socket, memory_profiling,
+                        merge_async_iterators, sha256, split_host_port,
+                        split_zmq_path, supports_kw, swap_dict_values)
 
 from .utils import create_new_process_for_each_test, error_on_warning
 
@@ -163,8 +162,7 @@ def parser_with_config():
     parser.add_argument('--port', type=int)
     parser.add_argument('--tensor-parallel-size', type=int)
     parser.add_argument('--trust-remote-code', action='store_true')
-    parser.add_argument('--multi-step-stream-outputs',
-                        action=BooleanOptionalAction)
+    parser.add_argument('--multi-step-stream-outputs', action=StoreBoolean)
     return parser
 
 
