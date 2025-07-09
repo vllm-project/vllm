@@ -175,7 +175,7 @@ endif()
 # Set nvcc fatbin compression.
 #
 if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.8 AND VLLM_GPU_LANG STREQUAL "CUDA")
-  list(APPEND VLLM_GPU_FLAGS "-Xfatbin -compress-all -compress-mode=size")
+  list(APPEND VLLM_GPU_FLAGS "-Xfatbin" "-compress-all" "-compress-mode=size")
 endif()
 
 
