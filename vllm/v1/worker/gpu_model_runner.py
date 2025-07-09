@@ -2219,8 +2219,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             encoder_budget = min(self.max_num_encoder_input_tokens,
                                  self.encoder_cache_size)
 
-            max_num_mm_items_encoder_budget = cdiv(encoder_budget,
-                                                   max_tokens_per_mm_item)
+            max_num_mm_items_encoder_budget = encoder_budget // \
+                max_tokens_per_mm_item
 
             # Check how many items of this modality can be supported by
             # the decoder budget.
@@ -2233,8 +2233,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             max_num_mm_items_decoder_budget = self.max_num_reqs * \
                 max_mm_items_per_req
 
-            max_num_mm_items = min(max_num_mm_items_encoder_budget,
-                                   max_num_mm_items_decoder_budget)
+            max_num_mm_items = max(
+                1,
+                min(max_num_mm_items_encoder_budget,
+                    max_num_mm_items_decoder_budget))
 
             logger.info(
                 "Encoder cache will be initialized with a budget of %s tokens,"
@@ -2244,7 +2246,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Create dummy batch of multimodal inputs.
             dummy_mm_kwargs = self.mm_registry.get_decoder_dummy_data(
                 model_config=self.model_config,
-                seq_len=self.max_num_tokens,
+                seq_len=max_tokens_per_mm_item,
                 mm_counts={
                     dummy_data_modality: 1
                 },
