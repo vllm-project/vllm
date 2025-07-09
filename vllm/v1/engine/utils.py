@@ -221,7 +221,7 @@ class CoreEngineActorManager:
             dp_vllm_config = copy.deepcopy(vllm_config)
             pg = placement_groups[index]
             dp_vllm_config.parallel_config.placement_group = pg
-            on_head_node = index < local_engine_count
+            local_client = index < local_engine_count
             actor = ray.remote(DPEngineCoreActor).options(
                 scheduling_strategy=PlacementGroupSchedulingStrategy(
                     placement_group=pg,
@@ -230,15 +230,15 @@ class CoreEngineActorManager:
                 runtime_env=runtime_env).remote(vllm_config=dp_vllm_config,
                                                 executor_class=executor_class,
                                                 log_stats=log_stats,
-                                                on_head_node=on_head_node,
+                                                local_client=local_client,
                                                 addresses=addresses,
                                                 dp_rank=index,
                                                 local_dp_rank=local_index)
-            if on_head_node:
+            if local_client:
                 self.local_engine_actors.append(actor)
             else:
                 self.remote_engine_actors.append(actor)
-            self.placement_group_is_local.append(on_head_node)
+            self.placement_group_is_local.append(local_client)
             refs.append(actor.wait_for_init.remote())
 
         ray.get(refs)
@@ -435,11 +435,11 @@ class CoreEngineActorManager:
             dp_vllm_config.parallel_config.placement_group = pg
 
             # Check if this placement group is on the head node
-            on_head_node = any(
+            local_client = any(
                 bundle.get("node:" + dp_master_ip, 0) > 0
                 for bundle in pg.bundle_specs)
 
-            if on_head_node:
+            if local_client:
                 new_local_engines += 1
                 # Update data_parallel_size_local
                 dp_vllm_config.parallel_config.data_parallel_size_local = (
@@ -455,17 +455,17 @@ class CoreEngineActorManager:
                     vllm_config=dp_vllm_config,
                     executor_class=self.executor_class,
                     log_stats=self.log_stats,
-                    on_head_node=on_head_node,
+                    local_client=local_client,
                     addresses=self.addresses,
                     dp_rank=rank,
                     local_dp_rank=local_rank)
 
-            if on_head_node:
+            if local_client:
                 self.local_engine_actors.append(actor)
             else:
                 self.remote_engine_actors.append(actor)
             self.created_placement_groups.append(pg)
-            self.placement_group_is_local.append(on_head_node)
+            self.placement_group_is_local.append(local_client)
 
         ray.get([
             actor.wait_for_init.remote()

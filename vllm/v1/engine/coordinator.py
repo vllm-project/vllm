@@ -223,14 +223,12 @@ class CoordinatorProc:
                             self.engines_running = False
                             logger.info(
                                 "DPCoordinator scaled up from %s to %s "
-                                "engines",
-                                current_count, new_engine_count)
+                                "engines", current_count, new_engine_count)
                         else:
                             self.engines = self.engines[:new_engine_count]
                             logger.info(
                                 "DPCoordinator scaled down from %s to %s "
-                                "engines",
-                                current_count, new_engine_count)
+                                "engines", current_count, new_engine_count)
                         continue  # Skip normal engine notification processing
 
                     # We received a message on the front-end XPUB socket,

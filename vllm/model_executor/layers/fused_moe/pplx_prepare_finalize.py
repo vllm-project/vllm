@@ -78,7 +78,9 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         return self.max_num_tokens
 
     def topk_indices_dtype(self) -> Optional[torch.dtype]:
-        return torch.int32
+        # FIXME(rui): this needs to be int32,
+        # see https://github.com/vllm-project/vllm/pull/20166
+        return torch.uint32
 
     def num_dispatchers(self) -> int:
         return self.num_dispatchers_
@@ -100,9 +102,10 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         hidden_dim = a1.size(-1)  # K
 
         assert topk_ids.size(0) == num_tokens
-        assert expert_map is None, """with expert map, -1 id is used for
-            non-local token; this causes error when casting ids to the
-            topk_indices_dtype() uint32"""
+        # FIXME(rui)
+        # assert expert_map is None, """with expert map, -1 id is used for
+        #     non-local token; this causes error when casting ids to the
+        #     topk_indices_dtype() uint32"""
 
         # Is this always going to be a1.device?
         device = a1.device

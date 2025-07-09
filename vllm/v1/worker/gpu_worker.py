@@ -372,6 +372,7 @@ class Worker(WorkerBase):
                 old_ep_rank: old_ep_rank if old_ep_rank < new_ep_size else -1
                 for old_ep_rank in range(old_ep_size)
             }
+            assert self.model_runner.eplb_state is not None
             self.model_runner.eplb_state.rearrange(self.model_runner.model,
                                                    execute_shuffle=True,
                                                    global_expert_load=None,
@@ -427,6 +428,7 @@ class Worker(WorkerBase):
             module.moe_config.moe_parallel_config = module.moe_parallel_config
         if new_ep_size < old_ep_size:
             num_local_physical_experts = num_local_experts
+            assert self.model_runner.eplb_state is not None
             new_physical_experts = \
                 self.model_runner.eplb_state.physical_to_logical_map.shape[1]
             parallel_config.num_redundant_experts = (
@@ -441,6 +443,7 @@ class Worker(WorkerBase):
                                         group_src=0)
             num_local_physical_experts = num_local_physical_experts.item()
             new_physical_experts = num_local_physical_experts * new_ep_size
+            assert self.model_runner.eplb_state is not None
             global_expert_load = self.model_runner.eplb_state.rearrange(
                 self.model_runner.model, execute_shuffle=False)
             parallel_config.num_redundant_experts = (
@@ -457,6 +460,7 @@ class Worker(WorkerBase):
                 old_ep_rank: old_ep_rank
                 for old_ep_rank in range(old_ep_size)
             }
+            assert self.model_runner.eplb_state is not None
             self.model_runner.eplb_state.rearrange(
                 self.model_runner.model,
                 execute_shuffle=True,
@@ -464,7 +468,6 @@ class Worker(WorkerBase):
                 rank_mapping=rank_mapping)
             if get_ep_group().rank == 0:
                 logger.info("[Elastic EP] Expert resharding completed!")
-        self.model_runner.eplb_state.expert_rearrangement_step = 0
 
     def save_sharded_state(
         self,

@@ -146,8 +146,7 @@ class EngineCore:
         if os.environ.get("VLLM_EEP_RECONFIGURE_LAUNCH") == "1":
             dp_group = getattr(self, "dp_group", None)
             assert dp_group is not None
-            kv_cache_memory = ParallelConfig.sync_kv_cache_memory(
-                dp_group, -1)
+            kv_cache_memory = ParallelConfig.sync_kv_cache_memory(dp_group, -1)
             available_gpu_memory = [kv_cache_memory] * len(kv_cache_specs)
         else:
             # Profiles the peak memory usage of the model to determine how much

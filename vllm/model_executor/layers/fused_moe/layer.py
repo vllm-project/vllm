@@ -223,7 +223,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     def __init__(self, moe: FusedMoEConfig):
         super().__init__()
         self.fused_experts = fused_experts  # type: ignore
-        self.topk_indices_dtype = None
+        self.topk_indices_dtype = torch.uint32
         self.moe = moe
 
         self.rocm_aiter_moe_enabled = is_rocm_aiter_moe_enabled()

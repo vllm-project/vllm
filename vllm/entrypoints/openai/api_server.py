@@ -1080,16 +1080,16 @@ async def scale(raw_request: Request):
         await client.scale(new_data_parallel_size, drain_timeout)
         return JSONResponse({
             "message":
-            f"Scaled up to {new_data_parallel_size} "
+            f"Scaled to {new_data_parallel_size} "
             "data parallel engines",
         })
     except TimeoutError as e:
-        raise HTTPException(
-            status_code=408,
-            detail="Scale up failed due to request drain timeout "
-            f"after {drain_timeout} seconds") from e
+        raise HTTPException(status_code=408,
+                            detail="Scale failed due to request drain timeout "
+                            f"after {drain_timeout} seconds") from e
     except Exception as e:
-        raise HTTPException(status_code=500, detail="Scale up failed") from e
+        logger.error("Scale failed: %s", e)
+        raise HTTPException(status_code=500, detail="Scale failed") from e
     finally:
         raw_request.app.state.scaling = False
 

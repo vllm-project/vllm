@@ -28,7 +28,7 @@ from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
 from vllm.v1.engine.coordinator import DPCoordinator
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
 from vllm.v1.engine.exceptions import EngineDeadError
-from vllm.v1.engine.utils import (CoreEngine, CoreEngineActorManager,
+from vllm.v1.engine.utils import (CoreEngineActorManager,
                                   CoreEngineProcManager, EngineZmqAddresses,
                                   launch_core_engines)
 from vllm.v1.executor.abstract import Executor
@@ -94,6 +94,8 @@ class EngineCoreClient(ABC):
                 # External load balancer - client per DP rank.
                 return DPAsyncMPClient(*client_args)
             # Internal load balancer - client balances to all DP ranks.
+            if parallel_config.data_parallel_backend == "ray":
+                return RayDPClient(*client_args)
             return DPLBAsyncMPClient(*client_args)
         return AsyncMPClient(*client_args)
 
@@ -1115,7 +1117,7 @@ class RayDPClient(DPAsyncMPClient):
 
     async def _send_reconfig_message(
             self, reconfig_request: ReconfigureDistributedRequest,
-            engine: CoreEngine) -> asyncio.Future:
+            engine: EngineIdentity) -> asyncio.Future:
         """Send reconfiguration message and return the result future without
         waiting for completion."""
         call_id = uuid.uuid1().int >> 64
@@ -1160,17 +1162,17 @@ class RayDPClient(DPAsyncMPClient):
         # Phase 2: Create new engines now that reconfig messages have been sent
         # self.resources.engine_manager is guaranteed to be
         # CoreEngineActorManager for RayDPClient
-        assert isinstance(self.resources.engine_manager, CoreEngineActorManager)
+        assert isinstance(self.resources.engine_manager,
+                          CoreEngineActorManager)
         self.resources.engine_manager.scale_up(self.vllm_config,
                                                new_data_parallel_size)
 
         # Create new CoreEngine objects for the new engines
         new_engine_identities = set()
         for i in range(current_dp_size, new_data_parallel_size):
-            # TODO(yongji): check if the engine is local
-            new_engine = CoreEngine(index=i, local=False)
+            new_engine = i.to_bytes(2, "little")
             self.core_engines.append(new_engine)
-            new_engine_identities.add(new_engine.identity)
+            new_engine_identities.add(new_engine)
 
         # Wait for ready messages from new engines on the input socket
         sync_input_socket = zmq.Socket.shadow(self.input_socket)
@@ -1233,7 +1235,8 @@ class RayDPClient(DPAsyncMPClient):
 
         await asyncio.gather(*reconfig_futures)
 
-        assert isinstance(self.resources.engine_manager, CoreEngineActorManager)
+        assert isinstance(self.resources.engine_manager,
+                          CoreEngineActorManager)
         self.resources.engine_manager.scale_down(current_dp_size,
                                                  new_data_parallel_size)
 
