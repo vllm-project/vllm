@@ -905,6 +905,7 @@ class AsyncLLMEngine(EngineClient):
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
         data_parallel_rank: Optional[int] = None,
+        arrival_time: Optional[float] = None,
     ) -> AsyncGenerator[RequestOutput, None]:
         """Generate outputs for a request.
 
@@ -926,6 +927,7 @@ class AsyncLLMEngine(EngineClient):
                 Only applicable with priority scheduling.
             data_parallel_rank: The (global) data parallel rank that must
                 handle this request. Only applicable if DP is enabled.
+            arrival_time: The arrival time for the request
         Yields:
             The output `RequestOutput` objects from the LLMEngine
             for the request.
@@ -986,6 +988,7 @@ class AsyncLLMEngine(EngineClient):
                     prompt_adapter_request=prompt_adapter_request,
                     priority=priority,
                     data_parallel_rank=data_parallel_rank,
+                    arrival_time=arrival_time,
             ):
                 output = LLMEngine.validate_output(output, RequestOutput)
                 if buffer is None:
