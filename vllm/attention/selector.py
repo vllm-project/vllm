@@ -106,6 +106,36 @@ def supports_head_size(
                               "head size validation")
 
 
+def get_selected_backend() -> Optional[_Backend]:
+    """
+    Determine which attention backend to use based on global settings
+    and environment variables.
+
+    Returns:
+        The selected backend enum value, or None if no override is specified.
+
+    Note:
+        Global forced backend setting takes precedence over environment variable.
+    """
+    # Check whether a particular choice of backend was
+    # previously forced.
+    #
+    # THIS SELECTION OVERRIDES THE VLLM_ATTENTION_BACKEND
+    # ENVIRONMENT VARIABLE.
+    selected_backend = None
+    backend_by_global_setting: Optional[
+        _Backend] = get_global_forced_attn_backend()
+    if backend_by_global_setting is not None:
+        selected_backend = backend_by_global_setting
+    else:
+        # Check the environment variable and override if specified
+        backend_by_env_var: Optional[str] = envs.VLLM_ATTENTION_BACKEND
+        if backend_by_env_var is not None:
+            selected_backend = backend_name_to_enum(backend_by_env_var)
+
+    return selected_backend
+
+
 def get_attn_backend(
     head_size: int,
     dtype: torch.dtype,
@@ -156,21 +186,8 @@ def _cached_get_attn_backend(
             PlaceholderAttentionBackend)
         return PlaceholderAttentionBackend
 
-    # Check whether a particular choice of backend was
-    # previously forced.
-    #
-    # THIS SELECTION OVERRIDES THE VLLM_ATTENTION_BACKEND
-    # ENVIRONMENT VARIABLE.
-    selected_backend = None
-    backend_by_global_setting: Optional[_Backend] = (
-        get_global_forced_attn_backend())
-    if backend_by_global_setting is not None:
-        selected_backend = backend_by_global_setting
-    else:
-        # Check the environment variable and override if specified
-        backend_by_env_var: Optional[str] = envs.VLLM_ATTENTION_BACKEND
-        if backend_by_env_var is not None:
-            selected_backend = backend_name_to_enum(backend_by_env_var)
+    # Get the selected backend using extracted function
+    selected_backend = get_selected_backend()
 
     # get device-specific attn_backend
     attention_cls = current_platform.get_attn_backend_cls(

@@ -621,6 +621,10 @@ def get_requirements() -> list[str]:
                 continue
             modified_requirements.append(req)
         requirements = modified_requirements
+        # Add direct dependency on TKE project for CUDA builds
+        requirements.append(
+            "trtllm-kernel-export @ git+ssh://git@gitlab.com/nvidia/tensorrt-llm/private/tensorrt-llm-kernel-export.git@api_improvements"
+        )
     elif _is_hip():
         requirements = _read_requirements("rocm.txt")
     elif _is_neuron():
@@ -693,7 +697,10 @@ setup(
         "fastsafetensors": ["fastsafetensors >= 0.1.10"],
         "runai": ["runai-model-streamer", "runai-model-streamer-s3", "boto3"],
         "audio": ["librosa", "soundfile"],  # Required for audio processing
-        "video": []  # Kept for backwards compatibility
+        "video": [],  # Kept for backwards compatibility
+        "tke": [
+            "trtllm-kernel-export @ git+ssh://git@gitlab.com/nvidia/tensorrt-llm/private/tensorrt-llm-kernel-export.git@api_improvements"
+        ],  # TKE project for CUDA builds
     },
     cmdclass=cmdclass,
     package_data=package_data,

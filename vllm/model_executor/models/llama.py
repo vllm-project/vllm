@@ -31,6 +31,8 @@ from torch import nn
 from transformers import LlamaConfig
 
 from vllm.attention import Attention, AttentionType
+from vllm.attention.layer import InputLayout
+from vllm.attention.selector import get_selected_backend
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
@@ -163,10 +165,6 @@ class LlamaAttention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
 
-        self._init_rotary_emb(config,
-                              rope_scaling=rope_scaling,
-                              quant_config=quant_config)
-
         if hasattr(config, "interleaved_sliding_window"):
             interleaved_sliding_window = config.interleaved_sliding_window
             if isinstance(interleaved_sliding_window, int):
@@ -180,6 +178,19 @@ class LlamaAttention(nn.Module):
         else:
             sliding_window = None
 
+        # TODO: there should be a better approach to solve this problem.
+        selected_backend = get_selected_backend()
+        if selected_backend == _Backend.TKE:
+            self.input_layout = InputLayout.CONTIGUOUS_QKV
+            self.backend_applies_rotary_embedding = True
+        else:
+            self.input_layout = InputLayout.SPLIT_QKV
+            self.backend_applies_rotary_embedding = False
+
+        if not self.backend_applies_rotary_embedding:
+            self._init_rotary_emb(config,
+                                  rope_scaling=rope_scaling,
+                                  quant_config=quant_config)
         self.attn = Attention(
             self.num_heads,
             self.head_dim,
@@ -190,6 +201,7 @@ class LlamaAttention(nn.Module):
             per_layer_sliding_window=sliding_window,
             attn_type=attn_type,
             prefix=f"{prefix}.attn",
+            input_layout=self.input_layout,
         )
 
     def forward(
@@ -198,15 +210,27 @@ class LlamaAttention(nn.Module):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
-        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v)
+        match (self.input_layout, self.backend_applies_rotary_embedding):
+            case (InputLayout.SPLIT_QKV, False):
+                q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size],
+                                    dim=-1)
+                q, k = self.rotary_emb(positions, q, k)
+                attn_output = self.attn(q, k, v)
+            case (InputLayout.CONTIGUOUS_QKV, True):
+                attn_output = self.attn(qkv, None, None)
+            case _:
+                raise ValueError(
+                    f"Invalid attention specifications: input_layout={self.input_layout}, backend_applies_rotary_embedding={self.backend_applies_rotary_embedding}"
+                )
         output, _ = self.o_proj(attn_output)
         return output
 
-    def _init_rotary_emb(self, config: LlamaConfig,
-                         rope_scaling: Optional[dict[str, Any]],
-                         quant_config: Optional[QuantizationConfig]) -> None:
+    def _init_rotary_emb(
+        self,
+        config: LlamaConfig,
+        rope_scaling: Optional[dict[str, Any]],
+        quant_config: Optional[QuantizationConfig],
+    ) -> None:
         is_neox_style = True
         is_gguf = quant_config and quant_config.get_name() == "gguf"
         if is_gguf and config.model_type == "llama":

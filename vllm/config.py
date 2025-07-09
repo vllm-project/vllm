@@ -1469,7 +1469,23 @@ class ModelConfig:
             sliding_window_len=self.get_hf_config_sliding_window(),
             spec_target_max_model_len=self.spec_target_max_model_len,
             encoder_config=self.encoder_config)
-        logger.info("Using max model len %s", max_model_len)
+
+        # FIXME: It seems that without this change, the model will always be limited by the tokenizer's model_max_length.
+        # This is not what we want?
+        tokenizer_config = try_get_tokenizer_config(
+            self.tokenizer,
+            trust_remote_code=self.trust_remote_code,
+            revision=self.tokenizer_revision)
+
+        if tokenizer_config is None:
+            return max_model_len
+
+        model_max_length = tokenizer_config.get("model_max_length",
+                                                max_model_len)
+        # Only use tokenizer's model_max_length if user didn't explicitly set max_model_len
+        if self.original_max_model_len is None:
+            max_model_len = min(max_model_len, model_max_length)
+        # Otherwise, respect the user's explicit setting
         return max_model_len
 
 
