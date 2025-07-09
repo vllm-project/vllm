@@ -839,7 +839,7 @@ class ModelConfig:
             for task in _RUNNER_TASKS[runner_type]
         ]
         supported_tasks = set(supported_tasks_lst)
-
+        # TODO here
         if task_option == "auto":
             selected_task = next(iter(supported_tasks_lst))
 
@@ -4975,21 +4975,19 @@ class SpeechToTextConfig:
     max_audio_clip_s: int = 30
     """Maximum duration in seconds for a single audio clip without chunking.
     Audio longer than this will be split into smaller chunks if
-    `allow_audio_chunking` is enabled, otherwise it will be rejected."""
-
-    allow_audio_chunking: bool = True
-    """Whether to allow splitting long audio files into smaller chunks.
-    When True, audio longer than `max_audio_clip_s` will be automatically
-    split with overlapping segments. When False, long audio will be rejected.
-    """
+    `allow_audio_chunking` evaluates to True, otherwise it will be rejected."""
 
     overlap_chunk_second: int = 1
     """Overlap duration in seconds between consecutive audio chunks when
     splitting long audio. This helps maintain context across chunk boundaries
     and improves transcription quality at split points."""
 
-    min_energy_split_window_size: int = 1600
+    min_energy_split_window_size: Optional[int] = 1600
     """Window size in samples for finding low-energy (quiet) regions to split
     audio chunks. The algorithm looks for the quietest moment within this
     window to minimize cutting through speech. Default 1600 samples ≈ 100ms
-    at 16kHz."""
+    at 16kHz. If None, no chunking will be done."""
+
+    @property
+    def allow_audio_chunking(self) -> bool:
+        return self.min_energy_split_window_size is not None

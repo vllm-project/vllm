@@ -814,7 +814,7 @@ class WhisperForConditionalGeneration(nn.Module, SupportsTranscription,
 
         return SpeechToTextConfig(
             max_audio_clip_s=processor.feature_extractor.chunk_length,
-            model_sr=processor.feature_extractor.sampling_rate,
+            sample_rate=processor.feature_extractor.sampling_rate,
             hop_length=processor.feature_extractor.hop_length,
         )
 
