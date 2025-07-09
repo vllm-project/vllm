@@ -76,6 +76,13 @@ class CpuPlatform(Platform):
         return psutil.virtual_memory().total
 
     @classmethod
+    def set_device(cls, device: torch.device) -> None:
+        """
+        Set the device for the current platform.
+        """
+        torch.cpu.set_device(device)
+
+    @classmethod
     def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
         return False
 

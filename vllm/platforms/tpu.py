@@ -56,6 +56,13 @@ class TpuPlatform(Platform):
         return "vllm.v1.attention.backends.pallas.PallasAttentionBackend"
 
     @classmethod
+    def set_device(cls, device: torch.device) -> None:
+        """
+        Set the device for the current platform.
+        """
+        torch.tpu.set_device(device)
+
+    @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
         chip_type, _ = device.get_local_chips()
         return f"TPU {chip_type.name}"
