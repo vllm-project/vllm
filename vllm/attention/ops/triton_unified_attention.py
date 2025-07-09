@@ -256,14 +256,14 @@ def kernel_unified_attention_2d(
         # alpha : (BLOCK_Q * num_queries_per_kv, )
         alpha = tl.exp(M - m_j)
 
-        # acc : (BLOCK_Q * num_queries_per_kv, BLOCK_N,)
+        # acc : (BLOCK_Q * num_queries_per_kv, HEAD_SIZE_PADDED,)
         acc = acc * alpha[:, None]
 
         # update constants
         L = L * alpha + l_j
         M = m_j
 
-        # acc : (BLOCK_Q * num_queries_per_kv, BLOCK_N,)
+        # acc : (BLOCK_Q * num_queries_per_kv, HEAD_SIZE_PADDED,)
         acc += tl.dot(P.to(V.dtype), V)
 
     # epilogue
