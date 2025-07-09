@@ -554,7 +554,6 @@ class ChameleonVQVAEEncoderResnetBlock(nn.Module):
                                         num_channels=out_channels,
                                         eps=1e-6,
                                         affine=True)
-        self.dropout = torch.nn.Dropout(config.dropout)
         self.conv2 = torch.nn.Conv2d(out_channels,
                                      out_channels,
                                      kernel_size=3,
@@ -582,7 +581,6 @@ class ChameleonVQVAEEncoderResnetBlock(nn.Module):
 
         hidden_states = self.norm2(hidden_states)
         hidden_states *= torch.sigmoid(hidden_states)
-        hidden_states = self.dropout(hidden_states)
         hidden_states = self.conv2(hidden_states)
 
         if self.in_channels != self.out_channels:

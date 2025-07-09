@@ -94,8 +94,6 @@ class Blip2QFormerMultiHeadAttention(nn.Module):
             raise NotImplementedError("Unsupported position_embedding_type: "
                                       f"{self.position_embedding_type}")
 
-        self.dropout = nn.Dropout(config.attention_probs_dropout_prob)
-
     def transpose_for_scores(self, x):
         x = x.view(*x.size()[:-1], self.num_attention_heads,
                    self.attention_head_size)
@@ -126,11 +124,7 @@ class Blip2QFormerMultiHeadAttention(nn.Module):
         attention_probs = torch.softmax(attention_scores * self.scaling,
                                         dim=-1)
 
-        # This is actually dropping out entire tokens to attend to, which might
-        # seem a bit unusual, but is taken from the original Transformer paper.
-        attention_probs_dropped = self.dropout(attention_probs)
-
-        context_layer = torch.matmul(attention_probs_dropped, value_layer)
+        context_layer = torch.matmul(attention_probs, value_layer)
 
         context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
         context_layer = context_layer.view(*context_layer.size()[:-2],
@@ -147,7 +141,6 @@ class Blip2QFormerSelfOutput(nn.Module):
         self.dense = nn.Linear(config.hidden_size, config.hidden_size)
         self.LayerNorm = nn.LayerNorm(config.hidden_size,
                                       eps=config.layer_norm_eps)
-        self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
     def forward(
         self,
@@ -155,7 +148,6 @@ class Blip2QFormerSelfOutput(nn.Module):
         input_tensor: torch.Tensor,
     ) -> torch.Tensor:
         hidden_states = self.dense(hidden_states)
-        hidden_states = self.dropout(hidden_states)
         hidden_states = self.LayerNorm(hidden_states + input_tensor)
         return hidden_states
 
@@ -219,7 +211,6 @@ class Blip2QFormerOutput(nn.Module):
         self.dense = nn.Linear(config.intermediate_size, config.hidden_size)
         self.LayerNorm = nn.LayerNorm(config.hidden_size,
                                       eps=config.layer_norm_eps)
-        self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
     def forward(
         self,
@@ -227,7 +218,6 @@ class Blip2QFormerOutput(nn.Module):
         input_tensor: torch.Tensor,
     ) -> torch.Tensor:
         hidden_states = self.dense(hidden_states)
-        hidden_states = self.dropout(hidden_states)
         hidden_states = self.LayerNorm(hidden_states + input_tensor)
         return hidden_states
 
@@ -384,7 +374,6 @@ class Blip2QFormerModel(nn.Module):
 
         self.layernorm = nn.LayerNorm(config.hidden_size,
                                       eps=config.layer_norm_eps)
-        self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
         self.encoder = Blip2QFormerEncoder(config,
                                            quant_config=quant_config,
@@ -399,7 +388,6 @@ class Blip2QFormerModel(nn.Module):
         query_length = query_embeds.shape[1]
 
         embedding_output = self.layernorm(query_embeds)
-        embedding_output = self.dropout(embedding_output)
 
         sequence_output = self.encoder(
             embedding_output,

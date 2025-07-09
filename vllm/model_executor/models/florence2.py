@@ -89,7 +89,6 @@ class PositionalEmbeddingCosine1D(nn.Module):
     https://pytorch.org/tutorials/beginner/translation_transformer.html
     Args:
         embed_dim: The dimension of the embeddings.
-        dropout_prob: The dropout probability.
         max_seq_len: The maximum length to precompute the positional encodings.
     """
 
