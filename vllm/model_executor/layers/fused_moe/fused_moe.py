@@ -30,7 +30,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils import direct_register_custom_op
-from vllm.utils.deep_gemm import is_new_deep_gemm_api_on_b200
+from vllm.utils.deep_gemm import is_blackwell_deep_gemm
 
 from .rocm_aiter_fused_moe import is_rocm_aiter_moe_enabled
 
@@ -1163,7 +1163,7 @@ def fused_experts(
     N = w1.size(1)
     should_use_deep_gemm = ((N > 512
                              and _valid_deep_gemm(hidden_states, w1, w2))
-                            or is_new_deep_gemm_api_on_b200())
+                            or is_blackwell_deep_gemm())
     if (allow_deep_gemm and use_fp8_w8a8 and should_use_deep_gemm):
         assert apply_router_weight_on_input is False
         return deep_gemm_moe_fp8(
