@@ -301,7 +301,6 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         default=False,
         help="Enable the /tokenizer_info endpoint. May expose chat "
         "templates and other tokenizer configuration.")
-
     return parser
 
 

@@ -1546,6 +1546,7 @@ async def run_server_worker(listen_address,
     async with build_async_engine_client(args, client_config) as engine_client:
         maybe_register_tokenizer_info_endpoint(args)
         app = build_app(args)
+
         vllm_config = await engine_client.get_vllm_config()
         await init_app_state(engine_client, vllm_config, app.state, args)
 
