@@ -305,7 +305,7 @@ class Platform:
         """
         Set the device for the current platform.
         """
-        torch.cuda.set_device(device)
+        raise NotImplementedError
 
     @classmethod
     def pre_register_and_update(cls,
