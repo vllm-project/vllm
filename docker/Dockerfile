@@ -387,30 +387,26 @@ RUN --mount=type=cache,target=/root/.cache/uv bash - <<'BASH'
       if [[ "$CUDA_VERSION" == 12.8* ]]; then
           uv pip install --system ${FLASHINFER_CUDA128_INDEX_URL}/${FLASHINFER_CUDA128_WHEEL}
       else
-          export TORCH_CUDA_ARCH_LIST='7.5 8.0 8.9 9.0a 10.0a 12.0'
-          git clone ${FLASHINFER_GIT_REPO} --single-branch --branch ${FLASHINFER_GIT_REF} --recursive
-          # Needed to build AOT kernels
-          (cd flashinfer && \
-              python3 -m flashinfer.aot && \
-              uv pip install --system --no-build-isolation . \
-          )
-          rm -rf flashinfer
-
-          # Default arches (skipping 10.0a and 12.0 since these need 12.8)
+          # Exclude CUDA arches for older versions (11.x and 12.0-12.7)
           # TODO: Update this to allow setting TORCH_CUDA_ARCH_LIST as a build arg.
-          TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9 9.0a"
           if [[ "${CUDA_VERSION}" == 11.* ]]; then
-              TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9"
+              FI_TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9"
+          elif [[ "${CUDA_VERSION}" == 12.[0-7]* ]]; then
+              FI_TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9 9.0a"
+          else
+              # CUDA 12.8+ supports 10.0a and 12.0
+              FI_TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9 9.0a 10.0a 12.0"
           fi
-          echo "🏗️  Building FlashInfer for arches: ${TORCH_CUDA_ARCH_LIST}"
+          echo "🏗️  Building FlashInfer for arches: ${FI_TORCH_CUDA_ARCH_LIST}"
 
           git clone --depth 1 --recursive --shallow-submodules \
-            --branch v0.2.6.post1 \
-            https://github.com/flashinfer-ai/flashinfer.git flashinfer
+            --branch ${FLASHINFER_GIT_REF} \
+            ${FLASHINFER_GIT_REPO} flashinfer
 
+          # Needed to build AOT kernels
           pushd flashinfer
             python3 -m flashinfer.aot
-            TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST}" \
+            TORCH_CUDA_ARCH_LIST="${FI_TORCH_CUDA_ARCH_LIST}" \
               uv pip install --system --no-build-isolation .
           popd
 
