@@ -34,11 +34,11 @@ to point to the new releases for `torch`, `torchvision`, and `torchaudio`.
 
 2. Use the following option to get the final release candidates' wheels. Some common platforms are `cpu`, `cu128`, and `rocm6.2.4`.
 
-```bash
---extra-index-url https://download.pytorch.org/whl/test/<PLATFORM>
-```
+    ```bash
+    --extra-index-url https://download.pytorch.org/whl/test/<PLATFORM>
+    ```
 
-1. Since vLLM uses `uv`, ensure the following index strategy is applied:
+3. Since vLLM uses `uv`, ensure the following index strategy is applied:
 
     - Via environment variable:
 
@@ -67,13 +67,14 @@ This complicates the process as we cannot use the out-of-the-box
 - To install a non-default CUDA version of PyTorch:
 
 ```bash
+# e.g. CUDA 12.8
 pip install torch torchvision torchaudio \
     --extra-index-url https://download.pytorch.org/whl/cu128
 ```
 
 - Other important indexes at the moment include:
 
-| Platform | Extra Index URL |
+| Platform | `--extra-index-url` |
 |----------|-----------------|
 | CPU      | [https://download.pytorch.org/whl/cpu](https://download.pytorch.org/whl/cpu)|
 | ROCm 6.2 | [https://download.pytorch.org/whl/rocm6.2.4](https://download.pytorch.org/whl/rocm6.2.4) |
