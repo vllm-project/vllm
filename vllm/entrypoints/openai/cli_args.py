@@ -233,10 +233,8 @@ schema. Example: ``[{"type": "text", "text": "Hello world!"}]``"""
             },
             # Special case: Middleware needs append action
             "middleware": {
-                "type": optional_type(str),
                 "action": "append",
-                "default": [],
-                "help": frontend_kwargs["middleware"]["help"]
+                **frontend_kwargs["middleware"],
             },
             # Special case: Tool call parser needs custom metavar
             "tool_call_parser": {
