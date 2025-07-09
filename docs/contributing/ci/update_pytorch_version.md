@@ -21,7 +21,7 @@ For example, `torch2.7.0+cu12.8` RC can be installed using the following command
 
 ```bash
 uv pip install torch torchvision torchaudio \
---index-url https://download.pytorch.org/whl/test/cu128
+    --index-url https://download.pytorch.org/whl/test/cu128
 ```
 
 When the final RC is ready for testing, it will be announced to the community
@@ -68,14 +68,14 @@ This complicates the process as we cannot use the out-of-the-box
 
 ```bash
 pip install torch torchvision torchaudio \
---extra-index-url https://download.pytorch.org/whl/cu128
+    --extra-index-url https://download.pytorch.org/whl/cu128
 ```
 
 - Other important indexes at the moment include:
 
 | Platform | Extra Index URL |
 |----------|-----------------|
-| CPU      | [https://download.pytorch.org/whl/cpu](https://download.pytorch.org/whl/cpu )|
+| CPU      | [https://download.pytorch.org/whl/cpu](https://download.pytorch.org/whl/cpu)|
 | ROCm 6.2 | [https://download.pytorch.org/whl/rocm6.2.4](https://download.pytorch.org/whl/rocm6.2.4) |
 | ROCm 6.3 | [https://download.pytorch.org/whl/rocm6.3](https://download.pytorch.org/whl/rocm6.3) |
 | XPU      | [https://download.pytorch.org/whl/xpu](https://download.pytorch.org/whl/xpu) |
@@ -119,7 +119,7 @@ Here is how to build and install it from source with `torch2.7.0+cu128` in vLLM 
 export TORCH_CUDA_ARCH_LIST='7.5 8.0 8.9 9.0 10.0+PTX'
 export FLASHINFER_ENABLE_SM90=1
 uv pip install --system \
---no-build-isolation "git+https://github.com/flashinfer-ai/flashinfer@v0.2.6.post1"
+    --no-build-isolation "git+https://github.com/flashinfer-ai/flashinfer@v0.2.6.post1"
 ```
 
 One caveat is that building FlashInfer from source adds approximately 30
@@ -133,14 +133,14 @@ Similar to FlashInfer, here is how to build and install xFormers from source:
 ```bash
 export TORCH_CUDA_ARCH_LIST='7.0 7.5 8.0 8.9 9.0 10.0+PTX'
 MAX_JOBS=16 uv pip install --system \
---no-build-isolation "git+https://github.com/facebookresearch/xformers@v0.0.30"
+    --no-build-isolation "git+https://github.com/facebookresearch/xformers@v0.0.30"
 ```
 
 ### Mamba
 
 ```bash
 uv pip install --system \
---no-build-isolation "git+https://github.com/state-spaces/mamba@v2.2.4"
+    --no-build-isolation "git+https://github.com/state-spaces/mamba@v2.2.4"
 ```
 
 ### causal-conv1d
