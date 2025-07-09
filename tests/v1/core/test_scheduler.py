@@ -138,6 +138,7 @@ def create_requests(num_requests: int,
         request = Request(
             request_id=f"{i}",
             prompt_token_ids=[i] * num_tokens,
+            token_type_ids=None,
             sampling_params=sampling_params,
             pooling_params=None,
             multi_modal_inputs=mm_inputs,
@@ -1398,6 +1399,7 @@ def create_requests_with_priority(
         request = Request(
             request_id=f"{i}",
             prompt_token_ids=[i] * num_tokens,
+            token_type_ids=None,
             sampling_params=sampling_params,
             pooling_params=None,
             multi_modal_inputs=mm_inputs,
@@ -1884,6 +1886,7 @@ def test_schedule_skip_tokenizer_init_structured_output_request():
     request = Request(
         request_id="0",
         prompt_token_ids=[0, 1],
+        token_type_ids=None,
         multi_modal_inputs=None,
         multi_modal_hashes=None,
         multi_modal_placeholders=None,

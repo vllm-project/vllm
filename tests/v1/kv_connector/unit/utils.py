@@ -149,6 +149,7 @@ def create_request(
     req = Request(
         request_id=f"id-{request_id}",
         prompt_token_ids=prompt_token_ids,
+        token_type_ids=None,
         sampling_params=sampling_params,
         pooling_params=None,
         multi_modal_inputs=None,
