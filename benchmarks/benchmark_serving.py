@@ -825,6 +825,7 @@ def main(args: argparse.Namespace):
             dataset_subset=args.hf_subset,
             dataset_split=args.hf_split,
             random_seed=args.seed,
+            no_stream=args.no_stream,
         ).sample(
             num_requests=args.num_prompts,
             tokenizer=tokenizer,
@@ -1032,6 +1033,11 @@ def create_argument_parser():
         default=None,
         help="Path to the sharegpt/sonnet dataset. "
         "Or the huggingface dataset ID if using HF dataset.",
+    )
+    parser.add_argument(
+        "--no-stream",
+        action="store_true",
+        help="Do not load the dataset in streaming mode.",
     )
     parser.add_argument(
         "--max-concurrency",
