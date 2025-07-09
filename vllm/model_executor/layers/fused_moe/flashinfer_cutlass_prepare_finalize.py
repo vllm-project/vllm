@@ -4,7 +4,6 @@ from typing import Optional
 import vllm.envs as envs
 
 import torch
-from flashinfer import fp4_swizzle_blockscale
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -90,6 +89,7 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                                            dim=0,
                                            sizes=get_local_sizes(local_tokens))
             a1_m, a1_n = a1q.shape
+            from flashinfer import fp4_swizzle_blockscale
             a1q_scale = fp4_swizzle_blockscale(a1q_scale, a1_m, a1_n * 2)
 
         return a1q, a1q_scale, None, topk_ids, topk_weights
@@ -105,7 +105,7 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         local_tokens: int = -1,
     ) -> None:
         if use_dp:
-            fused_expert_output = get_dp_group().reduce_scatter(
+            fused_expert_output = get_dp_group().reduce_scatterv(
                 fused_expert_output,
                 dim=0,
                 sizes=get_local_sizes(local_tokens),

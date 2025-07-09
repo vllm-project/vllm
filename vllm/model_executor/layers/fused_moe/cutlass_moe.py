@@ -414,7 +414,7 @@ def run_cutlass_moe_fp4(
     k: int,
     e: int,
     device: torch.device,
-):
+) -> None:
     """
     MoE implementation for FP4 Inputs
     
@@ -572,6 +572,9 @@ class CutlassExpertsFp4(mk.FusedMoEPermuteExpertsUnpermute):
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
         # Workspace1: for c1, Workspace2: for intermediate, Output: for final output
         workspace1 = a.shape
+        # workspace 2 remains empty because run_cutlass_moe_fp4 allocates the 
+        # intermediate tensor there.
+        # # workspace 1 is allocated to store the output.
         workspace2 = ()
         output = a.shape
         return (workspace1, workspace2, output, self.out_dtype)

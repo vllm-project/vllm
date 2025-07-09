@@ -33,7 +33,7 @@ from vllm.model_executor.parameter import (ModelWeightParameter,
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
-    FlashInferExperts)
+    FlashInferExperts, _valid_flashinfer_fused_moe)
 from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (
     FlashInferCutlassMoEPrepareAndFinalize)
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -832,8 +832,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
    
         if self.allow_flashinfer_cutlass:
             # TP or DP case
-            # import pdb
-            # pdb.set_trace()
+            assert _valid_flashinfer_fused_moe(
+                x, layer.w13_weight, layer.w2_weight), ("Flashinfer CUTLASS Fused MoE not applicable!") 
             extra_expert_args = {
               'topk_weights': None, #placeholder topk_weights,
               'g1_alphas': layer.g1_alphas,

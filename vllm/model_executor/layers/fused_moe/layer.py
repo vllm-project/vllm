@@ -1448,6 +1448,7 @@ class FusedMoE(torch.nn.Module):
         assert self.quant_method is not None
         # Route to the chunked forward path using the FlashInfer Cutlass kernel 
         # only when data parallelism (DP) is enabled.
+        # TODO(shuw): Make TP calling also chunked.
         use_flashinfer_cutlass_kernels = self.dp_size > 1 and self.moe_parallel_config.use_flashinfer_cutlass_kernels
         if (self.moe_parallel_config.use_pplx_kernels
                 or self.moe_parallel_config.use_deepep_ll_kernels or

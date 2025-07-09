@@ -164,6 +164,7 @@ class NCCLLibrary:
             buffer_type, buffer_type, ctypes.c_size_t, ncclDataType_t,
             ncclRedOp_t, ctypes.c_int, ncclComm_t, cudaStream_t
         ]),
+
         # ncclResult_t  ncclAllGather(
         #   const void* sendbuff, void* recvbuff, size_t count,
         #   ncclDataType_t datatype, ncclComm_t comm,

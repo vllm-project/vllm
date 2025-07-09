@@ -25,13 +25,12 @@ except ImportError:
 
 has_flashinfer_cutlass_fused_moe = flashinfer_cutlass_fused_moe is not None
 
-#TODO(shuw): use this check
+
 def _valid_flashinfer_fused_moe(hidden_states: torch.Tensor, w1: torch.Tensor,
                                 w2: torch.Tensor) -> bool:
     """
-    Check if the given problem size is supported by the DeepGemm grouped
-    gemm kernel.  All of M, N, K and the quantization block_shape must be
-    aligned by `dg.get_m_alignment_for_contiguous_layout()`.
+    Check if the given problem size is supported by the FlashInfer CUTLASS MoE 
+    kernel.
     """
     if not has_flashinfer_cutlass_fused_moe:
         logger.debug(
@@ -110,16 +109,17 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         - Note: in order for activation chunking to work, the first dimension
           of each tuple must be the number of tokens.
         """
-        if self.use_nvfp4_w4a4:
-            aq_m, aq_n = aq.shape
-            workspace2 = ()
-            output_shape = (aq_m, aq_n * 2)
-            workspace_dtype = a.dtype
-            workspace1 = output_shape
-            # determined by aq, since aq is the one after possible communication op and participate in experts computation.
-            return (workspace1, workspace2, output_shape, workspace_dtype)
-        else:
-            raise ValueError("Only nvfp4 quantization is currently supported.")
+        assert self.use_nvfp4_w4a4 is True, ("Only nvfp4 quantization is "
+                                             "currently supported.")    
+        aq_m, aq_n = aq.shape
+        workspace2 = ()
+        output_shape = (aq_m, aq_n * 2)
+        workspace_dtype = a.dtype
+        workspace1 = output_shape
+        # The workspace is determined by `aq`, since it comes after any 
+        # potential communication op and is involved in the expert computation.
+        return (workspace1, workspace2, output_shape, workspace_dtype)
+
 
     def apply(
         self,
@@ -148,30 +148,29 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
     ):
         # Flashinfer CUTLASS kernel takes scalar global scales,
         # min because inv_scale.
-        if self.use_nvfp4_w4a4:
-            quant_scales = [
-                a1_scale,
-                w1_scale.view(torch.int32),
-                g1_alphas,
-                a2_scale,
-                w2_scale.view(torch.int32),
-                g2_alphas,
-            ]
-            _ = flashinfer_cutlass_fused_moe(
-                hidden_states,
-                topk_ids.to(torch.int),
-                topk_weights,
-                # FlashInfer API requires weight to be long for nvfp4
-                w1.view(torch.long),
-                w2.view(torch.long),
-                output_dtype=out_dtype,
-                quant_scales=quant_scales,
-                input_sf=a1q_scale,
-                tp_size=self.tp_size,
-                tp_rank=self.tp_rank,
-                ep_size=self.ep_size,
-                ep_rank=self.ep_rank,
-                output=output,
-            )
-        else:
-            raise ValueError("Only nvfp4 quantization is currently supported.")
+        assert self.use_nvfp4_w4a4 is True, ("Only nvfp4 quantization is "
+                                             "currently supported.")
+        quant_scales = [
+            a1_scale,
+            w1_scale.view(torch.int32),
+            g1_alphas,
+            a2_scale,
+            w2_scale.view(torch.int32),
+            g2_alphas,
+        ]
+        _ = flashinfer_cutlass_fused_moe(
+            hidden_states,
+            topk_ids.to(torch.int),
+            topk_weights,
+            # FlashInfer API requires weight to be long for nvfp4
+            w1.view(torch.long),
+            w2.view(torch.long),
+            output_dtype=out_dtype,
+            quant_scales=quant_scales,
+            input_sf=a1q_scale,
+            tp_size=self.tp_size,
+            tp_rank=self.tp_rank,
+            ep_size=self.ep_size,
+            ep_rank=self.ep_rank,
+            output=output,
+        )

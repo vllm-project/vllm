@@ -408,6 +408,12 @@ class GroupCoordinator:
         else:
             return self._reduce_scatter_out_place(input_, dim, sizes)
 
+    def reduce_scatterv(self,
+                        input_: torch.Tensor,
+                        dim: int = -1,
+                        sizes: Optional[list[int]] = None) -> torch.Tensor:
+        return self.device_communicator.reduce_scatterv(input_, dim, sizes)
+
     def _reduce_scatter_out_place(
             self,
             input_: torch.Tensor,
