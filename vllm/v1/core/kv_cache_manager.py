@@ -291,7 +291,8 @@ class KVCacheManager:
         # generated (accepted) tokens.
         self.coordinator.cache_blocks(
             request, self.req_to_block_hashes[request.request_id],
-            num_computed_tokens + num_new_tokens - num_draft_tokens)
+            num_computed_tokens + num_new_tokens - num_draft_tokens -
+            request.num_output_placeholders)
 
         return KVCacheBlocks(new_blocks)
 
