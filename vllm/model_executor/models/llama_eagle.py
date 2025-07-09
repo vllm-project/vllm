@@ -117,9 +117,8 @@ class LlamaModel(nn.Module):
             if name in speculators_name_map:
                 name = speculators_name_map[name]
             elif name.startswith("transformer."):
-                # transformer.* -> model.layers.0.*
-                suffix = name[len("transformer."):]
-                name = f"model.layers.0.{suffix}"
+                # Skip transformer weights - they're loaded separately
+                continue
             
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
