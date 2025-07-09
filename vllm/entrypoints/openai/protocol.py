@@ -731,9 +731,11 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 "items": {
                     "type": "object",
                     "anyOf": [get_tool_schema(tool) for tool in self.tools]
-                },
-                "$defs": get_tool_schema_defs(self.tools)
+                }
             }
+            json_schema_defs = get_tool_schema_defs(self.tools)
+            if json_schema_defs:
+                json_schema["$defs"] = json_schema_defs
             return json_schema
 
         return None

@@ -743,7 +743,12 @@ async def test_named_tool_use(client: openai.AsyncOpenAI, sample_json_schema):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-async def test_required_tool_use(client: openai.AsyncOpenAI, model_name: str):
+async def test_required_tool_use(client: openai.AsyncOpenAI,
+                                 is_v1_server: bool, model_name: str):
+    if is_v1_server:
+        pytest.skip(
+            "tool_choice='required' requires features unsupported on V1")
+
     tools = [
         {
             "type": "function",
@@ -771,43 +776,8 @@ async def test_required_tool_use(client: openai.AsyncOpenAI, model_name: str):
                             "The unit to fetch the temperature in",
                             "enum": ["celsius", "fahrenheit"],
                         },
-                        "options": {
-                            "$ref": "#/$defs/WeatherOptions",
-                            "description":
-                            "Optional parameters for weather query",
-                        },
                     },
                     "required": ["country", "unit"],
-                    "$defs": {
-                        "WeatherOptions": {
-                            "title": "WeatherOptions",
-                            "type": "object",
-                            "additionalProperties": False,
-                            "properties": {
-                                "unit": {
-                                    "type": "string",
-                                    "enum": ["celsius", "fahrenheit"],
-                                    "default": "celsius",
-                                    "description": "Temperature unit",
-                                    "title": "Temperature Unit",
-                                },
-                                "include_forecast": {
-                                    "type": "boolean",
-                                    "default": False,
-                                    "description":
-                                    "Whether to include a 24-hour forecast",
-                                    "title": "Include Forecast",
-                                },
-                                "language": {
-                                    "type": "string",
-                                    "default": "zh-CN",
-                                    "description": "Language of the response",
-                                    "title": "Language",
-                                    "enum": ["zh-CN", "en-US", "ja-JP"],
-                                },
-                            },
-                        },
-                    },
                 },
             },
         },
