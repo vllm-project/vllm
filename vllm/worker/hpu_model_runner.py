@@ -2431,6 +2431,54 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                                      lora_ids=lora_ids), \
                                      sampling_metadata
 
+    @torch.inference_mode()
+    def prepare_model_input_align_worker(
+        self,
+        seq_group_metadata_list: List[SequenceGroupMetadata],
+        virtual_engine: int = 0,
+        finished_requests_ids: Optional[List[str]] = None,
+        align_worker: bool = False,
+    ) -> ModelInputForHPUWithSamplingMetadata:
+        """Prepare the model input based on a given sequence group, including
+        metadata for the sampling step.
+        The API assumes seq_group_metadata_list is sorted by prefill -> decode.
+        The result tensors and data structure also batches input in prefill
+        -> decode order. For example,
+        - input_tokens[:num_prefill_tokens] contains prefill tokens.
+        - input_tokens[num_prefill_tokens:] contains decode tokens.
+        If cuda graph is required, this API automatically pads inputs.
+        """
+        with self.profiler.record_event('internal', 'prepare_input_tensors'):
+            assert seq_group_metadata_list is not None
+            if self.profiler.enabled:
+                self.profiler_counter_helper.capture_seq_group_metadata_stats(
+                    seq_group_metadata_list=seq_group_metadata_list)
+            model_input, sampling_metadata = self.prepare_input_tensors(
+                seq_group_metadata_list, finished_requests_ids, align_worker)
+            assert model_input.attn_metadata is not None
+            is_prompt = model_input.attn_metadata.is_prompt
+
+        return ModelInputForHPUWithSamplingMetadata(
+            input_tokens=model_input.input_tokens,
+            input_positions=model_input.input_positions,
+            seq_lens=model_input.seq_lens,
+            query_lens=model_input.query_lens,
+            lora_mapping=model_input.lora_mapping,
+            lora_requests=model_input.lora_requests,
+            attn_metadata=model_input.attn_metadata,
+            multi_modal_kwargs=model_input.multi_modal_kwargs,
+            real_batch_size=model_input.real_batch_size,
+            batch_size_padded=model_input.batch_size_padded,
+            virtual_engine=virtual_engine,
+            lora_ids=model_input.lora_ids,
+            async_callback=model_input.async_callback,
+            is_first_multi_step=model_input.is_first_multi_step,
+            is_last_step=model_input.is_last_step,
+            previous_hidden_states=model_input.previous_hidden_states,
+            sampling_metadata=sampling_metadata,
+            is_prompt=is_prompt,
+        )
+
     def create_lora_mask(self, input_tokens: torch.Tensor, lora_ids: List[int],
                          is_prompt: bool):
         '''
@@ -3368,38 +3416,6 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                                                      virtual_engine,
                                                      finished_requests_ids,
                                                      False)
-
-    @torch.inference_mode()
-    def prepare_model_input_align_worker(
-        self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
-        virtual_engine: int = 0,
-        finished_requests_ids: Optional[List[str]] = None,
-        align_worker: bool = False,
-    ) -> ModelInputForHPUWithSamplingMetadata:
-        """Prepare the model input based on a given sequence group, including
-        metadata for the sampling step.
-        The API assumes seq_group_metadata_list is sorted by prefill -> decode.
-        The result tensors and data structure also batches input in prefill
-        -> decode order. For example,
-        - input_tokens[:num_prefill_tokens] contains prefill tokens.
-        - input_tokens[num_prefill_tokens:] contains decode tokens.
-        If cuda graph is required, this API automatically pads inputs.
-        """
-        with self.profiler.record_event('internal', 'prepare_input_tensors'):
-            assert seq_group_metadata_list is not None
-            if self.profiler.enabled:
-                self.profiler_counter_helper.capture_seq_group_metadata_stats(
-                    seq_group_metadata_list=seq_group_metadata_list)
-            model_input, sampling_metadata = self.prepare_input_tensors(
-                seq_group_metadata_list, finished_requests_ids, align_worker)
-            assert model_input.attn_metadata is not None
-            is_prompt = model_input.attn_metadata.is_prompt
-
-        return dataclasses.replace(model_input,
-                                   sampling_metadata=sampling_metadata,
-                                   is_prompt=is_prompt,
-                                   virtual_engine=virtual_engine)
 
     def finish_measurements(self):
         from neural_compressor.torch.quantization import finalize_calibration
