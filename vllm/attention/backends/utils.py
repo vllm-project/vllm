@@ -373,7 +373,7 @@ class CommonAttentionState(AttentionState):
                 f"Expected attn_backend name to be either 'XFORMERS'," \
                 f"'ROCM_FLASH', or 'FLASH_ATTN', but " \
                 f"got '{self.runner.attn_backend.get_name()}'"
-            self._add_additonal_input_buffers_for_enc_dec_model(
+            self._add_additional_input_buffers_for_enc_dec_model(
                 attn_metadata=attn_metadata, input_buffers=input_buffers)
         return input_buffers
 
@@ -427,7 +427,7 @@ class CommonAttentionState(AttentionState):
         attn_metadata.max_encoder_seq_len = self.runner.max_seq_len_to_capture
         attn_metadata.num_encoder_tokens = 0
 
-    def _add_additonal_input_buffers_for_enc_dec_model(
+    def _add_additional_input_buffers_for_enc_dec_model(
             self, attn_metadata, input_buffers: Dict[str, Any]):
         """
         Saves additional input buffers specific to the encoder-decoder model

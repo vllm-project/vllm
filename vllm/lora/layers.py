@@ -1202,7 +1202,7 @@ class LinearScalingRotaryEmbeddingWithLoRA(BaseLayerWithLoRA):
     multiple LoRA adapters with a specialized kernel.
 
     Replace LinearScalingRotaryEmbedding with MultiLinearScalingRotaryEmbedding
-    which can handle multi lora adapters in a specialied kernel.
+    which can handle multi lora adapters in a specialized kernel.
     """
 
     def __init__(self, base_layer: RotaryEmbedding) -> None:

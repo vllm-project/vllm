@@ -326,6 +326,7 @@ class Idefics3MultiModalProcessor(
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         # Text-only input not supported in composite processor
         if not (images := mm_data.get("images", [])):
@@ -337,6 +338,7 @@ class Idefics3MultiModalProcessor(
             prompt,
             mm_data,
             mm_kwargs,
+            tok_kwargs,
         )
 
         parsed_images = (self._get_data_parser().parse_mm_data({
@@ -589,6 +591,13 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal,
         ],
     }
 
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+        if modality.startswith("image"):
+            return "<image>"
+
+        raise ValueError("Only image modality is supported")
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
@@ -706,11 +715,11 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal,
     def get_language_model(self) -> torch.nn.Module:
         return self.model
 
-    def get_multimodal_embeddings(
-            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
+    def get_multimodal_embeddings(self,
+                                  **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
-            return None
+            return []
 
         return self._process_image_input(image_input)
 
@@ -720,7 +729,8 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal,
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.model.get_input_embeddings(input_ids)
-        if multimodal_embeddings is not None:
+        if multimodal_embeddings is not None \
+            and len(multimodal_embeddings) != 0:
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids,
                 inputs_embeds,

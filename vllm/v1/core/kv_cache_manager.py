@@ -84,12 +84,15 @@ class KVCacheManager:
         self.log_stats = log_stats
         # FIXME: make prefix cache stats conditional on log_stats
         self.prefix_cache_stats = PrefixCacheStats() if log_stats else None
-        assert len(
-            set(g.kv_cache_spec.block_size
-                for g in kv_cache_config.kv_cache_groups)
-        ) == 1, "Only one block size is supported for now"
-        self.block_size = kv_cache_config.kv_cache_groups[
-            0].kv_cache_spec.block_size
+
+        self.block_size: Optional[int] = None
+        if self.enable_caching:
+            assert len(
+                set(g.kv_cache_spec.block_size
+                    for g in kv_cache_config.kv_cache_groups)
+            ) == 1, "Only one block size is supported for now"
+            self.block_size = kv_cache_config.kv_cache_groups[
+                0].kv_cache_spec.block_size
 
         self.coordinator = get_kv_cache_coordinator(
             kv_cache_config=kv_cache_config,
@@ -146,13 +149,15 @@ class KVCacheManager:
         # Prefix caching is disabled or
         # When the request requires prompt logprobs, we skip prefix caching.
         if (not self.enable_caching
-                or request.sampling_params.prompt_logprobs is not None):
+                or (request.sampling_params is not None
+                    and request.sampling_params.prompt_logprobs is not None)):
             return self.create_empty_block_list(), 0
 
         # The block hashes for the request may already be computed
         # if the scheduler has tried to schedule the request before.
         block_hashes = self.req_to_block_hashes[request.request_id]
         if not block_hashes:
+            assert self.block_size is not None
             block_hashes = hash_request_tokens(self.caching_hash_fn,
                                                self.block_size, request)
             self.req_to_block_hashes[request.request_id] = block_hashes
@@ -381,10 +386,11 @@ class KVCacheManager:
             self.coordinator.get_blocks(request_id)).get_block_ids()
 
     def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
-        """Cache the blocks for the request."""
-        block_hashes = self.req_to_block_hashes[request.request_id]
-        self.coordinator.cache_blocks(request, block_hashes,
-                                      num_computed_tokens)
+        """Cache the blocks for the request, if enabled."""
+        if self.enable_caching:
+            block_hashes = self.req_to_block_hashes[request.request_id]
+            self.coordinator.cache_blocks(request, block_hashes,
+                                          num_computed_tokens)
 
     def create_empty_block_list(self) -> KVCacheBlocks:
         """Creates a new KVCacheBlocks instance with no blocks."""

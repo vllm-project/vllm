@@ -23,14 +23,11 @@ ARM CPU backend currently supports Float32, FP16 and BFloat16 datatypes.
 # --8<-- [end:pre-built-wheels]
 # --8<-- [start:build-wheel-from-source]
 
---8<-- "docs/getting_started/installation/cpu/cpu/build.inc.md"
+--8<-- "docs/getting_started/installation/cpu/build.inc.md"
 
 Testing has been conducted on AWS Graviton3 instances for compatibility.
 
 # --8<-- [end:build-wheel-from-source]
-# --8<-- [start:set-up-using-docker]
-
-# --8<-- [end:set-up-using-docker]
 # --8<-- [start:pre-built-images]
 
 # --8<-- [end:pre-built-images]
