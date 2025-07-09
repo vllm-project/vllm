@@ -6,23 +6,23 @@ from itertools import accumulate
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type
 
 import torch
-import torch.nn as nn
+from einops import rearrange
 
 from vllm import _custom_ops as ops
 # yapf conflicts with isort for this block
 # yapf: disable
-from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionLayer,
+from vllm.attention.backends.abstract import (AttentionImpl, AttentionLayer,
                                               AttentionMetadata,
                                               AttentionMetadataBuilder,
                                               AttentionType,
                                               is_quantized_kv_cache)
+from vllm.attention.backends.flash_attn import FlashAttentionBackend
 # yapf: enable
-from vllm.attention.backends.utils import (
-    PAD_SLOT_ID, CommonAttentionState, compute_slot_mapping,
-    compute_slot_mapping_start_idx, get_num_prefill_decode_query_kv_tokens,
-    get_seq_len_block_table_args, is_all_cross_attn_metadata_set,
-    is_all_encoder_attn_metadata_set, is_block_tables_empty)
+from vllm.attention.backends.utils import (PAD_SLOT_ID, compute_slot_mapping,
+                                           compute_slot_mapping_start_idx,
+                                           is_all_cross_attn_metadata_set,
+                                           is_all_encoder_attn_metadata_set,
+                                           is_block_tables_empty)
 from vllm.attention.utils.fa_utils import (flash_attn_supports_fp8,
                                            get_flash_attn_version)
 from vllm.logger import init_logger
@@ -30,11 +30,6 @@ from vllm.multimodal import MultiModalPlaceholderMap
 from vllm.utils import async_tensor_h2d, make_tensor_with_pad
 from vllm.vllm_flash_attn import (flash_attn_varlen_func,
                                   flash_attn_with_kvcache)
-from vllm.attention.backends.flash_attn import (FlashAttentionBackend,
-                                                FlashAttentionImpl,
-                                                FlashAttentionMetadata,
-                                                FlashAttentionMetadataBuilder)
-from einops import rearrange
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner import (ModelInputForGPUBuilder,
@@ -45,6 +40,7 @@ logger = init_logger(__name__)
 
 class DifferentialFlashAttentionBackend(FlashAttentionBackend):
     accept_output_buffer = False
+
     @staticmethod
     def get_kv_cache_shape(
         num_blocks: int,
@@ -72,8 +68,8 @@ class DifferentialFlashAttentionBackend(FlashAttentionBackend):
     @staticmethod
     def get_builder_cls() -> Type["DifferentialFlashAttentionMetadataBuilder"]:
         return DifferentialFlashAttentionMetadataBuilder
-        
-    
+
+
 @dataclass
 class DifferentialFlashAttentionMetadata(AttentionMetadata):
     """Metadata for FlashAttentionBackend.
@@ -136,8 +132,10 @@ class DifferentialFlashAttentionMetadata(AttentionMetadata):
     # [4, 6], it is [0, 4, 10].
     seq_start_loc: Optional[torch.Tensor] = None
 
-    _cached_prefill_metadata: Optional["DifferentialFlashAttentionMetadata"] = None
-    _cached_decode_metadata: Optional["DifferentialFlashAttentionMetadata"] = None
+    _cached_prefill_metadata: Optional[
+        "DifferentialFlashAttentionMetadata"] = None
+    _cached_decode_metadata: Optional[
+        "DifferentialFlashAttentionMetadata"] = None
 
     # Begin encoder attn & enc/dec cross-attn fields...
 
@@ -178,7 +176,8 @@ class DifferentialFlashAttentionMetadata(AttentionMetadata):
         return is_all_cross_attn_metadata_set(self)
 
     @property
-    def prefill_metadata(self) -> Optional["DifferentialFlashAttentionMetadata"]:
+    def prefill_metadata(
+            self) -> Optional["DifferentialFlashAttentionMetadata"]:
         if self.num_prefills == 0:
             return None
 
@@ -205,9 +204,10 @@ class DifferentialFlashAttentionMetadata(AttentionMetadata):
                                self.context_lens_tensor[:self.num_prefills])
         block_tables = (None if self.block_tables is None else
                         self.block_tables[:self.num_prefills])
-        cross_layer_shared_block_tables = (None if self.cross_layer_shared_block_tables is None else
-                                self.cross_layer_shared_block_tables[:self.num_prefills])
-        
+        cross_layer_shared_block_tables = (
+            None if self.cross_layer_shared_block_tables is None else
+            self.cross_layer_shared_block_tables[:self.num_prefills])
+
         self._cached_prefill_metadata = DifferentialFlashAttentionMetadata(
             num_prefills=self.num_prefills,
             num_prefill_tokens=self.num_prefill_tokens,
@@ -238,7 +238,8 @@ class DifferentialFlashAttentionMetadata(AttentionMetadata):
         return self._cached_prefill_metadata
 
     @property
-    def decode_metadata(self) -> Optional["DifferentialFlashAttentionMetadata"]:
+    def decode_metadata(
+            self) -> Optional["DifferentialFlashAttentionMetadata"]:
         if self.num_decode_tokens == 0:
             return None
 
@@ -254,8 +255,9 @@ class DifferentialFlashAttentionMetadata(AttentionMetadata):
                            self.seq_lens_tensor[self.num_prefills:])
         block_tables = (None if self.block_tables is None else
                         self.block_tables[self.num_prefills:])
-        cross_layer_shared_block_tables = (None if self.cross_layer_shared_block_tables is None else
-                                 self.cross_layer_shared_block_tables[self.num_prefills:])
+        cross_layer_shared_block_tables = (
+            None if self.cross_layer_shared_block_tables is None else
+            self.cross_layer_shared_block_tables[self.num_prefills:])
         self._cached_decode_metadata = DifferentialFlashAttentionMetadata(
             num_prefills=0,
             num_prefill_tokens=0,
@@ -448,7 +450,8 @@ class DifferentialFlashAttentionMetadataBuilder(
                 else:
                     cross_layer_shared_block_table = block_tables[seq_id][
                         -curr_sliding_window_block:]
-            self.cross_layer_shared_block_tables.append(cross_layer_shared_block_table)
+            self.cross_layer_shared_block_tables.append(
+                cross_layer_shared_block_table)
 
             # Compute slot mapping.
             is_profile_run = is_block_tables_empty(block_tables)
@@ -459,10 +462,9 @@ class DifferentialFlashAttentionMetadataBuilder(
                                  seq_len, context_len, start_idx,
                                  self.block_size, inter_data.block_tables)
 
-    def _get_graph_runner_block_tables(
-            self, num_seqs: int,
-            block_tables: List[List[int]],
-            graph_block_tables) -> torch.Tensor:
+    def _get_graph_runner_block_tables(self, num_seqs: int,
+                                       block_tables: List[List[int]],
+                                       graph_block_tables) -> torch.Tensor:
         # The shape of graph_block_tables is
         # [max batch size, max context len // block size].
         # max_batch_size, max_blocks = self.runner.graph_block_tables.shape
@@ -526,13 +528,16 @@ class DifferentialFlashAttentionMetadataBuilder(
             self.slot_mapping.extend([PAD_SLOT_ID] * cuda_graph_pad_size)
             self.block_tables.extend([] * cuda_graph_pad_size)
 
-            self.cross_layer_shared_block_tables.extend([] * cuda_graph_pad_size)
-            
+            self.cross_layer_shared_block_tables.extend([] *
+                                                        cuda_graph_pad_size)
+
             num_decode_tokens = batch_size - self.num_prefill_tokens
             block_tables = self._get_graph_runner_block_tables(
                 num_seqs, self.block_tables, self.runner.graph_block_tables)
-            cross_layer_shared_block_tables = self._get_graph_runner_block_tables(
-                num_seqs, self.cross_layer_shared_block_tables, self.runner.cross_layer_shared_graph_block_tables)
+            cross_layer_shared_block_tables = \
+                self._get_graph_runner_block_tables(
+                    num_seqs, self.cross_layer_shared_block_tables,
+                    self.runner.cross_layer_shared_graph_block_tables)
         else:
             block_tables = make_tensor_with_pad(
                 self.block_tables,
@@ -630,9 +635,11 @@ class DifferentialFlashAttentionImpl(AttentionImpl):
         use_irope: bool = False,
         differential_flash_attention_config: Optional[Dict[str, Any]] = None,
     ) -> None:
-        self.differential_flash_attention_config = differential_flash_attention_config
-        self.used_shared_kv_cache = self.differential_flash_attention_config.get(
-            "used_shared_kv_cache", False)
+        self.differential_flash_attention_config = \
+            differential_flash_attention_config
+        self.used_shared_kv_cache = \
+            self.differential_flash_attention_config.get(
+                "used_shared_kv_cache", False)
         # if kv_sharing_target_layer_name is not None:
         #     raise NotImplementedError("KV sharing is not supported in V0.")
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
@@ -686,44 +693,36 @@ class DifferentialFlashAttentionImpl(AttentionImpl):
         x1 = x[..., 0, :]
         x2 = x[..., 1, :]
         return x1.contiguous(), x2.contiguous()
-    
+
     def split_kv_cache(self, x):
         # split by num_heads, the stripe pattern is friendly to tensor parallel.
         if x.numel() == 0:
             return torch.empty(0), torch.empty(0)
-        
+
         x1, x2 = x[0], x[1]
         return x1, x2
 
-    def populate_kv_cache(self,
-                          layer: AttentionLayer,
-                          key: torch.Tensor, 
-                          value: torch.Tensor, 
-                          kv_cache: torch.Tensor,
+    def populate_kv_cache(self, layer: AttentionLayer, key: torch.Tensor,
+                          value: torch.Tensor, kv_cache: torch.Tensor,
                           attn_metadata: DifferentialFlashAttentionMetadata):
-        if (kv_cache.numel() > 0):
-            if (key is not None) and (value is not None):
-                updated_slot_mapping = attn_metadata.slot_mapping
-                torch.ops._C_cache_ops.reshape_and_cache_flash(
-                    key,
-                    value,
-                    kv_cache[0],
-                    kv_cache[1],
-                    updated_slot_mapping.flatten(),
-                    self.kv_cache_dtype,
-                    layer._k_scale,
-                    layer._v_scale,
-                )
+        if kv_cache.numel() > 0 and key is not None and value is not None:
+            updated_slot_mapping = attn_metadata.slot_mapping
+            torch.ops._C_cache_ops.reshape_and_cache_flash(
+                key,
+                value,
+                kv_cache[0],
+                kv_cache[1],
+                updated_slot_mapping.flatten(),
+                self.kv_cache_dtype,
+                layer._k_scale,
+                layer._v_scale,
+            )
 
     def forward_generate_kv_cache(
-        self,
-        query: torch.Tensor,
-        key: Optional[torch.Tensor],
-        value: Optional[torch.Tensor],
-        k_cache: torch.Tensor,
-        v_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata
-    ) -> torch.Tensor:
+            self, query: torch.Tensor, key: Optional[torch.Tensor],
+            value: Optional[torch.Tensor], k_cache: torch.Tensor,
+            v_cache: torch.Tensor,
+            attn_metadata: AttentionMetadata) -> torch.Tensor:
 
         head_size = self.head_size
         num_heads = self.num_heads // 2
@@ -739,9 +738,11 @@ class DifferentialFlashAttentionImpl(AttentionImpl):
 
         num_prefill_tokens = attn_metadata.num_prefill_tokens
         num_decode_tokens = attn_metadata.num_decode_tokens
-        assert key.shape[0] == num_prefill_tokens + num_decode_tokens, "key shape mismatch"
-        assert value.shape[0] == num_prefill_tokens + num_decode_tokens, "value shape mismatch"
-        
+        assert key.shape[
+            0] == num_prefill_tokens + num_decode_tokens, "key shape mismatch"
+        assert value.shape[
+            0] == num_prefill_tokens + num_decode_tokens, "value shape mismatch"
+
         output = torch.empty_like(query)
         # Query for decode. KV is not needed because it is already cached.
         decode_query = query[num_prefill_tokens:]
@@ -752,7 +753,8 @@ class DifferentialFlashAttentionImpl(AttentionImpl):
             value = value[:num_prefill_tokens]
 
         assert query.shape[0] == num_prefill_tokens, "query shape mismatch"
-        assert decode_query.shape[0] == num_decode_tokens, "decode query shape mismatch"
+        assert decode_query.shape[
+            0] == num_decode_tokens, "decode query shape mismatch"
 
         if prefill_meta := attn_metadata.prefill_metadata:
             # Prompt run.
@@ -772,7 +774,8 @@ class DifferentialFlashAttentionImpl(AttentionImpl):
                     alibi_slopes=self.alibi_slopes,
                     softcap=self.logits_soft_cap,
                 )
-                assert prefill_output.shape == output[:num_prefill_tokens].shape
+                assert prefill_output.shape == output[:
+                                                      num_prefill_tokens].shape
                 output[:num_prefill_tokens] = prefill_output
             else:
                 raise Exception("prefix caching not supported")
@@ -793,14 +796,13 @@ class DifferentialFlashAttentionImpl(AttentionImpl):
                     softcap=self.logits_soft_cap,
                 ).squeeze(1)
             except Exception as e:
-                logger.error(
-                    f"Error in PagedAttention.forward_decode: {str(e)}")
+                logger.error("Error in PagedAttention.forward_decode: %s",
+                             str(e))
                 raise e
 
         # Reshape the output tensor.
         return output.view(-1, num_heads, head_size)
-    
-    
+
     def forward_with_kv_cache_only(
         self,
         query: torch.Tensor,
@@ -808,8 +810,8 @@ class DifferentialFlashAttentionImpl(AttentionImpl):
         v_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
     ):
-        if not attn_metadata.decode_metadata:            
-            block_tables_arg = attn_metadata.cross_layer_shared_block_tables                
+        if not attn_metadata.decode_metadata:
+            block_tables_arg = attn_metadata.cross_layer_shared_block_tables
         else:
             block_tables_arg = attn_metadata.block_tables
 
@@ -854,17 +856,19 @@ class DifferentialFlashAttentionImpl(AttentionImpl):
               We use torch's .expand() to avoid duplicating values
         """
         if self.lambda_full is None:
-            self.lambda_init = self.differential_flash_attention_config["lambda_init"]
+            self.lambda_init = self.differential_flash_attention_config[
+                "lambda_init"]
             lambda_q1 = self.differential_flash_attention_config["lambda_q1"]
             lambda_k1 = self.differential_flash_attention_config["lambda_k1"]
             lambda_q2 = self.differential_flash_attention_config["lambda_q2"]
             lambda_k2 = self.differential_flash_attention_config["lambda_k2"]
-            lambda_1 = torch.exp(torch.sum(lambda_q1 * lambda_k1, dim=-1).float()).type_as(q)
-            lambda_2 = torch.exp(torch.sum(lambda_q2 * lambda_k2, dim=-1).float()).type_as(q)
+            lambda_1 = torch.exp(
+                torch.sum(lambda_q1 * lambda_k1, dim=-1).float()).type_as(q)
+            lambda_2 = torch.exp(
+                torch.sum(lambda_q2 * lambda_k2, dim=-1).float()).type_as(q)
             self.lambda_full = lambda_1 - lambda_2 + self.lambda_init
-            
 
-        if not self.used_shared_kv_cache: # need to generate kv-cache
+        if not self.used_shared_kv_cache:  # need to generate kv-cache
             q = q.view(-1, self.num_heads, self.head_size)
             k = k.view(-1, self.num_kv_heads, self.head_size)
             v = v.view(-1, self.num_kv_heads, self.head_size)
@@ -873,29 +877,37 @@ class DifferentialFlashAttentionImpl(AttentionImpl):
             k1, k2 = self.split_heads(k)
             v1, v2 = self.split_heads(v)
 
-            # kv_cache shape is (2, 2, num_blocks, block_size, num_kv_heads // 2, head_size)
+            # kv_cache shape is (2, 2, num_blocks, block_size, num_kv_heads // 2, head_size) # noqa: E501
             # Split by half along the first dimension.
             kv_cache1, kv_cache2 = self.split_kv_cache(kv_cache)
             assert kv_cache1.is_contiguous(), "kv_cache1 is not contiguous"
             assert kv_cache2.is_contiguous(), "kv_cache2 is not contiguous"
-            
+
             if kv_cache1.numel() != 0:
                 self.populate_kv_cache(layer, k1, v1, kv_cache1, attn_metadata)
                 self.populate_kv_cache(layer, k2, v2, kv_cache2, attn_metadata)
-                
+
                 key_cache1, value_cache1 = self.split_kv_cache(kv_cache1)
                 key_cache2, value_cache2 = self.split_kv_cache(kv_cache2)
             else:
                 key_cache1, value_cache1 = torch.empty(0), torch.empty(0)
                 key_cache2, value_cache2 = torch.empty(0), torch.empty(0)
-            attn11 = self.forward_generate_kv_cache(q1, k1, v1, key_cache1, value_cache1, attn_metadata)
-            attn12 = self.forward_generate_kv_cache(q1, k1, v2, key_cache1, value_cache2, attn_metadata)
+            attn11 = self.forward_generate_kv_cache(q1, k1, v1, key_cache1,
+                                                    value_cache1,
+                                                    attn_metadata)
+            attn12 = self.forward_generate_kv_cache(q1, k1, v2, key_cache1,
+                                                    value_cache2,
+                                                    attn_metadata)
             attn11 = attn11.view(q1.shape)
             attn12 = attn12.view(q1.shape)
             attn1 = torch.cat([attn11, attn12], dim=-1)
 
-            attn21 = self.forward_generate_kv_cache(q2, k2, v1, key_cache2, value_cache1, attn_metadata)
-            attn22 = self.forward_generate_kv_cache(q2, k2, v2, key_cache2, value_cache2, attn_metadata)
+            attn21 = self.forward_generate_kv_cache(q2, k2, v1, key_cache2,
+                                                    value_cache1,
+                                                    attn_metadata)
+            attn22 = self.forward_generate_kv_cache(q2, k2, v2, key_cache2,
+                                                    value_cache2,
+                                                    attn_metadata)
             attn21 = attn21.view(q2.shape)
             attn22 = attn22.view(q2.shape)
             attn2 = torch.cat([attn21, attn22], dim=-1)
@@ -905,24 +917,34 @@ class DifferentialFlashAttentionImpl(AttentionImpl):
             attn = self.subln(attn)
             attn = attn * (1 - self.lambda_init)
             # reshape back to 2 * num_head
-            attn_output = rearrange(attn, "... H (two D) -> ... (H two) D", two=2)
+            attn_output = rearrange(attn,
+                                    "... H (two D) -> ... (H two) D",
+                                    two=2)
 
-        else: # re-use the kv cache, full attention
+        else:  # re-use the kv cache, full attention
             q = q.view(-1, self.num_heads, self.head_size)
             q1, q2 = self.split_heads(q)
-            # kv_cache shape is (2, num_blocks, block_size, num_kv_heads, head_size)
+            # kv_cache shape is (2, num_blocks, block_size, num_kv_heads, head_size) # noqa: E501
             kv_cache1, kv_cache2 = self.split_kv_cache(kv_cache)
             key_cache1, value_cache1 = kv_cache1[0], kv_cache1[1]
             key_cache2, value_cache2 = kv_cache2[0], kv_cache2[1]
-            
-            attn11 = self.forward_with_kv_cache_only(q1, key_cache1, value_cache1, attn_metadata)
-            attn12 = self.forward_with_kv_cache_only(q1, key_cache1, value_cache2, attn_metadata)
+
+            attn11 = self.forward_with_kv_cache_only(q1, key_cache1,
+                                                     value_cache1,
+                                                     attn_metadata)
+            attn12 = self.forward_with_kv_cache_only(q1, key_cache1,
+                                                     value_cache2,
+                                                     attn_metadata)
             attn11 = attn11.view(q1.shape)
             attn12 = attn12.view(q1.shape)
             attn1 = torch.cat([attn11, attn12], dim=-1)
 
-            attn21 = self.forward_with_kv_cache_only(q2, key_cache2, value_cache1, attn_metadata)
-            attn22 = self.forward_with_kv_cache_only(q2, key_cache2, value_cache2, attn_metadata)
+            attn21 = self.forward_with_kv_cache_only(q2, key_cache2,
+                                                     value_cache1,
+                                                     attn_metadata)
+            attn22 = self.forward_with_kv_cache_only(q2, key_cache2,
+                                                     value_cache2,
+                                                     attn_metadata)
             attn21 = attn21.view(q2.shape)
             attn22 = attn22.view(q2.shape)
             attn2 = torch.cat([attn21, attn22], dim=-1)
@@ -931,6 +953,8 @@ class DifferentialFlashAttentionImpl(AttentionImpl):
             attn = self.subln(attn)
             attn = attn * (1 - self.lambda_init)
             # reshape back to 2 * num_head
-            attn_output = rearrange(attn, "... H (two D) -> ... (H two) D", two=2)
+            attn_output = rearrange(attn,
+                                    "... H (two D) -> ... (H two) D",
+                                    two=2)
         attn_output = attn_output.view(-1, self.num_heads * self.head_size)
         return attn_output

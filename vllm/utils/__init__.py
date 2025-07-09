@@ -2888,9 +2888,9 @@ def get_mp_context():
 
 
 def bind_kv_cache(
-        ctx: dict[str, Any],
-        kv_cache: list[list[torch.Tensor]],  # [virtual_engine][layer_index]
-        shared_kv_cache_layers: dict[str, str],
+    ctx: dict[str, Any],
+    kv_cache: list[list[torch.Tensor]],  # [virtual_engine][layer_index]
+    shared_kv_cache_layers: dict[str, str],
 ) -> None:
     # Bind the kv_cache tensor to Attention modules, similar to
     # ctx[layer_name].kv_cache[ve]=kv_cache[ve][extract_layer_index(layer_name)]
@@ -2914,13 +2914,12 @@ def bind_kv_cache(
             extract_layer_index(layer_name)
             for layer_name in layer_need_kv_cache))
     for layer_name in layer_need_kv_cache:
-        target_layer_name = shared_kv_cache_layers[layer_name] if layer_name \
-            in shared_kv_cache_layers else layer_name
+        target_layer_name = shared_kv_cache_layers.get(layer_name, layer_name)
         kv_cache_idx = layer_index_sorted.index(
             extract_layer_index(target_layer_name))
         forward_ctx = ctx[layer_name]
         assert len(forward_ctx.kv_cache) == len(kv_cache)
-        
+
         for ve, ve_kv_cache in enumerate(kv_cache):
             assert kv_cache_idx < len(ve_kv_cache), \
                 "v0 doesn't support interleaving kv sharing, use v1 instead"

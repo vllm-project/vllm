@@ -10,7 +10,7 @@ import torch.distributed
 
 import vllm.envs as envs
 from vllm.attention.layer import Attention
-from vllm.config import (VllmConfig, get_layers_from_vllm_config)
+from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.device_allocator.cumem import CuMemAllocator
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment,
@@ -27,7 +27,6 @@ from vllm.sequence import (ExecuteModelRequest, IntermediateTensors,
                            SequenceGroupMetadata, SequenceGroupMetadataDelta)
 from vllm.utils import (GiB_bytes, MemorySnapshot, bind_kv_cache,
                         memory_profiling)
-from vllm.v1.worker.utils import initialize_kv_cache_for_kv_sharing
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.enc_dec_model_runner import EncoderDecoderModelRunner
 from vllm.worker.model_runner import GPUModelRunnerBase, ModelRunner
@@ -367,7 +366,7 @@ class Worker(LocalOrDistributedWorkerBase):
                 # a given amount of memory to accommodate longer context lengths
                 # or enable more requests to be processed simultaneously.
                 shared_kv_cache_layers[layer_name] = kv_tgt_layer
-        
+
         bind_kv_cache(self.compilation_config.static_forward_context,
                       self.gpu_cache, shared_kv_cache_layers)
 
