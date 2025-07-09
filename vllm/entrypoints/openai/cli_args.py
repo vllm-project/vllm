@@ -263,8 +263,7 @@ schema. Example: ``[{"type": "text", "text": "Hello world!"}]``"""
 
         # Sanity assertion for special cases
         assert all(key in frontend_kwargs for key in special_cases), \
-            f"special cases keys {special_cases.keys()} not " \
-            f"in frontend_kwargs {frontend_kwargs.keys()}"
+            "Not all special cases keys are in frontend_kwargs."
 
         for key, value in frontend_kwargs.items():
             if key in special_cases:
