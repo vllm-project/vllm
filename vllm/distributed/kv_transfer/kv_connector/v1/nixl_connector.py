@@ -83,11 +83,6 @@ class ReqMeta:
     remote_port: int
     remote_engine_id: str
     tp_size: int
-    # load kv cache from remote engine / agent
-    load_remote_cache: bool = True
-    # NOTE: save kv cache from device to local host buffer.
-    # needed when kv_cache_device is cpu.
-    save_to_host: bool = False
 
 
 class NixlConnectorMetadata(KVConnectorMetadata):
@@ -115,12 +110,10 @@ class NixlConnectorMetadata(KVConnectorMetadata):
             remote_port=kv_transfer_params["remote_port"],
             # P workers don't need to receive tp_size from proxy here.
             tp_size=kv_transfer_params.get("tp_size", 1),
-            load_remote_cache=load_remote_cache,
-            save_to_host=save_to_host,
         )
         if save_to_host:
             self.reqs_to_save[request_id] = _req
-        else:
+        if load_remote_cache:
             self.reqs_to_recv[request_id] = _req
 
 
@@ -209,7 +202,6 @@ class NixlConnector(KVConnectorBase_V1):
         assert self.connector_worker is not None
         assert isinstance(self._connector_metadata, NixlConnectorMetadata)
         self.connector_worker.save_kv_to_host(self._connector_metadata)
-        return
 
 
 class NixlConnectorScheduler:
@@ -978,8 +970,6 @@ class NixlConnectorWorker:
         """copy recved kv from host buffer to device."""
         assert self.use_host_buffer
         assert self.copy_blocks is not None
-        if not meta.load_remote_cache:
-            return
 
         local_block_ids = meta.local_block_ids
         self.copy_blocks(self.host_xfer_buffers, self.device_kv_caches,
@@ -996,8 +986,6 @@ class NixlConnectorWorker:
         assert self.copy_blocks is not None
 
         for req_id, meta in metadata.reqs_to_save.items():
-            if not meta.save_to_host:
-                continue
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug(
                     "save_load_kv for request[%s] to host xfer buffer."
@@ -1030,7 +1018,7 @@ class NixlConnectorWorker:
         if self.use_host_buffer:
             for req_id in done_recving:
                 meta = self._recving_metadata.pop(req_id)
-                assert meta, (f"{req_id} not found in recving_metadata list")
+                assert meta, f"{req_id} not found in recving_metadata list"
                 self.sync_recved_kv_to_device(req_id, meta)
 
         # Handle timeout to avoid stranding blocks on remote.
@@ -1140,8 +1128,6 @@ class NixlConnectorWorker:
         We check for these trnxs to complete in each step().
         """
         for req_id, meta in metadata.reqs_to_recv.items():
-            if not meta.load_remote_cache:
-                continue
             remote_engine_id = meta.remote_engine_id
             logger.debug(
                 "start_load_kv for request %s from remote engine %s. "
