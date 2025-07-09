@@ -107,6 +107,9 @@ class FlashInferBackend(AttentionBackend):
             logger.info_once("VLLM_USE_TRTLLM_DECODE_ATTENTION is set to %s",
                              env_value)
             # Environment variable is set - respect it
+            # Making the conditional check for zero because
+            # the path is automatically enabled if the batch size condition
+            # is satisfied.
             no_use_trtllm = env_value == "0"
             if not no_use_trtllm:
                 logger.info_once(
@@ -120,8 +123,10 @@ class FlashInferBackend(AttentionBackend):
                           and kv_cache_dtype == "auto")
             FlashInferBackend.cached_use_trtllm = use_trtllm
             if use_trtllm:
-                logger.info_once(
-                    "Using TRTLLM decode attention (auto-detected).")
+                logger.warning_once(
+                    "Using TRTLLM decode attention (auto-detected)."
+                    "Please run with VLLM_KV_CACHE_LAYOUT=HND for "
+                    "accurate results.")
         return FlashInferBackend.cached_use_trtllm
 
 
@@ -730,10 +735,10 @@ class FlashInferImpl(AttentionImpl):
             else:
                 # This path needs to be enabled with VLLM_KV_CACHE_LAYOUT = HND
                 if num_decode_tokens > 0:
-                    contiguous_query = decode_query.contiguous()
+                    assert get_kv_cache_layout() == "HND"
                     output[:num_decode_tokens] = (
                         trtllm_batch_decode_with_kv_cache(
-                            query=contiguous_query,
+                            query=decode_query,
                             kv_cache=kv_cache.permute(*stride_order),
                             workspace_buffer=attn_metadata.workspace_buffer,
                             num_heads=self.num_heads,

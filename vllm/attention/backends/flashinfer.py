@@ -1144,8 +1144,9 @@ class FlashInferImpl(AttentionImpl):
             else:
                 workspace_buffer = (
                     decode_meta.decode_wrapper._int_workspace_buffer)
+                assert FLASHINFER_KV_CACHE_LAYOUT == "HND"
                 decode_output = trtllm_batch_decode_with_kv_cache(
-                    decode_query.contiguous(), kv_cache.permute(*stride_order),
+                    decode_query, kv_cache.permute(*stride_order),
                     workspace_buffer, num_heads, num_kv_heads, softmax_scale,
                     attn_metadata.block_tables, decode_meta.seq_lens_tensor,
                     attn_metadata.page_size, attn_metadata.max_decode_seq_len,
