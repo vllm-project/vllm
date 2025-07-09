@@ -295,6 +295,14 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         help=
         "If set to True, enable tracking server_load_metrics in the app state."
     )
+    parser.add_argument(
+        "--enable-log-outputs",
+        action='store_true',
+        default=False,
+        help=
+        "If set to True, enable logging of model outputs (generations) "
+        "in addition to the input logging that is enabled by default."
+    )
 
     return parser
 

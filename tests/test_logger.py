@@ -10,11 +10,12 @@ from dataclasses import dataclass
 from json.decoder import JSONDecodeError
 from tempfile import NamedTemporaryFile
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 from uuid import uuid4
 
 import pytest
 
+from vllm.entrypoints.logger import RequestLogger
 from vllm.logger import (_DATE_FORMAT, _FORMAT, _configure_vllm_root_logger,
                          enable_trace_function_call, init_logger)
 from vllm.logging_utils import NewLineFormatter
@@ -253,3 +254,202 @@ def test_prepare_object_to_dump():
 
     assert (prepare_object_to_dump(CustomClass(
         1, 'b')) == "CustomClass(a=1, b='b')")
+
+
+def test_request_logger_log_outputs():
+    """Test the new log_outputs functionality."""
+    # Create a mock logger to capture log calls
+    mock_logger = MagicMock()
+    
+    with patch('vllm.entrypoints.logger.logger', mock_logger):
+        request_logger = RequestLogger(max_log_len=None)
+        
+        # Test basic output logging
+        request_logger.log_outputs(
+            request_id="test-123",
+            outputs="Hello, world!",
+            output_token_ids=[1, 2, 3, 4],
+            finish_reason="stop",
+            is_streaming=False,
+            delta=False
+        )
+        
+        mock_logger.info.assert_called_once()
+        call_args = mock_logger.info.call_args[0]
+        assert "Generated response test-123" in call_args[0]
+        assert "Hello, world!" in call_args[1]
+        assert [1, 2, 3, 4] == call_args[2]
+        assert "stop" == call_args[3]
+
+
+def test_request_logger_log_outputs_streaming_delta():
+    """Test log_outputs with streaming delta mode."""
+    mock_logger = MagicMock()
+    
+    with patch('vllm.entrypoints.logger.logger', mock_logger):
+        request_logger = RequestLogger(max_log_len=None)
+        
+        # Test streaming delta logging
+        request_logger.log_outputs(
+            request_id="test-456",
+            outputs="Hello",
+            output_token_ids=[1],
+            finish_reason=None,
+            is_streaming=True,
+            delta=True
+        )
+        
+        mock_logger.info.assert_called_once()
+        call_args = mock_logger.info.call_args[0]
+        assert "Generated response test-456 (streaming delta)" in call_args[0]
+        assert "Hello" == call_args[1]
+        assert [1] == call_args[2]
+        assert call_args[3] is None
+
+
+def test_request_logger_log_outputs_streaming_complete():
+    """Test log_outputs with streaming complete mode."""
+    mock_logger = MagicMock()
+    
+    with patch('vllm.entrypoints.logger.logger', mock_logger):
+        request_logger = RequestLogger(max_log_len=None)
+        
+        # Test streaming complete logging
+        request_logger.log_outputs(
+            request_id="test-789",
+            outputs="Complete response",
+            output_token_ids=[1, 2, 3],
+            finish_reason="length",
+            is_streaming=True,
+            delta=False
+        )
+        
+        mock_logger.info.assert_called_once()
+        call_args = mock_logger.info.call_args[0]
+        assert "Generated response test-789 (streaming complete)" in call_args[0]
+        assert "Complete response" == call_args[1]
+        assert [1, 2, 3] == call_args[2]
+        assert "length" == call_args[3]
+
+
+def test_request_logger_log_outputs_with_truncation():
+    """Test log_outputs respects max_log_len setting."""
+    mock_logger = MagicMock()
+    
+    with patch('vllm.entrypoints.logger.logger', mock_logger):
+        # Set max_log_len to 10
+        request_logger = RequestLogger(max_log_len=10)
+        
+        # Test output truncation
+        long_output = "This is a very long output that should be truncated"
+        long_token_ids = list(range(20))  # 20 tokens
+        
+        request_logger.log_outputs(
+            request_id="test-truncate",
+            outputs=long_output,
+            output_token_ids=long_token_ids,
+            finish_reason="stop",
+            is_streaming=False,
+            delta=False
+        )
+        
+        mock_logger.info.assert_called_once()
+        call_args = mock_logger.info.call_args
+        
+        # Check that output was truncated to first 10 characters
+        logged_output = call_args[0][1]
+        assert logged_output == "This is a "
+        assert len(logged_output) == 10
+        
+        # Check that token IDs were truncated to first 10 tokens
+        logged_token_ids = call_args[0][2]
+        assert logged_token_ids == list(range(10))
+        assert len(logged_token_ids) == 10
+
+
+def test_request_logger_log_outputs_none_values():
+    """Test log_outputs handles None values correctly."""
+    mock_logger = MagicMock()
+    
+    with patch('vllm.entrypoints.logger.logger', mock_logger):
+        request_logger = RequestLogger(max_log_len=None)
+        
+        # Test with None output_token_ids
+        request_logger.log_outputs(
+            request_id="test-none",
+            outputs="Test output",
+            output_token_ids=None,
+            finish_reason="stop",
+            is_streaming=False,
+            delta=False
+        )
+        
+        mock_logger.info.assert_called_once()
+        call_args = mock_logger.info.call_args[0]
+        assert "Generated response test-none" in call_args[0]
+        assert "Test output" == call_args[1]
+        assert call_args[2] is None
+        assert "stop" == call_args[3]
+
+
+def test_request_logger_log_outputs_empty_output():
+    """Test log_outputs handles empty output correctly."""
+    mock_logger = MagicMock()
+    
+    with patch('vllm.entrypoints.logger.logger', mock_logger):
+        request_logger = RequestLogger(max_log_len=5)
+        
+        # Test with empty output
+        request_logger.log_outputs(
+            request_id="test-empty",
+            outputs="",
+            output_token_ids=[],
+            finish_reason="stop",
+            is_streaming=False,
+            delta=False
+        )
+        
+        mock_logger.info.assert_called_once()
+        call_args = mock_logger.info.call_args[0]
+        assert "Generated response test-empty" in call_args[0]
+        assert "" == call_args[1]
+        assert [] == call_args[2]
+        assert "stop" == call_args[3]
+
+
+def test_request_logger_log_outputs_integration():
+    """Test that log_outputs can be called alongside log_inputs."""
+    mock_logger = MagicMock()
+    
+    with patch('vllm.entrypoints.logger.logger', mock_logger):
+        request_logger = RequestLogger(max_log_len=None)
+        
+        # Test that both methods can be called without interference
+        request_logger.log_inputs(
+            request_id="test-integration",
+            prompt="Test prompt",
+            prompt_token_ids=[1, 2, 3],
+            prompt_embeds=None,
+            params=None,
+            lora_request=None,
+            prompt_adapter_request=None
+        )
+        
+        request_logger.log_outputs(
+            request_id="test-integration",
+            outputs="Test output",
+            output_token_ids=[4, 5, 6],
+            finish_reason="stop",
+            is_streaming=False,
+            delta=False
+        )
+        
+        # Should have been called twice - once for inputs, once for outputs
+        assert mock_logger.info.call_count == 2
+        
+        # Check that the calls were made with correct patterns
+        input_call = mock_logger.info.call_args_list[0][0]
+        output_call = mock_logger.info.call_args_list[1][0]
+        
+        assert "Received request test-integration" in input_call[0]
+        assert "Generated response test-integration" in output_call[0]

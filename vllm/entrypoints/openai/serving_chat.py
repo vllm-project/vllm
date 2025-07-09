@@ -67,6 +67,7 @@ class OpenAIServingChat(OpenAIServing):
         tool_parser: Optional[str] = None,
         enable_prompt_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
+        enable_log_outputs: bool = False,
     ) -> None:
         super().__init__(engine_client=engine_client,
                          model_config=model_config,
@@ -78,6 +79,7 @@ class OpenAIServingChat(OpenAIServing):
         self.response_role = response_role
         self.chat_template = chat_template
         self.chat_template_content_format: Final = chat_template_content_format
+        self.enable_log_outputs = enable_log_outputs
 
         # set up tool use
         self.enable_auto_tools: bool = enable_auto_tools
@@ -823,6 +825,24 @@ class OpenAIServingChat(OpenAIServing):
                     if delta_message is None:
                         continue
 
+                    # Log individual streaming delta if output logging is enabled
+                    if self.enable_log_outputs and self.request_logger:
+                        delta_content = ""
+                        if delta_message.content:
+                            delta_content = delta_message.content
+                        elif delta_message.tool_calls and delta_message.tool_calls[0].function and delta_message.tool_calls[0].function.arguments:
+                            delta_content = delta_message.tool_calls[0].function.arguments
+                        
+                        if delta_content:
+                            self.request_logger.log_outputs(
+                                request_id=request_id,
+                                outputs=delta_content,
+                                output_token_ids=list(output.token_ids),
+                                finish_reason=output.finish_reason,
+                                is_streaming=True,
+                                delta=True,
+                            )
+
                     if output.finish_reason is None:
                         # Send token-by-token response for each request.n
                         choice_data = ChatCompletionResponseStreamChoice(
@@ -942,6 +962,19 @@ class OpenAIServingChat(OpenAIServing):
                 prompt_tokens=num_prompt_tokens,
                 completion_tokens=num_completion_tokens,
                 total_tokens=num_prompt_tokens + num_completion_tokens)
+
+            # Log complete streaming response if output logging is enabled
+            if self.enable_log_outputs and self.request_logger:
+                # Collect all generated text from the SSE decoder if available
+                # For now, we'll log the completion tokens count as final output
+                self.request_logger.log_outputs(
+                    request_id=request_id,
+                    outputs=f"<streaming_complete: {num_completion_tokens} tokens>",
+                    output_token_ids=None,
+                    finish_reason="streaming_complete",
+                    is_streaming=True,
+                    delta=False,
+                )
 
         except Exception as e:
             # TODO: Use a vllm-specific Validation Error
@@ -1155,6 +1188,35 @@ class OpenAIServingChat(OpenAIServing):
             prompt_logprobs=clamp_prompt_logprobs(final_res.prompt_logprobs),
             kv_transfer_params=final_res.kv_transfer_params,
         )
+
+        # Log complete response if output logging is enabled
+        if self.enable_log_outputs and self.request_logger:
+            for choice in choices:
+                output_text = ""
+                if choice.message.content:
+                    output_text = choice.message.content
+                elif choice.message.tool_calls:
+                    # For tool calls, log the function name and arguments
+                    tool_call_info = []
+                    for tool_call in choice.message.tool_calls:
+                        if hasattr(tool_call.function, 'name') and hasattr(tool_call.function, 'arguments'):
+                            tool_call_info.append(f"{tool_call.function.name}({tool_call.function.arguments})")
+                    output_text = f"[tool_calls: {', '.join(tool_call_info)}]"
+                
+                if output_text:
+                    # Get the corresponding output token IDs
+                    output_token_ids = None
+                    if choice.index < len(final_res.outputs):
+                        output_token_ids = final_res.outputs[choice.index].token_ids
+                    
+                    self.request_logger.log_outputs(
+                        request_id=request_id,
+                        outputs=output_text,
+                        output_token_ids=output_token_ids,
+                        finish_reason=choice.finish_reason,
+                        is_streaming=False,
+                        delta=False,
+                    )
 
         return response
 

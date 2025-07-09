@@ -48,3 +48,29 @@ class RequestLogger:
             prompt, params, prompt_token_ids,
             prompt_embeds.shape if prompt_embeds is not None else None,
             lora_request, prompt_adapter_request)
+
+    def log_outputs(
+        self,
+        request_id: str,
+        outputs: str,
+        output_token_ids: Optional[list[int]],
+        finish_reason: Optional[str] = None,
+        is_streaming: bool = False,
+        delta: bool = False,
+    ) -> None:
+        max_log_len = self.max_log_len
+        if max_log_len is not None:
+            if outputs is not None:
+                outputs = outputs[:max_log_len]
+
+            if output_token_ids is not None:
+                output_token_ids = output_token_ids[:max_log_len]
+
+        stream_info = ""
+        if is_streaming:
+            stream_info = " (streaming delta)" if delta else " (streaming complete)"
+
+        logger.info(
+            "Generated response %s%s: output: %r, "
+            "output_token_ids: %s, finish_reason: %s", 
+            request_id, stream_info, outputs, output_token_ids, finish_reason)
