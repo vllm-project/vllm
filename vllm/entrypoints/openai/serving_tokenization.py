@@ -190,8 +190,7 @@ class TokenizerInfo:
         config.pop("merges_file", None)
 
         config = self._make_json_serializable(config)
-        config["tokenizer_class"] = self.tokenizer.__class__.__bases__[
-            0].__name__
+        config["tokenizer_class"] = type(self.tokenizer).__name__
         if self.chat_template:
             config["chat_template"] = self.chat_template
         return config
