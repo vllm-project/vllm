@@ -15,6 +15,7 @@ from typing_extensions import assert_never
 
 from vllm.beam.beam import BeamScorer
 from vllm.beam.filtering import _CHUNK_SIZE, BeamValidator
+from vllm.beam.metrics import report_metrics
 from vllm.beam.penalty import MEOW_CLASSI_IDX, PenaltyComputer
 from vllm.beam.tracing import trace_streaming_completion, trace_async_method
 from vllm.config import ModelConfig
