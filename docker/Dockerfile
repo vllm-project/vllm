@@ -400,7 +400,7 @@ RUN --mount=type=cache,target=/root/.cache/uv bash - <<'BASH'
           echo "🏗️  Building FlashInfer for arches: ${FI_TORCH_CUDA_ARCH_LIST}"
 
           git clone --depth 1 --recursive --shallow-submodules \
-            --single-branch --branch ${FLASHINFER_GIT_REF} \
+            --branch ${FLASHINFER_GIT_REF} \
             ${FLASHINFER_GIT_REPO} flashinfer
 
           # Needed to build AOT kernels
