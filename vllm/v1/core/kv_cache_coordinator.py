@@ -221,7 +221,8 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         super().__init__(kv_cache_config, max_model_len, use_eagle,
                          enable_caching, caching_hash_fn,
                          enable_kv_cache_events)
-        self.verify_and_split_kv_cache_groups()
+        if enable_caching:
+            self.verify_and_split_kv_cache_groups()
 
     def verify_and_split_kv_cache_groups(self) -> None:
         """
@@ -307,6 +308,9 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 - A list of the cache hit blocks for each single type manager.
                 - The number of tokens of the longest cache hit.
         """
+        assert self.enable_caching, (
+            "find_longest_cache_hit can't be used if prefix caching is disabled"
+        )
         # First, find the longest cache hit for full attention.
         hit_blocks_full_attn = (
             self.full_attention_manager_cls.find_longest_cache_hit(
