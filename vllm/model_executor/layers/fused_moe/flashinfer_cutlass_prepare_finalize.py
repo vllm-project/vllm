@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Optional
+import vllm.envs as envs
 
 import torch
 from flashinfer import fp4_swizzle_blockscale
@@ -14,13 +15,20 @@ from vllm.model_executor.layers.fused_moe.utils import (
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP)
 
-def get_local_sizes():
+def get_local_sizes(local_tokens):
     cu_sizes = get_forward_context().dp_metadata.cu_tokens_across_dp_cpu
     sizes = [cu_sizes[0].item()]
     for i in range(1, len(cu_sizes)):
         sizes.append((cu_sizes[i] - cu_sizes[i - 1]).item())
-    return sizes
+    max_num_tokens = envs.VLLM_MOE_DP_CHUNK_SIZE
+    sizes_chunked = [max_num_tokens] * len(sizes)
+    if local_tokens < max_num_tokens:
+        # When the number of local tokens is less than max_num_tokens, all other 
+        # ranks will also have fewer than max_num_tokens. The remaining tokens 
+        # are accounted for as residual.
+        sizes_chunked = [x % max_num_tokens for x in sizes]
 
+    return sizes_chunked
 
 class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     def __init__(
@@ -56,6 +64,7 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
         use_dp: Optional[bool] = True,
+        local_tokens: int = -1,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor],
                Optional[torch.Tensor], Optional[torch.Tensor]]:
 
@@ -79,7 +88,7 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             topk_weights, topk_ids, a1q, a1q_scale = \
                 get_dp_group().all_gatherv([topk_weights, topk_ids, a1q, a1q_scale],
                                            dim=0,
-                                           sizes=get_local_sizes())
+                                           sizes=get_local_sizes(local_tokens))
             a1_m, a1_n = a1q.shape
             a1q_scale = fp4_swizzle_blockscale(a1q_scale, a1_m, a1_n * 2)
 
@@ -93,11 +102,12 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
         use_dp: bool = False,
+        local_tokens: int = -1,
     ) -> None:
         if use_dp:
             fused_expert_output = get_dp_group().reduce_scatter(
                 fused_expert_output,
                 dim=0,
-                sizes=get_local_sizes(),
+                sizes=get_local_sizes(local_tokens),
             )
         output.copy_(fused_expert_output)

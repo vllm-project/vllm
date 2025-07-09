@@ -85,7 +85,7 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         return False
         
     def supports_chunking(self) -> bool:
-        #TODO(shuw): support chunking later
+        #TODO(shuw): support chunking later, actually support in layer.py
         return False
 
     def workspace_shapes(

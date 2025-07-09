@@ -805,7 +805,8 @@ class FusedMoE(torch.nn.Module):
         self.batched_hidden_states: Optional[torch.Tensor] = None
         self.batched_router_logits: Optional[torch.Tensor] = None
         if (self.moe_parallel_config.use_pplx_kernels
-                or self.moe_parallel_config.use_deepep_ll_kernels):
+                or self.moe_parallel_config.use_deepep_ll_kernels
+                or self.moe_parallel_config.use_flashinfer_cutlass_kernels):
             self.batched_hidden_states = torch.zeros(
                 (moe.max_num_tokens, self.hidden_size),
                 dtype=moe.in_dtype,
@@ -1414,6 +1415,7 @@ class FusedMoE(torch.nn.Module):
                 expert_load_view=self.expert_load_view,
                 logical_to_physical_map=self.logical_to_physical_map,
                 logical_replica_count=self.logical_replica_count,
+                # start
             )
 
             if not skip_result_store:
@@ -1422,11 +1424,9 @@ class FusedMoE(torch.nn.Module):
 
         ctx = get_forward_context()
         #TODO(shuw):where is it?
-        # flashinfer_cutlass_kernels can handle TP+EP without DP
-        max_tokens_across_dp = (MOE_DP_CHUNK_SIZE if self.dp_size == 1 else
-                                ctx.dp_metadata.max_tokens_across_dp_cpu)
+        # flashinfer_cutlass_kernels can handle: optional DP + TP/EP
+        max_tokens_across_dp = ctx.dp_metadata.max_tokens_across_dp_cpu
         moe_dp_chunk_size_per_rank = self.moe_config.max_num_tokens
-
         num_tokens = full_hidden_states.size(0)
         for chunk_start_ in range(0, max_tokens_across_dp,
                                   moe_dp_chunk_size_per_rank):
@@ -1446,15 +1446,18 @@ class FusedMoE(torch.nn.Module):
     def forward_impl(self, hidden_states: torch.Tensor,
                      router_logits: torch.Tensor):
         assert self.quant_method is not None
+        # Route to the chunked forward path using the FlashInfer Cutlass kernel 
+        # only when data parallelism (DP) is enabled.
+        use_flashinfer_cutlass_kernels = self.dp_size > 1 and self.moe_parallel_config.use_flashinfer_cutlass_kernels
         if (self.moe_parallel_config.use_pplx_kernels
-                or self.moe_parallel_config.use_deepep_ll_kernels):
+                or self.moe_parallel_config.use_deepep_ll_kernels or
+                use_flashinfer_cutlass_kernels):
             return self.forward_impl_chunked(hidden_states, router_logits)
 
         do_naive_dispatch_combine: bool = (
             self.dp_size > 1
             and not self.moe_parallel_config.use_deepep_ht_kernels
             and not self.moe_parallel_config.use_flashinfer_cutlass_kernels)
-        # do_naive_dispatch_combine = True
         if do_naive_dispatch_combine:
             hidden_states, router_logits = get_ep_group().dispatch(
                 hidden_states, router_logits)

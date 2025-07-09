@@ -843,9 +843,11 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             }
             extra_prepare_args = {
                 'use_dp': layer.dp_size > 1,
+                'local_tokens': x.shape[0],
             }
             extra_finalize_args = {
                 'use_dp': layer.dp_size > 1,
+                'local_tokens': x.shape[0],
             }
 
             out = self.fused_experts(
