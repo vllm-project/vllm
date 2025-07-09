@@ -84,7 +84,6 @@ def _mxfp4_quantize(
     block_shape: Optional[list[int]] = None,
 ) -> tuple[torch.Tensor, None]:
     assert block_shape is None
-    assert per_act_token_quant
     if not current_platform.supports_mx():
         A = quant_dequant_mxfp4(A)
     else:
