@@ -13,6 +13,7 @@ from vllm.entrypoints.chat_utils import (
     MultiModalItemTracker, _parse_chat_message_content_part)
 from vllm.inputs import SingletonPrompt, TokensPrompt
 from vllm.model_executor.model_loader import get_model_cls
+from vllm.model_executor.models.interfaces import supports_score_template
 from vllm.multimodal.inputs import MultiModalDataDict
 from vllm.outputs import PoolingRequestOutput
 from vllm.transformers_utils.tokenizer import (AnyTokenizer,
@@ -130,24 +131,25 @@ def apply_score_template(
     prompt_2: SingletonPrompt,
 ) -> SingletonPrompt:
 
-    if 'JinaVLForRanking' in model_config.architectures:
-        return get_model_cls(model_config).get_score_template(
-            prompt_1, prompt_2)
+    model = get_model_cls(model_config)
+    if supports_score_template(model):
+        return model.get_score_template(prompt_1, prompt_2)
 
     raise ValueError(
         f"Unsupported model architecture: {model_config.architectures}")
 
 
 def post_process_tokens(
-    model_arch: str,
+    model_config: ModelConfig,
     prompt: TokensPrompt,
 ):
     """
     Performs architecture-specific manipulations on the input tokens.
     Currently handles special processing for 'JinaVLForRanking' models.
     """
-    if 'JinaVLForRanking' in model_arch:
-        prompt['prompt_token_ids'].append(100)  # add score target token
+    model = get_model_cls(model_config)
+    if supports_score_template(model):
+        return model.post_process_tokens(prompt)
 
 
 def get_score_prompt(
@@ -170,7 +172,7 @@ def get_score_prompt(
 
     engine_prompt = TokensPrompt(prompt_token_ids=prompt_inputs["input_ids"])
 
-    post_process_tokens(model_config.architectures, engine_prompt)
+    post_process_tokens(model_config, engine_prompt)
 
     if mm_data is not None:
         engine_prompt["multi_modal_data"] = mm_data

@@ -8,6 +8,7 @@ import torch.nn as nn
 from transformers import BatchFeature, PretrainedConfig
 
 from vllm.config import VllmConfig
+from vllm.inputs import TokensPrompt
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
@@ -16,7 +17,8 @@ from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors, PoolerOutput
 
-from .interfaces import SupportsCrossEncoding, SupportsMultiModal
+from .interfaces import (SupportsCrossEncoding, SupportsMultiModal,
+                         SupportsScoreTemplate)
 from .qwen2_vl import (Qwen2VLDummyInputsBuilder,
                        Qwen2VLForConditionalGeneration,
                        Qwen2VLMultiModalProcessor, Qwen2VLProcessingInfo)
@@ -67,7 +69,8 @@ class JinaVLMultiModalProcessor(Qwen2VLMultiModalProcessor):
                                         dummy_inputs=Qwen2VLDummyInputsBuilder)
 class JinaVLForSequenceClassification(Qwen2VLForConditionalGeneration,
                                       SupportsCrossEncoding,
-                                      SupportsMultiModal):
+                                      SupportsMultiModal,
+                                      SupportsScoreTemplate):
     weight_mapper = WeightsMapper(
         orig_to_new_prefix={
             "score.0.": "score.dense.",
@@ -86,7 +89,8 @@ class JinaVLForSequenceClassification(Qwen2VLForConditionalGeneration,
         config = vllm_config.model_config.hf_config
         pooler_config = vllm_config.model_config.pooler_config
 
-        self.LOGIT_BIAS = 2.65  # logit bias for sigmoid normalization
+        # logit bias for sigmoid normalization
+        self.LOGIT_BIAS = 2.65
 
         self.score = JinaVLScorer(config)
 
@@ -106,6 +110,12 @@ class JinaVLForSequenceClassification(Qwen2VLForConditionalGeneration,
     @classmethod
     def get_score_template(cls, query: str, document: str) -> Optional[str]:
         return f"**Document**:\n{document}\n**Query**:\n{query}"
+
+    @classmethod
+    def post_process_tokens(cls, prompt: TokensPrompt):
+
+        # add score target token at the end of prompt tokens
+        prompt['prompt_token_ids'].append(100)
 
     def forward(
         self,

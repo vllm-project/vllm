@@ -1289,7 +1289,7 @@ class LLM:
         structure matches the model's expected input format.
 
         Args:
-            data_1: can be a single prompt, a list of prompts or `ScoreMultiModalParam`, which can contain
+            data_1: Can be a single prompt, a list of prompts or `ScoreMultiModalParam`, which can contain
                 either text or multi-modal data. When a list, it must have the same
                 length as the `data_2` list.
             data_2: The data to pair with the query to form the input to the LLM.
