@@ -14,10 +14,6 @@ logger = init_logger(__name__)
 
 class AsyncScheduler(Scheduler):
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.is_async = True
-
     def _update_after_schedule(
         self,
         scheduler_output: SchedulerOutput,
@@ -28,7 +24,8 @@ class AsyncScheduler(Scheduler):
             if request.has_encoder_inputs:
                 self._free_encoder_inputs(request)
 
-            if request.num_computed_tokens == request.num_tokens:
+            if (request.num_computed_tokens == request.num_tokens +
+                    request.num_output_placeholders):
                 # Pre-allocate the slot for output token ids.
                 request.num_output_placeholders += 1
 
@@ -49,13 +46,11 @@ class AsyncScheduler(Scheduler):
         # Now that the request has actual output tokens, we can cache the
         # blocks. NOTE(woosuk): We skip the preempted requests.
         if request.status == RequestStatus.RUNNING:
-            self.kv_cache_manager.cache_blocks(request,
-                                               request.num_computed_tokens)
+            self.kv_cache_manager.cache_blocks(
+                request,
+                request.num_computed_tokens - request.num_output_placeholders)
 
         # NOTE: In async scheduling, the placeholder token should be ignored
         # when checking the stop condition.
-        n = request.num_output_placeholders
-        request.num_output_placeholders = 0
         stopped = check_stop(request, self.max_model_len)
-        request.num_output_placeholders = n
         return new_token_ids, stopped

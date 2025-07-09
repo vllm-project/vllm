@@ -2330,6 +2330,7 @@ class SchedulerConfig:
         # increase startup time with limited performance benefit.
         if not self.cuda_graph_sizes:
             self.cuda_graph_sizes = [min(self.max_num_seqs * 2, 512)]
+
         if self.async_scheduling:
             self.scheduler_cls = (
                 "vllm.v1.core.sched.async_scheduler.AsyncScheduler")

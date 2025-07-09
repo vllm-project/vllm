@@ -190,7 +190,6 @@ class KVCacheManager:
         num_new_tokens: int,
         num_new_computed_tokens: int = 0,
         new_computed_blocks: Optional[KVCacheBlocks] = None,
-        num_draft_tokens: int = 0,
         num_lookahead_tokens: int = 0,
         delay_cache_blocks: bool = False,
     ) -> Optional[KVCacheBlocks]:
@@ -289,10 +288,11 @@ class KVCacheManager:
         # Speculated tokens might be rejected in the future, so we does
         # not cache any speculated tokens. We only cache blocks with
         # generated (accepted) tokens.
+        # For the same reason, we do not cache the output placeholders,
+        # which is used in async scheduling.
         self.coordinator.cache_blocks(
             request, self.req_to_block_hashes[request.request_id],
-            num_computed_tokens + num_new_tokens - num_draft_tokens -
-            request.num_output_placeholders)
+            min(request.num_tokens, num_computed_tokens + num_new_tokens))
 
         return KVCacheBlocks(new_blocks)
 
