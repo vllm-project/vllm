@@ -2947,17 +2947,11 @@ def build_uri(scheme: str,
     Returns:
         Complete URI string
     """
-    # Handle IPv6 addresses
-    if host:
-        try:
-            # Check if it's an IPv6 address
-            ip = ipaddress.ip_address(host)
-            # Ensure IPv6 addresses are bracketed
-            if (isinstance(ip, ipaddress.IPv6Address)
-                    and not (host.startswith('[') and host.endswith(']'))):
-                host = f'[{host}]'
-        except ValueError:
-            pass
+
+    # Ensure IPv6 addresses are bracketed
+    if (is_valid_ipv6_address(host)
+            and not (host.startswith('[') and host.endswith(']'))):
+        host = f'[{host}]'
 
     netloc = f"{host}:{port}" if port else host
     return urlunparse((scheme, netloc, path, params, query, fragment))
