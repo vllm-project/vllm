@@ -364,12 +364,13 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
 # TODO (huydhn): Remove this once xformers is released for 2.8.0
+# https://pytorch.s3.us-east-1.amazonaws.com/whl/test/cu128/xformers/xformers-0.0.30%2B4cf69f09.d20250708-cp312-cp312-linux_x86_64.whl
 RUN --mount=type=cache,target=/root/.cache/uv bash - <<'BASH'
     . /etc/environment
     export TORCH_CUDA_ARCH_LIST='7.0 7.5 8.0 8.9 9.0 10.0 12.0'
     uv pip install --system --no-build-isolation "git+https://github.com/facebookresearch/xformers@v0.0.30"
     # DEBUG
-    python -m xformers.info
+    python3 -m xformers.info
 BASH
 
 # If we need to build FlashInfer wheel before its release:
