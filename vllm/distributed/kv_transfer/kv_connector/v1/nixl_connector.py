@@ -12,7 +12,7 @@ from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Optional
 from urllib.error import HTTPError, URLError
 from urllib.request import Request as URLRequest
@@ -61,13 +61,13 @@ except ImportError:
 
 
 class NixlAgentMetadata(KVConnectorHandshakeMetadata):
+    engine_id: str = field()
+    agent_metadata: bytes = field()
+    kv_caches_base_addr: list[int] = field()
+    num_blocks: int = field()
+    block_len: int = field()
+    attn_backend_name: str = field()
     connector_type: str = "nixl"
-    engine_id: str
-    agent_metadata: bytes
-    kv_caches_base_addr: list[int]
-    num_blocks: int
-    block_len: int
-    attn_backend_name: str
 
 
 @dataclass
@@ -125,7 +125,7 @@ class ZmqHandshakeStrategy(HandshakeStrategy):
                          engine_id)
         self.add_remote_agent_func = add_remote_agent_func
         self._listener_thread: Optional[threading.Thread] = None
-        self._tp_size_mapping: dict[str, int] = {engine_id: tp_size}
+        self._tp_size: dict[str, int] = {engine_id: tp_size}
 
     def initiate_handshake(self, host: str, port: int,
                            remote_tp_size: int) -> dict[int, str]:
@@ -159,7 +159,7 @@ class ZmqHandshakeStrategy(HandshakeStrategy):
 
         # Handshake only with the other TP remote the current local rank will
         # pull from. With homogeneous TP it happens to be the same rank_i.
-        tp_ratio = self._tp_size_mapping[self.engine_id] // remote_tp_size
+        tp_ratio = self._tp_size[self.engine_id] // remote_tp_size
         p_remote_rank = self.tp_rank // tp_ratio
         if p_remote_rank > 0:
             path = make_zmq_path("tcp", host, port + p_remote_rank)

@@ -7,9 +7,15 @@ The class provides the following primitives:
     Scheduler-side: runs in the scheduler, binds metadata, which
     is used by the worker-side to load/save KV cache.
         get_num_new_matched_tokens() - get number of new tokens 
-            that exist in the remote KV cache
+            that exist in the remote KV cache. Might be called multiple
+            times for a given request and should be side-effect free.
         update_state_after_alloc() - update KVConnector state after
             temporary buffer alloc by the CacheManager.
+        request_finished() - called when a request is finished, with
+            the computed kv cache blocks for the request.
+            Returns whether KV cache should be freed now or will be
+            freed asynchronously and optionally returns KV transfer
+            params.
 
     Worker-side: runs in each worker, loads/saves KV cache to/from
     the Connector based on the metadata.
@@ -18,6 +24,8 @@ The class provides the following primitives:
 
         save_kv_layer() - starts saving KV for layer i (maybe async)
         wait_for_save() - blocks until all saves are done
+        get_finished() - called with ids of finished requests, returns
+            ids of requests that have completed async sending/recving.
 """
 
 import enum
@@ -277,6 +285,16 @@ class KVConnectorBase_V1(ABC):
                                  num_external_tokens: int):
         """
         Update KVConnector state after block allocation.
+        If get_num_new_matched_tokens previously returned True for a
+        request, this function may be called twice for that same request -
+        first when blocks are allocated for the connector tokens to be
+        asynchronously loaded into, and second when any additional blocks
+        are allocated, after the load/transfer is complete.
+        Args:
+            request (Request): the request object.
+            blocks (KVCacheBlocks): the blocks allocated for the request.
+            num_external_tokens (int): the number of tokens that will be
+                loaded from the external KV cache.
         """
         pass
 
