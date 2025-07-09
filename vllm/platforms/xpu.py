@@ -46,6 +46,13 @@ class XPUPlatform(Platform):
         return "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"
 
     @classmethod
+    def set_device(cls, device: torch.device) -> None:
+        """
+        Set the device for the current platform.
+        """
+        torch.xpu.set_device(device)
+
+    @classmethod
     def get_device_capability(
         cls,
         device_id: int = 0,
