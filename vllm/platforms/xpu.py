@@ -91,6 +91,7 @@ class XPUPlatform(Platform):
 
         # FIXME: Temporarily forcing eager mode
         # remove after t.compile support stabilizes.
+
         if (envs.VLLM_USE_V1 and vllm_config.model_config is not None
                 and not vllm_config.model_config.enforce_eager):
             from vllm.config import CompilationLevel
@@ -111,9 +112,6 @@ class XPUPlatform(Platform):
                     "mode.")
                 model_config.enforce_eager = True
 
-        if vllm_config.device_config is not None:
-            assert vllm_config.device_config.device_type == "xpu"
-
         # check and update parallel config
         parallel_config = vllm_config.parallel_config
         parallel_config.worker_cls = "vllm.v1.worker.xpu_worker.XPUWorker"
@@ -131,8 +129,10 @@ class XPUPlatform(Platform):
                 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
                 logger.warning(
                     "Please use spawn as start method if you want to use mp.")
-        elif parallel_config.distributed_executor_backend != "ray" and \
-                parallel_config.distributed_executor_backend != "uni":
+        elif (parallel_config.distributed_executor_backend != "ray"
+              and parallel_config.distributed_executor_backend != "uni"
+              and parallel_config.distributed_executor_backend
+              != "external_launcher"):
             logger.warning(
                 "%s is not supported on XPU, fallback to ray distributed"
                 " executor backend.",
