@@ -3,7 +3,7 @@
 """Attention layer with FlashAttention."""
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional
+from typing import Any, Optional
 
 import torch
 from torch.nn.attention.flex_attention import (BlockMask, _mask_mod_signature,
@@ -22,9 +22,6 @@ from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 logger = init_logger(__name__)
-
-if TYPE_CHECKING:
-    pass
 
 create_block_mask_compiled = torch.compile(create_block_mask,
                                            fullgraph=True,

@@ -685,6 +685,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         for kv_cache_group_id, kv_cache_group_spec in enumerate(
                 self.kv_cache_config.kv_cache_groups):
 
+            blk_table = self.input_batch.block_table[kv_cache_group_id]
+            blk_table_tensor = blk_table.get_device_tensor()[:num_reqs]
+            slot_mapping = blk_table.slot_mapping[:total_num_scheduled_tokens]
             common_attn_metadata = CommonAttentionMetadata(
                 query_start_loc=self.query_start_loc[:num_reqs + 1],
                 query_start_loc_cpu=self.query_start_loc_cpu[:num_reqs + 1],
@@ -695,10 +698,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_reqs=num_reqs,
                 num_actual_tokens=total_num_scheduled_tokens,
                 max_query_len=max_num_scheduled_tokens,
-                block_table_tensor=self.input_batch.
-                block_table[kv_cache_group_id].get_device_tensor()[:num_reqs],
-                slot_mapping=self.input_batch.block_table[kv_cache_group_id].
-                slot_mapping[:total_num_scheduled_tokens],
+                block_table_tensor=blk_table_tensor,
+                slot_mapping=slot_mapping,
             )
 
             if self.speculative_config and \
