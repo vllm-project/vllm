@@ -799,6 +799,33 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             del layer.w13_input_scale
             del layer.w2_input_scale
 
+        if not self.rocm_aiter_moe_enabled and self.cutlass_block_fp8_supported:
+            device = w13_weight.device
+            layer.ab_strides1 = torch.full((layer.local_num_experts, ),
+                                           layer.hidden_size,
+                                           device=device,
+                                           dtype=torch.int64)
+            layer.c_strides1 = torch.full(
+                (layer.local_num_experts, ),
+                2 * layer.intermediate_size_per_partition,
+                device=device,
+                dtype=torch.int64)
+            layer.ab_strides2 = torch.full(
+                (layer.local_num_experts, ),
+                layer.intermediate_size_per_partition,
+                device=device,
+                dtype=torch.int64)
+            layer.c_strides2 = torch.full((layer.local_num_experts, ),
+                                          layer.hidden_size,
+                                          device=device,
+                                          dtype=torch.int64)
+            layer.w13_weight_scale_inv = Parameter(
+                layer.w13_weight_scale_inv.transpose(1, 2).contiguous(),
+                requires_grad=False)
+            layer.w2_weight_scale_inv = Parameter(
+                layer.w2_weight_scale_inv.transpose(1, 2).contiguous(),
+                requires_grad=False)
+
     def select_gemm_impl(
         self,
         prepare_finalize: FusedMoEPrepareAndFinalize,
@@ -917,17 +944,21 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 layer.w2_weight,
                 topk_weights,
                 topk_ids,
-                (layer.w13_weight_scale_inv
-                 if self.block_quant else layer.w13_weight_scale),
-                (layer.w2_weight_scale_inv
-                 if self.block_quant else layer.w2_weight_scale),
+                layer.w13_weight_scale_inv,
+                layer.w2_weight_scale_inv,
                 block_shape,
+                layer.ab_strides1,
+                layer.ab_strides2,
+                layer.c_strides1,
+                layer.c_strides2,
                 activation,
                 layer.w13_input_scale,
                 layer.w2_input_scale,
                 apply_router_weight_on_input,
-                global_num_experts,
-            )
+                global_num_experts=(global_num_experts if global_num_experts
+                                    != -1 else layer.w13_weight.shape[0]),
+                per_act_block=(layer.w13_input_scale is None
+                               or layer.w13_input_scale.shape[0] == 1))
         elif self.use_marlin:
             assert activation == "silu", (
                 f"{activation} not supported for Marlin MoE.")

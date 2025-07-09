@@ -233,6 +233,8 @@ def benchmark_shape(e: int,
     w2_d = mt.w2_d
     w1_scale = mt.w1_scale
     w2_scale = mt.w2_scale
+    w1_scale_t = mt.w1_scale.transpose(1, 2).contiguous()
+    w2_scale_t = mt.w2_scale.transpose(1, 2).contiguous()
 
     score = torch.randn((m, e), device="cuda", dtype=torch.bfloat16)
     topk_weights, topk_ids, _ = fused_topk(a, score, topk, renormalize=False)
@@ -266,9 +268,13 @@ def benchmark_shape(e: int,
                     w2,
                     topk_weights,
                     topk_ids,
-                    w1_scale,
-                    w2_scale,
+                    w1_scale_t,
+                    w2_scale_t,
                     [128, 128],
+                    ab_strides1=mt.ab_strides1,
+                    ab_strides2=mt.ab_strides2,
+                    c_strides1=mt.c_strides1,
+                    c_strides2=mt.c_strides2,
                     a1_scale=a1_scale,
                     per_act_block=True,
                     global_num_experts=w1.size(0),
@@ -279,8 +285,6 @@ def benchmark_shape(e: int,
         print("Running correctness check...")
     C_vllm_triton = vllm_triton_gemm()
     C_vllm_cutlass = vllm_cutlass_gemm()
-
-    # raise ValueError("Stop here")
 
     vllm_triton_diff = calc_diff(C_vllm_triton, C_ref)
     vllm_cutlass_diff = calc_diff(C_vllm_cutlass, C_ref)

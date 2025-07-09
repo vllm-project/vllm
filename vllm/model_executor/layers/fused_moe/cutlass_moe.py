@@ -658,6 +658,10 @@ def run_blocked_cutlass_moe_fp8(
     w2_scale: Optional[torch.Tensor],
     a1q_scale: Optional[torch.Tensor],
     a2_scale: Optional[torch.Tensor],
+    ab_strides1: torch.Tensor,
+    ab_strides2: torch.Tensor,
+    c_strides1: torch.Tensor,
+    c_strides2: torch.Tensor,
     workspace13: torch.Tensor,
     workspace2: torch.Tensor,
     out_dtype: torch.dtype,
@@ -745,26 +749,10 @@ def run_blocked_cutlass_moe_fp8(
                                 problem_sizes2, a_map, c_map,
                                 global_num_experts, N, K)
 
-    a1q = _fp8_perm(a1q, a_map)
-    a1q_scale = a1q_scale[a_map] if per_act_block else a1q_scale
+    a1q = ops.shuffle_rows(a1q, a_map)
+    a1q_scale = (ops.shuffle_rows(a1q_scale, a_map)
+                 if per_act_block else a1q_scale)
     expert_offsets = expert_offsets[:-1]
-
-    ab_strides1 = torch.full((w1.shape[0], ),
-                             K,
-                             device=device,
-                             dtype=torch.int64)
-    c_strides1 = torch.full((w1.shape[0], ),
-                            2 * N,
-                            device=device,
-                            dtype=torch.int64)
-    ab_strides2 = torch.full((w1.shape[0], ),
-                             N,
-                             device=device,
-                             dtype=torch.int64)
-    c_strides2 = torch.full((w1.shape[0], ),
-                            K,
-                            device=device,
-                            dtype=torch.int64)
 
     c1 = _resize_cache(workspace13, (M * topk, N * 2))
     c2 = _resize_cache(workspace2, (M * topk, N))
@@ -780,8 +768,7 @@ def run_blocked_cutlass_moe_fp8(
     if expert_map is not None:
         c1.fill_(0)
 
-    ops.cutlass_moe_blockwise_mm(c1, a1q, w1, a1q_scale,
-                                 w1_scale.transpose(1, 2).contiguous(),
+    ops.cutlass_moe_blockwise_mm(c1, a1q, w1, a1q_scale, w1_scale,
                                  expert_offsets, problem_sizes1, ab_strides1,
                                  ab_strides1, c_strides1, per_act_block)
 
@@ -791,7 +778,9 @@ def run_blocked_cutlass_moe_fp8(
         c2,
         A_scale=None,
         per_act_token=False,
-        block_shape=[128, 128] if per_act_block else None)
+        block_shape=[128, 128] if per_act_block else None,
+    )
+
     if per_act_block:
         a2q_scale = ops.transpose_cutlass_moe_a_scales(a2q_scale,
                                                        expert_offsets,
@@ -802,12 +791,12 @@ def run_blocked_cutlass_moe_fp8(
     if expert_map is not None:
         c3.fill_(0)
 
-    ops.cutlass_moe_blockwise_mm(c3, a2q, w2, a2q_scale,
-                                 w2_scale.transpose(1, 2).contiguous(),
+    ops.cutlass_moe_blockwise_mm(c3, a2q, w2, a2q_scale, w2_scale,
                                  expert_offsets, problem_sizes2, ab_strides2,
                                  ab_strides2, c_strides2, per_act_block)
 
-    output.copy_(c3[c_map].view(M * topk, K), non_blocking=True)
+    output.copy_(ops.shuffle_rows(c3, c_map).view(M * topk, K),
+                 non_blocking=True)
 
 
 class CutlassExpertsBlockedFp8(mk.FusedMoEPermuteExpertsUnpermute):
@@ -818,6 +807,10 @@ class CutlassExpertsBlockedFp8(mk.FusedMoEPermuteExpertsUnpermute):
         out_dtype: torch.dtype,
         per_act_block: bool,
         block_shape: list[int],
+        ab_strides1: torch.Tensor,
+        ab_strides2: torch.Tensor,
+        c_strides1: torch.Tensor,
+        c_strides2: torch.Tensor,
     ):
         super().__init__(
             FusedMoEQuantConfig(
@@ -830,6 +823,10 @@ class CutlassExpertsBlockedFp8(mk.FusedMoEPermuteExpertsUnpermute):
         self.max_experts_per_worker = max_experts_per_worker
         self.out_dtype = out_dtype
         self.per_act_block = per_act_block
+        self.ab_strides1 = ab_strides1
+        self.ab_strides2 = ab_strides2
+        self.c_strides1 = c_strides1
+        self.c_strides2 = c_strides2
 
     @property
     def activation_formats(
@@ -886,12 +883,12 @@ class CutlassExpertsBlockedFp8(mk.FusedMoEPermuteExpertsUnpermute):
         assert w2_zp is None, "w2_zp is not supported in CUTLASS MoE"
         activation_callable = lambda i, o: self.activation(activation, i, o)
         assert expert_num_tokens is None, "PPLX is not supported in blocked CUTLASS MoE"  # noqa: E501
-        return run_blocked_cutlass_moe_fp8(output, hidden_states, w1, w2,
-                                           topk_ids, activation_callable,
-                                           global_num_experts, expert_map,
-                                           w1_scale, w2_scale, a1q_scale,
-                                           a2_scale, workspace13, workspace2,
-                                           self.out_dtype, self.per_act_block)
+        return run_blocked_cutlass_moe_fp8(
+            output, hidden_states, w1, w2, topk_ids, activation_callable,
+            global_num_experts, expert_map, w1_scale, w2_scale, a1q_scale,
+            a2_scale, self.ab_strides1, self.ab_strides2, self.c_strides1,
+            self.c_strides2, workspace13, workspace2, self.out_dtype,
+            self.per_act_block)
 
 
 def cutlass_moe_blocked_fp8(
@@ -903,6 +900,10 @@ def cutlass_moe_blocked_fp8(
     w1_scale: torch.Tensor,
     w2_scale: torch.Tensor,
     block_shape: list[int],
+    ab_strides1: torch.Tensor,
+    ab_strides2: torch.Tensor,
+    c_strides1: torch.Tensor,
+    c_strides2: torch.Tensor,
     activation: str = "silu",
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
@@ -951,6 +952,10 @@ def cutlass_moe_blocked_fp8(
             out_dtype=out_dtype,
             per_act_block=per_act_block,
             block_shape=block_shape,
+            ab_strides1=ab_strides1,
+            ab_strides2=ab_strides2,
+            c_strides1=c_strides1,
+            c_strides2=c_strides2,
         ),
     )
 
