@@ -95,7 +95,7 @@ def create_and_prepopulate_kv_cache(
         device: torch.device,
         num_blocks: int,
         common_attn_metadata: CommonAttentionMetadata,
-        randomize_blocks: bool = True) -> tuple[torch.Tensor, torch.Tensor]:
+        randomize_blocks: bool = True) -> torch.Tensor:
     """Create and prepopulate a KV cache with context data.
     
     Args:
