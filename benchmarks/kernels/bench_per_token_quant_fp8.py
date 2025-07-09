@@ -13,10 +13,10 @@ from vllm.triton_utils import triton
 
 
 # TODO(luka): use standalone_compile utility
-def with_dyn_arg(callable: Callable, arg_index: int, dim_index: int):
+def with_dyn_arg(fn: Callable, arg_index: int, dim_index: int):
     def inner(*args):
         torch._dynamo.mark_dynamic(args[arg_index], dim_index)
-        return callable(*args)
+        return fn(*args)
 
     return inner
 
