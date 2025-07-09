@@ -204,7 +204,10 @@ class Attention(nn.Module):
         """
         if self.calculate_kv_scales:
             attn_metadata = get_forward_context().attn_metadata
-            if attn_metadata.enable_kv_scales_calculation:
+            if isinstance(attn_metadata, dict):
+                attn_metadata = attn_metadata[self.layer_name]
+            if (attn_metadata is not None
+                    and attn_metadata.enable_kv_scales_calculation):
                 self.calc_kv_scales(query, key, value)
         if self.use_output:
             output_shape = (output_shape
