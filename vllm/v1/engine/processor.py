@@ -387,9 +387,10 @@ class Processor:
             else:
                 raise ValueError(f"The {prompt_type} prompt cannot be empty")
 
-        if tokenizer:
-            max_input_id = max(prompt_ids, default=0)
-            if max_input_id > tokenizer.max_token_id:
+        if (
+            tokenizer and (max_input_id:=max(prompt_ids, default=0)) > 
+            tokenizer.max_token_id
+        ):
                 raise ValueError(
                     f"Token id {max_input_id} is out of vocabulary")
 

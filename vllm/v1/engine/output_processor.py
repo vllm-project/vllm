@@ -336,7 +336,7 @@ class OutputProcessor:
                                                   parent_req=parent_req,
                                                   request_index=request_index,
                                                   queue=queue,
-                                                  log_stats=self.log_stats)
+                                                  log_stats=self.log_stats,)
         self.request_states[request_id] = req_state
         self.lora_states.add_request(req_state)
         if parent_req:

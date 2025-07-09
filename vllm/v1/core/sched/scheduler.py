@@ -92,7 +92,7 @@ class Scheduler(SchedulerInterface):
         )
 
         num_gpu_blocks = self.cache_config.num_gpu_blocks
-        # num_gpu_blocks can be ero for attention free models
+        # num_gpu_blocks can be zero for attention free models
         assert num_gpu_blocks is not None
 
         self.block_size = self.cache_config.block_size
@@ -164,6 +164,7 @@ class Scheduler(SchedulerInterface):
                 log_stats=self.log_stats,
                 enable_kv_cache_events=self.enable_kv_cache_events,
             )
+        self.use_pp = self.parallel_config.pipeline_parallel_size > 1
 
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
@@ -493,8 +494,8 @@ class Scheduler(SchedulerInterface):
 
                 if self.lora_config and request.lora_request:
                     scheduled_loras.add(request.lora_request.lora_int_id)
-                req_to_new_block_ids[request.request_id] = \
-                    self.kv_cache_manager.get_block_ids(request.request_id)
+                req_to_new_block_ids[request.request_id] = (
+                    self.kv_cache_manager.get_block_ids(request.request_id))
                 num_scheduled_tokens[request.request_id] = num_new_tokens
                 token_budget -= num_new_tokens
                 request.status = RequestStatus.RUNNING

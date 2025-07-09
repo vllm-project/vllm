@@ -330,9 +330,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             scheduler_output: The scheduler output.
         """
         
-        # nothing to be reordered when the mdoel is attention free
+        # nothing to be reordered when the model is attention free
         if self.model_config.is_attention_free:
-            return False
+            return
 
         self.attn_metadata_builders[0].reorder_batch(self.input_batch,
                                                      scheduler_output)
@@ -561,7 +561,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def _maybe_add_multimodal_kwargs(
             self,
             model_kwargs: dict[str, Any],
-            scheduler_output: "SchedulerOutput" = None,
+            scheduler_output: "Optional[SchedulerOutput]" = None,
             num_reqs: int = -1,
     ):
 
@@ -2105,7 +2105,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                 intermediate_tensors=intermediate_tensors,
                                 inputs_embeds=inputs_embeds,
                                 **MultiModalKwargs.as_kwargs(
-                                    model_kwargs, device=self.device))
+                                    model_kwargs, device=self.device),)
 
             if self.use_aux_hidden_state_outputs:
                 hidden_states, _ = outputs
