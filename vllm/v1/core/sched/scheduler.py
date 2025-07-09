@@ -241,15 +241,10 @@ class Scheduler(SchedulerInterface):
                 req_index += 1
                 continue
 
-            num_draft_tokens = max(
-                num_new_tokens + request.num_computed_tokens -
-                request.num_tokens, 0)
-
             while True:
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
                     num_new_tokens,
-                    num_draft_tokens=num_draft_tokens,
                     num_lookahead_tokens=self.num_lookahead_tokens)
                 if new_blocks is None:
                     # The request cannot be scheduled.
