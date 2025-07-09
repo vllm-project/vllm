@@ -688,9 +688,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             e_score_correction_bias=e_score_correction_bias)
 
         if self.use_marlin:
-            assert not apply_router_weight_on_input, (
-                "Router weight on input is not "
-                "supported for fused_marlin_moe.")
             return torch.ops.vllm.fused_marlin_moe(
                 x,
                 layer.w13_weight,
