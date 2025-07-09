@@ -248,7 +248,7 @@ def rocm_aiter_asm_moe_impl(
         fc2_smooth_scale=fc2_smooth_scale,
         a16=a16,
         per_tensor_quant_scale=per_tensor_quant_scale,
-        block_shape=tuple(block_shape),
+        block_shape=None if block_shape is None else tuple(block_shape),
         activation=activation,
         expert_mask=expert_mask,
     )
