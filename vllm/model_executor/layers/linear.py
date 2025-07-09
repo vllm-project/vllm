@@ -29,6 +29,7 @@ from vllm.model_executor.parameter import (BasevLLMParameter,
 # yapf: enable
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
+from vllm.utils import GiB_bytes
 
 logger = init_logger(__name__)
 
@@ -198,16 +199,15 @@ class UnquantizedLinearMethod(LinearMethodBase):
                                            input_size_per_partition,
                                            dtype=params_dtype),
                                requires_grad=False)
-        except RuntimeError as e:
+        except torch.cuda.OutOfMemoryError as e:
+            # This helps to see how much memory is allocated when using CUDA
+            logger.error("Failed to create unquantized linear weights: %s", e)
             if torch.cuda.is_available():
-                # This helps to see how much memory is allocated when using CUDA
-                logger.error("Failed to create unquantized linear weights: %s",
-                             e)
                 logger.debug("CUDA device: %s", torch.cuda.current_device())
-                allocated_gb = torch.cuda.memory_allocated() / 1024**3
-                logger.debug("Allocated: %.2f GB", allocated_gb)
-                reserved_gb = torch.cuda.memory_reserved() / 1024**3
-                logger.debug("Reserved: %.2f GB", reserved_gb)
+                allocated = torch.cuda.memory_allocated() / GiB_bytes
+                reserved = torch.cuda.memory_reserved() / GiB_bytes
+                logger.debug("Allocated: %.2fGiB", allocated)
+                logger.debug("Reserved: %.2fGiB", reserved)
             raise RuntimeError(
                 "Failed to create unquantized linear weights. "
                 "This may be caused by insufficient memory to allocate "
