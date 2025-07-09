@@ -166,9 +166,12 @@ class Gemma3MultiModalProcessor(BaseMultiModalProcessor[Gemma3nProcessingInfo]
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
+
+        # HF Transformers audio processor no longer accepts `audios` key.
+        # We pop `audios` and replace it with `audio` key to surpress
+        # the warning.
         if 'audios' in mm_data:
-            # TODO why is it ignored?
-            mm_data['audio'] = mm_data['audios']
+            mm_data['audio'] = mm_data.pop('audios')
         processed_outputs = super()._call_hf_processor(
             prompt,
             mm_data,
@@ -453,11 +456,13 @@ class Gemma3nForConditionalGeneration(nn.Module, SupportsMultiModal):
         assert self.audio_tower is not None
         input_features = audio_input["input_features"]
         input_features_mask = audio_input["input_features_mask"]
-        # TODO
-        input_features = input_features.squeeze(0)
-        input_features_mask = input_features_mask.squeeze(0)
         print("input_features", input_features.shape, "\n")
         print("input_features_mask", input_features_mask.shape, "\n")
+        # # TODO
+        # input_features = input_features.squeeze(0)
+        # input_features_mask = input_features_mask.squeeze(0)
+        # print("input_features", input_features.shape, "\n")
+        # print("input_features_mask", input_features_mask.shape, "\n")
         audio_outputs, audio_mask = self.audio_tower(input_features,
                                                      ~input_features_mask)
         audio_features = self.embed_audio(inputs_embeds=audio_outputs)
