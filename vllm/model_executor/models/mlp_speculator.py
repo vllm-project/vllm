@@ -70,7 +70,12 @@ class MLPSpeculator(nn.Module):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
-        config = vllm_config.model_config.hf_config
+        if hasattr(vllm_config, 'speculative_config'):
+            config = vllm_config.speculative_config.draft_model_config.hf_config
+            self.sampling_metadata_is_required = False
+        else:
+            config = vllm_config.model_config.hf_config
+            self.sampling_metadata_is_required = True
         self.n_predict = config.n_predict
         self.vocab_size = config.vocab_size
         self.emb_dim = config.emb_dim
@@ -182,8 +187,9 @@ class MLPSpeculator(nn.Module):
             # TODO: not yet supporting top_k_tokens_per_head
             states = states.flatten(0, 1)
 
-            logits = self.logits_processor(self.head[head_index], states,
-                                           sampling_metadata)
+            logits = self.logits_processor(
+                self.head[head_index], states, sampling_metadata
+                if self.sampling_metadata_is_required else None)
 
             output = self.sampler(logits, sampling_metadata)
             last_tokens = output.sampled_token_ids

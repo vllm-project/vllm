@@ -64,6 +64,7 @@ from vllm.v1.sample.sampler import Sampler
 from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.medusa import MedusaProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
+from vllm.v1.spec_decode.mlp_speculator import MLPSpeculatorProposer
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
@@ -188,6 +189,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.drafter = MedusaProposer(
                     vllm_config=self.vllm_config,
                     device=self.device)  # type: ignore
+            elif self.speculative_config.method == "mlp_speculator":
+                self.drafter = MLPSpeculatorProposer(self.vllm_config,
+                                                     self.device)
             else:
                 raise ValueError("Unknown speculative decoding method: "
                                  f"{self.speculative_config.method}")
@@ -1636,6 +1640,38 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
             spec_token_ids = self.drafter.propose(
                 target_hidden_states=hidden_states,
+                sampling_metadata=sampling_metadata,
+            )
+        elif self.speculative_config.method == "mlp_speculator":
+            assert isinstance(self.drafter, MLPSpeculatorProposer)
+
+            is_sample_match = sample_hidden_states.shape[0] == len(
+                sampled_token_ids)
+            # Get last token from each sequence
+            draft_input_ids = torch.tensor(
+                sampled_token_ids[0] if is_sample_match else
+                [tokens[-1] for tokens in sampled_token_ids],
+                device=sample_hidden_states.device)
+
+            if is_sample_match:
+                # Calculate indices for hidden states
+                indices = []
+                offset = 0
+                for num_draft, tokens in zip(
+                        spec_decode_metadata.num_draft_tokens,
+                        sampled_token_ids):
+                    indices.append(offset + len(tokens) - 1)
+                    offset += num_draft + 1
+                indices = torch.tensor(indices, device=self.device)
+                hidden_states = sample_hidden_states[indices]
+            else:
+                hidden_states = sample_hidden_states
+
+            spec_token_ids = self.drafter.propose(
+                input_ids=draft_input_ids,
+                previous_hidden_states=hidden_states,
+                num_predict_tokens=self.vllm_config.speculative_config.
+                num_speculative_tokens,
                 sampling_metadata=sampling_metadata,
             )
         elif self.speculative_config.use_eagle():
