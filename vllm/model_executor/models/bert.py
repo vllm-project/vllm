@@ -22,7 +22,6 @@ from vllm.model_executor.layers.pooler import (ClassifierPooler, Pooler,
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.sequence import IntermediateTensors, PoolerOutput
 
@@ -44,9 +43,13 @@ class BertEmbedding(nn.Module):
             config.type_vocab_size, config.hidden_size)
         self.LayerNorm = nn.LayerNorm(config.hidden_size,
                                       eps=config.layer_norm_eps)
-        self.register_buffer(
-            "position_ids",
-            torch.arange(config.max_position_embeddings).expand((1, -1)))
+
+        # Use nn.Parameter with requires_grad=False to maintain compatibility
+        # with existing HF checkpoints while ensuring position_ids are
+        # non-trainable.
+        self.position_ids = nn.Parameter(torch.empty(
+            (1, config.max_position_embeddings)),
+                                         requires_grad=False)
 
         self.position_embedding_type = config.position_embedding_type
         if self.position_embedding_type != "absolute":
@@ -359,45 +362,44 @@ class BertModel(nn.Module, SupportsQuant):
             ("qkv_proj", "value", "v"),
         ]
 
+        loaded_stacked_params = []
+        other_weights = []
         params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
         for name, loaded_weight in weights:
-            if self.pooler is None and "pooler" in name:
-                continue
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
                     continue
+
                 name = name.replace(weight_name, param_name)
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
+                if name not in params_dict:
                     continue
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
+                loaded_stacked_params.append(name)
                 break
             else:
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
-                weight_loader(param, loaded_weight)
-            loaded_params.add(name)
+                other_weights.append((name, loaded_weight))
+
+        loader = AutoWeightsLoader(
+            self,
+            skip_prefixes=(["pooler."] if self.pooler is None else []),
+        )
+        loaded_params = loader.load_weights(other_weights)
+        loaded_params.update(loaded_stacked_params)
         return loaded_params
 
 
 class BertEmbeddingModel(nn.Module, SupportsV0Only, SupportsQuant):
     """A model that uses Bert to provide embedding functionalities.
 
-   This class encapsulates the BertModel and provides an interface for
-   embedding operations and customized pooling functions.
+    This class encapsulates the BertModel and provides an interface for
+    embedding operations and customized pooling functions.
 
-   Attributes:
-       model: An instance of BertModel used for forward operations.
-       _pooler: An instance of Pooler used for pooling operations.
-   """
-    hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"model.": ""})
+    Attributes:
+        model: An instance of BertModel used for forward operations.
+        _pooler: An instance of Pooler used for pooling operations.
+    """
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -426,10 +428,15 @@ class BertEmbeddingModel(nn.Module, SupportsV0Only, SupportsQuant):
         return self._pooler(hidden_states, pooling_metadata)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-        weights = self.hf_to_vllm_mapper.apply(weights)
-        weights = ((name, data) for name, data in weights
-                   if not name.startswith("lm_head."))
-        self.model.load_weights(weights)
+        weights_list = list(weights)
+
+        has_model_prefix = any(
+            name.startswith("model.") for name, _ in weights_list)
+        if not has_model_prefix:
+            mapper = WeightsMapper(orig_to_new_prefix={"": "model."})
+
+        loader = AutoWeightsLoader(self, skip_prefixes=["lm_head."])
+        return loader.load_weights(weights_list, mapper=mapper)
 
     def _build_model(self,
                      vllm_config: VllmConfig,
@@ -471,27 +478,8 @@ class BertForSequenceClassification(nn.Module, SupportsV0Only,
                                         self.classifier, self.bert.pooler)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-        bert_weights = []
-        classifier_weights = []
-
-        for name, weight in weights:
-            if name.startswith("bert."):
-                bert_weights.append((name, weight))
-            else:
-                classifier_weights.append((name, weight))
-
         loader = AutoWeightsLoader(self)
-        loaded_params = loader.load_weights(bert_weights)
-
-        params_dict = dict(self.named_parameters())
-        for name, loaded_weight in classifier_weights:
-            if name in params_dict:
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
-                weight_loader(param, loaded_weight)
-                loaded_params.add(name)
-
+        loaded_params = loader.load_weights(weights)
         return loaded_params
 
     def pooler(
