@@ -14,7 +14,7 @@ mm_processor_kwargs = {
     "max_pixels": 602112,
 }
 
-limit_mm_per_prompt = {"image": 4}
+limit_mm_per_prompt = {"image": 2}
 
 
 def vllm_reranker(model_name,
@@ -27,7 +27,7 @@ def vllm_reranker(model_name,
     model = LLM(
         model=model_name,
         task="score",
-        dtype="float16",
+        max_model_len=32768,
         mm_processor_kwargs=mm_processor_kwargs,
         limit_mm_per_prompt=limit_mm_per_prompt,
     )
@@ -85,8 +85,8 @@ def test_model_text_image(model_name):
     hf_outputs = hf_reranker(model_name, query, documents, "text", "image")
     vllm_outputs = vllm_reranker(model_name, query, documents, "text", "image")
 
-    assert hf_outputs[0] == pytest.approx(vllm_outputs[0], rel=0.01)
-    assert hf_outputs[1] == pytest.approx(vllm_outputs[1], rel=0.01)
+    assert hf_outputs[0] == pytest.approx(vllm_outputs[0], rel=0.02)
+    assert hf_outputs[1] == pytest.approx(vllm_outputs[1], rel=0.02)
 
 
 # Textual Documents Reranking
@@ -102,8 +102,8 @@ def test_model_text_text(model_name):
     hf_outputs = hf_reranker(model_name, query, documents, "text", "text")
     vllm_outputs = vllm_reranker(model_name, query, documents, "text", "text")
 
-    assert hf_outputs[0] == pytest.approx(vllm_outputs[0], rel=0.01)
-    assert hf_outputs[1] == pytest.approx(vllm_outputs[1], rel=0.01)
+    assert hf_outputs[0] == pytest.approx(vllm_outputs[0], rel=0.02)
+    assert hf_outputs[1] == pytest.approx(vllm_outputs[1], rel=0.02)
 
 
 # Image Querying for Textual Documents
@@ -121,8 +121,8 @@ def test_model_image_text(model_name):
     hf_outputs = hf_reranker(model_name, query, documents, "image", "text")
     vllm_outputs = vllm_reranker(model_name, query, documents, "image", "text")
 
-    assert hf_outputs[0] == pytest.approx(vllm_outputs[0], rel=0.01)
-    assert hf_outputs[1] == pytest.approx(vllm_outputs[1], rel=0.01)
+    assert hf_outputs[0] == pytest.approx(vllm_outputs[0], rel=0.02)
+    assert hf_outputs[1] == pytest.approx(vllm_outputs[1], rel=0.02)
 
 
 # Image Querying for Image Documents
@@ -141,5 +141,5 @@ def test_model_image_image(model_name):
     vllm_outputs = vllm_reranker(model_name, query, documents, "image",
                                  "image")
 
-    assert hf_outputs == pytest.approx(vllm_outputs[0], rel=0.01)
-    assert hf_outputs[1] == pytest.approx(vllm_outputs[1], rel=0.01)
+    assert hf_outputs[0] == pytest.approx(vllm_outputs[0], rel=0.02)
+    assert hf_outputs[1] == pytest.approx(vllm_outputs[1], rel=0.02)

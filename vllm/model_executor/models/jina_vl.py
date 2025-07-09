@@ -65,29 +65,29 @@ class JinaVLMultiModalProcessor(Qwen2VLMultiModalProcessor):
 @MULTIMODAL_REGISTRY.register_processor(JinaVLMultiModalProcessor,
                                         info=Qwen2VLProcessingInfo,
                                         dummy_inputs=Qwen2VLDummyInputsBuilder)
-class JinaVLForSequenceClassification(nn.Module, SupportsCrossEncoding,
+class JinaVLForSequenceClassification(Qwen2VLForConditionalGeneration,
+                                      SupportsCrossEncoding,
                                       SupportsMultiModal):
     weight_mapper = WeightsMapper(
         orig_to_new_prefix={
             "score.0.": "score.dense.",
             "score.2.": "score.out_proj.",
             # mapping for new names in checkpoint saved after transformers v4.52
-            "model.language_model.": "qwen2_vl.language_model.model.",
-            "visual.": "qwen2_vl.visual.",
+            "model.language_model.": "language_model.model.",
+            "visual.": "visual.",
             # mapping for original checkpoint
-            "lm_head.": "qwen2_vl.language_model.lm_head.",
-            "model.": "qwen2_vl.language_model.model.",
+            "lm_head.": "language_model.lm_head.",
+            "model.": "language_model.model.",
         })
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__()
+        super().__init__(vllm_config=vllm_config,
+                         prefix=maybe_prefix(prefix, "qwen2_vl"))
         config = vllm_config.model_config.hf_config
         pooler_config = vllm_config.model_config.pooler_config
 
         self.LOGIT_BIAS = 2.65
 
-        self.qwen2_vl = Qwen2VLForConditionalGeneration(
-            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "qwen2_vl"))
         self.score = JinaVLScorer(config)
 
         self._pooler = Pooler.from_config_with_defaults(
@@ -115,7 +115,7 @@ class JinaVLForSequenceClassification(nn.Module, SupportsCrossEncoding,
         inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
     ) -> torch.Tensor:
-        hidden_states = self.qwen2_vl(
+        hidden_states = super().forward(
             input_ids=input_ids,
             positions=positions,
             intermediate_tensors=intermediate_tensors,
