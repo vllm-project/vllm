@@ -114,7 +114,7 @@ class Gemma3nProcessingInfo(BaseProcessingInfo):
 
         # Return the full audio sequence as defined by the processor
         return PromptUpdateDetails.select_token_id(
-            processor.full_image_sequence, processor.audio_token_id)
+            processor.full_audio_sequence, processor.audio_token_id)
 
 
 class Gemma3nDummyInputsBuilder(BaseDummyInputsBuilder[Gemma3nProcessingInfo]):
@@ -454,15 +454,8 @@ class Gemma3nForConditionalGeneration(nn.Module, SupportsMultiModal):
         audio_input: Gemma3nAudioInputs,
     ) -> list[torch.Tensor]:
         assert self.audio_tower is not None
-        input_features = audio_input["input_features"]
-        input_features_mask = audio_input["input_features_mask"]
-        print("input_features", input_features.shape, "\n")
-        print("input_features_mask", input_features_mask.shape, "\n")
-        # # TODO
-        # input_features = input_features.squeeze(0)
-        # input_features_mask = input_features_mask.squeeze(0)
-        # print("input_features", input_features.shape, "\n")
-        # print("input_features_mask", input_features_mask.shape, "\n")
+        input_features = audio_input["input_features"].squeeze(1)
+        input_features_mask = audio_input["input_features_mask"].squeeze(1)
         audio_outputs, audio_mask = self.audio_tower(input_features,
                                                      ~input_features_mask)
         audio_features = self.embed_audio(inputs_embeds=audio_outputs)
