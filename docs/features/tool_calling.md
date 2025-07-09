@@ -268,10 +268,10 @@ Flags: `--tool-call-parser hermes`
 
 Supported models:
 
-* `MiniMaxAi/MiniMax-M1-40k` (use with <gh-file:examples/tool_chat_template_minimax.jinja>)
-* `MiniMaxAi/MiniMax-M1-80k` (use with <gh-file:examples/tool_chat_template_minimax.jinja>)
+* `MiniMaxAi/MiniMax-M1-40k` (use with <gh-file:examples/tool_chat_template_minimax_m1.jinja>)
+* `MiniMaxAi/MiniMax-M1-80k` (use with <gh-file:examples/tool_chat_template_minimax_m1.jinja>)
 
-Flags: `--tool-call-parser minimax --chat-template examples/tool_chat_template_minimax.jinja`
+Flags: `--tool-call-parser minimax --chat-template examples/tool_chat_template_minimax_m1.jinja`
 
 ### DeepSeek-V3 Models (`deepseek_v3`)
 
