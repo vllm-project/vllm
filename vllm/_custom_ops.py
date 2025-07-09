@@ -13,7 +13,8 @@ from vllm.scalar_type import ScalarType
 
 logger = init_logger(__name__)
 
-if not current_platform.is_tpu() and not current_platform.is_hpu():
+if not current_platform.is_tpu() and not current_platform.is_hpu()\
+        and not current_platform.is_xpu():
     try:
         import vllm._C
     except ImportError as e:
@@ -646,6 +647,20 @@ def cutlass_scaled_mm_supports_fp4(cuda_device_capability: int) -> bool:
     return torch.ops._C.cutlass_scaled_mm_supports_fp4(cuda_device_capability)
 
 
+def cutlass_blockwise_scaled_grouped_mm(
+    output: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    scales_a: torch.Tensor,
+    scales_b: torch.Tensor,
+    problem_sizes: torch.Tensor,
+    expert_offsets: torch.Tensor,
+):
+    torch.ops._C.cutlass_blockwise_scaled_grouped_mm(output, a, b, scales_a,
+                                                     scales_b, problem_sizes,
+                                                     expert_offsets)
+
+
 def cutlass_scaled_fp4_mm(a: torch.Tensor, b: torch.Tensor,
                           block_scale_a: torch.Tensor,
                           block_scale_b: torch.Tensor, alpha: torch.Tensor,
@@ -1274,7 +1289,7 @@ def scaled_fp8_quant(
             scale = torch.zeros(1, device=input.device, dtype=torch.float32)
             torch.ops._C.dynamic_scaled_fp8_quant(output, input, scale)
     else:
-        assert scale.numel() == 1
+        assert scale.numel() == 1, f"{scale.shape}"
         torch.ops._C.static_scaled_fp8_quant(output, input, scale)
 
     return output, scale
@@ -1850,3 +1865,52 @@ def cutlass_mla_decode(out: torch.Tensor, q_nope: torch.Tensor,
     torch.ops._C.cutlass_mla_decode(out, q_nope, q_pe, kv_c_and_k_pe_cache,
                                     seq_lens, page_table, scale)
     return out
+
+
+if hasattr(torch.ops._C, "weight_packed_linear"):
+
+    @register_fake("_C::weight_packed_linear")
+    def weight_packed_linear_fake(mat1: torch.Tensor, mat2: torch.Tensor,
+                                  bias: Optional[torch.Tensor],
+                                  is_vnni: bool) -> torch.Tensor:
+        return torch.empty((mat1.size(0), mat2.size(0)),
+                           dtype=mat1.dtype,
+                           device=mat2.device)
+
+
+if hasattr(torch.ops._C, "fused_experts_cpu"):
+
+    @register_fake("_C::fused_experts_cpu")
+    def fused_experts_cpu_fake(
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        inplace: bool,
+        use_int8_w8a8: bool,
+        use_fp8_w8a16: bool,
+        w1_scale: Optional[torch.Tensor],
+        w2_scale: Optional[torch.Tensor],
+        block_size: Optional[list[int]],
+        a1_scale: Optional[torch.Tensor],
+        a2_scale: Optional[torch.Tensor],
+        is_vnni: bool,
+    ) -> torch.Tensor:
+        return torch.empty_like(hidden_states)
+
+
+if hasattr(torch.ops._C, "int8_scaled_mm_with_quant"):
+
+    @register_fake("_C::int8_scaled_mm_with_quant")
+    def int8_scaled_mm_with_quant_fake(
+        mat1: torch.Tensor,
+        mat2: torch.Tensor,
+        scales2: torch.Tensor,
+        bias: Optional[torch.Tensor],
+        out_dtype: torch.dtype,
+        is_vnni: bool,
+    ) -> torch.Tensor:
+        M = mat1.size(0)
+        N = mat2.size(0)
+        return torch.empty((M, N), dtype=out_dtype)

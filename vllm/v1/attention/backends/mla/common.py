@@ -217,7 +217,8 @@ try:
     is_vllm_fa = True
 except ImportError:
     # For rocm use upstream flash attention
-    from flash_attn import flash_attn_varlen_func
+    if current_platform.is_rocm():
+        from flash_attn import flash_attn_varlen_func
     is_vllm_fa = False
 
 if TYPE_CHECKING:
@@ -253,9 +254,20 @@ class MLACommonBackend(AttentionBackend):
     ) -> tuple[int, ...]:
         return (num_blocks, block_size, head_size)
 
-    @staticmethod
-    def get_supported_head_sizes() -> list[int]:
+    @classmethod
+    def get_supported_head_sizes(cls) -> list[int]:
         return [576]
+
+    @classmethod
+    def validate_head_size(cls, head_size: int) -> None:
+        supported_head_sizes = cls.get_supported_head_sizes()
+        if head_size not in supported_head_sizes:
+            attn_type = cls.__name__.removesuffix("Backend")
+            raise ValueError(
+                f"Head size {head_size} is not supported by {attn_type}. "
+                f"Supported head sizes are: {supported_head_sizes}. "
+                "Set VLLM_ATTENTION_BACKEND=FLEX_ATTENTION to use "
+                "FlexAttention backend which supports all head sizes.")
 
 
 @dataclass
@@ -319,12 +331,8 @@ class MLACommonMetadata(Generic[D]):
     prefill: Optional[MLACommonPrefillMetadata] = None
 
     def __post_init__(self):
-        supported_head_sizes = MLACommonBackend.get_supported_head_sizes()
-        if self.head_dim is not None and self.head_dim \
-                not in supported_head_sizes:
-            raise ValueError(
-                f"Only {supported_head_sizes} are supported for head_dim,",
-                f"received {self.head_dim}.")
+        if self.head_dim is not None:
+            MLACommonBackend.validate_head_size(self.head_dim)
 
 
 M = TypeVar("M", bound=MLACommonMetadata)
@@ -640,7 +648,6 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         self.qk_head_dim = qk_head_dim
         self.v_head_dim = v_head_dim
         self.kv_b_proj = kv_b_proj
-        self.vllm_flash_attn_version = get_flash_attn_version()
 
         # Handle the differences between the flash_attn_varlen from flash_attn
         # and the one from vllm_flash_attn. The former is used on RoCM and the
@@ -672,11 +679,17 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             maybe_padded_v = torch.nn.functional.pad(
                 v, [0, q.shape[-1] - v.shape[-1]], value=0)
 
+        if is_vllm_fa:
+            kwargs["return_softmax_lse"] = return_softmax_lse
+        else:
+            # ROCm leverages the upstream flash_attn, which takes a parameter
+            # called "return_attn_probs" instead of return_softmax_lse
+            kwargs["return_attn_probs"] = return_softmax_lse
+
         attn_out = self.flash_attn_varlen_func(
             q=q,
             k=k,
             v=maybe_padded_v,
-            return_softmax_lse=return_softmax_lse,
             softmax_scale=softmax_scale,
             **kwargs,
         )
