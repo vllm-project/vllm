@@ -157,10 +157,11 @@ class LoRAModelRunnerMixin:
 
     @contextmanager
     def maybe_dummy_run_with_lora(self, lora_config: LoRAConfig,
-                                  num_scheduled_tokens: np.ndarray):
+                                  num_scheduled_tokens: np.ndarray,
+                                  is_mm_input: bool = False):
         with self.maybe_setup_dummy_loras(
                 lora_config), self.maybe_select_dummy_loras(
-                    lora_config, num_scheduled_tokens):
+                    lora_config, num_scheduled_tokens, is_mm_input):
             yield
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
