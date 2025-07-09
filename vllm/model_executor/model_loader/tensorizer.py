@@ -27,6 +27,7 @@ from vllm.config import (ModelConfig, ParallelConfig, VllmConfig,
 from vllm.logger import init_logger
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
+from vllm.platforms import current_platform
 from vllm.utils import FlexibleArgumentParser, PlaceholderModule
 
 if TYPE_CHECKING:
@@ -222,9 +223,11 @@ class TensorizerConfig(MutableMapping):
             and re.search(r'%0\dd', self.tensorizer_uri) is not None
 
         if self.tensorizer_dir and self.tensorizer_uri:
-            raise ValueError(
-                "Either tensorizer_dir or tensorizer_uri must be provided, "
-                "not both.")
+            logger.warning_once(
+                "Provided both tensorizer_dir and tensorizer_uri. "
+                "Inferring tensorizer_dir from tensorizer_uri as the "
+                "latter takes precedence.")
+            self.tensorizer_dir = os.path.dirname(self.tensorizer_uri)
         if self.tensorizer_dir and self.lora_dir:
             raise ValueError(
                 "Only one of tensorizer_dir or lora_dir may be specified. "
@@ -513,7 +516,9 @@ def deserialize_tensorizer_model(model: nn.Module,
             **tensorizer_args.stream_kwargs) as stream, TensorDeserializer(
                 stream,
                 dtype=tensorizer_config.dtype,
-                device=torch.device("cuda", torch.cuda.current_device()),
+                device=f'xpu:{torch.xpu.current_device()}'
+                if current_platform.is_xpu() else
+                f'cuda:{torch.cuda.current_device()}',
                 **tensorizer_args.deserialization_kwargs) as deserializer:
         deserializer.load_into_module(model)
         end = time.perf_counter()
