@@ -1582,4 +1582,4 @@ direct_register_custom_op(
 
 # Mark the FusedMoE weight_loader as supporting MoE-specific parameters
 # to avoid expensive runtime reflection in model loading code
-FusedMoE.weight_loader.supports_moe_loading = True
+FusedMoE.weight_loader.supports_moe_loading = True  # type: ignore[attr-defined]

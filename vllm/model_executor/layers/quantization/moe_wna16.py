@@ -455,5 +455,5 @@ class MoeWNA16Method(FusedMoEMethodBase):
                               expert_id)
 
         # Mark as supporting MoE-specific loading to avoid expensive reflection
-        moe_wna16_weight_loader.supports_moe_loading = True
+        moe_wna16_weight_loader.supports_moe_loading = True  # type: ignore[attr-defined]
         return moe_wna16_weight_loader
