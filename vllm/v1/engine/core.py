@@ -211,29 +211,59 @@ class EngineCore:
     ) -> tuple[int, int, KVCacheConfig]:
         start = time.time()
 
+        env_mem_str = os.environ.get("VLLM_KVC_MEM_GB")
+        GiB = 1024 ** 3
+
         # Get all kv cache needed by the model
         kv_cache_specs = self.model_executor.get_kv_cache_specs()
+        num_devices = len(kv_cache_specs)
+        if env_mem_str is not None:
+            # available_gpu_memory = [int(float(env_mem_str) * (1024 ** 3))]  # Convert GB to Bytes
+            # logger.info(f"available_gpu_memory (from env): {available_gpu_memory} Bytes")
+            parts = [p.strip() for p in env_mem_str.split(",") if p.strip()]
+            try:
+                vals_gib = [float(p) for p in parts]
+            except ValueError:
+                logger.error(f"VLLM_KVC_MEM_GB malformed: {env_mem_str!r}. Expected floats or comma-separated floats (GiB).")
+                raise
 
-        has_kv_cache = any(kv_cache_spec for kv_cache_spec in kv_cache_specs)
-        if has_kv_cache:
-            if os.environ.get("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH") == "1":
-                dp_group = getattr(self, "dp_group", None)
-                assert dp_group is not None
-                self.available_gpu_memory_for_kv_cache = (
-                    ParallelConfig.sync_kv_cache_memory_size(dp_group, -1)
+            if len(vals_gib) == 1 and num_devices > 1:
+                vals_gib = vals_gib * num_devices
+            elif len(vals_gib) != num_devices:
+                logger.error(
+                    "VLLM_KVC_MEM_GB count mismatch: got %d value(s) for %d device(s). "
+                    "Provide one value (replicated) or one per visible device. env=%r",
+                    len(vals_gib), num_devices, env_mem_str,
                 )
-                available_gpu_memory = [self.available_gpu_memory_for_kv_cache] * len(
-                    kv_cache_specs
-                )
-            else:
-                # Profiles the peak memory usage of the model to determine how
-                # much memory can be allocated for kv cache.
-                available_gpu_memory = self.model_executor.determine_available_memory()
-                self.available_gpu_memory_for_kv_cache = available_gpu_memory[0]
+                raise AssertionError("VLLM_KVC_MEM_GB count mismatch")
+
+            available_gpu_memory = []
+            for i, gib in enumerate(vals_gib):
+                if gib < 1.0:
+                    logger.error("VLLM_KVC_MEM_GB[%d]=%.3f GiB is too small; must be >= 1 GiB.", i, gib)
+                    raise AssertionError("VLLM_KVC_MEM_GB too small")
+                available_gpu_memory.append(int(gib * GiB))
+
+            logger.info("available_gpu_memory (from env, per device): %s Bytes", available_gpu_memory)
         else:
-            # Attention free models don't need memory for kv cache
-            available_gpu_memory = [0] * len(kv_cache_specs)
 
+            has_kv_cache = any(kv_cache_spec for kv_cache_spec in kv_cache_specs)
+            if has_kv_cache:
+                if os.environ.get("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH") == "1":
+                    dp_group = getattr(self, "dp_group", None)
+                    assert dp_group is not None
+                    self.available_gpu_memory_for_kv_cache = (
+                        ParallelConfig.sync_kv_cache_memory_size(dp_group, -1)
+                    )
+                    available_gpu_memory = [self.available_gpu_memory_for_kv_cache] * len(
+                        kv_cache_specs
+                    )
+            else:
+                # Attention free models don't need memory for kv cache
+                available_gpu_memory = [0] * len(kv_cache_specs)
+                logger.info(f"available_gpu_memory (profiled): {available_gpu_memory} Bytes, profiling memory takes: {(time.time() - profile_start):.1f}s")
+
+            logger.info(f"kv_cache_specs is {kv_cache_specs}, available_gpu_memory is {available_gpu_memory}")
         assert len(kv_cache_specs) == len(available_gpu_memory)
 
         kv_cache_configs = get_kv_cache_configs(

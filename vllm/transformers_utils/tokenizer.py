@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 else:
     ModelConfig = Any
     TokenizerBase = Any
+import vllm.global_var as gv 
 
 logger = init_logger(__name__)
 
@@ -261,7 +262,6 @@ def get_tokenizer(
 
 cached_get_tokenizer = lru_cache(get_tokenizer)
 
-
 def cached_tokenizer_from_config(
     model_config: ModelConfig,
     **kwargs: Any,
@@ -276,6 +276,8 @@ def cached_tokenizer_from_config(
 
 
 def init_tokenizer_from_configs(model_config: ModelConfig):
+    if model_config.tokenizer in gv.TOKENIZER_MAP:
+        return gv.TOKENIZER_MAP[model_config.tokenizer]
     runner_type = model_config.runner_type
     if runner_type == "generate" or runner_type == "draft":
         truncation_side = "left"
