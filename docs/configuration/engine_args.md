@@ -1,3 +1,7 @@
+---
+toc_depth: 3
+---
+
 # Engine Arguments
 
 Engine arguments control the behavior of the vLLM engine.
