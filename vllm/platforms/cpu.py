@@ -271,5 +271,6 @@ class CpuPlatform(Platform):
         """Returns whether the current platform can use v1 by default for the
         supplied model configuration.
         """
-        return cls.supports_v1(
-            model_config) and cls.get_cpu_architecture() == CpuArchEnum.X86
+        arch = cls.get_cpu_architecture()
+        return (cls.supports_v1(model_config) and arch
+                in (CpuArchEnum.X86, CpuArchEnum.POWERPC, CpuArchEnum.ARM))

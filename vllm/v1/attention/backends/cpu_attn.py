@@ -316,7 +316,6 @@ class TorchSDPAMetadataBuilderV1(AttentionMetadataBuilder[TorchSDPAMetadata]):
                  block_table: BlockTable) -> None:
         self.runner = runner
         self.block_table = block_table
-
         # For reorder
         self.reorder_prompt_req_index_list = np.empty(self.runner.max_num_reqs,
                                                       dtype=np.int64)
@@ -401,11 +400,14 @@ class TorchSDPAMetadataBuilderV1(AttentionMetadataBuilder[TorchSDPAMetadata]):
             num_prefill_tokens=num_prefill_tokens,
             num_decode_tokens=num_decode_tokens,
             slot_mapping=slot_mapping,
+            # to ensure inference when chunked_prefill is disabled
+            seq_lens=runner.seq_lens_cpu[:num_reqs].tolist(),
             seq_lens_tensor=runner.
             seq_lens_cpu[num_prompt_req:num_reqs],  # decode
             max_decode_seq_len=max_decode_seq_len,  # decode
             block_tables=block_table_tensor[num_prompt_req:num_reqs],  # decode
-            chunked_prefill=True,
+            chunked_prefill=self.runner.scheduler_config.
+            chunked_prefill_enabled,
             max_query_len=max_query_len,
             max_kv_len=max_prefill_seq_len,
             prefill_query_start_loc=runner.
