@@ -517,9 +517,9 @@ class SambaYModel(nn.Module):
                 if kv_cache[0].numel() == 0:
                     break
 
-                # Starting from this layer, we do not need to cuculate the kv cache since we reuse
-                # the kv cache from last layer. If in prefill phase, we can prune truncate 
-                # hidden state to save computation cost.
+                # Starting from this layer, we do not need to calculate the kv cache since we reuse
+                # the kv cache from last layer. If in prefill phase, we can <s>prune></s> truncate 
+                # the hidden state to save computation cost.
                 if attn_metadata.prefill_metadata:
                     selected_token_indices = torch.cumsum(attn_metadata.seq_lens_tensor, dim=0) - 1
                     hidden_states = hidden_states.index_select(0, selected_token_indices)

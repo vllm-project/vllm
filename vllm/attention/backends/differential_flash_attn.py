@@ -54,6 +54,7 @@ class DifferentialFlashAttentionBackend(FlashAttentionBackend):
     ) -> Tuple[int, ...]:
         if block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
+        assert num_kv_heads % 2 == 0, "num_kv_heads must be divisible by 2"
         return (2, 2, num_blocks, block_size, num_kv_heads // 2, head_size)
 
     @staticmethod
@@ -872,7 +873,7 @@ class DifferentialFlashAttentionImpl(AttentionImpl):
             k1, k2 = self.split_heads(k)
             v1, v2 = self.split_heads(v)
 
-            # kv_cache shape is (2, 2, num_blocks, block_size * num_kv_heads // 2 * head_size)
+            # kv_cache shape is (2, 2, num_blocks, block_size, num_kv_heads // 2, head_size)
             # Split by half along the first dimension.
             kv_cache1, kv_cache2 = self.split_kv_cache(kv_cache)
             assert kv_cache1.is_contiguous(), "kv_cache1 is not contiguous"
@@ -909,7 +910,7 @@ class DifferentialFlashAttentionImpl(AttentionImpl):
         else: # re-use the kv cache, full attention
             q = q.view(-1, self.num_heads, self.head_size)
             q1, q2 = self.split_heads(q)
-            # kv_cache shape is (2, num_blocks, block_size * num_kv_heads * head_size)
+            # kv_cache shape is (2, num_blocks, block_size, num_kv_heads, head_size)
             kv_cache1, kv_cache2 = self.split_kv_cache(kv_cache)
             key_cache1, value_cache1 = kv_cache1[0], kv_cache1[1]
             key_cache2, value_cache2 = kv_cache2[0], kv_cache2[1]
