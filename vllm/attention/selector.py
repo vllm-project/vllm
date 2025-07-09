@@ -87,7 +87,7 @@ class _IsSupported:
     dtype: bool
 
     def __bool__(self) -> bool:
-        return self.head_size and self.dtype
+        return self.can_import and self.head_size and self.dtype
 
 
 def is_attn_backend_supported(
