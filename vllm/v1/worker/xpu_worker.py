@@ -132,7 +132,7 @@ class XPUWorker(Worker):
         if self.device_config.device.type == "xpu" and current_platform.is_xpu(
         ):
             self.device = torch.device(f"xpu:{self.local_rank}")
-            torch.xpu.set_device(self.device)
+            current_platform.set_device(self.device)
             torch.xpu.empty_cache()
             self.init_gpu_memory = torch.xpu.get_device_properties(
                 self.local_rank).total_memory
