@@ -201,7 +201,9 @@ class NixlConnector(KVConnectorBase_V1):
     def wait_for_save(self):
         assert self.connector_worker is not None
         assert isinstance(self._connector_metadata, NixlConnectorMetadata)
-        self.connector_worker.save_kv_to_host(self._connector_metadata)
+        if self.connector_worker.use_host_buffer and \
+           self.connector_worker.copy_blocks:
+            self.connector_worker.save_kv_to_host(self._connector_metadata)
 
 
 class NixlConnectorScheduler:
