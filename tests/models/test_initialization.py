@@ -11,16 +11,18 @@ from vllm.engine.llm_engine import LLMEngine as V0LLMEngine
 from vllm.utils import GiB_bytes
 from vllm.v1.core.kv_cache_utils import get_kv_cache_config
 from vllm.v1.engine.core import EngineCore as V1EngineCore
-from vllm.logger import init_logger
+from ..utils import create_new_process_for_each_test
 from .registry import HF_EXAMPLE_MODELS
-logger = init_logger(__name__)
+
 
 @pytest.mark.parametrize("model_arch", HF_EXAMPLE_MODELS.get_supported_archs())
+@create_new_process_for_each_test()
 def test_can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch):
+    
     model_info = HF_EXAMPLE_MODELS.get_hf_info(model_arch)
     model_info.check_available_online(on_fail="skip")
     model_info.check_transformers_version(on_fail="skip")
-
+  
     # FIXME: Possible memory leak in the previous tests?
     if model_arch in ("GraniteSpeechForConditionalGeneration",
                       "KimiVLForConditionalGeneration"):
@@ -81,13 +83,15 @@ def test_can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch):
         # gpu_blocks (> 0), cpu_blocks, scheduler_kv_cache_config
         return 1, 0, scheduler_kv_cache_config
     print("Do llm init...")
+
     with (patch.object(V0LLMEngine, "_initialize_kv_caches",
                        _initialize_kv_caches_v0),
           patch.object(V1EngineCore, "_initialize_kv_caches",
                        _initialize_kv_caches_v1), monkeypatch.context() as m):
-    
+        
         if model_info.v0_only:
             m.setenv("VLLM_USE_V1", "0")
+
         print("LLM init begin....")
         LLM(
             model_info.default,
