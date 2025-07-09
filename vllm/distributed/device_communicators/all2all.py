@@ -281,9 +281,3 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
         first_handle = self.handle_caches[0].get_or_create(buffer_kwargs, deep_ep.Buffer)
         second_handle = self.handle_caches[1].get_or_create(buffer_kwargs, deep_ep.Buffer)
         return [first_handle, second_handle]
-
-    def destroy(self):
-        for handle_cache in self.handle_caches:
-            with handle_cache._lock:
-                for _, handle in handle_cache._cache.items():
-                    handle.destroy()
