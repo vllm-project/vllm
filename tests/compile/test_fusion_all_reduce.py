@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from importlib.util import find_spec
-from pathlib import Path
 
 import pytest
 import torch
@@ -75,9 +74,9 @@ class TestAllReduceFusedAddRMSNormModel(torch.nn.Module):
                     reason="Only test on CUDA")
 @pytest.mark.skipif(not find_spec("flashinfer"),
                     reason="flashinfer is not installed")
-def test_all_reduce_fusion_pass_replace(test_model: str, batch_size: int,
-                                        seq_len: int, hidden_size: int,
-                                        dtype: torch.dtype):
+def test_all_reduce_fusion_pass_replace(test_model: torch.nn.Module,
+                                        batch_size: int, seq_len: int,
+                                        hidden_size: int, dtype: torch.dtype):
     num_processes = 2
 
     def run_torch_spawn(fn, nprocs):
@@ -117,11 +116,7 @@ def all_reduce_fusion_pass_on_test_model(local_rank: int, world_size: int,
                                              custom_ops=["+rms_norm"],
                                              compile_sizes=[2, 4, 8]))
     vllm_config.compilation_config.pass_config = PassConfig(
-        enable_flashinfer_allreduce_fusion=True,
-        dump_graph_dir=Path("dump_graph"),
-        dump_graph_stages=[
-            "before_all_reduce_fusion_pass", "after_all_reduce_fusion_pass"
-        ])
+        enable_flashinfer_allreduce_fusion=True)
     vllm_config.device_config = DeviceConfig(device=torch.device("cuda"))
 
     # this is a fake model name to construct the model config

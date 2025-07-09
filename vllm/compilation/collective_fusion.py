@@ -400,8 +400,9 @@ class AllReduceFusionPass(VllmInductorPass):
 
         self.patterns: PatternMatcherPass = PatternMatcherPass(
             pass_name="all_reduce_fusion_pass")
-        self.hidden_dim = (config.model_config.get_hidden_size()
-                           if config.model_config else 4096)
+        if config.model_config is None:
+            return
+        self.hidden_dim = config.model_config.get_hidden_size()
         self.group = get_tp_group().device_group
         rank = get_tensor_model_parallel_rank()
         use_fp32_lamport = self.model_dtype == torch.float32
