@@ -438,9 +438,7 @@ class OpenAIServing:
 
         if self._is_model_supported(request.model):
             return None
-        if request.model in [
-                lora.lora_name for lora in self.models.lora_requests
-        ]:
+        if request.model in self.models.lora_requests:
             return None
         if envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING and request.model and (
                 load_result := await self.models.resolve_lora(request.model)):
@@ -466,9 +464,8 @@ class OpenAIServing:
             None, PromptAdapterRequest]]:
         if self._is_model_supported(request.model):
             return None, None
-        for lora in self.models.lora_requests:
-            if request.model == lora.lora_name:
-                return lora, None
+        if request.model in self.models.lora_requests:
+            return self.models.lora_requests[request.model], None
         for prompt_adapter in self.models.prompt_adapter_requests:
             if request.model == prompt_adapter.prompt_adapter_name:
                 return None, prompt_adapter
