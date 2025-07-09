@@ -29,16 +29,16 @@ on the [PyTorch dev-discuss forum](https://dev-discuss.pytorch.org/c/release-ann
 After this announcement, we can begin testing vLLM integration by drafting a pull request
 following this 3-step process:
 
-- Update [requirements files](https://github.com/vllm-project/vllm/tree/main/requirements)
+1. Update [requirements files](https://github.com/vllm-project/vllm/tree/main/requirements)
 to point to the new releases for `torch`, `torchvision`, and `torchaudio`.
 
-- Use the following option to get the final release candidates' wheels. Some common platforms are `cpu`, `cu128`, and `rocm6.2.4`.
+2. Use the following option to get the final release candidates' wheels. Some common platforms are `cpu`, `cu128`, and `rocm6.2.4`.
 
 ```bash
 --extra-index-url https://download.pytorch.org/whl/test/<PLATFORM>
 ```
 
-- Since vLLM uses `uv`, ensure the following index strategy is applied:
+1. Since vLLM uses `uv`, ensure the following index strategy is applied:
 
     - Via environment variable:
 
