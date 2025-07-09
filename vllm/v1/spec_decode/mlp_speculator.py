@@ -28,11 +28,10 @@ class MLPSpeculatorProposer:
         self.vllm_config = vllm_config
         self.device = device
         self.max_num_seqs = vllm_config.scheduler_config.max_num_seqs
-        self.hidden_size = vllm_config.speculative_config.\
-            draft_model_config.get_hidden_size(
-        )
-        self.num_speculative_tokens = vllm_config.speculative_config.\
-            num_speculative_tokens
+        self.hidden_size = (vllm_config.speculative_config.
+            draft_model_config.get_hidden_size())
+        self.num_speculative_tokens = (vllm_config.speculative_config.
+            num_speculative_tokens)
         self.dtype = vllm_config.model_config.dtype
 
     def propose(
@@ -41,7 +40,7 @@ class MLPSpeculatorProposer:
         previous_hidden_states: torch.Tensor,
         num_predict_tokens: int,
         sampling_metadata: SamplingMetadata,
-    ) -> torch.Tensor:
+    ) -> list[list[int]]:
         # Generate blocks and compute logits
         draft_tokens = self.model.generate_proposals(input_ids, previous_hidden_states, num_predict_tokens,sampling_metadata)
         return list(map(lambda x: x[0], zip(*[i.sampled_token_ids.tolist() for i in draft_tokens])))
