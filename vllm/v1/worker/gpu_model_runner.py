@@ -177,7 +177,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # NOTE(Jiayi): currently we put the entire draft model on
         # the last PP rank. This is not ideal if there are many
         # layers in the draft model.
-        self.drafter: Union[NgramProposer, EagleProposer, MedusaProposer, MLPSpeculatorProposer, None] = None
         if self.speculative_config and get_pp_group().is_last_rank:
             if self.speculative_config.method == "ngram":
                 self.drafter = NgramProposer(self.vllm_config)
