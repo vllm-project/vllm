@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
+from dataclasses import dataclass
 from typing import Any, Final, Optional, Union
 
 import jinja2
@@ -163,32 +163,22 @@ class OpenAIServingTokenization(OpenAIServing):
         """Get comprehensive tokenizer information."""
         try:
             tokenizer = await self.engine_client.get_tokenizer()
-            info = TokenizerInfo(tokenizer, self.model_config,
-                                 self.chat_template).to_dict()
+            info = TokenizerInfo(tokenizer, self.chat_template).to_dict()
             return TokenizerInfoResponse(**info)
         except Exception as e:
             return self.create_error_response(
                 f"Failed to get tokenizer info: {str(e)}")
 
 
+@dataclass
 class TokenizerInfo:
-
-    def __init__(
-        self,
-        tokenizer: AnyTokenizer,
-        model_config: ModelConfig,
-        chat_template: Optional[str],
-    ):
-        self.tokenizer = tokenizer
-        self.model_config = model_config
-        self.chat_template = chat_template
+    tokenizer: AnyTokenizer
+    chat_template: Optional[str]
 
     def to_dict(self) -> dict[str, Any]:
         """Return the tokenizer configuration."""
         return self._get_tokenizer_config()
 
-    # Use the tokenizer's init_kwargs as the base
-    # (this contains the original config)
     def _get_tokenizer_config(self) -> dict[str, Any]:
         """Get tokenizer configuration directly from the tokenizer object."""
         config = (dict(self.tokenizer.init_kwargs)
