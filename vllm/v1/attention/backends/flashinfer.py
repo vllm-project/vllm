@@ -11,6 +11,8 @@ from flashinfer import (BatchDecodeWithPagedKVCacheWrapper,
                         BatchPrefillWithPagedKVCacheWrapper,
                         MultiLevelCascadeAttentionWrapper)
 from flashinfer.decode import trtllm_batch_decode_with_kv_cache
+from flashinfer.utils import is_sm100a_supported
+
 import vllm.envs as envs
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionType)
@@ -37,6 +39,7 @@ logger = init_logger(__name__)
 class FlashInferBackend(AttentionBackend):
 
     accept_output_buffer: bool = True
+    cached_use_trtllm: Optional[bool] = None
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
@@ -92,7 +95,30 @@ class FlashInferBackend(AttentionBackend):
             raise ValueError(f"Unknown cache layout format {cache_layout}.")
         return stride_order
 
-
+    @staticmethod
+    def use_trtllm_decode_attention(batch_size: int, max_seq_len: int) -> bool:
+        # Check if environment variable is explicitly set
+        if FlashInferBackend.cached_use_trtllm is not None:
+            return FlashInferBackend.cached_use_trtllm
+        env_value = envs.VLLM_USE_TRTLLM_DECODE_ATTENTION
+        if env_value is not None:
+            logger.info_once("VLLM_USE_TRTLLM_DECODE_ATTENTION is set to %s", env_value)
+            # Environment variable is set - respect it
+            no_use_trtllm = env_value == "0"
+            if not no_use_trtllm:
+                logger.info_once("VLLM_USE_TRTLLM_DECODE_ATTENTION is set to 1, "
+                               "using TRTLLM decode attention.")
+            FlashInferBackend.cached_use_trtllm = not no_use_trtllm
+        else:
+        # Environment variable not set - use auto-detection
+            use_trtllm = (is_sm100a_supported(torch.device("cuda")) and 
+                           batch_size <= 256 and 
+                           max_seq_len < 131072)
+            FlashInferBackend.cached_use_trtllm = use_trtllm
+            if use_trtllm:
+                logger.info_once("Using TRTLLM decode attention (auto-detected).")
+        return FlashInferBackend.cached_use_trtllm
+   
 @dataclass
 class PerLayerParameters:
     """
@@ -408,7 +434,10 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
             if self._num_decodes > 0:
                 attn_metadata.decode_wrapper = self._get_decode_wrapper()
-                if not envs.VLLM_USE_TRTLLM_DECODE_ATTENTION:
+                if not FlashInferBackend.use_trtllm_decode_attention(
+                    self._num_decodes,
+                    attn_metadata.max_seq_len
+                ):
                     attn_metadata.decode_wrapper.plan(
                         attn_metadata.paged_kv_indptr[:self._num_decodes + 1],
                         attn_metadata.paged_kv_indices,
@@ -678,7 +707,10 @@ class FlashInferImpl(AttentionImpl):
         if decode_wrapper := attn_metadata.decode_wrapper:
             decode_query = query[:num_decode_tokens]
             assert decode_query.shape[0] == num_decode_tokens
-            if not envs.VLLM_USE_TRTLLM_DECODE_ATTENTION:
+            if not FlashInferBackend.use_trtllm_decode_attention(
+                attn_metadata.num_decodes,
+                attn_metadata.max_seq_len
+            ):
                 assert decode_wrapper is not None
                 assert decode_wrapper._window_left == window_left
                 assert decode_wrapper._logits_soft_cap == (self.logits_soft_cap
@@ -706,7 +738,7 @@ class FlashInferImpl(AttentionImpl):
                         block_tables=attn_metadata.block_table_tensor[:num_decode_tokens],
                         seq_lens=attn_metadata.seq_lens[:num_decode_tokens],
                         block_size=attn_metadata.page_size,
-                        max_seq_len=((attn_metadata.seq_lens[:num_decode_tokens].max())),
+                        max_seq_len=attn_metadata.max_seq_len,
                         kv_cache_dtype=self.kv_cache_dtype,
                         k_scale=layer._k_scale_float,
                         v_scale=layer._v_scale_float,

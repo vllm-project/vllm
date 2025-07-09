@@ -7,6 +7,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Type
 
+from huggingface_hub import cached_assets_path
+
 from vllm.multimodal import MultiModalPlaceholderMap
 
 try:
@@ -14,6 +16,7 @@ try:
     from flashinfer.decode import CUDAGraphBatchDecodeWithPagedKVCacheWrapper
     from flashinfer.prefill import BatchPrefillWithPagedKVCacheWrapper
     from flashinfer.decode import trtllm_batch_decode_with_kv_cache
+    from flashinfer.utils import is_sm100a_supported
 
     from vllm.vllm_flash_attn import flash_attn_varlen_func
     FLASHINFER_WORKSPACE_BUFFER_SIZE = 256 * 1024 * 1024
@@ -25,6 +28,8 @@ except ImportError:
         BatchPrefillWithPagedKVCacheWrapper = None
         trtllm_batch_decode_with_kv_cache = None
     FLASHINFER_WORKSPACE_BUFFER_SIZE = 0
+    raise ImportError("FlashInfer is not installed. Please install it with "
+                      "`pip install flashinfer`.")
 
 import torch
 
@@ -55,7 +60,8 @@ FLASHINFER_KV_CACHE_LAYOUT: str = envs.VLLM_KV_CACHE_LAYOUT or "NHD"
 
 
 class FlashInferBackend(AttentionBackend):
-
+    cached_use_trtllm: Optional[bool] = None
+    
     @staticmethod
     def get_name() -> str:
         return "FLASHINFER"
@@ -120,7 +126,30 @@ class FlashInferBackend(AttentionBackend):
             return torch.float8_e5m2
         else:
             raise ValueError(f"Unrecognized FP8 dtype: {kv_cache_dtype}")
-
+    
+    @staticmethod
+    def use_trtllm_decode_attention(batch_size: int, max_seq_len: int) -> bool:
+        # Check if environment variable is explicitly set
+        if FlashInferBackend.cached_use_trtllm is not None:
+            return FlashInferBackend.cached_use_trtllm
+        env_value = envs.VLLM_USE_TRTLLM_DECODE_ATTENTION
+        if env_value is not None:
+            logger.info_once("VLLM_USE_TRTLLM_DECODE_ATTENTION is set to %s", env_value)
+            # Environment variable is set - respect it
+            no_use_trtllm = env_value == "0"
+            if not no_use_trtllm:
+                logger.info_once("VLLM_USE_TRTLLM_DECODE_ATTENTION is set to 1, "
+                               "using TRTLLM decode attention.")
+            FlashInferBackend.cached_use_trtllm = not no_use_trtllm
+        else:
+        # Environment variable not set - use auto-detection
+            use_trtllm = (is_sm100a_supported(torch.device("cuda")) and 
+                           batch_size <= 256 and 
+                           max_seq_len < 131072)
+            FlashInferBackend.cached_use_trtllm = use_trtllm
+            if use_trtllm:
+                logger.info_once("Using TRTLLM decode attention (auto-detected).")
+        return FlashInferBackend.cached_use_trtllm
 
 @dataclass
 class PerLayerParameters:
@@ -1099,7 +1128,10 @@ class FlashInferImpl(AttentionImpl):
                 logits_soft_cap or 0.0)
             assert decode_meta.decode_wrapper._sm_scale == softmax_scale
             # TODO: @pavanimajety Remove this once the switch happens inside flashinfer.
-            if not envs.VLLM_USE_TRTLLM_DECODE_ATTENTION:
+            if not FlashInferBackend.use_trtllm_decode_attention(
+                    num_decode_tokens,
+                    attn_metadata.max_decode_seq_len
+                ):
                 decode_output = decode_meta.decode_wrapper.run(
                     decode_query,
                     kv_cache.permute(*stride_order),
