@@ -352,6 +352,24 @@ def load_weights_using_from_2_way_softmax(
     weight = model.lm_head.weight.data[true_id].to(device).to(
         torch.float32) - model.lm_head.weight.data[false_id].to(device).to(
             torch.float32)
+    
+    # Handle tensor parallel: shard the weight vector if needed
+    from vllm.distributed import (get_tensor_model_parallel_rank,
+                                  get_tensor_model_parallel_world_size)
+    
+    tp_rank = get_tensor_model_parallel_rank()
+    tp_size = get_tensor_model_parallel_world_size()
+    
+    if tp_size > 1:
+        # The score layer uses RowParallelLinear where the input dimension is sharded
+        # Score weight shape: (num_labels, hidden_size // tp_size)
+        # We need to shard the weight vector along the hidden dimension
+        assert weight.shape[0] % tp_size == 0, (
+            f"Hidden size {weight.shape[0]} must be divisible by tensor parallel size {tp_size}")
+        shard_size = weight.shape[0] // tp_size
+        start_idx = tp_rank * shard_size
+        weight = weight[start_idx:start_idx + shard_size]
+    
     model.score.weight.data.copy_(weight)
 
     del model.lm_head
@@ -392,6 +410,24 @@ def load_weights_no_post_processing(model,
 
     token_ids = [tokenizer.convert_tokens_to_ids(t) for t in tokens]
     score_weight = model.lm_head.weight.data[token_ids].to(device)
+    
+    # Handle tensor parallelism: shard the weight matrix if needed
+    from vllm.distributed import (get_tensor_model_parallel_rank,
+                                  get_tensor_model_parallel_world_size)
+    
+    tp_rank = get_tensor_model_parallel_rank()
+    tp_size = get_tensor_model_parallel_world_size()
+    
+    if tp_size > 1:
+        # The score layer uses RowParallelLinear where the input dimension is sharded
+        # Score weight shape: (num_labels, hidden_size // tp_size)
+        # We need to shard the weight matrix along the hidden dimension (last dim)
+        assert score_weight.shape[-1] % tp_size == 0, (
+            f"Hidden size {score_weight.shape[-1]} must be divisible by tensor parallel size {tp_size}")
+        shard_size = score_weight.shape[-1] // tp_size
+        start_idx = tp_rank * shard_size
+        score_weight = score_weight[:, start_idx:start_idx + shard_size]
+    
     model.score.weight.data.copy_(score_weight)
 
     del model.lm_head
