@@ -48,13 +48,20 @@ vLLM is a Python library that supports the following CPU variants. Select your C
 
 ### Build image from source
 
+=== "Intel/AMD x86"
+
     --8<-- "docs/getting_started/installation/cpu/x86.inc.md:build-image-from-source"
 
-!!! tip
-    For ARM or Apple silicon, use `docker/Dockerfile.arm`
+=== "ARM AArch64"
 
-!!! tip
-    For IBM Z (s390x), use `docker/Dockerfile.s390x` and in `docker run` use flag `--dtype float`
+    --8<-- "docs/getting_started/installation/cpu/arm.inc.md:build-image-from-source"
+
+=== "Apple silicon"
+
+    --8<-- "docs/getting_started/installation/cpu/arm.inc.md:build-image-from-source"
+
+=== "IBM Z (S390X)"
+    --8<-- "docs/getting_started/installation/cpu/s390x.inc.md:build-image-from-source"
 
 ## Set up using Python
 
@@ -118,7 +125,7 @@ vllm serve facebook/opt-125m --dtype=bfloat16
 
 ### How to decide `VLLM_CPU_OMP_THREADS_BIND`?
 
-- Binding each OpenMP thread to a dedicated CPU core, by checking the mapping between logical CPU cores and physical CPU cores:
+- Bind each OpenMP thread to a dedicated physical CPU core respectively, or use auto thread binding feature by default. On a hyper-threading enabled platform with 16 logical CPU cores / 8 physical CPU cores:
 
 ??? console "Commands"
 
@@ -149,13 +156,13 @@ vllm serve facebook/opt-125m --dtype=bfloat16
     $ python examples/offline_inference/basic/basic.py
     ```
 
-- If using vLLM CPU backend on a multi-socket machine with NUMA, be aware to set CPU cores of a rank on a same node to avoid cross NUMA node memory access.
+- When deploy vLLM CPU backend on a multi-socket machine with NUMA and enable tensor parallel or pipeline parallel, each NUMA node is treated as a TP/PP rank. So be aware to set CPU cores of a single rank on a same NUMA node to avoid cross NUMA node memory access.
 
 ### How to decide `VLLM_CPU_KVCACHE_SPACE`?
 
   - This value is 4GB by default. Larger space can support more concurrent requests, longer context length. However, users should take care of memory capacity of each NUMA node. The memory usage of each TP rank is the sum of `weight shard size` and `VLLM_CPU_KVCACHE_SPACE`, if it exceeds the capacity of a single NUMA node, the TP worker will be killed with `exitcode 9` due to out-of-memory.
 
-### What quantization configs are vLLM CPU support?
+### Which quantization configs does vLLM CPU support?
 
   - vLLM CPU supports quantizations:
     - AWQ
