@@ -187,10 +187,10 @@ def create_and_prepopulate_kv_cache(
 class MockAttentionLayer:
     """A mock attention layer for testing."""
 
-    def __init__(self):
-        self._q_scale = torch.tensor(1.0)
-        self._k_scale = torch.tensor(1.0)
-        self._v_scale = torch.tensor(1.0)
+    def __init__(self, device: torch.device):
+        self._q_scale = torch.tensor(1.0, device=device)
+        self._k_scale = torch.tensor(1.0, device=device)
+        self._v_scale = torch.tensor(1.0, device=device)
         # Add float versions for flashinfer
         self._k_scale_float = 1.0
         self._v_scale_float = 1.0
@@ -258,7 +258,7 @@ def run_attention_backend(backend: _Backend, kv_cache_spec: FullAttentionSpec,
     )
 
     # Create mock layer and output buffer
-    mock_layer = MockAttentionLayer()
+    mock_layer = MockAttentionLayer(device)
     output = torch.empty_like(query)
 
     # Run forward pass
