@@ -12,6 +12,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import supports_multimodal
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
+from vllm.platforms import current_platform
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -329,7 +330,7 @@ class EagleProposer:
 
     def load_model(self, target_model: nn.Module) -> None:
         draft_model_config = \
-            self.vllm_config.speculative_config.draft_model_config
+            self.speculative_config.draft_model_config
         target_attn_layer_names = set(
             get_layers_from_vllm_config(self.vllm_config, Attention).keys())
 
@@ -371,7 +372,7 @@ class EagleProposer:
         # share lm_head with the target model if needed
         # some model definition do not define lm_head explicitly
         # and reuse embed_tokens for lm_head, e.g., CohereForCausalLM
-        if self.vllm_config.speculative_config.method != "eagle3" and \
+        if self.speculative_config.method != "eagle3" and \
                 hasattr(target_language_model, "lm_head"):
             logger.info("Loading EAGLE LM head weights from the target model.")
             self.model.lm_head = target_language_model.lm_head
@@ -383,11 +384,18 @@ class EagleProposer:
     ) -> None:
         with set_forward_context(None, self.vllm_config,
                                  num_tokens=num_tokens):
-            self.model(
+            ret_hidden_states = self.model(
                 self.input_ids[:num_tokens],
                 self.positions[:num_tokens],
                 self.hidden_states[:num_tokens],
             )
+            if self.method == "deepseek_mtp":
+                last_hidden_states = ret_hidden_states
+            else:
+                last_hidden_states, hidden_states = ret_hidden_states
+        logits = self.model.compute_logits(last_hidden_states, None)
+        temperature = torch.ones(num_tokens, device=logits.device)
+        _mixed_sample(logits, temperature)
 
     def validate_same_kv_cache_group(self,
                                      kv_cache_config: KVCacheConfig) -> None:
@@ -409,6 +417,32 @@ class EagleProposer:
         ) == 1, "All eagle layers should belong to the same kv cache group"
 
 
+@torch.compile(dynamic=True,
+               backend=current_platform.simple_compile_backend,
+               mode="max-autotune-no-cudagraphs")
+def _mixed_sample(
+        logits: torch.Tensor,
+        temperature: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    is_greedy = temperature == -1
+    temperature = torch.where(is_greedy, 1.0, temperature)
+    logits.div_(temperature.view(-1, 1))
+    probs = logits.softmax(dim=-1, dtype=torch.float32)
+
+    # NOTE(woosuk): Currently, we ignore most of the sampling parameters in
+    # generating the draft tokens. We only use the temperature. While this
+    # could degrade the acceptance rate, it does not affect the distribution
+    # of the generated tokens after rejection sampling.
+
+    # TODO(woosuk): Consider seeds.
+    q = torch.empty_like(probs)
+    q.exponential_()
+    q[is_greedy, :] = 1.0
+    # NOTE(woosuk): We shouldn't use `probs.div_(q)` because the draft_probs
+    # will be used later for rejection sampling.
+    next_token_ids = probs.div(q).argmax(dim=-1).view(-1)
+    return next_token_ids, probs
+
+
 # FIXME(woosuk): The logic here is duplicated with the main sampling code.
 # We should refactor this to reuse the same sampling implementation.
 def compute_probs_and_sample_next_token(
@@ -421,28 +455,4 @@ def compute_probs_and_sample_next_token(
         probs = logits
         next_token_ids = logits.argmax(dim=-1)
         return next_token_ids, probs
-
-    is_greedy = sampling_metadata.temperature == -1
-    temperature = torch.where(is_greedy, 1.0, sampling_metadata.temperature)
-    logits.div_(temperature.view(-1, 1))
-    probs = logits.softmax(dim=-1, dtype=torch.float32)
-
-    # NOTE(woosuk): Currently, we ignore most of the sampling parameters in
-    # generating the draft tokens. We only use the temperature. While this
-    # could degrade the acceptance rate, it does not affect the distribution
-    # of the generated tokens after rejection sampling.
-
-    # TODO(woosuk): Consider seeds.
-    q = torch.empty_like(probs)
-    q.exponential_()
-    # NOTE(woosuk): We shouldn't use `probs.div_(q)` because the draft_probs
-    # will be used later for rejection sampling.
-    next_token_ids = probs.div(q).argmax(dim=-1).view(-1)
-    if not sampling_metadata.all_random:
-        greedy_token_ids = probs.argmax(dim=-1)
-        next_token_ids = torch.where(
-            is_greedy,
-            greedy_token_ids,
-            next_token_ids,
-        )
-    return next_token_ids, probs
+    return _mixed_sample(logits, sampling_metadata.temperature)
