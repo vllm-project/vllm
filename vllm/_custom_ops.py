@@ -963,17 +963,17 @@ def cutlass_fp4_moe_mm(a_tensors: torch.Tensor, b_tensors: torch.Tensor,
                        expert_offsets: torch.Tensor, sf_offsets: torch.Tensor,
                        out_dtype: torch.dtype, device: torch.device):
     """
-    An FP4 Blockscaled Group Gemm that takes in  a_tensors, b_tensors and runs 
+    An FP4 Blockscaled Group Gemm that takes in  a_tensors, b_tensors and runs
     the gemms for each combination based on the specified problem sizes.
 
     This is used as the MoE gemm during NVFP4 Quantized FusedMoE forward.
     - a/b_tensors: the NVFP4 a_ptrs and b_ptrs tensors which are quantized
                      input and expert weights.
     - a_/b_scales: The blockscales in FP8-E4M3 precision
-    - expert_offsets/sf_offsets: Indices that mark at which token index 
-                    each expert begins its computation. The number of tokens 
-                    computed with expert E is expert_offsets[E + 1] - 
-                    expert_offsets[E] And the sf_size per expert is 
+    - expert_offsets/sf_offsets: Indices that mark at which token index
+                    each expert begins its computation. The number of tokens
+                    computed with expert E is expert_offsets[E + 1] -
+                    expert_offsets[E] And the sf_size per expert is
                     sf_offset[E+1] - sf_offset[E]
     - problem_sizes: MxNxK sizes of each expert's multiplication in two grouped
                      MMs used in the fused MoE operation.
@@ -1464,30 +1464,6 @@ def ggml_moe_get_block_size(quant_type: int) -> int:
 
 
 # mamba
-def causal_conv1d_fwd(x: torch.Tensor, weight: torch.Tensor,
-                      bias_: Optional[torch.Tensor],
-                      conv_states: Optional[torch.Tensor],
-                      query_start_loc: Optional[torch.Tensor],
-                      cache_indices: Optional[torch.Tensor],
-                      has_initial_state: Optional[torch.Tensor],
-                      silu_activation: bool, pad_slot_id: int):
-    torch.ops._C.causal_conv1d_fwd(x, weight, bias_, conv_states,
-                                   query_start_loc, cache_indices,
-                                   has_initial_state, silu_activation,
-                                   pad_slot_id)
-
-
-def causal_conv1d_update(x: torch.Tensor, conv_state: torch.Tensor,
-                         weight: torch.Tensor, bias_: Optional[torch.Tensor],
-                         silu_activation: bool,
-                         cache_seqlens: Optional[torch.Tensor],
-                         conv_state_indices: Optional[torch.Tensor],
-                         pad_slot_id: int):
-    torch.ops._C.causal_conv1d_update(x, conv_state, weight, bias_,
-                                      silu_activation, cache_seqlens,
-                                      conv_state_indices, pad_slot_id)
-
-
 def selective_scan_fwd(u: torch.Tensor, delta: torch.Tensor, A: torch.Tensor,
                        B: torch.Tensor, C: torch.Tensor,
                        D_: Optional[torch.Tensor], z_: Optional[torch.Tensor],
