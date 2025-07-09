@@ -34,6 +34,6 @@ VLLM_TARGET_DEVICE=cpu python setup.py develop
 ```
 
 !!! note
-    If build vLLM from source without using the pre-built images, remember to set `LD_PRELOAD="/usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4:$LD_PRELOAD"` before running vLLM.
+If build vLLM from source without using the pre-built images, remember to set `LD_PRELOAD="/usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4:$LD_PRELOAD"` before running vLLM to ensure TCMalloc is used for memory allocation.
 
 # --8<-- [end:extra-information]
