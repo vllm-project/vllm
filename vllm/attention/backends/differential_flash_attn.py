@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""" An implementation of https://arxiv.org/pdf/2410.05258 """
 from collections import defaultdict
 from dataclasses import dataclass
 from itertools import accumulate
@@ -11,14 +12,16 @@ from einops import rearrange
 from vllm import _custom_ops as ops
 # yapf conflicts with isort for this block
 # yapf: disable
-from vllm.attention.backends.abstract import (AttentionImpl, AttentionLayer,
+from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
+                                              AttentionLayer,
                                               AttentionMetadata,
                                               AttentionMetadataBuilder,
                                               AttentionType,
                                               is_quantized_kv_cache)
 from vllm.attention.backends.flash_attn import FlashAttentionBackend
 # yapf: enable
-from vllm.attention.backends.utils import (PAD_SLOT_ID, compute_slot_mapping,
+from vllm.attention.backends.utils import (PAD_SLOT_ID, CommonAttentionState,
+                                           compute_slot_mapping,
                                            compute_slot_mapping_start_idx,
                                            is_all_cross_attn_metadata_set,
                                            is_all_encoder_attn_metadata_set,
@@ -38,8 +41,12 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-class DifferentialFlashAttentionBackend(FlashAttentionBackend):
+class DifferentialFlashAttentionBackend(AttentionBackend):
     accept_output_buffer = False
+
+    @staticmethod
+    def get_supported_head_sizes() -> List[int]:
+        return [32, 64, 96, 128, 160, 192, 224, 256]
 
     @staticmethod
     def get_kv_cache_shape(
@@ -68,6 +75,33 @@ class DifferentialFlashAttentionBackend(FlashAttentionBackend):
     @staticmethod
     def get_builder_cls() -> Type["DifferentialFlashAttentionMetadataBuilder"]:
         return DifferentialFlashAttentionMetadataBuilder
+
+    @staticmethod
+    def get_state_cls() -> Type["CommonAttentionState"]:
+        return CommonAttentionState
+
+    @staticmethod
+    def swap_blocks(
+        src_kv_cache: torch.Tensor,
+        dst_kv_cache: torch.Tensor,
+        src_to_dst: torch.Tensor,
+    ) -> None:
+        src_key_cache = src_kv_cache[0]
+        dst_key_cache = dst_kv_cache[0]
+        ops.swap_blocks(src_key_cache, dst_key_cache, src_to_dst)
+        src_value_cache = src_kv_cache[1]
+        dst_value_cache = dst_kv_cache[1]
+        ops.swap_blocks(src_value_cache, dst_value_cache, src_to_dst)
+
+    @staticmethod
+    def copy_blocks(
+        kv_caches: List[torch.Tensor],
+        src_to_dists: torch.Tensor,
+    ) -> None:
+        key_caches = [kv_cache[0] for kv_cache in kv_caches]
+        value_caches = [kv_cache[1] for kv_cache in kv_caches]
+
+        ops.copy_blocks(key_caches, value_caches, src_to_dists)
 
 
 @dataclass
@@ -635,6 +669,8 @@ class DifferentialFlashAttentionImpl(AttentionImpl):
         use_irope: bool = False,
         differential_flash_attention_config: Optional[Dict[str, Any]] = None,
     ) -> None:
+        if differential_flash_attention_config is None:
+            differential_flash_attention_config = {}
         self.differential_flash_attention_config = \
             differential_flash_attention_config
         self.used_shared_kv_cache = \
@@ -722,7 +758,7 @@ class DifferentialFlashAttentionImpl(AttentionImpl):
             self, query: torch.Tensor, key: Optional[torch.Tensor],
             value: Optional[torch.Tensor], k_cache: torch.Tensor,
             v_cache: torch.Tensor,
-            attn_metadata: AttentionMetadata) -> torch.Tensor:
+            attn_metadata: DifferentialFlashAttentionMetadata) -> torch.Tensor:
 
         head_size = self.head_size
         num_heads = self.num_heads // 2
@@ -758,7 +794,9 @@ class DifferentialFlashAttentionImpl(AttentionImpl):
 
         if prefill_meta := attn_metadata.prefill_metadata:
             # Prompt run.
-            if k_cache.numel() == 0 or prefill_meta.block_tables.numel() == 0:
+            if k_cache.numel() == 0 \
+                or prefill_meta.block_tables is None \
+                or prefill_meta.block_tables.numel() == 0:
                 # normal attention
                 prefill_output = flash_attn_varlen_func(
                     q=query,
@@ -808,7 +846,7 @@ class DifferentialFlashAttentionImpl(AttentionImpl):
         query: torch.Tensor,
         k_cache: torch.Tensor,
         v_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
+        attn_metadata: DifferentialFlashAttentionMetadata,
     ):
         if not attn_metadata.decode_metadata:
             block_tables_arg = attn_metadata.cross_layer_shared_block_tables
@@ -838,6 +876,7 @@ class DifferentialFlashAttentionImpl(AttentionImpl):
         kv_cache: torch.Tensor,
         attn_metadata: DifferentialFlashAttentionMetadata,
         output: Optional[torch.Tensor] = None,
+        output_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention.
 
