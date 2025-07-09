@@ -19,6 +19,7 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         use_int8_w8a8: bool = False,
         use_int8_w8a16: bool = False,
         use_int4_w4a16: bool = False,
+        use_mxfp4_w4a4: bool = False,
         per_act_token_quant: bool = False,
         block_shape: Optional[list[int]] = None,
         allow_deep_gemm: bool = False,
@@ -29,6 +30,7 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
                 use_int8_w8a8=use_int8_w8a8,
                 use_int8_w8a16=use_int8_w8a16,
                 use_int4_w4a16=use_int4_w4a16,
+                use_mxfp4_w4a4=use_mxfp4_w4a4,
                 per_act_token_quant=per_act_token_quant,
                 block_shape=block_shape,
             ))
@@ -37,6 +39,7 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
             use_int8_w8a8=use_int8_w8a8,
             use_int4_w4a16=use_int4_w4a16,
             use_int8_w8a16=use_int8_w8a16,
+            use_mxfp4_w4a4=use_mxfp4_w4a4,
             per_act_token_quant=per_act_token_quant,
             block_shape=block_shape,
         )
