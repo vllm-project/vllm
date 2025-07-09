@@ -14,6 +14,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     pack_quantized_values_into_int32, unpack_quantized_values_into_int32)
 from vllm.model_executor.parameter import (BasevLLMParameter,
                                            permute_param_layout_)
+from vllm.platforms import current_platform
 
 from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
 
@@ -27,6 +28,9 @@ class MacheteLinearKernel(MPLinearKernel):
     @classmethod
     def can_implement(cls,
                       c: MPLinearLayerConfig) -> tuple[bool, Optional[str]]:
+        # Machete uses CUTLASS, so it can only be compatible with Nvidia
+        if not current_platform.is_cuda():
+            return False, "Machete only supported on CUDA"
 
         if c.has_g_idx and\
             c.partition_weight_shape[0] != c.full_weight_shape[0]:
