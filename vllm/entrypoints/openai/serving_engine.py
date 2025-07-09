@@ -489,9 +489,8 @@ class OpenAIServing:
     ) -> Union[tuple[None, None], tuple[LoRARequest, None], tuple[
             None, PromptAdapterRequest]]:
 
-        for lora in self.models.lora_requests:
-            if request.model == lora.lora_name:
-                return lora, None
+        if request.model in self.models.lora_requests:
+            return self.models.lora_requests[request.model], None
 
         # Currently only support default modality specific loras
         # if we have exactly one lora matched on the request.
