@@ -312,11 +312,7 @@ class QuarkConfig(QuantizationConfig):
             is_fp8_w8a8_supported = self._check_scheme_supported(
                 QuarkW8A8Fp8.get_min_capability(), error=False)
             if is_fp8_w8a8_supported:
-                weight_qscheme = cast(str, weight_config.get("qscheme"))
-                input_static = (input_config is not None and
-                                not cast(bool, input_config.get("is_dynamic")))
-                return QuarkW8A8Fp8(qscheme=weight_qscheme,
-                                    is_static_input_scheme=input_static)
+                return QuarkW8A8Fp8(weight_config, input_config)
         elif self._is_static_tensor_w8a8(weight_config, input_config):
             weight_qscheme = cast(str, weight_config.get("qscheme"))
             return QuarkW8A8Int8(qscheme=weight_qscheme,
