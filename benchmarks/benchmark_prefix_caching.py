@@ -45,24 +45,13 @@ try:
 except ImportError:
     from backend_request_func import get_tokenizer
 
-# PROMPT = "You are a helpful assistant in recognizes the content of tables in markdown format. Here is a table as fellows. You need to answer my question about the table.\n# Table\n|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|\n|----|----|----|----|----|----|----|----|\n|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan||\n|J A N|16|2|Priyamvada|Mohan Sharma, Lakshmi, KPAC Lalitha|K. S. Sethumadhavan|V. Dakshinamoorthy||\n|J A N|23|3|Yakshagaanam|Madhu, Sheela|Sheela|M. S. Viswanathan||\n|J A N|30|4|Paalkkadal|Sheela, Sharada|T. K. Prasad|A. T. Ummer||\n|F E B|5|5|Amma|Madhu, Srividya|M. Krishnan Nair|M. K. Arjunan||\n|F E B|13|6|Appooppan|Thikkurissi Sukumaran Nair, Kamal Haasan|P. Bhaskaran|M. S. Baburaj||\n|F E B|20|7|Srishti|Chowalloor Krishnankutty, Ravi Alummoodu|K. T. Muhammad|M. S. Baburaj||\n|F E B|20|8|Vanadevatha|Prem Nazir, Madhubala|Yusufali Kechery|G. Devarajan||\n|F E B|27|9|Samasya|Madhu, Kamalahaasan|K. Thankappan|Shyam||\n|F E B|27|10|Yudhabhoomi|K. P. Ummer, Vidhubala|Crossbelt Mani|R. K. Shekhar||\n|M A R|5|11|Seemantha Puthran|Prem Nazir, Jayabharathi|A. B. Raj|M. K. Arjunan||\n|M A R|12|12|Swapnadanam|Rani Chandra, Dr. Mohandas|K. G. George|Bhaskar Chandavarkar||\n|M A R|19|13|Thulavarsham|Prem Nazir, sreedevi, Sudheer|N. Sankaran Nair|V. Dakshinamoorthy||\n|M A R|20|14|Aruthu|Kaviyoor Ponnamma, Kamalahasan|Ravi|G. Devarajan||\n|M A R|26|15|Swimming Pool|Kamal Haasan, M. G. Soman|J. Sasikumar|M. K. Arjunan||\n\n# Question\nWhat' s the content in the (1,1) cells\n"  # noqa: E501
-# PROMPT = "Question: Who is bill gates?\n\nAnswer:"
-# content = """China officially the People's Republic of China (PRC), is a country in East Asia. With a population exceeding 1.4 billion, it is the second-most populous country after India, representing 17.4% of the world population. China spans the equivalent of five time zones and borders fourteen countries by land[k] across an area of nearly 9.6 million square kilometers (3,700,000 sq mi), making it the third-largest country by total land area.[l] The country is divided into 33 province-level divisions: 22 provinces,[m] five autonomous regions, four municipalities, and two semi-autonomous special administrative regions. Beijing is the country's capital, while Shanghai is its most populous city by urban area and largest financial center. China is considered one of the cradles of civilization: the first human inhabitants in the region arrived during the Paleolithic. By the late 2nd millennium BCE, the earliest dynastic states had emerged in the Yellow River basin. The 8th–3rd centuries BCE saw a breakdown in the authority of the Zhou dynasty, accompanied by the emergence of administrative and military techniques, literature, philosophy, and historiography. In 221 BCE, China was unified under an emperor, ushering in more than two millennia of imperial dynasties including the Qin, Han, Tang, Yuan, Ming, and Qing. With the invention of gunpowder and paper, the establishment of the Silk Road, and the building of the Great Wall, Chinese culture flourished and has heavily influenced both its neighbors and lands further afield. However, China began to cede parts of the country in the late 19th century to various European powers by a series of unequal treaties. After decades of Qing China on the decline, the 1911 Revolution overthrew the Qing dynasty and the monarchy and the Republic of China (ROC) was established the following year. The country under the nascent Beiyang government was unstable and ultimately fragmented during the Warlord Era, which was ended upon the Northern Expedition conducted by the Kuomintang (KMT) to reunify the country. The Chinese Civil War began in 1927, when KMT forces purged members of the rival Chinese Communist Party (CCP), who proceeded to engage in sporadic fighting against the KMT-led Nationalist government. Following the country's invasion by the Empire of Japan in 1937, the CCP and KMT formed the Second United Front to fight the Japanese. The Second Sino-Japanese War eventually ended in a Chinese victory; however, the CCP and the KMT resumed their civil war as soon as the war ended. In 1949, the resurgent Communists established control over most of the country, proclaiming the People's Republic of China and forcing the Nationalist government to retreat to the island of Taiwan. The country was split, with both sides claiming to be the sole legitimate government of China. Following the implementation of land reforms, further attempts by the PRC to realize communism failed: the Great Leap Forward was largely responsible for the Great Chinese Famine that ended with millions of Chinese people having died, and the subsequent Cultural Revolution was a period of social turmoil and persecution characterized by Maoist populism. Following the Sino-Soviet split, the Shanghai Communiqué in 1972 would precipitate the normalization of relations with the United States. Economic reforms that began in 1978 moved the country away from a socialist planned economy towards an increasingly capitalist market economy, spurring significant economic growth. A movement for increased democracy and liberalization stalled after the Tiananmen Square protests and massacre in 1989."""
-# PROMPT = f'{content}'
-PROMPT = "Question: Tell me about Seatttle?\n\nAnswer:"
+PROMPT = "You are a helpful assistant in recognizes the content of tables in markdown format. Here is a table as fellows. You need to answer my question about the table.\n# Table\n|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|\n|----|----|----|----|----|----|----|----|\n|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan||\n|J A N|16|2|Priyamvada|Mohan Sharma, Lakshmi, KPAC Lalitha|K. S. Sethumadhavan|V. Dakshinamoorthy||\n|J A N|23|3|Yakshagaanam|Madhu, Sheela|Sheela|M. S. Viswanathan||\n|J A N|30|4|Paalkkadal|Sheela, Sharada|T. K. Prasad|A. T. Ummer||\n|F E B|5|5|Amma|Madhu, Srividya|M. Krishnan Nair|M. K. Arjunan||\n|F E B|13|6|Appooppan|Thikkurissi Sukumaran Nair, Kamal Haasan|P. Bhaskaran|M. S. Baburaj||\n|F E B|20|7|Srishti|Chowalloor Krishnankutty, Ravi Alummoodu|K. T. Muhammad|M. S. Baburaj||\n|F E B|20|8|Vanadevatha|Prem Nazir, Madhubala|Yusufali Kechery|G. Devarajan||\n|F E B|27|9|Samasya|Madhu, Kamalahaasan|K. Thankappan|Shyam||\n|F E B|27|10|Yudhabhoomi|K. P. Ummer, Vidhubala|Crossbelt Mani|R. K. Shekhar||\n|M A R|5|11|Seemantha Puthran|Prem Nazir, Jayabharathi|A. B. Raj|M. K. Arjunan||\n|M A R|12|12|Swapnadanam|Rani Chandra, Dr. Mohandas|K. G. George|Bhaskar Chandavarkar||\n|M A R|19|13|Thulavarsham|Prem Nazir, sreedevi, Sudheer|N. Sankaran Nair|V. Dakshinamoorthy||\n|M A R|20|14|Aruthu|Kaviyoor Ponnamma, Kamalahasan|Ravi|G. Devarajan||\n|M A R|26|15|Swimming Pool|Kamal Haasan, M. G. Soman|J. Sasikumar|M. K. Arjunan||\n\n# Question\nWhat' s the content in the (1,1) cells\n"  # noqa: E501
+
 
 def test_prefix(llm=None, sampling_params=None, prompts=None):
     start_time = time.time()
 
-    # llm.generate(prompts, sampling_params=sampling_params)
-    outputs = llm.generate(prompts, sampling_params=sampling_params)
-        # Print the outputs.
-    generated_texts = []
-    for output in outputs:
-        prompt = output.prompt
-        generated_text = output.outputs[0].text.strip()
-        generated_texts.append(generated_text)
-        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+    llm.generate(prompts, sampling_params=sampling_params)
 
     end_time = time.time()
     print(f"cost time {end_time - start_time}")
@@ -147,16 +136,16 @@ def sample_requests_from_random(
     min_len, max_len = input_length_range
 
     for i in range(num_requests):
-        # unique_part_token_ids = sample_tokens(
-        #     tokenizer,
-        #     random.randint(min_len - prefix_len, max_len - prefix_len))
-        # prompt_token_ids = prefix_token_ids + unique_part_token_ids
-        # prompt = tokenizer.decode(prompt_token_ids)
-        # prompt_len = len(prompt_token_ids)
-        # assert (min_len <= prompt_len <= max_len
-        #         ), f"prompt_len {prompt_len} out of range {min_len}:{max_len}"
-
-        requests.append(Request(PROMPT, 10, fixed_output_len))
+        unique_part_token_ids = sample_tokens(
+            tokenizer, random.randint(min_len - prefix_len, max_len - prefix_len)
+        )
+        prompt_token_ids = prefix_token_ids + unique_part_token_ids
+        prompt = tokenizer.decode(prompt_token_ids)
+        prompt_len = len(prompt_token_ids)
+        assert min_len <= prompt_len <= max_len, (
+            f"prompt_len {prompt_len} out of range {min_len}:{max_len}"
+        )
+        requests.append(Request(prompt, prompt_len, fixed_output_len))
     return requests
 
 
