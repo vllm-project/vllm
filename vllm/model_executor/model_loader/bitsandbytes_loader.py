@@ -556,7 +556,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             stacked_quant_state_dict[quant_param_name][shard_index] = (
                 quant_state_dict[non_stacked_param_name])
 
-        # save quant_states and offsets as the attributes of the parameters
+        # save quant_states and offsets as the attributes of the parameters.
         for param_name, param in param_dict.items():
             if param_name in stacked_quant_state_dict:
                 quant_states = stacked_quant_state_dict[param_name]
