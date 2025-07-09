@@ -522,16 +522,14 @@ def cutlass_moe_fp4(a: torch.Tensor, a1_gscale: torch.Tensor,
     return out.to(dtype=out_dtype)
 
 
-def _valid_cutlass_block_scaled_grouped_gemm(hidden_states: torch.Tensor,
-                                             w1: torch.Tensor,
+def _valid_cutlass_block_scaled_grouped_gemm(w1: torch.Tensor,
                                              w2: torch.Tensor) -> bool:
 
-    def _valid_cutlass_block_scaled_grouped_gemm_shape(M: int, N: int, K: int):
-        return M >= 128 and N % 128 == 0 and K % 128 == 0
+    def _valid_cutlass_block_scaled_grouped_gemm_shape(N: int, K: int):
+        return N % 128 == 0 and K % 128 == 0
 
-    m = hidden_states.size(0)
     _, K, N = w2.size()
-    if not _valid_cutlass_block_scaled_grouped_gemm_shape(m, N, K):
+    if not _valid_cutlass_block_scaled_grouped_gemm_shape(N, K):
         logger.debug(
             "CutlassBlockScaledGroupedGemm disabled: unalinged problem size.")
         return False

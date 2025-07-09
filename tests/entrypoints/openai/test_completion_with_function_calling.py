@@ -145,7 +145,11 @@ async def test_function_tool_use(client: openai.AsyncOpenAI, model_name: str,
                     "enable_thinking": enable_thinking
                 }
             })
-
+        if enable_thinking:
+            assert chat_completion.choices[0].message.\
+                reasoning_content is not None
+            assert chat_completion.choices[0].message.\
+                reasoning_content != ""
         assert chat_completion.choices[0].message.tool_calls is not None
         assert len(chat_completion.choices[0].message.tool_calls) > 0
     else:
