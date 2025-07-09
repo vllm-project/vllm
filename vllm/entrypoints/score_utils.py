@@ -136,20 +136,22 @@ def apply_score_template(
         return model.get_score_template(prompt_1, prompt_2)
 
     raise ValueError(
-        f"Unsupported model architecture: {model_config.architectures}")
+        f"Unsupported model architecture: {model_config.architecture}")
 
 
 def post_process_tokens(
     model_config: ModelConfig,
     prompt: TokensPrompt,
-):
+) -> None:
     """
-    Performs architecture-specific manipulations on the input tokens.
-    Currently handles special processing for 'JinaVLForRanking' models.
+    Perform architecture-specific manipulations on the input tokens.
+    
+    Note:
+        This is an in-place operation.
     """
     model = get_model_cls(model_config)
     if supports_score_template(model):
-        return model.post_process_tokens(prompt)
+        model.post_process_tokens(prompt)
 
 
 def get_score_prompt(

@@ -163,9 +163,9 @@ class SupportsScoreTemplate(Protocol):
         ...
 
     @classmethod
-    def post_process_tokens(cls, prompt: TokensPrompt):
+    def post_process_tokens(cls, prompt: TokensPrompt) -> None:
         """
-        Performs architecture-specific manipulations on the input tokens.
+        Perform architecture-specific manipulations on the input tokens.
         """
         ...
 

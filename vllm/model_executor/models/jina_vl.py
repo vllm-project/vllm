@@ -112,7 +112,7 @@ class JinaVLForSequenceClassification(Qwen2VLForConditionalGeneration,
         return f"**Document**:\n{document}\n**Query**:\n{query}"
 
     @classmethod
-    def post_process_tokens(cls, prompt: TokensPrompt):
+    def post_process_tokens(cls, prompt: TokensPrompt) -> None:
 
         # add score target token at the end of prompt tokens
         prompt['prompt_token_ids'].append(100)
