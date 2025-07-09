@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Copyright 2025 The vLLM team.
 # Copyright 2025 IBM.
@@ -91,6 +92,7 @@ class PrithviGeoSpatialMAEMultiModalProcessor(BaseMultiModalProcessor):
         prompt: Union[str, list[int]],
         mm_data: MultiModalDataDict,
         hf_processor_mm_kwargs: Mapping[str, object],
+        tokenization_kwargs: Optional[Mapping[str, object]] = None,
         return_mm_hashes: bool = False,
     ) -> MultiModalInputs:
         mm_kwargs = {}
@@ -115,6 +117,13 @@ class PrithviGeoSpatialMAEMultiModalProcessor(BaseMultiModalProcessor):
 class PrithviGeoSpatialMAE(nn.Module, IsAttentionFree, SupportsMultiModal,
                            SupportsV0Only):
     """ Prithvi Masked Autoencoder"""
+
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+        if modality.startswith("image"):
+            return None
+
+        raise ValueError("Only image modality is supported")
 
     def _instantiate_model(self, config: dict) -> Optional[nn.Module]:
 

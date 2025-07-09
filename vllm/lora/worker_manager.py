@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from contextlib import contextmanager
 from typing import Any, Literal, Optional, Union
@@ -100,7 +101,8 @@ class WorkerLoRAManager(AbstractWorkerManager):
             lora_path = get_adapter_absolute_path(lora_request.lora_path)
 
             peft_helper = PEFTHelper.from_local_dir(
-                lora_path, self.max_position_embeddings)
+                lora_path, self.max_position_embeddings,
+                lora_request.tensorizer_config_dict)
 
             # Validates the LoRA configuration against requirements before
             # loading weights, throwing an exception if validation fails.
@@ -109,10 +111,7 @@ class WorkerLoRAManager(AbstractWorkerManager):
             # For some models like Qwen2VL, we need to use hf_to_vllm_mapper
             # to ensure correct loading of lora weights.
             model = self._adapter_manager.model
-            hf_to_vllm_mapper = None
-            if (hasattr(model, "hf_to_vllm_mapper")
-                    and model.hf_to_vllm_mapper is not None):
-                hf_to_vllm_mapper = model.hf_to_vllm_mapper
+            hf_to_vllm_mapper = getattr(model, "hf_to_vllm_mapper", None)
 
             lora = self._lora_model_cls.from_local_checkpoint(
                 lora_path,
@@ -125,6 +124,7 @@ class WorkerLoRAManager(AbstractWorkerManager):
                 self.lora_config.lora_extra_vocab_size,
                 embedding_modules=self.embedding_modules,
                 embedding_padding_modules=self.embedding_padding_modules,
+                tensorizer_config_dict=lora_request.tensorizer_config_dict,
                 weights_mapper=hf_to_vllm_mapper)
 
         except FileNotFoundError as e:
@@ -227,6 +227,11 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
             self.add_adapter(lora)
 
     def add_adapter(self, lora_request: LoRARequest) -> bool:
+        # Note that this method is not thread-safe. It may be invoked multiple
+        # times for the same adapter when using multiple API servers.
+        # This is ok because it's currently only called from
+        # the single-threaded core engine loop.
+
         if lora_request.lora_int_id not in self.list_adapters():
             # Load the new adapter first to ensure it is actually valid, before
             # evicting any existing adapters.

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable
 from typing import Optional
@@ -16,7 +17,7 @@ from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
-from vllm.model_executor.layers.pooler import (CrossEncodingPooler, Pooler,
+from vllm.model_executor.layers.pooler import (ClassifierPooler, Pooler,
                                                PoolingType)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -24,8 +25,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.sequence import IntermediateTensors, PoolerOutput
-from vllm.transformers_utils.config import (
-    get_cross_encoder_activation_function)
 
 from .interfaces import SupportsCrossEncoding, SupportsQuant, SupportsV0Only
 from .utils import WeightsMapper, maybe_prefix
@@ -445,8 +444,8 @@ class BertEmbeddingModel(nn.Module, SupportsV0Only, SupportsQuant):
                                                 softmax=False)
 
 
-class BertForSequenceClassification(nn.Module, SupportsCrossEncoding,
-                                    SupportsQuant):
+class BertForSequenceClassification(nn.Module, SupportsV0Only,
+                                    SupportsCrossEncoding, SupportsQuant):
     """A model that uses Bert to provide embedding functionalities.
 
    This class encapsulates the BertModel and provides an interface for
@@ -461,17 +460,14 @@ class BertForSequenceClassification(nn.Module, SupportsCrossEncoding,
         super().__init__()
         config = vllm_config.model_config.hf_config
 
-        self.default_activation_function = \
-            get_cross_encoder_activation_function(config)
-
         self.num_labels = config.num_labels
         self.bert = BertModel(vllm_config=vllm_config,
                               prefix=maybe_prefix(prefix, "bert"),
                               embedding_class=BertEmbedding,
                               add_pooling_layer=True)
         self.classifier = nn.Linear(config.hidden_size, config.num_labels)
-        self._pooler = CrossEncodingPooler(config, self.classifier,
-                                           self.bert.pooler)
+        self._pooler = ClassifierPooler(vllm_config.model_config,
+                                        self.classifier, self.bert.pooler)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
 

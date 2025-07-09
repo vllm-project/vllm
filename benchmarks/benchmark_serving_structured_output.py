@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 r"""Benchmark online serving throughput with structured outputs.
 
 On the server side, run one of the following commands:
@@ -11,7 +12,6 @@ On the client side, run:
         --model <your_model> \
         --dataset json \
         --structured-output-ratio 1.0 \
-        --structured-output-backend auto \
         --request-rate 10 \
         --num-prompts 1000
 
@@ -672,7 +672,7 @@ async def benchmark(
 def evaluate(ret, args):
     def _eval_correctness_json(expected, actual):
         # extract json string from string using regex
-        import re
+        import regex as re
 
         actual = actual.replace("\n", "").replace(" ", "").strip()
         try:
@@ -687,7 +687,7 @@ def evaluate(ret, args):
         return actual in args.choice
 
     def _eval_correctness_regex(expected, actual):
-        import re
+        import regex as re
 
         return re.match(args.regex, actual) is not None
 
@@ -850,7 +850,7 @@ def main(args: argparse.Namespace):
             json.dump(results, outfile, indent=4)
 
 
-if __name__ == "__main__":
+def create_argument_parser():
     parser = FlexibleArgumentParser(
         description="Benchmark the online serving throughput."
     )
@@ -1034,5 +1034,10 @@ if __name__ == "__main__":
         help="Ratio of Structured Outputs requests",
     )
 
+    return parser
+
+
+if __name__ == "__main__":
+    parser = create_argument_parser()
     args = parser.parse_args()
     main(args)

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from typing import Any, Callable, Optional, Union
 
@@ -180,6 +181,7 @@ class ModelOptNvFp4Config(QuantizationConfig):
         exclude_modules: list[str],
         group_size: int = 16,
     ) -> None:
+        super().__init__()
         self.is_checkpoint_nvfp4_serialized = is_checkpoint_nvfp4_serialized
         if is_checkpoint_nvfp4_serialized:
             logger.warning(
@@ -228,7 +230,7 @@ class ModelOptNvFp4Config(QuantizationConfig):
                    exclude_modules, group_size)
 
     def is_layer_excluded(self, prefix: str, exclude_modules: list):
-        import re
+        import regex as re
         for pattern in exclude_modules:
             regex_str = pattern.replace('.', r'\.').replace('*', r'.*')
             if re.fullmatch(regex_str, prefix):
@@ -585,9 +587,11 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
 
         # GEMM 1
-        assert torch.allclose(
-            layer.w13_weight_scale_2[:, 0], layer.w13_weight_scale_2[:, 1]), (
-                "w1_weight_scale_2 must match w3_weight_scale_2")
+        if not torch.allclose(layer.w13_weight_scale_2[:, 0],
+                              layer.w13_weight_scale_2[:, 1]):
+            logger.warning_once(
+                "w1_weight_scale_2 must match w3_weight_scale_2. "
+                "Accuracy may be affected.")
 
         w13_weight_scale_2 = layer.w13_weight_scale_2[:, 0]
         layer.w13_weight_scale_2 = Parameter(w13_weight_scale_2,
@@ -661,43 +665,15 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
+        enable_eplb: bool = False,
+        expert_load_view: Optional[torch.Tensor] = None,
+        logical_to_physical_map: Optional[torch.Tensor] = None,
+        logical_replica_count: Optional[torch.Tensor] = None,
     ):
-        if self.use_marlin:
-            topk_weights, topk_ids = FusedMoE.select_experts(
-                hidden_states=x,
-                router_logits=router_logits,
-                use_grouped_topk=use_grouped_topk,
-                top_k=top_k,
-                renormalize=renormalize,
-                topk_group=topk_group,
-                num_expert_group=num_expert_group,
-                custom_routing_function=custom_routing_function,
-                scoring_func=scoring_func,
-                e_score_correction_bias=e_score_correction_bias,
-            )
-
-            return torch.ops.vllm.fused_marlin_moe(
-                x,
-                layer.w13_weight,
-                layer.w2_weight,
-                layer.w13_weight_scale,
-                layer.w2_weight_scale,
-                router_logits,
-                topk_weights,
-                topk_ids,
-                global_scale1=layer.w13_weight_scale_2,
-                global_scale2=layer.w2_weight_scale_2,
-                quant_type_id=scalar_types.float4_e2m1f.id,
-                global_num_experts=global_num_experts,
-                expert_map=expert_map)
-
+        if enable_eplb:
+            raise NotImplementedError(
+                "EPLB not supported for `ModelOptNvFp4FusedMoE` yet.")
         assert activation == "silu", "Only SiLU activation is supported."
-        assert not apply_router_weight_on_input, (
-            "Router weight on input is not "
-            "supported for ModelOptNvFp4FusedMoE.")
-        assert expert_map is None, ("Expert Parallelism / expert_map "
-                                    "is currently not supported for "
-                                    "ModelOptNvFp4FusedMoE.")
 
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
@@ -711,24 +687,48 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias)
 
+        if self.use_marlin:
+            return torch.ops.vllm.fused_marlin_moe(
+                x,
+                layer.w13_weight,
+                layer.w2_weight,
+                layer.w13_weight_scale,
+                layer.w2_weight_scale,
+                router_logits,
+                topk_weights,
+                topk_ids,
+                global_scale1=layer.w13_weight_scale_2,
+                global_scale2=layer.w2_weight_scale_2,
+                quant_type_id=scalar_types.float4_e2m1f.id,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+                global_num_experts=global_num_experts,
+                expert_map=expert_map)
+
+        assert expert_map is None, ("Expert Parallelism / expert_map "
+                                    "is currently not supported for "
+                                    "ModelOptNvFp4FusedMoE.")
+
         from vllm.model_executor.layers.fused_moe.cutlass_moe import (
             cutlass_moe_fp4)
 
         # Cutlass moe takes in activations in BF16/Half precision
         # and fp4 quantized weights loaded from the checkpoint
-        return cutlass_moe_fp4(a=x,
-                               w1_fp4=layer.w13_weight,
-                               w1_blockscale=layer.w13_blockscale_swizzled,
-                               w1_alphas=layer.g1_alphas,
-                               w2_fp4=layer.w2_weight,
-                               w2_blockscale=layer.w2_blockscale_swizzled,
-                               w2_alphas=layer.g2_alphas,
-                               topk_weights=topk_weights,
-                               topk_ids=topk_ids,
-                               m=x.shape[0],
-                               n=layer.w2_weight.shape[2] * 2,
-                               k=x.shape[1],
-                               e=layer.w13_weight.shape[0],
-                               a1_gscale=layer.w13_input_scale_quant,
-                               a2_gscale=layer.w2_input_scale_quant,
-                               device=x.device).to(x.dtype)
+        return cutlass_moe_fp4(
+            a=x,
+            w1_fp4=layer.w13_weight,
+            w1_blockscale=layer.w13_blockscale_swizzled,
+            w1_alphas=layer.g1_alphas,
+            w2_fp4=layer.w2_weight,
+            w2_blockscale=layer.w2_blockscale_swizzled,
+            w2_alphas=layer.g2_alphas,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            m=x.shape[0],
+            n=layer.w2_weight.shape[2] * 2,
+            k=x.shape[1],
+            e=layer.w13_weight.shape[0],
+            a1_gscale=layer.w13_input_scale_quant,
+            a2_gscale=layer.w2_input_scale_quant,
+            device=x.device,
+            apply_router_weight_on_input=apply_router_weight_on_input).to(
+                x.dtype)

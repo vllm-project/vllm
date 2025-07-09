@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # ruff: noqa
 
 import asyncio
 import hashlib
 import json
+import logging
 import pickle
 import socket
 from collections.abc import AsyncIterator
@@ -12,15 +14,20 @@ from unittest.mock import patch
 import pytest
 import torch
 import zmq
+from transformers import AutoTokenizer
 from vllm_test_utils.monitor import monitor
 
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
+from vllm.transformers_utils.detokenizer_utils import (
+    convert_ids_list_to_tokens)
 from vllm.utils import (CacheInfo, FlexibleArgumentParser, LRUCache,
                         MemorySnapshot, PlaceholderModule, StoreBoolean,
-                        bind_kv_cache, deprecate_kwargs, get_open_port,
-                        make_zmq_path, make_zmq_socket, memory_profiling,
-                        merge_async_iterators, sha256, split_zmq_path,
-                        supports_kw, swap_dict_values)
+                        bind_kv_cache, common_broadcastable_dtype,
+                        deprecate_kwargs, get_open_port, get_tcp_uri,
+                        is_lossless_cast, join_host_port, make_zmq_path,
+                        make_zmq_socket, memory_profiling,
+                        merge_async_iterators, sha256, split_host_port,
+                        split_zmq_path, supports_kw, swap_dict_values)
 
 from .utils import create_new_process_for_each_test, error_on_warning
 
@@ -140,6 +147,7 @@ def parser():
     parser.add_argument('--batch-size', type=int)
     parser.add_argument('--enable-feature', action='store_true')
     parser.add_argument('--hf-overrides', type=json.loads)
+    parser.add_argument('-O', '--compilation-config', type=json.loads)
     return parser
 
 
@@ -258,11 +266,39 @@ def test_dict_args(parser):
         "--model-name=something.something",
         "--hf-overrides.key1",
         "val1",
+        # Test nesting
         "--hf-overrides.key2.key3",
         "val2",
         "--hf-overrides.key2.key4",
         "val3",
+        # Test compile config and compilation level
+        "-O.use_inductor=true",
+        "-O.backend",
+        "custom",
+        "-O1",
+        # Test = sign
         "--hf-overrides.key5=val4",
+        # Test underscore to dash conversion
+        "--hf_overrides.key_6",
+        "val5",
+        "--hf_overrides.key-7.key_8",
+        "val6",
+        # Test data type detection
+        "--hf_overrides.key9",
+        "100",
+        "--hf_overrides.key10",
+        "100.0",
+        "--hf_overrides.key11",
+        "true",
+        "--hf_overrides.key12.key13",
+        "null",
+        # Test '-' and '.' in value
+        "--hf_overrides.key14.key15",
+        "-minus.and.dot",
+        # Test array values
+        "-O.custom_ops+",
+        "-quant_fp8",
+        "-O.custom_ops+=+silu_mul,-rms_norm",
     ]
     parsed_args = parser.parse_args(args)
     assert parsed_args.model_name == "something.something"
@@ -273,7 +309,50 @@ def test_dict_args(parser):
             "key4": "val3",
         },
         "key5": "val4",
+        "key_6": "val5",
+        "key-7": {
+            "key_8": "val6",
+        },
+        "key9": 100,
+        "key10": 100.0,
+        "key11": True,
+        "key12": {
+            "key13": None,
+        },
+        "key14": {
+            "key15": "-minus.and.dot",
+        }
     }
+    assert parsed_args.compilation_config == {
+        "level": 1,
+        "use_inductor": True,
+        "backend": "custom",
+        "custom_ops": ["-quant_fp8", "+silu_mul", "-rms_norm"],
+    }
+
+
+def test_duplicate_dict_args(caplog_vllm, parser):
+    args = [
+        "--model-name=something.something",
+        "--hf-overrides.key1",
+        "val1",
+        "--hf-overrides.key1",
+        "val2",
+        "-O1",
+        "-O.level",
+        "2",
+        "-O3",
+    ]
+
+    parsed_args = parser.parse_args(args)
+    # Should be the last value
+    assert parsed_args.hf_overrides == {"key1": "val2"}
+    assert parsed_args.compilation_config == {"level": 3}
+
+    assert len(caplog_vllm.records) == 1
+    assert "duplicate" in caplog_vllm.text
+    assert "--hf-overrides.key1" in caplog_vllm.text
+    assert "-O.level" in caplog_vllm.text
 
 
 # yapf: enable
@@ -567,12 +646,65 @@ def test_lru_cache():
     assert 6 in cache
 
 
+# yapf: disable
+@pytest.mark.parametrize(
+    ("src_dtype", "tgt_dtype", "expected_result"),
+    [
+        # Different precision_levels
+        (torch.bool, torch.int8, True),
+        (torch.bool, torch.float16, True),
+        (torch.bool, torch.complex32, True),
+        (torch.int64, torch.bool, False),
+        (torch.int64, torch.float16, True),
+        (torch.int64, torch.complex32, True),
+        (torch.float64, torch.bool, False),
+        (torch.float64, torch.int8, False),
+        (torch.float64, torch.complex32, True),
+        (torch.complex128, torch.bool, False),
+        (torch.complex128, torch.int8, False),
+        (torch.complex128, torch.float16, False),
+        # precision_level=0
+        (torch.bool, torch.bool, True),
+        # precision_level=1
+        (torch.int8, torch.int16, True),
+        (torch.int16, torch.int8, False),
+        (torch.uint8, torch.int8, False),
+        (torch.int8, torch.uint8, False),
+        # precision_level=2
+        (torch.float16, torch.float32, True),
+        (torch.float32, torch.float16, False),
+        (torch.bfloat16, torch.float32, True),
+        (torch.float32, torch.bfloat16, False),
+        # precision_level=3
+        (torch.complex32, torch.complex64, True),
+        (torch.complex64, torch.complex32, False),
+    ],
+)
+# yapf: enable
+def test_is_lossless_cast(src_dtype, tgt_dtype, expected_result):
+    assert is_lossless_cast(src_dtype, tgt_dtype) == expected_result
+
+
+# yapf: disable
+@pytest.mark.parametrize(
+    ("dtypes", "expected_result"),
+    [
+        ([torch.bool], torch.bool),
+        ([torch.bool, torch.int8], torch.int8),
+        ([torch.bool, torch.int8, torch.float16], torch.float16),
+        ([torch.bool, torch.int8, torch.float16, torch.complex32], torch.complex32),  # noqa: E501
+    ],
+)
+# yapf: enable
+def test_common_broadcastable_dtype(dtypes, expected_result):
+    assert common_broadcastable_dtype(dtypes) == expected_result
+
+
 def test_placeholder_module_error_handling():
     placeholder = PlaceholderModule("placeholder_1234")
 
     def build_ctx():
-        return pytest.raises(ModuleNotFoundError,
-                             match="No module named")
+        return pytest.raises(ModuleNotFoundError, match="No module named")
 
     with build_ctx():
         int(placeholder)
@@ -608,6 +740,7 @@ def test_placeholder_module_error_handling():
         _ = placeholder_attr.module
 
 
+# yapf: disable
 @pytest.mark.parametrize(
     "obj,key1,key2",
     [
@@ -618,6 +751,7 @@ def test_placeholder_module_error_handling():
         # Tests for both keys do not exist
         ({1: "a", 2: "b"}, 3, 4),
     ])
+# yapf: enable
 def test_swap_dict_values(obj, key1, key2):
     original_obj = obj.copy()
     swap_dict_values(obj, key1, key2)
@@ -631,19 +765,19 @@ def test_swap_dict_values(obj, key1, key2):
         assert key1 not in obj
 
 
-def test_model_specification(parser_with_config,
-                             cli_config_file,
+def test_model_specification(parser_with_config, cli_config_file,
                              cli_config_file_with_model):
     # Test model in CLI takes precedence over config
-    args = parser_with_config.parse_args([
-        'serve', 'cli-model', '--config', cli_config_file_with_model
-    ])
+    args = parser_with_config.parse_args(
+        ['serve', 'cli-model', '--config', cli_config_file_with_model])
     assert args.model_tag == 'cli-model'
     assert args.served_model_name == 'mymodel'
 
     # Test model from config file works
     args = parser_with_config.parse_args([
-        'serve', '--config', cli_config_file_with_model,
+        'serve',
+        '--config',
+        cli_config_file_with_model,
     ])
     assert args.model == 'config-model'
     assert args.served_model_name == 'mymodel'
@@ -654,17 +788,19 @@ def test_model_specification(parser_with_config,
 
     # Test using --model option raises error
     with pytest.raises(
-        ValueError,
-        match=(
-            "With `vllm serve`, you should provide the model as a positional "
-            "argument or in a config file instead of via the `--model` option."
-        ),
+            ValueError,
+            match=
+        ("With `vllm serve`, you should provide the model as a positional "
+         "argument or in a config file instead of via the `--model` option."),
     ):
         parser_with_config.parse_args(['serve', '--model', 'my-model'])
 
     # Test other config values are preserved
     args = parser_with_config.parse_args([
-        'serve', 'cli-model', '--config', cli_config_file_with_model,
+        'serve',
+        'cli-model',
+        '--config',
+        cli_config_file_with_model,
     ])
     assert args.tensor_parallel_size == 2
     assert args.trust_remote_code is True
@@ -673,7 +809,7 @@ def test_model_specification(parser_with_config,
 
 
 @pytest.mark.parametrize("input", [(), ("abc", ), (None, ),
-                                    (None, bool, [1, 2, 3])])
+                                   (None, bool, [1, 2, 3])])
 @pytest.mark.parametrize("output", [0, 1, 2])
 def test_sha256(input: tuple, output: int):
     hash = sha256(input)
@@ -682,7 +818,8 @@ def test_sha256(input: tuple, output: int):
     assert hash != 0
 
     bytes = pickle.dumps(input, protocol=pickle.HIGHEST_PROTOCOL)
-    assert hash == int.from_bytes(hashlib.sha256(bytes).digest(), byteorder="big")
+    assert hash == int.from_bytes(hashlib.sha256(bytes).digest(),
+                                  byteorder="big")
 
     # hashing again, returns the same value
     assert hash == sha256(input)
@@ -698,8 +835,7 @@ def test_sha256(input: tuple, output: int):
         ("tcp://127.0.0.1:5555", ("tcp", "127.0.0.1", "5555")),
         ("tcp://[::1]:5555", ("tcp", "::1", "5555")),  # IPv6 address
         ("inproc://some_identifier", ("inproc", "some_identifier", "")),
-    ]
-)
+    ])
 def test_split_zmq_path(path, expected):
     assert split_zmq_path(path) == expected
 
@@ -711,8 +847,7 @@ def test_split_zmq_path(path, expected):
         "tcp://127.0.0.1",  # Missing port
         "tcp://[::1]",  # Missing port for IPv6
         "tcp://:5555",  # Missing host
-    ]
-)
+    ])
 def test_split_zmq_path_invalid(invalid_path):
     with pytest.raises(ValueError):
         split_zmq_path(invalid_path)
@@ -734,7 +869,8 @@ def test_make_zmq_socket_ipv6():
     zsock: zmq.Socket = make_zmq_socket(ctx, ipv6_path, socket_type)
 
     # Verify that the IPV6 option is set
-    assert zsock.getsockopt(zmq.IPV6) == 1, "IPV6 option should be enabled for IPv6 addresses"
+    assert zsock.getsockopt(
+        zmq.IPV6) == 1, "IPV6 option should be enabled for IPv6 addresses"
 
     # Clean up
     zsock.close()
@@ -744,3 +880,55 @@ def test_make_zmq_socket_ipv6():
 def test_make_zmq_path():
     assert make_zmq_path("tcp", "127.0.0.1", "5555") == "tcp://127.0.0.1:5555"
     assert make_zmq_path("tcp", "::1", "5555") == "tcp://[::1]:5555"
+
+
+def test_get_tcp_uri():
+    assert get_tcp_uri("127.0.0.1", 5555) == "tcp://127.0.0.1:5555"
+    assert get_tcp_uri("::1", 5555) == "tcp://[::1]:5555"
+
+
+def test_split_host_port():
+    # valid ipv4
+    assert split_host_port("127.0.0.1:5555") == ("127.0.0.1", 5555)
+    # invalid ipv4
+    with pytest.raises(ValueError):
+        # multi colon
+        assert split_host_port("127.0.0.1::5555")
+    with pytest.raises(ValueError):
+        # tailing colon
+        assert split_host_port("127.0.0.1:5555:")
+    with pytest.raises(ValueError):
+        # no colon
+        assert split_host_port("127.0.0.15555")
+    with pytest.raises(ValueError):
+        # none int port
+        assert split_host_port("127.0.0.1:5555a")
+
+    # valid ipv6
+    assert split_host_port("[::1]:5555") == ("::1", 5555)
+    # invalid ipv6
+    with pytest.raises(ValueError):
+        # multi colon
+        assert split_host_port("[::1]::5555")
+    with pytest.raises(IndexError):
+        # no colon
+        assert split_host_port("[::1]5555")
+    with pytest.raises(ValueError):
+        # none int port
+        assert split_host_port("[::1]:5555a")
+
+
+def test_join_host_port():
+    assert join_host_port("127.0.0.1", 5555) == "127.0.0.1:5555"
+    assert join_host_port("::1", 5555) == "[::1]:5555"
+
+
+def test_convert_ids_list_to_tokens():
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-1.5B-Instruct")
+    token_ids = tokenizer.encode("Hello, world!")
+    # token_ids = [9707, 11, 1879, 0]
+    assert tokenizer.convert_ids_to_tokens(token_ids) == [
+        'Hello', ',', 'Ġworld', '!'
+    ]
+    tokens = convert_ids_list_to_tokens(tokenizer, token_ids)
+    assert tokens == ['Hello', ',', ' world', '!']

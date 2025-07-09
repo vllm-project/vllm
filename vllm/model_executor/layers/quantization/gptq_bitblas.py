@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Any, Optional
 
 import torch
@@ -80,6 +81,7 @@ class GPTQBitBLASConfig(QuantizationConfig):
             # (since we have only one group per output channel)
             desc_act = False
 
+        super().__init__()
         self.weight_bits = weight_bits
         self.group_size = group_size
         self.desc_act = desc_act

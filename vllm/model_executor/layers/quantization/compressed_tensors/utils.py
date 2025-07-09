@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import re
 from collections.abc import Iterable, Mapping
 from types import MappingProxyType
 from typing import Optional
 
+import regex as re
 from compressed_tensors import CompressionFormat
 from torch.nn import Module
 
@@ -14,6 +15,7 @@ def is_activation_quantization_format(format: str) -> bool:
         CompressionFormat.naive_quantized.value,
         CompressionFormat.int_quantized.value,
         CompressionFormat.float_quantized.value,
+        CompressionFormat.nvfp4_pack_quantized.value
     ]
     return format in _ACTIVATION_QUANTIZATION_FORMATS
 

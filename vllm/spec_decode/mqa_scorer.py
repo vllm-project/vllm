@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from vllm.sequence import (ExecuteModelRequest, SequenceData,
                            SequenceGroupMetadata, get_all_seq_ids)

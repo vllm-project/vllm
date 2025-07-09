@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import copy
 import time
@@ -11,13 +12,14 @@ from transformers import AutoTokenizer
 from vllm import SamplingParams
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
+from vllm.utils import set_default_torch_num_threads
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core import EngineCore
 from vllm.v1.executor.abstract import Executor, UniProcExecutor
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import ModelRunnerOutput
 
-from ...utils import create_new_process_for_each_test
+from ...utils import create_new_process_for_each_test, multi_gpu_test
 
 if not current_platform.is_cuda():
     pytest.skip(reason="V1 currently only supported on CUDA.",
@@ -37,10 +39,12 @@ def make_request() -> EngineCoreRequest:
         mm_hashes=None,
         mm_placeholders=None,
         sampling_params=SamplingParams(),
+        pooling_params=None,
         eos_token_id=None,
         arrival_time=time.time(),
         lora_request=None,
         cache_salt=None,
+        data_parallel_rank=None,
     )
 
 
@@ -54,9 +58,10 @@ def test_engine_core(monkeypatch: pytest.MonkeyPatch):
         vllm_config = engine_args.create_engine_config()
         executor_class = Executor.get_class(vllm_config)
 
-        engine_core = EngineCore(vllm_config=vllm_config,
-                                 executor_class=executor_class,
-                                 log_stats=True)
+        with set_default_torch_num_threads(1):
+            engine_core = EngineCore(vllm_config=vllm_config,
+                                     executor_class=executor_class,
+                                     log_stats=True)
         """Test basic request lifecycle."""
 
         # First request.
@@ -88,7 +93,7 @@ def test_engine_core(monkeypatch: pytest.MonkeyPatch):
         assert len(engine_core.scheduler.running) == 4
 
         # Loop through until they are all done.
-        while len(engine_core.step().outputs) > 0:
+        while (outs := engine_core.step()[0].get(0)) and outs.outputs:
             pass
 
         assert len(engine_core.scheduler.waiting) == 0
@@ -163,11 +168,11 @@ def test_engine_core(monkeypatch: pytest.MonkeyPatch):
         req0.request_id = req1.request_id = "test"
         engine_core.add_request(req0)
 
-        while len(engine_core.step().outputs) > 0:
+        while (outs := engine_core.step()[0].get(0)) and outs.outputs:
             pass
 
         engine_core.add_request(req1)
-        while len(engine_core.step().outputs) > 0:
+        while (outs := engine_core.step()[0].get(0)) and outs.outputs:
             pass
 
         assert len(engine_core.scheduler.waiting) == 0
@@ -188,9 +193,10 @@ def test_engine_core_advanced_sampling(monkeypatch: pytest.MonkeyPatch):
         vllm_config = engine_args.create_engine_config()
         executor_class = Executor.get_class(vllm_config)
 
-        engine_core = EngineCore(vllm_config=vllm_config,
-                                 executor_class=executor_class,
-                                 log_stats=True)
+        with set_default_torch_num_threads(1):
+            engine_core = EngineCore(vllm_config=vllm_config,
+                                     executor_class=executor_class,
+                                     log_stats=True)
         """Test basic request lifecycle."""
         # First request.
         request: EngineCoreRequest = make_request()
@@ -207,7 +213,7 @@ def test_engine_core_advanced_sampling(monkeypatch: pytest.MonkeyPatch):
             assert len(engine_core.scheduler.waiting) == 1
             assert len(engine_core.scheduler.running) == 0
             # Loop through until they are all done.
-            while len(engine_core.step().outputs) > 0:
+            while (outs := engine_core.step()[0].get(0)) and outs.outputs:
                 pass
             assert len(engine_core.scheduler.waiting) == 0
             assert len(engine_core.scheduler.running) == 0
@@ -284,9 +290,10 @@ def test_engine_core_concurrent_batches(monkeypatch: pytest.MonkeyPatch):
             enforce_eager=True,
         )
         vllm_config = engine_args.create_engine_config()
-        engine_core = EngineCore(vllm_config=vllm_config,
-                                 log_stats=False,
-                                 executor_class=DummyExecutor)
+        with set_default_torch_num_threads(1):
+            engine_core = EngineCore(vllm_config=vllm_config,
+                                     log_stats=False,
+                                     executor_class=DummyExecutor)
         assert engine_core.batch_queue is not None
 
         # Add two requests in a row. Each request have 12 prompt tokens.
@@ -296,7 +303,7 @@ def test_engine_core_concurrent_batches(monkeypatch: pytest.MonkeyPatch):
         engine_core.add_request(req1)
 
         # Schedule Batch 1: (10, req0)
-        assert engine_core.step_with_batch_queue() is None
+        assert engine_core.step_with_batch_queue()[0] is None
         assert engine_core.batch_queue.qsize() == 1
         scheduler_output = engine_core.batch_queue.queue[-1][1]
         assert scheduler_output.num_scheduled_tokens[0] == 10
@@ -305,7 +312,7 @@ def test_engine_core_concurrent_batches(monkeypatch: pytest.MonkeyPatch):
             req0.request_id].num_computed_tokens == 10
 
         # Schedule Batch 2: (2, req0), (8, req1)
-        assert engine_core.step_with_batch_queue() is None
+        assert engine_core.step_with_batch_queue()[0] is None
         assert engine_core.batch_queue.qsize() == 2
         scheduler_output = engine_core.batch_queue.queue[-1][1]
         assert scheduler_output.num_scheduled_tokens[0] == 2
@@ -327,7 +334,7 @@ def test_engine_core_concurrent_batches(monkeypatch: pytest.MonkeyPatch):
         assert scheduler_output.num_scheduled_tokens[1] == 4
 
         # Batch queue is full. Finish Batch 2. Get first token of req0.
-        output = engine_core.step_with_batch_queue()
+        output = engine_core.step_with_batch_queue()[0].get(0)
         assert output is not None
         assert len(output.outputs) == 1
         assert engine_core.scheduler.requests[req0.request_id].num_tokens == 13
@@ -339,7 +346,7 @@ def test_engine_core_concurrent_batches(monkeypatch: pytest.MonkeyPatch):
         assert scheduler_output.num_scheduled_tokens[0] == 1
 
         # Batch queue is full. Finish Batch 3. Get first token of req1.
-        output = engine_core.step_with_batch_queue()
+        output = engine_core.step_with_batch_queue()[0].get(0)
         assert output is not None
         assert len(output.outputs) == 1
         assert engine_core.scheduler.requests[req1.request_id].num_tokens == 13
@@ -358,11 +365,11 @@ def test_engine_core_concurrent_batches(monkeypatch: pytest.MonkeyPatch):
             engine_core.scheduler.requests[1].num_tokens + 1,
         ]
         while engine_core.scheduler.get_num_unfinished_requests() == 2:
-            output = engine_core.step_with_batch_queue()
+            output = engine_core.step_with_batch_queue()[0]
             if step % 2 == 0:
                 # Even steps consumes an output.
                 assert output is not None
-                assert len(output.outputs) == 1
+                assert len(output[0].outputs) == 1
                 if req_id in engine_core.scheduler.requests:
                     assert engine_core.scheduler.requests[
                         req_id].num_tokens == expected_num_tokens[req_id]
@@ -372,3 +379,37 @@ def test_engine_core_concurrent_batches(monkeypatch: pytest.MonkeyPatch):
                 # Odd steps schedules a new batch.
                 assert output is None
             step += 1
+
+
+@multi_gpu_test(num_gpus=2)
+def test_engine_core_tp(monkeypatch: pytest.MonkeyPatch):
+    """
+    Test engine can initialize worker in tp properly
+    """
+
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_USE_V1", "1")
+        """Setup the EngineCore."""
+        engine_args = EngineArgs(
+            model=MODEL_NAME,
+            tensor_parallel_size=2,
+            # Reduce startup time.
+            enforce_eager=True,
+        )
+        vllm_config = engine_args.create_engine_config()
+        executor_class = Executor.get_class(vllm_config)
+
+        with set_default_torch_num_threads(1):
+            engine_core = EngineCore(vllm_config=vllm_config,
+                                     executor_class=executor_class,
+                                     log_stats=True)
+
+        def get_worker_cache_config_field(worker, key: str):
+            return getattr(worker.cache_config, key)
+
+        num_gpu_blocks = engine_core.collective_rpc(
+            get_worker_cache_config_field, args=("num_gpu_blocks", ))
+        num_cpu_blocks = engine_core.collective_rpc(
+            get_worker_cache_config_field, args=("num_cpu_blocks", ))
+        assert all(x is not None for x in num_gpu_blocks)
+        assert all(x is not None for x in num_cpu_blocks)

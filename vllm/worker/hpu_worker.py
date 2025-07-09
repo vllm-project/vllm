@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 ###############################################################################
 # Copyright (C) 2024 Habana Labs, Ltd. an Intel Company
@@ -22,6 +23,7 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
 from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.platforms import current_platform
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import ExecuteModelRequest
 from vllm.utils import bind_kv_cache
@@ -201,10 +203,9 @@ class HPUWorker(LocalOrDistributedWorkerBase):
         Then, it calculate the maximum possible number of GPU and CPU blocks
         that can be allocated with the remaining free memory.
 
-        :::{tip}
-        You may limit the usage of GPU memory
-        by adjusting the `gpu_memory_utilization` parameter.
-        :::
+        Tip:
+            You may limit the usage of GPU memory
+            by adjusting the `gpu_memory_utilization` parameter.
         """
         # Profile the memory usage of the model and get the maximum number of
         # cache blocks that can be allocated with the remaining free memory.
@@ -413,11 +414,10 @@ def init_worker_distributed_environment(
                                  rank,
                                  distributed_init_method,
                                  local_rank,
-                                 backend='hccl')
+                                 backend=current_platform.dist_backend)
 
     ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
-                                      parallel_config.pipeline_parallel_size,
-                                      parallel_config.enable_expert_parallel)
+                                      parallel_config.pipeline_parallel_size)
 
     if torch.distributed.is_initialized():
         torch_world_size = torch.distributed.get_world_size()
@@ -443,8 +443,7 @@ def init_worker_distributed_environment(
     torch.distributed.all_reduce(dummy_tensor_hpu)
     assert dummy_tensor_hpu.item() == parallel_config.world_size
     ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
-                                      parallel_config.pipeline_parallel_size,
-                                      parallel_config.enable_expert_parallel)
+                                      parallel_config.pipeline_parallel_size)
 
 
 def raise_if_cache_size_invalid(num_gpu_blocks, block_size, max_model_len,

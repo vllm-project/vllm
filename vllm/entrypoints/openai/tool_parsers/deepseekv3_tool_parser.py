@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import re
 from collections.abc import Sequence
 from typing import Union
 
+import regex as re
+
+from vllm.entrypoints.chat_utils import random_tool_call_id
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DeltaFunctionCall, DeltaMessage,
                                               DeltaToolCall,
@@ -13,7 +16,6 @@ from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     ToolParser, ToolParserManager)
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
 
@@ -265,7 +267,7 @@ class DeepSeekV3ToolParser(ToolParser):
                         DeltaToolCall(
                             index=self.current_tool_id,
                             type="function",
-                            id=f"chatcmpl-tool-{random_uuid()}",
+                            id=random_tool_call_id(),
                             function=DeltaFunctionCall(
                                 name=function_name).model_dump(
                                     exclude_none=True),

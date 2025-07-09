@@ -2,23 +2,57 @@
 
 # This script build the CPU docker image and run the offline inference inside the container.
 # It serves a sanity check for compilation and basic model usage.
-set -ex
+set -exuo pipefail
 
 # Try building the docker image
-docker build -t hpu-test-env -f docker/Dockerfile.hpu .
+cat <<EOF | docker build -t hpu-plugin-v1-test-env -f - .
+FROM 1.22-413-pt2.7.1:latest
+
+COPY ./ /workspace/vllm
+
+WORKDIR /workspace/vllm
+
+RUN pip install -v -r requirements/hpu.txt
+RUN pip install git+https://github.com/vllm-project/vllm-gaudi.git
+
+ENV no_proxy=localhost,127.0.0.1
+ENV PT_HPU_ENABLE_LAZY_COLLECTIVES=true
+
+RUN VLLM_TARGET_DEVICE=hpu python3 setup.py install
+
+# install development dependencies (for testing)
+RUN python3 -m pip install -e tests/vllm_test_utils
+
+WORKDIR /workspace/
+
+RUN git clone https://github.com/vllm-project/vllm-gaudi.git
+
+RUN ln -s /workspace/vllm/tests && ln -s /workspace/vllm/examples && ln -s /workspace/vllm/benchmarks
+
+EOF
 
 # Setup cleanup
 # certain versions of HPU software stack have a bug that can
 # override the exit code of the script, so we need to use
-# separate remove_docker_container and remove_docker_container_and_exit
+# separate remove_docker_containers and remove_docker_containers_and_exit
 # functions, while other platforms only need one remove_docker_container
 # function.
 EXITCODE=1
-remove_docker_container() { docker rm -f hpu-test || true; }
-remove_docker_container_and_exit() { remove_docker_container; exit $EXITCODE; }
-trap remove_docker_container_and_exit EXIT
-remove_docker_container
+remove_docker_containers() { docker rm -f hpu-plugin-v1-test || true; }
+trap 'remove_docker_containers; exit $EXITCODE;' EXIT
+remove_docker_containers
 
-# Run the image and launch offline inference
-docker run --runtime=habana --name=hpu-test --network=host -e HABANA_VISIBLE_DEVICES=all -e VLLM_SKIP_WARMUP=true --entrypoint="" hpu-test-env python3 examples/offline_inference/basic/generate.py --model facebook/opt-125m
+echo "Running HPU plugin v1 test"
+docker run --rm --runtime=habana --name=hpu-plugin-v1-test --network=host \
+  -e HABANA_VISIBLE_DEVICES=all \
+  hpu-plugin-v1-test-env \
+  /bin/bash "/workspace/vllm-gaudi/tests/upstream_tests/ci_tests.sh"
+
 EXITCODE=$?
+if [ $EXITCODE -eq 0 ]; then
+  echo "Test with basic model passed"
+else
+  echo "Test with basic model FAILED with exit code: $EXITCODE" >&2
+fi
+
+# The trap will handle the container removal and final exit.

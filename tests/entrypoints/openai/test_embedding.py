@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import base64
 
@@ -11,12 +12,21 @@ import requests
 from vllm.entrypoints.openai.protocol import EmbeddingResponse
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
-from ...models.utils import run_embedding_correctness_test
+from ...models.language.pooling.embed_utils import (
+    run_embedding_correctness_test)
 from ...utils import RemoteOpenAIServer
 
 MODEL_NAME = "intfloat/multilingual-e5-small"
 DUMMY_CHAT_TEMPLATE = """{% for message in messages %}{{message['role'] + ': ' + message['content'] + '\\n'}}{% endfor %}"""  # noqa: E501
 DTYPE = "bfloat16"
+
+
+@pytest.fixture(autouse=True)
+def v1(run_with_both_engines):
+    # Simple autouse wrapper to run both engines for each test
+    # This can be promoted up to conftest.py to run for every
+    # test in a package
+    pass
 
 
 @pytest.fixture(scope="module")

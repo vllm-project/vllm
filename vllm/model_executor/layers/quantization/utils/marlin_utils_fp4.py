@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from typing import Optional
 
@@ -22,7 +23,12 @@ def is_fp4_marlin_supported():
 
 
 def fp4_marlin_process_scales(marlin_scales):
-    assert (marlin_scales >= 0).all()
+    if not (marlin_scales >= 0).all():
+        logger.warning_once(
+            "NVFP4 Marlin assumes the scales to be >=0, but has encountered "
+            "negative scales. Accuracy will likely be degraded. This is "
+            "because it changes the scales from FP8-S1E4M3 to a special "
+            "FP8-S0E5M3 format to speedup the dequantization.")
 
     # convert to half first, we would convert to fp8 later
     marlin_scales = marlin_scales.to(torch.half)

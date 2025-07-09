@@ -1,13 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
+from datetime import timedelta
 from functools import cache, lru_cache, wraps
 from typing import TYPE_CHECKING, Optional
 
 import torch
+from torch.distributed import PrefixStore, ProcessGroup
+from torch.distributed.distributed_c10d import is_nccl_available
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.utils import cuda_device_count_stateless
 
 from .interface import DeviceCapability, Platform, PlatformEnum, _Backend
 
@@ -96,9 +101,21 @@ def with_amdsmi_context(fn):
 
 
 @cache
-def on_mi250_mi300() -> bool:
+def on_gfx1x() -> bool:
     GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
-    return any(arch in GPU_ARCH for arch in ["gfx90a", "gfx942"])
+    return any(arch in GPU_ARCH for arch in ["gfx11", "gfx12"])
+
+
+@cache
+def on_mi3xx() -> bool:
+    GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
+    return any(arch in GPU_ARCH for arch in ["gfx942", "gfx950"])
+
+
+@cache
+def on_gfx9() -> bool:
+    GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
+    return any(arch in GPU_ARCH for arch in ["gfx90a", "gfx942", "gfx950"])
 
 
 @cache
@@ -125,7 +142,8 @@ def use_rocm_custom_paged_attention(
                 and (head_size == 64 or head_size == 128)
                 and (block_size == 16 or block_size == 32)
                 and (gqa_ratio >= 1 and gqa_ratio <= 16)
-                and max_seq_len <= 32768 and (envs.VLLM_ROCM_CUSTOM_PAGED_ATTN)
+                and max_seq_len <= 128 * 1024
+                and (envs.VLLM_ROCM_CUSTOM_PAGED_ATTN)
                 and not (envs.VLLM_ROCM_USE_AITER_PAGED_ATTN
                          and envs.VLLM_ROCM_USE_AITER))
 
@@ -135,7 +153,7 @@ def use_rocm_custom_paged_attention(
                 and (qtype == torch.half or qtype == torch.bfloat16)
                 and head_size == 128 and block_size == 16
                 and (gqa_ratio >= 3 and gqa_ratio <= 16)
-                and max_seq_len <= 32768 and alibi_slopes is None
+                and max_seq_len <= 128 * 1024 and alibi_slopes is None
                 and kv_cache_dtype == "auto"
                 and envs.VLLM_ROCM_CUSTOM_PAGED_ATTN)
 
@@ -146,6 +164,7 @@ class RocmPlatform(Platform):
     device_type: str = "cuda"
     dispatch_key: str = "CUDA"
     ray_device_key: str = "GPU"
+    dist_backend: str = "nccl"
     # rocm shares the same device control env var as CUDA
     device_control_env_var: str = "CUDA_VISIBLE_DEVICES"
 
@@ -169,8 +188,14 @@ class RocmPlatform(Platform):
 
             if selected_backend == _Backend.TRITON_MLA:
                 if block_size != 1:
-                    logger.info("Using Triton MLA backend.")
-                    return "vllm.attention.backends.triton_mla.TritonMLABackend"  # noqa: E501
+                    if use_v1:
+                        logger.info_once(
+                            "Using Triton MLA backend on V1 engine.")
+                        return ("vllm.v1.attention.backends.mla."
+                                "triton_mla.TritonMLABackend")
+                    else:
+                        logger.info("Using Triton MLA backend.")
+                        return "vllm.attention.backends.triton_mla.TritonMLABackend"  # noqa: E501
                 else:
                     raise ValueError(
                         f" The selected backend, {selected_backend.name},"
@@ -194,12 +219,19 @@ class RocmPlatform(Platform):
                     f" The selected backend, {selected_backend.name},"
                     f"is not MLA type while requested for MLA backend.")
 
-        selected_backend = (_Backend.ROCM_FLASH if selected_backend
-                            == _Backend.FLASH_ATTN else selected_backend)
+        if selected_backend is None or selected_backend == _Backend.FLASH_ATTN:
+            selected_backend = _Backend.ROCM_FLASH
+
         if envs.VLLM_USE_V1:
-            logger.info("Using Triton Attention backend on V1 engine.")
-            return ("vllm.v1.attention.backends."
-                    "triton_attn.TritonAttentionBackend")
+            if envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA \
+                and on_gfx9():
+                logger.info("Using Flash Attention backend on V1 engine.")
+                return ("vllm.v1.attention.backends."
+                        "rocm_aiter_fa.AiterFlashAttentionBackend")
+            else:
+                logger.info("Using Triton Attention backend on V1 engine.")
+                return ("vllm.v1.attention.backends."
+                        "triton_attn.TritonAttentionBackend")
         if selected_backend == _Backend.ROCM_FLASH:
             if not cls.has_device_capability(90):
                 # not Instinct series GPUs.
@@ -210,6 +242,17 @@ class RocmPlatform(Platform):
         return "vllm.attention.backends.rocm_flash_attn.ROCmFlashAttentionBackend"  # noqa: E501
 
     @classmethod
+    def set_device(cls, device: torch.device) -> None:
+        """
+        Set the device for the current platform.
+        """
+        torch.cuda.set_device(device)
+        # With this trick we can force the device to be set eagerly
+        # see https://github.com/pytorch/pytorch/issues/155668
+        # for why and when it is needed
+        _ = torch.zeros(1, device=device)
+
+    @classmethod
     @lru_cache(maxsize=8)
     def get_device_capability(cls,
                               device_id: int = 0
@@ -217,9 +260,9 @@ class RocmPlatform(Platform):
         major, minor = torch.cuda.get_device_capability(device_id)
         return DeviceCapability(major=major, minor=minor)
 
-    @staticmethod
+    @classmethod
     @with_amdsmi_context
-    def is_fully_connected(physical_device_ids: list[int]) -> bool:
+    def is_fully_connected(cls, physical_device_ids: list[int]) -> bool:
         """
         Query if the set of gpus are fully connected by xgmi (1 hop)
         """
@@ -382,3 +425,41 @@ class RocmPlatform(Platform):
     @classmethod
     def is_navi(cls) -> bool:
         return 'gfx1' in torch.cuda.get_device_properties(0).gcnArchName
+
+    @classmethod
+    def get_piecewise_backend_cls(cls) -> str:
+        return "vllm.compilation.cuda_piecewise_backend.CUDAPiecewiseBackend"  # noqa
+
+    @classmethod
+    def stateless_init_device_torch_dist_pg(
+        cls,
+        backend: str,
+        prefix_store: PrefixStore,
+        group_rank: int,
+        group_size: int,
+        timeout: timedelta,
+    ) -> ProcessGroup:
+        assert is_nccl_available()
+        pg: ProcessGroup = ProcessGroup(
+            prefix_store,
+            group_rank,
+            group_size,
+        )
+        from torch.distributed.distributed_c10d import ProcessGroupNCCL
+
+        backend_options = ProcessGroupNCCL.Options()
+        backend_options._timeout = timeout
+
+        backend_class = ProcessGroupNCCL(prefix_store, group_rank, group_size,
+                                         backend_options)
+        backend_type = ProcessGroup.BackendType.NCCL
+        device = torch.device("cuda")
+        pg._set_default_backend(backend_type)
+        backend_class._set_sequence_number_for_group()
+
+        pg._register_backend(device, backend_type, backend_class)
+        return pg
+
+    @classmethod
+    def device_count(cls) -> int:
+        return cuda_device_count_stateless()

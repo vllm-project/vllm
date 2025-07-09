@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
-import re
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from copy import deepcopy
 from typing import Optional, Union
 
+import regex as re
 import torch
 
 from vllm.config import QuantizationConfig

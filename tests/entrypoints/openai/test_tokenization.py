@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
 import pytest_asyncio
@@ -76,11 +77,11 @@ async def test_tokenize_completions(
                                  })
         response.raise_for_status()
 
-        assert response.json() == {
-            "tokens": tokens,
-            "count": len(tokens),
-            "max_model_len": 8192
-        }
+        result = response.json()
+        assert result["tokens"] == tokens
+        assert result["count"] == len(tokens)
+        assert result["max_model_len"] == 8192
+        assert result["token_strs"] is None
 
 
 @pytest.mark.asyncio
@@ -138,11 +139,11 @@ async def test_tokenize_chat(
                                          })
                 response.raise_for_status()
 
-                assert response.json() == {
-                    "tokens": tokens,
-                    "count": len(tokens),
-                    "max_model_len": 8192
-                }
+                result = response.json()
+                assert result["tokens"] == tokens
+                assert result["count"] == len(tokens)
+                assert result["max_model_len"] == 8192
+                assert result["token_strs"] is None
 
 
 @pytest.mark.asyncio
@@ -215,11 +216,46 @@ async def test_tokenize_chat_with_tools(
                 )
                 response.raise_for_status()
 
-                assert response.json() == {
-                    "tokens": tokens,
-                    "count": len(tokens),
-                    "max_model_len": 8192,
-                }
+                result = response.json()
+                assert result["tokens"] == tokens
+                assert result["count"] == len(tokens)
+                assert result["max_model_len"] == 8192
+                assert result["token_strs"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model_name, tokenizer_name",
+    [(MODEL_NAME, MODEL_NAME), ("zephyr-lora2", "zephyr-lora2")],
+    indirect=["tokenizer_name"],
+)
+async def test_tokenize_with_return_token_strs(
+    server: RemoteOpenAIServer,
+    model_name: str,
+    tokenizer_name: str,
+):
+    tokenizer = get_tokenizer(tokenizer_name=tokenizer_name,
+                              tokenizer_mode="fast")
+
+    prompt = "This is a token_strs test prompt! vllm1"
+    response = requests.post(
+        server.url_for("tokenize"),
+        json={
+            "prompt": prompt,
+            "model": model_name,
+            "return_token_strs": True
+        },
+    )
+    response.raise_for_status()
+
+    tokens = tokenizer.encode(prompt, add_special_tokens=True)
+    tokens_str = tokenizer.convert_ids_to_tokens(tokens)
+
+    result = response.json()
+    assert result["tokens"] == tokens
+    assert result["count"] == len(tokens)
+    assert result["max_model_len"] == 8192
+    assert result["token_strs"] == tokens_str
 
 
 @pytest.mark.asyncio

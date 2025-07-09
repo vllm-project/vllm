@@ -321,7 +321,7 @@ void selective_scan_fwd_launch(SSMParamsBase &params, cudaStream_t stream) {
             auto kernel = &selective_scan_fwd_kernel<Ktraits>;
             if (kSmemSize >= 48 * 1024) {
                 C10_CUDA_CHECK(cudaFuncSetAttribute(
-                    kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemSize));
+                    (void *) kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemSize));
             }
             kernel<<<grid, Ktraits::kNThreads, kSmemSize, stream>>>(params);
             C10_CUDA_KERNEL_LAUNCH_CHECK();
@@ -647,9 +647,7 @@ void selective_scan_fwd(const torch::Tensor &u, const torch::Tensor &delta,
                        );
 
     
-    // Otherwise the kernel will be launched from cuda:0 device
-    // Cast to char to avoid compiler warning about narrowing
-    at::cuda::CUDAGuard device_guard{(char)u.get_device()};
+    const at::cuda::OptionalCUDAGuard device_guard(device_of(u));
     auto stream = at::cuda::getCurrentCUDAStream().stream();
     DISPATCH_WTYPE_ITYPE_FLOAT_AND_HALF_AND_BF16(u.scalar_type(), "selective_scan_fwd", [&] {
         selective_scan_fwd_cuda<input_t, weight_t>(params, stream);

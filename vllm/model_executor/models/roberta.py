@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
 from collections.abc import Iterable
@@ -9,7 +10,7 @@ from torch import nn
 from transformers import RobertaConfig
 
 from vllm.config import VllmConfig
-from vllm.model_executor.layers.pooler import CrossEncodingPooler
+from vllm.model_executor.layers.pooler import ClassifierPooler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -17,8 +18,6 @@ from vllm.model_executor.models.bert import BertEmbeddingModel, BertModel
 from vllm.model_executor.models.utils import WeightsMapper, maybe_prefix
 from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.sequence import IntermediateTensors, PoolerOutput
-from vllm.transformers_utils.config import (
-    get_cross_encoder_activation_function)
 
 from .bert_with_rope import BertWithRope, JinaRobertaModel
 from .interfaces import SupportsCrossEncoding, SupportsV0Only
@@ -177,16 +176,15 @@ class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding,
         super().__init__()
         config = vllm_config.model_config.hf_config
 
-        self.default_activation_function = \
-            get_cross_encoder_activation_function(config)
-
         self.num_labels = config.num_labels
         self.roberta = BertModel(vllm_config=vllm_config,
                                  prefix=maybe_prefix(prefix, "bert"),
                                  embedding_class=RobertaEmbedding,
                                  add_pooling_layer=False)
         self.classifier = RobertaClassificationHead(config)
-        self._pooler = CrossEncodingPooler(config, self.classifier)
+
+        self._pooler = ClassifierPooler(vllm_config.model_config,
+                                        self.classifier)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         bert_weights, task_weights = roberta_task_weights_filter(weights)
