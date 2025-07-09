@@ -103,7 +103,24 @@ class LlamaModel(nn.Module):
         ]
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
+        
+        # Support for speculators format weights
+        speculators_name_map = {
+            "fusion_fc.weight": "fc.weight",
+            "fusion_fc.bias": "fc.bias",
+            "embedding_layernorm.weight": "enorm.weight",
+            "pre_lm_head_layernorm.weight": "hnorm.weight",
+        }
+        
         for name, loaded_weight in weights:
+            # Handle speculators format weight names
+            if name in speculators_name_map:
+                name = speculators_name_map[name]
+            elif name.startswith("transformer."):
+                # transformer.* -> model.layers.0.*
+                suffix = name[len("transformer."):]
+                name = f"model.layers.0.{suffix}"
+            
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
