@@ -877,6 +877,12 @@ class CompletionRequest(OpenAIBaseModel):
             "Special kind of echo where in the response instead of delta we return the accumulated text"
         )
     )
+    arrival_time: Optional[float] = Field(
+        default=None,
+        description=(
+            "The arrival time of the request. This is used for priority scheduling."
+        )
+    )
     # doc: end-completion-extra-params
 
     # Default sampling parameters for completion requests

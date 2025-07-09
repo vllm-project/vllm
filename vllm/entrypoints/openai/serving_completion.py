@@ -96,6 +96,8 @@ class OpenAIServingCompletion(OpenAIServing):
         """
     Chunkwise beam search hack
     """
+        # set request.arrival_time to current time for all chunks
+        request.arrival_time = time.time()
         @trace_async_method(span_name='_process_prefix')
         async def _process_prefix(request: CompletionRequest):
             og_max_tokens = request.max_tokens
@@ -297,6 +299,7 @@ class OpenAIServingCompletion(OpenAIServing):
                         prompt_adapter_request=prompt_adapter_request,
                         trace_headers=trace_headers,
                         priority=request.priority,
+                        arrival_time=request.arrival_time,
                     )
 
                 generators.append(generator)
