@@ -21,8 +21,8 @@ if TYPE_CHECKING:
 
 
 def get_mamba2_chunk_size(vllm_config: VllmConfig) -> int:
-    from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
-    layers = get_layers_from_vllm_config(vllm_config, MambaMixer2)
+    from vllm.model_executor.layers.mamba.mamba_mixer2 import Mamba2Layer
+    layers = get_layers_from_vllm_config(vllm_config, Mamba2Layer)
     chunk_sizes = set(layer.chunk_size for layer in layers.values())
     assert len(
         chunk_sizes) == 1, "All Mamba2 layers must have the same chunk size"

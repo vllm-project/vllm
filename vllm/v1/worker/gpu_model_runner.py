@@ -31,7 +31,7 @@ from vllm.distributed.parallel_state import (
 from vllm.forward_context import (DPMetadata, get_forward_context,
                                   set_forward_context)
 from vllm.logger import init_logger
-from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
+from vllm.model_executor.layers.mamba.mamba_mixer2 import Mamba2Layer
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.model_loader import TensorizerLoader, get_model_loader
 from vllm.model_executor.models.interfaces import (has_step_pooler,
@@ -2660,7 +2660,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     f"Unknown attention type: {attn_module.attn_type}")
 
         mamba_layers = get_layers_from_vllm_config(self.vllm_config,
-                                                   MambaMixer2)
+                                                   Mamba2Layer)
         if len(mamba_layers) > 0:
             if self.vllm_config.speculative_config is not None:
                 raise NotImplementedError(
@@ -2691,7 +2691,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def _maybe_pad_mamba_page_size(
         self,
         attn_layers: dict[str, Attention],
-        mamba_layers: dict[str, MambaMixer2],
+        mamba_layers: dict[str, Mamba2Layer],
         kv_cache_spec: dict[str, KVCacheSpec],
         max_model_len: int,
         block_size: int,
