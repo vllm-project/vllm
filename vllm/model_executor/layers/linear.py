@@ -200,10 +200,9 @@ class UnquantizedLinearMethod(LinearMethodBase):
                                            input_size_per_partition,
                                            dtype=params_dtype),
                                requires_grad=False)
-        except RuntimeError as e:
+        except torch.cuda.OutOfMemoryError as e:
+            logger.error("Failed to create unquantized linear weights: %s", e)
             if torch.cuda.is_available():
-                logger.error(
-                    "Failed to create unquantized linear weights: %s", e)
                 logger.debug("CUDA device: %s", torch.cuda.current_device())
                 logger.debug("Allocated: %.2f GiB",
                              torch.cuda.memory_allocated() / GiB_bytes)
