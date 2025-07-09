@@ -2,19 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any, Optional, Union
+from typing import Optional, Union
 
 from transformers import PreTrainedTokenizerBase
 
+from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
+                                              DeltaMessage)
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
-
-if TYPE_CHECKING:
-    from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
-                                                  DeltaMessage)
-else:
-    ChatCompletionRequest = Any
-    DeltaMessage = Any
 
 logger = init_logger(__name__)
 
