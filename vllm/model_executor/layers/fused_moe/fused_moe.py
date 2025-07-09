@@ -1180,7 +1180,7 @@ def fused_experts(
             apply_router_weight_on_input=apply_router_weight_on_input,
         )
     elif (allow_cutlass_block_scaled_grouped_gemm and use_fp8_w8a8
-          and _valid_cutlass_block_scaled_grouped_gemm(hidden_states, w1, w2)):
+          and _valid_cutlass_block_scaled_grouped_gemm(w1, w2)):
         assert apply_router_weight_on_input is False
         return run_cutlass_block_scaled_fused_experts(
             a=hidden_states,
