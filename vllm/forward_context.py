@@ -97,7 +97,7 @@ class ForwardContext:
     dp_metadata: Optional[DPMetadata] = None
     # determine the cudagraph style at runtime to be FULL, PIECEWISE, or NONE.
     # by default NONE, no cudagraph is used.
-    cudagraph_runtime_style: int = CUDAGraphRuntimeStyle.NONE
+    cudagraph_runtime_style: CUDAGraphRuntimeStyle = CUDAGraphRuntimeStyle.NONE
 
 
 _forward_context: Optional[ForwardContext] = None
@@ -118,7 +118,7 @@ def set_forward_context(
     virtual_engine: int = 0,
     num_tokens: Optional[int] = None,
     num_tokens_across_dp: Optional[torch.Tensor] = None,
-    cudagraph_runtime_style: int = CUDAGraphRuntimeStyle.NONE,
+    cudagraph_runtime_style: CUDAGraphRuntimeStyle = CUDAGraphRuntimeStyle.NONE,
 ):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.

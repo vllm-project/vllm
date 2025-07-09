@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import enum
 from typing import Any, Callable, Protocol
 
 from vllm.config import VllmConfig
@@ -13,7 +14,7 @@ class AbstractStaticGraphWrapper(Protocol):
     """
 
     def __init__(self, runnable: Callable, vllm_config: VllmConfig,
-                 graph_pool: Any, runtime_style: int, **kwargs):
+                 graph_pool: Any, runtime_style: enum.Enum, **kwargs):
         """
         Initializes the StaticGraphWrapper class with graph capturing and
         execution-related configurations.
@@ -24,17 +25,11 @@ class AbstractStaticGraphWrapper(Protocol):
             graph_pool (Any):
                 Graph memory pool handle, e.g.,
                     `torch.cuda.graph_pool_handle()`.
-            runtime_style (Any): The style of the static
-                graph runtime.
+            runtime_style (enum.Enum): The style of the static
+                graph runtime. e.g. see CUDAGraphRuntimeStyle in vllm/config.py.
         Keyword Args:
             kwargs: Additional keyword arguments for platform-specific
                 configurations.
-        """
-        raise NotImplementedError
-
-    def maybe_replace_runnable(self, shape: int, runnable: Any):
-        """
-        Replaces the runnable with a new one for a specific compiled shape.
         """
         raise NotImplementedError
 

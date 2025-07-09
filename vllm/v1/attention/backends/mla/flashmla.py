@@ -55,8 +55,8 @@ class FlashMLAMetadata(MLACommonMetadata[FlashMLADecodeMetadata]):
 
 
 class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
-    attn_cudagraph_support: ClassVar[int] = AttentionCGSupport.PURE_DECODE_ONLY
-    prefer_separate_routine: ClassVar[Optional[bool]] = True
+    attn_cudagraph_support: ClassVar[AttentionCGSupport] = \
+        AttentionCGSupport.PURE_DECODE_ONLY
 
     def __init__(self, runner, kv_cache_spec: AttentionSpec,
                  block_table: BlockTable):

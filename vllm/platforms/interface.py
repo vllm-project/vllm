@@ -7,7 +7,7 @@ import random
 import sys
 from datetime import timedelta
 from platform import uname
-from typing import TYPE_CHECKING, NamedTuple, Optional, Union
+from typing import TYPE_CHECKING, Any, NamedTuple, Optional, Union
 
 import numpy as np
 import torch
@@ -29,6 +29,8 @@ else:
     PoolingParams = None
     SamplingParams = None
     FlexibleArgumentParser = None
+
+_global_graph_pool = None
 
 logger = init_logger(__name__)
 
@@ -516,6 +518,15 @@ class Platform:
             logger.warning("Current platform %s does not have '%s'" \
             " attribute.", self.device_type, key)
             return None
+        
+    def get_global_graph_pool(self) -> Any:
+        """
+        Return the global graph pool for the this platform.
+        """
+        global _global_graph_pool
+        if _global_graph_pool is None:
+            _global_graph_pool = self.graph_pool_handle()
+        return _global_graph_pool
 
     @classmethod
     def get_cu_count(cls, device_id: int = 0) -> int:

@@ -3891,15 +3891,16 @@ class CompilationLevel:
     PIECEWISE = 3
 
 
-class CUDAGraphMode:
-    # constants for the config of the cudagraph mode
+class CUDAGraphMode(enum.Enum):
+    # constants for the config of the cudagraph mode. 
     NONE = 0
     PIECEWISE = 1
     FULL = 2
 
 
-class CUDAGraphRuntimeStyle:
-    # constants same as CUDAGraphMode, but used for runtime dispatching
+class CUDAGraphRuntimeStyle(enum.Enum):
+    # constants for concrete cudagraph runtime style, used for
+    # runtime dispatching.
     NONE = 0
     PIECEWISE = 1
     FULL = 2
@@ -4062,16 +4063,17 @@ class CompilationConfig:
     constructor, e.g. `CompilationConfig(inductor_passes={"a": func})`."""
 
     # CudaGraph compilation
-    cudagraph_mode: int = field(
-        default_factory=lambda: 1 if envs.VLLM_USE_V1 else 0)
+    cudagraph_mode: CUDAGraphMode = field(
+        default_factory=lambda: CUDAGraphMode.PIECEWISE if envs.VLLM_USE_V1
+            else CUDAGraphMode.NONE)
     """
     The mode of the cudagraph.
-    - 0: NONE, no cudagraph capture.
-    - 1: PIECEWISE. (v1 default)
-    - 2: FULL.
-    For cudagraph_mode > 0, It requires that all input buffers have
-    fixed addresses and all splitting ops write their outputs to 
-    input buffers.
+    - NONE, no cudagraph capture.
+    - PIECEWISE. (v1 default)
+    - FULL.
+    For cudagraph_mode != CUDAGraphMode.NONE, it requires that all input 
+    buffers have fixed addresses and all splitting ops write their outputs 
+    to input buffers.
 
     PIECEWISE mode build piecewise cudagraph only, keeping the cudagraph
     incompatiable ops (i.e. some attention ops) outside the cudagraph
@@ -4088,19 +4090,6 @@ class CompilationConfig:
     inside the compilation. Meanwhile, the full cudagraph is captured
     outside the compilation, and it further supports cudagraph 
     without compilation.
-    """
-    use_cudagraph: bool = field(default_factory=lambda: envs.VLLM_USE_V1)
-    """Whether to use cudagraph inside compilation.
-    - False: cudagraph inside compilation is not used.
-    - True: cudagraph inside compilation is used. It requires
-        that all input buffers have fixed addresses, and all
-        splitting ops write their outputs to input buffers.
-    In the vLLM V1 Engine, this flag only applies for
-    CompilationLevel.PIECEWISE (aka -O3).
-    Note that this is orthogonal to the cudagraph capture logic
-    outside of compilation.
-    TODO: Now this flag is treated as a placeholder for cudagraph
-    control inside compilation, will removed it in future.
     """
     cudagraph_num_of_warmups: int = 0
     """Number of warmup runs for cudagraph.
@@ -4210,6 +4199,16 @@ class CompilationConfig:
         -O1, -O2, -O3, etc. is handled in FlexibleArgumentParser.
         """
         return TypeAdapter(CompilationConfig).validate_json(cli_value)
+
+    @field_validator("cudagraph_mode", mode="before")
+    @classmethod
+    def validate_cudagraph_mode_before(cls, value: Any) -> Any:
+        """
+        enable parse the `cudagraph_mode` enum type from string
+        """
+        if isinstance(value, str):
+            return CUDAGraphMode[value.upper()]
+        return value
 
     def __post_init__(self) -> None:
         count_none = self.custom_ops.count("none")

@@ -4,6 +4,7 @@ import abc
 import functools
 from abc import abstractmethod
 from dataclasses import dataclass
+import enum
 from typing import TYPE_CHECKING, ClassVar, Generic, Optional, TypeVar
 
 import numpy as np
@@ -47,33 +48,26 @@ class CommonAttentionMetadata:
 M = TypeVar("M")
 
 
-class AttentionCGSupport:
-    # constants for the cudagraph support of the attention backend
+class AttentionCGSupport(enum.Enum):
+    # Constants for the cudagraph support of the attention backend
+    # Here we do not consider the cascade attention, as currently
+    # it is never cudagraph supported.
 
-    ALWAYS = 2  # Cudagraph always supported
-    # Cudagraph supported for pure decode, need to use piecewise
-    # if mixed prefill-decode batches
-    PURE_DECODE_ONLY = 1
     NEVER = 0  # No support
+    PURE_DECODE_ONLY = 1
+    # Cudagraph supported for pure decode, need to use piecewise
+    # cudagraph or no cudagraph for mixed prefill-decode batches
+    ALWAYS_UNIFIED = 2
+    # Cudagraph always supported with unified routine
+    ALWAYS_SEPARATE = 3
+    # Cudagraph supported for both mixed prefill-decode
+    # or pure decode attention routines.
 
 
 class AttentionMetadataBuilder(abc.ABC, Generic[M]):
     # Does this backend/builder support CUDA Graphs for attention.
-    attn_cudagraph_support: ClassVar[int] = AttentionCGSupport.NEVER
-    # If attn_cudagraph_supported >0, attention backend can set its
-    # preference of separate rountine to be True, False or None.
-    # True: expect to explicit separate routines for capturing cudagraph
-    #       of pure decode batches and mixed batches. Should be true if
-    #       attn_cudagraph_supported is PURE_DECODE_ONLY. And may be faster
-    #       to set it true if attn_cudagraph_supported is ALWAYS.
-    # False: expect to keep a unified kernel routine when
-    #       attn_cudagraph_supported is ALWAYS. It is the case if an
-    #       attention kernel can dynamically dispatch different optimzied
-    #       rountines inside a kernel, so no need to manually separate them
-    #       outside kernel when capturing cudagraph.
-    # None: indicates no specific preference, and the control is left
-    #       to the users.
-    prefer_separate_routine: ClassVar[Optional[bool]] = None
+    attn_cudagraph_support: ClassVar[AttentionCGSupport] = \
+        AttentionCGSupport.NEVER
 
     @abstractmethod
     def build(self, common_prefix_len: int,

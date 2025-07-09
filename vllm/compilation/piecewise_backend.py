@@ -21,37 +21,28 @@ logger = init_logger(__name__)
 @dataclasses.dataclass
 class ConcreteSizeEntry:
     runtime_shape: int
-    need_to_compile: bool  # the size is in compile_sizes
-    use_cudagraph: bool  # the size is in cudagraph_capture_sizes
     compiled: bool = False
     runnable: Callable = None  # type: ignore
-
-    usage_type: Optional[str] = None  # For debug logging only
 
 
 class PiecewiseBackend:
 
     def __init__(self, graph: fx.GraphModule, vllm_config: VllmConfig,
-                 graph_pool: Any, piecewise_compile_index: int,
-                 total_piecewise_compiles: int, sym_shape_indices: list[int],
+                 piecewise_compile_index: int, total_piecewise_compiles: int,
+                 sym_shape_indices: list[int],
                  compiled_graph_for_general_shape: Callable,
                  vllm_backend: VllmBackend):
         """
         The backend for piecewise compilation.
-        It mainly handles the compilation and cudagraph capturing.
+        It mainly handles the compilation.
 
         We will compile `self.graph` once for the general shape,
         and then compile for different shapes specified in
         `compilation_config.compile_sizes`.
-
-        Independently, the static graph capturing (e.g. CUDA graph) is handled 
-        by a separate static graph wrapper, which is expected to wrap the 
-        compiled callable of the general shape.
         """
         self.graph = graph
         self.vllm_config = vllm_config
         self.compilation_config = vllm_config.compilation_config
-        self.graph_pool = graph_pool
         self.piecewise_compile_index = piecewise_compile_index
         self.total_piecewise_compiles = total_piecewise_compiles
         self.vllm_backend = vllm_backend
@@ -73,52 +64,18 @@ class PiecewiseBackend:
 
         self.is_debugging_mode = envs.VLLM_LOGGING_LEVEL == "DEBUG"
 
-        # the entries for different shapes that we need to either
-        # compile or capture cudagraph
+        # the entries for different shapes that we need to compile
         self.concrete_size_entries: dict[int, ConcreteSizeEntry] = {}
 
         # to_be_compiled_sizes tracks the remaining sizes to compile,
         # and updates during the compilation process, so we need to copy it
         self.to_be_compiled_sizes: set[int] = self.compile_sizes.copy()
-
-        usage_type = "full/general" if self.is_full_graph else \
-                                                    "piecewise/general"
-
-        self.cudagraph_capture_sizes: set[int] = set()
-        self.cudagraph_runable: Optional[Any] = None
-        if self.compilation_config.cudagraph_mode > 0:
-            cudagraph_specific_config = {
-                "debug_capturing": self.is_first_graph,
-                "gc_disable": not self.is_first_graph,
-                "weak_ref_output": self.is_last_graph,
-                "usage_type": usage_type
-            }
-
-            # Note: To easier distinguish whether it is under the
-            # piecewise backend, we always assume PIECEWISE here,
-            # no matter it is on a full fx graph or piecewise fx graph.
-
-            static_graph_wrapper_class = resolve_obj_by_qualname(
-                current_platform.get_static_graph_wrapper_cls())
-            self.cudagraph_runable = static_graph_wrapper_class(
-                self.compiled_graph_for_general_shape,
-                vllm_config,
-                runtime_style=CUDAGraphRuntimeStyle.PIECEWISE,
-                graph_pool=self.graph_pool,
-                cudagraph_specific_config=cudagraph_specific_config)
-
-            self.cudagraph_capture_sizes = (self.compilation_config.\
-                                            cudagraph_capture_sizes)
-
-        # We now only keep compilation management inside this class directly.
-        # The cudagraph logic is delegated to the CUDAGraphWrapper class.
-        for shape in self.compile_sizes.union(self.cudagraph_capture_sizes):
+        
+        # We only keep compilation management inside this class directly.
+        for shape in self.compile_sizes:
             self.concrete_size_entries[shape] = ConcreteSizeEntry(
                 runtime_shape=shape,
-                need_to_compile=shape in self.compile_sizes,
-                use_cudagraph=shape in self.cudagraph_capture_sizes,
                 runnable=self.compiled_graph_for_general_shape,
-                usage_type=usage_type,  # for debug logging only
             )
 
     def check_for_ending_compilation(self):
@@ -144,7 +101,7 @@ class PiecewiseBackend:
 
         entry = self.concrete_size_entries[runtime_shape]
 
-        if entry.need_to_compile and not entry.compiled:
+        if not entry.compiled:
             entry.compiled = True
             self.to_be_compiled_sizes.remove(runtime_shape)
             # args are real arguments
@@ -157,19 +114,8 @@ class PiecewiseBackend:
                 num_graphs=self.total_piecewise_compiles,
                 runtime_shape=runtime_shape)
 
-            # replace the runnable with the compiled one for
-            # cudagraph capturing
-            if self.cudagraph_runable is not None:
-                self.cudagraph_runable.maybe_replace_runnable(
-                    runtime_shape, entry.runnable)
-
             # finished compilations for all required shapes
             if self.is_last_graph and not self.to_be_compiled_sizes:
                 self.check_for_ending_compilation()
 
-        if not entry.use_cudagraph:
-            return entry.runnable(*args)
-
-        # safety check to ensure the cudagraph runnable is not None
-        assert self.cudagraph_runable is not None
-        return self.cudagraph_runable(*args)
+        return entry.runnable(*args)

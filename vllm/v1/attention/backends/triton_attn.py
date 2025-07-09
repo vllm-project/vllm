@@ -73,7 +73,8 @@ class TritonAttentionMetadata:
 
 class TritonAttentionMetadataBuilder(
         AttentionMetadataBuilder[TritonAttentionMetadata]):
-    attn_cudagraph_support: ClassVar[int] = AttentionCGSupport.ALWAYS
+    attn_cudagraph_support: ClassVar[AttentionCGSupport] = \
+        AttentionCGSupport.ALWAYS_SEPARATE
 
     def __init__(self, runner: "GPUModelRunner", kv_cache_spec: AttentionSpec,
                  block_table: BlockTable):

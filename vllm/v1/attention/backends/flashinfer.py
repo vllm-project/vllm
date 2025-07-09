@@ -15,7 +15,7 @@ import vllm.envs as envs
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionType)
 from vllm.attention.layer import Attention
-from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.config import CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.flash_attn import use_cascade_attention
 from vllm.v1.attention.backends.utils import (AttentionCGSupport,
@@ -219,8 +219,8 @@ class FlashInferMetadata:
 
 
 class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
-    attn_cudagraph_support: ClassVar[int] = AttentionCGSupport.PURE_DECODE_ONLY
-    prefer_separate_routine: ClassVar[Optional[bool]] = True
+    attn_cudagraph_support: ClassVar[AttentionCGSupport] = \
+        AttentionCGSupport.PURE_DECODE_ONLY
 
     def __init__(self, runner: GPUModelRunner, kv_cache_spec: AttentionSpec,
                  block_table: BlockTable):
@@ -229,14 +229,17 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self._workspace_buffer = None
         self._prefill_wrapper = None  # Wrapper for prefill/append
         self._decode_wrapper = None  # Wrapper for decode (general shape)
-        self.enable_cuda_graph = self.runner.full_cuda_graph
+
+        compilation_config = self.vllm_config.compilation_config
+        self.enable_cuda_graph = (compilation_config.cudagraph_mode ==
+                                  CUDAGraphMode.FULL)
         if self.enable_cuda_graph:
             # For full cudagraph capture, one `decode_wrapper` for each batch
             # size is needed for FlashInfer.
             self._decode_wrappers_cudagraph: dict[
                 int, BatchDecodeWithPagedKVCacheWrapper] = {}
             self._decode_cudagraph_max_bs = min(
-                runner.max_num_reqs, runner.cudagraph_batch_sizes[-1])
+                runner.max_num_reqs, compilation_config.max_capture_size)
 
         self._cascade_wrapper = None  # Wrapper for cascade attention
 
