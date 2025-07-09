@@ -15,7 +15,6 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, ModelConfig,
                          VllmConfig)
 from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.platforms import current_platform
-from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.spec_decode.eagle import EagleProposer
 
 model_dir = "meta-llama/Llama-3.1-8B-Instruct"
@@ -218,6 +217,7 @@ def test_propose(num_speculative_tokens):
     seq_len_2 = 3
     total_tokens = seq_len_1 + seq_len_2
     vocab_size = 100
+    seq_lens = [seq_len_1, seq_len_2]
 
     # Create proposer first so we can use its actual hidden_size
     proposer = _create_proposer("eagle", num_speculative_tokens)
@@ -279,9 +279,16 @@ def test_propose(num_speculative_tokens):
     proposer.attn_layer_names = ["layer.0"]
 
     # Create input tensors
-    cu_num_tokens = torch.tensor([0, seq_len_1, total_tokens],
-                                 dtype=torch.int32,
-                                 device=device)
+    batch_spec = BatchSpec(
+        seq_lens=seq_lens,
+        query_lens=seq_lens,
+    )
+
+    common_attn_metadata = create_common_attn_metadata(
+        batch_spec,
+        block_size=16,
+        device=device,
+    )
 
     target_token_ids = torch.randint(0,
                                      vocab_size, (total_tokens, ),
@@ -298,26 +305,6 @@ def test_propose(num_speculative_tokens):
                                    dtype=torch.int32,
                                    device=device)
     sampling_metadata = mock.MagicMock()
-
-    batch_size = cu_num_tokens.shape[0] - 1
-    num_tokens = cu_num_tokens[-1].item()
-    seq_lens = cu_num_tokens[1:] - cu_num_tokens[:-1]
-
-    common_attn_metadata = CommonAttentionMetadata(
-        query_start_loc=cu_num_tokens,
-        query_start_loc_cpu=cu_num_tokens.cpu(),
-        seq_lens=seq_lens,
-        seq_lens_cpu=seq_lens.cpu(),
-        num_computed_tokens_cpu=seq_lens.cpu(),
-        num_reqs=batch_size,
-        num_actual_tokens=int(num_tokens),
-        max_query_len=int(seq_lens.max().item()),
-        block_table_tensor=torch.zeros((batch_size, 1),
-                                       dtype=torch.int32,
-                                       device=device),
-        slot_mapping=torch.arange(num_tokens, dtype=torch.int64,
-                                  device=device),
-    )
 
     attn_metadata_builder_cls, _ = get_attention_backend(
         _Backend.FLASH_ATTN_VLLM_V1)
