@@ -38,31 +38,6 @@ vLLM is a Python library that supports the following CPU variants. Select your C
 
     --8<-- "docs/getting_started/installation/cpu/s390x.inc.md:requirements"
 
-## Set up using Docker
-
-### Pre-built images
-
-=== "Intel/AMD x86"
-
-    --8<-- "docs/getting_started/installation/cpu/x86.inc.md:pre-built-images"
-
-### Build image from source
-
-=== "Intel/AMD x86"
-
-    --8<-- "docs/getting_started/installation/cpu/x86.inc.md:build-image-from-source"
-
-=== "ARM AArch64"
-
-    --8<-- "docs/getting_started/installation/cpu/arm.inc.md:build-image-from-source"
-
-=== "Apple silicon"
-
-    --8<-- "docs/getting_started/installation/cpu/arm.inc.md:build-image-from-source"
-
-=== "IBM Z (S390X)"
-    --8<-- "docs/getting_started/installation/cpu/s390x.inc.md:build-image-from-source"
-
 ## Set up using Python
 
 ### Create a new Python environment
@@ -90,6 +65,31 @@ Currently, there are no pre-built CPU wheels.
 === "IBM Z (s390x)"
 
     --8<-- "docs/getting_started/installation/cpu/s390x.inc.md:build-wheel-from-source"
+
+## Set up using Docker
+
+### Pre-built images
+
+=== "Intel/AMD x86"
+
+    --8<-- "docs/getting_started/installation/cpu/x86.inc.md:pre-built-images"
+
+### Build image from source
+
+=== "Intel/AMD x86"
+
+    --8<-- "docs/getting_started/installation/cpu/x86.inc.md:build-image-from-source"
+
+=== "ARM AArch64"
+
+    --8<-- "docs/getting_started/installation/cpu/arm.inc.md:build-image-from-source"
+
+=== "Apple silicon"
+
+    --8<-- "docs/getting_started/installation/cpu/arm.inc.md:build-image-from-source"
+
+=== "IBM Z (S390X)"
+    --8<-- "docs/getting_started/installation/cpu/s390x.inc.md:build-image-from-source"
 
 ## Related runtime environment variables
 
