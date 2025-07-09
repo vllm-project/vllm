@@ -223,9 +223,10 @@ class TensorizerConfig(MutableMapping):
             and re.search(r'%0\dd', self.tensorizer_uri) is not None
 
         if self.tensorizer_dir and self.tensorizer_uri:
-            logger.info("Provided both tensorizer_dir and tensorizer_uri. "
-                        "Inferring tensorizer_dir from tensorizer_uri as the "
-                        "latter takes precedence.")
+            logger.warning_once(
+                "Provided both tensorizer_dir and tensorizer_uri. "
+                "Inferring tensorizer_dir from tensorizer_uri as the "
+                "latter takes precedence.")
             self.tensorizer_dir = os.path.dirname(self.tensorizer_uri)
         if self.tensorizer_dir and self.lora_dir:
             raise ValueError(
