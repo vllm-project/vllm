@@ -43,7 +43,7 @@ class TensorizerLoader(BaseModelLoader):
         else:
             validate_config(load_config.model_loader_extra_config)
             self.tensorizer_config = TensorizerConfig(
-                **load_config.model_loader_extra_config)
+                **load_config.model_loader_extra_config["tensorizer_config"])
 
     def _verify_config(self, model_config: ModelConfig,
                        parallel_config: ParallelConfig):

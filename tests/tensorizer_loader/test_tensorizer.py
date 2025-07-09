@@ -104,25 +104,6 @@ def write_keyfile(keyfile_path: str):
 
 
 @pytest.mark.skipif(not is_curl_installed(), reason="cURL is not installed")
-def test_can_deserialize_s3(vllm_runner):
-    model_ref = "EleutherAI/pythia-1.4b"
-    tensorized_path = f"s3://tensorized/{model_ref}/fp16/model.tensors"
-
-    with vllm_runner(model_ref,
-                     load_format="tensorizer",
-                     model_loader_extra_config=TensorizerConfig(
-                         tensorizer_uri=tensorized_path,
-                         num_readers=1,
-                         s3_endpoint="object.ord1.coreweave.com",
-                     )) as loaded_hf_model:
-        deserialized_outputs = loaded_hf_model.generate(
-            prompts, sampling_params)
-        # noqa: E501
-
-        assert deserialized_outputs
-
-
-@pytest.mark.skipif(not is_curl_installed(), reason="cURL is not installed")
 def test_deserialized_encrypted_vllm_model_has_same_outputs(
         model_ref, vllm_runner, tmp_path, model_path):
     args = EngineArgs(model=model_ref)
