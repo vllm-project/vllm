@@ -89,6 +89,7 @@ class SpeculatorsEagleConfig(EAGLEConfig):
             "eagle_fc_bias": speculators_config.get("fusion_bias", False),
             "truncated_vocab_size": transformer_config.get("vocab_size"),
             "method": speculators_config.get("speculators_model_type", "eagle"),  # Use speculators_model_type
+            "num_lookahead_tokens": 5,  # Default number of speculative tokens for Eagle
         }
         
         # Preserve any additional fields that might be needed
