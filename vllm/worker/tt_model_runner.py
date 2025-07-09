@@ -6,6 +6,7 @@ from typing import Any, Callable, Dict, List, Optional, Type, Union
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import ttnn
 from transformers import TopPLogitsWarper
 
 from vllm.attention.backends.abstract import AttentionBackend
@@ -178,12 +179,21 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
         else:
             self.dp_kv_cache = False
 
+        if self.llama_tg:
+            self.async_torch_proc = True
+        else:
+            self.async_torch_proc = False
+
         if self.dp_kv_cache:
             # Map request id strs to seq group ids
             self.req_id_to_seq_id: Dict[str, int] = {}
             self.empty_slots = list(range(self.scheduler_config.max_num_seqs))
             self.seq_groups_to_batch_slot: Dict[int, int] = {}
             self.prev_seq_groups_list: Optional[List[int]] = None
+            if self.async_torch_proc:
+                self.cached_read_events: List[Any] = [
+                ]  # Only used for multi-step execution
+                self.perm_table_tensor: List[torch.Tensor] = []
 
     def get_model(self) -> nn.Module:
         return self.model
@@ -473,6 +483,8 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
         # always true if not using multi-step
         if model_input.is_first_multi_step:
             self.cached_step_outputs = []
+            if is_decode:
+                self.cached_read_events = []
             for i in range(num_steps):
                 next_token_ids = self._execute_model_single_step(
                     model_input,
@@ -480,6 +492,9 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                     is_decode,
                     use_async_out_proc,
                     step_idx=i)
+                if is_decode and self.async_torch_proc:
+                    next_token_ids, read_event = next_token_ids
+                    self.cached_read_events.append(read_event)
                 self.cached_step_outputs.append(next_token_ids)
                 if not self.llama_tg and i < num_steps - 1:
                     # Prepare the inputs for the next step
@@ -520,6 +535,15 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                 assert num_outputs == 1, "Last step should only have one output"
             for i in range(num_outputs):
                 next_token_ids = self.cached_step_outputs.pop(0)
+                if is_decode and self.async_torch_proc:
+                    read_event = self.cached_read_events.pop(0)
+                    ttnn.event_synchronize(read_event)
+                    next_token_ids = ttnn.to_torch(
+                        ttnn.get_device_tensors(next_token_ids)[0])[0, 0, 0, :]
+                    if self.dp_kv_cache:
+                        # permute the tt_out
+                        next_token_ids = next_token_ids[
+                            self.perm_table_tensor.pop(0)]
                 # TODO: sync read back from device
                 # once model can keep executing steps on device
                 sampler_output = self._make_sampler_output(
@@ -563,6 +587,15 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
     def _send_prev_step_async_out(self, model_input: TTModelInput, step_idx):
         if step_idx > 0:
             next_token_ids = self.cached_step_outputs.pop(0)
+            if self.async_torch_proc:
+                read_event = self.cached_read_events.pop(0)
+                ttnn.event_synchronize(read_event)
+                next_token_ids = ttnn.to_torch(
+                    ttnn.get_device_tensors(next_token_ids)[0])[0, 0, 0, :]
+                if self.dp_kv_cache:
+                    # permute the tt_out
+                    next_token_ids = next_token_ids[self.perm_table_tensor.pop(
+                        0)]
             # TODO: sync read back from device
             # once model can keep executing steps on device
             sampler_output = self._make_sampler_output(next_token_ids,
@@ -689,6 +722,8 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                     ] + self.empty_slots,
                     dtype=torch.long,
                 )
+                if self.async_torch_proc:
+                    self.perm_table_tensor.append(perm_table_tensor)
 
                 assert perm_table_tensor.shape[
                     0] == self.scheduler_config.max_num_seqs
@@ -720,8 +755,9 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                 tt_out,
                 model_input.unpadded_batch_size,
                 is_tokens=(self.sample_on_device_mode is not None))
-            if self.dp_kv_cache:
-                # permute the tt_out
+            if self.async_torch_proc:
+                tt_out, read_event = tt_out
+            if self.dp_kv_cache and not self.async_torch_proc:
                 tt_out = tt_out[perm_table_tensor]
 
         # Note: for other devices, vLLM applies
@@ -739,8 +775,10 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                 next_logits, model_input.tt_sampling_params)
         else:
             next_token_ids = tt_out
-
-        return next_token_ids
+        if not is_decode or not self.async_torch_proc:
+            return next_token_ids
+        else:
+            return tt_out, read_event
 
     def _sample_tokens(self, logits, tt_sampling_params: TTSamplingParams):
         if tt_sampling_params.temperature == 0:  # greedy decoding
