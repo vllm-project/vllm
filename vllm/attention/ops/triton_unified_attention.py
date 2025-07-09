@@ -84,7 +84,7 @@ def kernel_unified_attention_2d(
         query_start_len_ptr,  # [num_seqs+1]
         num_seqs: tl.int32,
         BLOCK_M: tl.constexpr,  # int
-        BLOCK_N: tl.constexpr, # int
+        BLOCK_N: tl.constexpr,  # int
 ):
     q_block_global_idx = tl.program_id(0)
     kv_head_idx = tl.program_id(1)
@@ -124,7 +124,7 @@ def kernel_unified_attention_2d(
     query_offset_0 = cur_batch_in_all_start_index + query_pos
     query_offset_1 = kv_head_idx * num_queries_per_kv + \
         offs_m % num_queries_per_kv
-    
+
     query_offset = (query_offset_0[:, None] * query_stride_0 +
                     query_offset_1[:, None] * query_stride_1 + offs_d[None, :])
 
@@ -172,9 +172,7 @@ def kernel_unified_attention_2d(
     offs_n = tl.arange(0, BLOCK_N)
 
     # iterate through tiles (below the mask)
-    for start_n in range(0,
-                         max_seq_prefix_len,
-                         BLOCK_N):
+    for start_n in range(0, max_seq_prefix_len, BLOCK_N):
 
         start_n = tl.multiple_of(start_n, BLOCK_N)
 
@@ -638,12 +636,11 @@ def unified_attention(
 
     # if batch contains a prefill
     if max_seqlen_q > 1 or total_num_q_blocks * num_kv_heads > 128:
-        
+
         BLOCK_N = 16 if triton.next_power_of_2(int(max_seqlen_k)) < 128 else 64
 
-        grid = lambda META : (q.shape[0] // (META['BLOCK_M'] // num_queries_per_kv)
-                                + num_seqs, num_kv_heads)
-
+        grid = lambda META: (q.shape[0] // (META[
+            'BLOCK_M'] // num_queries_per_kv) + num_seqs, num_kv_heads)
 
         kernel_unified_attention_2d[grid](
             output_ptr=out,
