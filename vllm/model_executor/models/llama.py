@@ -50,7 +50,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
-
+from vllm.platforms.interface import _Backend
 from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (AutoWeightsLoader, PPMissingLayer, extract_layer_index,
                     is_pp_missing_parameter,
@@ -178,7 +178,7 @@ class LlamaAttention(nn.Module):
         else:
             sliding_window = None
 
-        # TODO: there should be a better approach to solve this problem.
+        # TODO: make the backend advertise its required input layout and 'features' (e.g. fused rotary embedding application) and use that instead of relying on the particular implementation.
         selected_backend = get_selected_backend()
         if selected_backend == _Backend.TKE:
             self.input_layout = InputLayout.CONTIGUOUS_QKV

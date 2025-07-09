@@ -219,6 +219,7 @@ class Attention(nn.Module):
         context using
         `vllm.forward_context.get_forward_context().attn_metadata`.
         """
+        q_dimension = self.head_size * self.num_heads
         if self.calculate_kv_scales:
             attn_metadata = get_forward_context().attn_metadata
             if attn_metadata.enable_kv_scales_calculation:
@@ -246,7 +247,6 @@ class Attention(nn.Module):
                         value = value.view(-1, self.num_kv_heads,
                                            self.head_size)
             elif self.input_layout == InputLayout.CONTIGUOUS_QKV:
-                q_dimension = self.head_size * self.num_heads
                 output_shape = (output_shape if output_shape is not None else
                                 (query.shape[0], q_dimension))
                 output = torch.zeros(output_shape,

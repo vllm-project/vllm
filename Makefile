@@ -7,6 +7,14 @@ USER_NAME          ?= $(shell id --user --name)
 GROUP_ID           ?= $(shell id --group)
 GROUP_NAME         ?= $(shell id --group --name)
 IMAGE_TAG_SUFFIX   ?= -$(USER_NAME)
+
+NSYS_PROFILE ?= 0
+ifeq ($(NSYS_PROFILE), 1)
+	NSYS_PROFILE_CMD := nsys profile -o vllm-sample-profile.nsys-rep --trace-fork-before-exec=true --cuda-graph-trace=node --force-overwrite=true
+else
+	NSYS_PROFILE_CMD :=
+endif
+
 define add_local_user
 	docker build \
 		--progress $(DOCKER_PROGRESS) \
@@ -131,26 +139,11 @@ benchmark-latency:
 		--kv-cache-dtype fp8 \
 		--enforce-eager
 
-profile-vllm-sample:
-	VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 VLLM_ATTENTION_BACKEND=TKE nsys profile \
-	-o vllm-sample-profile.nsys-rep \
-	--trace-fork-before-exec=true \
-	--cuda-graph-trace=node \
-	--force-overwrite=true \
-	python vllm_sample.py \
-	--model /scratch/usr/quantized_model/ \
-	--enforce-eager \
-	--batch-size 3 \
-	--prompts-file sample_prompts.txt \
-	--num-iters 1 \
-	--num-iters-warmup 0 \
-	--tensor-parallel-size 4
-
 delete-vllm-cache:
 	rm -rf ~/.cache/vllm
 
 vllm-sample-flashinfer-v1: delete-vllm-cache
-	VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 VLLM_ATTENTION_BACKEND=FLASHINFER_VLLM_V1 python vllm_sample.py \
+	VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 VLLM_ATTENTION_BACKEND=FLASHINFER_VLLM_V1 $(NSYS_PROFILE_CMD) python vllm_sample.py \
 	--model /scratch/usr/quantized_model/ \
 	--batch-size 1 \
 	--prompts-file sample_prompts.txt \
@@ -159,7 +152,7 @@ vllm-sample-flashinfer-v1: delete-vllm-cache
 	--tensor-parallel-size 4 > flashinfer.txt 2>&1
 
 vllm-sample-tke: delete-vllm-cache
-	VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 VLLM_ATTENTION_BACKEND=TKE python vllm_sample.py \
+	VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 VLLM_ATTENTION_BACKEND=TKE $(NSYS_PROFILE_CMD) python vllm_sample.py \
 	--model /scratch/usr/quantized_model/ \
 	--batch-size 1 \
 	--prompts-file sample_prompts.txt \
@@ -167,6 +160,18 @@ vllm-sample-tke: delete-vllm-cache
 	--num-iters-warmup 0 \
 	--kv-cache-dtype fp8 \
 	--tensor-parallel-size 4 > tke.txt 2>&1
+
+vllm-sample-flash-attn: delete-vllm-cache
+	VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 VLLM_ATTENTION_BACKEND=FLASH_ATTN_VLLM_V1 $(NSYS_PROFILE_CMD) python vllm_sample.py \
+	--model /scratch/usr/quantized_model/ \
+	--batch-size 1 \
+	--prompts-file sample_prompts.txt \
+	--num-iters 1 \
+	--num-iters-warmup 0 \
+	--kv-cache-dtype fp8 \
+	--tensor-parallel-size 4 > flash_attn.txt 2>&1
+
+all-samples: vllm-sample-flash-attn vllm-sample-tke vllm-sample-flashinfer-v1
 
 install-lm-eval:
 	git clone --depth 1 https://github.com/EleutherAI/lm-evaluation-harness

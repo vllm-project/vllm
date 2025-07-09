@@ -1,0 +1,25 @@
+15,What is the capital of France?
+50,Write a short story about a robot that discovers it can dream. The story should be engaging and touch on themes of consciousness and identity.
+25,Explain the difference between machine learning and artificial intelligence in simple terms that a beginner could understand.
+10,Name three benefits of renewable energy.
+75,You are a detective investigating a mysterious disappearance. The only clue is a cryptic note left behind. Describe your investigation process and what you discover.
+5,Complete this sentence: The best way to learn programming is
+100,Write a persuasive essay arguing for or against remote work. Include specific examples and consider both the benefits and drawbacks for employees and employers.
+30,Describe the process of photosynthesis and explain why it's important for life on Earth.
+20,Create a recipe for a healthy breakfast that takes less than 10 minutes to prepare.
+60,You wake up one morning to find that gravity has been reversed. Write about your first hour navigating this new world.
+8,List the primary colors.
+45,Explain how blockchain technology works and give two real-world applications beyond cryptocurrency.
+35,Write a dialogue between two characters who meet for the first time at a coffee shop during a thunderstorm.
+12,What are the main causes of climate change?
+80,Design a mobile app that helps people reduce food waste. Describe its key features, target audience, and how it would work.
+18,Describe the water cycle in three sentences.
+55,You are an AI assistant helping a student prepare for a job interview. Give specific advice on how to answer "What is your greatest weakness?"
+25,Explain the concept of compound interest and why it's important for personal finance.
+40,Write a poem about the changing seasons that includes imagery from all four seasons.
+7,Define photosynthesis.
+65,Create a business plan for a small bakery. Include target market, unique selling proposition, and basic financial projections.
+28,Describe three ways that artificial intelligence is currently being used in healthcare.
+90,You are a travel blogger writing about a hidden gem destination. Describe the location, local culture, must-see attractions, and practical travel tips.
+16,How do vaccines work to protect against diseases?
+70,Write a short mystery story where the solution involves a misunderstanding about technology. Include red herrings and a satisfying resolution.

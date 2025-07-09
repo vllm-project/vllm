@@ -259,6 +259,9 @@ class CudaPlatformBase(Platform):
             elif selected_backend == _Backend.FLASH_ATTN:
                 logger.info_once("Using Flash Attention backend on V1 engine.")
                 return FLASH_ATTN_V1
+            elif selected_backend == _Backend.FLASH_ATTN_VLLM_V1:
+                logger.info_once("Using Flash Attention backend on V1 engine.")
+                return FLASH_ATTN_V1
 
             from vllm.attention.selector import supports_head_size
 
