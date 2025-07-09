@@ -44,32 +44,27 @@ def _convert_dtype_to_torch(dtype):
 # Define common batch configurations
 BATCH_SPECS = {
     "small_decode":
-    BatchSpec(batch_size=2, seq_lens=[32, 40], query_lens=[1, 1]),
+    BatchSpec(seq_lens=[32, 40], query_lens=[1, 1]),
     "small_prefill":
-    BatchSpec(batch_size=2, seq_lens=[32, 40], query_lens=[8, 8]),
+    BatchSpec(seq_lens=[32, 40], query_lens=[8, 8]),
     "mixed_small":
-    BatchSpec(batch_size=4, seq_lens=[32, 40, 48, 56], query_lens=[1, 1, 5,
-                                                                   5]),
+    BatchSpec(seq_lens=[32, 40, 48, 56], query_lens=[1, 1, 5, 5]),
     "medium_decode":
-    BatchSpec(batch_size=8,
-              seq_lens=[128, 256, 512, 1024, 128, 256, 512, 1024],
+    BatchSpec(seq_lens=[128, 256, 512, 1024, 128, 256, 512, 1024],
               query_lens=[1, 1, 1, 1, 1, 1, 1, 1]),
     "medium_prefill":
-    BatchSpec(batch_size=4,
-              seq_lens=[256, 512, 1024, 2048],
-              query_lens=[16, 16, 16, 16]),
+    BatchSpec(seq_lens=[256, 512, 1024, 2048], query_lens=[16, 16, 16, 16]),
     "mixed_medium":
-    BatchSpec(batch_size=6,
-              seq_lens=[512, 1024, 2048, 512, 1024, 2048],
+    BatchSpec(seq_lens=[512, 1024, 2048, 512, 1024, 2048],
               query_lens=[1, 1, 1, 7, 7, 7]),
     "large_decode":
-    BatchSpec(batch_size=32, seq_lens=[2048] * 32, query_lens=[1] * 32),
+    BatchSpec(seq_lens=[2048] * 32, query_lens=[1] * 32),
     "large_prefill":
-    BatchSpec(batch_size=8, seq_lens=[4096] * 8, query_lens=[32] * 8),
+    BatchSpec(seq_lens=[4096] * 8, query_lens=[32] * 8),
     "single_decode":
-    BatchSpec(batch_size=1, seq_lens=[1024], query_lens=[1]),
+    BatchSpec(seq_lens=[1024], query_lens=[1]),
     "single_prefill":
-    BatchSpec(batch_size=1, seq_lens=[1024], query_lens=[64]),
+    BatchSpec(seq_lens=[1024], query_lens=[64]),
 }
 
 
