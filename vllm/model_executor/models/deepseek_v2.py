@@ -746,8 +746,10 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
 
             assert isinstance(layer, DeepseekV2DecoderLayer)
             if isinstance(layer.mlp, DeepseekV2MoE):
-                self.moe_layers.append(layer.mlp.experts)
+                # Pick last one layer since the first ones may be dense layers.
                 example_moe = layer.mlp
+                self.moe_layers.append(layer.mlp.experts)
+
 
         if example_moe is None:
             raise RuntimeError("No DeepseekV2MoE layer found in model.layers.")
