@@ -109,8 +109,8 @@ docker run \
 
 ### Supported features
 
-- [Offline inference][offline-inference]
-- Online serving via [OpenAI-Compatible Server][serving-openai-compatible-server]
+- [Offline inference](../../serving/offline_inference.md)
+- Online serving via [OpenAI-Compatible Server](../../serving/openai_compatible_server.md)
 - HPU autodetection - no need to manually select device within vLLM
 - Paged KV cache with algorithms enabled for Intel Gaudi accelerators
 - Custom Intel Gaudi implementations of Paged Attention, KV cache ops,
@@ -237,7 +237,7 @@ As an example, if a request of 3 sequences, with max sequence length of 412 come
 
 Warmup is an optional, but highly recommended step occurring before vLLM server starts listening. It executes a forward pass for each bucket with dummy data. The goal is to pre-compile all graphs and not incur any graph compilation overheads within bucket boundaries during server runtime. Each warmup step is logged during vLLM startup:
 
-??? Logs
+??? console "Logs"
 
     ```text
     INFO 08-01 22:26:47 hpu_model_runner.py:1066] [Warmup][Prompt][1/24] batch_size:4 seq_len:1024 free_mem:79.16 GiB
@@ -286,7 +286,7 @@ When there's large amount of requests pending, vLLM scheduler will attempt to fi
 
 Each described step is logged by vLLM server, as follows (negative values correspond to memory being released):
 
-??? Logs
+??? console "Logs"
 
     ```text
     INFO 08-02 17:37:44 hpu_model_runner.py:493] Prompt bucket config (min, step, max_warmup) bs:[1, 32, 4], seq:[128, 128, 1024]

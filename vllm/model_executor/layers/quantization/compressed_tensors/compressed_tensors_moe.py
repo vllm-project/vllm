@@ -368,6 +368,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             "weights")
         self.input_quant = self.quant_config.target_scheme_map["Linear"].get(
             "input_activations")
+        self.topk_indices_dtype = None
 
         per_tensor = (self.weight_quant.strategy == QuantizationStrategy.TENSOR
                       and self.input_quant.strategy
@@ -738,6 +739,7 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
 
         from vllm.model_executor.layers.fused_moe.cutlass_moe import (
             cutlass_moe_fp8)
+        self.topk_indices_dtype = None
         self.fused_experts = cutlass_moe_fp8  # type: ignore
         self.disable_expert_map = False
 
@@ -927,9 +929,12 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
             num_expert_group=num_expert_group,
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
-            e_score_correction_bias=e_score_correction_bias,
-            indices_type=self.topk_indices_dtype,
-        )
+            e_score_correction_bias=e_score_correction_bias)
+
+        a1_scale = layer.w13_input_scale
+        a2_scale = layer.w2_input_scale
+        per_act_token = a1_scale.numel() != 1 if a1_scale is not None else (
+            a2_scale.numel() != 1 if a2_scale is not None else False)
 
         return self.fused_experts(
             x,
@@ -937,13 +942,14 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
             layer.w2_weight,
             topk_weights,
             topk_ids,
+            per_act_token=per_act_token,
             activation=activation,
             global_num_experts=global_num_experts,
             expert_map=None if self.disable_expert_map else expert_map,
             w1_scale=layer.w13_weight_scale,
             w2_scale=layer.w2_weight_scale,
-            a1_scale=layer.w13_input_scale,
-            a2_scale=layer.w2_input_scale,
+            a1_scale=a1_scale,
+            a2_scale=a2_scale,
         )
 
 
