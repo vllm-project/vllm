@@ -390,14 +390,14 @@ RUN --mount=type=cache,target=/root/.cache/uv bash - <<'BASH'
           # Exclude CUDA arches for older versions (11.x and 12.0-12.7)
           # TODO: Update this to allow setting TORCH_CUDA_ARCH_LIST as a build arg.
           if [[ "${CUDA_VERSION}" == 11.* ]]; then
-              TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9"
+              FI_TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9"
           elif [[ "${CUDA_VERSION}" == 12.[0-7]* ]]; then
-              TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9 9.0a"
+              FI_TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9 9.0a"
           else
               # CUDA 12.8+ supports 10.0a and 12.0
-              TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9 9.0a 10.0a 12.0"
+              FI_TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9 9.0a 10.0a 12.0"
           fi
-          echo "🏗️  Building FlashInfer for arches: ${TORCH_CUDA_ARCH_LIST}"
+          echo "🏗️  Building FlashInfer for arches: ${FI_TORCH_CUDA_ARCH_LIST}"
 
           git clone --depth 1 --recursive --shallow-submodules \
             --single-branch --branch ${FLASHINFER_GIT_REF} \
@@ -406,7 +406,7 @@ RUN --mount=type=cache,target=/root/.cache/uv bash - <<'BASH'
           # Needed to build AOT kernels
           pushd flashinfer
             python3 -m flashinfer.aot
-            TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST}" \
+            TORCH_CUDA_ARCH_LIST="${FI_TORCH_CUDA_ARCH_LIST}" \
               uv pip install --system --no-build-isolation .
           popd
 
