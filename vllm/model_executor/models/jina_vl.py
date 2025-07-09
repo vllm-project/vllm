@@ -86,7 +86,7 @@ class JinaVLForSequenceClassification(Qwen2VLForConditionalGeneration,
         config = vllm_config.model_config.hf_config
         pooler_config = vllm_config.model_config.pooler_config
 
-        self.LOGIT_BIAS = 2.65
+        self.LOGIT_BIAS = 2.65  # logit bias for sigmoid normalization
 
         self.score = JinaVLScorer(config)
 

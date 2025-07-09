@@ -718,7 +718,7 @@ Specified using `--task score`.
 
 | Architecture                        | Models             | Inputs   | Example HF Models        | [LoRA][lora-adapter]   | [PP][distributed-serving]   | [V1](gh-issue:8779)   |
 |-------------------------------------|--------------------|----------|--------------------------|------------------------|-----------------------------|-----------------------|
-| `JinaVLForSequenceClassification`     | JinaVL-based       | T + I<sup>E+</sup> |   `jinaai/jina-reranker-m0`, etc.                                                      |                      |✅︎     |✅︎       |
+| `JinaVLForSequenceClassification` | JinaVL-based | T + I<sup>E+</sup> | `jinaai/jina-reranker-m0`,etc. | | | ✅︎ |
 
 ## Model Support Policy
 

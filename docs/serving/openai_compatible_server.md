@@ -675,6 +675,7 @@ The total number of pairs is `len(text_2)`.
       "usage": {}
     }
     ```
+
 #### Multi-modal inputs
 
 You can pass multi-modal inputs to scoring models by passing `content` including a list of multi-modal input (image, etc.) in the request. Refer to the examples below for illustration.

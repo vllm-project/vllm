@@ -1262,9 +1262,9 @@ class LLM:
 
     def score(
         self,
-        text_1: Union[SingletonPrompt, Sequence[SingletonPrompt],
+        data_1: Union[SingletonPrompt, Sequence[SingletonPrompt],
                       ScoreMultiModalParam],
-        text_2: Union[SingletonPrompt, Sequence[SingletonPrompt],
+        data_2: Union[SingletonPrompt, Sequence[SingletonPrompt],
                       ScoreMultiModalParam],
         /,
         *,
@@ -1277,8 +1277,8 @@ class LLM:
           `<multi-modal data, multi-modal data pair>`.
 
         The inputs can be `1 -> 1`, `1 -> N` or `N -> N`.
-        In the `1 - N` case the `text_1` input will be replicated `N`
-        times to pair with the `text_2` inputs.
+        In the `1 - N` case the `data_1` input will be replicated `N`
+        times to pair with the `data_2` inputs.
         The input pairs are used to build a list of prompts for the
         cross encoder model. This class automatically batches the prompts,
         considering the memory constraint. For the best performance, put all
@@ -1289,10 +1289,10 @@ class LLM:
         structure matches the model's expected input format.
 
         Args:
-            text_1: can be a single prompt, a list of prompts or `ScoreMultiModalParam`, which can contain
+            data_1: can be a single prompt, a list of prompts or `ScoreMultiModalParam`, which can contain
                 either text or multi-modal data. When a list, it must have the same
-                length as the `text_2` list.
-            text_2: The data to pair with the query to form the input to the LLM.
+                length as the `data_2` list.
+            data_2: The data to pair with the query to form the input to the LLM.
                 Can be text or multi-modal data. See [PromptType][vllm.inputs.PromptType]
                 for more details about the format of each prompt.
             use_tqdm: If `True`, shows a tqdm progress bar.
@@ -1334,9 +1334,6 @@ class LLM:
         # "cross-encoder/ms-marco-MiniLM-L-6-v2" doesn't support passing
         # lists of tokens to the `text` and `text_pair` kwargs
         tokenizer = self.get_tokenizer()
-
-        data_1 = text_1
-        data_2 = text_2
 
         if not self.llm_engine.model_config.is_multimodal_model:
 
