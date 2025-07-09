@@ -29,6 +29,7 @@ from vllm.model_executor.parameter import (BasevLLMParameter,
 # yapf: enable
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
+from triton_dist.kernels.nvidia.allreduce import (create_allreduce_ctx, all_reduce, AllReduceMethod)
 
 logger = init_logger(__name__)
 
@@ -1313,7 +1314,18 @@ class RowParallelLinear(LinearBase):
                                                   input_parallel,
                                                   bias=bias_)
         if self.reduce_results and self.tp_size > 1:
-            output = tensor_model_parallel_all_reduce(output_parallel)
+            # output = tensor_model_parallel_all_reduce(output_parallel)
+            M, N = output_parallel.shape
+            # print(output_parallel.shape, self.ar_output.shape, self.ar_output[:M].contiguous().shape)
+            self.ctx.M = M
+            self.ctx.buf_M = M
+            self.ctx.scatter_bufs = self.ctx._scatter_bufs[:M]
+            output = all_reduce(
+                input=output_parallel.contiguous(),
+                output=self.ar_output[:M].contiguous(),
+                method=self.ar_method,
+                ctx=self.ctx,
+            )
         else:
             output = output_parallel
 
