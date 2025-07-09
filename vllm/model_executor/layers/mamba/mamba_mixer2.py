@@ -224,8 +224,6 @@ class Mamba2Layer(ABC):
     Inherit from this class if you implement a custom Mamba2 layer.
     """
 
-    chunk_size: int
-
     # Contains the KV cache (mamba state) for the layer
     # in the shape specified by `self.get_state_shape`.
     # The outer list is for v0 PP virtual engine. Though this code path
@@ -257,22 +255,21 @@ class MambaMixer2(Mamba2Layer, CustomOp):
     """
 
     def __init__(
-            self,
-            hidden_size: int,
-            ssm_state_size: int,
-            conv_kernel_size: int,
-            intermediate_size: int,
-            use_conv_bias: bool,
-            use_bias: bool,
-            n_groups: int = 1,
-            num_heads: int = 128,
-            head_dim: int = 64,
-            rms_norm_eps: float = 1e-5,
-            activation: str = "silu",
-            use_rms_norm: bool = True,
-            quant_config: Optional[QuantizationConfig] = None,
-            prefix: str = "",
-            chunk_size: int = -1,  # the chunk size used by v1
+        self,
+        hidden_size: int,
+        ssm_state_size: int,
+        conv_kernel_size: int,
+        intermediate_size: int,
+        use_conv_bias: bool,
+        use_bias: bool,
+        n_groups: int = 1,
+        num_heads: int = 128,
+        head_dim: int = 64,
+        rms_norm_eps: float = 1e-5,
+        activation: str = "silu",
+        use_rms_norm: bool = True,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
 
@@ -454,10 +451,7 @@ class MambaMixer2(Mamba2Layer, CustomOp):
             # of Attention + v0 PP.
             # The inner tuple is (conv_state, ssm_state)
             self.kv_cache = [(torch.tensor([]), torch.tensor([]))]
-            assert chunk_size != -1, "chunk_size must be set for v1"
 
-        # NOTE: chunk_size may be -1 for models without v1 support
-        self.chunk_size = chunk_size
         self.prefix = prefix
 
     def forward_native(
