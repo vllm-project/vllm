@@ -31,6 +31,7 @@ from vllm.transformers_utils.configs.telechat2 import Telechat2Config
 from vllm.transformers_utils.configs.ultravox import UltravoxConfig
 
 __all__ = [
+    "BailingMoeConfig",
     "ChatGLMConfig",
     "Cohere2Config",
     "DbrxConfig",
