@@ -620,7 +620,7 @@ def unified_attention(
     num_queries_per_kv = num_query_heads // num_kv_heads
     head_size = q.shape[2]
 
-    BLOCK_M = 64 if triton.next_power_of_2(int(max_seqlen_q)) > 1 else 16
+    BLOCK_M = 64 if max_seqlen_q > 1 else 16
     BLOCK_Q = BLOCK_M // num_queries_per_kv  # for 3d
 
     # Ideally we would launch with kernel with:
@@ -637,7 +637,7 @@ def unified_attention(
     # if batch contains a prefill
     if max_seqlen_q > 1 or total_num_q_blocks * num_kv_heads > 128:
 
-        BLOCK_N = 16 if triton.next_power_of_2(int(max_seqlen_k)) < 128 else 64
+        BLOCK_N = 16 if max_seqlen_k <= 64 else 64
 
         grid = lambda META: (q.shape[0] // (META[
             'BLOCK_M'] // num_queries_per_kv) + num_seqs, num_kv_heads)
