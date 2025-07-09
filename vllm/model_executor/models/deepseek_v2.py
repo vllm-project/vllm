@@ -740,7 +740,7 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
 
         self.moe_layers: list[FusedMoE] = []
         for layer in self.model.layers:
-            assert isinstance(layer, DeepseekV2DecoderLayer)
+            assert isinstance(layer, (DeepseekV2DecoderLayer, PPMissingLayer))
             if isinstance(layer.mlp, DeepseekV2MoE):
                 self.moe_layers.append(layer.mlp.experts)
 
