@@ -11,7 +11,7 @@
             {% set ns.system_prompt = ns.system_prompt + '\n\n' + message['content'] %}
         {%- endif %}
     {%- endif %}
-{%- endfor %}
+{%- endfor -%}
 
 {#- Adapted from https://github.com/sgl-project/sglang/blob/main/examples/chat_template/tool_chat_template_deepseekr1.jinja #}
 {% if tools is defined and tools is not none %}
@@ -27,8 +27,8 @@
     {% set ns.system_prompt = ns.system_prompt + '\n\n' + tool_ns.text %}
 {% endif %}
 
-{{ bos_token }}
-{{ ns.system_prompt }}
+{{- bos_token }}
+{{- ns.system_prompt }}
 {%- for message in messages %}
     {% set content = message['content'] %}
     {%- if message['role'] == 'user' %}
@@ -70,7 +70,7 @@
             {{'<｜tool▁outputs▁end｜>' + content + '<｜end▁of▁sentence｜>'}}
             {%- set ns.is_tool = false -%}
         {%- else %}
-            {{content + '<｜end▁of▁sentence｜>'}}
+            {{- content + '<｜end▁of▁sentence｜>'}}
         {%- endif %}
     {%- endif %}
     {%- if message['role'] == 'tool' %}
@@ -88,5 +88,5 @@
     {{'<｜tool▁outputs▁end｜>'}}
 {% endif %}
 {% if add_generation_prompt and not ns.is_last_user and not ns.is_tool %}
-    {{'<｜Assistant｜>'}}
-{% endif %}
+    {{- '<｜Assistant｜>'}}
+{%- endif %}
