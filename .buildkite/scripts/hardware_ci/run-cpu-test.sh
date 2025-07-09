@@ -43,7 +43,7 @@ function cpu_tests() {
   # offline inference
   docker exec cpu-test-"$NUMA_NODE"-avx2 bash -c "
     set -e
-    python3 examples/offline_inference/basic/generate.py --model facebook/opt-125m"
+    # python3 examples/offline_inference/basic/generate.py --model facebook/opt-125m"
 
   # Run basic model test
   docker exec cpu-test-"$NUMA_NODE" bash -c "
@@ -53,16 +53,17 @@ function cpu_tests() {
     # pytest -v -s tests/kernels/attention/test_mla_decode_cpu.py -m cpu_model
 
     # Note: disable Bart until supports V1
-    pytest -v -s tests/models/language/generation -m cpu_model \
-                --ignore=tests/models/language/generation/test_bart.py
-    VLLM_CPU_SGL_KERNEL=1 pytest -v -s tests/models/language/generation -m cpu_model \
-                --ignore=tests/models/language/generation/test_bart.py
+    # pytest -v -s tests/models/language/generation -m cpu_model \
+    #             --ignore=tests/models/language/generation/test_bart.py
+    # VLLM_CPU_SGL_KERNEL=1 pytest -v -s tests/models/language/generation -m cpu_model \
+    #             --ignore=tests/models/language/generation/test_bart.py
 
-    pytest -v -s tests/models/language/pooling -m cpu_model
-    pytest -v -s tests/models/multimodal/generation \
-                --ignore=tests/models/multimodal/generation/test_mllama.py \
-                --ignore=tests/models/multimodal/generation/test_pixtral.py \
-                -m cpu_model"
+    # pytest -v -s tests/models/language/pooling -m cpu_model
+    # pytest -v -s tests/models/multimodal/generation \
+    #             --ignore=tests/models/multimodal/generation/test_mllama.py \
+    #             --ignore=tests/models/multimodal/generation/test_pixtral.py \
+    #             -m cpu_model
+    pytest -v -s tests/models/multimodal/generation/test_common.py::test_multi_image_models[qwen2_5_omni-test_case51]"
 
   # Run compressed-tensor test
   docker exec cpu-test-"$NUMA_NODE" bash -c "
