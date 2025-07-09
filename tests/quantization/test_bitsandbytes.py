@@ -26,6 +26,10 @@ models_4bit_to_embedding_test = [
     ("intfloat/e5-mistral-7b-instruct", "quantize embedding model inflight"),
 ]
 
+models_4bit_to_moe_test = [
+    ("Qwen/Qwen1.5-MoE-A2.7B-Chat", "quantize moe model inflight"),
+]
+
 models_pre_qaunt_4bit_to_test = [
     ('PrunaAI/Einstein-v6.1-Llama3-8B-bnb-4bit-smashed',
      'read pre-quantized 4-bit FP4 model'),
@@ -122,6 +126,30 @@ def test_load_pp_4bit_bnb_model(model_name, description) -> None:
     compare_two_settings(model_name, common_args, pp_args)
 
 
+@pytest.mark.skipif(torch.cuda.device_count() < 2,
+                    reason='Test requires at least 2 GPUs.')
+@pytest.mark.skipif(not is_quant_method_supported("bitsandbytes"),
+                    reason='bitsandbytes is not supported on this GPU type.')
+@pytest.mark.parametrize("model_name, description", models_4bit_to_moe_test)
+@create_new_process_for_each_test()
+def test_4bit_bnb_moe_model(hf_runner, vllm_runner, example_prompts,
+                            model_name, description) -> None:
+
+    hf_model_kwargs = dict(quantization_config=BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_use_double_quant=True,
+    ))
+    validate_generated_texts(hf_runner,
+                             vllm_runner,
+                             example_prompts[:1],
+                             model_name,
+                             False,
+                             hf_model_kwargs,
+                             vllm_tp_size=2,
+                             max_tokens=6)
+
+
 @pytest.mark.skipif(not is_quant_method_supported("bitsandbytes"),
                     reason='bitsandbytes is not supported on this GPU type.')
 @pytest.mark.parametrize("model_name, description",
@@ -189,7 +217,8 @@ def validate_generated_texts(hf_runner,
                              model_name,
                              pre_quant=False,
                              hf_model_kwargs=None,
-                             vllm_tp_size=1):
+                             vllm_tp_size=1,
+                             max_tokens=8):
 
     # NOTE: run vLLM first, as it requires a clean process
     # when using distributed inference
@@ -197,7 +226,8 @@ def validate_generated_texts(hf_runner,
                      quantization=None if pre_quant else 'bitsandbytes',
                      tensor_parallel_size=vllm_tp_size,
                      enforce_eager=False) as llm:
-        vllm_outputs = llm.generate_greedy(prompts, 8)
+
+        vllm_outputs = llm.generate_greedy(prompts, max_tokens)
         vllm_logs = log_generated_texts(prompts, vllm_outputs, "VllmRunner")
 
     # Clean up the GPU memory for the next test
@@ -209,7 +239,7 @@ def validate_generated_texts(hf_runner,
 
     # Run with HF runner
     with hf_runner(model_name, model_kwargs=hf_model_kwargs) as llm:
-        hf_outputs = llm.generate_greedy(prompts, 8)
+        hf_outputs = llm.generate_greedy(prompts, max_tokens)
         hf_logs = log_generated_texts(prompts, hf_outputs, "HfRunner")
 
     # Clean up the GPU memory for the next test
@@ -221,7 +251,6 @@ def validate_generated_texts(hf_runner,
         hf_str = hf_log["generated_text"]
         vllm_str = vllm_log["generated_text"]
         prompt = hf_log["prompt"]
-
         assert hf_str == vllm_str, (f"Model: {model_name}"
                                     f"Mismatch between HF and vLLM outputs:\n"
                                     f"Prompt: {prompt}\n"
