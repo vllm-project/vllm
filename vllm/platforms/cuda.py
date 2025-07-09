@@ -287,15 +287,15 @@ class CudaPlatformBase(Platform):
 
             assert not is_default_backend_supported
 
-            default_not_supported_reason = {}
+            use_flex_attention_reason = {}
             if not is_default_backend_supported.head_size:
-                default_not_supported_reason["head_size"] = head_size
+                use_flex_attention_reason["head_size"] = head_size
             if not is_default_backend_supported.dtype:
-                default_not_supported_reason["dtype"] = dtype
+                use_flex_attention_reason["dtype"] = dtype
 
             logger.info_once(
                 "Using FlexAttention backend for %s on V1 engine.",
-                str(default_not_supported_reason),
+                str(use_flex_attention_reason),
             )
             return FLEX_ATTENTION_V1
 
