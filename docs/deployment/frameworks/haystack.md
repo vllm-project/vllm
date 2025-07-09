@@ -1,7 +1,4 @@
----
-title: Haystack
----
-[](){ #deployment-haystack }
+# Haystack
 
 # Haystack
 

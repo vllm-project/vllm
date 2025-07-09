@@ -1,7 +1,4 @@
----
-title: LoRA Adapters
----
-[](){ #lora-adapter }
+# LoRA Adapters
 
 This document shows you how to use [LoRA adapters](https://arxiv.org/abs/2106.09685) with vLLM on top of a base model.
 
