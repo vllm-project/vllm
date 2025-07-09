@@ -47,8 +47,8 @@ class MultiConnector(KVConnectorBase_V1):
         assert ktcs is not None
         for ktc in ktcs:
             temp_config = copy.copy(vllm_config)
-            engine_id = ktc.get(
-                "engine_id", vllm_config.kv_transfer_config.engine_id)
+            engine_id = ktc.get("engine_id",
+                                vllm_config.kv_transfer_config.engine_id)
             temp_config.kv_transfer_config = KVTransferConfig(
                 **ktc, engine_id=engine_id)
             self._connectors.append(
