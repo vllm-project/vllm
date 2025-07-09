@@ -5,13 +5,14 @@ import sys
 from argparse import SUPPRESS, HelpFormatter
 from pathlib import Path
 from typing import Literal
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 ROOT_DIR = Path(__file__).parent.parent.parent.parent
 ARGPARSE_DOC_DIR = ROOT_DIR / "docs/argparse"
 
 sys.path.insert(0, str(ROOT_DIR))
 sys.modules["blake3"] = MagicMock()
+sys.modules["vllm._C"] = MagicMock()
 
 from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs  # noqa: E402
 from vllm.utils import FlexibleArgumentParser  # noqa: E402
@@ -75,7 +76,8 @@ def create_parser(cls, **kwargs) -> FlexibleArgumentParser:
     """
     parser = FlexibleArgumentParser()
     parser.formatter_class = MarkdownFormatter
-    return cls.add_cli_args(parser, **kwargs)
+    with patch("vllm.config.DeviceConfig.__post_init__"):
+        return cls.add_cli_args(parser, **kwargs)
 
 
 def on_startup(command: Literal["build", "gh-deploy", "serve"], dirty: bool):
