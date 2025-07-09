@@ -41,6 +41,7 @@ from vllm.test_utils import MODEL_WEIGHTS_S3_BUCKET, MODELS_ON_S3
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.utils import (STR_DUAL_CHUNK_FLASH_ATTN_VAL, FlexibleArgumentParser,
                         GiB_bytes, get_ip, is_in_ray_actor)
+from vllm.transformers_utils.configs.speculators_eagle import is_speculators_eagle_config
 
 # yapf: enable
 
@@ -1416,6 +1417,8 @@ class EngineArgs:
         if self.speculative_config is not None:
             # This is supported but experimental (handled below).
             speculative_method = self.speculative_config.get("method")
+            speculative_model = self.speculative_config.get("model")
+            
             if speculative_method:
                 if speculative_method in ("ngram", "[ngram]"):
                     is_ngram_enabled = True
@@ -1424,9 +1427,14 @@ class EngineArgs:
                 elif speculative_method in ("eagle", "eagle3", "deepseek_mtp"):
                     is_eagle_enabled = True
             else:
-                speculative_model = self.speculative_config.get("model")
-                if speculative_model in ("ngram", "[ngram]"):
-                    is_ngram_enabled = True
+                # If method is not set, try to detect from model
+                if speculative_model:
+                    if speculative_model in ("ngram", "[ngram]"):
+                        is_ngram_enabled = True
+                    # Special case: Check if it's a speculators Eagle model
+                    elif is_speculators_eagle_config(speculative_model):
+                        is_eagle_enabled = True
+                        
             if not (is_ngram_enabled or is_eagle_enabled or is_medusa_enabled):
                 # Other speculative decoding methods are not supported yet.
                 _raise_or_fallback(feature_name="Speculative Decoding",
