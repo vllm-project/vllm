@@ -1460,6 +1460,7 @@ class EngineArgs:
         is_ngram_enabled = False
         is_eagle_enabled = False
         is_medusa_enabled = False
+        is_mlp_speculator_enabled = False
         if self.speculative_config is not None:
             # This is supported but experimental (handled below).
             speculative_method = self.speculative_config.get("method")
@@ -1470,6 +1471,8 @@ class EngineArgs:
                     is_medusa_enabled = True
                 elif speculative_method in ("eagle", "eagle3", "deepseek_mtp"):
                     is_eagle_enabled = True
+                elif speculative_method == "mlp_speculator":
+                    is_mlp_speculator_enabled = True
             else:
                 speculative_model = self.speculative_config.get("model")
                 if speculative_model in ("ngram", "[ngram]"):
