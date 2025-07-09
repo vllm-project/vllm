@@ -11,7 +11,7 @@ from vllm.config import VllmConfig
 from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 from vllm.logger import init_logger
 from vllm.model_executor.utils import set_random_seed
-from vllm.platforms import current_platform
+from vllm.platforms import CpuArchEnum, current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import ModelRunnerOutput
@@ -43,8 +43,12 @@ class CPUWorker(Worker):
         omp_cpuids = envs.VLLM_CPU_OMP_THREADS_BIND
         self.local_omp_cpuid = "all"
         if omp_cpuids == "auto":
-            self.local_omp_cpuid = self.get_cpus_id_binding_based_on_numa_nodes(
-            )
+            if current_platform.get_cpu_architecture() == CpuArchEnum.POWERPC:
+                self.local_omp_cpuid = (
+                    self.get_cpus_id_binding_based_on_numa_nodes_ppc64le())
+            else:
+                self.local_omp_cpuid = (
+                    self.get_cpus_id_binding_based_on_numa_nodes())
         else:
             self.local_omp_cpuid = omp_cpuids.split("|")[self.rank]
 
@@ -146,6 +150,60 @@ class CPUWorker(Worker):
                 rank_to_cpus_list = node_to_cpus[self.rank][:end]
                 rank_to_cpus = ','.join(str(x) for x in rank_to_cpus_list)
                 logger.info("auto thread-binding list: %s", rank_to_cpus)
+        else:
+            logger.warning(
+                "Auto thread-binding is not supported due to "
+                "the lack of package numa and psutil,"
+                "fallback to no thread-binding. To get better performance,"
+                "please try to manually bind threads.")
+        return rank_to_cpus
+
+    def get_cpus_id_binding_based_on_numa_nodes_ppc64le(self) -> str:
+        """
+        Power (ppc64le) specific: Selects a subset of threads per core for 
+        each NUMA node.This is robust to SMT mode (SMT-8, SMT-4, etc) 
+        because the OS only exposes available threads.This maximizes 
+        performance by avoiding oversubscription of logical CPUs on Power.
+        """
+
+        def select_threads_per_power_core(node_cpu_ids):
+            return [cpu for cpu in node_cpu_ids if cpu % 8 < 4]
+
+        rank_to_cpus = self.local_omp_cpuid
+        world_size = self.vllm_config.parallel_config.world_size
+        libnuma_found = util.find_spec("numa") is not None
+        psutil_found = util.find_spec("psutil") is not None
+        if libnuma_found and psutil_found:
+            import psutil
+            from numa import info
+            cpus_allow_list = psutil.Process().cpu_affinity()
+            numa_size = info.get_num_configured_nodes()
+
+            node_to_cpus = []
+            for i in range(numa_size):
+                node_intersect = set(
+                    info.node_to_cpus(i)).intersection(cpus_allow_list)
+                if bool(node_intersect):
+                    node_to_cpus.append(sorted(list(node_intersect)))
+
+            if world_size > len(node_to_cpus):
+                logger.error(
+                    "Auto thread-binding failed due to "
+                    "world size: %d is larger than "
+                    "allowed NUMA nodes number: %d."
+                    "Please try to bind threads manually.", world_size,
+                    len(node_to_cpus))
+            else:
+                node_cpus_this_rank = node_to_cpus[self.rank]
+                node_cpus_this_rank = select_threads_per_power_core(
+                    node_cpus_this_rank)
+                cpu_count_per_numa = len(node_cpus_this_rank)
+                num_of_reserved_cpu = min(envs.VLLM_CPU_NUM_OF_RESERVED_CPU,
+                                          cpu_count_per_numa // 2)
+                end = cpu_count_per_numa - num_of_reserved_cpu
+                rank_to_cpus_list = node_cpus_this_rank[:end]
+                rank_to_cpus = ','.join(str(x) for x in rank_to_cpus_list)
+                logger.info("ppc64le thread-binding list: %s", rank_to_cpus)
         else:
             logger.warning(
                 "Auto thread-binding is not supported due to "
