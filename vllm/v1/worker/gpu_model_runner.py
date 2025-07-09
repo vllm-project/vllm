@@ -1858,8 +1858,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if not isinstance(tokenizer, MistralTokenizer):
             tok_output = tokenizer(text="foo")
             if "token_type_ids" in tok_output:
-                assert model_supports_token_type_ids
-                self.supports_token_type_ids = True
+                if not model_supports_token_type_ids:
+                    logger.warning("Tokenizer returns token_type_ids but "
+                                   "but model forward() doesn't support that "
+                                   "argument")
+                else:
+                    self.supports_token_type_ids = True
 
         if self.supports_token_type_ids:
             # pre-allocate tensor
