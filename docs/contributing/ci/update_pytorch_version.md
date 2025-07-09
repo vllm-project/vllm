@@ -64,18 +64,11 @@ This complicates the process as we cannot use the out-of-the-box
 `pip install torch torchvision torchaudio` command. The solution is to use
 `--extra-index-url` in vLLM's Dockerfiles.
 
-- To install a non-default CUDA version of PyTorch:
-
-```bash
-# e.g. CUDA 12.8
-pip install torch torchvision torchaudio \
-    --extra-index-url https://download.pytorch.org/whl/cu128
-```
-
-- Other important indexes at the moment include:
+- Important indexes at the moment include:
 
 | Platform | `--extra-index-url` |
 |----------|-----------------|
+| GPU (CUDA 12.8)      | [https://download.pytorch.org/whl/cu128](https://download.pytorch.org/whl/cu128)|
 | CPU      | [https://download.pytorch.org/whl/cpu](https://download.pytorch.org/whl/cpu)|
 | ROCm 6.2 | [https://download.pytorch.org/whl/rocm6.2.4](https://download.pytorch.org/whl/rocm6.2.4) |
 | ROCm 6.3 | [https://download.pytorch.org/whl/rocm6.3](https://download.pytorch.org/whl/rocm6.3) |
