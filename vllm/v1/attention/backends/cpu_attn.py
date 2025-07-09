@@ -13,8 +13,7 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               is_quantized_kv_cache)
 from vllm.attention.backends.utils import CommonAttentionState
 from vllm.logger import init_logger
-from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
-                                              CommonAttentionMetadata)
+from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.block_table import BlockTable
@@ -314,7 +313,7 @@ class TorchSDPAMetadata(AttentionMetadata):
             raise AttributeError(f"Invalid attention type {str(attn_type)}")
 
 
-class TorchSDPAMetadataBuilderV1(AttentionMetadataBuilder[TorchSDPAMetadata]):
+class TorchSDPAMetadataBuilderV1:
 
     def __init__(self, runner: CPUModelRunner, kv_cache_spec: AttentionSpec,
                  block_table: BlockTable) -> None:
@@ -378,10 +377,8 @@ class TorchSDPAMetadataBuilderV1(AttentionMetadataBuilder[TorchSDPAMetadata]):
 
         return True
 
-    def build(self,
-              common_prefix_len: int,
-              common_attn_metadata: CommonAttentionMetadata,
-              fast_build: bool = False) -> TorchSDPAMetadata:
+    def build(self, common_prefix_len: int,
+              common_attn_metadata: CommonAttentionMetadata):
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len
