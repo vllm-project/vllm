@@ -3,6 +3,7 @@
 
 import torch
 
+from vllm.attention import AttentionType
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import (BlockHash, BlockHashWithGroupId,
                                          KVCacheBlock)
@@ -26,6 +27,7 @@ def test_sliding_window_possible_cached_prefix():
         dtype=torch.float32,
         sliding_window=4,
         use_mla=False,
+        attn_type=AttentionType.DECODER,
     )
 
     block_pool = BlockPool(num_gpu_blocks=100, enable_caching=True)
@@ -92,6 +94,7 @@ def test_sliding_window_remove_skipped_blocks():
         dtype=torch.float32,
         sliding_window=4,
         use_mla=False,
+        attn_type=AttentionType.DECODER,
     )
 
     block_pool = BlockPool(num_gpu_blocks=2000, enable_caching=True)
@@ -160,6 +163,7 @@ def test_get_num_blocks_to_allocate():
         dtype=torch.float32,
         sliding_window=4,  # Placeholder value, not related to test result
         use_mla=False,
+        attn_type=AttentionType.DECODER,
     )
 
     block_pool = BlockPool(num_gpu_blocks=100, enable_caching=True)
