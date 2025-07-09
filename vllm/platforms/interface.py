@@ -131,6 +131,9 @@ class Platform:
     # compilation strategy.
     simple_compile_backend: str = "inductor"
 
+    # The backend used for distributed communication.
+    dist_backend: str = ""
+
     supported_quantization: list[str] = []
 
     additional_env_vars: list[str] = []
@@ -304,7 +307,7 @@ class Platform:
         """
         Set the device for the current platform.
         """
-        torch.cuda.set_device(device)
+        raise NotImplementedError
 
     @classmethod
     def pre_register_and_update(cls,

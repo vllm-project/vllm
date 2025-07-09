@@ -542,18 +542,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     start_token_index:end_token_index] = new_token_ids
                 self.input_batch.num_tokens_no_spec[
                     req_index] = end_token_index
-                # Add spec_token_ids to token_ids_cpu.
-                spec_token_ids = (
-                    scheduler_output.scheduled_spec_decode_tokens.get(
-                        req_id, ()))
-                if spec_token_ids:
-                    start_index = end_token_index
-                    end_token_index += len(spec_token_ids)
-                    self.input_batch.token_ids_cpu[
-                        req_index,
-                        start_index:end_token_index] = spec_token_ids
-                # NOTE(woosuk): `num_tokens` here may include spec tokens.
                 self.input_batch.num_tokens[req_index] = end_token_index
+
+            # Add spec_token_ids to token_ids_cpu.
+            spec_token_ids = (
+                scheduler_output.scheduled_spec_decode_tokens.get(req_id, ()))
+            if spec_token_ids:
+                num_spec_tokens = len(spec_token_ids)
+                start_index = self.input_batch.num_tokens_no_spec[req_index]
+                end_token_index = start_index + num_spec_tokens
+                self.input_batch.token_ids_cpu[
+                    req_index, start_index:end_token_index] = spec_token_ids
+                # NOTE(woosuk): `num_tokens` here may include spec tokens.
+                self.input_batch.num_tokens[req_index] += num_spec_tokens
 
         # Add the new or resumed requests to the persistent batch.
         # The smaller empty indices are filled first.
@@ -1841,6 +1842,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         TensorizerLoader.save_model(
             self.model,
             tensorizer_config=tensorizer_config,
+            model_config=self.model_config,
         )
 
     def _get_prompt_logprobs_dict(
@@ -2252,8 +2254,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             encoder_budget = min(self.max_num_encoder_input_tokens,
                                  self.encoder_cache_size)
 
-            max_num_mm_items_encoder_budget = cdiv(encoder_budget,
-                                                   max_tokens_per_mm_item)
+            max_num_mm_items_encoder_budget = encoder_budget // \
+                max_tokens_per_mm_item
 
             # Check how many items of this modality can be supported by
             # the decoder budget.
@@ -2266,8 +2268,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             max_num_mm_items_decoder_budget = self.max_num_reqs * \
                 max_mm_items_per_req
 
-            max_num_mm_items = min(max_num_mm_items_encoder_budget,
-                                   max_num_mm_items_decoder_budget)
+            max_num_mm_items = max(
+                1,
+                min(max_num_mm_items_encoder_budget,
+                    max_num_mm_items_decoder_budget))
 
             logger.info(
                 "Encoder cache will be initialized with a budget of %s tokens,"
@@ -2277,7 +2281,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Create dummy batch of multimodal inputs.
             dummy_mm_kwargs = self.mm_registry.get_decoder_dummy_data(
                 model_config=self.model_config,
-                seq_len=self.max_num_tokens,
+                seq_len=max_tokens_per_mm_item,
                 mm_counts={
                     dummy_data_modality: 1
                 },
