@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Attention layer with FlashAttention."""
 from collections import defaultdict
 from dataclasses import dataclass
 from itertools import accumulate
@@ -55,7 +54,6 @@ class DifferentialFlashAttentionBackend(FlashAttentionBackend):
     ) -> Tuple[int, ...]:
         if block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
-        # return (2, num_blocks, block_size, num_kv_heads, head_size)
         return (2, 2, num_blocks, block_size, num_kv_heads // 2, head_size)
 
     @staticmethod
@@ -634,8 +632,9 @@ class DifferentialFlashAttentionImpl(AttentionImpl):
         self.differential_flash_attention_config = differential_flash_attention_config
         self.used_shared_kv_cache = self.differential_flash_attention_config.get(
             "used_shared_kv_cache", False)
-        if kv_sharing_target_layer_name is not None:
-            raise NotImplementedError("KV sharing is not supported in V0.")
+        # if kv_sharing_target_layer_name is not None:
+        #     raise NotImplementedError("KV sharing is not supported in V0.")
+        self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
         if blocksparse_params is not None:
             raise ValueError(
                 "FlashAttention does not support block-sparse attention.")

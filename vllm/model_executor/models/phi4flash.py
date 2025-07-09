@@ -138,7 +138,13 @@ class SambaYAttention(nn.Module):
                 "subln": self.subln,
             }   
         }
-        
+
+        if yoco_cross:
+            kv_shared_layer_index = config.num_hidden_layers//2 + 1
+            kv_sharing_target_layer_name = f"model.layers.{kv_shared_layer_index}.self_attn.attn"  # noqa: E501
+        else:
+            kv_sharing_target_layer_name = None
+
         self.attn = Attention(
             self.num_heads,
             self.head_dim,
@@ -147,7 +153,8 @@ class SambaYAttention(nn.Module):
             cache_config=cache_config,
             per_layer_sliding_window=sliding_window,
             prefix=f"{prefix}.attn",
-            attn_type=AttentionType.DECODER_DECODER if self.yoco_cross else AttentionType.DECODER,
+            attn_type=AttentionType.DECODER,
+            kv_sharing_target_layer_name=kv_sharing_target_layer_name,
             **params
         )
 
@@ -157,9 +164,6 @@ class SambaYAttention(nn.Module):
     def forward(
             self,
             hidden_states: torch.Tensor,
-            positions: torch.Tensor,
-            kv_cache: torch.Tensor,
-            attn_metadata: AttentionMetadata,
         ):
 
         if not self.yoco_cross: # need to generate kv-cache
@@ -168,9 +172,6 @@ class SambaYAttention(nn.Module):
             attn_output = self.attn(q, k, v)
         else: # re-use the kv cache, full attention
             q = self.Wqkv(hidden_states)
-            virtual_engine = get_virtual_engine()
-            if self.attn.kv_cache[virtual_engine].numel() == 0:
-                 self.attn.kv_cache[virtual_engine] = kv_cache
             attn_output = self.attn(q, None, None)
         attn_output = attn_output.view(-1, self.num_heads * self.head_dim)
         return self.out_proj(attn_output)
@@ -417,15 +418,14 @@ class SambaYDecoderLayer(nn.Module):
         self,
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
-        kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
         mamba_cache_params: MambaCacheParams,
         ssm_output: Optional[torch.LongTensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         if self.use_mamba:
-            assert kv_cache is None and mamba_cache_params is not None
+            assert mamba_cache_params is not None
         else:
-            assert kv_cache is not None and mamba_cache_params is None
+            assert mamba_cache_params is None
 
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states.to(dtype=self.input_layernorm.weight.dtype))
@@ -441,9 +441,6 @@ class SambaYDecoderLayer(nn.Module):
         else:
             attn_outputs = self.attn(
                 hidden_states,
-                positions,
-                kv_cache,
-                attn_metadata,
             )
         hidden_states = residual + attn_outputs
         residual = hidden_states
@@ -452,12 +449,7 @@ class SambaYDecoderLayer(nn.Module):
         hidden_states = residual + hidden_states
 
         return hidden_states, ssm_output
-
-def get_kv_cache(layer_name):
-    forward_context: ForwardContext = get_forward_context()
-    self = forward_context.no_compile_layers[layer_name]
-    kv_cache = self.kv_cache[forward_context.virtual_engine]
-    return kv_cache
+    
 
 class SambaYModel(nn.Module):
 
@@ -513,16 +505,16 @@ class SambaYModel(nn.Module):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
 
-        kv_cache_idx = 0
         mamba_state_idx = 0
         ssm_output = None
         for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
             if i == self.config.num_hidden_layers // 2 + 2:
                 # profile run
+                kv_cache_idx = self.config.num_hidden_layers//2 + 1
                 cache_layer = self.layers[kv_cache_idx]
-                kv_cache = get_kv_cache(cache_layer.attn.attn.layer_name)
-                if kv_cache.numel() == 0:
+                kv_cache = cache_layer.attn.attn.kv_cache
+                if kv_cache[0].numel() == 0:
                     break
 
                 # Starting from this layer, we do not need to cuculate the kv cache since we reuse
@@ -546,31 +538,14 @@ class SambaYModel(nn.Module):
                 hidden_states, ssm_output = layer(
                     hidden_states,
                     positions,
-                    None, # kv_cache
                     attn_metadata,
                     mamba_cache,
                     ssm_output = ssm_output
                 )
             else:
-                if i < self.config.num_hidden_layers // 2:
-                    # sliding window attention
-                    cache_layer = self.layers[i]
-                    kv_cache = get_kv_cache(cache_layer.attn.attn.layer_name)
-                    kv_cache_idx = i
-                elif not layer.yoco_cross:
-                    # full attention that generates kv cache
-                    cache_layer = self.layers[i]
-                    kv_cache = get_kv_cache(cache_layer.attn.attn.layer_name)
-                    kv_cache_idx = i
-                else:
-                    # full attention that reuses kv cache
-                    cache_layer = self.layers[kv_cache_idx]
-                    kv_cache = get_kv_cache(cache_layer.attn.attn.layer_name)
-
                 hidden_states, ssm_output = layer(
                     hidden_states,
                     positions,
-                    kv_cache,
                     attn_metadata,
                     None, # mamba_cache_params
                     ssm_output = ssm_output

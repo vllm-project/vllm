@@ -160,9 +160,9 @@ class Attention(nn.Module):
         self.attn_type = attn_type
 
         if kv_sharing_target_layer_name is not None:
-            if not envs.VLLM_USE_V1:
-                raise NotImplementedError(
-                    "Cross-layer KV sharing is not supported in V0.")
+            # if not envs.VLLM_USE_V1:
+            #     raise NotImplementedError(
+            #         "Cross-layer KV sharing is not supported in V0.")
 
             validate_kv_sharing_target(
                 prefix,

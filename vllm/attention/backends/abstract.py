@@ -32,8 +32,6 @@ class AttentionType:
     ENCODER_ONLY = "encoder_only"
     # Attention between dec. Q and enc. K/V for encoder-decoder
     ENCODER_DECODER = "encoder_decoder"
-    # Attention layer that reuse kv cache
-    DECODER_DECODER = "decoder_decoder"
 
 
 class AttentionBackend(ABC):
