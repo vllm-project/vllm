@@ -31,8 +31,10 @@ from vllm.v1.core.kv_cache_utils import (get_kv_cache_config,
 from vllm.v1.core.sched.interface import SchedulerInterface
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler as V1Scheduler
+# eep-dev
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
-                            EngineCoreRequestType, UtilityOutput)
+                            EngineCoreRequestType,
+                            ReconfigureDistributedRequest, UtilityOutput)
 from vllm.v1.engine.mm_input_cache import MirroredProcessingCache
 from vllm.v1.engine.utils import EngineHandshakeMetadata, EngineZmqAddresses
 from vllm.v1.executor.abstract import Executor
@@ -76,6 +78,9 @@ class EngineCore:
         if executor_fail_callback is not None:
             self.model_executor.register_failure_callback(
                 executor_fail_callback)
+
+        # eep-dev
+        self.available_gpu_memory_for_kv_cache = -1
 
         # Setup KV Caches and update CacheConfig after profiling.
         num_gpu_blocks, num_cpu_blocks, kv_cache_config = \
@@ -137,9 +142,19 @@ class EngineCore:
         # Get all kv cache needed by the model
         kv_cache_specs = self.model_executor.get_kv_cache_specs()
 
-        # Profiles the peak memory usage of the model to determine how much
-        # memory can be allocated for kv cache.
-        available_gpu_memory = self.model_executor.determine_available_memory()
+        # eep-dev
+        if os.environ.get("VLLM_EEP_RECONFIGURE_LAUNCH") == "1":
+            dp_group = getattr(self, "dp_group", None)
+            assert dp_group is not None
+            kv_cache_memory = ParallelConfig.sync_kv_cache_memory(
+                dp_group, -1)
+            available_gpu_memory = [kv_cache_memory] * len(kv_cache_specs)
+        else:
+            # Profiles the peak memory usage of the model to determine how much
+            # memory can be allocated for kv cache.
+            available_gpu_memory = (
+                self.model_executor.determine_available_memory())
+            self.available_gpu_memory_for_kv_cache = available_gpu_memory[0]
 
         assert len(kv_cache_specs) == len(available_gpu_memory)
         # Get the kv cache tensor size
@@ -853,7 +868,7 @@ class DPEngineCoreProc(EngineCoreProc):
         local_dp_rank = vllm_config.parallel_config.data_parallel_rank_local
 
         assert dp_size > 1
-        assert 0 <= local_dp_rank <= dp_rank < dp_size
+        # assert 0 <= local_dp_rank <= dp_rank < dp_size
 
         if vllm_config.kv_transfer_config is not None:
             # modify the engine_id and append the local_dp_rank to it to ensure
@@ -976,6 +991,48 @@ class DPEngineCoreProc(EngineCoreProc):
 
         return ParallelConfig.has_unfinished_dp(self.dp_group,
                                                 local_unfinished)
+
+    # eep-dev
+    def reinitialize_distributed(
+            self, reconfig_request: ReconfigureDistributedRequest) -> None:
+        stateless_destroy_torch_distributed_process_group(self.dp_group)
+        self.shutdown()
+
+        parallel_config = self.vllm_config.parallel_config
+        old_dp_size = parallel_config.data_parallel_size
+        parallel_config.data_parallel_size = \
+            reconfig_request.new_data_parallel_size
+        if reconfig_request.new_data_parallel_rank != -1:
+            parallel_config.data_parallel_rank = \
+                reconfig_request.new_data_parallel_rank
+        # local rank specifies device visibility, it should not be changed
+        assert reconfig_request.new_data_parallel_rank_local == -1
+        parallel_config.data_parallel_master_ip = \
+            reconfig_request.new_data_parallel_master_ip
+        parallel_config.data_parallel_master_port = \
+            reconfig_request.new_data_parallel_master_port
+        if reconfig_request.new_data_parallel_rank != -2:
+            self.dp_rank = parallel_config.data_parallel_rank
+            self.dp_group = parallel_config.stateless_init_dp_group()
+        reconfig_request.new_data_parallel_master_port = \
+            parallel_config.data_parallel_master_port
+
+        self.model_executor.reinitialize_distributed(reconfig_request)
+        if reconfig_request.new_data_parallel_size > old_dp_size:
+            assert self.available_gpu_memory_for_kv_cache > 0
+            # broadcast KV cache available memory for _initialize_kv_caches
+            # on new EngineCore
+            ParallelConfig.sync_kv_cache_memory(
+                self.dp_group, self.available_gpu_memory_for_kv_cache)
+            # NOTE(yongji): newly joined workers require dummy_run even
+            # CUDA graph is not used
+            self.model_executor.collective_rpc("compile_or_warm_up_model")
+        if reconfig_request.new_data_parallel_rank == -2:
+            self.shutdown()
+            logger.info("DPEngineCoreProc %s shutdown", self.dp_rank)
+        else:
+            logger.info("Distributed environment reinitialized for DP rank %s",
+                        self.dp_rank)
 
 
 class DPEngineCoreActor(DPEngineCoreProc):

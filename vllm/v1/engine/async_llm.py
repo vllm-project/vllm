@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
+import time
 from collections.abc import AsyncGenerator, Mapping
 from copy import copy
 from typing import Any, Optional, Union
@@ -132,6 +133,7 @@ class AsyncLLM(EngineClient):
             for stat_logger in self.stat_loggers[0]:
                 stat_logger.log_engine_initialized()
         self.output_handler: Optional[asyncio.Task] = None
+        self.scaling = False
         try:
             # Start output handler eagerly if we are in the asyncio eventloop.
             asyncio.get_running_loop()
@@ -607,6 +609,75 @@ class AsyncLLM(EngineClient):
         """
         return await self.engine_core.collective_rpc_async(
             method, timeout, args, kwargs)
+
+    # eep-dev
+    async def wait_for_requests_to_drain(self, drain_timeout: int = 300):
+        """Wait for all requests to be drained."""
+        start_time = time.time()
+        while time.time() - start_time < drain_timeout:
+            if not self.engine_core.dp_engines_running():
+                logger.info("Engines are idle, requests have been drained")
+                return
+
+            logger.info(
+                "Engines are still running, waiting for requests to drain...")
+            await asyncio.sleep(1)  # Wait 1 second before checking again
+
+        raise TimeoutError(f"Timeout reached after {drain_timeout} seconds "
+                           "waiting for requests to drain.")
+
+    async def scale(self,
+                    new_data_parallel_size: int,
+                    drain_timeout: int = 300):
+        """
+        Scale up or down the data parallel size by adding or removing
+        engine cores.
+        Args:
+            new_data_parallel_size: The new number of data parallel workers
+            drain_timeout:
+                Maximum time to wait for requests to drain (seconds)
+        """
+        from vllm.v1.engine.core_client import RayDPClient
+        
+        if not isinstance(self.engine_core, RayDPClient):
+            raise NotImplementedError(
+                "Scale up/down only supported by RayDPClient")
+
+        self.scaling = True
+        old_data_parallel_size = \
+            self.vllm_config.parallel_config.data_parallel_size
+        try:
+            logger.info(
+                "Waiting for requests to drain before "
+                "scaling up to %s engines...", new_data_parallel_size)
+            await self.wait_for_requests_to_drain(drain_timeout)
+            logger.info(
+                "Requests have been drained, proceeding with scale "
+                "to %s engines", new_data_parallel_size)
+            if new_data_parallel_size > old_data_parallel_size:
+                await self.engine_core.scale_up(new_data_parallel_size)
+            else:
+                await self.engine_core.scale_down(new_data_parallel_size)
+            self.vllm_config.parallel_config.data_parallel_size = \
+                new_data_parallel_size
+
+            # recreate stat loggers
+            if new_data_parallel_size > old_data_parallel_size:
+                stat_loggers: list[
+                    list[StatLoggerBase]] = setup_default_loggers(
+                        vllm_config=self.vllm_config,
+                        log_stats=self.log_stats,
+                        engine_num=new_data_parallel_size,
+                        custom_stat_loggers=None,
+                    )
+                num_new_engines = len(stat_loggers) - len(self.stat_loggers)
+                self.stat_loggers.extend(stat_loggers[-num_new_engines:])
+            else:
+                for _ in range(old_data_parallel_size -
+                               new_data_parallel_size):
+                    self.stat_loggers.pop()
+        finally:
+            self.scaling = False
 
     @property
     def is_running(self) -> bool:

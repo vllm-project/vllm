@@ -23,6 +23,8 @@ from vllm.model_executor import set_random_seed
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils import GiB_bytes, MemorySnapshot, memory_profiling
+# eep-dev
+from vllm.v1.engine import ReconfigureDistributedRequest
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.utils import report_usage_stats
@@ -182,8 +184,9 @@ class Worker(WorkerBase):
         else:
             from contextlib import nullcontext
             context = nullcontext()
+        reconfigure = os.environ.get("VLLM_EEP_RECONFIGURE_LAUNCH") == "1"
         with context:
-            self.model_runner.load_model()
+            self.model_runner.load_model(reconfigure=reconfigure)
 
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
@@ -346,6 +349,122 @@ class Worker(WorkerBase):
     def check_health(self) -> None:
         # worker will always be healthy as long as it's running.
         return
+
+    def reinitialize_distributed(
+            self, reconfig_request: ReconfigureDistributedRequest) -> None:
+        from vllm.config import set_current_vllm_config
+        from vllm.distributed.parallel_state import (
+            cleanup_dist_env_and_memory, get_dp_group, get_ep_group,
+            prepare_communication_buffer_for_model)
+        from vllm.model_executor.layers.fused_moe.layer import (
+            FusedMoEParallelConfig)
+
+        old_ep_size = get_ep_group().world_size
+        old_ep_rank = get_ep_group().rank
+        new_ep_size = reconfig_request.new_data_parallel_size * get_tp_group(
+        ).world_size * get_pp_group().world_size
+        if new_ep_size < old_ep_size:
+            # scale down
+            if get_ep_group().rank == 0:
+                logger.info("[Elastic EP] Starting expert resharding "
+                            "before scaling down...")
+            rank_mapping = {
+                old_ep_rank: old_ep_rank if old_ep_rank < new_ep_size else -1
+                for old_ep_rank in range(old_ep_size)
+            }
+            self.model_runner.eplb_state.rearrange(self.model_runner.model,
+                                                   execute_shuffle=True,
+                                                   global_expert_load=None,
+                                                   rank_mapping=rank_mapping)
+            torch.cuda.synchronize()
+            if get_ep_group().rank == 0:
+                logger.info("[Elastic EP] Expert resharding completed!")
+
+        cleanup_dist_env_and_memory()
+
+        if reconfig_request.new_data_parallel_rank == -2:
+            assert old_ep_rank >= new_ep_size
+            # shutdown
+            return
+
+        # Update parallel config with provided reconfig_request
+        parallel_config = self.vllm_config.parallel_config
+        parallel_config.data_parallel_size = \
+            reconfig_request.new_data_parallel_size
+        # Only update rank if new value is provided (-1 means keep current)
+        if reconfig_request.new_data_parallel_rank != -1:
+            parallel_config.data_parallel_rank = \
+                reconfig_request.new_data_parallel_rank
+        if reconfig_request.new_data_parallel_rank_local != -1:
+            parallel_config.data_parallel_rank_local = \
+                reconfig_request.new_data_parallel_rank_local
+        parallel_config.data_parallel_master_ip = \
+            reconfig_request.new_data_parallel_master_ip
+        parallel_config.data_parallel_master_port = \
+            reconfig_request.new_data_parallel_master_port
+
+        with set_current_vllm_config(self.vllm_config):
+            init_worker_distributed_environment(self.vllm_config, self.rank,
+                                                self.distributed_init_method,
+                                                self.local_rank)
+        moe_modules = [
+            module for module in self.model_runner.model.modules()
+            if module.__class__.__name__ == "FusedMoE"
+        ]
+        num_local_experts = moe_modules[0].moe_config.num_local_experts
+        assert all(module.moe_config.num_local_experts == num_local_experts
+                   for module in moe_modules), (
+                       "All MoE modules must have the same number of experts")
+        new_ep_size = get_ep_group().world_size
+        for module in moe_modules:
+            module.moe_config.num_experts = num_local_experts * new_ep_size
+            module.global_num_experts = module.moe_config.num_experts
+            module.moe_parallel_config = FusedMoEParallelConfig.make(
+                tp_size_=get_tp_group().world_size,
+                dp_size_=get_dp_group().world_size,
+                vllm_parallel_config=parallel_config,
+            )
+            module.moe_config.moe_parallel_config = module.moe_parallel_config
+        if new_ep_size < old_ep_size:
+            num_local_physical_experts = num_local_experts
+            new_physical_experts = \
+                self.model_runner.eplb_state.physical_to_logical_map.shape[1]
+            parallel_config.num_redundant_experts = (
+                new_physical_experts -
+                self.model_runner.eplb_state.logical_replica_count.shape[1])
+        else:
+            num_local_physical_experts = torch.tensor([num_local_experts],
+                                                      dtype=torch.int32,
+                                                      device="cpu")
+            torch.distributed.broadcast(num_local_physical_experts,
+                                        group=get_ep_group().cpu_group,
+                                        group_src=0)
+            num_local_physical_experts = num_local_physical_experts.item()
+            new_physical_experts = num_local_physical_experts * new_ep_size
+            global_expert_load = self.model_runner.eplb_state.rearrange(
+                self.model_runner.model, execute_shuffle=False)
+            parallel_config.num_redundant_experts = (
+                new_physical_experts - global_expert_load.shape[1])
+        prepare_communication_buffer_for_model(self.model_runner.model)
+        self.model_runner.model.update_physical_experts_metadata(
+            num_physical_experts=new_physical_experts,
+            num_local_physical_experts=num_local_physical_experts)
+        if new_ep_size > old_ep_size:
+            if get_ep_group().rank == 0:
+                logger.info("[Elastic EP] Starting expert resharding "
+                            "after scaling up...")
+            rank_mapping = {
+                old_ep_rank: old_ep_rank
+                for old_ep_rank in range(old_ep_size)
+            }
+            self.model_runner.eplb_state.rearrange(
+                self.model_runner.model,
+                execute_shuffle=True,
+                global_expert_load=global_expert_load,
+                rank_mapping=rank_mapping)
+            if get_ep_group().rank == 0:
+                logger.info("[Elastic EP] Expert resharding completed!")
+        self.model_runner.eplb_state.expert_rearrangement_step = 0
 
     def save_sharded_state(
         self,

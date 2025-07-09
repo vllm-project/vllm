@@ -31,6 +31,8 @@ from vllm.executor.multiproc_worker_utils import (
 from vllm.logger import init_logger
 from vllm.utils import (get_distributed_init_method, get_mp_context,
                         get_open_port)
+# eep-dev
+from vllm.v1.engine import ReconfigureDistributedRequest
 from vllm.v1.executor.abstract import Executor, FailureCallback
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.worker.worker_base import WorkerWrapperBase
@@ -267,6 +269,15 @@ class MultiprocExecutor(Executor):
 
     def check_health(self) -> None:
         self.collective_rpc("check_health", timeout=10)
+        return
+
+    # eep-dev
+    def reinitialize_distributed(
+            self, reconfig_request: ReconfigureDistributedRequest) -> None:
+        self.collective_rpc("reinitialize_distributed",
+                            args=(reconfig_request, ))
+        if reconfig_request.new_data_parallel_rank == -2:
+            self.shutdown()
         return
 
     @property

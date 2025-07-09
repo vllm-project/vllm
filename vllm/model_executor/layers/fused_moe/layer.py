@@ -239,7 +239,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         moe: FusedMoEConfig,
     ) -> FusedMoEPermuteExpertsUnpermute:
 
-        assert self.fused_experts == fused_experts
+        # eep-dev
+        # assert self.fused_experts == fused_experts
 
         if (prepare_finalize.activation_format ==
                 FusedMoEActivationFormat.BatchedExperts):
@@ -348,8 +349,10 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         logical_replica_count: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if enable_eplb:
-            raise NotImplementedError(
-                "EPLB not supported for `UnquantizedFusedMoEMethod` yet.")
+            assert expert_load_view is not None
+            assert logical_to_physical_map is not None
+            assert logical_replica_count is not None
+            assert isinstance(layer, FusedMoE)
 
         return self.forward(
             x=x,
@@ -366,7 +369,12 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias,
             activation=activation,
-            apply_router_weight_on_input=apply_router_weight_on_input)
+            apply_router_weight_on_input=apply_router_weight_on_input,
+            enable_eplb=enable_eplb,
+            expert_load_view=expert_load_view,
+            logical_to_physical_map=logical_to_physical_map,
+            logical_replica_count=logical_replica_count,
+        )
 
     def forward_cuda(
         self,
@@ -385,6 +393,10 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
+        enable_eplb: bool = False,
+        expert_load_view: Optional[torch.Tensor] = None,
+        logical_to_physical_map: Optional[torch.Tensor] = None,
+        logical_replica_count: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
 
         topk_weights, topk_ids = FusedMoE.select_experts(
@@ -398,7 +410,12 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias,
-            indices_type=self.topk_indices_dtype)
+            indices_type=self.topk_indices_dtype,
+            enable_eplb=enable_eplb,
+            expert_map=expert_map,
+            expert_load_view=expert_load_view,
+            logical_to_physical_map=logical_to_physical_map,
+            logical_replica_count=logical_replica_count)
 
         if self.rocm_aiter_moe_enabled:
             return self.rocm_aiter_fused_experts(
@@ -739,7 +756,8 @@ class FusedMoE(torch.nn.Module):
         if self.enable_eplb:
             from vllm.model_executor.layers.quantization.fp8 import (
                 Fp8MoEMethod)
-            if not isinstance(quant_method, Fp8MoEMethod):
+            if not isinstance(quant_method,
+                              (Fp8MoEMethod, UnquantizedFusedMoEMethod)):
                 # TODO: Add support for additional quantization methods.
                 # The implementation for other quantization methods does not
                 # contain essential differences, but the current quant API
@@ -822,6 +840,15 @@ class FusedMoE(torch.nn.Module):
     @property
     def use_deepep_ll_kernels(self):
         return self.moe_parallel_config.use_deepep_ll_kernels
+
+    # eep-dev
+    def update_expert_map(self):
+        # ep_size and ep_rank should already be updated
+        with self.expert_map.device:
+            self.local_num_experts, self.expert_map = determine_expert_map(
+                ep_size=self.ep_size,
+                ep_rank=self.ep_rank,
+                global_num_experts=self.global_num_experts)
 
     def _load_per_tensor_weight_scale(self, shard_id: str,
                                       param: torch.nn.Parameter,

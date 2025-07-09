@@ -1766,8 +1766,37 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 draft_token_ids.append(drafter_output.tolist())
         return draft_token_ids
 
-    def load_model(self) -> None:
+    def load_model(self, reconfigure: bool = False) -> None:
         logger.info("Starting to load model %s...", self.model_config.model)
+        # eep-dev
+        if reconfigure:
+            from vllm.distributed.parallel_state import get_ep_group
+            num_local_physical_experts = torch.empty(1,
+                                                     dtype=torch.int32,
+                                                     device="cpu")
+            torch.distributed.broadcast(num_local_physical_experts,
+                                        group=get_ep_group().cpu_group,
+                                        group_src=0)
+            num_local_physical_experts = num_local_physical_experts.item()
+            new_ep_size = get_ep_group().world_size
+            global_expert_load, old_global_expert_indices = (
+                EplbState.recv_state())
+            num_logical_experts = global_expert_load.shape[1]
+            self.parallel_config.num_redundant_experts = (
+                num_local_physical_experts * new_ep_size - num_logical_experts)
+            assert old_global_expert_indices.shape[
+                1] % num_local_physical_experts == 0
+            old_ep_size = old_global_expert_indices.shape[
+                1] // num_local_physical_experts
+            rank_mapping = {
+                old_ep_rank: old_ep_rank
+                for old_ep_rank in range(old_ep_size)
+            }
+        else:
+            global_expert_load = None
+            old_global_expert_indices = None
+            rank_mapping = None
+
         with DeviceMemoryProfiler() as m:  # noqa: SIM117
             time_before_load = time.perf_counter()
             model_loader = get_model_loader(self.load_config)
@@ -1811,6 +1840,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.model,
                 self.device,
                 self.parallel_config,
+                global_expert_load,
+                old_global_expert_indices,
+                rank_mapping,
             )
 
     def save_tensorized_model(

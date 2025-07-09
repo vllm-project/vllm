@@ -630,6 +630,11 @@ async def create_chat_completion(request: ChatCompletionRequest,
         return base(raw_request).create_error_response(
             message="The model does not support Chat Completions API")
 
+    if raw_request.app.state.scaling:
+        raise HTTPException(
+            status_code=503,
+            detail="The model is currently scaling. Please try again later.")
+
     generator = await handler.create_chat_completion(request, raw_request)
 
     if isinstance(generator, ErrorResponse):
@@ -668,6 +673,11 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
         return base(raw_request).create_error_response(
             message="The model does not support Completions API")
 
+    if raw_request.app.state.scaling:
+        raise HTTPException(
+            status_code=503,
+            detail="The model is currently scaling. Please try again later.")
+
     try:
         generator = await handler.create_completion(request, raw_request)
     except OverflowError as e:
@@ -703,6 +713,11 @@ async def create_embedding(request: EmbeddingRequest, raw_request: Request):
     if handler is None:
         return base(raw_request).create_error_response(
             message="The model does not support Embeddings API")
+
+    if raw_request.app.state.scaling:
+        raise HTTPException(
+            status_code=503,
+            detail="The model is currently scaling. Please try again later.")
 
     generator = await handler.create_embedding(request, raw_request)
 
@@ -1030,6 +1045,53 @@ if envs.VLLM_SERVER_DEV_MODE:
         logger.info("check whether the engine is sleeping")
         is_sleeping = await engine_client(raw_request).is_sleeping()
         return JSONResponse(content={"is_sleeping": is_sleeping})
+
+
+# eep-dev
+@router.post("/scale", dependencies=[Depends(validate_json_request)])
+async def scale(raw_request: Request):
+    try:
+        body = await raw_request.json()
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=400,
+                            detail="Invalid JSON format") from e  # noqa: B904
+
+    new_data_parallel_size = body.get("new_data_parallel_size")
+    drain_timeout = body.get("drain_timeout", 120)  # Default 2 minutes
+
+    if new_data_parallel_size is None:
+        raise HTTPException(status_code=400,
+                            detail="new_data_parallel_size is required")
+
+    if not isinstance(new_data_parallel_size,
+                      int) or new_data_parallel_size <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="new_data_parallel_size must be a positive integer")
+
+    if not isinstance(drain_timeout, int) or drain_timeout <= 0:
+        raise HTTPException(status_code=400,
+                            detail="drain_timeout must be a positive integer")
+
+    # Set scaling flag to prevent new requests
+    raw_request.app.state.scaling = True
+    client = engine_client(raw_request)
+    try:
+        await client.scale(new_data_parallel_size, drain_timeout)
+        return JSONResponse({
+            "message":
+            f"Scaled up to {new_data_parallel_size} "
+            "data parallel engines",
+        })
+    except TimeoutError as e:
+        raise HTTPException(
+            status_code=408,
+            detail="Scale up failed due to request drain timeout "
+            f"after {drain_timeout} seconds") from e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="Scale up failed") from e
+    finally:
+        raw_request.app.state.scaling = False
 
 
 @router.post("/invocations",
@@ -1586,6 +1648,7 @@ async def init_app_state(
 
     state.enable_server_load_tracking = args.enable_server_load_tracking
     state.server_load_metrics = 0
+    state.scaling = False
 
 
 def create_server_socket(addr: tuple[str, int]) -> socket.socket:
