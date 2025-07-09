@@ -1,7 +1,4 @@
----
-title: LiteLLM
----
-[](){ #deployment-litellm }
+# LiteLLM
 
 [LiteLLM](https://github.com/BerriAI/litellm) call all LLM APIs using the OpenAI format [Bedrock, Huggingface, VertexAI, TogetherAI, Azure, OpenAI, Groq etc.]
 
@@ -34,7 +31,7 @@ vllm serve qwen/Qwen1.5-0.5B-Chat
 
 - Call it with litellm:
 
-??? Code
+??? code
 
     ```python
     import litellm 
