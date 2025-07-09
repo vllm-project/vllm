@@ -36,6 +36,7 @@ from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationMethods
+from vllm.platforms import CpuArchEnum, current_platform
 from vllm.plugins import load_general_plugins
 from vllm.reasoning import ReasoningParserManager
 from vllm.test_utils import MODEL_WEIGHTS_S3_BUCKET, MODELS_ON_S3
@@ -1006,41 +1007,27 @@ class EngineArgs:
             override_attention_dtype=self.override_attention_dtype,
         )
 
-    def valid_tensorizer_config_provided(self) -> bool:
-        """
-        Checks if a parseable TensorizerConfig was passed to
-        self.model_loader_extra_config. It first checks if the config passed
-        is a dict or a TensorizerConfig object directly, and if the latter is
-        true (by checking that the object has TensorizerConfig's
-        .to_serializable() method), converts it in to a serializable dict
-        format
-        """
-        if self.model_loader_extra_config:
-            if hasattr(self.model_loader_extra_config, "to_serializable"):
-                self.model_loader_extra_config = (
-                    self.model_loader_extra_config.to_serializable())
-            for allowed_to_pass in ["tensorizer_uri", "tensorizer_dir"]:
-                try:
-                    self.model_loader_extra_config[allowed_to_pass]
-                    return False
-                except KeyError:
-                    pass
-        return True
+    def validate_tensorizer_args(self):
+        from vllm.model_executor.model_loader.tensorizer import (
+            TensorizerConfig)
+        for key in self.model_loader_extra_config:
+            if key in TensorizerConfig._fields:
+                self.model_loader_extra_config["tensorizer_config"][
+                    key] = self.model_loader_extra_config[key]
 
     def create_load_config(self) -> LoadConfig:
 
         if self.quantization == "bitsandbytes":
             self.load_format = "bitsandbytes"
 
-        if (self.load_format == "tensorizer"
-                and self.valid_tensorizer_config_provided()):
-            logger.info("Inferring Tensorizer args from %s", self.model)
-            self.model_loader_extra_config = {"tensorizer_dir": self.model}
-        else:
-            logger.info(
-                "Using Tensorizer args from --model-loader-extra-config. "
-                "Note that you can now simply pass the S3 directory in the "
-                "model tag instead of providing the JSON string.")
+        if self.load_format == "tensorizer":
+            if hasattr(self.model_loader_extra_config, "to_serializable"):
+                self.model_loader_extra_config = (
+                    self.model_loader_extra_config.to_serializable())
+            self.model_loader_extra_config["tensorizer_config"] = {}
+            self.model_loader_extra_config["tensorizer_config"][
+                "tensorizer_dir"] = self.model
+            self.validate_tensorizer_args()
 
         return LoadConfig(
             load_format=self.load_format,
@@ -1100,7 +1087,6 @@ class EngineArgs:
         If VLLM_USE_V1 is specified by the user but the VllmConfig
         is incompatible, we raise an error.
         """
-        from vllm.platforms import current_platform
         current_platform.pre_register_and_update()
 
         device_config = DeviceConfig(
@@ -1127,9 +1113,16 @@ class EngineArgs:
         # Set default arguments for V0 or V1 Engine.
         if use_v1:
             self._set_default_args_v1(usage_context, model_config)
+            # Disable chunked prefill for POWER (ppc64le)/ARM CPUs in V1
+            if current_platform.is_cpu(
+            ) and current_platform.get_cpu_architecture() in (
+                    CpuArchEnum.POWERPC, CpuArchEnum.ARM):
+                logger.info(
+                    "Chunked prefill is not supported for ARM and POWER CPUs; "
+                    "disabling it for V1 backend.")
+                self.enable_chunked_prefill = False
         else:
             self._set_default_args_v0(model_config)
-
         assert self.enable_chunked_prefill is not None
 
         if envs.VLLM_ATTENTION_BACKEND in [STR_DUAL_CHUNK_FLASH_ATTN_VAL]:
@@ -1259,7 +1252,6 @@ class EngineArgs:
             if self.enable_chunked_prefill and self.pipeline_parallel_size > 1:
                 raise ValueError("Multi-Step Chunked-Prefill is not supported "
                                  "for pipeline-parallel-size > 1")
-            from vllm.platforms import current_platform
             if current_platform.is_cpu():
                 logger.warning("Multi-Step (--num-scheduler-steps > 1) is "
                                "currently not supported for CPUs and has been "
@@ -1409,7 +1401,6 @@ class EngineArgs:
         # Skip this check if we are running on a non-GPU platform,
         # or if the device capability is not available
         # (e.g. in a Ray actor without GPUs).
-        from vllm.platforms import current_platform
         if (current_platform.is_cuda()
                 and current_platform.get_device_capability()
                 and current_platform.get_device_capability().major < 8):
@@ -1670,7 +1661,6 @@ class EngineArgs:
         # as the platform that vLLM is running on (e.g. the case of scaling
         # vLLM with Ray) and has no GPUs. In this case we use the default
         # values for non-H100/H200 GPUs.
-        from vllm.platforms import current_platform
         try:
             device_memory = current_platform.get_device_total_memory()
             device_name = current_platform.get_device_name().lower()
@@ -1773,7 +1763,6 @@ class AsyncEngineArgs(EngineArgs):
         parser.add_argument('--disable-log-requests',
                             action='store_true',
                             help='Disable logging requests.')
-        from vllm.platforms import current_platform
         current_platform.pre_register_and_update(parser)
         return parser
 
