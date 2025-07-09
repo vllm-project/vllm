@@ -388,6 +388,8 @@ class QuarkW4A4MXFp4MoEMethod(QuarkMoEMethod):
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias)
 
+        # We pass `per_channel_quant=True` as OCP MXFP4 quantization is a
+        # per-token quantization scheme (with groups of `OCP_MX_BLOCK_SIZE`).
         out = fused_experts(
             x,
             layer.w13_weight,
@@ -405,5 +407,6 @@ class QuarkW4A4MXFp4MoEMethod(QuarkMoEMethod):
             a2_scale=None,
             block_shape=None,
             per_channel_quant=True,
+            activation=activation,
         )
         return out
