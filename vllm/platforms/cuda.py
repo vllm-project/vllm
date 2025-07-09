@@ -295,7 +295,8 @@ class CudaPlatformBase(Platform):
 
             logger.info_once(
                 "Using FlexAttention backend for %s on V1 engine.",
-                str(use_flex_attention_reason),
+                ", ".join(f"{k}={v}"
+                          for k, v in use_flex_attention_reason.items()),
             )
             return FLEX_ATTENTION_V1
 
