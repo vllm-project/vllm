@@ -1956,7 +1956,7 @@ class ParallelConfig:
 
     @staticmethod
     def sync_kv_cache_memory(dp_group: "ProcessGroup",
-                             kv_cache_memory: int) -> None:
+                             kv_cache_memory: int) -> int:
         if kv_cache_memory == -1:
             kv_cache_memory = torch.iinfo(torch.int64).max
         tensor = torch.tensor([kv_cache_memory],
