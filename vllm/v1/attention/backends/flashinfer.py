@@ -92,6 +92,15 @@ class FlashInferBackend(AttentionBackend):
             raise ValueError(f"Unknown cache layout format {cache_layout}.")
         return stride_order
 
+    @staticmethod
+    def get_fp8_dtype_for_flashinfer(kv_cache_dtype: str) -> torch.dtype:
+        if kv_cache_dtype in ("fp8", "fp8_e4m3"):
+            return torch.float8_e4m3fn
+        elif kv_cache_dtype == "fp8_e5m2":
+            return torch.float8_e5m2
+        else:
+            raise ValueError(f"Unrecognized FP8 dtype: {kv_cache_dtype}")
+
 
 @dataclass
 class PerLayerParameters:
@@ -479,6 +488,14 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         paged_kv_last_page_len = seq_lens % page_size
         paged_kv_last_page_len = torch.where(paged_kv_last_page_len == 0,
                                              page_size, paged_kv_last_page_len)
+        # gpu_model_runner converts cache_dtype into torch.uint8 if cache_dtype
+        # is fp8, so let's use the original cache_dtype from cache_config here.
+        cache_dtype = self.runner.cache_config.cache_dtype
+        if cache_dtype.startswith("fp8"):
+            kv_cache_dtype = FlashInferBackend.get_fp8_dtype_for_flashinfer(
+                cache_dtype)
+        else:
+            kv_cache_dtype = self.kv_cache_spec.dtype
 
         attn_metadata = FlashInferMetadata(
             num_actual_tokens=num_actual_tokens,
@@ -490,7 +507,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             num_kv_heads=self.kv_cache_spec.num_kv_heads,
             head_dim=self.kv_cache_spec.head_size,
             page_size=page_size,
-            data_type=self.kv_cache_spec.dtype,
+            data_type=kv_cache_dtype,
             q_data_type=self.runner.dtype,
             slot_mapping=slot_mapping,
             num_decodes=self._num_decodes,
@@ -622,6 +639,11 @@ class FlashInferImpl(AttentionImpl):
                 layer._k_scale,
                 layer._v_scale,
             )
+
+        if self.kv_cache_dtype.startswith("fp8"):
+            torch_dtype = FlashInferBackend.get_fp8_dtype_for_flashinfer(
+                self.kv_cache_dtype)
+            kv_cache = kv_cache.view(torch_dtype)
 
         window_left = (self.sliding_window[0]
                        if self.sliding_window is not None else -1)
