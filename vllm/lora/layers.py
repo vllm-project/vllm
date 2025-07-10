@@ -240,17 +240,31 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         added_tokens_mask = torch.where(x > self.base_layer.org_vocab_size - 1,
                                         1, 0)
-        embeddings_indices = torch.narrow(
-            self.punica_wrapper._embeddings_indices, 1, 0, x.size(0))
+        # NOTE: [torch.compile narrow_add_mul_workaround]
+        if torch.compiler.is_compiling():
+            x_plus_indices, indices_mul_added_tokens_mask = \
+                    narrow_add_mul_workaround(
+                        self.punica_wrapper._embeddings_indices,
+                        x,
+                        added_tokens_mask)
+            full_lora_a_embeddings = F.embedding(
+                x_plus_indices,
+                self.lora_a_stacked_2d,
+            )
+            full_output = self.base_layer.forward(
+                x + indices_mul_added_tokens_mask)
+        else:
+            embeddings_indices = torch.narrow(
+                self.punica_wrapper._embeddings_indices, 1, 0, x.size(0))
 
-        indices = embeddings_indices[1]
-        full_lora_a_embeddings = F.embedding(
-            x + indices,
-            self.lora_a_stacked_2d,
-        )
-        indices = embeddings_indices[0]
-        full_output = self.base_layer.forward(x +
-                                              (indices * added_tokens_mask))
+            indices = embeddings_indices[1]
+            full_lora_a_embeddings = F.embedding(
+                x + indices,
+                self.lora_a_stacked_2d,
+            )
+            indices = embeddings_indices[0]
+            full_output = self.base_layer.forward(x + (indices *
+                                                       added_tokens_mask))
 
         full_output_org = full_output
         if full_output.ndim == 3:
@@ -288,6 +302,29 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
     @property
     def weight(self):
         return self.base_layer.weight
+
+
+# NOTE: [torch.compile narrow_add_mul_workaround]
+# torch.compile has difficult compiling this sequence of operations.
+# with dynamic shapes: it causes an unnecessary specialization on x.shape[0].
+# To prevent it from doing this, we hide the sequence of operations inside a
+# custom operator. Note that this does not use vLLM's custom op infra
+# because (1) we explicitly want torch.compile to never look into it
+# and (2) the implementation for all backends is the same.
+@torch.library.custom_op("vllm::narrow_add_mul_workaround", mutates_args=())
+def narrow_add_mul_workaround(
+        indices: torch.Tensor, x: torch.Tensor,
+        added_tokens_mask: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    assert x.is_contiguous()
+    embeddings_indices = torch.narrow(indices, 1, 0, x.size(0))
+    indices_1 = embeddings_indices[1]
+    indices_0 = embeddings_indices[0]
+    return x + indices_1, indices_0 * added_tokens_mask
+
+
+@narrow_add_mul_workaround.register_fake
+def _(indices, x, added_tokens_mask):
+    return torch.empty_like(x), torch.empty_like(x)
 
 
 class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
