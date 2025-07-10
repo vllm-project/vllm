@@ -1855,8 +1855,8 @@ class TokenizerInfoResponse(OpenAIBaseModel):
     equivalent to tokenizer_config.json
     """
 
-    tokenizer_class: str
     model_config = ConfigDict(extra="allow")
+    tokenizer_class: str
 
 
 class LoadLoRAAdapterRequest(BaseModel):
