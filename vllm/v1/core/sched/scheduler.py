@@ -753,7 +753,7 @@ class Scheduler(SchedulerInterface):
         # NOTE(woosuk): As len(num_scheduled_tokens) can be up to 1K or more,
         # the below loop can be a performance bottleneck. We should do our best
         # to avoid expensive operations inside the loop.
-        stopped_running_reqs: set[str] = set()
+        stopped_running_reqs: set[Request] = set()
         stopped_preempted_reqs: set[Request] = set()
         for req_id, num_tokens_scheduled in num_scheduled_tokens.items():
             assert num_tokens_scheduled > 0
@@ -819,7 +819,7 @@ class Scheduler(SchedulerInterface):
             if stopped:
                 kv_transfer_params = self._free_request(request)
                 if status_before_stop == RequestStatus.RUNNING:
-                    stopped_running_reqs.add(req_id)
+                    stopped_running_reqs.add(request)
                 else:
                     stopped_preempted_reqs.add(request)
 
@@ -879,8 +879,7 @@ class Scheduler(SchedulerInterface):
         # Remove the stopped requests from the running and waiting queues.
         if stopped_running_reqs:
             self.running = [
-                req for req in self.running
-                if req.request_id not in stopped_running_reqs
+                req for req in self.running if req not in stopped_running_reqs
             ]
         if stopped_preempted_reqs:
             # This is a rare case and unlikely to impact performance.
