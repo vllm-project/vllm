@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """A GPU worker class."""
+import copy
 import gc
 import os
 from typing import TYPE_CHECKING, Optional
@@ -14,7 +15,9 @@ from vllm.config import VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment,
                               set_custom_all_reduce)
-from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
+from vllm.distributed.kv_transfer import (ensure_kv_transfer_initialized,
+                                          get_kv_transfer_group,
+                                          has_kv_transfer_group)
 from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -23,7 +26,7 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils import GiB_bytes, MemorySnapshot, memory_profiling
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
-from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
 from vllm.v1.utils import report_usage_stats
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.worker_base import WorkerBase
@@ -316,14 +319,29 @@ class Worker(WorkerBase):
 
         output = self.model_runner.execute_model(scheduler_output,
                                                  intermediate_tensors)
+
         parallel_config = self.vllm_config.parallel_config
         if parallel_config.distributed_executor_backend != "external_launcher" \
             and not get_pp_group().is_last_rank:
             assert isinstance(output, IntermediateTensors)
             get_pp_group().send_tensor_dict(output.tensors,
                                             all_gather_group=get_tp_group())
-            return None
+            output = EMPTY_MODEL_RUNNER_OUTPUT
+
         assert isinstance(output, ModelRunnerOutput)
+        if has_kv_transfer_group():
+            finished_sending, finished_recving = (
+                get_kv_transfer_group().get_finished(
+                    scheduler_output.finished_req_ids))
+            if finished_sending or finished_recving:
+                if output is EMPTY_MODEL_RUNNER_OUTPUT:
+                    output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
+                output.finished_sending = finished_sending
+                output.finished_recving = finished_recving
+            # with a connector, the scheduler expects output from all workers
+            return output
+
+        # return output only from the driver worker
         return output if self.is_driver_worker else None
 
     def profile(self, is_start: bool = True):
