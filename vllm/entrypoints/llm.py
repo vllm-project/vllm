@@ -28,8 +28,11 @@ from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
                                          apply_mistral_chat_template,
                                          parse_chat_messages,
                                          resolve_chat_template_content_format)
-from vllm.entrypoints.score_utils import (_cosine_similarity,
-                                          _validate_score_input_lens)
+from vllm.entrypoints.score_utils import (ScoreContentPartParam,
+                                          ScoreMultiModalParam,
+                                          _cosine_similarity,
+                                          _validate_score_input_lens,
+                                          get_score_prompt)
 from vllm.entrypoints.utils import _validate_truncation_size
 from vllm.inputs import PromptType, SingletonPrompt, TextPrompt, TokensPrompt
 from vllm.inputs.parse import parse_and_batch_prompt
@@ -1187,8 +1190,8 @@ class LLM:
     def _cross_encoding_score(
         self,
         tokenizer: AnyTokenizer,
-        text_1: list[str],
-        text_2: list[str],
+        data_1: Union[list[str], list[ScoreContentPartParam]],
+        data_2: Union[list[str], list[ScoreContentPartParam]],
         truncate_prompt_tokens: Optional[int] = None,
         use_tqdm: Union[bool, Callable[..., tqdm]] = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
@@ -1199,10 +1202,8 @@ class LLM:
             raise ValueError(
                 "Score API is only enabled for `--task embed or score`")
 
-        if len(text_1) == 1:
-            text_1 = text_1 * len(text_2)
-
-        input_pairs = [(t1, t2) for t1, t2 in zip(text_1, text_2)]
+        if len(data_1) == 1:
+            data_1 = data_1 * len(data_2)
 
         pooling_params = PoolingParams(use_cross_encoder=True)
         tokenization_kwargs: dict[str, Any] = {}
@@ -1211,19 +1212,41 @@ class LLM:
 
         parsed_prompts = []
 
-        for q, t in input_pairs:
-            if self.llm_engine.model_config.use_pad_token:
-                # cross_encoder models defaults to using pad_token.
-                prompt_inputs = tokenizer(text=q,
-                                          text_pair=t,
-                                          **tokenization_kwargs)
-            else:
-                # `llm as reranker` models defaults to not using pad_token.
-                prompt_inputs = tokenizer(text=q + t, **tokenization_kwargs)
-            engine_prompt = TokensPrompt(
-                prompt_token_ids=prompt_inputs["input_ids"],
-                token_type_ids=prompt_inputs.get("token_type_ids"))
-            parsed_prompts.append(engine_prompt)
+        input_pairs = [(t1, t2) for t1, t2 in zip(data_1, data_2)]
+
+        if self.llm_engine.model_config.is_multimodal_model:
+
+            model_config = self.llm_engine.model_config
+
+            for q, d in input_pairs:
+                _, engine_prompt = get_score_prompt(
+                    model_config=model_config,
+                    data_1=q,
+                    data_2=d,
+                    tokenizer=tokenizer,
+                    tokenization_kwargs=tokenization_kwargs,
+                )
+
+                parsed_prompts.append(engine_prompt)
+
+        else:
+
+            for q, t in input_pairs:
+                if self.llm_engine.model_config.use_pad_token:
+                    # cross_encoder models defaults to using pad_token.
+                    prompt_inputs = tokenizer(
+                        text=q,  # type: ignore[arg-type]
+                        text_pair=t,  # type: ignore[arg-type]
+                        **tokenization_kwargs)
+                else:
+                    # `llm as reranker` models defaults to not using pad_token.
+                    prompt_inputs = tokenizer(
+                        text=q + t,  # type: ignore[operator]
+                        **tokenization_kwargs)
+                engine_prompt = TokensPrompt(
+                    prompt_token_ids=prompt_inputs["input_ids"],
+                    token_type_ids=prompt_inputs.get("token_type_ids"))
+                parsed_prompts.append(engine_prompt)
 
         self._validate_and_add_requests(
             prompts=parsed_prompts,
@@ -1241,8 +1264,10 @@ class LLM:
 
     def score(
         self,
-        text_1: Union[SingletonPrompt, Sequence[SingletonPrompt]],
-        text_2: Union[SingletonPrompt, Sequence[SingletonPrompt]],
+        data_1: Union[SingletonPrompt, Sequence[SingletonPrompt],
+                      ScoreMultiModalParam],
+        data_2: Union[SingletonPrompt, Sequence[SingletonPrompt],
+                      ScoreMultiModalParam],
         /,
         *,
         truncate_prompt_tokens: Optional[int] = None,
@@ -1250,22 +1275,30 @@ class LLM:
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> list[ScoringRequestOutput]:
-        """Generate similarity scores for all pairs `<text,text_pair>`.
+        """Generate similarity scores for all pairs `<text,text_pair>` or
+          `<multi-modal data, multi-modal data pair>`.
 
         The inputs can be `1 -> 1`, `1 -> N` or `N -> N`.
-        In the `1 - N` case the `text_1` sentence will be replicated `N`
-        times to pair with the `text_2` sentences.
+        In the `1 - N` case the `data_1` input will be replicated `N`
+        times to pair with the `data_2` inputs.
         The input pairs are used to build a list of prompts for the
         cross encoder model. This class automatically batches the prompts,
         considering the memory constraint. For the best performance, put all
-        of your texts into a single list and pass it to this method.
+        of your inputs into a single list and pass it to this method.
+
+        Supports both text and multi-modal data (images, etc.) when used with
+        appropriate multi-modal models. For multi-modal inputs, ensure the 
+        prompt structure matches the model's expected input format.
 
         Args:
-            text_1: can be a single prompt or a list of prompts, in which
-                case it has to have the same length as the `text_2` list
-            text_2: The texts to pair with the query to form the input
-                to the LLM. See [PromptType][vllm.inputs.PromptType] for
-                more details about the format of each prompts.
+            data_1: Can be a single prompt, a list of prompts or 
+                `ScoreMultiModalParam`, which can contain either text or 
+                multi-modal data. When a list, it must have the same length as 
+                the `data_2` list.
+            data_2: The data to pair with the query to form the input to 
+                the LLM. Can be text or multi-modal data. See [PromptType]
+                [vllm.inputs.PromptType] for more details about the format of 
+                each prompt.
             use_tqdm: If `True`, shows a tqdm progress bar.
                 If a callable (e.g., `functools.partial(tqdm, leave=False)`),
                 it is used to create the progress bar.
@@ -1306,42 +1339,70 @@ class LLM:
         # lists of tokens to the `text` and `text_pair` kwargs
         tokenizer = self.get_tokenizer()
 
-        def ensure_str(prompt: SingletonPrompt):
-            if isinstance(prompt, dict):
-                if "multi_modal_data" in prompt:
-                    raise ValueError("Multi-modal prompt is not "
-                                     "supported for scoring")
-                elif "prompt_token_ids" in prompt:
-                    prompt = tokenizer.decode(
-                        cast(TokensPrompt, prompt)["prompt_token_ids"])
-                elif "prompt" in prompt:
-                    prompt = cast(TextPrompt, prompt)["prompt"]
-            assert type(prompt) is str
-            return prompt
+        if not self.llm_engine.model_config.is_multimodal_model:
 
-        if isinstance(text_1, (str, dict)):
-            # Convert a single prompt to a list.
-            text_1 = [text_1]
-        input_text_1: list[str] = [ensure_str(t) for t in text_1]
+            def check_data_type(data: Union[SingletonPrompt,
+                                            Sequence[SingletonPrompt],
+                                            ScoreMultiModalParam]):
+                if isinstance(data, dict) and "content" in data:
+                    raise ValueError(
+                        f"ScoreMultiModalParam is not supported for {self.llm_engine.model_config.architecture}",  # noqa: E501
+                    )
 
-        if isinstance(text_2, (str, dict)):
-            # Convert a single prompt to a list.
-            text_2 = [text_2]
-        input_text_2: list[str] = [ensure_str(t) for t in text_2]
+            check_data_type(data_1)
+            check_data_type(data_2)
 
-        _validate_score_input_lens(input_text_1, input_text_2)
+            def ensure_str(prompt: SingletonPrompt):
+                if isinstance(prompt, dict):
+                    if "multi_modal_data" in prompt:
+                        raise ValueError("Multi-modal prompt is not "
+                                         "supported for scoring")
+                    elif "prompt_token_ids" in prompt:
+                        prompt = tokenizer.decode(
+                            cast(TokensPrompt, prompt)["prompt_token_ids"])
+                    elif "prompt" in prompt:
+                        prompt = cast(TextPrompt, prompt)["prompt"]
+                assert type(prompt) is str
+                return prompt
+
+            if isinstance(data_1, (str, dict)):
+                # Convert a single prompt to a list.
+                data_1 = [data_1]  # type: ignore[list-item]
+
+            data_1 = [ensure_str(t) for t in data_1]
+
+            if isinstance(data_2, (str, dict)):
+                # Convert a single prompt to a list.
+                data_2 = [data_2]  # type: ignore[list-item]
+
+            data_2 = [ensure_str(t) for t in data_2]
+
+        if isinstance(data_1, dict) and "content" in data_1:
+            data_1 = data_1.get("content")  # type: ignore[assignment]
+        elif isinstance(data_1, str):
+            data_1 = [data_1]
+
+        if isinstance(data_2, dict) and "content" in data_2:
+            data_2 = data_2.get("content")  # type: ignore[assignment]
+        elif isinstance(data_2, str):
+            data_2 = [data_2]
+
+        _validate_score_input_lens(data_1, data_2)  # type: ignore[arg-type]
 
         if self.llm_engine.model_config.is_cross_encoder:
-            return self._cross_encoding_score(tokenizer, input_text_1,
-                                              input_text_2,
-                                              truncate_prompt_tokens, use_tqdm,
-                                              lora_request,
-                                              prompt_adapter_request)
+            return self._cross_encoding_score(
+                tokenizer,
+                data_1,  # type: ignore[arg-type]
+                data_2,  # type: ignore[arg-type]
+                truncate_prompt_tokens,
+                use_tqdm,
+                lora_request,
+                prompt_adapter_request)
         else:
             return self._embedding_score(
                 tokenizer,
-                input_text_1,  # type: ignore[arg-type]
-                input_text_2,  # type: ignore[arg-type]
+                data_1,  # type: ignore[arg-type]
+                data_2,  # type: ignore[arg-type]
                 truncate_prompt_tokens,
                 use_tqdm,
                 lora_request,
