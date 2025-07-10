@@ -92,7 +92,7 @@ class HpuPlatform(Platform):
         cache_config = vllm_config.cache_config
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = 128
-        if (parallel_config.distributed_executor_backend == 'mp'
+        if (parallel_config.distributed_executor_backend in ['mp', 'uni']
                 and envs.VLLM_WORKER_MULTIPROC_METHOD == 'fork'):
             if os.environ.get("VLLM_WORKER_MULTIPROC_METHOD",
                               None) is not None:
