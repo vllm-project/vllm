@@ -22,7 +22,8 @@ def test_can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch):
     model_info.check_transformers_version(on_fail="skip")
 
     # FIXME: Possible memory leak in the previous tests?
-    if model_arch in ("GraniteSpeechForConditionalGeneration",
+    if model_arch in ("Glm4vForConditionalGeneration",
+                      "GraniteSpeechForConditionalGeneration",
                       "KimiVLForConditionalGeneration"):
         pytest.skip("Avoid OOM")
 
