@@ -303,8 +303,8 @@ class MLACommonPrefillMetadata:
 
 @dataclass
 class FlashInferPrefillMetadata(MLACommonPrefillMetadata):
-    prefill_main: Optional[BatchPrefillWithRaggedKVCacheWrapper] = None
-    prefill_chunks: list[BatchPrefillWithRaggedKVCacheWrapper] = field(
+    prefill_main: Optional['BatchPrefillWithRaggedKVCacheWrapper'] = None
+    prefill_chunks: list['BatchPrefillWithRaggedKVCacheWrapper'] = field(
         default_factory=list)
 
 
