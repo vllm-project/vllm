@@ -33,7 +33,9 @@ from transformers import PretrainedConfig
 from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
+from vllm.distributed import (get_pp_group,
+                              get_tensor_model_parallel_world_size,
+                              tensor_model_parallel_all_reduce)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import FusedMoE
@@ -53,8 +55,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsPP
-from .utils import (AutoWeightsLoader, extract_layer_index,
-                    is_pp_missing_parameter,
+from .utils import (AutoWeightsLoader, PPMissingLayer, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
 
@@ -96,7 +97,7 @@ class Glm4MoeMLP(nn.Module):
         return x
 
 
-class Glm4MoeSparseMoeBlock(nn.Module):
+class Glm4MoeE(nn.Module):
 
     def __init__(
         self,
@@ -108,9 +109,13 @@ class Glm4MoeSparseMoeBlock(nn.Module):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.config = config
         self.num_experts = config.n_routed_experts
-        self.top_k = config.num_experts_per_tok
         self.routed_scaling_factor = config.routed_scaling_factor
         self.norm_topk_prob = config.norm_topk_prob
+        self.n_shared_experts = config.n_shared_experts
+
+        if config.hidden_act != "silu":
+            raise ValueError(f"Unsupported activation: {config.hidden_act}. "
+                             "Only silu is supported for now.")
 
         if self.tp_size > self.num_experts:
             raise ValueError(
@@ -123,53 +128,52 @@ class Glm4MoeSparseMoeBlock(nn.Module):
                                      quant_config=None,
                                      prefix=f"{prefix}.gate")
 
+        # noaux_tc is not wrote in config now
         self.gate.e_score_correction_bias = nn.Parameter(
             torch.zeros(config.n_routed_experts, dtype=torch.float32))
 
         self.experts = FusedMoE(
-            num_experts=self.num_experts,
-            top_k=self.top_k,
+            num_experts=config.n_routed_experts,
+            top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
             intermediate_size=config.moe_intermediate_size,
             reduce_results=False,
-            renormalize=self.norm_topk_prob,
+            renormalize=config.norm_topk_prob,
             quant_config=quant_config,
             use_grouped_topk=True,
             num_expert_group=config.n_group,
             topk_group=config.topk_group,
             prefix=f"{prefix}.experts",
-            scoring_func=getattr(config, 'scoring_func', 'sigmoid'),
+            scoring_func=config.scoring_func,
             e_score_correction_bias=self.gate.e_score_correction_bias)
 
-        self.shared_experts = Glm4MoeMLP(
-            hidden_size=config.hidden_size,
-            intermediate_size=config.moe_intermediate_size *
-            config.n_shared_experts,
-            hidden_act=config.hidden_act,
-            quant_config=quant_config,
-            reduce_results=False,
-            prefix=f"{prefix}.shared_experts")
+        if config.n_shared_experts is not None:
+            intermediate_size = (config.moe_intermediate_size *
+                                 config.n_shared_experts)
+            self.shared_experts = Glm4MoeMLP(
+                hidden_size=config.hidden_size,
+                intermediate_size=intermediate_size,
+                hidden_act=config.hidden_act,
+                quant_config=quant_config,
+                reduce_results=False,
+                prefix=f"{prefix}.shared_experts",
+            )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
-
-        shared_output = self.shared_experts(hidden_states)
-
-        # router_logits: (num_tokens, n_experts)
+        if self.n_shared_experts is not None:
+            shared_output = self.shared_experts(hidden_states)
         router_logits, _ = self.gate(hidden_states)
-
-        routed_output = self.experts(
+        final_hidden_states = self.experts(
             hidden_states=hidden_states,
             router_logits=router_logits) * self.routed_scaling_factor
-
+        if shared_output is not None:
+            final_hidden_states = final_hidden_states + shared_output
         if self.tp_size > 1:
-            routed_output = self.experts.maybe_all_reduce_tensor_model_parallel(
-                routed_output)
-
-        final_output = routed_output + shared_output
-
-        return final_output.view(num_tokens, hidden_dim)
+            final_hidden_states = tensor_model_parallel_all_reduce(
+                final_hidden_states)
+        return final_hidden_states.view(num_tokens, hidden_dim)
 
 
 class Glm4MoeAttention(nn.Module):
@@ -181,9 +185,9 @@ class Glm4MoeAttention(nn.Module):
         num_kv_heads: int,
         rope_theta: float = 10000,
         rope_scaling: Optional[dict[str, Any]] = None,
-        max_position_embeddings: int = 8192,
+        max_position_embeddings: int = 131072,
         head_dim: Optional[int] = None,
-        rms_norm_eps: float = 1e-06,
+        rms_norm_eps: float = 1e-05,
         qkv_bias: bool = False,
         add_qk_norm: bool = False,
         cache_config: Optional[CacheConfig] = None,
@@ -254,7 +258,6 @@ class Glm4MoeAttention(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        # Add qk-norm
         if self.add_qk_norm:
             q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim,
                                self.head_dim)
@@ -286,7 +289,9 @@ class Glm4MoeDecoderLayer(nn.Module):
         rope_theta = getattr(config, "rope_theta", 10000)
         rope_scaling = getattr(config, "rope_scaling", None)
         max_position_embeddings = getattr(config, "max_position_embeddings",
-                                          8192)
+                                          131072)
+        layer_idx = int(prefix.split(sep='.')[-1])
+        self.layer_idx = layer_idx
 
         self.self_attn = Glm4MoeAttention(
             hidden_size=self.hidden_size,
@@ -296,20 +301,15 @@ class Glm4MoeDecoderLayer(nn.Module):
             rope_scaling=rope_scaling,
             max_position_embeddings=max_position_embeddings,
             rms_norm_eps=config.rms_norm_eps,
-            qkv_bias=getattr(config, 'attention_bias', False),
-            head_dim=getattr(config, 'head_dim', None),
-            add_qk_norm=getattr(config, 'add_qk_norm', False),
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
         )
 
-        # `mlp_only_layers` in the config.
-        layer_idx = extract_layer_index(prefix)
-        if layer_idx >= getattr(config, "first_k_dense_replace", 1):
-            self.mlp = Glm4MoeSparseMoeBlock(config=config,
-                                             quant_config=quant_config,
-                                             prefix=f"{prefix}.mlp")
+        if layer_idx >= config.first_k_dense_replace:
+            self.mlp = Glm4MoeE(config=config,
+                                quant_config=quant_config,
+                                prefix=f"{prefix}.mlp")
         else:
             self.mlp = Glm4MoeMLP(hidden_size=config.hidden_size,
                                   intermediate_size=config.intermediate_size,
@@ -328,20 +328,14 @@ class Glm4MoeDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         residual: Optional[torch.Tensor],
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        # Self Attention
         if residual is None:
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
             hidden_states, residual = self.input_layernorm(
                 hidden_states, residual)
-
-        hidden_states = self.self_attn(
-            positions=positions,
-            hidden_states=hidden_states,
-        )
-
-        # Fully Connected
+        hidden_states = self.self_attn(positions=positions,
+                                       hidden_states=hidden_states)
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
@@ -357,30 +351,31 @@ class Glm4MoeModel(nn.Module):
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-
-        self.padding_idx = config.pad_token_id
-        self.vocab_size = config.vocab_size
         self.config = config
 
-        self.embed_tokens = VocabParallelEmbedding(
-            config.vocab_size,
-            config.hidden_size,
-            prefix=f"{prefix}.embed_tokens")
+        self.vocab_size = config.vocab_size
 
-        num_layers = config.num_hidden_layers
-        if hasattr(config, 'num_nextn_predict_layers'):
-            num_layers = config.num_hidden_layers - config.num_nextn_predict_layers
+        if get_pp_group().is_first_rank:
+            self.embed_tokens = VocabParallelEmbedding(
+                config.vocab_size,
+                config.hidden_size,
+                quant_config=quant_config,
+                prefix=f"{prefix}.embed_tokens")
+        else:
+            self.embed_tokens = PPMissingLayer()
 
         self.start_layer, self.end_layer, self.layers = make_layers(
-            num_layers,
+            config.num_hidden_layers,
             lambda prefix: Glm4MoeDecoderLayer(config=config,
                                                cache_config=cache_config,
                                                quant_config=quant_config,
                                                prefix=prefix),
-            prefix=f"{prefix}.layers",
-        )
+            prefix=f"{prefix}.layers")
 
-        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        if get_pp_group().is_last_rank:
+            self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        else:
+            self.norm = PPMissingLayer()
         self.make_empty_intermediate_tensors = (
             make_empty_intermediate_tensors_factory(
                 ["hidden_states", "residual"], config.hidden_size))
@@ -461,7 +456,6 @@ class Glm4MoeModel(nn.Module):
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
                     continue
-
                 if is_pp_missing_parameter(name, self):
                     continue
 
