@@ -128,9 +128,9 @@ class Glm4MoeE(nn.Module):
                                      quant_config=None,
                                      prefix=f"{prefix}.gate")
 
-        # noaux_tc is not wrote in config now
-        self.gate.e_score_correction_bias = nn.Parameter(
-            torch.zeros(config.n_routed_experts, dtype=torch.float32))
+        # noaux_tc is not set in config now
+        self.gate.e_score_correction_bias = (nn.Parameter(
+            torch.empty(config.n_routed_experts)))
 
         self.experts = FusedMoE(
             num_experts=config.n_routed_experts,
@@ -144,7 +144,7 @@ class Glm4MoeE(nn.Module):
             num_expert_group=config.n_group,
             topk_group=config.topk_group,
             prefix=f"{prefix}.experts",
-            scoring_func=config.scoring_func,
+            scoring_func="sigmoid",
             e_score_correction_bias=self.gate.e_score_correction_bias)
 
         if config.n_shared_experts is not None:
@@ -306,7 +306,8 @@ class Glm4MoeDecoderLayer(nn.Module):
             prefix=f"{prefix}.self_attn",
         )
 
-        if layer_idx >= config.first_k_dense_replace:
+        if (config.n_routed_experts is not None
+                and layer_idx >= config.first_k_dense_replace):
             self.mlp = Glm4MoeE(config=config,
                                 quant_config=quant_config,
                                 prefix=f"{prefix}.mlp")
