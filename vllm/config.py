@@ -4137,11 +4137,11 @@ class CompilationConfig:
     internally managed buffer. Default is False."""
     separate_attention_routine: bool = False
     """
-    Enable a distinct attention calls routine under an attention backend for
+    Enable distinct attention routines for mixed and pure-decode batches during
     full cuda graph capturing. This is because some attention backends like
-    FlashMLA, FlashInfer, FA2, etc. implement different branches for mix
-    prefill-decode and pure decode cases. This flag enables us to potentially
-    capture the cudagraph separately for each branch.
+    FlashMLA, FlashInfer, FA2, etc. implement different branches for mixed
+    prefill-decode and pure decode cases. This flag enables capturing separate
+    cudagraphs for each branch.
     """
     pass_config: PassConfig = field(default_factory=PassConfig)
     """Custom inductor passes, see PassConfig for more details"""
