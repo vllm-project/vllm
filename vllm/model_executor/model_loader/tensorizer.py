@@ -222,17 +222,17 @@ class TensorizerConfig(MutableMapping):
         self._is_sharded = isinstance(self.tensorizer_uri, str) \
             and re.search(r'%0\dd', self.tensorizer_uri) is not None
 
+        if self.tensorizer_dir and self.lora_dir:
+            raise ValueError(
+                "Only one of tensorizer_dir or lora_dir may be specified. "
+                "Use lora_dir exclusively when serializing LoRA adapters, "
+                "and tensorizer_dir or tensorizer_uri otherwise.")
         if self.tensorizer_dir and self.tensorizer_uri:
             logger.warning_once(
                 "Provided both tensorizer_dir and tensorizer_uri. "
                 "Inferring tensorizer_dir from tensorizer_uri as the "
                 "latter takes precedence.")
             self.tensorizer_dir = os.path.dirname(self.tensorizer_uri)
-        if self.tensorizer_dir and self.lora_dir:
-            raise ValueError(
-                "Only one of tensorizer_dir or lora_dir may be specified. "
-                "Use lora_dir exclusively when serializing LoRA adapters, "
-                "and tensorizer_dir or tensorizer_uri otherwise.")
         if not self.tensorizer_uri:
             if self.lora_dir:
                 self.tensorizer_uri = f"{self.lora_dir}/adapter_model.tensors"
@@ -695,7 +695,7 @@ def tensorize_lora_adapter(lora_path: str,
     needed to load a LoRA adapter are a safetensors-format file called
     adapter_model.safetensors and a json config file called adapter_config.json.
 
-    Serializes the files in the tensorizer_config.lora_dir
+    Serializes the files in the tensorizer_config.tensorizer_dir
     """
     import safetensors
 
@@ -725,13 +725,13 @@ def tensorize_lora_adapter(lora_path: str,
 
     tensorizer_args = tensorizer_config._construct_tensorizer_args()
 
-    with open_stream(f"{tensorizer_config.lora_dir}/adapter_config.json",
+    with open_stream(f"{tensorizer_config.tensorizer_dir}/adapter_config.json",
                      mode="wb+",
                      **tensorizer_args.stream_kwargs) as f:
 
         f.write(json.dumps(config).encode("utf-8"))
 
-    lora_uri = (f"{tensorizer_config.lora_dir}"
+    lora_uri = (f"{tensorizer_config.tensorizer_dir}"
                 f"/adapter_model.tensors")
     with open_stream(lora_uri, mode="wb+",
                      **tensorizer_args.stream_kwargs) as f:
@@ -740,4 +740,4 @@ def tensorize_lora_adapter(lora_path: str,
         serializer.close()
 
     logger.info("Successfully serialized LoRA files to %s",
-                str(tensorizer_config.lora_dir))
+                str(tensorizer_config.tensorizer_dir))
