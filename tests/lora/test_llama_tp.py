@@ -4,8 +4,6 @@ import subprocess
 import sys
 from typing import Union
 
-import pytest
-
 import vllm
 from vllm import LLM
 from vllm.lora.request import LoRARequest
@@ -151,8 +149,6 @@ def test_llama_lora_tp4_fully_sharded_loras(sql_lora_files):
     generate_and_test(llm, sql_lora_files)
 
 
-@pytest.mark.skip(reason=("Skipping this test as tensorizer is not "
-                          "working with LoRA as of #19619"))
 @multi_gpu_test(num_gpus=2)
 @create_new_process_for_each_test()
 def test_tp2_serialize_and_deserialize_lora(tmp_path, sql_lora_files,
@@ -189,7 +185,6 @@ def test_tp2_serialize_and_deserialize_lora(tmp_path, sql_lora_files,
 
     model_uri = tmp_path / "vllm" / model_ref / suffix / model_name
     tensorizer_config = TensorizerConfig(tensorizer_uri=str(model_uri))
-    tensorizer_config.lora_dir = tensorizer_config.tensorizer_dir
 
     loaded_vllm_model = LLM(model=model_ref,
                             load_format="tensorizer",
@@ -200,16 +195,16 @@ def test_tp2_serialize_and_deserialize_lora(tmp_path, sql_lora_files,
                             tensor_parallel_size=2,
                             max_loras=2)
 
-    tensorizer_config_dict = tensorizer_config.to_serializable()
+    tc_as_dict = tensorizer_config.to_serializable()
 
     print("lora adapter created")
     assert do_sample(loaded_vllm_model,
                      sql_lora_files,
-                     tensorizer_config_dict=tensorizer_config_dict,
+                     tensorizer_config_dict=tc_as_dict,
                      lora_id=0) == EXPECTED_NO_LORA_OUTPUT
 
     print("lora 1")
     assert do_sample(loaded_vllm_model,
                      sql_lora_files,
-                     tensorizer_config_dict=tensorizer_config_dict,
+                     tensorizer_config_dict=tc_as_dict,
                      lora_id=1) == EXPECTED_LORA_OUTPUT
