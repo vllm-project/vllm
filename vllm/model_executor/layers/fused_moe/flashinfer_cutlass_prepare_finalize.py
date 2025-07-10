@@ -54,14 +54,15 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     def prepare(
         self,
         a1: torch.Tensor,
-        a1_scale: Optional[torch.Tensor],
-        a2_scale: Optional[torch.Tensor],
+        a1_scale: Optional[torch.Tensor],  # Not used
+        a2_scale: Optional[torch.Tensor],  # Not used
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         num_experts: int,
         expert_map: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
+        a1_gscale: torch.Tensor, 
         use_dp: Optional[bool] = True,
         local_tokens: int = -1,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor],
@@ -76,7 +77,7 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         a1q, a1q_scale = moe_kernel_quantize_input(
             a1,
-            a1_scale,
+            a1_gscale,
             quant_config.quant_dtype,
             self.per_channel_quant,
             self.block_shape,

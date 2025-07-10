@@ -830,6 +830,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias)
    
+        a1_gscale = torch.min(layer.w13_input_scale_quant)
+        a2_gscale = torch.min(layer.w2_input_scale_quant)
         if self.allow_flashinfer_cutlass:
             # TP or DP case
             assert _valid_flashinfer_fused_moe(
@@ -841,11 +843,13 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
               'out_dtype': x.dtype,
               # Avoid confusion with a1_scale and a2_scale whare are batch size 
               # related.
-              'a1_scale': torch.min(layer.w13_input_scale_quant),
+              'a1_gscale': a1_gscale,
+              'a2_gscale': a2_gscale,
             }
             extra_prepare_args = {
                 'use_dp': layer.dp_size > 1,
                 'local_tokens': x.shape[0],
+                'a1_gscale': a1_gscale,
             }
             extra_finalize_args = {
                 'use_dp': layer.dp_size > 1,
@@ -864,8 +868,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 expert_map=expert_map,
                 w1_scale=layer.w13_blockscale_swizzled,
                 w2_scale=layer.w2_blockscale_swizzled,
-                a1_scale=torch.min(layer.w13_input_scale_quant),
-                a2_scale=torch.min(layer.w2_input_scale_quant),
                 extra_expert_args=extra_expert_args,
                 extra_prepare_args=extra_prepare_args,
                 extra_finalize_args=extra_finalize_args,

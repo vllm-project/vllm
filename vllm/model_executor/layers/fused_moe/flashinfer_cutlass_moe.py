@@ -85,7 +85,8 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         
     def supports_chunking(self) -> bool:
         #TODO(shuw): support chunking later, actually support in layer.py
-        return False
+        # It means TP chunking
+        return True
 
     def workspace_shapes(
         self, a: torch.Tensor, aq: torch.Tensor, M: int, N: int, K: int,
@@ -136,14 +137,15 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         w1_zp: Optional[torch.Tensor],
         w2_zp: Optional[torch.Tensor],
         a1q_scale: Optional[torch.Tensor],
-        a2_scale: Optional[torch.Tensor],
+        a2_scale: Optional[torch.Tensor],  # Not used
         workspace13:Optional[torch.Tensor],
         workspace2:Optional[torch.Tensor],
         expert_num_tokens: Optional[torch.Tensor],
         topk_weights: torch.Tensor,
         g1_alphas: torch.Tensor,
         g2_alphas: torch.Tensor,
-        a1_scale: torch.Tensor,
+        a1_gscale: torch.Tensor,
+        a2_gscale: torch.Tensor,
         out_dtype: torch.dtype,
     ):
         # Flashinfer CUTLASS kernel takes scalar global scales,
@@ -151,10 +153,10 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         assert self.use_nvfp4_w4a4 is True, ("Only nvfp4 quantization is "
                                              "currently supported.")
         quant_scales = [
-            a1_scale,
+            a1_gscale,
             w1_scale.view(torch.int32),
             g1_alphas,
-            a2_scale,
+            a2_gscale,
             w2_scale.view(torch.int32),
             g2_alphas,
         ]

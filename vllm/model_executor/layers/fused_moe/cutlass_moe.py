@@ -417,21 +417,6 @@ def run_cutlass_moe_fp4(
     e: int,
     device: torch.device,
 ) -> None:
-    # print("---------------start-------------")
-    # print(f"output.shape: {output.shape}")                  # [m, n]
-    # print(f"a.shape: {a.shape}")                           # [m, k]
-    # print(f"a1_gscale.shape: {a1_gscale.shape}")           # [1]
-    # print(f"w1_fp4.shape: {w1_fp4.shape}")                 # [e, k//2, n]
-    # print(f"w1_blockscale.shape: {w1_blockscale.shape}")   # [e, n//groupsize]
-    # print(f"w1_alphas.shape: {w1_alphas.shape}")           # [e, 1]
-    # print(f"a2_gscale.shape: {a2_gscale.shape}")           # [1]
-    # print(f"w2_fp4.shape: {w2_fp4.shape}")                 # [e, n//2, k]
-    # print(f"w2_blockscale.shape: {w2_blockscale.shape}")   # [e, k//groupsize]
-    # print(f"w2_alphas.shape: {w2_alphas.shape}")           # [e, 1]
-    # print(f"topk_weights.shape: {topk_weights.shape}")     # [m, top_k]
-    # print(f"topk_ids.shape: {topk_ids.shape}")             # [m, top_k]
-    # print(f"m:{m}, n:{n}, k:{k}, e:{e}")
-    
     """
     MoE implementation for FP4 Inputs
     
@@ -475,8 +460,6 @@ def run_cutlass_moe_fp4(
             and k == k_w2), ("Hidden size mismatch between a, w1 and w2")
     assert (nx2_w1 == n * 2 and half_n_w2 * 2 == n), ("mismatch in "
                                                        "expected `n`")
-    # print(f"m:{m}; m_a:{m_a}")
-    # m = m_a
     assert (m == m_a), "input shape mismatch"
     assert 2 * half_k_w1 == k_w2, "Hidden size mismatch w2 and w1"
     assert a.dtype in [torch.half, torch.bfloat16], "Invalid input dtype"
@@ -503,7 +486,6 @@ def run_cutlass_moe_fp4(
                                 blockscale_offsets)
 
     a = ops.shuffle_rows(a, a_map)
-    # print(f"a:{a.shape}; a1_gscale:{a1_gscale.shape}")
     rep_a_fp4, rep_a_blockscale = ops.scaled_fp4_experts_quant(
         a,
         a1_gscale,
@@ -518,38 +500,21 @@ def run_cutlass_moe_fp4(
                                 w1_blockscale, w1_alphas, problem_sizes1,
                                 expert_offsets[:-1], blockscale_offsets[:-1],
                                 out_dtype, device)
-    # print(f"c1:{c1.shape}")
     del rep_a_fp4, rep_a_blockscale
-    # hidden size dimension is split to one halfpytho sized tensor.
-    # intermediate = torch.empty((m * num_topk, w1_fp4.size(1) // 2),
-    #                            device=device,
-    #                            dtype=out_dtype)
-    # print(f"intermediate:{intermediate.shape}")
     torch.ops._C.silu_and_mul(c2, c1)
-    # torch.ops._C.silu_and_mul(intermediate, c1)
-    # print(f"c2:{c2.shape}")
-    # print(f"a2_gscale:{a2_gscale.shape}")
-    # import pdb
-    # pdb.set_trace()
     int_fp4, int_blockscale = ops.scaled_fp4_experts_quant(
         c2, a2_gscale, expert_offsets, blockscale_offsets, num_topk)
 
     ops.cutlass_fp4_moe_mm(c3, int_fp4, w2_fp4, int_blockscale, w2_blockscale,
                                 w2_alphas, problem_sizes2, expert_offsets[:-1],
                                 blockscale_offsets[:-1], out_dtype, device)
-    # print(f"c2:{c2.shape}")
     del int_fp4, int_blockscale
 
     c3 = ops.shuffle_rows(c3, c_map)
 
     assert output.dtype == out_dtype
-    # print(f"output:{output.shape}")
-    # print(f"c3:{c3.view(m, num_topk, k).shape}")
-    # print(f"b:{topk_weights.view(m, num_topk, 1).half().shape}")
-    # print(f"g:{g.shape}")
     output.copy_((c3.view(m, num_topk, k) *
            topk_weights.view(m, num_topk, 1).half()).sum(dim=1), non_blocking=True)
-    # print("---------------end-------------")
     return
 
 
@@ -591,26 +556,6 @@ class CutlassExpertsFp4(mk.FusedMoEPermuteExpertsUnpermute):
 
     def supports_chunking(self) -> bool:
         return True
-
-    # def workspace_shapes(
-    #     self,
-    #     a: torch.Tensor,
-    #     aq: torch.Tensor,
-    #     M: int,
-    #     N: int,
-    #     K: int,
-    #     topk: int,
-    #     global_num_experts: int,
-    #     local_num_experts: int,
-    # ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
-    #     # Workspace1: for c1, Workspace2: for intermediate, Output: for final output
-    #     workspace1 = a.shape
-    #     # workspace 2 remains empty because run_cutlass_moe_fp4 allocates the 
-    #     # intermediate tensor there.
-    #     # # workspace 1 is allocated to store the output.
-    #     workspace2 = ()
-    #     output = a.shape
-    #     return (workspace1, workspace2, output, self.out_dtype)
     
     def workspace_shapes(
         self,

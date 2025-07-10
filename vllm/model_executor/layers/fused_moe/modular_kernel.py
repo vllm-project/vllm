@@ -461,8 +461,7 @@ class FusedMoEModularKernel(torch.nn.Module):
             global_num_experts = local_num_experts
 
         prepare_kwargs = extra_prepare_args or {}
-        # import pdb
-        # pdb.set_trace()
+
         (a1q, a1q_scale, expert_num_tokens, _expert_topk_ids,
          _expert_topk_weights) = self.prepare_finalize.prepare(
              a1,
@@ -560,7 +559,6 @@ class FusedMoEModularKernel(torch.nn.Module):
             else:
                 # The leading output dimension may not be equal to M, so
                 # we compute output indices separately.
-                # print('ttt'*100)
                 M_out = fused_out_shape[0]
                 assert M_out >= M
                 factor = M_out // M
