@@ -338,6 +338,10 @@ class Worker(WorkerBase):
                     output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
                 output.finished_sending = finished_sending
                 output.finished_recving = finished_recving
+
+            # Clear KVConnector state for this step.
+            get_kv_transfer_group().clear_connector_metadata()
+
             # with a connector, the scheduler expects output from all workers
             return output
 
