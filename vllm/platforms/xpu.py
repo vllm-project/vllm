@@ -85,14 +85,14 @@ class XPUPlatform(Platform):
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         cache_config = vllm_config.cache_config
+        model_config = vllm_config.model_config
         # in V1(or with ipex chunked prefill) block_size is 64
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = 64
 
         # FIXME: Temporarily forcing eager mode
         # remove after t.compile support stabilizes.
-
-        if (envs.VLLM_USE_V1 and vllm_config.model_config is not None
+        if (envs.VLLM_USE_V1 and model_config is not None
                 and not vllm_config.model_config.enforce_eager):
             from vllm.config import CompilationLevel
             vllm_config.compilation_config.level = CompilationLevel.NO_COMPILATION  # noqa: E501
@@ -100,8 +100,7 @@ class XPUPlatform(Platform):
         # Instances created using VllmConfig() typically have model_config as
         # None by default. The modification involves adding a check to prevent
         # potential null exceptions check and update model config.
-        if vllm_config.model_config is not None:
-            model_config = vllm_config.model_config
+        if model_config is not None:
             if model_config.dtype == torch.bfloat16:
                 bf16_supported = cls.device_support_bf16()
                 if not bf16_supported:
@@ -139,7 +138,7 @@ class XPUPlatform(Platform):
                 parallel_config.distributed_executor_backend)
             parallel_config.distributed_executor_backend = "ray"
 
-        if vllm_config.model_config and vllm_config.model_config.use_mla:
+        if model_config and model_config.use_mla:
             logger.info(
                 "MLA is enabled on a non-GPU platform; forcing chunked "
                 "prefill and prefix caching to be disabled.")

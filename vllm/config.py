@@ -4722,7 +4722,6 @@ class VllmConfig:
         # calculate the default `batch_size_capture_list`
         if not envs.VLLM_USE_V1:
             batch_size_capture_list = []
-            max_batchsize_to_capture = 0
             if self.scheduler_config is not None and \
                 self.model_config is not None and \
                     not self.model_config.enforce_eager:
