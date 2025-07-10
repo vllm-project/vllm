@@ -3,7 +3,7 @@
 
 MODEL_NAME = "facebook/opt-125m"
 DUMMY_LOGITPROC_ENTRYPOINT = "dummy_logitproc"
-DUMMY_LOGITPROC_FQN = ("vllm.test_utils:DummyLogitsProcessor")
+DUMMY_LOGITPROC_FQN = "vllm.test_utils:DummyLogitsProcessor"
 DUMMY_LOGITPROC_ARG = "target_token"
 LOGITPROC_SOURCE_ENTRYPOINT = "entrypoint"
 LOGITPROC_SOURCE_FQN = "fqn"
