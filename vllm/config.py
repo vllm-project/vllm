@@ -3958,11 +3958,9 @@ class PassConfig:
         """
         Produces a hash unique to the pass configuration.
         Any new fields that affect compilation should be added to the hash.
-        Exclude any fields that don't affect compilation.
+        Any future fields that don't affect compilation should be excluded.
         """
-        exclude = {}
-        dict_ = {k: v for k, v in asdict(self).items() if k not in exclude}
-        return InductorPass.hash_dict(dict_)
+        return InductorPass.hash_dict(asdict(self))
 
     def __post_init__(self) -> None:
         if not self.enable_noop:
