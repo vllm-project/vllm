@@ -69,14 +69,8 @@ append_cmake_prefix_path("torch" "torch.utils.cmake_prefix_path")
 if (VLLM_TARGET_DEVICE STREQUAL "cpu")
     message(STATUS "VLLM: Building for CPU. Skipping all CUDA/HIP related configuration.")
     
-    # For CPU builds, we need to find Torch but without triggering CUDA detection
-    # Set these variables to prevent CUDA detection
-    set(CUDA_FOUND FALSE CACHE INTERNAL "Force CUDA to be not found for CPU build" FORCE)
-    set(HIP_FOUND FALSE CACHE INTERNAL "Force HIP to be not found for CPU build" FORCE)
-    set(CAFFE2_USE_CUDA OFF CACHE BOOL "Disable CUDA for CPU build" FORCE)
-    
-    # Find Torch with minimal requirements for CPU
-    find_package(Torch REQUIRED)
+    # For CPU builds, we don't need to find Torch through CMake
+    # The Python extension will link against torch through the Python environment
     
     # Include the CPU extension cmake and return early
     include(${CMAKE_CURRENT_LIST_DIR}/cmake/cpu_extension.cmake)
