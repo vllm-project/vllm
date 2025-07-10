@@ -72,7 +72,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 # currently be an MI300 series.
                 self.qr_comm = QuickAllReduce(group=self.cpu_group,
                                               device=self.device)
-        if envs.VLLM_USE_SYMM_MEM and current_platform.is_cuda():
+        if envs.VLLM_ALLREDUCE_USE_SYMM_MEM and current_platform.is_cuda():
             self.symm_mem_comm = SymmMemCommunicator(
                 group=self.cpu_group,
                 device=self.device,
