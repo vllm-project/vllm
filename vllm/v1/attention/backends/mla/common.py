@@ -189,7 +189,7 @@ return curr_o @ W_O
 
 import functools
 from abc import abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Generic, Optional, TypeVar, Union
 
 import torch
@@ -229,6 +229,7 @@ except ImportError:
 try:
     from flashinfer import BatchPrefillWithRaggedKVCacheWrapper
     from flashinfer.utils import is_sm100a_supported
+    flashinfer_available = True
 except ImportError:
     flashinfer_available = False
 
@@ -304,7 +305,8 @@ class MLACommonPrefillMetadata:
 @dataclass
 class FlashInferPrefillMetadata(MLACommonPrefillMetadata):
     prefill_main: Optional[BatchPrefillWithRaggedKVCacheWrapper] = None
-    prefill_chunks: list[BatchPrefillWithRaggedKVCacheWrapper] = []
+    prefill_chunks: list[BatchPrefillWithRaggedKVCacheWrapper] = field(
+        default_factory=list)
 
 
 @dataclass
