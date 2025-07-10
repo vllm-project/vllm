@@ -1,0 +1,172 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+from typing import Any, Callable, Optional
+
+import torch
+import torch.nn.functional as F
+
+from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization.quark.schemes import QuarkScheme
+from vllm.model_executor.layers.quantization.utils.mxfp4_utils import OCP_MX_BLOCK_SIZE, quant_dequant_mxfp6, quant_dequant_mxfp4, dequant_mxfp4
+from vllm.model_executor.parameter import (GroupQuantScaleParameter,
+                                           PackedvLLMParameter)
+from vllm.platforms import current_platform
+from functools import partial
+
+logger = init_logger(__name__)
+
+__all__ = ["QuarkOCP_MX"]
+
+
+class QuarkOCP_MX(QuarkScheme):
+
+    def __init__(self, weight_quant_spec: dict[str, Any],
+                 input_quant_spec: dict[str, Any]):
+        self.out_dtype = torch.get_default_dtype()
+        self.qscheme = "per_group"
+        self.weight_quant_spec = weight_quant_spec
+        self.input_quant_spec = input_quant_spec
+
+        self.weight_dtype = weight_quant_spec["dtype"]
+        self.input_dtype = input_quant_spec["dtype"]
+
+        if self.weight_dtype == "fp4":
+            self.packed_factor = 2
+            self.dequant_func = dequant_mxfp4
+        else:
+            self.packed_factor = 8/6
+            self.dequant_func = self.dequant_mxfp6
+
+        if self.input_dtype == "fp4":
+            self.quant_dequant_func = quant_dequant_mxfp4
+        else:
+            self.quant_dequant_func = partial(quant_dequant_mxfp6, quant_dtype=self.input_dtype)
+
+        self.static_input_scales = not input_quant_spec.get("is_dynamic")
+
+        if self.static_input_scales:
+            raise NotImplementedError(
+                "QuarkOCP_MX with static input scales is currently not "
+                "implemented. Please open an issue.")
+
+        if not current_platform.supports_mx():
+            self.emulate = True
+            logger.warning_once(
+                "The current platform does not support native MXFP4/MXFP6 "
+                "computation. Simulated weight dequantization and activation "
+                "QDQ (quantize and dequantize) will be used, with the linear "
+                "layers computed in high precision.")
+        else:
+            self.emulate = True
+            logger.warning_once(
+                "The current platform supports native MXFP4/MXFP6 "
+                "computation, but kernels are not yet integrated in vLLM. "
+                "Simulated weight dequantization and activation "
+                "QDQ (quantize and dequantize) will be used, with the linear "
+                "layers computed in high precision.")
+
+    def get_packed_dim(self, dim: int, quant_dtype: str):
+        if quant_dtype == "fp4":
+            assert dim % 2 == 0
+            return dim // 2
+        else:
+            # FP6 packs 4 * 6 = 24 bits on 3 bytes.
+            assert (dim * 3) % 4 == 0
+            return (dim * 3) // 4
+
+    @classmethod
+    def get_min_capability(cls) -> int:
+        return 70
+
+    def create_weights(self, layer: torch.nn.Module,
+                       output_partition_sizes: list[int],
+                       input_size_per_partition: int,
+                       params_dtype: torch.dtype, weight_loader: Callable,
+                       **kwargs):
+        output_size_per_partition = sum(output_partition_sizes)
+        layer.logical_widths = output_partition_sizes
+
+        # WEIGHT
+        weight = PackedvLLMParameter(
+            data=torch.empty(
+                output_size_per_partition,
+                self.get_packed_dim(input_size_per_partition, self.weight_dtype),
+                dtype=torch.uint8,
+            ),
+            input_dim=1,
+            output_dim=0,
+            packed_dim=1,
+            packed_factor=self.packed_factor,  # TODO: verify if correct.
+            weight_loader=weight_loader,
+        )
+        layer.register_parameter("weight", weight)
+
+        # WEIGHT SCALE
+        weight_scale = GroupQuantScaleParameter(
+            data=torch.empty(
+                output_size_per_partition,
+                input_size_per_partition // OCP_MX_BLOCK_SIZE,
+                dtype=torch.uint8,
+            ),
+            input_dim=1,
+            output_dim=0,
+            weight_loader=weight_loader,
+        )
+        layer.register_parameter("weight_scale", weight_scale)
+
+    def dequant_mxfp6(self, weight: torch.Tensor, scale: torch.Tensor,
+                      float_dtype: torch.dtype):
+        return self.weight_quantizer(weight).to(float_dtype)
+
+    def _process_weights_after_loading_fp6(self, layer: torch.nn.Module) -> None:
+        try:
+            from quark.torch.export.nn.modules import realquantizer
+            from quark.torch.quantization.config.config import (
+                QuantizationSpec)
+        except ImportError as err:
+            raise ImportError(
+                "The package `amd-quark` is required to use AMD Quark "
+                "MX-FP6 models. Please install it with `pip install "
+                "amd-quark`.") from err
+
+        weight_quant_spec = QuantizationSpec.from_dict(
+            self.weight_quant_spec)
+
+        weight_quantizer = realquantizer.get_real_quantizer(
+            qspec=weight_quant_spec,
+            quantizer=None,
+            real_quantized=True,
+            reorder=False,  # TODO: load from config
+            float_dtype=self.out_dtype,
+            scale_shape=layer.weight_scale.shape,
+            zero_point_shape=None,
+        )
+        weight_quantizer.scale.data = layer.weight_scale.data
+        self.weight_quantizer = weight_quantizer
+        layer.weight_scale = None
+
+        # This call is necessary to release the scales memory.
+        torch.cuda.empty_cache()
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        layer.weight = torch.nn.Parameter(layer.weight.data,
+                                        requires_grad=False)
+
+        if self.weight_dtype in ["fp6_e3m2", "fp6_e2m3"]:
+            # Uses Quark quantizer for now.
+            self._process_weights_after_loading_fp6(layer)
+        else:
+            layer.weight_scale = torch.nn.Parameter(layer.weight_scale.data,
+                                                    requires_grad=False)
+
+    def apply_weights(self,
+                      layer: torch.nn.Module,
+                      x: torch.Tensor,
+                      bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+        if self.emulate:
+            dq_w = self.dequant_func(layer.weight, layer.weight_scale, x.dtype)
+            qdq_x = self.quant_dequant_func(x)
+            return F.linear(qdq_x, dq_w, bias)
+        else:
+            raise NotImplementedError()
