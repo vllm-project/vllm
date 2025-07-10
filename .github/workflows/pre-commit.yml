@@ -19,7 +19,7 @@ jobs:
     - name: Install PyTorch for CPU and NumPy
       run: |
         pip install numpy
-        pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cpu
+        pip install torch==2.6.0+cpu torchvision==0.21.0+cpu torchaudio==2.6.0+cpu --index-url https://download.pytorch.org/whl/cpu
 
     - name: Install vLLM Build Dependencies (excluding torch and comments)
       run: pip install $(grep -v 'torch==' requirements/build.txt | grep -v '^#' | tr '\n' ' ')
@@ -27,6 +27,9 @@ jobs:
     - name: Install vLLM Project and Dev Dependencies
       env:
         VLLM_TARGET_DEVICE: cpu
+        USE_CUDA: "OFF"
+        CUDA_VISIBLE_DEVICES: ""
+        FORCE_CUDA: "0"
       run: pip install -e ".[dev]"
 
     - uses: pre-commit/action@v3.0.1

@@ -126,16 +126,34 @@ find_package(Torch REQUIRED)
 # Forward the non-CUDA device extensions to external CMake scripts.
 # This block should now logically only hit for HIP if VLLM_TARGET_DEVICE is not "cpu"
 # and also not "cuda". But your structure handles it well.
-if (NOT VLLM_TARGET_DEVICE STREQUAL "cuda" AND
-    NOT VLLM_TARGET_DEVICE STREQUAL "rocm")
-    # This 'if cpu' block within here is now redundant because the main 'if (VLLM_TARGET_DEVICE STREQUAL "cpu")'
-    # at the top handles it. However, keeping it doesn't harm, just means this outer if
-    # will never be true in practice for a "cpu" target given the early return.
-    if (VLLM_TARGET_DEVICE STREQUAL "cpu")
-        include(${CMAKE_CURRENT_LIST_DIR}/cmake/cpu_extension.cmake)
-    else()
-        return()
-    endif()
+if (VLLM_TARGET_DEVICE STREQUAL "cpu")
+    message(STATUS "VLLM: Building for CPU. Skipping all CUDA/HIP related configuration.")
+
+    # Explicitly set CUDA_FOUND and HIP_FOUND to FALSE for CPU builds.
+    # This prevents 'find_package(Torch)' from potentially setting them based on
+    # system-wide detections or the Torch config's internal checks for CUDA components.
+    set(CUDA_FOUND FALSE CACHE INTERNAL "Force CUDA to be not found for CPU build" FORCE)
+    set(HIP_FOUND FALSE CACHE INTERNAL "Force HIP to be not found for CPU build" FORCE)
+
+    # Set VLLM_GPU_LANG to an empty string or a placeholder
+    set(VLLM_GPU_LANG "" CACHE INTERNAL "No GPU language for CPU build" FORCE)
+
+    # Set environment variables to disable CUDA detection in PyTorch
+    set(ENV{USE_CUDA} OFF)
+    set(ENV{CUDA_VISIBLE_DEVICES} "")
+    
+    # Try to find Torch with CUDA explicitly disabled
+    set(CAFFE2_USE_CUDA OFF CACHE BOOL "Disable CUDA for CPU build" FORCE)
+    
+    # Now, find Torch, but with explicit instructions to not look for CUDA/HIP
+    find_package(Torch REQUIRED)
+
+    # Include the cpu_extension.cmake directly and then return/exit this CMakeList.
+    # This ensures no further GPU-specific code is processed.
+    include(${CMAKE_CURRENT_LIST_DIR}/cmake/cpu_extension.cmake)
+
+    # After configuring for CPU, we don't need to process any GPU-specific logic.
+    # This `return()` effectively stops CMake processing this file for GPU-related sections.
     return()
 endif()
 
