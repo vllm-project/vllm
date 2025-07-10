@@ -730,14 +730,6 @@ class FusedMoE(torch.nn.Module):
         self.apply_router_weight_on_input = apply_router_weight_on_input
         self.activation = activation
 
-        if self.use_triton_kernels:
-            # calculating padding needed for each tensor
-            smallest_even_divide_number = lambda x, n: (
-                x // n + 1) * n if x % n != 0 else x
-
-            self.hidden_state_pad_size = smallest_even_divide_number(
-                self.hidden_size, 256) - self.hidden_size
-
         if self.scoring_func != "softmax" and not self.use_grouped_topk:
             raise ValueError("Only softmax scoring function is supported for "
                              "non-grouped topk.")
@@ -1504,9 +1496,6 @@ class FusedMoE(torch.nn.Module):
         if do_naive_dispatch_combine:
             hidden_states, router_logits = get_ep_group().dispatch(
                 hidden_states, router_logits)
-
-        if self.hidden_state_pad_size is not None:
-            hidden_states = F.pad(hidden_states, (0, self.hidden_state_pad_size, 0, 0), mode="constant", value=0)
 
         # Matrix multiply.
         final_hidden_states = self.quant_method.apply(
