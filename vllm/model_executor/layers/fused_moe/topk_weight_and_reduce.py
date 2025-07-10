@@ -24,6 +24,9 @@ class TopKWeightAndReduceDelegate(mk.TopKWeightAndReduce):
     weight + reduce.
     """
 
+    def __eq__(self, other):
+        return isinstance(other, TopKWeightAndReduceDelegate)
+
     def apply(self, output: Optional[torch.Tensor],
               fused_expert_output: torch.Tensor, topk_weights: torch.Tensor,
               topk_ids: torch.Tensor,
@@ -37,6 +40,9 @@ class TopKWeightAndReduceNoOP(mk.TopKWeightAndReduce):
     The fused_experts outputs have already been weight applied and reduced.
     This implementation is a no-op.
     """
+
+    def __eq__(self, other):
+        return isinstance(other, TopKWeightAndReduceNoOP)
 
     def apply(self, output: Optional[torch.Tensor],
               fused_expert_output: torch.Tensor, topk_weights: torch.Tensor,
@@ -54,6 +60,9 @@ class TopKWeightAndReduceContiguous(mk.TopKWeightAndReduce):
     TopKWeightAndReduce implementation for a fused_experts output
     of shape (m, topk, K)
     """
+
+    def __eq__(self, other):
+        return isinstance(other, TopKWeightAndReduceContiguous)
 
     def apply(self, output: Optional[torch.Tensor],
               fused_expert_output: torch.Tensor, topk_weights: torch.Tensor,
@@ -91,6 +100,10 @@ class TopKWeightAndReduceNaiveBatched(mk.TopKWeightAndReduce):
 
     def __init__(self, rank: int):
         self.rank = rank
+
+    def __eq__(self, other):
+        return (isinstance(other, TopKWeightAndReduceContiguous)
+                and (other.rank == self.rank))
 
     def apply(self, output: Optional[torch.Tensor],
               fused_expert_output: torch.Tensor, topk_weights: torch.Tensor,
