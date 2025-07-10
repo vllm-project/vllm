@@ -365,36 +365,9 @@ def use_flashinfer_prefill() -> bool:
 
 
 # Currently 394MB, this can be tuned based on GEMM sizes used.
+# Choosen to be the same as sglang:
+#  https://github.com/sgl-project/sglang/blob/766392c6bda2558b61ce6d1c1bfd8081a549e1f1/python/sglang/global_config.py#L37
 FLASHINFER_WORKSPACE_BUFFER_SIZE = 394 * 1024 * 1024
-
-
-class FlashInferPrefill:
-
-    def __init__(self, runner):
-        self._device = runner.device
-        self._workspace_buffer = None
-        self._global_hyperparameters = infer_global_hyperparameters(
-            get_per_layer_parameters(runner.vllm_config, MLACommonImpl))
-
-    def get_global_hyperparameters(self):
-        return self._global_hyperparameters
-
-    def _get_workspace_buffer(self) -> torch.Tensor:
-        # Note that this maintains a single workspace buffer that is reused
-        # for all prefill executions.
-        if self._workspace_buffer is None:
-            self._workspace_buffer = torch.empty(
-                FLASHINFER_WORKSPACE_BUFFER_SIZE,
-                dtype=torch.uint8,
-                device=self._device)
-        return self._workspace_buffer
-
-    def get_ragged_prefill(self) -> BatchPrefillWithRaggedKVCacheWrapper:
-        # Notes:
-        #   1. kv_layout used is NHD
-        #   2. Force "cutlass" backend that runs new NVIDIA's B200 kernel
-        return BatchPrefillWithRaggedKVCacheWrapper(
-            self._get_workspace_buffer(), "NHD", backend="cutlass")
 
 
 class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
@@ -456,11 +429,18 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             if self._use_fi_prefill else MLACommonPrefillMetadata
 
         if self._use_fi_prefill:
-            self._fi_prefill = FlashInferPrefill(self.runner)
+            self._workspace_buffer = torch.empty(
+                FLASHINFER_WORKSPACE_BUFFER_SIZE,
+                dtype=torch.uint8,
+                device=runner.device)
+
             self._fi_prefill_main: Optional[
                 BatchPrefillWithRaggedKVCacheWrapper] = None
             self._fi_prefill_chunks: list[
                 BatchPrefillWithRaggedKVCacheWrapper] = []
+
+            self._global_hyperparameters = infer_global_hyperparameters(
+                get_per_layer_parameters(runner.vllm_config, MLACommonImpl))
 
     def _build_fi_prefill_wrappers(self, prefill: FlashInferPrefillMetadata):
         qo_indptr = prefill.query_start_loc
@@ -471,18 +451,18 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             has_context = True
 
         if self._fi_prefill_main is None:
-            self._fi_prefill_main = self._fi_prefill.get_ragged_prefill()
-        prefill_main = self._fi_prefill_main
+            self._fi_prefill_main = BatchPrefillWithRaggedKVCacheWrapper(
+                self._workspace_buffer, "NHD", backend="cutlass")
 
-        prefill_chunks: list[BatchPrefillWithRaggedKVCacheWrapper] = []
         if has_context:
             num_chunks = chunked_context.cu_seq_lens.shape[0]
             # Allocate more prefill chunk wrappers if needed
             if len(self._fi_prefill_chunks) < num_chunks:
                 for _ in range(len(self._fi_prefill_chunks), num_chunks):
                     self._fi_prefill_chunks.append(
-                        self._fi_prefill.get_ragged_prefill())
-            assert len(prefill_chunks) == num_chunks
+                        BatchPrefillWithRaggedKVCacheWrapper(
+                            self._workspace_buffer, "NHD", backend="cutlass"))
+            assert num_chunks <= len(self._fi_prefill_chunks)
 
         # In MLA, the non-latent num_qo_heads == num_kv_heads
         num_qo_heads = self.runner.num_query_heads
@@ -496,13 +476,11 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                        self.mla_dims.qk_rope_head_dim)
         head_dim_vo = self.mla_dims.v_head_dim
 
-        global_hyperparameters = self._fi_prefill.get_global_hyperparameters()
-
         # For main run, qo_indptr == kv_indptr
         kv_indptr = qo_indptr.clone()
 
         # Prepare main prefill
-        prefill_main.plan(
+        self._fi_prefill_main.plan(
             qo_indptr=qo_indptr,
             kv_indptr=kv_indptr,
             num_qo_heads=num_qo_heads,
@@ -510,9 +488,9 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             head_dim_qk=head_dim_qk,
             head_dim_vo=head_dim_vo,
             causal=True,  # This is main run
-            sm_scale=global_hyperparameters.sm_scale,
-            window_left=global_hyperparameters.window_left,
-            logits_soft_cap=global_hyperparameters.logits_soft_cap,
+            sm_scale=self._global_hyperparameters.sm_scale,
+            window_left=self._global_hyperparameters.window_left,
+            logits_soft_cap=self._global_hyperparameters.logits_soft_cap,
             q_data_type=self.runner.dtype,
             kv_data_type=self.kv_cache_spec.dtype,
         )
@@ -522,7 +500,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             for i in range(num_chunks):
                 kv_indptr_chunk = chunked_context.cu_seq_lens[i]
 
-                prefill_chunks[i].plan(
+                self._fi_prefill_chunks[i].plan(
                     qo_indptr=qo_indptr,
                     kv_indptr=kv_indptr_chunk,
                     num_qo_heads=num_qo_heads,
@@ -530,15 +508,16 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                     head_dim_qk=head_dim_qk,
                     head_dim_vo=head_dim_vo,
                     causal=False,  # This is context run
-                    sm_scale=global_hyperparameters.sm_scale,
-                    window_left=global_hyperparameters.window_left,
-                    logits_soft_cap=global_hyperparameters.logits_soft_cap,
+                    sm_scale=self._global_hyperparameters.sm_scale,
+                    window_left=self._global_hyperparameters.window_left,
+                    logits_soft_cap=self._global_hyperparameters.
+                    logits_soft_cap,
                     q_data_type=self.runner.dtype,
                     kv_data_type=self.kv_cache_spec.dtype,
                 )
 
-        prefill.prefill_main = prefill_main
-        prefill.prefill_chunks = prefill_chunks
+        prefill.prefill_main = self._fi_prefill_main
+        prefill.prefill_chunks = self._fi_prefill_chunks
 
     def reorder_batch(self, input_batch: "InputBatch",
                       scheduler_output: "SchedulerOutput") -> bool:
@@ -807,6 +786,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             logger.debug_once("Using FlashInfer prefill for MLA")
             self._run_prefill_context_chunk = self._run_prefill_context_chunk_fi
             self._run_prefill_new_tokens = self._run_prefill_new_tokens_fi
+            self._pad_v = False
         else:  # Use FlashAttention
             # For MLA the v head dim is smaller than qk head dim so we pad out
             # v with 0s to match the qk head dim for attention backends that do
@@ -869,27 +849,6 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             return attn_out, lse
         return attn_out
 
-    def _run_fi_prefill(self, prefill_wrapper, q, k, v, return_softmax_lse):
-        assert not self._pad_v
-
-        attn_out = prefill_wrapper.run(
-            q,
-            k,
-            v,
-            return_lse=return_softmax_lse,
-        )
-
-        # Unpack the output if there is multiple results
-        lse = None
-        if isinstance(attn_out, tuple):
-            attn_out, lse = attn_out[0], attn_out[1]
-
-        # Remain consistent with old `flash_attn_varlen_func` where there
-        # is only one output tensor if `return_softmax_lse` is False.
-        if return_softmax_lse:
-            return attn_out, lse
-        return attn_out
-
     def _run_prefill_new_tokens_fa(self, prefill: MLACommonPrefillMetadata, q,
                                    k, v, return_softmax_lse):
         return self._flash_attn_varlen_diff_headdims(
@@ -908,12 +867,12 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
     def _run_prefill_new_tokens_fi(self, prefill: MLACommonPrefillMetadata, q,
                                    k, v, return_softmax_lse):
         assert isinstance(prefill, FlashInferPrefillMetadata)
-        return self._run_fi_prefill(
-            prefill_wrapper=prefill.prefill_main,
+        assert prefill.prefill_main is not None
+        return prefill.prefill_main.run(
             q=q,
             k=k,
             v=v,
-            return_softmax_lse=return_softmax_lse,
+            return_lse=return_softmax_lse,
         )
 
     def _run_prefill_context_chunk_fa(self, prefill: MLACommonPrefillMetadata,
@@ -935,12 +894,11 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
     def _run_prefill_context_chunk_fi(self, prefill: MLACommonPrefillMetadata,
                                       chunk_idx: int, q, k, v):
         assert isinstance(prefill, FlashInferPrefillMetadata)
-        return self._run_fi_prefill(
-            prefill_wrapper=prefill.prefill_chunks[chunk_idx],
+        return prefill.prefill_chunks[chunk_idx].run(
             q=q,
             k=k,
             v=v,
-            return_softmax_lse=True,
+            return_lse=True,
         )
 
     def _v_up_proj(self, x):
