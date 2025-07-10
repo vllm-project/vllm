@@ -331,7 +331,7 @@ class LFM2Model(nn.Module):
 
         def get_layer(prefix: str):
             layer_idx = int(prefix.rsplit(".", 1)[1])
-            is_attn = layer_idx in config.full_attn_idxs
+            is_attn = self.config.layer_types[layer_idx] == "full_attention"
             layer_class = (LFM2AttentionDecoderLayer
                            if is_attn else LFM2ShortConvDecoderLayer)
             return layer_class(
