@@ -155,7 +155,7 @@ if TYPE_CHECKING:
     VLLM_USE_TRTLLM_ATTENTION: Optional[str] = None
     VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8: bool = False
     VLLM_USE_FLASHINFER_MOE_MXFP4_BF16: bool = False
-    VLLM_USE_SYMM_MEM: bool = False
+    VLLM_ALLREDUCE_USE_SYMM_MEM: bool = False
 
 
 def get_default_cache_root():
@@ -1096,8 +1096,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: bool(int(os.getenv("VLLM_ENABLE_RESPONSES_API_STORE", "0"))),
 
     # Whether to use pytorch symmetric memory for allreduce
-    "VLLM_USE_SYMM_MEM":
-    lambda: bool(int(os.getenv("VLLM_USE_SYMM_MEM", "0"))),
+    "VLLM_ALLREDUCE_USE_SYMM_MEM":
+    lambda: bool(int(os.getenv("VLLM_ALLREDUCE_USE_SYMM_MEM", "0"))),
 }
 
 # --8<-- [end:env-vars-definition]
