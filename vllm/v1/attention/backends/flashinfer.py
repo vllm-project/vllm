@@ -392,8 +392,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         if self.global_hyperparameters is None:
             self.global_hyperparameters = infer_global_hyperparameters(
                 get_per_layer_parameters(self.vllm_config))
-        if attn_metadata.kv_data_type == torch.uint8:
-            attn_metadata.kv_data_type = torch.float8_e4m3fn
+
         if attn_metadata.use_cascade:
             attn_metadata.cascade_wrapper = self._get_cascade_wrapper()
             attn_metadata.cascade_wrapper.plan(
@@ -542,7 +541,12 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         paged_kv_last_page_len = seq_lens % page_size
         paged_kv_last_page_len = torch.where(paged_kv_last_page_len == 0,
                                              page_size, paged_kv_last_page_len)
-
+        cache_dtype = self.runner.cache_config.cache_dtype
+        if cache_dtype.startswith("fp8"):
+            kv_cache_dtype = FlashInferBackend.get_fp8_dtype_for_flashinfer(
+                cache_dtype)
+        else:
+            kv_cache_dtype = self.kv_cache_spec.dtype
         attn_metadata = FlashInferMetadata(
             num_actual_tokens=num_actual_tokens,
             qo_indptr=qo_indptr,
@@ -553,7 +557,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             num_kv_heads=self.kv_cache_spec.num_kv_heads,
             head_dim=self.kv_cache_spec.head_size,
             page_size=page_size,
-            kv_data_type=self.kv_cache_spec.dtype,
+            kv_data_type=kv_cache_dtype,
             q_data_type=self.runner.dtype,
             slot_mapping=slot_mapping,
             num_decodes=self._num_decodes,
