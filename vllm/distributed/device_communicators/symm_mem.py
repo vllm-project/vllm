@@ -19,13 +19,13 @@ logger = init_logger(__name__)
 
 
 class SymmMemCommunicator:
-    MB = 1024 * 1024
+    MiB = 1024 * 1024
     # Max sizes for each world size
     _MAX_SIZES = {
-        2: 8 * MB,
-        4: 32 * MB,
-        6: 64 * MB,
-        8: 256 * MB,
+        2: 8 * MiB,
+        4: 32 * MiB,
+        6: 128 * MiB,
+        8: 128 * MiB,
     }
 
     def __init__(self, group: ProcessGroup, device: Union[int, str,
