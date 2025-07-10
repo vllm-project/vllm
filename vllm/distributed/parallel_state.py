@@ -782,6 +782,7 @@ class GroupCoordinator:
 
     def prepare_communication_buffer_for_model(self, model: torch.nn.Module):
         if self.device_communicator is not None:
+            torch.distributed.barrier(self.device_communicator)
             self.device_communicator.prepare_communication_buffer_for_model(
                 model)
 
