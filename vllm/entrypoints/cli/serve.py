@@ -101,14 +101,13 @@ class ServeSubcommand(CLISubcommand):
             help="Read CLI options from a config file. "
             "Must be a YAML with the following options: "
             "https://docs.vllm.ai/en/latest/configuration/serve_args.html")
+        serve_parser = make_arg_parser(serve_parser)
         serve_parser.add_argument(
             "--gpu-ids",
             type=str,
             default=None,
             help="Comma-separated GPU IDs or a single GPU ID to use for vLLM serve. "
                  "Overrides CUDA_VISIBLE_DEVICES.")
-
-        serve_parser = make_arg_parser(serve_parser)
         show_filtered_argument_or_group_from_help(serve_parser, ["serve"])
         serve_parser.epilog = VLLM_SUBCMD_PARSER_EPILOG
         return serve_parser
