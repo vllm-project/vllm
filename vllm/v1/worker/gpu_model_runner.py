@@ -56,7 +56,7 @@ from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
                              ModelRunnerOutput)
 from vllm.v1.pool.metadata import PoolingMetadata
 from vllm.v1.sample.logits_processor import (LogitProcessorCtorArgs,
-                                             LogitsProcessorsManager,
+                                             LogitsProcessors,
                                              build_logitsprocs)
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import RejectionSampler
@@ -198,7 +198,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Build logits processors. If specified by user, load custom
         # logitsprocs constructors.
-        self.logitsprocs: LogitsProcessorsManager = build_logitsprocs(
+        self.logitsprocs: LogitsProcessors = build_logitsprocs(
             LogitProcessorCtorArgs(
                 vllm_config=vllm_config,
                 device=self.device,
@@ -2093,7 +2093,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             output_token_ids=[[] for _ in range(num_reqs)],
             allowed_token_ids_mask=None,
             bad_words_token_ids={},
-            logitsprocs=LogitsProcessorsManager(),
+            logitsprocs=LogitsProcessors(),
         )
         try:
             sampler_output = self.sampler(logits=logits,

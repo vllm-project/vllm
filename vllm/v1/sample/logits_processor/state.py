@@ -163,7 +163,7 @@ class BatchUpdateBuilder:
 
 
 @dataclass
-class LogitsProcessorsManager:
+class LogitsProcessors:
     """Encapsulates initialized logitsproc objects."""
     argmax_invariant: list["LogitsProcessor"] = field(
         default_factory=list, init=False)  # argmax-invariant logitsprocs

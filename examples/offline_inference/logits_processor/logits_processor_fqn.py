@@ -23,9 +23,7 @@ def main():
     # Create an LLM.
     llm = LLM(
         model="facebook/opt-125m",
-        logits_processors_fqns=[
-            "vllm.v1.sample.logits_processor.impls:DummyLogitsProcessor"
-        ],
+        logits_processors_fqns=["vllm.test_utils:DummyLogitsProcessor"],
     )
     # Generate texts from the prompts.
     # The output is a list of RequestOutput objects

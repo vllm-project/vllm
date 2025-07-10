@@ -45,7 +45,7 @@ vllm = "vllm.entrypoints.cli.main:main"
 lora_filesystem_resolver = "vllm.plugins.lora_resolvers.filesystem_resolver:register_filesystem_resolver"
 
 [project.entry-points."vllm.logits_processors"]
-dummy_logitproc = "vllm.v1.sample.logits_processor.impls:DummyLogitsProcessor"
+dummy_logitproc = "vllm.test_utils:DummyLogitsProcessor"
 
 [tool.setuptools_scm]
 # no extra settings needed, presence enables setuptools-scm

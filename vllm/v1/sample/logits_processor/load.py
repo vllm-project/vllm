@@ -9,7 +9,7 @@ from vllm.v1.sample.logits_processor import LogitsProcessor
 from vllm.v1.sample.logits_processor.impls import (LogitBiasLogitsProcessor,
                                                    MinPLogitsProcessor,
                                                    MinTokensLogitsProcessor)
-from vllm.v1.sample.logits_processor.state import LogitsProcessorsManager
+from vllm.v1.sample.logits_processor.state import LogitsProcessors
 from vllm.v1.sample.logits_processor.utils import LogitProcessorCtorArgs
 
 logger = logging.getLogger(__name__)
@@ -47,8 +47,9 @@ def _load_logitsprocs_ctors_by_fqns(
             if not callable(obj):
                 raise ValueError(f"{fqn} is not a Callable.")
             constructors.append(obj)
-        except Exception:
+        except Exception as e:
             logger.exception("Failed to load logits processor %s", fqn)
+            raise e
 
     return constructors
 
@@ -93,8 +94,9 @@ def _load_logitsprocs_ctors_by_entrypoints(
         try:
             func = installed_logitsprocs_plugins[entrypoint].load()
             constructors.append(func)
-        except Exception:
+        except Exception as e:
             logger.exception("Failed to load plugin %s", entrypoint)
+            raise e
 
     return constructors
 
@@ -118,11 +120,11 @@ def _load_custom_logitsprocs_ctors(
         _load_logitsprocs_ctors_by_fqns(logits_processors_fqns))
 
 
-def build_logitsprocs(args: LogitProcessorCtorArgs) -> LogitsProcessorsManager:
+def build_logitsprocs(args: LogitProcessorCtorArgs) -> LogitsProcessors:
     _custom_logitsprocs_ctors = _load_custom_logitsprocs_ctors(
         args.vllm_config.logits_processors_fqns,
         args.vllm_config.logits_processors_entrypoints,
     )
-    return LogitsProcessorsManager(
+    return LogitsProcessors(
         ctor(args) for ctor in itertools.chain(_builtin_logitsprocs_ctors,
                                                _custom_logitsprocs_ctors))

@@ -16,7 +16,7 @@ from vllm.utils import swap_dict_values
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.pool.metadata import PoolingMetadata
 from vllm.v1.sample.logits_processor import (BatchUpdateBuilder,
-                                             LogitsProcessorsManager,
+                                             LogitsProcessors,
                                              MoveDirectionality)
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.utils import is_spec_decode_unsupported
@@ -69,7 +69,7 @@ class InputBatch:
         pin_memory: bool,
         vocab_size: int,
         block_sizes: list[int],  # The block_size of each kv cache group
-        logitsprocs: LogitsProcessorsManager,
+        logitsprocs: LogitsProcessors,
         is_spec_decode: bool = False,
         logits_processing_needs_token_ids: bool = False,
     ):
@@ -579,7 +579,7 @@ class InputBatch:
         del self.req_output_token_ids[self.num_reqs:]
 
     @property
-    def _logitsprocs(self) -> Optional[LogitsProcessorsManager]:
+    def _logitsprocs(self) -> Optional[LogitsProcessors]:
         if not self.sampling_metadata:
             return None
         return self.sampling_metadata.logitsprocs
@@ -601,7 +601,7 @@ class InputBatch:
                 old_logitsprocs)
 
     def _make_sampling_metadata(
-            self, logitsprocs: LogitsProcessorsManager) -> SamplingMetadata:
+            self, logitsprocs: LogitsProcessors) -> SamplingMetadata:
         num_reqs = self.num_reqs
         if not self.all_greedy:
             temperature = copy_slice(self.temperature_cpu_tensor,

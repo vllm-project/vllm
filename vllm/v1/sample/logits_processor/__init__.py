@@ -9,7 +9,7 @@ from vllm.v1.sample.logits_processor.load import (LogitprocCtor,
                                                   build_logitsprocs)
 from vllm.v1.sample.logits_processor.state import (BatchUpdate,
                                                    BatchUpdateBuilder,
-                                                   LogitsProcessorsManager,
+                                                   LogitsProcessors,
                                                    MoveDirectionality)
 
 __all__ = [
@@ -21,7 +21,7 @@ __all__ = [
     "BatchUpdate",
     "BatchUpdateBuilder",
     "MoveDirectionality",
-    "LogitsProcessorsManager",
+    "LogitsProcessors",
     "build_logitsprocs",
     "LogitProcessorCtorArgs",
 ]
