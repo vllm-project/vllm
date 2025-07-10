@@ -151,6 +151,9 @@ class cmake_build_ext(build_ext):
 
         if VLLM_TARGET_DEVICE == "cpu":
             cmake_args.append("-DUSE_CUDA=OFF")
+            cmake_args.append("-DBUILD_CUDA_LIBS=OFF")
+            cmake_args.append("-DUSE_CUDNN=OFF")
+            cmake_args.append("-DTORCH_CUDA_ARCH_LIST=NoCUDA")
 
         verbose = envs.VERBOSE
         if verbose:
