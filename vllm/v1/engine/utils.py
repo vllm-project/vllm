@@ -415,11 +415,12 @@ class CoreEngineActorManager:
 
         from vllm.v1.engine.core import DPEngineCoreActor
 
-        old_dp_size = len(self.local_engine_actors) + len(
-            self.remote_engine_actors)
+        old_data_parallel_size = len(self.local_engine_actors) + \
+            len(self.remote_engine_actors)
 
-        if new_data_parallel_size <= old_dp_size:
-            return
+        assert new_data_parallel_size > old_data_parallel_size, (
+            "New data parallel size must be greater than old data parallel "
+            "size for scale up")
 
         placement_groups, local_dp_ranks = \
             self.add_dp_placement_groups(
@@ -434,7 +435,7 @@ class CoreEngineActorManager:
         for i, (pg,
                 local_rank) in enumerate(zip(placement_groups,
                                              local_dp_ranks)):
-            rank = old_dp_size + i
+            rank = old_data_parallel_size + i
             dp_vllm_config = copy.deepcopy(old_vllm_config)
             dp_vllm_config.parallel_config.data_parallel_size = \
                 new_data_parallel_size
