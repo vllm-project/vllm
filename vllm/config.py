@@ -4651,6 +4651,10 @@ class VllmConfig:
         if self.compilation_config.level is None:
             self.compilation_config.level = CompilationLevel.NO_COMPILATION
 
+        # disable cudagraph if enforce eager execution
+        if self.model_config is not None and self.model_config.enforce_eager:
+            self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+
         self._set_cudagraph_sizes()
 
         if self.cache_config.cpu_offload_gb > 0 and \
