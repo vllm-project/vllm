@@ -1170,6 +1170,10 @@ def fused_experts(
         allow_cutlass_block_scaled_grouped_gemm: bool = False) -> torch.Tensor:
     # For now, disable DeepGemm for small N (<= 512) until better
     # permute/unpermute ops are available.
+    # However, on B200, we use DeepGemm for all cases becuase they only support
+    # E8M0 scale, which means we requantize the weight and input to the specific
+    # scale. Fallen back to cutlass or triton for some cases would cause
+    # accuracy issue.
     N = w1.size(1)
     should_use_deep_gemm = ((N > 512
                              and _valid_deep_gemm(hidden_states, w1, w2))

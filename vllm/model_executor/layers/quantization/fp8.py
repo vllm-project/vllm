@@ -395,9 +395,12 @@ class Fp8LinearMethod(LinearMethodBase):
             prepare_fp8_layer_for_marlin(layer, size_k_first)
             # Activations not quantized for marlin.
             del layer.input_scale
+
+        # On B200, DeepGemm only support E8M0 scale, which means we need to
+        # requantize the weight and input to the specific scale
+        # at the same time.
         if is_blackwell_deep_gemm_used():
             assert layer.weight_block_size is not None
-            # Re-quantise the expert weights so their scales are UE8M0.
             block_sz = tuple(layer.weight_block_size)
             requant_weight_ue8m0_inplace(
                 layer.weight.data,
