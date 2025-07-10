@@ -14,7 +14,6 @@ try:
     from flashinfer.decode import (CUDAGraphBatchDecodeWithPagedKVCacheWrapper,
                                    trtllm_batch_decode_with_kv_cache)
     from flashinfer.prefill import BatchPrefillWithPagedKVCacheWrapper
-    from flashinfer.utils import is_sm100a_supported
 
     from vllm.vllm_flash_attn import flash_attn_varlen_func
     FLASHINFER_WORKSPACE_BUFFER_SIZE = 256 * 1024 * 1024
@@ -45,6 +44,7 @@ from vllm.attention.layer import Attention
 from vllm.attention.ops.paged_attn import PagedAttention
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils import (async_tensor_h2d, get_kv_cache_torch_dtype,
                         make_tensor_with_pad)
 
@@ -58,7 +58,7 @@ FLASHINFER_KV_CACHE_LAYOUT: str = envs.VLLM_KV_CACHE_LAYOUT or "NHD"
 
 
 class FlashInferBackend(AttentionBackend):
-    cached_use_trtllm: Optional[bool] = None
+    cached_sm100a_supported: Optional[bool] = None
 
     @staticmethod
     def get_name() -> str:
@@ -128,10 +128,15 @@ class FlashInferBackend(AttentionBackend):
     @staticmethod
     def use_trtllm_decode_attention(batch_size: int,
                                     max_seq_len: int,
+                                    attn_head_size: int,
                                     kv_cache_dtype: str = "auto") -> bool:
-        # Check if environment variable is explicitly set
-        if FlashInferBackend.cached_use_trtllm is not None:
-            return FlashInferBackend.cached_use_trtllm
+
+        if FlashInferBackend.cached_sm100a_supported is None:
+            FlashInferBackend.cached_sm100a_supported = (
+                current_platform.has_device_capability(100))
+        if not FlashInferBackend.cached_sm100a_supported:
+            return False
+
         env_value = envs.VLLM_USE_TRTLLM_DECODE_ATTENTION
         if env_value is not None:
             logger.info_once("VLLM_USE_TRTLLM_DECODE_ATTENTION is set to %s",
@@ -145,9 +150,11 @@ class FlashInferBackend(AttentionBackend):
             FlashInferBackend.cached_use_trtllm = not no_use_trtllm
         else:
             # Environment variable not set - use auto-detection
-            use_trtllm = (is_sm100a_supported(torch.device("cuda"))
+            # Only supports attention head size of 128
+            use_trtllm = (FlashInferBackend.cached_sm100a_supported
                           and batch_size <= 256 and max_seq_len < 131072
-                          and kv_cache_dtype == "auto")
+                          and kv_cache_dtype == "auto"
+                          and attn_head_size == 128)
             FlashInferBackend.cached_use_trtllm = use_trtllm
             if use_trtllm:
                 logger.info_once(
@@ -394,8 +401,7 @@ class FlashInferState(AttentionState):
                                     input_buffers,
                                     attn_metadata,
                                     is_encoder_decoder_model: bool = False):
-        super().prepare_graph_input_buffers(input_buffers, attn_metadata,
-                                            is_encoder_decoder_model)
+        # FlashInfer-specific logic: copy additional tensors
         num_total_blocks = attn_metadata.decode_metadata.seq_lens_tensor.shape[
             0]
         input_buffers["seq_lens_tensor"][:num_total_blocks].copy_(
@@ -1134,7 +1140,8 @@ class FlashInferImpl(AttentionImpl):
             # TODO: @pavanimajety Remove this once the switch happens
             # inside flashinfer.
             if not FlashInferBackend.use_trtllm_decode_attention(
-                    num_decode_tokens, attn_metadata.max_decode_seq_len):
+                    num_decode_tokens, attn_metadata.max_decode_seq_len,
+                    attn_metadata.head_dim, kv_cache_dtype):
                 decode_output = decode_meta.decode_wrapper.run(
                     decode_query,
                     kv_cache.permute(*stride_order),

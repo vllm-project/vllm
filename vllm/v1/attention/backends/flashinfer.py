@@ -11,7 +11,6 @@ from flashinfer import (BatchDecodeWithPagedKVCacheWrapper,
                         BatchPrefillWithPagedKVCacheWrapper,
                         MultiLevelCascadeAttentionWrapper)
 from flashinfer.decode import trtllm_batch_decode_with_kv_cache
-from flashinfer.utils import is_sm100a_supported
 
 import vllm.envs as envs
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
@@ -19,6 +18,7 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
 from vllm.attention.layer import Attention
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.v1.attention.backends.flash_attn import use_cascade_attention
 from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
                                               CommonAttentionMetadata,
@@ -100,10 +100,9 @@ class FlashInferBackend(AttentionBackend):
                                     max_seq_len: int,
                                     attn_head_size: int = 128,
                                     kv_cache_dtype: str = "auto") -> bool:
-        # Only supports attention head size of 128
         if FlashInferBackend.cached_sm100a_supported is None:
-            FlashInferBackend.cached_sm100a_supported = (is_sm100a_supported(
-                torch.device("cuda")))
+            FlashInferBackend.cached_sm100a_supported = (
+                current_platform.has_device_capability(100))
         if not FlashInferBackend.cached_sm100a_supported:
             return False
 
@@ -123,6 +122,7 @@ class FlashInferBackend(AttentionBackend):
             return not no_use_trtllm
         else:
             # Environment variable not set - use auto-detection
+            # Only supports attention head size of 128
             use_trtllm = (FlashInferBackend.cached_sm100a_supported
                           and batch_size <= 256 and max_seq_len < 131072
                           and kv_cache_dtype == "auto"
@@ -743,7 +743,7 @@ class FlashInferImpl(AttentionImpl):
             assert decode_query.shape[0] == num_decode_tokens
             if not FlashInferBackend.use_trtllm_decode_attention(
                     attn_metadata.num_decodes, attn_metadata.max_seq_len,
-                    attn_metadata.head_dim):
+                    attn_metadata.head_dim, self.kv_cache_dtype):
                 assert decode_wrapper is not None
                 assert decode_wrapper._window_left == window_left
                 assert decode_wrapper._logits_soft_cap == (self.logits_soft_cap
