@@ -54,7 +54,7 @@ def test_get_field():
         ("jason9693/Qwen2.5-1.5B-apeach", "pooling", "classify"),
         ("cross-encoder/ms-marco-MiniLM-L-6-v2", "pooling", "classify"),
         ("Qwen/Qwen2.5-Math-RM-72B", "pooling", "reward"),
-        ("openai/whisper-small", "transcription", "transcription"),
+        ("openai/whisper-small", "transcription_only", "transcription"),
     ],
 )
 def test_auto_task(model_id, expected_runner_type, expected_task):
@@ -100,6 +100,7 @@ def test_score_task(model_id, expected_runner_type, expected_task):
 
 @pytest.mark.parametrize(("model_id", "bad_task"), [
     ("Qwen/Qwen2.5-Math-RM-72B", "generate"),
+    ("Qwen/Qwen3-0.6B", "transcription"),
 ])
 def test_incorrect_task(model_id, bad_task):
     with pytest.raises(ValueError, match=r"does not support the .* task"):

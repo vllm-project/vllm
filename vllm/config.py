@@ -96,13 +96,14 @@ TaskOption = Literal["auto", "generate", "embedding", "embed", "classify",
 _ResolvedTask = Literal["generate", "embed", "classify", "reward", "draft",
                         "transcription"]
 
-RunnerType = Literal["generate", "pooling", "draft", "transcription"]
+RunnerType = Literal["generate", "pooling", "draft", "transcription_only"]
 
 _RUNNER_TASKS: dict[RunnerType, list[_ResolvedTask]] = {
-    "generate": ["generate"],
+    "generate": ["generate", "transcription"],
     "pooling": ["embed", "classify", "reward"],
     "draft": ["draft"],
-    "transcription": ["transcription"],
+    # Runner for all models that do not support the generate endpoints.
+    "transcription_only": [],
 }
 
 _TASK_RUNNER: dict[_ResolvedTask, RunnerType] = {
@@ -821,22 +822,35 @@ class ModelConfig:
         registry = self.registry
         architectures = self.architectures
 
+        if (registry.is_transcription_only_model(architectures) and\
+             task_option== "auto"):
+            self.runner_type = "transcription_only"
+            return {"transcription"}, "transcription"
+
         runner_support: dict[RunnerType, bool] = {
             # NOTE: Listed from highest to lowest priority,
             # in case the model supports multiple of them
-            "transcription": registry.is_transcription_model(architectures),
             "generate": registry.is_text_generation_model(architectures),
             "pooling": registry.is_pooling_model(architectures),
         }
-        supported_runner_types_lst: list[RunnerType] = [
+
+        def is_task_supported(task: _ResolvedTask) -> bool:
+            # Allows the model to opt out of tasks listed by the runner.
+            if task == "transcription":
+                return registry.is_transcription_model(architectures)
+            elif task == "score":
+                return runner_support["pooling"]
+            return True
+
+        self.supported_runner_types: list[RunnerType] = [
             runner_type
             for runner_type, is_supported in runner_support.items()
             if is_supported
         ]
 
         supported_tasks_lst: list[_ResolvedTask] = [
-            task for runner_type in supported_runner_types_lst
-            for task in _RUNNER_TASKS[runner_type]
+            task for runner_type in self.supported_runner_types
+            for task in _RUNNER_TASKS[runner_type] if is_task_supported(task)
         ]
         supported_tasks = set(supported_tasks_lst)
 
@@ -854,10 +868,6 @@ class ModelConfig:
                     "Defaulting to '%s'.", supported_tasks, selected_task)
         else:
             if task_option == "score":
-                if not runner_support["pooling"]:
-                    msg = (f"This model does not support the '{task_option}' "
-                           f"task. Supported tasks: {supported_tasks}")
-                    raise ValueError(msg)
                 if self.registry.is_cross_encoder_model(architectures):
                     task_option = "classify"
                 else:
@@ -880,6 +890,7 @@ class ModelConfig:
 
             selected_task = task_option
 
+        self.runner_type = _TASK_RUNNER[cast(_ResolvedTask, selected_task)]
         return supported_tasks, selected_task
 
     def _parse_quant_hf_config(self):
@@ -1437,14 +1448,6 @@ class ModelConfig:
     @property
     def use_mla(self) -> bool:
         return self.is_deepseek_mla and not envs.VLLM_MLA_DISABLE
-
-    @property
-    def supported_runner_types(self) -> set[RunnerType]:
-        return {_TASK_RUNNER[task] for task in self.supported_tasks}
-
-    @property
-    def runner_type(self) -> RunnerType:
-        return _TASK_RUNNER[cast(_ResolvedTask, self.task)]
 
     @property
     def is_v1_compatible(self) -> bool:

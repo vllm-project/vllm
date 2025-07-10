@@ -1575,13 +1575,13 @@ async def init_app_state(
         model_config,
         state.openai_serving_models,
         request_logger=request_logger,
-    ) if model_config.runner_type == "transcription" else None
+    ) if model_config.task == "transcription" else None
     state.openai_serving_translation = OpenAIServingTranslation(
         engine_client,
         model_config,
         state.openai_serving_models,
         request_logger=request_logger,
-    ) if model_config.runner_type == "transcription" else None
+    ) if model_config.task == "transcription" else None
     state.task = model_config.task
 
     state.enable_server_load_tracking = args.enable_server_load_tracking

@@ -633,6 +633,8 @@ class SupportsTranscription(Protocol):
     """The interface required for all models that support transcription."""
 
     supports_transcription: ClassVar[Literal[True]] = True
+    # Allows transcription models to opt out of text generation when True.
+    supports_transcription_only: ClassVar[bool] = False
 
     @classmethod
     def get_decoder_prompt(cls, language: str, task_type: str,
@@ -664,6 +666,29 @@ def supports_transcription(
         return isinstance(model, SupportsTranscription)
 
     return isinstance(model, SupportsTranscription)
+
+
+@overload
+def supports_transcription_only(
+        model: type[object]) -> TypeIs[type[SupportsTranscription]]:
+    ...
+
+
+@overload
+def supports_transcription_only(
+        model: object) -> TypeIs[SupportsTranscription]:
+    ...
+
+
+def supports_transcription_only(
+    model: Union[type[object], object],
+) -> Union[TypeIs[type[SupportsTranscription]], TypeIs[SupportsTranscription]]:
+    if isinstance(model, type):
+        return isinstance(
+            model, SupportsTranscription) and model.supports_transcription_only
+
+    return isinstance(
+        model, SupportsTranscription) and model.supports_transcription_only
 
 
 @runtime_checkable
