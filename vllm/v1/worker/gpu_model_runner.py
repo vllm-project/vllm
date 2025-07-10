@@ -1992,6 +1992,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         num_tokens: int,
         cudagraph_runtime_style: CUDAGraphRuntimeStyle = (
             CUDAGraphRuntimeStyle.NONE),
+        force_attention: bool = False,
         is_pure_decode: bool = False,
         skip_eplb: bool = False,
         is_profile: bool = False,
@@ -2025,7 +2026,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         attn_metadata: Optional[dict[str, Any]] = None
 
-        if cudagraph_runtime_style == CUDAGraphRuntimeStyle.FULL:
+        # If force_attention is True, we always capture attention. Otherwise,
+        # it depends on the cudagraph_runtime_style to be FULL or PIECEWISE.
+        if force_attention or cudagraph_runtime_style == \
+                CUDAGraphRuntimeStyle.FULL:
             attn_metadata = {}
 
             query_start_loc = self.query_start_loc[:num_reqs + 1]
@@ -2369,9 +2373,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 for num_tokens in compilation_cases:
                     for _ in range(
                             self.compilation_config.cudagraph_num_of_warmups):
-                        # use CUDAGraphRuntimeStyle.NONE (default) for warmup
+                        # Use CUDAGraphRuntimeStyle.NONE (default) for warmup.
+                        # But be careful, warm up with `NONE`is orthogonal to
+                        # if we want to warm up attention or not. This is
+                        # different from the case where `FULL` implies capture
+                        # attention while `PIECEWISE` implies no attention.
                         self._dummy_run(num_tokens,
                                         is_pure_decode=False,
+                                        force_attention=attn_cuda_graphs,
                                         skip_eplb=True)
                     self._dummy_run(
                         num_tokens,
@@ -2397,9 +2406,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 for num_tokens in compilation_cases_decode:
                     for _ in range(
                             self.compilation_config.cudagraph_num_of_warmups):
-                        # use CUDAGraphRuntimeStyle.NONE (default) for warmup
+                        # Always force attention for warmup of pure decode.
                         self._dummy_run(num_tokens,
                                         is_pure_decode=True,
+                                        force_attention=True,
                                         skip_eplb=True)
                     self._dummy_run(
                         num_tokens,

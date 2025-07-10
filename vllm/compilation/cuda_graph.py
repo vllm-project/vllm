@@ -63,7 +63,7 @@ class CUDAGraphWrapper:
         # need to initialize a CUDAGraphWrapper.
         assert self.runtime_style != CUDAGraphRuntimeStyle.NONE
         if self.graph_pool is None:
-            self.graph_pool = current_platform.get_default_cudagraph_pool()
+            self.graph_pool = current_platform.get_global_graph_pool()
 
         if cudagraph_options is None:
             cudagraph_options = CUDAGraphOptions()
