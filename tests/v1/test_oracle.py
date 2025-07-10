@@ -13,7 +13,6 @@ UNSUPPORTED_MODELS_V1 = [
     "openai/whisper-large-v3",  # transcription
     "facebook/bart-large-cnn",  # encoder decoder
     "state-spaces/mamba-130m-hf",  # mamba1
-    "BAAI/bge-m3",  # embedding
 ]
 
 MODEL = "meta-llama/Llama-3.2-1B-Instruct"
