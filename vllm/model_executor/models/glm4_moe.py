@@ -27,8 +27,8 @@ from collections.abc import Iterable
 from typing import Any, Optional, Union
 
 import torch
-from torch import nn
 import torch.nn.functional as F
+from torch import nn
 from transformers import PretrainedConfig
 
 from vllm.attention import Attention
@@ -63,13 +63,13 @@ logger = init_logger(__name__)
 class Glm4MoeMLP(nn.Module):
 
     def __init__(
-            self,
-            hidden_size: int,
-            intermediate_size: int,
-            hidden_act: str,
-            quant_config: Optional[QuantizationConfig] = None,
-            reduce_results: bool = True,
-            prefix: str = "",
+        self,
+        hidden_size: int,
+        intermediate_size: int,
+        hidden_act: str,
+        quant_config: Optional[QuantizationConfig] = None,
+        reduce_results: bool = True,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.gate_up_proj = MergedColumnParallelLinear(
@@ -97,70 +97,81 @@ class Glm4MoeMLP(nn.Module):
 
 class Glm4MoeTopkRouter(nn.Module):
 
-   def __init__(
-           self,
-           config: PretrainedConfig,
-           quant_config: Optional[QuantizationConfig] = None,
-           prefix: str = "",
-   ):
-       super().__init__()
-       self.config = config
-       self.top_k = config.num_experts_per_tok
-       self.n_routed_experts = config.n_routed_experts
-       self.routed_scaling_factor = config.routed_scaling_factor
-       self.n_group = config.n_group
-       self.topk_group = config.topk_group
-       self.norm_topk_prob = config.norm_topk_prob
+    def __init__(
+        self,
+        config: PretrainedConfig,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+    ):
+        super().__init__()
+        self.config = config
+        self.top_k = config.num_experts_per_tok
+        self.n_routed_experts = config.n_routed_experts
+        self.routed_scaling_factor = config.routed_scaling_factor
+        self.n_group = config.n_group
+        self.topk_group = config.topk_group
+        self.norm_topk_prob = config.norm_topk_prob
 
-       self.weight = nn.Parameter(torch.empty((self.n_routed_experts, config.hidden_size)))
-       self.register_buffer("e_score_correction_bias",torch.zeros((self.n_routed_experts)))
+        self.weight = nn.Parameter(
+            torch.empty((self.n_routed_experts, config.hidden_size)))
+        self.register_buffer(
+            "e_score_correction_bias",
+            torch.zeros((self.n_routed_experts), dtype=torch.float32))
 
-   @torch.no_grad()
-   def get_topk_indices(self, scores):
-       scores_for_choice = scores.view(-1, self.n_routed_experts) + self.e_score_correction_bias.unsqueeze(0)
+    @torch.no_grad()
+    def get_topk_indices(self, scores):
+        scores_for_choice = scores.view(
+            -1,
+            self.n_routed_experts) + self.e_score_correction_bias.unsqueeze(0)
 
-       group_scores = (
-           scores_for_choice.view(-1, self.n_group, self.n_routed_experts // self.n_group)
-           .topk(2, dim=-1)[0]
-           .sum(dim=-1)
-       )
+        group_scores = (scores_for_choice.view(
+            -1, self.n_group,
+            self.n_routed_experts // self.n_group).topk(2,
+                                                        dim=-1)[0].sum(dim=-1))
 
-       group_idx = torch.topk(group_scores, k=self.topk_group, dim=-1, sorted=False)[1]
-       group_mask = torch.zeros_like(group_scores)
-       group_mask.scatter_(1, group_idx, 1)
+        group_idx = torch.topk(group_scores,
+                               k=self.topk_group,
+                               dim=-1,
+                               sorted=False)[1]
+        group_mask = torch.zeros_like(group_scores)
+        group_mask.scatter_(1, group_idx, 1)
 
-       score_mask = (
-           group_mask.unsqueeze(-1)
-           .expand(-1, self.n_group, self.n_routed_experts // self.n_group)
-           .reshape(-1, self.n_routed_experts)
-       )
+        score_mask = (group_mask.unsqueeze(-1).expand(
+            -1, self.n_group, self.n_routed_experts // self.n_group).reshape(
+                -1, self.n_routed_experts))
 
-       scores_for_choice = scores_for_choice.masked_fill(~score_mask.bool(), 0.0)
-       topk_indices = torch.topk(scores_for_choice, k=self.top_k, dim=-1, sorted=False)[1]
-       return topk_indices
+        scores_for_choice = scores_for_choice.masked_fill(
+            ~score_mask.bool(), 0.0)
+        topk_indices = torch.topk(scores_for_choice,
+                                  k=self.top_k,
+                                  dim=-1,
+                                  sorted=False)[1]
+        return topk_indices
 
-   def forward(self, hidden_states):
-       hidden_states = hidden_states.view(-1, self.config.hidden_size)
-       router_logits = F.linear(hidden_states.type(torch.float32), self.weight.type(torch.float32))
-       scores = router_logits.sigmoid()
+    def forward(self, hidden_states):
+        hidden_states = hidden_states.view(-1, self.config.hidden_size)
+        router_logits = F.linear(hidden_states.type(torch.float32),
+                                 self.weight.type(torch.float32))
+        scores = router_logits.sigmoid()
 
-       topk_indices = self.get_topk_indices(scores)
-       topk_weights = scores.gather(1, topk_indices)
+        topk_indices = self.get_topk_indices(scores)
+        topk_weights = scores.gather(1, topk_indices)
 
-       if self.norm_topk_prob:
-           denominator = topk_weights.sum(dim=-1, keepdim=True) + 1e-20
-           topk_weights /= denominator
+        if self.norm_topk_prob:
+            denominator = topk_weights.sum(dim=-1, keepdim=True) + 1e-20
+            topk_weights /= denominator
 
-       topk_weights = topk_weights * self.routed_scaling_factor
-       return topk_indices, topk_weights
+        topk_weights = topk_weights * self.routed_scaling_factor
+        return topk_indices, topk_weights
 
 
 class Glm4MoeSparseMoeBlock(nn.Module):
+
     def __init__(
-            self,
-            config: PretrainedConfig,
-            quant_config: Optional[QuantizationConfig] = None,
-            prefix: str = "",
+        self,
+        config: PretrainedConfig,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
@@ -174,31 +185,27 @@ class Glm4MoeSparseMoeBlock(nn.Module):
                 f"Tensor parallel size {self.tp_size} is greater than "
                 f"the number of experts {self.num_experts}.")
 
-        self.gate = Glm4MoeTopkRouter(
-            config=config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.gate"
-        )
+        self.gate = Glm4MoeTopkRouter(config=config,
+                                      quant_config=quant_config,
+                                      prefix=f"{prefix}.gate")
 
-        self.experts = FusedMoE(
-            num_experts=self.num_experts,
-            top_k=self.top_k,
-            hidden_size=config.hidden_size,
-            intermediate_size=config.moe_intermediate_size,
-            reduce_results=False,
-            renormalize=self.norm_topk_prob,
-            quant_config=quant_config,
-            prefix=f"{prefix}.experts"
-        )
+        self.experts = FusedMoE(num_experts=self.num_experts,
+                                top_k=self.top_k,
+                                hidden_size=config.hidden_size,
+                                intermediate_size=config.moe_intermediate_size,
+                                reduce_results=False,
+                                renormalize=self.norm_topk_prob,
+                                quant_config=quant_config,
+                                prefix=f"{prefix}.experts")
 
         self.shared_experts = Glm4MoeMLP(
             hidden_size=config.hidden_size,
-            intermediate_size=config.moe_intermediate_size * config.n_shared_experts,
+            intermediate_size=config.moe_intermediate_size *
+            config.n_shared_experts,
             hidden_act=config.hidden_act,
             quant_config=quant_config,
             reduce_results=False,
-            prefix=f"{prefix}.shared_experts"
-        )
+            prefix=f"{prefix}.shared_experts")
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
 
@@ -208,23 +215,19 @@ class Glm4MoeSparseMoeBlock(nn.Module):
         hidden_states = hidden_states.view(-1, hidden_dim)
         topk_indices, topk_weights = self.gate(hidden_states)
         batch_size = hidden_states.shape[0]
-        router_logits = torch.zeros(
-            batch_size, self.num_experts,
-            device=hidden_states.device,
-            dtype=hidden_states.dtype
-        )
+        router_logits = torch.zeros(batch_size,
+                                    self.num_experts,
+                                    device=hidden_states.device,
+                                    dtype=hidden_states.dtype)
 
         for i in range(batch_size):
             router_logits[i, topk_indices[i]] = topk_weights[i]
-        routed_output = self.experts(
-            hidden_states=hidden_states,
-            router_logits=router_logits
-        )
+        routed_output = self.experts(hidden_states=hidden_states,
+                                     router_logits=router_logits)
 
         if self.tp_size > 1:
             routed_output = self.experts.maybe_all_reduce_tensor_model_parallel(
-                routed_output
-            )
+                routed_output)
 
         shared_output = self.shared_experts(residuals.view(-1, hidden_dim))
         final_output = routed_output + shared_output
@@ -235,20 +238,20 @@ class Glm4MoeSparseMoeBlock(nn.Module):
 class Glm4MoeAttention(nn.Module):
 
     def __init__(
-            self,
-            hidden_size: int,
-            num_heads: int,
-            num_kv_heads: int,
-            rope_theta: float = 10000,
-            rope_scaling: Optional[dict[str, Any]] = None,
-            max_position_embeddings: int = 8192,
-            head_dim: Optional[int] = None,
-            rms_norm_eps: float = 1e-06,
-            qkv_bias: bool = False,
-            add_qk_norm: bool = False,
-            cache_config: Optional[CacheConfig] = None,
-            quant_config: Optional[QuantizationConfig] = None,
-            prefix: str = "",
+        self,
+        hidden_size: int,
+        num_heads: int,
+        num_kv_heads: int,
+        rope_theta: float = 10000,
+        rope_scaling: Optional[dict[str, Any]] = None,
+        max_position_embeddings: int = 8192,
+        head_dim: Optional[int] = None,
+        rms_norm_eps: float = 1e-06,
+        qkv_bias: bool = False,
+        add_qk_norm: bool = False,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -269,7 +272,7 @@ class Glm4MoeAttention(nn.Module):
         self.head_dim = head_dim or (hidden_size // self.total_num_heads)
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
-        self.scaling = self.head_dim ** -0.5
+        self.scaling = self.head_dim**-0.5
         self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
         self.add_qk_norm = add_qk_norm
@@ -308,19 +311,21 @@ class Glm4MoeAttention(nn.Module):
             self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
 
     def forward(
-            self,
-            positions: torch.Tensor,
-            hidden_states: torch.Tensor,
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
         if self.add_qk_norm:
-            q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim)
+            q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim,
+                               self.head_dim)
             q_by_head = self.q_norm(q_by_head)
             q = q_by_head.view(q.shape)
 
-            k_by_head = k.view(*k.shape[:-1], k.shape[-1] // self.head_dim, self.head_dim)
+            k_by_head = k.view(*k.shape[:-1], k.shape[-1] // self.head_dim,
+                               self.head_dim)
             k_by_head = self.k_norm(k_by_head)
             k = k_by_head.view(k.shape)
 
@@ -333,17 +338,18 @@ class Glm4MoeAttention(nn.Module):
 class Glm4MoeDecoderLayer(nn.Module):
 
     def __init__(
-            self,
-            config: PretrainedConfig,
-            cache_config: Optional[CacheConfig] = None,
-            quant_config: Optional[QuantizationConfig] = None,
-            prefix: str = "",
+        self,
+        config: PretrainedConfig,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
         rope_theta = getattr(config, "rope_theta", 10000)
         rope_scaling = getattr(config, "rope_scaling", None)
-        max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
+        max_position_embeddings = getattr(config, "max_position_embeddings",
+                                          8192)
 
         self.self_attn = Glm4MoeAttention(
             hidden_size=self.hidden_size,
@@ -355,7 +361,7 @@ class Glm4MoeDecoderLayer(nn.Module):
             rms_norm_eps=config.rms_norm_eps,
             qkv_bias=getattr(config, 'attention_bias', False),
             head_dim=getattr(config, 'head_dim', None),
-            add_qk_norm=getattr(config, 'add_qk_norm', False),  # Add this
+            add_qk_norm=getattr(config, 'add_qk_norm', False),
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
@@ -363,41 +369,41 @@ class Glm4MoeDecoderLayer(nn.Module):
 
         layer_idx = extract_layer_index(prefix)
         if layer_idx >= getattr(config, "first_k_dense_replace", 1):
-            self.mlp = Glm4MoeSparseMoeBlock(
-                config=config,
-                quant_config=quant_config,
-                prefix=f"{prefix}.mlp"
-            )
+            self.mlp = Glm4MoeSparseMoeBlock(config=config,
+                                             quant_config=quant_config,
+                                             prefix=f"{prefix}.mlp")
         else:
-            self.mlp = Glm4MoeMLP(
-                hidden_size=config.hidden_size,
-                intermediate_size=config.intermediate_size,
-                hidden_act=config.hidden_act,
-                quant_config=quant_config,
-                prefix=f"{prefix}.mlp"
-            )
+            self.mlp = Glm4MoeMLP(hidden_size=config.hidden_size,
+                                  intermediate_size=config.intermediate_size,
+                                  hidden_act=config.hidden_act,
+                                  quant_config=quant_config,
+                                  prefix=f"{prefix}.mlp")
 
-        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.input_layernorm = RMSNorm(config.hidden_size,
+                                       eps=config.rms_norm_eps)
+        self.post_attention_layernorm = RMSNorm(config.hidden_size,
+                                                eps=config.rms_norm_eps)
 
     def forward(
-            self,
-            positions: torch.Tensor,
-            hidden_states: torch.Tensor,
-            residual: Optional[torch.Tensor],
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        residual: Optional[torch.Tensor],
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if residual is None:
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
-            hidden_states, residual = self.input_layernorm(hidden_states, residual)
+            hidden_states, residual = self.input_layernorm(
+                hidden_states, residual)
 
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
         )
 
-        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
+        hidden_states, residual = self.post_attention_layernorm(
+            hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
 
@@ -419,8 +425,7 @@ class Glm4MoeModel(nn.Module):
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size,
             config.hidden_size,
-            prefix=f"{prefix}.embed_tokens"
-        )
+            prefix=f"{prefix}.embed_tokens")
 
         num_layers = config.num_hidden_layers
         if hasattr(config, 'num_nextn_predict_layers'):
@@ -428,31 +433,27 @@ class Glm4MoeModel(nn.Module):
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             num_layers,
-            lambda prefix: Glm4MoeDecoderLayer(
-                config=config,
-                cache_config=cache_config,
-                quant_config=quant_config,
-                prefix=prefix
-            ),
+            lambda prefix: Glm4MoeDecoderLayer(config=config,
+                                               cache_config=cache_config,
+                                               quant_config=quant_config,
+                                               prefix=prefix),
             prefix=f"{prefix}.layers",
         )
 
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.make_empty_intermediate_tensors = (
             make_empty_intermediate_tensors_factory(
-                ["hidden_states", "residual"], config.hidden_size
-            )
-        )
+                ["hidden_states", "residual"], config.hidden_size))
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
     def forward(
-            self,
-            input_ids: torch.Tensor,
-            positions: torch.Tensor,
-            intermediate_tensors: Optional[IntermediateTensors] = None,
-            inputs_embeds: Optional[torch.Tensor] = None,
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
@@ -478,7 +479,8 @@ class Glm4MoeModel(nn.Module):
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -499,8 +501,7 @@ class Glm4MoeModel(nn.Module):
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
-            num_experts=self.config.n_routed_experts
-        )
+            num_experts=self.config.n_routed_experts)
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
@@ -511,7 +512,8 @@ class Glm4MoeModel(nn.Module):
                     continue
                 if name in params_dict:
                     param = params_dict[name]
-                    weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                    weight_loader = getattr(param, "weight_loader",
+                                            default_weight_loader)
                     weight_loader(param, loaded_weight)
                     loaded_params.add(name)
                 continue
@@ -555,31 +557,39 @@ class Glm4MoeModel(nn.Module):
                         name = name.replace(weight_name, param_name)
                         if is_pp_missing_parameter(name, self):
                             continue
-                        if name.endswith(ignore_suffixes) and name not in params_dict:
+                        if name.endswith(
+                                ignore_suffixes) and name not in params_dict:
                             continue
                         if name not in params_dict:
                             continue
 
                         param = params_dict[name]
                         weight_loader = param.weight_loader
-                        weight_loader(param, loaded_weight, name,
-                                      shard_id=shard_id, expert_id=expert_id)
+                        weight_loader(param,
+                                      loaded_weight,
+                                      name,
+                                      shard_id=shard_id,
+                                      expert_id=expert_id)
                         loaded_params.add(name)
                         break
                 else:
                     # Handle other parameters
-                    if name.endswith(ignore_suffixes) and name not in params_dict:
+                    if name.endswith(
+                            ignore_suffixes) and name not in params_dict:
                         continue
+                    # Skip layers on other devices.
                     if is_pp_missing_parameter(name, self):
                         continue
 
                     # Remapping for FP8 kv-scale
                     if name.endswith("kv_scale"):
-                        remapped_kv_scale_name = name.replace(".kv_scale", ".attn.kv_scale")
+                        remapped_kv_scale_name = name.replace(
+                            ".kv_scale", ".attn.kv_scale")
                         if remapped_kv_scale_name not in params_dict:
                             logger.warning_once(
                                 "Found kv scale in the checkpoint (e.g. %s), but not found the expected name in the model (e.g. %s). kv-scale is not loaded.",
-                                name, remapped_kv_scale_name,
+                                name,
+                                remapped_kv_scale_name,
                             )
                             continue
                         else:
@@ -589,7 +599,8 @@ class Glm4MoeModel(nn.Module):
                         continue
 
                     param = params_dict[name]
-                    weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                    weight_loader = getattr(param, "weight_loader",
+                                            default_weight_loader)
                     weight_loader(param, loaded_weight)
                     loaded_params.add(name)
 
@@ -618,47 +629,44 @@ class Glm4MoeForCausalLM(nn.Module, SupportsPP):
         self.config = config
         self.quant_config = quant_config
 
-        self.model = Glm4MoeModel(
-            vllm_config=vllm_config,
-            prefix=maybe_prefix(prefix, "model")
-        )
+        self.model = Glm4MoeModel(vllm_config=vllm_config,
+                                  prefix=maybe_prefix(prefix, "model"))
 
-        self.lm_head = ParallelLMHead(
-            config.vocab_size,
-            config.hidden_size,
-            quant_config=quant_config
-        )
+        self.lm_head = ParallelLMHead(config.vocab_size,
+                                      config.hidden_size,
+                                      quant_config=quant_config)
 
         if self.config.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight
 
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (
-            self.model.make_empty_intermediate_tensors
-        )
+            self.model.make_empty_intermediate_tensors)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
 
     def forward(
-            self,
-            input_ids: torch.Tensor,
-            positions: torch.Tensor,
-            intermediate_tensors: Optional[IntermediateTensors] = None,
-            inputs_embeds: Optional[torch.Tensor] = None,
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        hidden_states = self.model(input_ids, positions, intermediate_tensors, inputs_embeds)
+        hidden_states = self.model(input_ids, positions, intermediate_tensors,
+                                   inputs_embeds)
         return hidden_states
 
     def compute_logits(
-            self,
-            hidden_states: torch.Tensor,
-            sampling_metadata: SamplingMetadata,
+        self,
+        hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         return logits
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
