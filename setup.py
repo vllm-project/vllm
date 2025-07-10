@@ -585,8 +585,9 @@ def get_vllm_version() -> str:
     elif _is_tpu():
         version += f"{sep}tpu"
     elif _is_cpu():
-        if envs.VLLM_TARGET_DEVICE == "cpu":
-            version += f"{sep}cpu"
+        # For CPU builds, we don't append a suffix to the version.
+        # The standard PyPI `torch` package is CPU-only by default.
+        pass # Do not append +cpu to the version string
     elif _is_xpu():
         version += f"{sep}xpu"
     else:
