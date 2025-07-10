@@ -166,12 +166,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         layer.register_parameter("w2_bias", w2_bias)
         set_weight_attrs(w2_bias, extra_weight_attrs)
 
-        # self.w13_precision_config = None
-        # self.w2_precision_config = None
-
     def process_weights_after_loading(self, layer):
 
-        # w13_bias = shuffle_weight(layer.w13_bias)
         w13_bias = layer.w13_bias.to(torch.float32)
         # w13_bias = F.pad(w13_bias, (0, layer.w13_right_pad, 0, 0),
         #                  mode="constant",

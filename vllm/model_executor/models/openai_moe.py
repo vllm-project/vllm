@@ -242,6 +242,7 @@ class OpenAIMoeForCausalLM(nn.Module):
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
+        mxfp4_block = 32
 
         my_rank = dist.get_rank() if dist.is_initialized() else 0
         world_size = dist.get_world_size() if dist.is_initialized() else 1
@@ -288,7 +289,7 @@ class OpenAIMoeForCausalLM(nn.Module):
                 # same flatten here, but since 2 mx4 value are packed in 1 uint8, 
                 # divide by 2
                 weight = weight.view(num_experts, -1, intermediate_size // 2).contiguous()
-                narrow_weight = weight[..., rank_start:rank_end]
+                narrow_weight = weight[..., rank_start // 2: rank_end // 2]
 
                 param = params_dict[new_name]
                 weight_loader = getattr(param, "weight_loader",
@@ -318,7 +319,7 @@ class OpenAIMoeForCausalLM(nn.Module):
             elif "mlp2_weight.scales" in name:
                 # Handle MLP down projection weights
                 new_name = name.replace("mlp2_weight.scales", "experts.w2_weight_scale")
-                narrow_weight = weight[..., rank_start:rank_end]
+                narrow_weight = weight[..., rank_start // mxfp4_block: rank_end // mxfp4_block]
 
                 param = params_dict[new_name]
                 weight_loader = getattr(param, "weight_loader",
