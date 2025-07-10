@@ -11,6 +11,8 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 from vllm.model_executor.layers.quantization.utils.int8_utils import (
     per_token_group_quant_int8, per_token_quant_int8)
 from vllm.utils import cdiv
+from vllm.utils.deep_gemm import (is_blackwell_deep_gemm_used,
+                                  per_token_group_cast_to_fp8)
 
 
 def _resize_cache(x: torch.Tensor, v: tuple[int, ...]) -> torch.Tensor:
@@ -40,7 +42,10 @@ def _fp8_quantize(
         assert not per_act_token
         assert len(block_shape) == 2
         _, block_k = block_shape[0], block_shape[1]
-        A, A_scale = per_token_group_quant_fp8(A, block_k)
+        if is_blackwell_deep_gemm_used():
+            A, A_scale = per_token_group_cast_to_fp8(A)
+        else:
+            A, A_scale = per_token_group_quant_fp8(A, block_k)
         assert cdiv(A.size(-1), block_k) == A_scale.size(-1)
 
     return A, A_scale
