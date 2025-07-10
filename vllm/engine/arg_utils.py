@@ -12,8 +12,9 @@ import threading
 import warnings
 from dataclasses import MISSING, dataclass, fields, is_dataclass
 from itertools import permutations
-from typing import (Annotated, Any, Callable, Dict, List, Literal, Optional,
-                    Type, TypeVar, Union, cast, get_args, get_origin)
+from typing import (TYPE_CHECKING, Annotated, Any, Callable, Dict, List,
+                    Literal, Optional, Type, TypeVar, Union, cast, get_args,
+                    get_origin)
 
 import regex as re
 import torch
@@ -33,19 +34,25 @@ from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
                          SchedulerConfig, SchedulerPolicy, SpeculativeConfig,
                          TaskOption, TokenizerMode, TokenizerPoolConfig,
                          VllmConfig, get_attr_docs, get_field)
-from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.plugins import load_general_plugins
 from vllm.reasoning import ReasoningParserManager
 from vllm.test_utils import MODEL_WEIGHTS_S3_BUCKET, MODELS_ON_S3
 from vllm.transformers_utils.utils import check_gguf_file
-from vllm.usage.usage_lib import UsageContext
 from vllm.utils import (STR_DUAL_CHUNK_FLASH_ATTN_VAL, FlexibleArgumentParser,
                         GiB_bytes, get_ip, is_in_ray_actor)
 
 # yapf: enable
+
+if TYPE_CHECKING:
+    from vllm.executor.executor_base import ExecutorBase
+    from vllm.model_executor.layers.quantization import QuantizationMethods
+    from vllm.usage.usage_lib import UsageContext
+else:
+    ExecutorBase = Any
+    QuantizationMethods = Any
+    UsageContext = Any
 
 logger = init_logger(__name__)
 
@@ -200,14 +207,17 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, Any]:
         kwargs[name] = {"default": default, "help": help}
 
         # Set other kwargs based on the type hints
-        json_tip = """\n\nShould either be a valid JSON string or JSON keys
-        passed individually. For example, the following sets of arguments are
-        equivalent:\n\n
-        - `--json-arg '{"key1": "value1", "key2": {"key3": "value2"}}'`\n
-        - `--json-arg.key1 value1 --json-arg.key2.key3 value2`\n
-        Additionally, list elements can be passed individually using '+':
-        - `--json-arg '{"key4": ["value3", "value4", "value5"]}'`\n
-        - `--json-arg.key4+ value3 --json-arg.key4+='value4,value5'`\n\n"""
+        json_tip = """Should either be a valid JSON string or JSON keys
+passed individually. For example, the following sets of arguments are
+equivalent:
+
+- `--json-arg '{"key1": "value1", "key2": {"key3": "value2"}}'`\n
+- `--json-arg.key1 value1 --json-arg.key2.key3 value2`
+
+Additionally, list elements can be passed individually using `+`:
+
+- `--json-arg '{"key4": ["value3", "value4", "value5"]}'`\n
+- `--json-arg.key4+ value3 --json-arg.key4+='value4,value5'`"""
         if dataclass_cls is not None:
 
             def parse_dataclass(val: str, cls=dataclass_cls) -> Any:
@@ -219,7 +229,7 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, Any]:
                     raise argparse.ArgumentTypeError(repr(e)) from e
 
             kwargs[name]["type"] = parse_dataclass
-            kwargs[name]["help"] += json_tip
+            kwargs[name]["help"] += f"\n\n{json_tip}"
         elif contains_type(type_hints, bool):
             # Creates --no-<name> and --<name> flags
             kwargs[name]["action"] = argparse.BooleanOptionalAction
@@ -255,7 +265,7 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, Any]:
             kwargs[name]["type"] = union_dict_and_str
         elif contains_type(type_hints, dict):
             kwargs[name]["type"] = parse_type(json.loads)
-            kwargs[name]["help"] += json_tip
+            kwargs[name]["help"] += f"\n\n{json_tip}"
         elif (contains_type(type_hints, str)
               or any(is_not_builtin(th) for th in type_hints)):
             kwargs[name]["type"] = str
@@ -1545,7 +1555,6 @@ class EngineArgs:
             # Enable chunked prefill by default for long context (> 32K)
             # models to avoid OOM errors in initial memory profiling phase.
             elif use_long_context:
-                from vllm.platforms import current_platform
                 is_gpu = current_platform.is_cuda()
                 use_sliding_window = (model_config.get_sliding_window()
                                       is not None)
@@ -1653,6 +1662,7 @@ class EngineArgs:
         # NOTE(Kuntai): Setting large `max_num_batched_tokens` for A100 reduces
         # throughput, see PR #17885 for more details.
         # So here we do an extra device name check to prevent such regression.
+        from vllm.usage.usage_lib import UsageContext
         if device_memory >= 70 * GiB_bytes and "a100" not in device_name:
             # For GPUs like H100 and MI300x, use larger default values.
             default_max_num_batched_tokens = {
