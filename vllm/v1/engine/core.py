@@ -143,10 +143,10 @@ class EngineCore:
         if os.environ.get("VLLM_EEP_SCALE_UP_LAUNCH") == "1":
             dp_group = getattr(self, "dp_group", None)
             assert dp_group is not None
-            kv_cache_memory_size = ParallelConfig.sync_kv_cache_memory_size(
-                dp_group, -1)
-            available_gpu_memory = [kv_cache_memory_size] * \
-                len(kv_cache_specs)
+            self.available_gpu_memory_for_kv_cache = \
+                ParallelConfig.sync_kv_cache_memory_size(dp_group, -1)
+            available_gpu_memory = [self.available_gpu_memory_for_kv_cache
+                                    ] * len(kv_cache_specs)
         else:
             # Profiles the peak memory usage of the model to determine how much
             # memory can be allocated for kv cache.
