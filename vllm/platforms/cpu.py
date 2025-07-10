@@ -335,3 +335,30 @@ class CpuPlatform(Platform):
         return (cls.supports_v1(model_config)
                 and arch in (CpuArchEnum.X86, CpuArchEnum.POWERPC,
                              CpuArchEnum.ARM, CpuArchEnum.S390X))
+
+    @classmethod
+    def empty_cache(cls):
+        pass
+
+    @classmethod
+    def reset_peak_memory_stats(cls):
+        pass
+
+    @classmethod
+    def mem_get_info(cls):
+        # FIXME: impl
+        return None
+
+    @classmethod
+    def memory_stats(cls):
+        # FIXME: impl
+        return None
+
+    @classmethod
+    def memory_reserved(cls):
+        # FIXME: impl
+        return None
+
+    @classmethod
+    def synchronize(cls):
+        torch.cpu.synchronize()

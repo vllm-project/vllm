@@ -573,7 +573,7 @@ class Platform:
         return False
 
     @classmethod
-    def empty_cache(cls, ):
+    def empty_cache(cls):
         raise NotImplementedError
 
     @classmethod
