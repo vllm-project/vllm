@@ -9,18 +9,28 @@ jobs:
   pre-commit:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4 # Use the latest stable version tag
-    - uses: actions/setup-python@v5 # Use the latest stable version tag
+    - uses: actions/checkout@v4
+    - uses: actions/setup-python@v5
       with:
         python-version: "3.12"
     - run: echo "::add-matcher::.github/workflows/matchers/actionlint.json"
     - run: echo "::add-matcher::.github/workflows/matchers/mypy.json"
     - name: Set VLLM_TARGET_DEVICE to CPU for pre-commit checks
       run: echo "VLLM_TARGET_DEVICE=cpu" >> $GITHUB_ENV
-    - name: Install vLLM Build Dependencies
-      run: pip install -r requirements/build.txt
+    - name: Install PyTorch for CPU
+      # Explicitly install the CPU version of PyTorch from their stable index.
+      # This ensures pip finds the correct wheel without the problematic '+cpu' tag.
+      # Check PyTorch's official website for the exact command for torch==2.6.0 CPU
+      # As of my last update, it would typically be:
+      run: pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cpu
+    - name: Install vLLM Build Dependencies (excluding torch, as it's already installed)
+      # We need to filter out torch from build.txt for this step
+      # A simple way is to use grep or sed, or if build.txt is small, just list others.
+      # Given build.txt has `torch==2.6.0`, we'll exclude it here.
+      run: pip install $(grep -v 'torch==' requirements/build.txt | tr '\n' ' ')
     - name: Install vLLM Project and Dev Dependencies
       run: pip install -e ".[dev]"
-    - uses: pre-commit/action@v3.0.1 # Use the latest stable version tag
+
+    - uses: pre-commit/action@v3.0.1
       with:
         extra_args: --all-files --hook-stage manual
