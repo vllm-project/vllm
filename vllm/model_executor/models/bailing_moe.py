@@ -27,8 +27,8 @@ from collections.abc import Iterable
 from typing import Optional, Union
 
 import torch
-from torch import nn
 import torch.nn.functional as F
+from torch import nn
 
 from vllm.attention import Attention
 from vllm.config import CacheConfig, VllmConfig
@@ -54,7 +54,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.bailing_moe import BailingMoeConfig
 
-from .interfaces import SupportsLoRA, SupportsPP
+from .interfaces import SupportsPP
 from .utils import (AutoWeightsLoader, PPMissingLayer, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
@@ -227,6 +227,8 @@ class BailingMoE(nn.Module):
                 quant_config=quant_config,
                 reduce_results=False,
                 prefix=f"{prefix}.shared_experts")
+        else:
+            self.shared_experts = None
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_size = hidden_states.shape
@@ -454,7 +456,7 @@ class BailingMoeModel(nn.Module):
         return loaded_params
 
 
-class BailingMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
+class BailingMoeForCausalLM(nn.Module, SupportsPP):
 
     packed_modules_mapping = {
         "query_key_value": ["query_key_value"],
@@ -463,16 +465,6 @@ class BailingMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             "up_proj",
         ],
     }
-
-    # LoRA specific attributes
-    supported_lora_modules = [
-        "query_key_value",
-        "dense",
-        "gate_up_proj",
-        "down_proj",
-    ]
-    embedding_modules = {}
-    embedding_padding_modules = []
 
     def __init__(
         self,
@@ -484,10 +476,8 @@ class BailingMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
-        lora_config = vllm_config.lora_config
 
         self.config = config
-        self.lora_config = lora_config
         self.quant_config = quant_config
         self.max_position_embeddings = config.max_position_embeddings
         self.model = BailingMoeModel(vllm_config=vllm_config,
