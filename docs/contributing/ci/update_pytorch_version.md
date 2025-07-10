@@ -1,6 +1,4 @@
----
-title: Update PyTorch version on vLLM OSS CI/CD
----
+# Update PyTorch version on vLLM OSS CI/CD
 
 vLLM's current policy is to always use the latest PyTorch stable
 release in CI/CD. It is standard practice to submit a PR to update the
