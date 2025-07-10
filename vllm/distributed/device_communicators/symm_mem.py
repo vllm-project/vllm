@@ -7,6 +7,7 @@ import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 
 try:
     import torch.distributed._symmetric_memory as torch_symm_mem
@@ -33,6 +34,11 @@ class SymmMemCommunicator:
         self.disabled = True
 
         if not symm_mem_available:
+            return
+
+        if not current_platform.is_cuda():
+            logger.warning("SymmMemCommunicator: symmetric "
+                           "memory is not available.")
             return
         if isinstance(device, int):
             device = torch.device(f"cuda:{device}")
