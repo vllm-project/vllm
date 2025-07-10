@@ -1043,10 +1043,13 @@ async def invocations(raw_request: Request):
         raise HTTPException(status_code=HTTPStatus.BAD_REQUEST.value,
                             detail=f"JSON decode error: {e}") from e
 
-    for request_type, (get_handler, endpoint) in INVOCATION_TYPES.items():
-        if not get_handler(raw_request):
-            continue
+    valid_endpoints = {
+        request_type: endpoint
+        for request_type, (get_handler, endpoint) in INVOCATION_TYPES.items()
+        if get_handler(raw_request) is not None
+    }
 
+    for request_type, endpoint in valid_endpoints.items():
         try:
             request = pydantic.TypeAdapter(request_type).validate_python(body)
             break
@@ -1055,7 +1058,7 @@ async def invocations(raw_request: Request):
     else:
         type_names = [
             t.__name__ if isinstance(t, type) else str(t)
-            for t in INVOCATION_TYPES
+            for t in valid_endpoints
         ]
         msg = ("Cannot find suitable handler for request. "
                f"Expected one of: {type_names}")
