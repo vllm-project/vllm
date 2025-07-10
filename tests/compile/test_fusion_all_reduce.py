@@ -96,7 +96,6 @@ def all_reduce_fusion_pass_on_test_model(local_rank: int, world_size: int,
     current_platform.seed_everything(0)
 
     device = torch.device(f"cuda:{local_rank}")
-    torch.cuda.set_device(device)
     torch.set_default_device(device)
     torch.set_default_dtype(dtype)
 
@@ -116,7 +115,7 @@ def all_reduce_fusion_pass_on_test_model(local_rank: int, world_size: int,
                                              custom_ops=["+rms_norm"],
                                              compile_sizes=[2, 4, 8]))
     vllm_config.compilation_config.pass_config = PassConfig(
-        enable_flashinfer_allreduce_fusion=True)
+        enable_fi_allreduce_fusion=True)
     vllm_config.device_config = DeviceConfig(device=torch.device("cuda"))
 
     # this is a fake model name to construct the model config
@@ -130,16 +129,16 @@ def all_reduce_fusion_pass_on_test_model(local_rank: int, world_size: int,
                                            dtype=dtype,
                                            seed=42)
 
-    all_reduce_fusion_pass = AllReduceFusionPass(vllm_config)
+    all_reduce_fusion_pass = AllReduceFusionPass(
+        vllm_config, vllm_config.compilation_config.pass_config.
+        fi_allreduce_fusion_max_token_num)
     backend = TestBackend(all_reduce_fusion_pass)
 
     model = test_model_cls(hidden_size)
 
     hidden_states = torch.randn((batch_size * seq_len, hidden_size),
-                                dtype=dtype,
                                 requires_grad=False)
     residual = torch.randn((batch_size * seq_len, hidden_size),
-                           dtype=dtype,
                            requires_grad=False)
 
     compiled_model = torch.compile(model, backend=backend)

@@ -148,14 +148,17 @@ class AsyncTPPass(VllmInductorPass):
 if flashinfer_comm is not None:
     _FI_WORKSPACE_TENSOR = None
 
-    MB = 1024 * 1024
+    MiB = 1024 * 1024
+    # Max size of the input tensor per world size
+    # to use flashinfer fused allreduce
     _FI_MAX_SIZES = {
-        2: MB,  # 1MB
-        4: MB,  # 1MB
-        8: MB // 2,  # 512KB
+        2: MiB,  # 1MB
+        4: MiB,  # 1MB
+        6: MiB // 2,  # 512KB
+        8: MiB // 2,  # 512KB
     }
 
-    def call_trtllm_allreduce_fusion(
+    def call_trtllm_fused_allreduce_norm(
         allreduce_in: torch.Tensor,
         residual: torch.Tensor,
         rms_gamma: torch.Tensor,
@@ -165,11 +168,15 @@ if flashinfer_comm is not None:
         launch_with_pdl: bool,
         trigger_completion_at_end: bool,
         fp32_acc: bool,
+        max_token_num: int,
         norm_out: Optional[torch.Tensor] = None,
     ) -> None:
-        use_flashinfer = (allreduce_in.shape[0] * allreduce_in.shape[1] *
-                          allreduce_in.element_size()
-                          <= _FI_MAX_SIZES[world_size])
+        use_flashinfer = allreduce_in.shape[0] * allreduce_in.shape[
+            1] * allreduce_in.element_size() <= min(
+                _FI_MAX_SIZES[world_size],
+                max_token_num * allreduce_in.shape[0] *
+                allreduce_in.element_size(),
+            )
         if use_flashinfer:
             assert (_FI_WORKSPACE_TENSOR is not None
                     ), "Flashinfer must be enabled when using flashinfer"
@@ -181,7 +188,8 @@ if flashinfer_comm is not None:
                 # as flashinfer does not support rms_norm
                 # and allreduce_out together
                 residual_out = allreduce_in
-
+            # For the sizes that are smaller than the max size,
+            # we only use flashinfer one shot allreduce
             flashinfer_comm.trtllm_allreduce_fusion(
                 allreduce_in=allreduce_in,
                 token_num=allreduce_in.shape[0],
@@ -216,7 +224,7 @@ if flashinfer_comm is not None:
                                       rms_eps)
             allreduce_in.copy_(allreduce_out)
 
-    def call_trtllm_allreduce_fusion_fake(
+    def call_trtllm_fused_allreduce_norm_fake(
         allreduce_in: torch.Tensor,
         residual: torch.Tensor,
         rms_gamma: torch.Tensor,
@@ -226,36 +234,35 @@ if flashinfer_comm is not None:
         launch_with_pdl: bool,
         trigger_completion_at_end: bool,
         fp32_acc: bool,
+        max_token_num: int,
         norm_out: Optional[torch.Tensor] = None,
     ) -> None:
         pass
 
-    try:
-        direct_register_custom_op(
-            op_name="flashinfer_trtllm_allreduce_fusion",
-            op_func=call_trtllm_allreduce_fusion,
-            mutates_args=[
-                "allreduce_in",
-                "residual",
-                "norm_out",
-            ],
-            fake_impl=call_trtllm_allreduce_fusion_fake,
-            dispatch_key=current_platform.dispatch_key,
-        )
-        flashinfer_trtllm_allreduce_fusion = (
-            torch.ops.vllm.flashinfer_trtllm_allreduce_fusion.default)
-    except AttributeError as error:
-        raise error
+    direct_register_custom_op(
+        op_name="flashinfer_trtllm_fused_allreduce_norm",
+        op_func=call_trtllm_fused_allreduce_norm,
+        mutates_args=[
+            "allreduce_in",
+            "residual",
+            "norm_out",
+        ],
+        fake_impl=call_trtllm_fused_allreduce_norm_fake,
+        dispatch_key=current_platform.dispatch_key,
+    )
+    flashinfer_trtllm_fused_allreduce_norm = (
+        torch.ops.vllm.flashinfer_trtllm_fused_allreduce_norm.default)
 
 
-class FlashInferAllReduceFusionParams:
-    """Parameters for FlashInfer allreduce fusion operations."""
+class FlashInferFusedAllReduceParams:
+    """Parameters for FlashInfer fused allreduce operations."""
 
     def __init__(
         self,
         rank: int,
         world_size: int,
         use_fp32_lamport: bool = False,
+        max_token_num: int = 1024,
     ):
         self.rank = rank
         self.world_size = world_size
@@ -264,14 +271,16 @@ class FlashInferAllReduceFusionParams:
         self.launch_with_pdl = True
         self.fp32_acc = True
         self.use_oneshot = False
+        self.max_token_num = max_token_num
 
-    def get_trtllm_fusion_kwargs(self):
+    def get_trtllm_fused_allreduce_kwargs(self):
         return {
             "world_rank": self.rank,
             "world_size": self.world_size,
             "launch_with_pdl": self.launch_with_pdl,
             "trigger_completion_at_end": self.trigger_completion_at_end,
             "fp32_acc": self.fp32_acc,
+            "max_token_num": self.max_token_num,
         }
 
 
@@ -282,7 +291,7 @@ class AllReduceRMSNORMPattern(BasePattern):
         epsilon: float,
         dtype: torch.dtype,
         device: str,
-        allreduce_params: Optional[FlashInferAllReduceFusionParams],
+        allreduce_params: Optional[FlashInferFusedAllReduceParams],
     ):
         super().__init__(dtype, device)
         self.epsilon = epsilon
@@ -317,13 +326,13 @@ class AllReduceRMSNORMPattern(BasePattern):
             assert (self.allreduce_params
                     is not None), "No allreduce params for flashinfer provided"
             allreduce = auto_functionalized(
-                torch.ops.vllm.flashinfer_trtllm_allreduce_fusion.default,
+                torch.ops.vllm.flashinfer_trtllm_fused_allreduce_norm.default,
                 allreduce_in=input,
                 residual=residual,
                 norm_out=rms_result,
                 rms_gamma=weight,
                 rms_eps=self.epsilon,
-                **self.allreduce_params.get_trtllm_fusion_kwargs(),
+                **self.allreduce_params.get_trtllm_fused_allreduce_kwargs(),
             )
 
             return allreduce[3], allreduce[1]
@@ -339,7 +348,7 @@ class AllReduceFusedAddRMSNormPattern(BasePattern):
         epsilon: float,
         dtype: torch.dtype,
         device: str,
-        allreduce_params: Optional[FlashInferAllReduceFusionParams] = None,
+        allreduce_params: Optional[FlashInferFusedAllReduceParams] = None,
     ):
         super().__init__(dtype, device)
         self.epsilon = epsilon
@@ -374,13 +383,13 @@ class AllReduceFusedAddRMSNormPattern(BasePattern):
             assert (self.allreduce_params
                     is not None), "No allreduce params for flashinfer provided"
             allreduce = auto_functionalized(
-                torch.ops.vllm.flashinfer_trtllm_allreduce_fusion.default,
+                torch.ops.vllm.flashinfer_trtllm_fused_allreduce_norm.default,
                 allreduce_in=input,
                 residual=residual,
                 rms_gamma=weight,
                 rms_eps=self.epsilon,
                 norm_out=None,
-                **self.allreduce_params.get_trtllm_fusion_kwargs(),
+                **self.allreduce_params.get_trtllm_fused_allreduce_kwargs(),
             )
             return allreduce[1], allreduce[2]
 
@@ -389,15 +398,13 @@ class AllReduceFusedAddRMSNormPattern(BasePattern):
 
 
 class AllReduceFusionPass(VllmInductorPass):
-    MAX_TOKEN_NUM_INIT = 1024
 
-    def __init__(self, config: VllmConfig):
+    def __init__(self, config: VllmConfig, max_token_num: int):
         super().__init__(config)
         self.disabled = True
         self.tp_size = get_tensor_model_parallel_world_size()
         if self.tp_size <= 1:
             return
-
         self.patterns: PatternMatcherPass = PatternMatcherPass(
             pass_name="all_reduce_fusion_pass")
         if config.model_config is None:
@@ -410,12 +417,20 @@ class AllReduceFusionPass(VllmInductorPass):
             logger.warning(
                 "Flashinfer is not installed, skipping allreduce fusion pass")
             return
+        # Check if the world size is supported
+        if self.tp_size not in _FI_MAX_SIZES:
+            logger.warning(
+                "Flashinfer allreduce fusion is not "
+                "supported for world size %s",
+                self.tp_size,
+            )
+            return
 
         self.ipc_handles, workspace_tensor = (
             flashinfer_comm.trtllm_create_ipc_workspace_for_all_reduce_fusion(
                 tp_rank=rank,
                 tp_size=self.tp_size,
-                max_token_num=AllReduceFusionPass.MAX_TOKEN_NUM_INIT,
+                max_token_num=max_token_num,
                 hidden_dim=self.hidden_dim,
                 group=self.group,
                 use_fp32_lamport=use_fp32_lamport,
@@ -423,10 +438,11 @@ class AllReduceFusionPass(VllmInductorPass):
 
         global _FI_WORKSPACE_TENSOR
         _FI_WORKSPACE_TENSOR = workspace_tensor
-        self.allreduce_params = FlashInferAllReduceFusionParams(
+        self.allreduce_params = FlashInferFusedAllReduceParams(
             rank=rank,
             world_size=self.tp_size,
             use_fp32_lamport=use_fp32_lamport,
+            max_token_num=max_token_num,
         )
 
         for epsilon in [1e-5, 1e-6]:

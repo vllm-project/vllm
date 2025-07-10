@@ -62,8 +62,11 @@ class PostGradPassManager(CustomGraphPass):
 
         if self.pass_config.enable_attn_fusion:
             self.passes += [AttnFusionPass(config)]
-        if self.pass_config.enable_flashinfer_allreduce_fusion:
-            self.passes += [AllReduceFusionPass(config)]
+        if self.pass_config.enable_fi_allreduce_fusion:
+            self.passes += [
+                AllReduceFusionPass(
+                    config, self.pass_config.fi_allreduce_fusion_max_token_num)
+            ]
         self.fix_functionalization = FixFunctionalizationPass(config)
 
     def add(self, pass_: InductorPass):
