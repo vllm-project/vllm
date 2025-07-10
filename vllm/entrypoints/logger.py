@@ -69,7 +69,8 @@ class RequestLogger:
 
         stream_info = ""
         if is_streaming:
-            stream_info = " (streaming delta)" if delta else " (streaming complete)"
+            stream_info = (" (streaming delta)" if delta else 
+                          " (streaming complete)")
 
         logger.info(
             "Generated response %s%s: output: %r, "

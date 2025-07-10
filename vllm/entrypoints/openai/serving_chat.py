@@ -830,8 +830,11 @@ class OpenAIServingChat(OpenAIServing):
                         delta_content = ""
                         if delta_message.content:
                             delta_content = delta_message.content
-                        elif delta_message.tool_calls and delta_message.tool_calls[0].function and delta_message.tool_calls[0].function.arguments:
-                            delta_content = delta_message.tool_calls[0].function.arguments
+                        elif (delta_message.tool_calls and 
+                              delta_message.tool_calls[0].function and 
+                              delta_message.tool_calls[0].function.arguments):
+                            func_args = delta_message.tool_calls[0].function.arguments
+                            delta_content = func_args
                         
                         if delta_content:
                             self.request_logger.log_outputs(
@@ -1200,8 +1203,10 @@ class OpenAIServingChat(OpenAIServing):
                     tool_call_descriptions = []
                     for tool_call in choice.message.tool_calls:
                         if hasattr(tool_call.function, 'name') and hasattr(tool_call.function, 'arguments'):
-                            tool_call_descriptions.append(f"{tool_call.function.name}({tool_call.function.arguments})")
-                    output_text = f"[tool_calls: {', '.join(tool_call_descriptions)}]"
+                            tool_call_descriptions.append(
+                                f"{tool_call.function.name}({tool_call.function.arguments})")
+                    tool_calls_str = ', '.join(tool_call_descriptions)
+                    output_text = f"[tool_calls: {tool_calls_str}]"
                 
                 if output_text:
                     # Get the corresponding output token IDs
