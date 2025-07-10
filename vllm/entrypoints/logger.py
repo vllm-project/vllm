@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional, Union
+from typing import Optional, Union, Sequence
 
 import torch
 
@@ -53,7 +53,7 @@ class RequestLogger:
         self,
         request_id: str,
         outputs: str,
-        output_token_ids: Optional[list[int]],
+        output_token_ids: Optional[Sequence[int]],
         finish_reason: Optional[str] = None,
         is_streaming: bool = False,
         delta: bool = False,
@@ -64,7 +64,8 @@ class RequestLogger:
                 outputs = outputs[:max_log_len]
 
             if output_token_ids is not None:
-                output_token_ids = output_token_ids[:max_log_len]
+                # Convert to list and apply truncation
+                output_token_ids = list(output_token_ids)[:max_log_len]
 
         stream_info = ""
         if is_streaming:

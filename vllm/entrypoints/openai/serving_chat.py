@@ -1197,11 +1197,11 @@ class OpenAIServingChat(OpenAIServing):
                     output_text = choice.message.content
                 elif choice.message.tool_calls:
                     # For tool calls, log the function name and arguments
-                    tool_call_info = []
+                    tool_call_descriptions = []
                     for tool_call in choice.message.tool_calls:
                         if hasattr(tool_call.function, 'name') and hasattr(tool_call.function, 'arguments'):
-                            tool_call_info.append(f"{tool_call.function.name}({tool_call.function.arguments})")
-                    output_text = f"[tool_calls: {', '.join(tool_call_info)}]"
+                            tool_call_descriptions.append(f"{tool_call.function.name}({tool_call.function.arguments})")
+                    output_text = f"[tool_calls: {', '.join(tool_call_descriptions)}]"
                 
                 if output_text:
                     # Get the corresponding output token IDs

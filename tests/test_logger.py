@@ -9,7 +9,7 @@ import tempfile
 from dataclasses import dataclass
 from json.decoder import JSONDecodeError
 from tempfile import NamedTemporaryFile
-from typing import Any
+from typing import Any, Sequence
 from unittest.mock import patch, MagicMock
 from uuid import uuid4
 
