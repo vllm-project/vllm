@@ -825,7 +825,7 @@ class OpenAIServingChat(OpenAIServing):
                     if delta_message is None:
                         continue
 
-                    # Log individual streaming delta if output logging is enabled
+                    # Log streaming delta if output logging is enabled
                     if self.enable_log_outputs and self.request_logger:
                         delta_content = ""
                         if delta_message.content:
