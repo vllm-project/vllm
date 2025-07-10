@@ -14,6 +14,7 @@ FLOAT32_BYTES = torch.finfo(torch.float).bits // 8
 # KV Cache Layout for TRT-LLM
 # kv_cache_shape = (num_blocks, 2, num_kv_heads, page_size, head_dim)
 
+
 def to_float8(x, dtype=torch.float8_e4m3fn):
     finfo = torch.finfo(dtype)
     min_val, max_val = x.aminmax()
