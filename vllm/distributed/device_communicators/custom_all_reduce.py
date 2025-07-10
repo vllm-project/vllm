@@ -117,7 +117,7 @@ class CustomAllreduce:
         # now `device` is a `torch.device` object
         assert isinstance(device, torch.device)
         self.device = device
-        if current_platform.is_cuda() and envs.VLLM_USE_SYMM_MEM:
+        if current_platform.is_cuda() and envs.VLLM_ALLREDUCE_USE_SYMM_MEM:
             max_size = CustomAllreduce._MAX_SIZES[world_size]
 
         cuda_visible_devices = envs.CUDA_VISIBLE_DEVICES
