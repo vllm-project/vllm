@@ -312,14 +312,19 @@ def run_blocked_8_bit_sm90(moe_tensors: MOETensors8Bit,
         ]
     ])
 
+    w1_scale_t = (moe_tensors.w1_scale.transpose(1, 2).contiguous()
+                  if moe_tensors.w1_scale is not None else None)
+    w2_scale_t = (moe_tensors.w2_scale.transpose(1, 2).contiguous()
+                  if moe_tensors.w2_scale is not None else None)
+
     kwargs = {
         'a': moe_tensors.a,
         'w1_q': moe_tensors.w1_q,  # type: ignore[union-attr]
         'w2_q': moe_tensors.w2_q,  # type: ignore[union-attr]
         'topk_weights': topk_weights,
         'topk_ids': topk_ids,
-        'w1_scale': moe_tensors.w1_scale.transpose(1, 2).contiguous(),
-        'w2_scale': moe_tensors.w2_scale.transpose(1, 2).contiguous(),
+        'w1_scale': w1_scale_t,
+        'w2_scale': w2_scale_t,
         'a1_scale': moe_tensors.a_scale,
         'ab_strides1': moe_tensors.ab_strides1,
         'ab_strides2': moe_tensors.ab_strides2,
