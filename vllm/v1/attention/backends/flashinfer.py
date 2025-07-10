@@ -7,20 +7,21 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
 
 import torch
+
+import vllm.envs as envs
 from flashinfer import (BatchDecodeWithPagedKVCacheWrapper,
                         BatchPrefillWithPagedKVCacheWrapper,
                         MultiLevelCascadeAttentionWrapper)
-
-import vllm.envs as envs
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionType)
-from vllm.attention.layer import Attention
-from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.flash_attn import use_cascade_attention
 from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
                                               CommonAttentionMetadata,
-                                              get_kv_cache_layout)
+                                              PerLayerParameters,
+                                              get_kv_cache_layout,
+                                              get_per_layer_parameters,
+                                              infer_global_hyperparameters)
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.block_table import BlockTable
 
@@ -91,71 +92,6 @@ class FlashInferBackend(AttentionBackend):
         else:
             raise ValueError(f"Unknown cache layout format {cache_layout}.")
         return stride_order
-
-
-@dataclass
-class PerLayerParameters:
-    """
-    Currently, FlashInfer backend only support models in which all layers share
-    the same values for the following hyperparameters.
-    """
-
-    window_left: int
-    logits_soft_cap: Optional[float]
-    sm_scale: float
-
-
-def get_per_layer_parameters(
-        vllm_config: VllmConfig,
-        cls_: type[AttentionImpl]) -> dict[str, PerLayerParameters]:
-    """
-    Scan all attention layers and determine some hyperparameters
-    to use during `plan`.
-    """
-
-    layers = get_layers_from_vllm_config(vllm_config, Attention)
-    per_layer_params: dict[str, PerLayerParameters] = {}
-
-    for key, layer in layers.items():
-        impl = layer.impl
-        assert isinstance(impl, cls_)
-
-        # Infer hyperparameters from the attention layer
-        window_size = getattr(impl, "sliding_window", None)
-        window_left = window_size[0] if window_size is not None else -1
-        logits_soft_cap = getattr(impl, "logits_soft_cap", None)
-        sm_scale = impl.scale
-
-        per_layer_params[key] = PerLayerParameters(window_left,
-                                                   logits_soft_cap, sm_scale)
-
-    return per_layer_params
-
-
-def infer_global_hyperparameters(
-        per_layer_params: dict[str, PerLayerParameters]) -> PerLayerParameters:
-    """
-    Currently, FlashInfer backend only support models in which all layers share
-    the same values for the following hyperparameters:
-    - `window_left`
-    - `logits_soft_cap`
-    - `sm_scale`
-
-    So this function asserts that all layers share the same values for these
-    hyperparameters and returns the global values.
-    """
-
-    assert len(per_layer_params) > 0, "No attention layers found in the model."
-
-    param_sets = list(per_layer_params.values())
-    global_params = param_sets[0]
-    for params in param_sets:
-        assert params == global_params, (
-            "FlashInfer backend currently only supports models in which all "
-            "layers share the same values for the following hyperparameters: "
-            "`window_left`, `logits_soft_cap`, `sm_scale`.")
-
-    return global_params
 
 
 @dataclass

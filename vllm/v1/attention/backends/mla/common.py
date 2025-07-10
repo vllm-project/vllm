@@ -207,13 +207,10 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                UnquantizedLinearMethod)
 from vllm.platforms import current_platform
 from vllm.utils import cdiv, round_down
-# yapf conflicts with isort for this block
-# yapf: disable
-from vllm.v1.attention.backends.flashinfer import (
-    get_per_layer_parameters, infer_global_hyperparameters)
-# yapf: enable
 from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
-                                              CommonAttentionMetadata)
+                                              CommonAttentionMetadata,
+                                              get_per_layer_parameters,
+                                              infer_global_hyperparameters)
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.block_table import BlockTable
 
