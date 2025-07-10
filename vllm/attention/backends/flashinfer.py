@@ -313,7 +313,7 @@ class FlashInferState(AttentionState):
                                             dtype=torch.int32)
 
         global_params = infer_global_hyperparameters(
-            get_per_layer_parameters(self.vllm_config))
+            get_per_layer_parameters(self.vllm_config, FlashInferImpl))
 
         attn_metadata = self.runner.attn_backend.make_metadata(
             num_prefills=0,
@@ -679,7 +679,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             # - `logits_soft_cap`
             # - `sm_scale`
             inferred_params = infer_global_hyperparameters(
-                get_per_layer_parameters(self.vllm_config))
+                get_per_layer_parameters(self.vllm_config, FlashInferImpl))
             self.global_hyperparameters = inferred_params
             self.window_left = inferred_params.window_left
             self.logits_soft_cap = inferred_params.logits_soft_cap

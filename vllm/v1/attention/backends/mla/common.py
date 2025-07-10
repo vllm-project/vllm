@@ -374,7 +374,7 @@ class FlashInferPrefill:
         self._device = runner.device
         self._workspace_buffer = None
         self._global_hyperparameters = infer_global_hyperparameters(
-            get_per_layer_parameters(runner.vllm_config))
+            get_per_layer_parameters(runner.vllm_config, MLACommonImpl))
 
     def get_global_hyperparameters(self):
         return self._global_hyperparameters

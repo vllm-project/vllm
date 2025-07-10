@@ -106,7 +106,8 @@ class PerLayerParameters:
 
 
 def get_per_layer_parameters(
-        vllm_config: VllmConfig) -> dict[str, PerLayerParameters]:
+        vllm_config: VllmConfig,
+        cls_: type[AttentionImpl]) -> dict[str, PerLayerParameters]:
     """
     Scan all attention layers and determine some hyperparameters
     to use during `plan`.
@@ -117,6 +118,7 @@ def get_per_layer_parameters(
 
     for key, layer in layers.items():
         impl = layer.impl
+        assert isinstance(impl, cls_)
 
         # Infer hyperparameters from the attention layer
         window_size = impl.sliding_window
@@ -335,7 +337,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
     def _plan(self, attn_metadata: FlashInferMetadata):
         if self.global_hyperparameters is None:
             self.global_hyperparameters = infer_global_hyperparameters(
-                get_per_layer_parameters(self.vllm_config))
+                get_per_layer_parameters(self.vllm_config, FlashInferImpl))
         if attn_metadata.use_cascade:
             attn_metadata.cascade_wrapper = self._get_cascade_wrapper()
             attn_metadata.cascade_wrapper.plan(
