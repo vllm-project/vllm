@@ -14,6 +14,8 @@ import torch
 from torch.distributed import (P2POp, ProcessGroup, all_gather,
                                batch_isend_irecv, get_global_rank)
 
+from vllm.platforms import current_platform
+
 
 def idx_local_to_global(
     local_idx: int,
@@ -323,7 +325,7 @@ def rearrange_expert_weights_inplace(
     for layer in range(num_moe_layers):
         # NOTE(bowen): We need this synchronize to run, but I don't know why.
         # If you figure out the reason, please let me know -- thank you!
-        torch.cuda.synchronize()
+        current_platform.synchronize()
         shuffle_layer(
             num_local_physical_experts,
             ep_rank,
