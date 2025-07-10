@@ -556,12 +556,20 @@ def _valid_cutlass_block_scaled_grouped_gemm(w1: torch.Tensor,
     _, K, N = w2.size()
     if not _valid_cutlass_block_scaled_grouped_gemm_shape(N, K):
         logger.debug(
-            "CutlassBlockScaledGroupedGemm disabled: unalinged problem size.")
+            "CutlassBlockScaledGroupedGemm disabled: unalinged problem size. "
+            "N: %s, K: %s",
+            N,
+            K,
+        )
         return False
 
     if (w1.dtype != torch.float8_e4m3fn or w2.dtype != torch.float8_e4m3fn):
         logger.debug(
-            "CutlassBlockScaledGroupedGemm disabled: invalid weight dtype(s).")
+            "CutlassBlockScaledGroupedGemm disabled: invalid weight dtype(s). "
+            "w1.dtype: %s, w2.dtype: %s",
+            w1.dtype,
+            w2.dtype,
+        )
         return False
 
     return True
