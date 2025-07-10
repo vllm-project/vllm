@@ -11,7 +11,6 @@ from vllm.entrypoints.chat_utils import (
     ChatCompletionContentPartImageParam, ChatCompletionContentPartTextParam,
     MultiModalItemTracker, _ContentPart, _parse_chat_message_content_part)
 from vllm.inputs import TokensPrompt
-from vllm.model_executor.model_loader import get_model_cls
 from vllm.model_executor.models.interfaces import supports_score_template
 from vllm.multimodal.inputs import MultiModalDataDict
 from vllm.outputs import PoolingRequestOutput
@@ -140,6 +139,8 @@ def apply_score_template(
     prompt_1: str,
     prompt_2: str,
 ) -> str:
+    # NOTE(Simon): lazy import to avoid bring in all dependencies (e.g. gguf)
+    from vllm.model_executor.model_loader import get_model_cls
 
     model = get_model_cls(model_config)
     if supports_score_template(model):
@@ -162,6 +163,9 @@ def post_process_tokens(
     Note:
         This is an in-place operation.
     """
+    # NOTE(Simon): lazy import to avoid bring in all dependencies (e.g. gguf)
+    from vllm.model_executor.model_loader import get_model_cls
+
     model = get_model_cls(model_config)
     if supports_score_template(model):
         model.post_process_tokens(prompt)
