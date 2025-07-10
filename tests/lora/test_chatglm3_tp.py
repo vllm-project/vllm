@@ -48,7 +48,7 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> list[str]:
 @create_new_process_for_each_test()
 def test_chatglm3_lora(chatglm3_lora_files):
     llm = vllm.LLM(MODEL_PATH,
-                   max_model_len=1024,
+                   max_model_len=512,
                    enable_lora=True,
                    max_loras=4,
                    max_lora_rank=64,
@@ -67,7 +67,7 @@ def test_chatglm3_lora(chatglm3_lora_files):
 @create_new_process_for_each_test()
 def test_chatglm3_lora_tp4(chatglm3_lora_files):
     llm = vllm.LLM(MODEL_PATH,
-                   max_model_len=1024,
+                   max_model_len=512,
                    enable_lora=True,
                    max_loras=4,
                    max_lora_rank=64,
@@ -88,7 +88,7 @@ def test_chatglm3_lora_tp4(chatglm3_lora_files):
 @create_new_process_for_each_test()
 def test_chatglm3_lora_tp4_fully_sharded_loras(chatglm3_lora_files):
     llm = vllm.LLM(MODEL_PATH,
-                   max_model_len=1024,
+                   max_model_len=512,
                    enable_lora=True,
                    max_loras=4,
                    max_lora_rank=64,
