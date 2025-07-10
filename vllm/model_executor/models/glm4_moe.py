@@ -300,6 +300,7 @@ class Glm4MoeDecoderLayer(nn.Module):
             rope_theta=rope_theta,
             rope_scaling=rope_scaling,
             max_position_embeddings=max_position_embeddings,
+            head_dim=config.head_dim,
             rms_norm_eps=config.rms_norm_eps,
             cache_config=cache_config,
             quant_config=quant_config,
