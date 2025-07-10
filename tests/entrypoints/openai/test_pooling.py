@@ -246,3 +246,63 @@ async def test_batch_base64_pooling(server: RemoteOpenAIServer,
         embeddings_1_lst=[d.data for d in responses_default.data],
         name_0="float32",
         name_1="base64")
+
+
+@pytest.mark.asyncio
+async def test_invocations(server: RemoteOpenAIServer):
+    input_texts = [
+        "The chef prepared a delicious meal.",
+    ]
+
+    request_args = {
+        "model": MODEL_NAME,
+        "input": input_texts,
+        "encoding_format": "float",
+    }
+
+    completion_response = requests.post(server.url_for("pooling"),
+                                        json=request_args)
+    completion_response.raise_for_status()
+
+    invocation_response = requests.post(server.url_for("invocations"),
+                                        json=request_args)
+    invocation_response.raise_for_status()
+
+    completion_output = completion_response.json()
+    invocation_output = invocation_response.json()
+
+    assert completion_output.keys() == invocation_output.keys()
+    assert completion_output["data"] == invocation_output["data"]
+
+
+@pytest.mark.asyncio
+async def test_invocations_conversation(server: RemoteOpenAIServer):
+    messages = [{
+        "role": "user",
+        "content": "The cat sat on the mat.",
+    }, {
+        "role": "assistant",
+        "content": "A feline was resting on a rug.",
+    }, {
+        "role": "user",
+        "content": "Stars twinkle brightly in the night sky.",
+    }]
+
+    request_args = {
+        "model": MODEL_NAME,
+        "messages": messages,
+        "encoding_format": "float",
+    }
+
+    chat_response = requests.post(server.url_for("pooling"), json=request_args)
+    chat_response.raise_for_status()
+
+    invocation_response = requests.post(server.url_for("invocations"),
+                                        json=request_args)
+    invocation_response.raise_for_status()
+
+    chat_output = chat_response.json()
+    invocation_output = invocation_response.json()
+
+    assert chat_output.keys() == invocation_output.keys()
+    assert chat_output["data"] == invocation_output["data"]
