@@ -250,28 +250,24 @@ class MultiprocExecutor(Executor):
             self, outputs: list[ModelRunnerOutput]) -> ModelRunnerOutput:
         # aggregate finished_sending, finished_recving from all workers
 
+        def update_finished_set(req_ids: Optional[set[str]],
+                                remaining_count_dict: dict[str, int],
+                                finished_set: set[str]) -> None:
+            for req_id in req_ids or ():
+                new_count = remaining_count_dict[req_id] - 1
+                if new_count == 0:
+                    finished_set.add(req_id)
+                    del remaining_count_dict[req_id]
+                else:
+                    remaining_count_dict[req_id] = new_count
+
         finished_sending = set[str]()
         finished_recving = set[str]()
         for output in outputs:
-            # update finished_sending
-            for req_id in output.finished_sending or []:
-                new_count = self._send_remaining_count[req_id] - 1
-                if new_count == 0:
-                    # got response from all workers, report back to scheduler
-                    finished_sending.add(req_id)
-                    del self._send_remaining_count[req_id]
-                else:
-                    self._send_remaining_count[req_id] = new_count
-
-            # update finished_recving
-            for req_id in output.finished_recving or []:
-                new_count = self._recv_remaining_count[req_id] - 1
-                if new_count == 0:
-                    # got response from all workers, report back to scheduler
-                    finished_recving.add(req_id)
-                    del self._recv_remaining_count[req_id]
-                else:
-                    self._recv_remaining_count[req_id] = new_count
+            update_finished_set(output.finished_sending,
+                                self._send_remaining_count, finished_sending)
+            update_finished_set(output.finished_recving,
+                                self._recv_remaining_count, finished_recving)
 
         # select output of the worker specified by output_rank
         output = outputs[self.output_rank]
