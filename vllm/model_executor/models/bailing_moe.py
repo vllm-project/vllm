@@ -131,18 +131,14 @@ class BailingAttention(nn.Module):
     ) -> torch.Tensor:
 
         qkv, _ = self.query_key_value(hidden_states)
-        q, k, v = qkv.split([
-            self.q_size_per_rank, self.kv_size_per_rank, self.kv_size_per_rank
-        ],
-                            dim=-1)
+        q, k, v = qkv.split(
+            [self.q_size_per_rank, self.kv_size_per_rank, self.kv_size_per_rank],
+            dim=-1
+        )
 
         q, k = self.rotary_emb(position_ids, q, k)
 
-        context_layer = self.attn(
-            q,
-            k,
-            v,
-        )
+        context_layer = self.attn(q, k, v)
 
         attn_output, _ = self.dense(context_layer)
         return attn_output
@@ -380,7 +376,7 @@ class BailingMoeModel(nn.Module):
 
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
-    
+
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
@@ -534,4 +530,3 @@ class BailingMoeForCausalLM(nn.Module, SupportsPP):
                            if self.config.tie_word_embeddings else None),
         )
         return loader.load_weights(weights)
-
