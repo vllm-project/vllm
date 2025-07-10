@@ -8,10 +8,10 @@ from typing import Optional, TypedDict, Union, cast
 import numpy as np
 import torch
 from torch import nn
-
 from transformers import (BatchFeature, WhisperConfig, WhisperFeatureExtractor,
                           WhisperProcessor)
 from transformers.models.whisper.modeling_whisper import sinusoids
+
 from vllm.attention import Attention, AttentionType
 from vllm.config import (CacheConfig, ModelConfig, SpeechToTextConfig,
                          VllmConfig)
