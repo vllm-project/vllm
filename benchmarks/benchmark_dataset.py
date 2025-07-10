@@ -349,8 +349,9 @@ class RandomDataset(BenchmarkDataset):
             # [1650, 939, 486] -> ['Ġcall', 'sh', 'ere']
             # To avoid uncontrolled change of the prompt length,
             # the encoded sequence is truncated before being decode again.
+            total_input_len = prefix_len + int(input_lens[i])
             re_encoded_sequence = tokenizer.encode(prompt, add_special_tokens=False)[
-                : input_lens[i]
+                :total_input_len
             ]
             prompt = tokenizer.decode(re_encoded_sequence)
             total_input_len = len(re_encoded_sequence)
@@ -700,6 +701,7 @@ class HuggingFaceDataset(BenchmarkDataset):
         self,
         dataset_path: str,
         dataset_split: str,
+        no_stream: bool = False,
         dataset_subset: Optional[str] = None,
         **kwargs,
     ) -> None:
@@ -707,6 +709,7 @@ class HuggingFaceDataset(BenchmarkDataset):
 
         self.dataset_split = dataset_split
         self.dataset_subset = dataset_subset
+        self.load_stream = not no_stream
         self.load_data()
 
     def load_data(self) -> None:
@@ -715,7 +718,7 @@ class HuggingFaceDataset(BenchmarkDataset):
             self.dataset_path,
             name=self.dataset_subset,
             split=self.dataset_split,
-            streaming=True,
+            streaming=self.load_stream,
         )
         self.data = self.data.shuffle(seed=self.random_seed)
 
