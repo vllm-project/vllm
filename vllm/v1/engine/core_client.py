@@ -914,7 +914,6 @@ class DPAsyncMPClient(AsyncMPClient):
                     events = await poller.poll()
                     if not self.engines_running and len(events) == 2 or (
                             events[0][0] == first_req_rcv_socket):
-                        # eep-dev
                         # Check if this is a regular request notification or
                         # scale up notification
                         buf = first_req_rcv_socket.recv(

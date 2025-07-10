@@ -200,7 +200,6 @@ class CoordinatorProc:
                         # Ignore subscription messages.
                         continue
 
-                    # eep-dev
                     decoded = msgspec.msgpack.decode(buffer)
                     if isinstance(decoded, list) and len(
                             decoded) == 2 and decoded[0] == "SCALE_UP":

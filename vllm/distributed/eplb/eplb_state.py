@@ -29,17 +29,14 @@ physical experts.
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
-# eep-dev
 from typing import Optional, Union
 
 import torch
-# eep-dev
 from torch.distributed import ProcessGroup, all_gather, all_reduce
 
 from vllm.config import ParallelConfig
 from vllm.distributed.parallel_state import (get_ep_group, get_node_count,
                                              in_the_same_node_as)
-# eep-dev
 from vllm.distributed.utils import StatelessProcessGroup
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import MixtureOfExperts
@@ -248,7 +245,6 @@ class EplbState:
         expert_rearrangement_step = max(
             0, eplb_step_interval - eplb_step_interval // 4)
 
-        # eep-dev
         if global_expert_load is not None:
             ep_group = get_ep_group().device_group
             assert global_expert_load.shape == (model.num_moe_layers,
@@ -422,7 +418,6 @@ class EplbState:
             logger.info("Rearranging experts %s...",
                         "(profile)" if is_profile else "")
 
-        # eep-dev
         if global_expert_load is None:
             # This mapping is only used here, so we do not store it in the state
             physical_expert_start = ep_rank * model.num_local_physical_experts
@@ -481,7 +476,6 @@ class EplbState:
         num_replicas = model.num_physical_experts
         num_groups = model.num_expert_groups
         if rank_mapping is not None and len(rank_mapping) == ep_group.size():
-            # eep-dev
             # NOTE(yongji): scale down, we need to rebalance the experts on
             # remaining GPUs, transfer the experts while we haven't shutdown
             # the GPUs to be released.
@@ -496,7 +490,6 @@ class EplbState:
             num_gpus = ep_group.size()
 
         if num_gpus % num_nodes != 0:
-            # eep-dev
             self.num_nodes = 1
             logger.warning_once(
                 f"num_gpus % num_nodes != 0, "
@@ -584,7 +577,6 @@ class EplbState:
         return global_expert_load, old_global_expert_indices
 
 
-# eep-dev
 def _node_count_with_rank_mapping(
     pg: Union[ProcessGroup, StatelessProcessGroup],
     rank_mapping: dict[int, int],

@@ -31,7 +31,6 @@ from vllm.v1.core.kv_cache_utils import (get_kv_cache_config,
 from vllm.v1.core.sched.interface import SchedulerInterface
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler as V1Scheduler
-# eep-dev
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
                             EngineCoreRequestType,
                             ReconfigureDistributedRequest, UtilityOutput)
@@ -79,7 +78,6 @@ class EngineCore:
             self.model_executor.register_failure_callback(
                 executor_fail_callback)
 
-        # eep-dev
         self.available_gpu_memory_for_kv_cache = -1
 
         # Setup KV Caches and update CacheConfig after profiling.
@@ -142,7 +140,6 @@ class EngineCore:
         # Get all kv cache needed by the model
         kv_cache_specs = self.model_executor.get_kv_cache_specs()
 
-        # eep-dev
         if os.environ.get("VLLM_EEP_RECONFIGURE_LAUNCH") == "1":
             dp_group = getattr(self, "dp_group", None)
             assert dp_group is not None
@@ -991,7 +988,6 @@ class DPEngineCoreProc(EngineCoreProc):
         return ParallelConfig.has_unfinished_dp(self.dp_group,
                                                 local_unfinished)
 
-    # eep-dev
     def reinitialize_distributed(
             self, reconfig_request: ReconfigureDistributedRequest) -> None:
         stateless_destroy_torch_distributed_process_group(self.dp_group)

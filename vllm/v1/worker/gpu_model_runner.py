@@ -1768,7 +1768,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     def load_model(self, reconfigure: bool = False) -> None:
         logger.info("Starting to load model %s...", self.model_config.model)
-        # eep-dev
         if reconfigure:
             from vllm.distributed.parallel_state import get_ep_group
             num_local_physical_experts = torch.empty(1,

@@ -182,7 +182,6 @@ class CoreEngineActorManager:
         }
         runtime_env = RuntimeEnv(env_vars=self.env_vars_dict)
 
-        # eep-dev
         self.addresses = addresses
         self.executor_class = executor_class
         self.log_stats = log_stats

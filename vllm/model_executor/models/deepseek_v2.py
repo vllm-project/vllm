@@ -770,7 +770,6 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
                 logical_replica_count=logical_replica_count,
             )
 
-    # eep-dev
     def update_physical_experts_metadata(
         self,
         num_physical_experts: int,

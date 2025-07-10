@@ -179,7 +179,6 @@ class EngineCoreRequestType(enum.Enum):
     EXECUTOR_FAILED = b'\x04'
 
 
-# eep-dev
 class ReconfigureDistributedRequest(msgspec.Struct):
     new_data_parallel_size: int
     new_data_parallel_rank: int  # -1 means keep current rank

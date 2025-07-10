@@ -239,7 +239,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         moe: FusedMoEConfig,
     ) -> FusedMoEPermuteExpertsUnpermute:
 
-        # eep-dev
         # assert self.fused_experts == fused_experts
 
         if (prepare_finalize.activation_format ==
@@ -841,7 +840,6 @@ class FusedMoE(torch.nn.Module):
     def use_deepep_ll_kernels(self):
         return self.moe_parallel_config.use_deepep_ll_kernels
 
-    # eep-dev
     def update_expert_map(self):
         # ep_size and ep_rank should already be updated
         with self.expert_map.device:

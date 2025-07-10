@@ -63,7 +63,6 @@ class UniProcExecutor(ExecutorBase):
         # it's running.
         return
 
-    # eep-dev
     def reinitialize_distributed(
             self, reconfig_request: ReconfigureDistributedRequest) -> None:
         self.driver_worker.reinitialize_distributed(reconfig_request)

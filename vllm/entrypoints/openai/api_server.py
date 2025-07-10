@@ -1047,7 +1047,6 @@ if envs.VLLM_SERVER_DEV_MODE:
         return JSONResponse(content={"is_sleeping": is_sleeping})
 
 
-# eep-dev
 @router.post("/scale", dependencies=[Depends(validate_json_request)])
 async def scale(raw_request: Request):
     try:

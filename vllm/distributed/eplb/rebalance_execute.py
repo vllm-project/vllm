@@ -8,7 +8,6 @@ This involves the exchange of expert weights between GPUs.
 
 from collections.abc import Iterable, MutableSequence, Sequence
 from functools import partial
-# eep-dev
 from typing import Optional
 
 import torch
@@ -129,7 +128,6 @@ def shuffle_layer(
             dst_global = local2global(dst)
             if is_received_locally[dst]:
                 continue
-            # eep-dev
             if old_indices[src_global] == -1 or new_indices[dst_global] == -1:
                 continue
             if old_indices[src_global] == new_indices[dst_global]:
@@ -144,7 +142,6 @@ def shuffle_layer(
     experts_send_loc: dict[int, int] = {}
     for src in range(num_local_experts):
         expert = old_indices[local2global(src)]
-        # eep-dev
         if expert == -1:
             continue
         if expert in experts_send_loc:
@@ -189,7 +186,6 @@ def shuffle_layer(
         if is_received_locally[dst]:
             continue
         expert = new_indices[local2global(dst)]
-        # eep-dev
         if expert == -1:
             continue
         if expert in experts_recv_loc:
@@ -238,7 +234,6 @@ def shuffle_layer(
                 weight[dst].copy_(buffer[dst])
         else:
             expert = new_indices[local2global(dst)]
-            # eep-dev
             if expert == -1:
                 continue
             src = experts_recv_loc[expert]
@@ -252,7 +247,6 @@ def rearrange_expert_weights_inplace(
     expert_weights: Sequence[Iterable[torch.Tensor]],
     ep_group: ProcessGroup,
     is_profile: bool = False,
-    # eep-dev
     rank_mapping: Optional[dict[int, int]] = None,
 ) -> None:
     """
@@ -273,7 +267,6 @@ def rearrange_expert_weights_inplace(
             This is used during profile run, where we only perform dummy
             communications to reserve enough memory for the buffers.
     """
-    # eep-dev
     if rank_mapping is not None:
         if len(rank_mapping) == ep_group.size():
             # scale down
@@ -341,7 +334,6 @@ def rearrange_expert_weights_inplace(
         )
 
 
-# eep-dev
 def _map_old_expert_indices_with_rank_mapping(
     old_global_expert_indices: torch.Tensor,
     rank_mapping: dict[int, int],
@@ -397,7 +389,6 @@ def _map_old_expert_indices_with_rank_mapping(
     return mapped_expert_indices
 
 
-# eep-dev
 def _map_new_expert_indices_with_rank_mapping(
     new_global_expert_indices: torch.Tensor,
     rank_mapping: dict[int, int],

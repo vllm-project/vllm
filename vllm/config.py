@@ -1954,7 +1954,6 @@ class ParallelConfig:
         aggregated_has_unfinished = bool(tensor.item())
         return aggregated_has_unfinished
 
-    # eep-dev
     @staticmethod
     def sync_kv_cache_memory(dp_group: "ProcessGroup",
                              kv_cache_memory: int) -> None:
