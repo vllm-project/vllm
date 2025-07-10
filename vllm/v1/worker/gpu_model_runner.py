@@ -123,7 +123,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 cache_config.cache_dtype]
 
         self.is_multimodal_model = model_config.is_multimodal_model
-        self.is_pooling_model = model_config.pooler_config is not None
+        self.is_pooling_model = model_config.is_pooling_model
+        self.model_supports_multimodal_raw_input = (
+            model_config.model_supports_multimodal_raw_input)
         self.max_model_len = model_config.max_model_len
         self.max_num_tokens = scheduler_config.max_num_batched_tokens
         self.max_num_reqs = scheduler_config.max_num_seqs
@@ -326,6 +328,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         Args:
             scheduler_output: The scheduler output.
         """
+        
+        # nothing to be reordered when the model is attention free
+        if self.model_config.is_attention_free:
+            return
+
         self.attn_metadata_builders[0].reorder_batch(self.input_batch,
                                                      scheduler_output)
 
@@ -554,6 +561,39 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Refresh batch metadata with any pending updates.
         self.input_batch.refresh_metadata()
 
+    def _maybe_add_multimodal_kwargs(
+            self,
+            model_kwargs: dict[str, Any],
+            scheduler_output: "Optional[SchedulerOutput]" = None,
+            num_reqs: int = -1,
+    ):
+
+        if not self.model_supports_multimodal_raw_input:
+            return
+
+        # Multi-modal data.
+        if scheduler_output:
+            multi_modal_kwargs_list = []
+            for req in scheduler_output.scheduled_new_reqs:
+                req_mm_inputs = req.mm_inputs
+                if not isinstance(req_mm_inputs, list):
+                    req_mm_inputs = list(req_mm_inputs)
+                multi_modal_kwargs_list.extend(req_mm_inputs)
+            multi_modal_kwargs = MultiModalKwargs.batch(
+                multi_modal_kwargs_list)
+        else:
+            # The only case where SchedulerOtput is None is for a dummy run,
+            # let's get some dummy data.
+            dummy_data = [
+                self.mm_registry.get_decoder_dummy_data(
+                    model_config=self.model_config, seq_len=1).multi_modal_data
+                for i in range(num_reqs)
+            ]
+            multi_modal_kwargs = MultiModalKwargs.batch(dummy_data)
+
+        model_kwargs.update(multi_modal_kwargs)
+
+ 
     def _get_cumsum_and_arange(
         self,
         num_tokens: np.ndarray,
@@ -1019,13 +1059,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             curr_group_outputs = self.model.get_multimodal_embeddings(
                 **batched_mm_inputs)
 
-            sanity_check_mm_encoder_outputs(
-                curr_group_outputs,
-                expected_num_items=len(grouped_mm_inputs),
-            )
+            if curr_group_outputs:
+                sanity_check_mm_encoder_outputs(
+                    curr_group_outputs,
+                    expected_num_items=len(grouped_mm_inputs),
+                )
 
-            for output in curr_group_outputs:
-                encoder_outputs.append(output)
+                for output in curr_group_outputs:
+                    encoder_outputs.append(output)
 
         # Cache the encoder outputs.
         for (req_id, input_id, pos_info), output in zip(
@@ -1319,11 +1360,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         else:
             mm_embeds = []
 
+        model_kwargs: dict[str, Any] = {}
         if self.is_multimodal_model and get_pp_group().is_first_rank:
             # NOTE(woosuk): To unify token ids and soft tokens (vision
             # embeddings), we always use embeddings (rather than token ids)
             # as input to the multimodal model, even when the input is text.
             input_ids = self.input_ids[:num_scheduled_tokens]
+            self._maybe_add_multimodal_kwargs(
+                model_kwargs=model_kwargs, scheduler_output=scheduler_output)
             if mm_embeds:
                 inputs_embeds = self.model.get_input_embeddings(
                     input_ids, mm_embeds)
@@ -1372,7 +1416,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 positions=positions,
                 intermediate_tensors=intermediate_tensors,
                 inputs_embeds=inputs_embeds,
-            )
+                **MultiModalKwargs.as_kwargs(
+                    model_kwargs,
+                    device=self.device,
+                ))
 
             self.maybe_wait_for_kv_save()
 
@@ -1992,7 +2039,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         with self.maybe_dummy_run_with_lora(self.lora_config,
                                             num_scheduled_tokens):
             model = self.model
+            model_kwargs: dict[str, Any] = {}
             if self.is_multimodal_model:
+                self._maybe_add_multimodal_kwargs(model_kwargs=model_kwargs,
+                                                  num_reqs=num_reqs)
                 input_ids = None
                 inputs_embeds = self.inputs_embeds[:num_tokens]
             else:
@@ -2021,12 +2071,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     self.vllm_config,
                     num_tokens=num_tokens,
                     num_tokens_across_dp=num_tokens_across_dp):
-                outputs = model(
-                    input_ids=input_ids,
-                    positions=positions,
-                    intermediate_tensors=intermediate_tensors,
-                    inputs_embeds=inputs_embeds,
-                )
+                outputs = model(input_ids=input_ids,
+                                positions=positions,
+                                intermediate_tensors=intermediate_tensors,
+                                inputs_embeds=inputs_embeds,
+                                **MultiModalKwargs.as_kwargs(
+                                    model_kwargs, device=self.device),)
+
             if self.use_aux_hidden_state_outputs:
                 hidden_states, _ = outputs
             else:

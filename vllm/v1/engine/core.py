@@ -134,26 +134,37 @@ class EngineCore:
             self, vllm_config: VllmConfig) -> tuple[int, int, KVCacheConfig]:
         start = time.time()
 
-        # Get all kv cache needed by the model
-        kv_cache_specs = self.model_executor.get_kv_cache_specs()
+        if vllm_config.model_config.is_attention_free:
+            # No need for initializing anything related to KV cache if the model
+            # is attention free.
+            kv_cache_specs = []
+            kv_cache_configs = [
+                KVCacheConfig(num_blocks=0,
+                              kv_cache_tensors=[],
+                              kv_cache_groups=[])
+            ]
+        else:
+            # Get all kv cache needed by the model
+            kv_cache_specs = self.model_executor.get_kv_cache_specs()
 
-        # Profiles the peak memory usage of the model to determine how much
-        # memory can be allocated for kv cache.
-        available_gpu_memory = self.model_executor.determine_available_memory()
+            # Profiles the peak memory usage of the model to determine how much
+            # memory can be allocated for kv cache.
+            available_gpu_memory = (
+                self.model_executor.determine_available_memory())
 
-        assert len(kv_cache_specs) == len(available_gpu_memory)
-        # Get the kv cache tensor size
-        kv_cache_configs = [
-            get_kv_cache_config(vllm_config, kv_cache_spec_one_worker,
-                                available_gpu_memory_one_worker)
-            for kv_cache_spec_one_worker, available_gpu_memory_one_worker in
-            zip(kv_cache_specs, available_gpu_memory)
-        ]
+            assert len(kv_cache_specs) == len(available_gpu_memory)
+            # Get the kv cache tensor size
+            kv_cache_configs = [
+                get_kv_cache_config(vllm_config, kv_cache_spec_one_worker,
+                                    available_gpu_memory_one_worker)
+                for kv_cache_spec_one_worker, available_gpu_memory_one_worker
+                in zip(kv_cache_specs, available_gpu_memory)
+            ]
 
-        # Since we use a shared centralized controller, we need the
-        # `kv_cache_config` to be consistent across all workers to make sure
-        # all the memory operators can be applied to all workers.
-        unify_kv_cache_configs(kv_cache_configs)
+            # Since we use a shared centralized controller, we need the
+            # `kv_cache_config` to be consistent across all workers to make sure
+            # all the memory operators can be applied to all workers.
+            unify_kv_cache_configs(kv_cache_configs)
 
         # All workers have the same kv_cache_config except layer names, so use
         # an arbitrary one to initialize the scheduler.
