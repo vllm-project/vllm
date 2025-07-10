@@ -14,7 +14,6 @@ from pathlib import Path
 from typing import Any, Callable, Optional, Union
 
 import filelock
-import gguf
 import huggingface_hub.constants
 import numpy as np
 import torch
@@ -39,6 +38,11 @@ except (ImportError, OSError):
         "runai_model_streamer")  # type: ignore[assignment]
     SafetensorsStreamer = runai_model_streamer.placeholder_attr(
         "SafetensorsStreamer")
+
+try:
+    import gguf
+except ImportError:
+    gguf = PlaceholderModule("gguf")
 
 try:
     from fastsafetensors import SafeTensorsFileLoader, SingleGroup
