@@ -1021,6 +1021,11 @@ INVOCATION_TYPES: dict[RequestType, tuple[GetHandlerFn, EndpointFn]] = {
     PoolingRequest: (pooling, create_pooling),
 }
 
+INVOCATION_VALIDATORS = {
+    pydantic.TypeAdapter(request_type): (get_handler, endpoint)
+    for request_type, (get_handler, endpoint) in INVOCATION_TYPES.items()
+}
+
 
 @router.post("/invocations",
              dependencies=[Depends(validate_json_request)],
@@ -1044,14 +1049,15 @@ async def invocations(raw_request: Request):
                             detail=f"JSON decode error: {e}") from e
 
     valid_endpoints = {
-        request_type: endpoint
-        for request_type, (get_handler, endpoint) in INVOCATION_TYPES.items()
+        validator: endpoint
+        for validator, (get_handler,
+                        endpoint) in INVOCATION_VALIDATORS.items()
         if get_handler(raw_request) is not None
     }
 
-    for request_type, endpoint in valid_endpoints.items():
+    for request_validator, endpoint in valid_endpoints.items():
         try:
-            request = pydantic.TypeAdapter(request_type).validate_python(body)
+            request = request_validator.validate_python(body)
             break
         except pydantic.ValidationError:
             continue
