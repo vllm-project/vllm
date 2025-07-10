@@ -13,7 +13,6 @@ try:
     from flashinfer import BatchDecodeWithPagedKVCacheWrapper
     from flashinfer.decode import CUDAGraphBatchDecodeWithPagedKVCacheWrapper
     from flashinfer.prefill import BatchPrefillWithPagedKVCacheWrapper
-
     from vllm.vllm_flash_attn import flash_attn_varlen_func
     FLASHINFER_WORKSPACE_BUFFER_SIZE = 256 * 1024 * 1024
 except ImportError:
@@ -313,7 +312,7 @@ class FlashInferState(AttentionState):
                                             dtype=torch.int32)
 
         global_params = infer_global_hyperparameters(
-            get_per_layer_parameters(self.vllm_config, FlashInferImpl))
+            get_per_layer_parameters(self.vllm_config))
 
         attn_metadata = self.runner.attn_backend.make_metadata(
             num_prefills=0,
@@ -679,7 +678,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             # - `logits_soft_cap`
             # - `sm_scale`
             inferred_params = infer_global_hyperparameters(
-                get_per_layer_parameters(self.vllm_config, FlashInferImpl))
+                get_per_layer_parameters(self.vllm_config))
             self.global_hyperparameters = inferred_params
             self.window_left = inferred_params.window_left
             self.logits_soft_cap = inferred_params.logits_soft_cap
