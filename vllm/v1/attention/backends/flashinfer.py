@@ -39,7 +39,7 @@ logger = init_logger(__name__)
 class FlashInferBackend(AttentionBackend):
 
     accept_output_buffer: bool = True
-    cached_use_trtllm: Optional[bool] = None
+    cached_sm100a_supported: Optional[bool] = None
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
@@ -98,10 +98,15 @@ class FlashInferBackend(AttentionBackend):
     @staticmethod
     def use_trtllm_decode_attention(batch_size: int,
                                     max_seq_len: int,
+                                    attn_head_size: int = 128,
                                     kv_cache_dtype: str = "auto") -> bool:
-        # Check if environment variable is explicitly set
-        if FlashInferBackend.cached_use_trtllm is not None:
-            return FlashInferBackend.cached_use_trtllm
+        # Only supports attention head size of 128
+        if FlashInferBackend.cached_sm100a_supported is None:
+            FlashInferBackend.cached_sm100a_supported = (is_sm100a_supported(
+                torch.device("cuda")))
+        if not FlashInferBackend.cached_sm100a_supported:
+            return False
+
         env_value = envs.VLLM_USE_TRTLLM_DECODE_ATTENTION
         if env_value is not None:
             logger.info_once("VLLM_USE_TRTLLM_DECODE_ATTENTION is set to %s",
@@ -115,19 +120,17 @@ class FlashInferBackend(AttentionBackend):
                 logger.info_once(
                     "VLLM_USE_TRTLLM_DECODE_ATTENTION is set to 1, "
                     "using TRTLLM decode attention.")
-            FlashInferBackend.cached_use_trtllm = not no_use_trtllm
+            return not no_use_trtllm
         else:
             # Environment variable not set - use auto-detection
-            use_trtllm = (is_sm100a_supported(torch.device("cuda"))
+            use_trtllm = (FlashInferBackend.cached_sm100a_supported
                           and batch_size <= 256 and max_seq_len < 131072
-                          and kv_cache_dtype == "auto")
-            FlashInferBackend.cached_use_trtllm = use_trtllm
+                          and kv_cache_dtype == "auto"
+                          and attn_head_size == 128)
             if use_trtllm:
                 logger.warning_once(
-                    "Using TRTLLM decode attention (auto-detected)."
-                    "Please run with VLLM_KV_CACHE_LAYOUT=HND for "
-                    "accurate results.")
-        return FlashInferBackend.cached_use_trtllm
+                    "Using TRTLLM decode attention (auto-detected).")
+        return use_trtllm
 
     @staticmethod
     def get_fp8_dtype_for_flashinfer(kv_cache_dtype: str) -> torch.dtype:
@@ -458,7 +461,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             if self._num_decodes > 0:
                 attn_metadata.decode_wrapper = self._get_decode_wrapper()
                 if not FlashInferBackend.use_trtllm_decode_attention(
-                        self._num_decodes, attn_metadata.max_seq_len):
+                        self._num_decodes, attn_metadata.max_seq_len,
+                        attn_metadata.head_dim):
                     attn_metadata.decode_wrapper.plan(
                         attn_metadata.paged_kv_indptr[:self._num_decodes + 1],
                         attn_metadata.paged_kv_indices,
@@ -738,7 +742,8 @@ class FlashInferImpl(AttentionImpl):
             decode_query = query[:num_decode_tokens]
             assert decode_query.shape[0] == num_decode_tokens
             if not FlashInferBackend.use_trtllm_decode_attention(
-                    attn_metadata.num_decodes, attn_metadata.max_seq_len):
+                    attn_metadata.num_decodes, attn_metadata.max_seq_len,
+                    attn_metadata.head_dim):
                 assert decode_wrapper is not None
                 assert decode_wrapper._window_left == window_left
                 assert decode_wrapper._logits_soft_cap == (self.logits_soft_cap

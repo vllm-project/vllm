@@ -26,8 +26,8 @@ except ImportError:
         BatchPrefillWithPagedKVCacheWrapper = None
         trtllm_batch_decode_with_kv_cache = None
     FLASHINFER_WORKSPACE_BUFFER_SIZE = 0
-    raise ImportError("FlashInfer is not installed. Please install it with "
-                      "`pip install flashinfer`.") from None
+    raise ImportError("FlashInfer is not installed. Please install it from "
+                      "https://github.com/flashinfer-ai/flashinfer") from None
 
 import torch
 
