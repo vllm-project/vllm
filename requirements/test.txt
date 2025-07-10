@@ -45,7 +45,7 @@ backoff==2.2.1
     # via
     #   -r requirements/test.in
     #   schemathesis
-bitsandbytes==0.45.3
+bitsandbytes==0.46.1
     # via -r requirements/test.in
 black==24.10.0
     # via datamodel-code-generator
@@ -739,7 +739,7 @@ tenacity==9.0.0
     # via
     #   lm-eval
     #   plotly
-tensorizer==2.9.0
+tensorizer==2.10.1
     # via -r requirements/test.in
 threadpoolctl==3.5.0
     # via scikit-learn

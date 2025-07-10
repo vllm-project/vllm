@@ -551,7 +551,7 @@ async def benchmark(
         "total_input_tokens": metrics.total_input,
         "total_output_tokens": metrics.total_output,
         "request_throughput": metrics.request_throughput,
-        "request_goodput:": metrics.request_goodput if goodput_config_dict else None,
+        "request_goodput": metrics.request_goodput if goodput_config_dict else None,
         "output_throughput": metrics.output_throughput,
         "total_token_throughput": metrics.total_token_throughput,
         "input_lens": [output.prompt_len for output in outputs],
@@ -825,6 +825,7 @@ def main(args: argparse.Namespace):
             dataset_subset=args.hf_subset,
             dataset_split=args.hf_split,
             random_seed=args.seed,
+            no_stream=args.no_stream,
         ).sample(
             num_requests=args.num_prompts,
             tokenizer=tokenizer,
@@ -1032,6 +1033,11 @@ def create_argument_parser():
         default=None,
         help="Path to the sharegpt/sonnet dataset. "
         "Or the huggingface dataset ID if using HF dataset.",
+    )
+    parser.add_argument(
+        "--no-stream",
+        action="store_true",
+        help="Do not load the dataset in streaming mode.",
     )
     parser.add_argument(
         "--max-concurrency",

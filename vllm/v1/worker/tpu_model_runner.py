@@ -418,21 +418,24 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             req_ids_to_add.append(req_id)
 
         # Update the states of the running/resumed requests.
-        for req_data in scheduler_output.scheduled_cached_reqs:
-            req_id = req_data.req_id
+        req_data = scheduler_output.scheduled_cached_reqs
+        for i, req_id in enumerate(req_data.req_ids):
             req_state = self.requests[req_id]
+            num_computed_tokens = req_data.num_computed_tokens[i]
+            new_block_ids = req_data.new_block_ids[i]
+            resumed_from_preemption = req_data.resumed_from_preemption[i]
 
             # Update the cached states.
-            req_state.num_computed_tokens = req_data.num_computed_tokens
-            if not req_data.resumed_from_preemption:
+            req_state.num_computed_tokens = num_computed_tokens
+            if not resumed_from_preemption:
                 # Append the new blocks to the existing block IDs.
-                for block_ids, new_block_ids in zip(req_state.block_ids,
-                                                    req_data.new_block_ids):
-                    block_ids.extend(new_block_ids)
+                for block_ids, new_ids in zip(req_state.block_ids,
+                                              new_block_ids):
+                    block_ids.extend(new_ids)
             else:
                 # The request is resumed from preemption.
                 # Replace the existing block IDs with the new ones.
-                req_state.block_ids = req_data.new_block_ids
+                req_state.block_ids = new_block_ids
 
             req_index = self.input_batch.req_id_to_index.get(req_id)
             if req_index is None:
@@ -444,9 +447,8 @@ class TPUModelRunner(LoRAModelRunnerMixin):
 
             # Update the persistent batch.
             self.input_batch.num_computed_tokens_cpu[req_index] = (
-                req_data.num_computed_tokens)
-            self.input_batch.block_table.append_row(req_data.new_block_ids,
-                                                    req_index)
+                num_computed_tokens)
+            self.input_batch.block_table.append_row(new_block_ids, req_index)
 
         # Add the new or resumed requests to the persistent batch.
         # The smaller empty indices are filled first.
@@ -711,8 +713,10 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                 self.device)
         block_tables = block_tables.to(self.device)
 
+        # Calculate the slot mapping
         slot_mapping_metadata = self._get_slot_mapping_metadata(
             num_reqs, num_scheduled_tokens_per_req)
+        num_kv_update_slices = slot_mapping_metadata.shape[0]
         padded_num_slices = _get_padded_num_kv_cache_update_slices(
             padded_total_num_scheduled_tokens, self.max_num_reqs,
             self.block_size)
@@ -743,6 +747,9 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             num_seqs=torch.tensor([num_reqs],
                                   dtype=torch.int32,
                                   device=self.device),
+            num_kv_update_slices=torch.tensor([num_kv_update_slices],
+                                              dtype=torch.int32,
+                                              device=self.device),
             num_slices_per_kv_cache_update_block=
             NUM_SLICES_PER_KV_CACHE_UPDATE_BLOCK,
         )
@@ -1172,6 +1179,8 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                                    dtype=torch.int32).to(self.device)
         padded_num_slices = _get_padded_num_kv_cache_update_slices(
             num_tokens, self.max_num_reqs, self.block_size)
+        num_kv_update_slices = torch.tensor([padded_num_slices],
+                                            dtype=torch.int32).to(self.device)
         slot_mapping = torch.zeros((3, padded_num_slices),
                                    dtype=torch.int32).to(self.device)
         block_tables = torch.zeros((num_reqs, num_blocks),
@@ -1191,6 +1200,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             context_lens=context_lens,
             query_start_loc=query_start_loc,
             num_seqs=num_seqs,
+            num_kv_update_slices=num_kv_update_slices,
             num_slices_per_kv_cache_update_block=
             NUM_SLICES_PER_KV_CACHE_UPDATE_BLOCK,
         )

@@ -37,6 +37,7 @@ class CpuPlatform(Platform):
     device_name: str = "cpu"
     device_type: str = "cpu"
     dispatch_key: str = "CPU"
+    dist_backend: str = "gloo"
 
     @property
     def supported_dtypes(self) -> list[torch.dtype]:
@@ -64,17 +65,22 @@ class CpuPlatform(Platform):
         if selected_backend and selected_backend != _Backend.TORCH_SDPA:
             logger.info("Cannot use %s backend on CPU.", selected_backend)
         if use_mla:
-            logger.info("Using CPU MLA backend.")
-            return "vllm.attention.backends.cpu_mla.CPUMLABackend"
+            raise NotImplementedError("MLA is not supported on CPU.")
         logger.info("Using Torch SDPA backend.")
-        if use_v1:
-            return "vllm.v1.attention.backends.cpu_attn.TorchSDPABackend"
-        else:
-            return "vllm.attention.backends.torch_sdpa.TorchSDPABackend"
+        if not use_v1:
+            raise ValueError("CPU backend only supports V1.")
+        return "vllm.v1.attention.backends.cpu_attn.TorchSDPABackend"
 
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
         return psutil.virtual_memory().total
+
+    @classmethod
+    def set_device(cls, device: torch.device) -> None:
+        """
+        Set the device for the current platform.
+        """
+        torch.cpu.set_device(device)
 
     @classmethod
     def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
@@ -147,26 +153,14 @@ class CpuPlatform(Platform):
                            parallel_config.distributed_executor_backend)
             parallel_config.distributed_executor_backend = "mp"
         if parallel_config.worker_cls == "auto":
-            if vllm_config.speculative_config:
-                parallel_config.worker_cls = \
-                    "vllm.spec_decode.spec_decode_worker.create_spec_worker"
-                parallel_config.sd_worker_cls = \
-                    "vllm.worker.cpu_worker.CPUWorker"
-            else:
-                if envs.VLLM_USE_V1:
-                    parallel_config.worker_cls = \
-                        "vllm.v1.worker.cpu_worker.CPUWorker"
-                else:
-                    parallel_config.worker_cls = \
-                        "vllm.worker.cpu_worker.CPUWorker"
+            parallel_config.worker_cls = "vllm.v1.worker.cpu_worker.CPUWorker"
 
         # Note: workaround for v1 gpu_model_runner
         from vllm.config import CompilationLevel
         vllm_config.compilation_config.cudagraph_capture_sizes = []
 
         compilation_config = vllm_config.compilation_config
-        if (envs.VLLM_USE_V1 and vllm_config.compilation_config.level
-                == CompilationLevel.PIECEWISE):
+        if vllm_config.compilation_config.level == CompilationLevel.PIECEWISE:
 
             # Note: vLLM V1 is using PIECEWISE level compilation, which will
             # take time to compile kernels just-in-time with the inductor
@@ -194,6 +188,8 @@ class CpuPlatform(Platform):
                 "epilogue_fusion":
                 True,
             })
+            if compilation_config.use_inductor:
+                compilation_config.custom_ops = ["none"]
 
         if vllm_config.lora_config is not None:
             compilation_config.level = CompilationLevel.NO_COMPILATION
@@ -275,5 +271,6 @@ class CpuPlatform(Platform):
         """Returns whether the current platform can use v1 by default for the
         supplied model configuration.
         """
-        return cls.supports_v1(
-            model_config) and cls.get_cpu_architecture() == CpuArchEnum.X86
+        arch = cls.get_cpu_architecture()
+        return (cls.supports_v1(model_config) and arch
+                in (CpuArchEnum.X86, CpuArchEnum.POWERPC, CpuArchEnum.ARM))

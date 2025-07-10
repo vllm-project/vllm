@@ -130,7 +130,7 @@ class Worker(WorkerBase):
             # This env var set by Ray causes exceptions with graph building.
             os.environ.pop("NCCL_ASYNC_ERROR_HANDLING", None)
             self.device = torch.device(f"cuda:{self.local_rank}")
-            torch.cuda.set_device(self.device)
+            current_platform.set_device(self.device)
 
             _check_if_gpu_supports_dtype(self.model_config.dtype)
             gc.collect()
@@ -157,7 +157,8 @@ class Worker(WorkerBase):
         # Initialize the distributed environment.
         init_worker_distributed_environment(self.vllm_config, self.rank,
                                             self.distributed_init_method,
-                                            self.local_rank)
+                                            self.local_rank,
+                                            current_platform.dist_backend)
         # Set random seed.
         set_random_seed(self.model_config.seed)
 

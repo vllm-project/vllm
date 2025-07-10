@@ -1,12 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from enum import Enum
 from math import prod
-from typing import Optional
+from typing import Optional, final
 
 import torch
 
 import vllm.envs as envs
+from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.utils import _resize_cache
 from vllm.utils import cdiv
 
@@ -82,6 +85,38 @@ def _moe_problem_size(
     return E, M, N, K, topk
 
 
+class FusedMoEActivationFormat(Enum):
+    """
+    The standard activation format (num_tokens, hidden dim).
+    """
+    Standard = "standard",
+    """
+    The batched experts format (num experts, max tokens per expert, hidden dim)
+    """
+    BatchedExperts = "batched_experts",
+
+
+@dataclass
+class ExpertTokensMetadata:
+    """
+  Metadata regarding expert-token routing.
+  """
+    expert_num_tokens: torch.Tensor
+    expert_num_tokens_cpu: Optional[torch.Tensor]
+
+    @staticmethod
+    def make_from_list(expert_num_tokens_list: list[int],
+                       device: str) -> "ExpertTokensMetadata":
+        expert_num_tokens_cpu = torch.tensor(expert_num_tokens_list,
+                                             device="cpu",
+                                             dtype=torch.int32)
+        return ExpertTokensMetadata(
+            expert_num_tokens=expert_num_tokens_cpu.to(device,
+                                                       non_blocking=True),
+            expert_num_tokens_cpu=expert_num_tokens_cpu)
+
+
+# TODO: pass FusedMoEParallelConfig in as ctor parameter?
 class FusedMoEPrepareAndFinalize(ABC):
     """
     An abstract base class for the [Quantize-Prepare] and [Finalize] steps
@@ -99,8 +134,10 @@ class FusedMoEPrepareAndFinalize(ABC):
         num_experts: int,
         expert_map: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor],
-               Optional[torch.Tensor], Optional[torch.Tensor]]:
+        quant_config: FusedMoEQuantConfig,
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor],
+               Optional[ExpertTokensMetadata], Optional[torch.Tensor],
+               Optional[torch.Tensor]]:
         """
         Perform any quantization (and/or) dispatching needed
         for this kernel.
@@ -119,7 +156,8 @@ class FusedMoEPrepareAndFinalize(ABC):
         Returns a tuple of:
         - quantized + dispatched a.
         - quantized + dispatched a1_scales.
-        - Optional tensor as big as number of local experts that contains the
+        - Optional ExpertTokensMetadata containing gpu/cpu tensors
+          as big as the number of local experts with the information about the
           number of tokens assigned to each local expert.
         - Optional dispatched expert topk IDs
         - Optional dispatched expert topk weight
@@ -148,6 +186,15 @@ class FusedMoEPrepareAndFinalize(ABC):
         """
         raise NotImplementedError
 
+    @property
+    @abstractmethod
+    def activation_format(self) -> FusedMoEActivationFormat:
+        """
+        A property indicating the output format of the activations for the
+        'prepare' method.
+        """
+        raise NotImplementedError
+
     @abstractmethod
     def topk_indices_dtype(self) -> Optional[torch.dtype]:
         """
@@ -169,6 +216,10 @@ class FusedMoEPrepareAndFinalize(ABC):
         """
         raise NotImplementedError
 
+    @abstractmethod
+    def num_dispatchers(self) -> int:
+        raise NotImplementedError
+
 
 class FusedMoEPermuteExpertsUnpermute(ABC):
     """
@@ -176,12 +227,54 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
     above.
     """
 
+    def __init__(
+        self,
+        quant_config: Optional[FusedMoEQuantConfig],
+    ):
+        if quant_config is not None:
+            self.quant_config = quant_config
+        else:
+            self.quant_config = FusedMoEQuantConfig()
+
+    @property
+    @abstractmethod
+    def activation_formats(
+            self) -> tuple[FusedMoEActivationFormat, FusedMoEActivationFormat]:
+        """
+        A property which is a tuple of the input and output activation formats
+        for the 'apply' method.
+        """
+        raise NotImplementedError
+
+    @property
+    def quant_dtype(self) -> Optional[torch.dtype]:
+        return self.quant_config.quant_dtype
+
+    @property
+    def block_shape(self) -> Optional[list[int]]:
+        return self.quant_config.block_shape
+
+    @property
+    def per_act_token_quant(self) -> bool:
+        return self.quant_config.per_act_token_quant
+
+    @property
+    def per_out_ch_quant(self) -> bool:
+        return self.quant_config.per_out_ch_quant
+
     # TODO (bnell): make this return a CHUNK_SIZE or None instead?
     @abstractmethod
     def supports_chunking(self) -> bool:
         """
         A flag indicating whether or not this class supports activation
         chunking.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def supports_expert_map(self) -> bool:
+        """
+        A flag indicating whether or not this class supports expert maps
         """
         raise NotImplementedError
 
@@ -248,7 +341,7 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         a2_scale: Optional[torch.Tensor],
         workspace13: torch.Tensor,
         workspace2: torch.Tensor,
-        expert_num_tokens: Optional[torch.Tensor],
+        expert_tokens_meta: Optional[ExpertTokensMetadata],
     ):
         """
         This function computes the intermediate result of a Mixture of Experts
@@ -281,8 +374,10 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
           must be large enough to hold output of either MoE gemm.
         - workspace2 (torch.Tensor): A scratch tensor used for the activation
           function.
-        - expert_num_tokens: An optional tensor containing the number of tokens
-          assigned to each expert when using batched experts format input.
+        - expert_tokens_meta (Optional[ExpertTokensMetadata]) - An optional
+          ExpertTokensMetadata object containing gpu/cpu tensors
+          as big as the number of local experts with the information about the
+          number of tokens assigned to each local expert.
         """
         raise NotImplementedError
 
@@ -297,6 +392,7 @@ def _chunk_scales(scales: Optional[torch.Tensor], start: int,
     return None
 
 
+@final
 class FusedMoEModularKernel(torch.nn.Module):
     """
     This class combines a FusedMoEPrepareAndFinalize instance and
@@ -318,6 +414,12 @@ class FusedMoEModularKernel(torch.nn.Module):
         super().__init__()
         self.prepare_finalize = prepare_finalize
         self.fused_experts = fused_experts
+        assert prepare_finalize.activation_format == \
+            fused_experts.activation_formats[0], (
+                f"{prepare_finalize.__class__.__name__}."
+                f"{prepare_finalize.activation_format} == "
+                f"{fused_experts.__class__.__name__}."
+                f"{fused_experts.activation_formats[0]}")
 
     def forward(
         self,
@@ -381,10 +483,18 @@ class FusedMoEModularKernel(torch.nn.Module):
         if global_num_experts == -1:
             global_num_experts = local_num_experts
 
-        (a1q, a1q_scale, expert_num_tokens, _expert_topk_ids,
+        (a1q, a1q_scale, expert_tokens_meta, _expert_topk_ids,
          _expert_topk_weights) = self.prepare_finalize.prepare(
-             a1, a1_scale, a2_scale, topk_weights, topk_ids,
-             global_num_experts, expert_map, apply_router_weight_on_input)
+             a1,
+             a1_scale,
+             a2_scale,
+             topk_weights,
+             topk_ids,
+             global_num_experts,
+             expert_map,
+             apply_router_weight_on_input,
+             self.fused_experts.quant_config,
+         )
 
         # Maybe prepare gathered topk_ids and topk_weights from other EP ranks.
         topk_ids = topk_ids if _expert_topk_ids is None else _expert_topk_ids
@@ -457,7 +567,7 @@ class FusedMoEModularKernel(torch.nn.Module):
                     a2_scale=a2_scale,
                     workspace13=workspace13,
                     workspace2=workspace2,
-                    expert_num_tokens=expert_num_tokens,
+                    expert_tokens_meta=expert_tokens_meta,
                 )
             else:
                 # The leading output dimension may not be equal to M, so
@@ -504,7 +614,7 @@ class FusedMoEModularKernel(torch.nn.Module):
                         a2_scale=curr_a2_scale,
                         workspace13=workspace13,
                         workspace2=workspace2,
-                        expert_num_tokens=expert_num_tokens,
+                        expert_tokens_meta=expert_tokens_meta,
                     )
 
         self.prepare_finalize.finalize(output, fused_out, topk_weights,
