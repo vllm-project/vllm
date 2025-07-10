@@ -13,6 +13,7 @@ ARGPARSE_DOC_DIR = ROOT_DIR / "docs/argparse"
 sys.path.insert(0, str(ROOT_DIR))
 sys.modules["aiohttp"] = MagicMock()
 sys.modules["blake3"] = MagicMock()
+sys.modules["gguf"] = MagicMock()
 sys.modules["vllm._C"] = MagicMock()
 
 from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs  # noqa: E402
