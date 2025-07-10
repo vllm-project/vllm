@@ -78,12 +78,11 @@ class ModelOptFp8Config(QuantizationConfig):
         if hf_quant_cfg is None:
             return None
 
-        quant_library = hf_quant_cfg.get("quant_library", "").lower()
-        if not quant_library:
-            quant_library = hf_quant_cfg.get("quant_method", "").lower()
+        # Use the community standard 'quant_method'
+        quant_method = hf_quant_cfg.get("quant_method", "").lower()
 
-        # Only proceed if the library is explicitly "modelopt"
-        if quant_library != "modelopt":
+        # Only proceed if the method is explicitly "modelopt"
+        if quant_method != "modelopt":
             return None
 
         # Look for ModelOpt-specific config structure
@@ -117,7 +116,7 @@ class ModelOptFp8Config(QuantizationConfig):
             exclude_modules = quant_config.get("exclude_modules")
         else:
             # Compressed-tensors style format:
-            # {"quant_algo": "...", "quant_library": "modelopt"}
+            # {"quant_algo": "...", "quant_method": "modelopt"}
             quant_method = config.get("quant_algo", "")
             kv_cache_quant_method = config.get("kv_cache_quant_algo")
             exclude_modules = config.get("exclude_modules")
@@ -512,12 +511,11 @@ class ModelOptNvFp4Config(QuantizationConfig):
         if hf_quant_cfg is None:
             return None
 
-        quant_library = hf_quant_cfg.get("quant_library", "").lower()
-        if not quant_library:
-            quant_library = hf_quant_cfg.get("quant_method", "").lower()
+        # Use the community standard 'quant_method'
+        quant_method = hf_quant_cfg.get("quant_method", "").lower()
 
-        # Only proceed if the library is explicitly "modelopt"
-        if quant_library != "modelopt":
+        # Only proceed if the method is explicitly "modelopt"
+        if quant_method != "modelopt":
             return None
 
         # Look for ModelOpt-specific config structure
@@ -582,7 +580,7 @@ class ModelOptNvFp4Config(QuantizationConfig):
                                  f"{type(exclude_modules)}")
         else:
             # Compressed-tensors style format:
-            # {"quant_algo": "...", "quant_library": "modelopt"}
+            # {"quant_algo": "...", "quant_method": "modelopt"}
             quant_method = config.get("quant_algo", "")
 
             # Handle kv_cache_quant_algo with proper type validation
