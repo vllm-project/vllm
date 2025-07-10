@@ -180,7 +180,11 @@ def run_cutlass_moe_fp8(
         c2 = _resize_cache(workspace2, (M * topk, N))
         c3 = _resize_cache(workspace13, (M * topk, K))
 
-    c1.fill_(0)
+    if not per_act_token and (expert_map is not None or use_batched_format):
+        # this is necessary to avoid imprecise scale calculation caused by
+        # random data in the unused workspace. The workspace is unused when
+        # this rank handles only partial tokens, or when it is batched .
+        c1.fill_(0)
 
     ops.cutlass_moe_mm(c1, a1q, w1, a1q_scale, w1_scale, expert_offsets,
                        problem_sizes1, ab_strides1, ab_strides1, c_strides1,
@@ -303,7 +307,7 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
     ):
         assert w1_zp is None, "w1_zp is not supported in CUTLASS MoE"
         assert w2_zp is None, "w2_zp is not supported in CUTLASS MoE"
-        activation_callable = lambda i, o: self.activation(activation, i, o)
+        activation_callable = lambda o, i: self.activation(activation, o, i)
         in_dtype = hidden_states.dtype
         run_cutlass_moe_fp8(
             output, hidden_states, w1, w2, topk_ids, activation_callable,
@@ -407,13 +411,23 @@ FLOAT4_E2M1_MAX = scalar_types.float4_e2m1f.max()
 FLOAT8_E4M3_MAX = torch.finfo(torch.float8_e4m3fn).max
 
 
-def cutlass_moe_fp4(a: torch.Tensor, a1_gscale: torch.Tensor,
-                    w1_fp4: torch.Tensor, w1_blockscale: torch.Tensor,
-                    w1_alphas: torch.Tensor, a2_gscale: torch.Tensor,
-                    w2_fp4: torch.Tensor, w2_blockscale: torch.Tensor,
-                    w2_alphas: torch.Tensor, topk_weights: torch.Tensor,
-                    topk_ids: torch.Tensor, m: int, n: int, k: int, e: int,
-                    device: torch.device):
+def cutlass_moe_fp4(a: torch.Tensor,
+                    a1_gscale: torch.Tensor,
+                    w1_fp4: torch.Tensor,
+                    w1_blockscale: torch.Tensor,
+                    w1_alphas: torch.Tensor,
+                    a2_gscale: torch.Tensor,
+                    w2_fp4: torch.Tensor,
+                    w2_blockscale: torch.Tensor,
+                    w2_alphas: torch.Tensor,
+                    topk_weights: torch.Tensor,
+                    topk_ids: torch.Tensor,
+                    m: int,
+                    n: int,
+                    k: int,
+                    e: int,
+                    device: torch.device,
+                    apply_router_weight_on_input: bool = False):
     """
     MoE implementation for FP4 Inputs
     
@@ -476,6 +490,12 @@ def cutlass_moe_fp4(a: torch.Tensor, a1_gscale: torch.Tensor,
     a_map = torch.empty((topk_ids.numel()), dtype=torch.int32, device=device)
     c_map = torch.empty((topk_ids.numel()), dtype=torch.int32, device=device)
 
+    if apply_router_weight_on_input:
+        # TODO: this only works for topK=1, will need to update for topK>1
+        assert num_topk == 1, \
+            "apply_router_weight_on_input is only implemented for topk=1"
+        a.mul_(topk_weights.to(out_dtype))
+
     # problem shapes should have [m, n, k]
     # Note that problem sizes are based on logical number of elements.
     ops.get_cutlass_moe_mm_data(topk_ids, expert_offsets, problem_sizes1,
@@ -513,21 +533,22 @@ def cutlass_moe_fp4(a: torch.Tensor, a1_gscale: torch.Tensor,
     del int_fp4, int_blockscale
 
     c2 = ops.shuffle_rows(c2, c_map)
-    out = (c2.view(m, num_topk, k) *
-           topk_weights.view(m, num_topk, 1).half()).sum(dim=1)
+    if not apply_router_weight_on_input:
+        out = (c2.view(m, num_topk, k) *
+               topk_weights.view(m, num_topk, 1).to(out_dtype)).sum(dim=1)
+    else:
+        out = c2.view(m, num_topk, k).sum(dim=1)
     return out.to(dtype=out_dtype)
 
 
-def _valid_cutlass_block_scaled_grouped_gemm(hidden_states: torch.Tensor,
-                                             w1: torch.Tensor,
+def _valid_cutlass_block_scaled_grouped_gemm(w1: torch.Tensor,
                                              w2: torch.Tensor) -> bool:
 
-    def _valid_cutlass_block_scaled_grouped_gemm_shape(M: int, N: int, K: int):
-        return M >= 128 and N % 128 == 0 and K % 128 == 0
+    def _valid_cutlass_block_scaled_grouped_gemm_shape(N: int, K: int):
+        return N % 128 == 0 and K % 128 == 0
 
-    m = hidden_states.size(0)
     _, K, N = w2.size()
-    if not _valid_cutlass_block_scaled_grouped_gemm_shape(m, N, K):
+    if not _valid_cutlass_block_scaled_grouped_gemm_shape(N, K):
         logger.debug(
             "CutlassBlockScaledGroupedGemm disabled: unalinged problem size.")
         return False

@@ -7,7 +7,7 @@ import os
 import time
 from functools import cache, partial
 from pathlib import Path
-from typing import Any, Callable, Literal, Optional, TypeVar, Union
+from typing import Any, Callable, Optional, TypeVar, Union
 
 import huggingface_hub
 from huggingface_hub import get_safetensors_metadata, hf_hub_download
@@ -42,6 +42,7 @@ from vllm.transformers_utils.configs import (ChatGLMConfig, Cohere2Config,
                                              SkyworkR1VChatConfig, SolarConfig,
                                              Telechat2Config, UltravoxConfig)
 # yapf: enable
+from vllm.transformers_utils.configs.mistral import adapt_config_dict
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.utils import resolve_obj_by_qualname
 
@@ -394,7 +395,16 @@ def get_config(
         config = _maybe_remap_hf_config_attrs(config)
 
     elif config_format == ConfigFormat.MISTRAL:
-        config = load_params_config(model, revision, **kwargs)
+        # This function loads a params.json config which
+        # should be used when loading models in mistral format
+        config_dict = _download_mistral_config_file(model, revision)
+        if (max_position_embeddings :=
+                config_dict.get("max_position_embeddings")) is None:
+            max_position_embeddings = _maybe_retrieve_max_pos_from_hf(
+                model, revision, **kwargs)
+            config_dict["max_position_embeddings"] = max_position_embeddings
+
+        config = adapt_config_dict(config_dict)
     else:
         supported_formats = [
             fmt.value for fmt in ConfigFormat if fmt != ConfigFormat.AUTO
@@ -693,117 +703,6 @@ def maybe_register_config_serialize_by_value() -> None:
             exc_info=e)
 
 
-def load_params_config(model: Union[str, Path], revision: Optional[str],
-                       **kwargs) -> PretrainedConfig:
-    # This function loads a params.json config which
-    # should be used when loading models in mistral format
-
-    config_file_name = "params.json"
-
-    config_dict = get_hf_file_to_dict(config_file_name, model, revision)
-    if config_dict is None:
-        raise ValueError(
-            f"Failed to load mistral '{config_file_name}' config for model "
-            f"{model}. Please check if the model is a mistral-format model "
-            f"and if the config file exists.")
-    assert isinstance(config_dict, dict)
-
-    config_mapping = {
-        "dim": "hidden_size",
-        "norm_eps": "rms_norm_eps",
-        "n_kv_heads": "num_key_value_heads",
-        "n_layers": "num_hidden_layers",
-        "n_heads": "num_attention_heads",
-        "hidden_dim": "intermediate_size",
-    }
-
-    def recurse_elems(elem: Any):
-        if isinstance(elem, dict):
-            config_dict = {}
-            for key, value in elem.items():
-                key = config_mapping.get(key, key)
-                config_dict[key] = recurse_elems(value)
-
-            return config_dict
-        else:
-            return elem
-
-    config_dict["model_type"] = config_dict.get("model_type", "transformer")
-    config_dict["hidden_act"] = config_dict.get("activation", "silu")
-    config_dict["tie_word_embeddings"] = config_dict.get(
-        "tie_embeddings", False)
-
-    if config_dict.get("max_position_embeddings") is None:
-        max_position_embeddings = 128_000
-        try:
-            trust_remote_code_val = kwargs.get("trust_remote_code", False)
-            hf_config = get_config(model=model,
-                                   trust_remote_code=trust_remote_code_val,
-                                   revision=revision,
-                                   config_format=ConfigFormat.HF)
-            if hf_value := hf_config.get_text_config().max_position_embeddings:
-                max_position_embeddings = hf_value
-        except Exception as e:
-            logger.warning(
-                "The params.json file is missing 'max_position_embeddings'"
-                " and could not get a value from the HF config."
-                " Defaulting to 128000",
-                exc_info=e)
-        config_dict["max_position_embeddings"] = max_position_embeddings
-
-    if config_dict.get("quantization") is not None:
-        quantization = config_dict.get("quantization", {})
-        if quantization.get("qformat_weight") == "fp8_e4m3":
-            # This maps to the FP8 static per-tensor quantization scheme
-            quantization_config = {
-                "quant_method": "fp8",
-                "activation_scheme": "static"
-            }
-        elif quantization.get("quant_method") == "compressed-tensors":
-            # Pass through the quantization config to compressed-tensors
-            quantization_config = quantization
-        else:
-            raise ValueError(
-                f"Found unknown quantization='{quantization}' in config")
-
-        config_dict["quantization_config"] = quantization_config
-
-    config_type: Literal["text",
-                         "multimodal"] = "multimodal" if config_dict.get(
-                             "vision_encoder") is not None else "text"
-
-    if config_dict.get("moe") is not None:
-        config_dict["architectures"] = ["MixtralForCausalLM"]
-    else:
-        config_dict["architectures"] = ["MistralForCausalLM"]
-
-    if config_type == "multimodal":
-        multimodal_config = config_dict.pop("vision_encoder")
-        quantization_config = config_dict.get("quantization_config", {})
-
-        config_dict = {
-            "text_config": config_dict,
-            "vision_config": multimodal_config
-        }
-        config_dict["architectures"] = ["PixtralForConditionalGeneration"]
-        config_dict["model_type"] = "pixtral"
-        if quantization_config:
-            config_dict["quantization_config"] = quantization_config
-
-    config_dict.update(kwargs)
-
-    config_dict = recurse_elems(config_dict)
-
-    # transform to HF config format
-    if config_type == "multimodal":
-        config_dict["text_config"] = PretrainedConfig(
-            **config_dict["text_config"])
-        config_dict["vision_config"] = PretrainedConfig(
-            **config_dict["vision_config"])
-
-    return PretrainedConfig(**config_dict)
-
-
 def get_hf_image_processor_config(
     model: Union[str, Path],
     hf_token: Optional[Union[bool, str]] = None,
@@ -920,3 +819,35 @@ def try_get_tokenizer_config(
         )
     except Exception:
         return None
+
+
+def _download_mistral_config_file(model, revision) -> dict:
+    config_file_name = "params.json"
+    config_dict = get_hf_file_to_dict(config_file_name, model, revision)
+    if config_dict is None:
+        raise ValueError(
+            f"Failed to load mistral '{config_file_name}' config for model "
+            f"{model}. Please check if the model is a mistral-format model "
+            f"and if the config file exists.")
+    assert isinstance(config_dict, dict)
+    return config_dict
+
+
+def _maybe_retrieve_max_pos_from_hf(model, revision, **kwargs) -> int:
+    max_position_embeddings = 128_000
+    try:
+        trust_remote_code_val = kwargs.get("trust_remote_code", False)
+        hf_config = get_config(model=model,
+                               trust_remote_code=trust_remote_code_val,
+                               revision=revision,
+                               config_format=ConfigFormat.HF)
+        if hf_value := hf_config.get_text_config().max_position_embeddings:
+            max_position_embeddings = hf_value
+    except Exception as e:
+        logger.warning(
+            "The params.json file is missing 'max_position_embeddings'"
+            " and could not get a value from the HF config."
+            " Defaulting to 128000",
+            exc_info=e)
+
+    return max_position_embeddings

@@ -673,21 +673,21 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         if enable_eplb:
             raise NotImplementedError(
                 "EPLB not supported for `ModelOptNvFp4FusedMoE` yet.")
+        assert activation == "silu", "Only SiLU activation is supported."
+
+        topk_weights, topk_ids = FusedMoE.select_experts(
+            hidden_states=x,
+            router_logits=router_logits,
+            use_grouped_topk=use_grouped_topk,
+            top_k=top_k,
+            renormalize=renormalize,
+            topk_group=topk_group,
+            num_expert_group=num_expert_group,
+            custom_routing_function=custom_routing_function,
+            scoring_func=scoring_func,
+            e_score_correction_bias=e_score_correction_bias)
 
         if self.use_marlin:
-            topk_weights, topk_ids = FusedMoE.select_experts(
-                hidden_states=x,
-                router_logits=router_logits,
-                use_grouped_topk=use_grouped_topk,
-                top_k=top_k,
-                renormalize=renormalize,
-                topk_group=topk_group,
-                num_expert_group=num_expert_group,
-                custom_routing_function=custom_routing_function,
-                scoring_func=scoring_func,
-                e_score_correction_bias=e_score_correction_bias,
-            )
-
             return torch.ops.vllm.fused_marlin_moe(
                 x,
                 layer.w13_weight,
@@ -704,44 +704,31 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 global_num_experts=global_num_experts,
                 expert_map=expert_map)
 
-        assert activation == "silu", "Only SiLU activation is supported."
-        assert not apply_router_weight_on_input, (
-            "Router weight on input is not "
-            "supported for ModelOptNvFp4FusedMoE.")
         assert expert_map is None, ("Expert Parallelism / expert_map "
                                     "is currently not supported for "
                                     "ModelOptNvFp4FusedMoE.")
-
-        topk_weights, topk_ids = FusedMoE.select_experts(
-            hidden_states=x,
-            router_logits=router_logits,
-            use_grouped_topk=use_grouped_topk,
-            top_k=top_k,
-            renormalize=renormalize,
-            topk_group=topk_group,
-            num_expert_group=num_expert_group,
-            custom_routing_function=custom_routing_function,
-            scoring_func=scoring_func,
-            e_score_correction_bias=e_score_correction_bias)
 
         from vllm.model_executor.layers.fused_moe.cutlass_moe import (
             cutlass_moe_fp4)
 
         # Cutlass moe takes in activations in BF16/Half precision
         # and fp4 quantized weights loaded from the checkpoint
-        return cutlass_moe_fp4(a=x,
-                               w1_fp4=layer.w13_weight,
-                               w1_blockscale=layer.w13_blockscale_swizzled,
-                               w1_alphas=layer.g1_alphas,
-                               w2_fp4=layer.w2_weight,
-                               w2_blockscale=layer.w2_blockscale_swizzled,
-                               w2_alphas=layer.g2_alphas,
-                               topk_weights=topk_weights,
-                               topk_ids=topk_ids,
-                               m=x.shape[0],
-                               n=layer.w2_weight.shape[2] * 2,
-                               k=x.shape[1],
-                               e=layer.w13_weight.shape[0],
-                               a1_gscale=layer.w13_input_scale_quant,
-                               a2_gscale=layer.w2_input_scale_quant,
-                               device=x.device).to(x.dtype)
+        return cutlass_moe_fp4(
+            a=x,
+            w1_fp4=layer.w13_weight,
+            w1_blockscale=layer.w13_blockscale_swizzled,
+            w1_alphas=layer.g1_alphas,
+            w2_fp4=layer.w2_weight,
+            w2_blockscale=layer.w2_blockscale_swizzled,
+            w2_alphas=layer.g2_alphas,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            m=x.shape[0],
+            n=layer.w2_weight.shape[2] * 2,
+            k=x.shape[1],
+            e=layer.w13_weight.shape[0],
+            a1_gscale=layer.w13_input_scale_quant,
+            a2_gscale=layer.w2_input_scale_quant,
+            device=x.device,
+            apply_router_weight_on_input=apply_router_weight_on_input).to(
+                x.dtype)

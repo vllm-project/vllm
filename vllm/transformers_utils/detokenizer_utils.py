@@ -78,6 +78,7 @@ def convert_prompt_ids_to_tokens(
 def convert_ids_list_to_tokens(
     tokenizer: AnyTokenizer,
     token_ids: list[int],
+    skip_special_tokens: bool = False,
 ) -> list[str]:
     """Detokenize the input ids individually.
 
@@ -89,8 +90,15 @@ def convert_ids_list_to_tokens(
       Python list of token string representations
     
     """
-    token_str_lst = tokenizer.convert_ids_to_tokens(token_ids)
-    _replace_none_with_empty(token_str_lst)  # type: ignore
+    token_str_lst = []
+    for token_id in token_ids:
+        token_str = tokenizer.decode(
+            [token_id],
+            skip_special_tokens=skip_special_tokens,
+        )
+        if token_str is None:
+            token_str = ""
+        token_str_lst.append(token_str)
     return token_str_lst
 
 

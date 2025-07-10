@@ -46,6 +46,13 @@ class XPUPlatform(Platform):
         return "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"
 
     @classmethod
+    def set_device(cls, device: torch.device) -> None:
+        """
+        Set the device for the current platform.
+        """
+        torch.xpu.set_device(device)
+
+    @classmethod
     def get_device_capability(
         cls,
         device_id: int = 0,
@@ -57,6 +64,10 @@ class XPUPlatform(Platform):
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
         return torch.xpu.get_device_name(device_id)
+
+    @classmethod
+    def get_punica_wrapper(cls) -> str:
+        return "vllm.lora.punica_wrapper.punica_gpu.PunicaWrapperGPU"
 
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
@@ -78,6 +89,14 @@ class XPUPlatform(Platform):
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = 64
 
+        # FIXME: Temporarily forcing eager mode
+        # remove after t.compile support stabilizes.
+
+        if (envs.VLLM_USE_V1 and vllm_config.model_config is not None
+                and not vllm_config.model_config.enforce_eager):
+            from vllm.config import CompilationLevel
+            vllm_config.compilation_config.level = CompilationLevel.NO_COMPILATION  # noqa: E501
+
         # Instances created using VllmConfig() typically have model_config as
         # None by default. The modification involves adding a check to prevent
         # potential null exceptions check and update model config.
@@ -92,9 +111,6 @@ class XPUPlatform(Platform):
                     "CUDA graph is not supported on XPU, fallback to the eager "
                     "mode.")
                 model_config.enforce_eager = True
-
-        if vllm_config.device_config is not None:
-            assert vllm_config.device_config.device_type == "xpu"
 
         # check and update parallel config
         parallel_config = vllm_config.parallel_config
@@ -113,8 +129,10 @@ class XPUPlatform(Platform):
                 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
                 logger.warning(
                     "Please use spawn as start method if you want to use mp.")
-        elif parallel_config.distributed_executor_backend != "ray" and \
-                parallel_config.distributed_executor_backend != "uni":
+        elif (parallel_config.distributed_executor_backend != "ray"
+              and parallel_config.distributed_executor_backend != "uni"
+              and parallel_config.distributed_executor_backend
+              != "external_launcher"):
             logger.warning(
                 "%s is not supported on XPU, fallback to ray distributed"
                 " executor backend.",

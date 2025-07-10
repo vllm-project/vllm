@@ -240,6 +240,8 @@ class GroupCoordinator:
 
         if current_platform.is_cuda_alike():
             self.device = torch.device(f"cuda:{local_rank}")
+        elif current_platform.is_xpu():
+            self.device = torch.device(f"xpu:{local_rank}")
         elif current_platform.is_out_of_tree():
             self.device = torch.device(
                 f"{current_platform.device_name}:{local_rank}")
@@ -1317,13 +1319,13 @@ def in_the_same_node_as(pg: Union[ProcessGroup, StatelessProcessGroup],
 
 def is_global_first_rank() -> bool:
     """
-    Check if the current process is the first rank globally across all 
+    Check if the current process is the first rank globally across all
     parallelism strategies (PP, TP, DP, EP, etc.).
-    
+
     Unlike group-specific checks like `get_tensor_model_parallel_rank() == 0`
     or `get_pp_group().is_first_rank`, this function checks the global rank
     across all parallelism dimensions.
-    
+
     Returns:
         bool: True if this is the global first rank (rank 0), False otherwise.
               Returns True if distributed is not initialized (single process).
@@ -1352,7 +1354,7 @@ def _node_count(pg: Union[ProcessGroup, StatelessProcessGroup]) -> int:
 
     Args:
         pg: The process group to analyze
-        
+
     Returns:
         int: The total number of nodes
     """

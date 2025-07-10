@@ -190,7 +190,6 @@ class KVCacheManager:
         num_new_tokens: int,
         num_new_computed_tokens: int = 0,
         new_computed_blocks: Optional[KVCacheBlocks] = None,
-        num_draft_tokens: int = 0,
         num_lookahead_tokens: int = 0,
         delay_cache_blocks: bool = False,
     ) -> Optional[KVCacheBlocks]:
@@ -286,12 +285,17 @@ class KVCacheManager:
         if not self.enable_caching or delay_cache_blocks:
             return KVCacheBlocks(new_blocks)
 
-        # Speculated tokens might be rejected in the future, so we does
-        # not cache any speculated tokens. We only cache blocks with
-        # generated (accepted) tokens.
+        # NOTE(woosuk): We want to commit (cache) up to num_computed_tokens +
+        # num_new_tokens, but must exclude "non-committable" tokens (e.g.,
+        # draft tokens that could be rejected). Therefore, we cap the number
+        # at `request.num_tokens`, ensuring only "finalized" tokens are cached.
+        num_tokens_to_cache = min(num_computed_tokens + num_new_tokens,
+                                  request.num_tokens)
         self.coordinator.cache_blocks(
-            request, self.req_to_block_hashes[request.request_id],
-            num_computed_tokens + num_new_tokens - num_draft_tokens)
+            request,
+            self.req_to_block_hashes[request.request_id],
+            num_tokens_to_cache,
+        )
 
         return KVCacheBlocks(new_blocks)
 

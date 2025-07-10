@@ -76,6 +76,13 @@ class CpuPlatform(Platform):
         return psutil.virtual_memory().total
 
     @classmethod
+    def set_device(cls, device: torch.device) -> None:
+        """
+        Set the device for the current platform.
+        """
+        torch.cpu.set_device(device)
+
+    @classmethod
     def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
         return False
 
@@ -264,5 +271,6 @@ class CpuPlatform(Platform):
         """Returns whether the current platform can use v1 by default for the
         supplied model configuration.
         """
-        return cls.supports_v1(
-            model_config) and cls.get_cpu_architecture() == CpuArchEnum.X86
+        arch = cls.get_cpu_architecture()
+        return (cls.supports_v1(model_config) and arch
+                in (CpuArchEnum.X86, CpuArchEnum.POWERPC, CpuArchEnum.ARM))

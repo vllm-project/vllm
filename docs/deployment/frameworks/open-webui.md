@@ -1,7 +1,4 @@
----
-title: Open WebUI
----
-[](){ #deployment-open-webui }
+# Open WebUI
 
 1. Install the [Docker](https://docs.docker.com/engine/install/)
 

@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
+
 import pytest
 import torch
 import torch.nn.functional as F
@@ -84,6 +86,9 @@ def test_prm_models(
     dtype: str,
     monkeypatch,
 ) -> None:
+    if current_platform.is_cpu() and os.environ.get("VLLM_USE_V1", "0") == "0":
+        pytest.skip("CPU only supports V1")
+
     if current_platform.is_rocm():
         # ROCm Triton FA does not currently support sliding window attention
         # switch to use ROCm CK FA backend

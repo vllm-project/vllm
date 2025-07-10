@@ -258,8 +258,13 @@ class MultiModalProfiler(Generic[_I]):
         seq_len: int,
         mm_counts: Optional[Mapping[str, int]] = None,
     ) -> Mapping[str, int]:
-        max_tokens_per_item = self.processing_info.get_max_tokens_per_item(
-            seq_len=seq_len, mm_counts=mm_counts)
+        if mm_counts is None:
+            mm_counts = self.get_mm_limits()
+
+        max_tokens_per_item = self.processing_info.get_mm_max_tokens_per_item(
+            seq_len=seq_len,
+            mm_counts=mm_counts,
+        )
         if max_tokens_per_item is not None:
             if mm_counts is None:
                 total_mm_tokens = sum(max_tokens_per_item.values())

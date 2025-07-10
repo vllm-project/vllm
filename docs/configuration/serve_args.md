@@ -1,7 +1,4 @@
----
-title: Server Arguments
----
-[](){ #serve-args }
+# Server Arguments
 
 The `vllm serve` command is used to launch the OpenAI-compatible server.
 
@@ -13,7 +10,7 @@ To see the available CLI arguments, run `vllm serve --help`!
 ## Configuration file
 
 You can load CLI arguments via a [YAML](https://yaml.org/) config file.
-The argument names must be the long form of those outlined [above][serve-args].
+The argument names must be the long form of those outlined [above](serve_args.md).
 
 For example:
 

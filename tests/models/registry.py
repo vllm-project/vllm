@@ -319,9 +319,14 @@ _EMBEDDING_EXAMPLE_MODELS = {
 _CROSS_ENCODER_EXAMPLE_MODELS = {
     # [Text-only]
     "BertForSequenceClassification": _HfExamplesInfo("cross-encoder/ms-marco-MiniLM-L-6-v2", v0_only=True),  # noqa: E501
+    "GemmaForSequenceClassification": _HfExamplesInfo("BAAI/bge-reranker-v2-gemma", # noqa: E501
+                                                      v0_only=True,
+                                                      hf_overrides={"architectures": ["GemmaForSequenceClassification"], # noqa: E501
+                                                                    "classifier_from_token": ["Yes"], # noqa: E501
+                                                                    "method": "no_post_processing"}), # noqa: E501
+    "ModernBertForSequenceClassification": _HfExamplesInfo("Alibaba-NLP/gte-reranker-modernbert-base", v0_only=True), # noqa: E501
     "RobertaForSequenceClassification": _HfExamplesInfo("cross-encoder/quora-roberta-base", v0_only=True),  # noqa: E501
     "XLMRobertaForSequenceClassification": _HfExamplesInfo("BAAI/bge-reranker-v2-m3", v0_only=True),  # noqa: E501
-    "ModernBertForSequenceClassification": _HfExamplesInfo("Alibaba-NLP/gte-reranker-modernbert-base", v0_only=True),  # noqa: E501
 }
 
 _MULTIMODAL_EXAMPLE_MODELS = {
@@ -407,7 +412,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                                       hf_overrides={"architectures": ["QwenVLForConditionalGeneration"]}),  # noqa: E501
     "Qwen2AudioForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen2-Audio-7B-Instruct"),  # noqa: E501
     "Qwen2VLForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen2-VL-2B-Instruct"),  # noqa: E501
-    "Qwen2_5_VLForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen2.5-VL-3B-Instruct"),  # noqa: E501
+    "Qwen2_5_VLForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen2.5-VL-3B-Instruct", # noqa: E501
+                                                          max_model_len=4096),
     "Qwen2_5OmniModel": _HfExamplesInfo("Qwen/Qwen2.5-Omni-3B"),
     "Qwen2_5OmniForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen2.5-Omni-7B-AWQ"),  # noqa: E501
     "SkyworkR1VChatModel": _HfExamplesInfo("Skywork/Skywork-R1V-38B"),

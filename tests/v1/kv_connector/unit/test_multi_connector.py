@@ -76,6 +76,9 @@ class TestSharedStorageConnector(SharedStorageConnector):
         return attr
 
 
+# This relies on "fork" multiprocessing method being used.
+# It's the default but vLLM may fall back to spawn if for example CUDA
+# is already initialized.
 KVConnectorFactory.register_connector("TestSharedStorageConnector",
                                       TestSharedStorageConnector.__module__,
                                       TestSharedStorageConnector.__name__)

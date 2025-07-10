@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import os
 from typing import Optional
 
 import pytest
@@ -29,8 +28,10 @@ def v1(run_with_both_engines):
         # [Decoder-only]
         pytest.param("BAAI/bge-multilingual-gemma2",
                      marks=[pytest.mark.core_model]),
-        pytest.param("intfloat/e5-mistral-7b-instruct",
-                     marks=[pytest.mark.core_model, pytest.mark.cpu_model]),
+        pytest.param(
+            "intfloat/e5-mistral-7b-instruct",
+            # CPU v1 doesn't support sliding window
+            marks=[pytest.mark.core_model]),
         # the qwen models interfere with each other (see PR
         # https://github.com/vllm-project/vllm/pull/18720).
         # To avoid this problem, for now we skip v0 since it will be
@@ -38,11 +39,13 @@ def v1(run_with_both_engines):
         pytest.param("ssmits/Qwen2-7B-Instruct-embed-base",
                      marks=[pytest.mark.skip_v0, pytest.mark.cpu_model]),
         # [Encoder-only]
-        pytest.param("BAAI/bge-base-en-v1.5",
-                     marks=[
-                         pytest.mark.core_model, pytest.mark.cpu_model,
-                         pytest.mark.skip_v1
-                     ]),
+        pytest.param(
+            "BAAI/bge-base-en-v1.5",
+            marks=[
+                # CPU only supports V1
+                pytest.mark.core_model,
+                pytest.mark.skip_v1
+            ]),
         pytest.param("sentence-transformers/all-MiniLM-L12-v2",
                      marks=[pytest.mark.skip_v1]),
         pytest.param("intfloat/multilingual-e5-small",
@@ -61,10 +64,6 @@ def test_models(
     model,
     monkeypatch,
 ) -> None:
-    if model == "intfloat/e5-mistral-7b-instruct" and current_platform.is_cpu(
-    ) and os.environ.get("VLLM_USE_V1", "0") == "1":
-        pytest.skip("CPU V1 doesn't support sliding window")
-
     if model == "BAAI/bge-multilingual-gemma2" and current_platform.is_rocm():
         # ROCm Triton FA does not currently support sliding window attention
         # switch to use ROCm CK FA backend

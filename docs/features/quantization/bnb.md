@@ -1,7 +1,4 @@
----
-title: BitsAndBytes
----
-[](){ #bits-and-bytes }
+# BitsAndBytes
 
 vLLM now supports [BitsAndBytes](https://github.com/TimDettmers/bitsandbytes) for more efficient model inference.
 BitsAndBytes quantizes models to reduce memory usage and enhance performance without significantly sacrificing accuracy.

@@ -701,6 +701,7 @@ class HuggingFaceDataset(BenchmarkDataset):
         self,
         dataset_path: str,
         dataset_split: str,
+        no_stream: bool = False,
         dataset_subset: Optional[str] = None,
         **kwargs,
     ) -> None:
@@ -708,6 +709,7 @@ class HuggingFaceDataset(BenchmarkDataset):
 
         self.dataset_split = dataset_split
         self.dataset_subset = dataset_subset
+        self.load_stream = not no_stream
         self.load_data()
 
     def load_data(self) -> None:
@@ -716,7 +718,7 @@ class HuggingFaceDataset(BenchmarkDataset):
             self.dataset_path,
             name=self.dataset_subset,
             split=self.dataset_split,
-            streaming=True,
+            streaming=self.load_stream,
         )
         self.data = self.data.shuffle(seed=self.random_seed)
 

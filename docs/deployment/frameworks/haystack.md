@@ -1,7 +1,4 @@
----
-title: Haystack
----
-[](){ #deployment-haystack }
+# Haystack
 
 # Haystack
 
@@ -27,7 +24,7 @@ vllm serve mistralai/Mistral-7B-Instruct-v0.1
 
 - Use the `OpenAIGenerator` and `OpenAIChatGenerator` components in Haystack to query the vLLM server.
 
-??? Code
+??? code
 
     ```python
     from haystack.components.generators.chat import OpenAIChatGenerator

@@ -1,7 +1,4 @@
----
-title: GPTQModel
----
-[](){ #gptqmodel }
+# GPTQModel
 
 To create a new 4-bit or 8-bit GPTQ quantized model, you can leverage [GPTQModel](https://github.com/ModelCloud/GPTQModel) from ModelCloud.AI.
 
@@ -31,7 +28,7 @@ After installing GPTQModel, you are ready to quantize a model. Please refer to t
 
 Here is an example of how to quantize `meta-llama/Llama-3.2-1B-Instruct`:
 
-??? Code
+??? code
 
     ```python
     from datasets import load_dataset
@@ -69,7 +66,7 @@ python examples/offline_inference/llm_engine_example.py \
 
 GPTQModel quantized models are also supported directly through the LLM entrypoint:
 
-??? Code
+??? code
 
     ```python
     from vllm import LLM, SamplingParams

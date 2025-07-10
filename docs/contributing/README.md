@@ -95,7 +95,7 @@ For additional features and advanced configurations, refer to the official [MkDo
 
 ## Testing
 
-??? note "Commands"
+??? console "Commands"
 
     ```bash
     pip install -r requirements/dev.txt
