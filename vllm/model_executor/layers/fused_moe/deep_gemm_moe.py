@@ -98,7 +98,7 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         M_sum = round_up(M_sum, block_m)
         workspace1 = (M_sum, max(N * 2, K))
         workspace2 = (M_sum, max(N, K))
-        output = (M * topk, K)
+        output = (M, topk, K)
         return (workspace1, workspace2, output, a.dtype)
 
     def apply(
@@ -172,7 +172,7 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         dg.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
             (a2q, a2q_scale), (w2, w2_scale), mm2_out, expert_ids)
 
-        torch.index_select(mm2_out, 0, inv_perm, out=output)
+        torch.index_select(mm2_out, 0, inv_perm, out=output.view((-1, K)))
 
 
 def deep_gemm_moe_fp8(
