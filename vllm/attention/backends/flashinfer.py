@@ -128,9 +128,8 @@ class FlashInferBackend(AttentionBackend):
     @staticmethod
     def use_trtllm_decode_attention(batch_size: int,
                                     max_seq_len: int,
-                                    attn_head_size: int,
+                                    attn_head_size: Optional[int] = None,
                                     kv_cache_dtype: str = "auto") -> bool:
-
         if FlashInferBackend.cached_sm100a_supported is None:
             FlashInferBackend.cached_sm100a_supported = (
                 current_platform.has_device_capability(100))
@@ -142,24 +141,30 @@ class FlashInferBackend(AttentionBackend):
             logger.info_once("VLLM_USE_TRTLLM_DECODE_ATTENTION is set to %s",
                              env_value)
             # Environment variable is set - respect it
+            # Making the conditional check for zero because
+            # the path is automatically enabled if the batch size condition
+            # is satisfied.
             no_use_trtllm = env_value == "0"
             if not no_use_trtllm:
                 logger.info_once(
                     "VLLM_USE_TRTLLM_DECODE_ATTENTION is set to 1, "
                     "using TRTLLM decode attention.")
-            FlashInferBackend.cached_use_trtllm = not no_use_trtllm
+            return not no_use_trtllm
         else:
             # Environment variable not set - use auto-detection
             # Only supports attention head size of 128
+            if attn_head_size is None:
+                attn_head_size = 128
+                logger.info_once("Using default attention head size of 128"
+                                 " for TRTLLM decode attention.")
             use_trtllm = (FlashInferBackend.cached_sm100a_supported
                           and batch_size <= 256 and max_seq_len < 131072
                           and kv_cache_dtype == "auto"
                           and attn_head_size == 128)
-            FlashInferBackend.cached_use_trtllm = use_trtllm
             if use_trtllm:
-                logger.info_once(
+                logger.warning_once(
                     "Using TRTLLM decode attention (auto-detected).")
-        return FlashInferBackend.cached_use_trtllm
+        return use_trtllm
 
 
 @dataclass
