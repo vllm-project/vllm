@@ -168,7 +168,7 @@ class CudaPlatformBase(Platform):
 
         # lazy import to avoid circular import
         from vllm.config import CUDAGraphMode
-
+        
         if (envs.VLLM_ALL2ALL_BACKEND == "deepep_high_throughput"
                 and parallel_config.data_parallel_size > 1
                 and vllm_config.compilation_config.cudagraph_mode
@@ -181,7 +181,9 @@ class CudaPlatformBase(Platform):
                 "to use those kernels instead.")
 
             vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-            vllm_config.model_config.enforce_eager = True
+            if vllm_config.model_config is not None:
+                vllm_config.model_config.enforce_eager = True
+
             # TODO (varun): Turning this ON gives incorrect results for the
             # Deepseek-V2-lite model.
             vllm_config.compilation_config.use_inductor = False
