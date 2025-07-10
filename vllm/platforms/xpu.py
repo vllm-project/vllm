@@ -196,7 +196,7 @@ class XPUPlatform(Platform):
         return torch.xpu.device_count()
 
     @classmethod
-    def empty_cache(cls, ):
+    def empty_cache(cls):
         torch.xpu.empty_cache()
 
     @classmethod
@@ -230,4 +230,4 @@ class XPUPlatform(Platform):
 
     @classmethod
     def synchronize(cls):
-        return torch.xpu.synchronize()
+        torch.xpu.synchronize()
