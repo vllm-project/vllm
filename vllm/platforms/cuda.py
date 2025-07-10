@@ -470,7 +470,7 @@ class CudaPlatformBase(Platform):
         return supported
 
     @classmethod
-    def empty_cache(cls, ):
+    def empty_cache(cls):
         torch.cuda.empty_cache()
 
     @classmethod
@@ -491,7 +491,7 @@ class CudaPlatformBase(Platform):
 
     @classmethod
     def synchronize(cls):
-        return torch.cuda.synchronize()
+        torch.cuda.synchronize()
 
 
 # NVML utils
