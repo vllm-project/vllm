@@ -72,7 +72,12 @@ class EAGLEConfig(PretrainedConfig):
         if self.model is not None:
             for k, v in self.model.to_dict().items():
                 if k not in kwargs:
-                    setattr(self, k, v)
+                    if k == "torch_dtype" and v is not None and isinstance(
+                            v, str):
+                        import torch
+                        setattr(self, k, getattr(torch, v))
+                    else:
+                        setattr(self, k, v)
 
     @classmethod
     def from_pretrained(
