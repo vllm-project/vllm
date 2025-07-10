@@ -31,6 +31,7 @@ def test_fast_inc_detok_invalid_utf8_err_case():
         None,
         None,
         None,
+        None,
         params,
         None,
         None,
