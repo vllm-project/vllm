@@ -4,6 +4,7 @@ mkdocs-material
 mkdocstrings-python
 mkdocs-gen-files
 mkdocs-awesome-nav
+mkdocs-glightbox
 python-markdown-math
 regex
 ruff
@@ -22,3 +23,4 @@ pydantic
 torch
 transformers
 zmq
+gguf
