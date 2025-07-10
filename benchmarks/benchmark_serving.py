@@ -70,6 +70,7 @@ from benchmark_dataset import (
     SampleRequest,
     ShareGPTDataset,
     SonnetDataset,
+    UnslothVisionDataset,
     VisionArenaDataset,
 )
 from benchmark_utils import convert_to_pytorch_benchmark_format, write_to_json
@@ -795,6 +796,10 @@ def main(args: argparse.Namespace):
         elif args.dataset_path in ASRDataset.SUPPORTED_DATASET_PATHS:
             dataset_class = ASRDataset
             args.hf_split = "train"
+        elif args.dataset_path in UnslothVisionDataset.SUPPORTED_DATASET_PATHS:
+            dataset_class = UnslothVisionDataset
+            args.hf_split = "train"
+            args.hf_subset = None
         else:
             supported_datasets = set(
                 [
