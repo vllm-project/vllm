@@ -22,8 +22,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only GLM-4-MOE model compatible with HuggingFace weights."""
-
-from collections.abc import Iterable
+import typing
+from collections.abc import Callable, Iterable
 from typing import Any, Optional, Union
 
 import torch
@@ -47,7 +47,8 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.model_loader.weight_utils import (
+    default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
@@ -429,11 +430,6 @@ class Glm4MoeModel(nn.Module):
             ("gate_up_proj", "up_proj", 1),
         ]
 
-        # Skip loading extra parameters for GPTQ/modelopt models.
-        ignore_suffixes = (".bias", "_bias", ".k_scale", "_k_scale",
-                           ".v_scale", "_v_scale", ".weight_scale",
-                           "_weight_scale", ".input_scale", "_input_scale")
-
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
         expert_params_mapping = FusedMoE.make_expert_params_mapping(
@@ -444,18 +440,10 @@ class Glm4MoeModel(nn.Module):
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
-
         for name, loaded_weight in weights:
-            if "gate.weight" in name and "experts" not in name:
-                if is_pp_missing_parameter(name, self):
-                    continue
-                if name in params_dict:
-                    param = params_dict[name]
-                    weight_loader = getattr(param, "weight_loader",
-                                            default_weight_loader)
-                    weight_loader(param, loaded_weight)
-                    loaded_params.add(name)
-                continue
+            spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)
+            if spec_layer is not None:
+                continue  # skip spec decode layers for main model
 
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 # Skip non-stacked layers and experts (experts handled below).
@@ -467,82 +455,77 @@ class Glm4MoeModel(nn.Module):
                 # name will be updated to mlp.experts[0].gate_up_proj, which
                 # will then be updated below in expert_params_mapping
                 # for mlp.experts[0].gate_gate_up_proj, which breaks load.
-                if "mlp.experts" in name and "shared_experts" not in name:
+                if (("mlp.experts." in name) and name not in params_dict):
                     continue
-
                 name = name.replace(weight_name, param_name)
-
-                # Skip loading extra parameters for GPTQ/modelopt models.
-                if name.endswith(ignore_suffixes) and name not in params_dict:
+                # Skip loading extra bias for GPTQ models.
+                if name.endswith(".bias") and name not in params_dict:
                     continue
 
-                # Skip layers on other devices.
                 if is_pp_missing_parameter(name, self):
-                    continue
-                if name not in params_dict:
                     continue
 
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
-                loaded_params.add(name)
                 break
             else:
-                if "mlp.experts" in name and "shared_experts" not in name:
-                    for mapping in expert_params_mapping:
-                        param_name, weight_name, expert_id, shard_id = mapping
-                        if weight_name not in name:
-                            continue
-                        name = name.replace(weight_name, param_name)
-                        # Skip layers on other devices.
-                        if is_pp_missing_parameter(name, self):
-                            continue
-                        # Skip loading extra parameters for GPTQ/modelopt models.
-                        if name.endswith(
-                                ignore_suffixes) and name not in params_dict:
-                            continue
-                        if name not in params_dict:
-                            continue
+                is_expert_weight = False
+                for mapping in expert_params_mapping:
+                    param_name, weight_name, expert_id, shard_id = mapping
+                    if weight_name not in name:
+                        continue
 
-                        param = params_dict[name]
-                        weight_loader = param.weight_loader
-                        weight_loader(param,
-                                      loaded_weight,
-                                      name,
-                                      shard_id=shard_id,
-                                      expert_id=expert_id)
-                        loaded_params.add(name)
+                    # Anyway, this is an expert weight and should not be
+                    # attempted to load as other weights later
+                    is_expert_weight = True
+
+                    # Do not modify `name` since the loop may continue here
+                    # Instead, create a new variable
+                    name_mapped = name.replace(weight_name, param_name)
+
+                    if is_pp_missing_parameter(name_mapped, self):
+                        continue
+
+                    param = params_dict[name_mapped]
+                    # We should ask the weight loader to return success or not
+                    # here since otherwise we may skip experts with other
+                    # available replicas.
+                    weight_loader = typing.cast(Callable[..., bool],
+                                                param.weight_loader)
+                    success = weight_loader(param,
+                                            loaded_weight,
+                                            name_mapped,
+                                            shard_id=shard_id,
+                                            expert_id=expert_id,
+                                            return_success=True)
+                    if success:
+                        name = name_mapped
                         break
                 else:
-                    # Skip loading extra parameters for GPTQ/modelopt models.
-                    if name.endswith(
-                            ignore_suffixes) and name not in params_dict:
+                    if is_expert_weight:
+                        # We've checked that this is an expert weight
+                        # However it's not mapped locally to this rank
+                        # So we simply skip it
                         continue
-                    # Skip layers on other devices.
-                    if is_pp_missing_parameter(name, self):
-                        continue
-                    # Remapping the name of FP8 kv-scale.
-                    if name.endswith("kv_scale"):
-                        remapped_kv_scale_name = name.replace(
-                            ".kv_scale", ".attn.kv_scale")
-                        if remapped_kv_scale_name not in params_dict:
-                            logger.warning_once(
-                                "Found kv scale in the checkpoint (e.g. %s), but not found the expected name in the model (e.g. %s). kv-scale is not loaded.",
-                                name,
-                                remapped_kv_scale_name,
-                            )
-                            continue
-                        else:
-                            name = remapped_kv_scale_name
 
-                    if name not in params_dict:
+                    # Skip loading extra bias for GPTQ models.
+                    if name.endswith(".bias") and name not in params_dict:
+                        continue
+
+                    # Remapping the name of FP8 kv-scale.
+                    name = maybe_remap_kv_scale_name(name, params_dict)
+                    if name is None:
+                        continue
+
+                    if is_pp_missing_parameter(name, self):
                         continue
 
                     param = params_dict[name]
                     weight_loader = getattr(param, "weight_loader",
                                             default_weight_loader)
                     weight_loader(param, loaded_weight)
-                    loaded_params.add(name)
+            loaded_params.add(name)
 
         return loaded_params
 
@@ -610,3 +593,15 @@ class Glm4MoeForCausalLM(nn.Module, SupportsPP):
                                                    torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
+
+
+def get_spec_layer_idx_from_weight_name(config: PretrainedConfig,
+                                        weight_name: str) -> Optional[int]:
+    if hasattr(config,
+               "num_nextn_predict_layers") and (config.num_nextn_predict_layers
+                                                > 0):
+        layer_idx = config.num_hidden_layers
+        for i in range(config.num_nextn_predict_layers):
+            if weight_name.startswith(f"model.layers.{layer_idx+i}."):
+                return layer_idx + i
+    return None
