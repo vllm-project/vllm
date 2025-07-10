@@ -26,7 +26,13 @@ vLLM supports "self-contained" data parallel deployments that expose a single AP
 
 It can be configured by simply including e.g. `--data-parallel-size=4` in the vllm serve command line arguments. This will require 4 GPUs. It can be combined with tensor parallel, for example `--data-parallel-size=4 --tensor-parallel-size=2`, which would require 8 GPUs.
 
-Running a single data parallel deployment across multiple nodes requires a different `vllm serve` to be run on each node, specifying which DP ranks should run on that node. In this case, there will still be a single HTTP entrypoint - the API server(s) will run only on one node, but it doesn't necessarily need to be colocated with the DP ranks.
+Running a single data parallel deployment across multiple nodes requires a different `vllm serve` to be run on each node, specifying which DP ranks should run on that node. In this case, there will still be a single HTTP entrypoint - the API server(s) will run only on one node, but it doesn't necessarily need to be co-located with the DP ranks.
+
+This will run DP=4, TP=2 on a single 8-GPU node:
+
+```bash
+vllm serve $MODEL --data-parallel-size 4 --tensor-parallel-size 2
+```
 
 This will run DP=4 with DP ranks 0 and 1 on the head node and ranks 2 and 3 on the second node:
 
@@ -51,9 +57,19 @@ vllm serve $MODEL --headless --data-parallel-size 4 --data-parallel-size-local 4
                   --data-parallel-address 10.99.48.128 --data-parallel-rpc-port 13345
 ```
 
+This DP mode can also be used with Ray, in which case only a single launch command is needed irrespective of the number of nodes:
+
+```bash
+vllm serve $MODEL --data-parallel-size 16 --tensor-parallel-size 2 --data-parallel-backend=ray
+```
+
 Currently, the internal DP load balancing is done within the API server process(es) and is based on the running and waiting queues in each of the engines. This could be made more sophisticated in future by incorporating KV cache aware logic.
 
 When deploying large DP sizes using this method, the API server process can become a bottleneck. In this case, the orthogonal `--api-server-count` command line option can be used to scale this out (for example `--api-server-count=4`). This is transparent to users - a single HTTP endpoint / port is still exposed. Note that this API server scale-out is "internal" and still confined to the "head" node.
+
+<figure markdown="1">
+![DP Internal LB Diagram](../assets/deployment/dp_internal_lb.png)
+</figure>
 
 ## External Load Balancing
 
@@ -65,7 +81,7 @@ This can already be done trivially for non-MoE models, since each deployed serve
 
 We support an equivalent topology for MoE DP+EP which can be configured via the following CLI arguments.
 
-If DP ranks are colocated (same node / ip address), a default RPC port is used, but a different HTTP server port must be specified for each rank:
+If DP ranks are co-located (same node / ip address), a default RPC port is used, but a different HTTP server port must be specified for each rank:
 
 ```bash
 # Rank 0
@@ -89,4 +105,8 @@ vllm serve $MODEL --data-parallel-size 2 --data-parallel-rank 1 \
 
 The coordinator process also runs in this scenario, co-located with the DP rank 0 engine.
 
-In the above examples, each command block corresponds to a separate launch of `vllm serve` - these could be separate Kubernetes pods, for example.
+<figure markdown="1">
+![DP External LB Diagram](../assets/deployment/dp_external_lb.png)
+</figure>
+
+In the above diagram, each of the dotted boxes corresponds to a separate launch of `vllm serve` - these could be separate Kubernetes pods, for example.
