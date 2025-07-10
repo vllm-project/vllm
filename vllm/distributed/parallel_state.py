@@ -1115,7 +1115,13 @@ def prepare_communication_buffer_for_model(model: torch.nn.Module):
     MoE all2all (DeepEP) usually allocate the communication buffer
     based on the model shape for optimal performance.
     """
-    get_world_group().barrier()
+    gpus = list(range(torch.cuda.device_count()))
+    orig = torch.cuda.current_device()
+    for d in gpus:
+        torch.cuda.set_device(d)
+        torch.zeros(1, device=f'cuda:{d}')
+    torch.cuda.set_device(orig)
+    print("pre-warmed all GPUs:", gpus)
     if _TP is not None:
         _TP.prepare_communication_buffer_for_model(model)
     if _PP is not None:
