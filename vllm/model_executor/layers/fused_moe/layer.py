@@ -631,31 +631,30 @@ class FusedMoE(torch.nn.Module):
     """
 
     def __init__(
-        self,
-        num_experts: int,  # Global number of experts
-        top_k: int,
-        hidden_size: int,
-        intermediate_size: int,
-        params_dtype: Optional[torch.dtype] = None,
-        reduce_results: bool = False,
-        renormalize: bool = True,
-        use_grouped_topk: bool = False,
-        num_expert_group: Optional[int] = None,
-        topk_group: Optional[int] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        tp_size: Optional[int] = None,
-        ep_size: Optional[int] = None,
-        dp_size: Optional[int] = None,
-        prefix: str = "",
-        custom_routing_function: Optional[Callable] = None,
-        scoring_func: str = "softmax",
-        e_score_correction_bias: Optional[torch.Tensor] = None,
-        apply_router_weight_on_input: bool = False,
-        activation: str = "silu",
-        enable_eplb: bool = False,
-        num_redundant_experts: int = 0,
-        use_triton_kernels: bool = False,
-    ):
+            self,
+            num_experts: int,  # Global number of experts
+            top_k: int,
+            hidden_size: int,
+            intermediate_size: int,
+            params_dtype: Optional[torch.dtype] = None,
+            reduce_results: bool = False,
+            renormalize: bool = True,
+            use_grouped_topk: bool = False,
+            num_expert_group: Optional[int] = None,
+            topk_group: Optional[int] = None,
+            quant_config: Optional[QuantizationConfig] = None,
+            tp_size: Optional[int] = None,
+            ep_size: Optional[int] = None,
+            dp_size: Optional[int] = None,
+            prefix: str = "",
+            custom_routing_function: Optional[Callable] = None,
+            scoring_func: str = "softmax",
+            e_score_correction_bias: Optional[torch.Tensor] = None,
+            apply_router_weight_on_input: bool = False,
+            activation: str = "silu",
+            enable_eplb: bool = False,
+            num_redundant_experts: int = 0,
+        ):
         super().__init__()
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
@@ -676,7 +675,7 @@ class FusedMoE(torch.nn.Module):
         self.global_num_experts = num_experts + num_redundant_experts
 
         self.use_triton_kernels = False
-        if use_triton_kernels:
+        if quant_config.get_name() == "mxfp4":
             if has_triton_kernels:
                 self.use_triton_kernels = True
             else:
@@ -736,12 +735,7 @@ class FusedMoE(torch.nn.Module):
             smallest_even_divide_number = lambda x, n: (
                 x // n + 1) * n if x % n != 0 else x
 
-            self.w13_right_pad = smallest_even_divide_number(
-                self.intermediate_size_per_partition * 2,
-                256) - self.intermediate_size_per_partition * 2
-
-            self.w2_bottom_pad = self.w13_right_pad // 2
-            self.w2_right_pad = smallest_even_divide_number(
+            self.hidden_state_pad_size = smallest_even_divide_number(
                 self.hidden_size, 256) - self.hidden_size
 
         if self.scoring_func != "softmax" and not self.use_grouped_topk:
@@ -1009,85 +1003,13 @@ class FusedMoE(torch.nn.Module):
             return expert_id
         return self.expert_map[expert_id].item()
 
-    def _quantize_to_mxfp4(self, x: torch.Tensor):
-        from triton_kernels.numerics_details.mxfp import SwizzlingType
-
-        from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
-            quantize)
-
-        # perform downcast
-        w_opt = dict()
-        if torch.cuda.get_device_capability()[0] < 9:
-            # NYI for Ampere
-            swizzle_mx_value = None
-            swizzle_mx_scale = None
-        elif torch.cuda.get_device_capability()[0] < 10:
-            swizzle_mx_value = SwizzlingType.HOPPER
-            swizzle_mx_scale = SwizzlingType.HOPPER
-        else:
-            swizzle_mx_value = None
-            swizzle_mx_scale = SwizzlingType.BLACKWELL
-        w_opt = {
-            "swizzle_mx_value": swizzle_mx_value,
-            "swizzle_mx_scale": swizzle_mx_scale
-        }
-        return quantize(x, "mx4", "cuda", **w_opt)
-
-    def _load_weights_oai_mlp(self, param: torch.nn.Parameter,
-                              loaded_weight: torch.Tensor, weight_name: str):
-        from triton_kernels.matmul_ogs import FlexCtx, PrecisionConfig
-
-        from vllm.model_executor.layers.utils import shuffle_weight
-
-        if "w13_weight" in weight_name:
-            loaded_weight_transpose = loaded_weight.transpose_(-2, -1)
-            loaded_weight_shuffled = shuffle_weight(loaded_weight_transpose)
-            loaded_weight = F.pad(loaded_weight_shuffled,
-                                  (0, self.w13_right_pad, 0, 0, 0, 0),
-                                  mode="constant",
-                                  value=0)
-            # delete intermediate tensor immediate to prevent OOM
-            del loaded_weight_transpose, loaded_weight_shuffled
-            torch.cuda.empty_cache()
-            loaded_weight, w13_flex, w13_mx = self._quantize_to_mxfp4(
-                loaded_weight)
-            self.quant_method.w13_precision_config = PrecisionConfig(
-                mx_ctx=w13_mx, flex_ctx=FlexCtx(rhs_data=w13_flex))
-        elif "w2_weight" in weight_name:
-            loaded_weight_transpose = loaded_weight.transpose_(-2, -1)
-            loaded_weight = F.pad(
-                loaded_weight_transpose,
-                (0, self.w2_right_pad, 0, self.w2_bottom_pad, 0, 0),
-                mode="constant",
-                value=0)
-            del loaded_weight_transpose
-            torch.cuda.empty_cache()
-            loaded_weight, w2_flex, w2_mx = self._quantize_to_mxfp4(
-                loaded_weight)
-            self.quant_method.w2_precision_config = PrecisionConfig(
-                mx_ctx=w2_mx, flex_ctx=FlexCtx(rhs_data=w2_flex))
-
-        # we can't do copy_ here because
-        # shape will be different after quantization
-        param.data = loaded_weight
-
-    @overload
     def weight_loader(self, param: torch.nn.Parameter,
                       loaded_weight: torch.Tensor, weight_name: str,
-                      shard_id: str, expert_id: int,
-                      return_success: Literal[True]) -> bool:
-        ...
-
-    def weight_loader(self,
-                      param: torch.nn.Parameter,
-                      loaded_weight: torch.Tensor,
-                      weight_name: str,
-                      shard_id: str,
-                      expert_id: int,
-                      return_success: bool = False) -> Optional[bool]:
-        # hack to indicate we loaded entire expert tensor at the same time
+                      shard_id: str, expert_id: int) -> None:
+        # if expert_id is None, then 
+        # all the experts are loaded at the same time
         if not expert_id and self.use_triton_kernels:
-            self._load_weights_oai_mlp(param, loaded_weight, weight_name)
+            param.data.copy_(loaded_weight)
             return
 
         expert_id = self._map_global_expert_id_to_local_expert_id(expert_id)
@@ -1582,6 +1504,9 @@ class FusedMoE(torch.nn.Module):
         if do_naive_dispatch_combine:
             hidden_states, router_logits = get_ep_group().dispatch(
                 hidden_states, router_logits)
+
+        if self.hidden_state_pad_size is not None:
+            hidden_states = F.pad(hidden_states, (0, self.hidden_state_pad_size, 0, 0), mode="constant", value=0)
 
         # Matrix multiply.
         final_hidden_states = self.quant_method.apply(
