@@ -1304,6 +1304,12 @@ class ModelConfig:
             # Hybrid model Jamba
             layers_block_type_value = getattr(self.hf_config,
                                               "layers_block_type", None)
+
+            # Hybrid models in `transformers` >= 4.54.0.dev0
+            if layers_block_type_value is None:
+                layers_block_type_value = getattr(self.hf_text_config,
+                                                  "layer_types", None)
+
             if layers_block_type_value is not None:
                 if hasattr(self.hf_text_config,
                            "model_type") and (self.hf_text_config.model_type
