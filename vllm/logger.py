@@ -145,6 +145,7 @@ def init_logger(name: str) -> _VllmLogger:
     logger = logging.getLogger(name)
 
     methods_to_patch = {
+        "debug_once": _print_debug_once,
         "info_once": _print_info_once,
         "warning_once": _print_warning_once,
     }
