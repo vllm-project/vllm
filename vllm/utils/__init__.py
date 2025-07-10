@@ -2639,7 +2639,7 @@ class MemorySnapshot:
         # rather than `torch.cuda.memory_reserved()` .
         # After `torch.cuda.reset_peak_memory_stats()`,
         # `torch.cuda.memory_reserved()` will keep growing, and only shrink
-        # when we call `torch.cuda.empty_cache()` or OOM happens.
+        # when we call `current_platform.empty_cache()` or OOM happens.
         from vllm.platforms import current_platform
 
         self.torch_peak = current_platform.memory_stats().get(

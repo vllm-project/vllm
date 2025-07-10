@@ -765,7 +765,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             **stacked_quant_state_dict
         }
         self._bind_quant_states_to_params(model, stacked_quant_state_dict)
-        torch.cuda.empty_cache()
+        current_platform.empty_cache()
 
     def download_model(self, model_config: ModelConfig) -> None:
         self._prepare_weights(model_config.model, model_config.revision)
