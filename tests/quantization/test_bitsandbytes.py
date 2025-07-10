@@ -138,6 +138,13 @@ def test_4bit_bnb_embedding_model(
     example_prompts = [str(s).strip() for s in example_prompts]
 
     # Inflight 4bit quantization
+    with vllm_runner(model_name,
+                     task="embed",
+                     dtype=dtype,
+                     gpu_memory_utilization=0.5,
+                     quantization="bitsandbytes") as vllm_model:
+        vllm_outputs = vllm_model.embed(example_prompts)
+
     hf_model_kwargs = dict(quantization_config=BitsAndBytesConfig(
         load_in_4bit=True))
     with hf_runner(
@@ -148,12 +155,6 @@ def test_4bit_bnb_embedding_model(
     ) as hf_model:
         hf_outputs = hf_model.encode(example_prompts)
 
-    with vllm_runner(model_name,
-                     task="embed",
-                     dtype=dtype,
-                     gpu_memory_utilization=0.5,
-                     quantization="bitsandbytes") as vllm_model:
-        vllm_outputs = vllm_model.embed(example_prompts)
     check_embeddings_close(
         embeddings_0_lst=hf_outputs,
         embeddings_1_lst=vllm_outputs,
