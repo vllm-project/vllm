@@ -458,19 +458,73 @@ class OpenAIServing:
             err_type="NotFoundError",
             status_code=HTTPStatus.NOT_FOUND)
 
+    def _get_active_default_mm_loras(
+            self, request: AnyRequest) -> Optional[LoRARequest]:
+        """Determine if there are any active default multimodal loras."""
+        # TODO: Currently this is only enabled for chat completions
+        # to be better aligned with only being enabled for .generate
+        # when run offline. It would be nice to support additional
+        # tasks types in the future.
+        message_types = self._get_message_types(request)
+        default_mm_loras = set()
+
+        for lora in self.models.lora_requests.values():
+            # Best effort match for default multimodal lora adapters;
+            # There is probably a better way to do this, but currently
+            # this matches against the set of 'types' in any content lists
+            # up until '_', e.g., to match audio_url -> audio
+            if lora.lora_name in message_types:
+                default_mm_loras.add(lora)
+
+        # Currently only support default modality specific loras if
+        # we have exactly one lora matched on the request.
+        if len(default_mm_loras) == 1:
+            return default_mm_loras.pop()
+        return None
+
     def _maybe_get_adapters(
-        self, request: AnyRequest
+        self,
+        request: AnyRequest,
+        supports_default_mm_loras: bool = False,
     ) -> Union[tuple[None, None], tuple[LoRARequest, None], tuple[
             None, PromptAdapterRequest]]:
-        if self._is_model_supported(request.model):
-            return None, None
+
         if request.model in self.models.lora_requests:
             return self.models.lora_requests[request.model], None
+
+        # Currently only support default modality specific loras
+        # if we have exactly one lora matched on the request.
+        if supports_default_mm_loras:
+            default_mm_lora = self._get_active_default_mm_loras(request)
+            if default_mm_lora is not None:
+                return default_mm_lora, None
+
+        if self._is_model_supported(request.model):
+            return None, None
+
         for prompt_adapter in self.models.prompt_adapter_requests:
             if request.model == prompt_adapter.prompt_adapter_name:
                 return None, prompt_adapter
         # if _check_model has been called earlier, this will be unreachable
         raise ValueError(f"The model `{request.model}` does not exist.")
+
+    def _get_message_types(self, request: AnyRequest) -> set[str]:
+        """Retrieve the set of types from message content dicts up
+        until `_`; we use this to match potential multimodal data
+        with default per modality loras.
+        """
+        message_types: set[str] = set()
+
+        if not hasattr(request, "messages"):
+            return message_types
+
+        for message in request.messages:
+            if (isinstance(message, dict) and "content" in message
+                    and isinstance(message["content"], list)):
+                for content_dict in message["content"]:
+                    if "type" in content_dict:
+                        message_types.add(content_dict["type"].split("_")[0])
+        return message_types
 
     async def _normalize_prompt_text_to_input(
         self,

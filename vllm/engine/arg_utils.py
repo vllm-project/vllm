@@ -395,6 +395,8 @@ class EngineArgs:
     enable_lora_bias: bool = LoRAConfig.bias_enabled
     max_loras: int = LoRAConfig.max_loras
     max_lora_rank: int = LoRAConfig.max_lora_rank
+    default_mm_loras: Optional[Dict[str, str]] = \
+        LoRAConfig.default_mm_loras
     fully_sharded_loras: bool = LoRAConfig.fully_sharded_loras
     max_cpu_loras: Optional[int] = LoRAConfig.max_cpu_loras
     lora_dtype: Optional[Union[str, torch.dtype]] = LoRAConfig.lora_dtype
@@ -807,6 +809,8 @@ class EngineArgs:
                                 **lora_kwargs["max_cpu_loras"])
         lora_group.add_argument("--fully-sharded-loras",
                                 **lora_kwargs["fully_sharded_loras"])
+        lora_group.add_argument("--default-mm-loras",
+                                **lora_kwargs["default_mm_loras"])
 
         # PromptAdapter related configs
         prompt_adapter_kwargs = get_kwargs(PromptAdapterConfig)
@@ -1284,10 +1288,16 @@ class EngineArgs:
             disable_hybrid_kv_cache_manager,
         )
 
+        if not model_config.is_multimodal_model and self.default_mm_loras:
+            raise ValueError(
+                "Default modality-specific LoRA(s) were provided for a "
+                "non multimodal model")
+
         lora_config = LoRAConfig(
             bias_enabled=self.enable_lora_bias,
             max_lora_rank=self.max_lora_rank,
             max_loras=self.max_loras,
+            default_mm_loras=self.default_mm_loras,
             fully_sharded_loras=self.fully_sharded_loras,
             lora_extra_vocab_size=self.lora_extra_vocab_size,
             long_lora_scaling_factors=self.long_lora_scaling_factors,
