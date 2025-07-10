@@ -903,7 +903,7 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
             qkv_weight = torch.cat(weight, dim=0)
             yield key, qkv_weight
 
-    def _rename_weight_for_checkpoint(self, name: str) -> str:
+    def _rename_weight_for_modelopt_checkpoint(self, name: str) -> str:
         """Rename weights from ModelOpt llama4 fp8 checkpoints to vLLM
         format."""
         if name.startswith("model."):
@@ -954,7 +954,7 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
         other_weights = []
 
         for name, weight in weights:
-            renamed = self._rename_weight_for_checkpoint(name)
+            renamed = self._rename_weight_for_modelopt_checkpoint(name)
 
             if renamed.startswith("language_model."):
                 language_model_weights.append((renamed, weight))
@@ -966,7 +966,11 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
     def _handle_expert_scale_broadcasting(
             self, weights: list[tuple[str, torch.Tensor]], params_dict: dict
     ) -> tuple[list[tuple[str, torch.Tensor]], set[str]]:
-        """Handle expert scale parameters that need broadcasting."""
+        """Handle expert scale parameters that need broadcasting.
+
+        ModelOpt checkpoints use a single value tensor scalar for BMM style
+        experts, vLLM expects the scale to be broadcasted across all experts.
+        """
         regular_weights = []
         expert_scale_weights = []
         updated_params = set()
