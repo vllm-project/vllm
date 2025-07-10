@@ -18,10 +18,7 @@ def test_scale(host, port, new_dp_size):
     print(f"Payload: {json.dumps(payload, indent=2)}")
 
     try:
-        response = requests.post(url,
-                                 json=payload,
-                                 headers=headers,
-                                 timeout=300)
+        response = requests.post(url, json=payload, headers=headers, timeout=300)
 
         print(f"Status Code: {response.status_code}")
         print(f"Response: {response.text}")
@@ -39,17 +36,12 @@ def test_scale(host, port, new_dp_size):
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Test scale up/down functionality")
+    parser = argparse.ArgumentParser(description="Test scale up/down functionality")
     parser.add_argument("--host", default="localhost", help="API server host")
-    parser.add_argument("--port",
-                        type=int,
-                        default=8006,
-                        help="API server port")
-    parser.add_argument("--new_dp_size",
-                        type=int,
-                        default=2,
-                        help="New data parallel size")
+    parser.add_argument("--port", type=int, default=8006, help="API server port")
+    parser.add_argument(
+        "--new_dp_size", type=int, default=2, help="New data parallel size"
+    )
 
     args = parser.parse_args()
 
