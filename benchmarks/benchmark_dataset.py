@@ -324,6 +324,10 @@ class RandomDataset(BenchmarkDataset):
         input_low = int(real_input_len * (1 - range_ratio))
         input_high = int(real_input_len * (1 + range_ratio))
         output_low = int(output_len * (1 - range_ratio))
+        # Prevent output_low from being 0, which would cause sampling 0 tokens
+        # and fail the request. 
+        # This happens when range_ratio > 0 and output_len = 1.
+        output_low = max(output_low, 1)
         output_high = int(output_len * (1 + range_ratio))
 
         # Add logging for debugging
