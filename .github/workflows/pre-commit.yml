@@ -18,16 +18,10 @@ jobs:
     - name: Set VLLM_TARGET_DEVICE to CPU for pre-commit checks
       run: echo "VLLM_TARGET_DEVICE=cpu" >> $GITHUB_ENV
     - name: Install PyTorch for CPU
-      # Explicitly install the CPU version of PyTorch from their stable index.
-      # This ensures pip finds the correct wheel without the problematic '+cpu' tag.
-      # Check PyTorch's official website for the exact command for torch==2.6.0 CPU
-      # As of my last update, it would typically be:
       run: pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cpu
-    - name: Install vLLM Build Dependencies (excluding torch, as it's already installed)
-      # We need to filter out torch from build.txt for this step
-      # A simple way is to use grep or sed, or if build.txt is small, just list others.
-      # Given build.txt has `torch==2.6.0`, we'll exclude it here.
-      run: pip install $(grep -v 'torch==' requirements/build.txt | tr '\n' ' ')
+    - name: Install vLLM Build Dependencies (excluding torch and comments)
+      # This command filters out lines with 'torch==' AND lines starting with '#'
+      run: pip install $(grep -v 'torch==' requirements/build.txt | grep -v '^#' | tr '\n' ' ')
     - name: Install vLLM Project and Dev Dependencies
       run: pip install -e ".[dev]"
 
