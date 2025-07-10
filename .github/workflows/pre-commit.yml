@@ -9,24 +9,25 @@ jobs:
   pre-commit:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4 # Keep this as v4
-    - uses: actions/setup-python@v5 # Keep this as v5
+    - uses: actions/checkout@v4
+    - uses: actions/setup-python@v5
       with:
         python-version: "3.12"
     - run: echo "::add-matcher::.github/workflows/matchers/actionlint.json"
     - run: echo "::add-matcher::.github/workflows/matchers/mypy.json"
-    
-    - name: Set VLLM_TARGET_DEVICE and VLLM_CMAKE_ARGS for CPU build
+
+    - name: Install PyTorch for CPU and NumPy
       run: |
-        echo "VLLM_TARGET_DEVICE=cpu" >> $GITHUB_ENV
-        # Crucial: Tell CMake to explicitly disable CUDA usage.
-        # This should override PyTorch/Caffe2's internal checks for CUDA libraries.
-    - name: Install PyTorch for CPU
-      run: pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cpu
+        pip install numpy
+        pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cpu
+
     - name: Install vLLM Build Dependencies (excluding torch and comments)
       run: pip install $(grep -v 'torch==' requirements/build.txt | grep -v '^#' | tr '\n' ' ')
+
     - name: Install vLLM Project and Dev Dependencies
+
       run: pip install -e ".[dev]"
-    - uses: pre-commit/action@v3.0.1 # Keep this as v3.0.1
+
+    - uses: pre-commit/action@v3.0.1
       with:
         extra_args: --all-files --hook-stage manual

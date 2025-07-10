@@ -25,8 +25,8 @@ include(${CMAKE_CURRENT_LIST_DIR}/cmake/utils.cmake)
 set(ignoreMe "${VLLM_PYTHON_PATH}")
 
 #
-# Supported python versions.  These versions will be searched in order, the
-# first match will be selected.  These should be kept in sync with setup.py.
+# Supported python versions. These versions will be searched in order, the
+# first match will be selected. These should be kept in sync with setup.py.
 #
 set(PYTHON_SUPPORTED_VERSIONS "3.9" "3.10" "3.11" "3.12")
 
@@ -43,7 +43,7 @@ set(HIP_SUPPORTED_ARCHS "gfx906;gfx908;gfx90a;gfx942;gfx950;gfx1030;gfx1100;gfx1
 # rather than an error.
 #
 # Note: the CUDA torch version is derived from pyproject.toml and various
-# requirements.txt files and should be kept consistent.  The ROCm torch
+# requirements.txt files and should be kept consistent. The ROCm torch
 # versions are derived from docker/Dockerfile.rocm
 #
 set(TORCH_SUPPORTED_VERSION_CUDA "2.6.0")
@@ -66,10 +66,51 @@ endif()
 #
 append_cmake_prefix_path("torch" "torch.utils.cmake_prefix_path")
 
+
+
+# Move the core logic for CPU-only builds much earlier.
+# If building for CPU, we will handle Torch finding differently and then exit.
+if (VLLM_TARGET_DEVICE STREQUAL "cpu")
+    message(STATUS "VLLM: Building for CPU. Skipping all CUDA/HIP related configuration.")
+
+    # Explicitly set CUDA_FOUND and HIP_FOUND to FALSE for CPU builds.
+    # This prevents 'find_package(Torch)' from potentially setting them based on
+    # system-wide detections or the Torch config's internal checks for CUDA components.
+    set(CUDA_FOUND FALSE CACHE INTERNAL "Force CUDA to be not found for CPU build" FORCE)
+    set(HIP_FOUND FALSE CACHE INTERNAL "Force HIP to be not found for CPU build" FORCE)
+
+    # Set VLLM_GPU_LANG to an empty string or a placeholder
+    set(VLLM_GPU_LANG "" CACHE INTERNAL "No GPU language for CPU build" FORCE)
+
+    # Now, find Torch, but with explicit instructions to not look for CUDA/HIP
+    # This might still trigger Caffe2 warnings, but it's the correct way to try.
+    # If the Caffe2 error persists here, it means the PyTorch CPU wheel's CMake
+    # config is truly stubborn.
+    find_package(Torch REQUIRED COMPONENTS Python) # Only require Python components
+
+    # Ensure the 'nvcc' command is NOT searched for or checked for CPU builds.
+    # This whole 'find_program(NVCC_EXECUTABLE nvcc)' block is now unnecessary for CPU.
+    # We will simply not define NVCC_EXECUTABLE or let it be 'NOTFOUND'.
+
+    # Include the cpu_extension.cmake directly and then return/exit this CMakeList.
+    # This ensures no further GPU-specific code is processed.
+    include(${CMAKE_CURRENT_LIST_DIR}/cmake/cpu_extension.cmake)
+
+    # After configuring for CPU, we don't need to process any GPU-specific logic.
+    # This `return()` effectively stops CMake processing this file for GPU-related sections.
+    return()
+endif()
+
+
+
+# The following blocks will ONLY be processed if VLLM_TARGET_DEVICE is NOT "cpu"
+# (i.e., it's "cuda" or "rocm" or potentially some other future GPU target)
+
 # Ensure the 'nvcc' command is in the PATH
+# This block is now outside the "if cpu" condition, so it only runs for GPU builds.
 find_program(NVCC_EXECUTABLE nvcc)
 if (CUDA_FOUND AND NOT NVCC_EXECUTABLE)
-    message(FATAL_ERROR "nvcc not found")
+  message(FATAL_ERROR "nvcc not found")
 endif()
 
 #
@@ -78,13 +119,18 @@ endif()
 # so there is no need to do this explicitly with check_language/enable_language,
 # etc.
 #
+# This find_package(Torch REQUIRED) call only happens for GPU builds now.
 find_package(Torch REQUIRED)
 
 #
 # Forward the non-CUDA device extensions to external CMake scripts.
-#
+# This block should now logically only hit for HIP if VLLM_TARGET_DEVICE is not "cpu"
+# and also not "cuda". But your structure handles it well.
 if (NOT VLLM_TARGET_DEVICE STREQUAL "cuda" AND
     NOT VLLM_TARGET_DEVICE STREQUAL "rocm")
+    # This 'if cpu' block within here is now redundant because the main 'if (VLLM_TARGET_DEVICE STREQUAL "cpu")'
+    # at the top handles it. However, keeping it doesn't harm, just means this outer if
+    # will never be true in practice for a "cpu" target given the early return.
     if (VLLM_TARGET_DEVICE STREQUAL "cpu")
         include(${CMAKE_CURRENT_LIST_DIR}/cmake/cpu_extension.cmake)
     else()
@@ -119,6 +165,9 @@ elseif(HIP_FOUND)
       "expected for ROCm build, saw ${Torch_VERSION} instead.")
   endif()
 else()
+  # This FATAL_ERROR will now only trigger if VLLM_TARGET_DEVICE is something
+  # that requires a GPU (like "cuda" or "rocm") but neither CUDA nor HIP are found.
+  # It will NOT trigger for "cpu" anymore.
   message(FATAL_ERROR "Can't find CUDA or HIP installation.")
 endif()
 
@@ -204,11 +253,12 @@ endif()
 set(VLLM_CUMEM_EXT_SRC
   "csrc/cumem_allocator.cpp")
 
-set_gencode_flags_for_srcs(
-  SRCS "${VLLM_CUMEM_EXT_SRC}"
-  CUDA_ARCHS "${CUDA_ARCHS}")
-
+# --- MODIFICATION: Make cumem_allocator conditional ---
 if(VLLM_GPU_LANG STREQUAL "CUDA")
+  set_gencode_flags_for_srcs(
+    SRCS "${VLLM_CUMEM_EXT_SRC}"
+    CUDA_ARCHS "${CUDA_ARCHS}")
+
   message(STATUS "Enabling cumem allocator extension.")
   # link against cuda driver library
   list(APPEND CUMEM_LIBS CUDA::cuda_driver)
@@ -221,6 +271,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     USE_SABI 3.8
     WITH_SOABI)
 endif()
+
 
 #
 # _C extension
@@ -246,6 +297,7 @@ set(VLLM_EXT_SRC
   "csrc/custom_all_reduce.cu"
   "csrc/torch_bindings.cpp")
 
+# --- MODIFICATION: Wrap all CUDA-specific source additions and FetchContent ---
 if(VLLM_GPU_LANG STREQUAL "CUDA")
   SET(CUTLASS_ENABLE_HEADERS_ONLY ON CACHE BOOL "Enable only the header library")
 
@@ -303,13 +355,13 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   cuda_archs_loose_intersection(MARLIN_ARCHS "8.0;8.6;8.7;8.9;9.0;10.0;10.1;12.0" "${CUDA_ARCHS}")
   if (MARLIN_ARCHS)
     set(MARLIN_SRCS
-       "csrc/quantization/fp8/fp8_marlin.cu"
-       "csrc/quantization/marlin/dense/marlin_cuda_kernel.cu"
-       "csrc/quantization/marlin/sparse/marlin_24_cuda_kernel.cu"
-       "csrc/quantization/marlin/qqq/marlin_qqq_gemm_kernel.cu"
-       "csrc/quantization/gptq_marlin/gptq_marlin.cu"
-       "csrc/quantization/gptq_marlin/gptq_marlin_repack.cu"
-       "csrc/quantization/gptq_marlin/awq_marlin_repack.cu")
+        "csrc/quantization/fp8/fp8_marlin.cu"
+        "csrc/quantization/marlin/dense/marlin_cuda_kernel.cu"
+        "csrc/quantization/marlin/sparse/marlin_24_cuda_kernel.cu"
+        "csrc/quantization/marlin/qqq/marlin_qqq_gemm_kernel.cu"
+        "csrc/quantization/gptq_marlin/gptq_marlin.cu"
+        "csrc/quantization/gptq_marlin/gptq_marlin_repack.cu"
+        "csrc/quantization/gptq_marlin/awq_marlin_repack.cu")
     set_gencode_flags_for_srcs(
       SRCS "${MARLIN_SRCS}"
       CUDA_ARCHS "${MARLIN_ARCHS}")
@@ -317,15 +369,15 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     message(STATUS "Building Marlin kernels for archs: ${MARLIN_ARCHS}")
   else()
     message(STATUS "Not building Marlin kernels as no compatible archs found"
-                   " in CUDA target architectures")
+                    " in CUDA target architectures")
   endif()
 
   # Only build AllSpark kernels if we are building for at least some compatible archs.
   cuda_archs_loose_intersection(ALLSPARK_ARCHS "8.0;8.6;8.7;8.9" "${CUDA_ARCHS}")
   if (ALLSPARK_ARCHS)
     set(ALLSPARK_SRCS
-       "csrc/quantization/gptq_allspark/allspark_repack.cu"
-       "csrc/quantization/gptq_allspark/allspark_qgemm_w8a16.cu")
+        "csrc/quantization/gptq_allspark/allspark_repack.cu"
+        "csrc/quantization/gptq_allspark/allspark_qgemm_w8a16.cu")
     set_gencode_flags_for_srcs(
       SRCS "${ALLSPARK_SRCS}"
       CUDA_ARCHS "${ALLSPARK_ARCHS}")
@@ -333,7 +385,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     message(STATUS "Building AllSpark kernels for archs: ${ALLSPARK_ARCHS}")
   else()
     message(STATUS "Not building AllSpark kernels as no compatible archs found"
-                   " in CUDA target architectures")
+                    " in CUDA target architectures")
   endif()
 
 
@@ -343,11 +395,11 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   cuda_archs_loose_intersection(SCALED_MM_ARCHS "9.0a;" "${CUDA_ARCHS}")
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.0 AND SCALED_MM_ARCHS)
     set(SRCS
-       "csrc/quantization/cutlass_w8a8/scaled_mm_c3x_sm90.cu"
-       "csrc/quantization/cutlass_w8a8/c3x/scaled_mm_sm90_fp8.cu"
-       "csrc/quantization/cutlass_w8a8/c3x/scaled_mm_sm90_int8.cu"
-       "csrc/quantization/cutlass_w8a8/c3x/scaled_mm_azp_sm90_int8.cu"
-       "csrc/quantization/cutlass_w8a8/c3x/scaled_mm_blockwise_sm90_fp8.cu")
+        "csrc/quantization/cutlass_w8a8/scaled_mm_c3x_sm90.cu"
+        "csrc/quantization/cutlass_w8a8/c3x/scaled_mm_sm90_fp8.cu"
+        "csrc/quantization/cutlass_w8a8/c3x/scaled_mm_sm90_int8.cu"
+        "csrc/quantization/cutlass_w8a8/c3x/scaled_mm_azp_sm90_int8.cu"
+        "csrc/quantization/cutlass_w8a8/c3x/scaled_mm_blockwise_sm90_fp8.cu")
     set_gencode_flags_for_srcs(
       SRCS "${SRCS}"
       CUDA_ARCHS "${SCALED_MM_ARCHS}")
@@ -359,12 +411,12 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   else()
     if (NOT ${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.0 AND SCALED_MM_ARCHS)
       message(STATUS "Not building scaled_mm_c3x_sm90 as CUDA Compiler version is "
-                     "not >= 12.0, we recommend upgrading to CUDA 12.0 or "
-                     "later if you intend on running FP8 quantized models on "
-                     "Hopper.")
+                      "not >= 12.0, we recommend upgrading to CUDA 12.0 or "
+                      "later if you intend on running FP8 quantized models on "
+                      "Hopper.")
     else()
       message(STATUS "Not building scaled_mm_c3x_sm90 as no compatible archs found "
-                     "in CUDA target architectures")
+                      "in CUDA target architectures")
     endif()
   endif()
 
@@ -387,12 +439,12 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   else()
     if (NOT ${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.8 AND SCALED_MM_ARCHS)
       message(STATUS "Not building scaled_mm_c3x_sm100 as CUDA Compiler version is "
-                     "not >= 12.8, we recommend upgrading to CUDA 12.8 or "
-                     "later if you intend on running FP8 quantized models on "
-                     "Blackwell.")
+                      "not >= 12.8, we recommend upgrading to CUDA 12.8 or "
+                      "later if you intend on running FP8 quantized models on "
+                      "Blackwell.")
     else()
       message(STATUS "Not building scaled_mm_c3x_100 as no compatible archs found "
-                     "in CUDA target architectures")
+                      "in CUDA target architectures")
     endif()
   endif()
 
@@ -414,10 +466,10 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   else()
     if (SCALED_MM_3X_ARCHS)
       message(STATUS "Not building scaled_mm_c2x as all archs are already built"
-                     " for and covered by scaled_mm_c3x")
+                      " for and covered by scaled_mm_c3x")
     else()
       message(STATUS "Not building scaled_mm_c2x as no compatible archs found "
-                    "in CUDA target architectures")
+                      "in CUDA target architectures")
     endif()
   endif()
 
@@ -438,11 +490,11 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   else()
     if (NOT ${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.2 AND SCALED_MM_ARCHS)
       message(STATUS "Not building sparse_scaled_mm_c3x kernels as CUDA Compiler version is "
-                     "not >= 12.2, we recommend upgrading to CUDA 12.2 or later "
-                     "if you intend on running FP8 sparse quantized models on Hopper.")
+                      "not >= 12.2, we recommend upgrading to CUDA 12.2 or later "
+                      "if you intend on running FP8 sparse quantized models on Hopper.")
     else()
       message(STATUS "Not building sparse_scaled_mm_c3x as no compatible archs found "
-                     "in CUDA target architectures")
+                      "in CUDA target architectures")
     endif()
   endif()
 
@@ -492,7 +544,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   cuda_archs_loose_intersection(SCALED_MM_ARCHS "9.0a;" "${CUDA_ARCHS}")
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.3 AND SCALED_MM_ARCHS)
     set(SRCS "csrc/quantization/cutlass_w8a8/moe/grouped_mm_c3x.cu"
-             "csrc/quantization/cutlass_w8a8/moe/moe_data.cu")
+              "csrc/quantization/cutlass_w8a8/moe/moe_data.cu")
     set_gencode_flags_for_srcs(
       SRCS "${SRCS}"
       CUDA_ARCHS "${SCALED_MM_ARCHS}")
@@ -502,11 +554,11 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   else()
     if (NOT ${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.3 AND SCALED_MM_ARCHS)
       message(STATUS "Not building grouped_mm_c3x kernels as CUDA Compiler version is "
-                     "not >= 12.3, we recommend upgrading to CUDA 12.3 or later "
-                     "if you intend on running FP8 quantized MoE models on Hopper.")
+                      "not >= 12.3, we recommend upgrading to CUDA 12.3 or later "
+                      "if you intend on running FP8 quantized MoE models on Hopper.")
     else()
       message(STATUS "Not building grouped_mm_c3x as no compatible archs found "
-                     "in CUDA target architectures")
+                      "in CUDA target architectures")
     endif()
   endif()
 
@@ -571,35 +623,57 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     if (NOT ${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.0
         AND MACHETE_ARCHS)
       message(STATUS "Not building Machete kernels as CUDA Compiler version is "
-                     "not >= 12.0, we recommend upgrading to CUDA 12.0 or "
-                     "later if you intend on running w4a16 quantized models on "
-                     "Hopper.")
+                      "not >= 12.0, we recommend upgrading to CUDA 12.0 or "
+                      "later if you intend on running w4a16 quantized models on "
+                      "Hopper.")
     else()
       message(STATUS "Not building Machete kernels as no compatible archs "
-                     "found in CUDA target architectures")
+                      "found in CUDA target architectures")
     endif()
   endif()
-# if CUDA endif
-endif()
+endif() # End of if(VLLM_GPU_LANG STREQUAL "CUDA") for _C extension sources
+
 
 message(STATUS "Enabling C extension.")
-define_gpu_extension_target(
-  _C
-  DESTINATION vllm
-  LANGUAGE ${VLLM_GPU_LANG}
-  SOURCES ${VLLM_EXT_SRC}
-  COMPILE_FLAGS ${VLLM_GPU_FLAGS}
-  ARCHITECTURES ${VLLM_GPU_ARCHES}
-  INCLUDE_DIRECTORIES ${CUTLASS_INCLUDE_DIR}
-  INCLUDE_DIRECTORIES ${CUTLASS_TOOLS_UTIL_INCLUDE_DIR}
-  USE_SABI 3
-  WITH_SOABI)
+# --- MODIFICATION: Make _C extension target conditional ---
+if (VLLM_TARGET_DEVICE STREQUAL "cpu")
+    # For CPU, define a C++ extension with no GPU-specific sources or flags
+    # You might need to adjust VLLM_EXT_SRC for CPU-only files here if any exist
+    # For now, we'll assume torch_bindings.cpp is the main one
+    set(VLLM_EXT_SRC "csrc/torch_bindings.cpp") # Only C++ sources
+    define_gpu_extension_target(
+        _C
+        DESTINATION vllm
+        LANGUAGE CXX # Use CXX language for CPU
+        SOURCES ${VLLM_EXT_SRC}
+        # No GPU specific flags or architectures for CPU
+        USE_SABI 3
+        WITH_SOABI)
+else()
+    # Original logic for GPU targets
+    define_gpu_extension_target(
+        _C
+        DESTINATION vllm
+        LANGUAGE ${VLLM_GPU_LANG}
+        SOURCES ${VLLM_EXT_SRC}
+        COMPILE_FLAGS ${VLLM_GPU_FLAGS}
+        ARCHITECTURES ${VLLM_GPU_ARCHES}
+        INCLUDE_DIRECTORIES ${CUTLASS_INCLUDE_DIR}
+        INCLUDE_DIRECTORIES ${CUTLASS_TOOLS_UTIL_INCLUDE_DIR}
+        USE_SABI 3
+        WITH_SOABI)
+endif()
+
 
 # If CUTLASS is compiled on NVCC >= 12.5, it by default uses
 # cudaGetDriverEntryPointByVersion as a wrapper to avoid directly calling the
 # driver API. This causes problems when linking with earlier versions of CUDA.
 # Setting this variable sidesteps the issue by calling the driver directly.
-target_compile_definitions(_C PRIVATE CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1)
+# --- MODIFICATION: Make this conditional for CUDA ---
+if(VLLM_GPU_LANG STREQUAL "CUDA")
+    target_compile_definitions(_C PRIVATE CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1)
+endif()
+
 
 #
 # _moe_C extension
@@ -610,15 +684,14 @@ set(VLLM_MOE_EXT_SRC
   "csrc/moe/moe_align_sum_kernels.cu"
   "csrc/moe/topk_softmax_kernels.cu")
 
+# --- MODIFICATION: Wrap all MoE specific CUDA source additions and build ---
 if(VLLM_GPU_LANG STREQUAL "CUDA")
   list(APPEND VLLM_MOE_EXT_SRC "csrc/moe/moe_wna16.cu")
-endif()
 
-set_gencode_flags_for_srcs(
-  SRCS "${VLLM_MOE_EXT_SRC}"
-  CUDA_ARCHS "${CUDA_ARCHS}")
+  set_gencode_flags_for_srcs(
+    SRCS "${VLLM_MOE_EXT_SRC}"
+    CUDA_ARCHS "${CUDA_ARCHS}")
 
-if(VLLM_GPU_LANG STREQUAL "CUDA")
   set(VLLM_MOE_WNA16_SRC
     "csrc/moe/moe_wna16.cu")
 
@@ -677,20 +750,37 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     message(STATUS "Building Marlin MOE kernels for archs: ${MARLIN_MOE_ARCHS}")
   else()
     message(STATUS "Not building Marlin MOE kernels as no compatible archs found"
-                   " in CUDA target architectures")
+                    " in CUDA target architectures")
   endif()
-endif()
+endif() # End of if(VLLM_GPU_LANG STREQUAL "CUDA") for moe
+
 
 message(STATUS "Enabling moe extension.")
-define_gpu_extension_target(
-  _moe_C
-  DESTINATION vllm
-  LANGUAGE ${VLLM_GPU_LANG}
-  SOURCES ${VLLM_MOE_EXT_SRC}
-  COMPILE_FLAGS ${VLLM_GPU_FLAGS}
-  ARCHITECTURES ${VLLM_GPU_ARCHES}
-  USE_SABI 3
-  WITH_SOABI)
+# --- MODIFICATION: Make _moe_C extension target conditional ---
+if (VLLM_TARGET_DEVICE STREQUAL "cpu")
+    # For CPU, define a C++ extension for MoE with only C++ sources
+    set(VLLM_MOE_EXT_SRC "csrc/moe/torch_bindings.cpp") # Only C++ sources
+    define_gpu_extension_target(
+        _moe_C
+        DESTINATION vllm
+        LANGUAGE CXX # Use CXX language for CPU
+        SOURCES ${VLLM_MOE_EXT_SRC}
+        USE_SABI 3
+        WITH_SOABI)
+else()
+    # Original logic for GPU targets
+    define_gpu_extension_target(
+        _moe_C
+        DESTINATION vllm
+        LANGUAGE ${VLLM_GPU_LANG}
+        SOURCES ${VLLM_MOE_EXT_SRC}
+        COMPILE_FLAGS ${VLLM_GPU_FLAGS}
+        ARCHITECTURES ${VLLM_GPU_ARCHES}
+        USE_SABI 3
+        WITH_SOABI)
+endif()
+
+
 
 if(VLLM_GPU_LANG STREQUAL "HIP")
   #
@@ -713,6 +803,7 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
 endif()
 
 # For CUDA we also build and ship some external projects.
+# --- MODIFICATION: Make external projects conditional ---
 if (VLLM_GPU_LANG STREQUAL "CUDA")
     include(cmake/external_projects/flashmla.cmake)
     include(cmake/external_projects/vllm_flash_attn.cmake)
