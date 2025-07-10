@@ -10,7 +10,7 @@ from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import (
     _moe_unpermute_and_reduce)
 from vllm.model_executor.layers.fused_moe.utils import (
     moe_kernel_quantize_input)
-from vllm.utils.deep_gemm import per_token_cast_to_fp8
+from vllm.utils.deep_gemm import per_token_group_cast_to_fp8
 
 
 class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
@@ -99,7 +99,7 @@ class MoEPrepareAndFinalizeNoEPDeepGEMM(mk.FusedMoEPrepareAndFinalize):
                 "apply_router_weight_on_input is only implemented for topk=1"
             a1.mul_(topk_weights.to(a1.dtype))
 
-        a1q, a1q_scale = per_token_cast_to_fp8(a1)
+        a1q, a1q_scale = per_token_group_cast_to_fp8(a1)
         return a1q, a1q_scale, None, None, None
 
     def finalize(
