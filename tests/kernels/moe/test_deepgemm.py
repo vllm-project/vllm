@@ -11,7 +11,6 @@ import math
 import pytest
 import torch
 
-import vllm.model_executor.layers.fused_moe.utils as _moe_utils
 # vLLM fused-expert reference (Triton fallback + DeepGEMM option)
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
 from vllm.utils import has_deep_gemm
@@ -167,18 +166,6 @@ def test_deepgemm_vs_triton(mnk, topk, num_experts, monkeypatch):
 
         monkeypatch.setattr(_fused_moe_mod, "deep_gemm_moe_fp8",
                             _spy_deep_gemm_moe_fp8)
-
-        # Patch per_token_group_quant_fp8 so that _fp8_quantize indirectly
-        # uses per_token_group_cast_to_fp8 for this test only.
-        _orig_ptgg = _moe_utils.per_token_group_quant_fp8
-
-        def _patched_ptgg(x, *args, **kwargs):
-            return per_token_group_cast_to_fp8(x, BLOCK_SIZE[1])
-
-        m.setattr(_moe_utils,
-                  "per_token_group_quant_fp8",
-                  _patched_ptgg,
-                  raising=True)
 
         m, n, k = mnk
 
