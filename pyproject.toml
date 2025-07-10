@@ -31,7 +31,7 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Information Analysis",
 ]
 requires-python = ">=3.9,<3.13"
-dynamic = [ "version", "dependencies", "optional-dependencies"]
+dynamic = [ "version", "dependencies"]
 
 [project.urls]
 Homepage="https://github.com/vllm-project/vllm"
