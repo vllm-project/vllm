@@ -19,6 +19,7 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         use_int8_w8a8: bool = False,
         use_int8_w8a16: bool = False,
         use_int4_w4a16: bool = False,
+        use_mxfp4_w4a4: bool = False,
         per_act_token_quant: bool = False,
         block_shape: Optional[list[int]] = None,
         allow_deep_gemm: bool = False,
@@ -29,6 +30,7 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
                 use_int8_w8a8=use_int8_w8a8,
                 use_int8_w8a16=use_int8_w8a16,
                 use_int4_w4a16=use_int4_w4a16,
+                use_mxfp4_w4a4=use_mxfp4_w4a4,
                 per_act_token_quant=per_act_token_quant,
                 block_shape=block_shape,
             ))
@@ -37,6 +39,7 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
             use_int8_w8a8=use_int8_w8a8,
             use_int4_w4a16=use_int4_w4a16,
             use_int8_w8a16=use_int8_w8a16,
+            use_mxfp4_w4a4=use_mxfp4_w4a4,
             per_act_token_quant=per_act_token_quant,
             block_shape=block_shape,
         )
@@ -65,6 +68,25 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         te = self.triton_expert
         return ((dge is None or dge.supports_expert_map())
                 and (te is None or te.supports_expert_map()))
+
+    def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
+        dge = self.deep_gemm_expert
+        te = self.triton_expert
+        dge_war = dge.finalize_weight_and_reduce_impl() if dge else None
+        te_war = te.finalize_weight_and_reduce_impl() if te else None
+        is_dge_war = dge_war is not None
+        is_te_war = te_war is not None
+
+        if is_dge_war and is_te_war:
+            assert dge_war == te_war, (
+                "Both implementations should agree on WeightAndReduce impls. "
+                f"Got dge_war: {dge_war}, and te_war: {te_war}")
+
+        if dge_war is not None:
+            return dge_war
+
+        assert te_war is not None
+        return te_war
 
     def workspace_shapes(
         self,
@@ -107,7 +129,7 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         a2_scale: Optional[torch.Tensor],
         workspace13: torch.Tensor,
         workspace2: torch.Tensor,
-        expert_num_tokens: Optional[torch.Tensor],
+        expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
     ):
         use_deep_gemm = (self.allow_deep_gemm
                          and _valid_deep_gemm(hidden_states, w1, w2))
@@ -132,5 +154,5 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
             a2_scale,
             workspace13,
             workspace2,
-            expert_num_tokens,
+            expert_tokens_meta,
         )
