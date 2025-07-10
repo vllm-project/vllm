@@ -23,6 +23,8 @@ Supports a wide range of validated models including LLaMa, Mistral, and Qwen fam
 | Qwen/Qwen2.5-7B-Instruct                  | 1 |
 | meta-llama/Llama-3.2-11B-Vision-Instruct  | 1 |
 | meta-llama/Llama-3.2-90B-Vision-Instruct  | 4 |
+| ibm-granite/granite-8b-code-instruct-4k   | 1 |
+| ibm-granite/granite-20b-code-instruct-8k  | 1 |
 
 ## How to Use
 

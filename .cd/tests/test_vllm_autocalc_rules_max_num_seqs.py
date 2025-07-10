@@ -2,7 +2,7 @@
 import math
 
 import pytest
-import server_autoconfig.vllm_autocalc_rules as rules
+import server.vllm_autocalc_rules as rules
 
 
 def test_calc_MAX_NUM_SEQS_user_provided():

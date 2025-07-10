@@ -1,24 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 import pytest
-from server_autoconfig.vllm_autocalc import VarsGenerator
+from server.vllm_autocalc import VarsGenerator
 
 
 @pytest.fixture
 def minimal_config(tmp_path):
     # Prepare minimal config files for VarsGenerator
     defaults = tmp_path / "defaults.yaml"
-    varlist_conf = tmp_path / "varlist_conf.yaml"
+    varlist_conf = tmp_path / "tmp.env"
     model_def_settings = tmp_path / "settings_vllm.csv"
 
-    defaults.write_text("defaults:\n"
+    defaults.write_text("hw_defaults:\n"
                         "  DEVICE_NAME: TEST_DEVICE\n"
-                        "  HPU_MEM: {GAUDI2: 96}\n"
+                        "  HPU_MEM: {TEST_DEVICE: 96}\n"
                         "  DTYPE: bfloat16\n")
-    varlist_conf.write_text("output_vars:\n"
-                            "  - DEVICE_NAME\n"
-                            "  - DTYPE\n"
-                            "user_variable:\n"
-                            "  - DEVICE_NAME\n")
+    varlist_conf.write_text("MODEL\n"
+                            "PT_HPU_LAZY_MODE\n")
     model_def_settings.write_text("MODEL,PARAM1\nTEST_MODEL,123\n")
 
     return {
@@ -38,16 +35,15 @@ def test_build_context(monkeypatch, minimal_config):
 
 def test_overwrite_params(monkeypatch, minimal_config):
     monkeypatch.setenv("MODEL", "TEST_MODEL")
-    monkeypatch.setenv("DEVICE_NAME", "OVERRIDE_DEVICE")
+    monkeypatch.setenv("PT_HPU_LAZY_MODE", "1")
     vg = VarsGenerator(**minimal_config)
     vg.overwrite_params()
-    assert vg.context["DEVICE_NAME"] == "OVERRIDE_DEVICE"
+    assert vg.context["PT_HPU_LAZY_MODE"] == 1
 
 
-def test_return_dict(monkeypatch, minimal_config):
+def test_context(monkeypatch, minimal_config):
     monkeypatch.setenv("MODEL", "TEST_MODEL")
     vg = VarsGenerator(**minimal_config)
-    result = vg.return_dict()
-    assert "DEVICE_NAME" in result
-    assert "DTYPE" in result
-    assert "MODEL" not in result  # Not in output_vars
+    assert "DEVICE_NAME" in vg.context
+    assert "DTYPE" in vg.context
+    assert "MODEL" in vg.context

@@ -1,6 +1,0 @@
-variables:
-  - MODEL
-  - INPUT_TOK
-  - OUTPUT_TOK
-  - CON_REQ
-  - NUM_PROMPTS

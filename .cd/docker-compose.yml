@@ -7,15 +7,8 @@ services:
       - HF_TOKEN
       - HABANA_VISIBLE_DEVICES=${HABANA_VISIBLE_DEVICES:-all}
       - PYTHONUNBUFFERED=1
-      - PT_HPU_LAZY_MODE
-      - VLLM_DECODE_BLOCK_BUCKET_STEP
-      - VLLM_DECODE_BS_BUCKET_STEP
-      - VLLM_PROMPT_BS_BUCKET_STEP
-      - VLLM_PROMPT_SEQ_BUCKET_STEP
-      - VLLM_SKIP_WARMUP
-      - MAX_MODEL_LEN
-      - MAX_NUM_SEQS
-      - TENSOR_PARALLEL_SIZE
+    env_file:
+      - ./server/server_user.env
     volumes:
       - /mnt/hf_cache:/mnt/hf_cache
     ports:
@@ -44,8 +37,6 @@ services:
       - MODEL
       - HF_TOKEN=${HF_TOKEN}
       - PYTHONUNBUFFERED=1
-      - INPUT_TOK
-      - OUTPUT_TOK
-      - CON_REQ
-      - NUM_PROMPTS
+    env_file:
+      - ./benchmark/benchmark_user.env
     command: ["benchmark", "--config-file", "${VLLM_BENCHMARK_CONFIG_FILE}", "--config-name", "${VLLM_BENCHMARK_CONFIG_NAME}"]

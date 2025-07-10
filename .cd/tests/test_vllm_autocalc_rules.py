@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import math
 
-import server_autoconfig.vllm_autocalc_rules as rules
+import server.vllm_autocalc_rules as rules
 
 
 def test_calc_TENSOR_PARALLEL_SIZE():
