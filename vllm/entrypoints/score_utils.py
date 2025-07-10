@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Sequence
-from typing import Any, Optional, Union
+from typing import Any, Optional, Union, cast
 
 from torch.nn import CosineSimilarity
 from typing_extensions import Required, TypeAlias, TypedDict
@@ -19,6 +19,7 @@ from vllm.outputs import PoolingRequestOutput
 from vllm.transformers_utils.tokenizer import (AnyTokenizer,
                                                PreTrainedTokenizer,
                                                PreTrainedTokenizerFast)
+from vllm.entrypoints.chat_utils import _ContentPart
 
 ScoreContentPartParam: TypeAlias = Union[
     ChatCompletionContentPartImageParam,
@@ -68,8 +69,8 @@ def _cosine_similarity(
 
 
 def _validate_score_input_lens(
-    data_1: Union[Sequence[SingletonPrompt], list[ScoreContentPartParam]],
-    data_2: Union[Sequence[SingletonPrompt], list[ScoreContentPartParam]],
+    data_1: Union[list[str], list[ScoreContentPartParam]],
+    data_2: Union[list[str], list[ScoreContentPartParam]],
 ):
     len_1 = len(data_1)
     len_2 = len(data_2)
@@ -87,20 +88,30 @@ def parse_score_data(
     data_2: Union[str, ScoreContentPartParam],
     model_config: ModelConfig,
     tokenizer: AnyTokenizer,
-) -> tuple[SingletonPrompt, SingletonPrompt, Optional[MultiModalDataDict]]:
+) -> tuple[str, str, Optional[MultiModalDataDict]]:
     mm_tracker = MultiModalItemTracker(model_config, tokenizer)
 
     content_1 = _parse_score_content(data_1, mm_tracker)
 
     content_2 = _parse_score_content(data_2, mm_tracker)
 
-    return content_1, content_2, mm_tracker.all_mm_data()
+    def ensure_str(content: Optional[_ContentPart]) -> str:
+        if content and isinstance(content, str):
+            return cast(str, content)
+        else:
+            raise ValueError(
+                f"Only string content is supported, but got {content}.")
+
+    prompt_1 = ensure_str(content_1)
+    prompt_2 = ensure_str(content_2)
+
+    return prompt_1, prompt_2, mm_tracker.all_mm_data()
 
 
 def _parse_score_content(
     data: Union[str, ScoreContentPartParam],
     mm_tracker: BaseMultiModalItemTracker,
-) -> SingletonPrompt:
+) -> Optional[_ContentPart]:
 
     if isinstance(data, str):
         data = ChatCompletionContentPartTextParam(type="text", text=data)
@@ -111,29 +122,33 @@ def _parse_score_content(
         data,
         mm_parser,
         wrap_dicts=False,
+        interleave_strings=False,
     )
 
     if parse_res:
         return parse_res
 
-    mm_placeholder_counts = mm_parser.mm_placeholder_counts()
+    mm_placeholder_storage = mm_parser.mm_placeholder_storage()
 
-    if len(mm_placeholder_counts) != 1 or next(
-            iter(mm_placeholder_counts.values())) != 1:
+    if len(mm_placeholder_storage) != 1 or len(
+            next(iter(mm_placeholder_storage.values()))) != 1:
         raise ValueError("Only one multi-modal item is supported")
 
-    return next(iter(mm_placeholder_counts))
+    return next(iter(mm_placeholder_storage.values()))[0]
 
 
 def apply_score_template(
     model_config: ModelConfig,
-    prompt_1: SingletonPrompt,
-    prompt_2: SingletonPrompt,
-) -> SingletonPrompt:
+    prompt_1: str,
+    prompt_2: str,
+) -> str:
 
     model = get_model_cls(model_config)
     if supports_score_template(model):
-        return model.get_score_template(prompt_1, prompt_2)
+        full_prompt = model.get_score_template(prompt_1, prompt_2)
+        if full_prompt is None:
+            raise ValueError("Get empty score template from model")
+        return full_prompt
 
     raise ValueError(
         f"Unsupported model architecture: {model_config.architecture}")
@@ -157,10 +172,10 @@ def post_process_tokens(
 def get_score_prompt(
     model_config: ModelConfig,
     tokenizer: AnyTokenizer,
-    tokenization_kwargs: Optional[dict[str, Any]],
+    tokenization_kwargs: dict[str, Any],
     data_1: Union[str, ScoreContentPartParam],
     data_2: Union[str, ScoreContentPartParam],
-) -> tuple[SingletonPrompt, TokensPrompt]:
+) -> tuple[str, TokensPrompt]:
     prompt_1, prompt_2, mm_data = parse_score_data(
         data_1,
         data_2,

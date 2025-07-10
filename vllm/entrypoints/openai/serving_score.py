@@ -23,7 +23,7 @@ from vllm.entrypoints.score_utils import (ScoreContentPartParam,
                                           _validate_score_input_lens,
                                           get_score_prompt)
 from vllm.entrypoints.utils import _validate_truncation_size
-from vllm.inputs.data import SingletonPrompt, TokensPrompt
+from vllm.inputs.data import TokensPrompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.outputs import PoolingRequestOutput, ScoringRequestOutput
@@ -144,10 +144,10 @@ class ServingScores(OpenAIServing):
         self,
         request: Union[RerankRequest, ScoreRequest],
         tokenizer: AnyTokenizer,
-        tokenization_kwargs: Optional[dict[str, Any]],
+        tokenization_kwargs: dict[str, Any],
         data_1: Union[str, ScoreContentPartParam],
         data_2: Union[str, ScoreContentPartParam],
-    ) -> tuple[SingletonPrompt, TokensPrompt]:
+    ) -> tuple[str, TokensPrompt]:
 
         model_config = self.model_config
 
@@ -216,12 +216,12 @@ class ServingScores(OpenAIServing):
                 # cross_encoder models defaults to using pad_token.
                 tokenized_prompts = await asyncio.gather(
                     *(tokenize_async(
-                        text=t1, text_pair=t2, **tokenization_kwargs)
+                        text=t1, text_pair=t2, **tokenization_kwargs) # type: ignore[arg-type]
                       for t1, t2 in input_pairs))
             else:
                 # `llm as reranker` models defaults to not using pad_token.
                 tokenized_prompts = await asyncio.gather(
-                    *(tokenize_async(text=t1 + t2, **tokenization_kwargs)
+                    *(tokenize_async(text=t1 + t2, **tokenization_kwargs) # type: ignore[operator]
                       for t1, t2 in input_pairs))
 
             for prompt_inputs, (t1, t2) in zip(tokenized_prompts, input_pairs):
@@ -312,20 +312,20 @@ class ServingScores(OpenAIServing):
         if isinstance(data_1, str):
             data_1 = [data_1]
         elif isinstance(data_1, dict):
-            data_1 = data_1.get("content")
+            data_1 = data_1.get("content") # type: ignore[assignment]
 
         if isinstance(data_2, str):
             data_2 = [data_2]
         elif isinstance(data_2, dict):
-            data_2 = data_2.get("content")
+            data_2 = data_2.get("content") # type: ignore[assignment]
 
-        _validate_score_input_lens(data_1, data_2)
+        _validate_score_input_lens(data_1, data_2) # type: ignore[arg-type]
 
         if self.model_config.is_cross_encoder:
             return await self._cross_encoding_score(
                 tokenizer=tokenizer,
-                data_1=data_1,
-                data_2=data_2,
+                data_1=data_1, # type: ignore[arg-type]
+                data_2=data_2, # type: ignore[arg-type]
                 request=request,
                 request_id=request_id,
                 tokenization_kwargs=tokenization_kwargs,
@@ -336,8 +336,8 @@ class ServingScores(OpenAIServing):
         else:
             return await self._embedding_score(
                 tokenizer=tokenizer,
-                texts_1=data_1,
-                texts_2=data_2,
+                texts_1=data_1, # type: ignore[arg-type]
+                texts_2=data_2, # type: ignore[arg-type]
                 request=request,
                 request_id=request_id,
                 tokenization_kwargs=tokenization_kwargs,

@@ -1234,12 +1234,12 @@ class LLM:
             for q, t in input_pairs:
                 if self.llm_engine.model_config.use_pad_token:
                     # cross_encoder models defaults to using pad_token.
-                    prompt_inputs = tokenizer(text=q,
-                                              text_pair=t,
+                    prompt_inputs = tokenizer(text=q,   # type: ignore[arg-type]
+                                              text_pair=t, # type: ignore[arg-type]
                                               **tokenization_kwargs)
                 else:
                     # `llm as reranker` models defaults to not using pad_token.
-                    prompt_inputs = tokenizer(text=q + t,
+                    prompt_inputs = tokenizer(text=q + t,   # type: ignore[operator]
                                               **tokenization_kwargs)
                 engine_prompt = TokensPrompt(
                     prompt_token_ids=prompt_inputs["input_ids"],
@@ -1363,30 +1363,30 @@ class LLM:
 
             if isinstance(data_1, (str, dict)):
                 # Convert a single prompt to a list.
-                data_1 = [data_1]
+                data_1 = [data_1]  # type: ignore[list-item]
 
             data_1 = [ensure_str(t) for t in data_1]
 
             if isinstance(data_2, (str, dict)):
                 # Convert a single prompt to a list.
-                data_2 = [data_2]
+                data_2 = [data_2]  # type: ignore[list-item]
 
             data_2 = [ensure_str(t) for t in data_2]
 
         if isinstance(data_1, dict) and "content" in data_1:
-            data_1 = data_1.get("content")
+            data_1 = data_1.get("content")  # type: ignore[assignment]
         elif isinstance(data_1, str):
             data_1 = [data_1]
 
         if isinstance(data_2, dict) and "content" in data_2:
-            data_2 = data_2.get("content")
+            data_2 = data_2.get("content")  # type: ignore[assignment]
         elif isinstance(data_2, str):
             data_2 = [data_2]
 
-        _validate_score_input_lens(data_1, data_2)
+        _validate_score_input_lens(data_1, data_2)  # type: ignore[arg-type]
 
         if self.llm_engine.model_config.is_cross_encoder:
-            return self._cross_encoding_score(tokenizer, data_1, data_2,
+            return self._cross_encoding_score(tokenizer, data_1, data_2, # type: ignore[arg-type]
                                               truncate_prompt_tokens, use_tqdm,
                                               lora_request,
                                               prompt_adapter_request)
