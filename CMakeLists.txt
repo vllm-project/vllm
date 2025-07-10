@@ -174,8 +174,10 @@ endif()
 #
 # Set nvcc fatbin compression.
 #
-if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND VLLM_GPU_LANG STREQUAL "CUDA")
-  list(APPEND VLLM_GPU_FLAGS "-Xfatbin" "-compress-all" "-compress-mode=size")
+if(VLLM_GPU_LANG STREQUAL "CUDA")
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8)
+    list(APPEND VLLM_GPU_FLAGS "-Xfatbin" "-compress-all" "-compress-mode=size")
+  endif()
 endif()
 
 
@@ -239,7 +241,6 @@ endif()
 
 set(VLLM_EXT_SRC
   "csrc/mamba/mamba_ssm/selective_scan_fwd.cu"
-  "csrc/mamba/causal_conv1d/causal_conv1d.cu"
   "csrc/cache_kernels.cu"
   "csrc/attention/paged_attention_v1.cu"
   "csrc/attention/paged_attention_v2.cu"

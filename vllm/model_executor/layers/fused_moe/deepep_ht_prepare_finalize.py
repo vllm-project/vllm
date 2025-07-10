@@ -62,8 +62,9 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         has_scales = token_scales is not None
 
-        (num_tokens_per_rank, num_tokens_per_rdma_rank, expert_num_tokens,
-         is_token_in_rank, event) = self.buffer.get_dispatch_layout(
+        (num_tokens_per_rank, num_tokens_per_rdma_rank,
+         dispatch_expert_num_tokens, is_token_in_rank,
+         event) = self.buffer.get_dispatch_layout(
              topk_idx=rank_topk_ids,
              num_experts=num_experts,
              previous_event=None,
@@ -83,7 +84,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             num_tokens_per_rank=num_tokens_per_rank,
             num_tokens_per_rdma_rank=num_tokens_per_rdma_rank,
             is_token_in_rank=is_token_in_rank,
-            num_tokens_per_expert=expert_num_tokens,
+            num_tokens_per_expert=dispatch_expert_num_tokens,
             topk_idx=rank_topk_ids,
             topk_weights=rank_topk_weights,
             # expert_alignment rounds the number of tokens per expert
@@ -115,7 +116,13 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             num_experts - 1 if self.rank_expert_offset == 0 else 0,
             expert_topk_ids + self.rank_expert_offset)
 
-        return (expert_x, expert_x_scale, expert_num_tokens, expert_topk_ids,
+        # Makes a GPU-CPU copy.
+        # TODO (varun): Maybe it is better to re-compute the expert_num_tokens
+        # on GPU.
+        expert_tokens_meta = mk.ExpertTokensMetadata.make_from_list(
+            expert_num_tokens_per_expert_list, device=expert_x.device)
+
+        return (expert_x, expert_x_scale, expert_tokens_meta, expert_topk_ids,
                 expert_topk_weights)
 
     def prepare(
@@ -129,8 +136,9 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         expert_map: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor],
-               Optional[torch.Tensor], Optional[torch.Tensor]]:
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor],
+               Optional[mk.ExpertTokensMetadata], Optional[torch.Tensor],
+               Optional[torch.Tensor]]:
 
         if apply_router_weight_on_input:
             topk = topk_ids.size(1)
@@ -149,7 +157,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             )
             if a1q_scale is not None and a1q_scale.numel() == 1:
                 a1q_scale = a1q_scale.view(1, 1)
-            (expert_x, expert_x_scale, expert_num_tokens, expert_topk_ids,
+            (expert_x, expert_x_scale, expert_tokens_meta, expert_topk_ids,
              expert_topk_weights) = self._do_dispatch(
                  tokens=a1q,
                  token_scales=a1q_scale,
@@ -159,7 +167,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         else:
             # DeepEP kernels only support dispatching per-token-quant
             # quantization. dispatch in bfloat16.
-            (expert_x, _, expert_num_tokens, expert_topk_ids,
+            (expert_x, _, expert_tokens_meta, expert_topk_ids,
              expert_topk_weights) = self._do_dispatch(
                  tokens=a1,
                  token_scales=None,
@@ -176,7 +184,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                     per_act_token_quant=False,
                     block_shape=quant_config.block_shape)
 
-        return (expert_x, expert_x_scale, expert_num_tokens, expert_topk_ids,
+        return (expert_x, expert_x_scale, expert_tokens_meta, expert_topk_ids,
                 expert_topk_weights)
 
     def _apply_weights_and_reduce(self, num_tokens: int,
