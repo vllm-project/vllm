@@ -379,12 +379,15 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
 ARG FLASHINFER_CUDA128_INDEX_URL="https://download.pytorch.org/whl/cu128/flashinfer"
 ARG FLASHINFER_CUDA128_WHEEL="flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl"
 ARG FLASHINFER_GIT_REPO="https://github.com/flashinfer-ai/flashinfer.git"
-ARG FLASHINFER_GIT_REF="v0.2.6.post1"
+ARG FLASHINFER_GIT_REF="v0.2.8rc1"
+# Flag to control whether to use pre-built FlashInfer wheels (set to false to force build from source)
+# TODO: Currently disabled because the pre-built wheels are not available for FLASHINFER_GIT_REF
+ARG USE_FLASHINFER_PREBUILT_WHEEL=false
 RUN --mount=type=cache,target=/root/.cache/uv bash - <<'BASH'
   . /etc/environment
   if [ "$TARGETPLATFORM" != "linux/arm64" ]; then
       # FlashInfer already has a wheel for PyTorch 2.7.0 and CUDA 12.8. This is enough for CI use
-      if [[ "$CUDA_VERSION" == 12.8* ]]; then
+      if [[ "$CUDA_VERSION" == 12.8* ]] && [[ "$USE_FLASHINFER_PREBUILT_WHEEL" == "true" ]]; then
           uv pip install --system ${FLASHINFER_CUDA128_INDEX_URL}/${FLASHINFER_CUDA128_WHEEL}
       else
           # Exclude CUDA arches for older versions (11.x and 12.0-12.7)
