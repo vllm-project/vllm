@@ -26,7 +26,7 @@ jobs:
 
     - name: Install vLLM Project and Dev Dependencies
       env:
-        VLLM_BUILD_TARGET: cpu
+        VLLM_TARGET_DEVICE: cpu
       run: pip install -e ".[dev]"
 
     - uses: pre-commit/action@v3.0.1
