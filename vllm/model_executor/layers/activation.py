@@ -31,7 +31,7 @@ class XIELU(nn.Module):
         self.alpha_n = nn.Parameter(
             torch.log(torch.exp(torch.tensor(alpha_n_init - beta)) - 1).unsqueeze(0))
         self.register_buffer("beta", torch.tensor(beta))
-        self.register_buffer("eps", torch.tensor(eps, dtype=torch.float16))  # Using float16 for vLLM compatibility
+        self.register_buffer("eps", torch.tensor(eps))
         
         self.cuda_obj = None
         try:
@@ -54,7 +54,7 @@ class XIELU(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if self.cuda_obj is not None and not torch.compiler.is_compiling():
+        if self.cuda_obj is not None and input.is_cuda and not torch.compiler.is_compiling():
             return self._xielu_cuda(x)
         return self._xielu_python(x)
 
