@@ -684,9 +684,14 @@ def cutlass_moe_fp4(
         'e': e,
         'device': device,
     }
+
+    # NVFP4 requires two levels of quantization, which involves computing some scaling
+    # factors dynamically. This makes it incompatible with the typical 
+    # prepare -> MoE -> finalize pipeline. Move the quantization logic into the MoE body.
     extra_prepare_args = {
         'skip_quant': True,
     }
+    # Similar reason as above.
     extra_finalize_args = {
         'skip_permute_reduce': True,
     }

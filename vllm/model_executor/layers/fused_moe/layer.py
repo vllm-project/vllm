@@ -933,7 +933,8 @@ class FusedMoE(torch.nn.Module):
         # Narrow parameter and load.
         # w1, gate_proj: Load into first logical weight of w13.
         # w3, up_proj: Load into second logical weight of w13.
-        # trtllm cutlass kernel assumes differently
+        # The FlashInfer Cutlass fused MoE kernel expects the combined weights 
+        # to be ordered as [w3, w1], unlike the standard [w1, w3] layout.
         assert shard_id in ("w1", "w3")
         switch_w13 = getattr(self.quant_method, 'load_up_proj_weight_first',
                              False)
@@ -1422,7 +1423,6 @@ class FusedMoE(torch.nn.Module):
                     final_hidden_states, non_blocking=True)
 
         ctx = get_forward_context()
-        #TODO(shuw):where is it?
         # flashinfer_cutlass_kernels can handle: optional DP + TP/EP
         max_tokens_across_dp = ctx.dp_metadata.max_tokens_across_dp_cpu
         moe_dp_chunk_size_per_rank = self.moe_config.max_num_tokens
@@ -1447,7 +1447,6 @@ class FusedMoE(torch.nn.Module):
         assert self.quant_method is not None
         # Route to the chunked forward path using the FlashInfer Cutlass kernel 
         # only when data parallelism (DP) is enabled.
-        # TODO(shuw): Make TP calling also chunked.
         use_flashinfer_cutlass_kernels = self.dp_size > 1 and self.moe_parallel_config.use_flashinfer_cutlass_kernels
         if (self.moe_parallel_config.use_pplx_kernels
                 or self.moe_parallel_config.use_deepep_ll_kernels or

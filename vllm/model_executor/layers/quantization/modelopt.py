@@ -563,7 +563,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
                 FlashInferExperts)
             logger.debug("FlashInferExperts %s", moe)
-            # assert moe.dp_size == all2all_manager.dp_world_size
             experts = FlashInferExperts(
                 use_nvfp4_w4a4=True,
                 use_dp=moe.moe_parallel_config.dp_size>1,

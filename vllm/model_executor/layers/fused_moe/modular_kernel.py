@@ -497,11 +497,9 @@ class FusedMoEModularKernel(torch.nn.Module):
             if self.fused_experts.enable_chunking():
                 CHUNK_SIZE = envs.VLLM_FUSED_MOE_CHUNK_SIZE
                 num_chunks = cdiv(M, CHUNK_SIZE)
-                # print(f"1CHUNK_SIZE:{CHUNK_SIZE} and M:{M}")
             else:
                 CHUNK_SIZE = M
                 num_chunks = 1
-                # print(f"2CHUNK_SIZE:{CHUNK_SIZE} and M:{M}")
 
             if num_chunks == 1:
                 (workspace13_shape, workspace2_shape, fused_out_shape,
@@ -531,7 +529,6 @@ class FusedMoEModularKernel(torch.nn.Module):
             expert_kwargs = extra_expert_args or {}
 
             if num_chunks == 1:
-                # print('gggg'*100)
                 fused_out = _resize_cache(workspace13, fused_out_shape)
                 if 'topk_weights' in expert_kwargs and expert_kwargs['topk_weights'] is None:
                     expert_kwargs['topk_weights'] = topk_weights
@@ -590,15 +587,6 @@ class FusedMoEModularKernel(torch.nn.Module):
                     
                     if 'm' in expert_kwargs and expert_kwargs['m'] is not None:
                         expert_kwargs['m'] = end_chunk_idx - begin_chunk_idx
-
-                    
-                    # if 'a1_scale' in expert_kwargs and expert_kwargs['a1_scale'] is not None:
-                    #     print("before swapping a1_scale"*10)
-                    #     print(f"a1_scale in kwargs:{expert_kwargs['a1_scale'].shape}")
-                    #     expert_kwargs['a1_scale'] = expert_kwargs['a1_scale'][begin_chunk_idx:end_chunk_idx]
-                    #     print(f"a1_scale in kwargs:{expert_kwargs['a1_scale'].shape}")
-                    #     print("after swapping a1_scale"*10)
-                    #     assert expert_kwargs['a1_scale'] is not None
 
                     self.fused_experts.apply(
                         fused_out[begin_out_idx:end_out_idx],
