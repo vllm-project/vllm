@@ -13,7 +13,6 @@ FLOAT32_BYTES = torch.finfo(torch.float).bits // 8
 # KV Cache Layout for TRT-LLM
 # kv_cache_shape = (num_blocks, 2, num_kv_heads, page_size, head_dim)
 
-# Only supports - num_query_heads / num_kv_heads == 8 atm
 NUM_HEADS = [(64, 8), (16, 16), (40, 8), (32, 8)]
 HEAD_SIZES = [128]
 BLOCK_SIZES = [16, 32]

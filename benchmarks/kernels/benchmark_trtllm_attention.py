@@ -14,15 +14,6 @@ FLOAT32_BYTES = torch.finfo(torch.float).bits // 8
 # KV Cache Layout for TRT-LLM
 # kv_cache_shape = (num_blocks, 2, num_kv_heads, page_size, head_dim)
 
-# Only supports - num_query_heads / num_kv_heads == 8 atm
-NUM_HEADS = [(64, 8), (16, 16)]
-HEAD_SIZES = [128, 256]
-BLOCK_SIZES = [16, 32]
-DTYPES = [torch.float16, torch.bfloat16]
-NUM_BLOCKS = 32768  # Large enough to test overflow in index calculation.
-SOFT_CAPS = [None, 30.0, 50.0]
-
-
 def to_float8(x, dtype=torch.float8_e4m3fn):
     finfo = torch.finfo(dtype)
     min_val, max_val = x.aminmax()
