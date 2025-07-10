@@ -803,6 +803,14 @@ steps:
   commands:
     - bash weight_loading/run_model_weight_loading_test.sh -c weight_loading/models-large.txt
 
+- label: Hopper Test Job # optional
+  gpu: h200
+  optional: true
+  source_file_dependencies:
+  - vllm/
+  commands:
+    - vllm bench throughput --model deepseek-ai/DeepSeek-R1 --tensor-parallel-size 8 --input-len 1000 --output-len 1000 --num-prompts 50
+
 
 ##### multi gpus test #####
 ##### A100 test #####
