@@ -139,6 +139,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16: bool = True
     VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB: Optional[int] = None
     VLLM_NIXL_ABORT_REQUEST_TIMEOUT: int = 120
+    VLLM_USE_SYMM_MEM: bool = False
 
 
 def get_default_cache_root():
@@ -964,6 +965,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # If set to 1, use the TRTLLM Decode Attention backend in flashinfer.
     "VLLM_USE_TRTLLM_DECODE_ATTENTION":
     lambda: os.getenv("VLLM_USE_TRTLLM_DECODE_ATTENTION", None),
+        # Whether to use pytorch symmetric memory for allreduce
+    "VLLM_USE_SYMM_MEM":
+    lambda: bool(int(os.getenv("VLLM_USE_SYMM_MEM", "0"))),
 }
 
 # --8<-- [end:env-vars-definition]
