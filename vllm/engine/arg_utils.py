@@ -207,14 +207,17 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, Any]:
         kwargs[name] = {"default": default, "help": help}
 
         # Set other kwargs based on the type hints
-        json_tip = """\n\nShould either be a valid JSON string or JSON keys
+        json_tip = """Should either be a valid JSON string or JSON keys
 passed individually. For example, the following sets of arguments are
-equivalent:\n\n
+equivalent:
+
 - `--json-arg '{"key1": "value1", "key2": {"key3": "value2"}}'`\n
-- `--json-arg.key1 value1 --json-arg.key2.key3 value2`\n\n
-Additionally, list elements can be passed individually using `+`:\n\n
+- `--json-arg.key1 value1 --json-arg.key2.key3 value2`
+
+Additionally, list elements can be passed individually using `+`:
+
 - `--json-arg '{"key4": ["value3", "value4", "value5"]}'`\n
-- `--json-arg.key4+ value3 --json-arg.key4+='value4,value5'`\n\n"""
+- `--json-arg.key4+ value3 --json-arg.key4+='value4,value5'`"""
         if dataclass_cls is not None:
 
             def parse_dataclass(val: str, cls=dataclass_cls) -> Any:
@@ -226,7 +229,7 @@ Additionally, list elements can be passed individually using `+`:\n\n
                     raise argparse.ArgumentTypeError(repr(e)) from e
 
             kwargs[name]["type"] = parse_dataclass
-            kwargs[name]["help"] += json_tip
+            kwargs[name]["help"] += f"\n\n{json_tip}"
         elif contains_type(type_hints, bool):
             # Creates --no-<name> and --<name> flags
             kwargs[name]["action"] = argparse.BooleanOptionalAction
@@ -262,7 +265,7 @@ Additionally, list elements can be passed individually using `+`:\n\n
             kwargs[name]["type"] = union_dict_and_str
         elif contains_type(type_hints, dict):
             kwargs[name]["type"] = parse_type(json.loads)
-            kwargs[name]["help"] += json_tip
+            kwargs[name]["help"] += f"\n\n{json_tip}"
         elif (contains_type(type_hints, str)
               or any(is_not_builtin(th) for th in type_hints)):
             kwargs[name]["type"] = str
