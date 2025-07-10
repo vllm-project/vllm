@@ -548,7 +548,8 @@ def cutlass_moe_fp4(a: torch.Tensor,
 
 
 def _valid_cutlass_block_scaled_grouped_gemm(
-        w1: torch.Tensor, w2: torch.Tensor,
+        w1: torch.Tensor, w2: torch.Tensor, inplace: bool, activation: str,
+        apply_router_weight_on_input: bool,
         expert_map: Optional[torch.Tensor]) -> bool:
 
     def _valid_cutlass_block_scaled_grouped_gemm_shape(N: int, K: int):
@@ -566,9 +567,26 @@ def _valid_cutlass_block_scaled_grouped_gemm(
         return False
 
     if expert_map is not None:
-        logger.warning(
+        logger.debug(
             "CutlassBlockScaledGroupedGemm disabled: expert_parallel is"
             " not supported.")
+        return False
+
+    if activation != "silu":
+        logger.debug(
+            "CutlassBlockScaledGroupedGemm disabled: only activation silu is"
+            " supported.")
+        return False
+
+    if apply_router_weight_on_input:
+        logger.debug("CutlassBlockScaledGroupedGemm disabled:"
+                     " apply_router_weight_on_input is not supported.")
+        return False
+
+    if inplace:
+        logger.debug(
+            "CutlassBlockScaledGroupedGemm disabled: inplace is not supported."
+        )
         return False
 
     return True
