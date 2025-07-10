@@ -37,6 +37,7 @@ from vllm.config import ParallelConfig
 from vllm.distributed.parallel_state import get_ep_group, get_node_count
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import MixtureOfExperts
+from vllm.platforms import current_platform
 
 from .rebalance_algo import rebalance_experts
 from .rebalance_execute import rearrange_expert_weights_inplace
@@ -348,7 +349,7 @@ class EplbState:
         time_start = None
         is_main_rank = ep_rank == 0
         if is_main_rank:
-            torch.cuda.synchronize()
+            current_platform.synchronize()
             time_start = time.perf_counter()
             logger.info("Rearranging experts %s...",
                         "(profile)" if is_profile else "")
@@ -423,7 +424,7 @@ class EplbState:
 
         if is_main_rank:
             assert time_start is not None
-            torch.cuda.synchronize()
+            current_platform.synchronize()
             time_end = time.perf_counter()
             logger.info(
                 "Rearranged experts%sin %.2f seconds.",
