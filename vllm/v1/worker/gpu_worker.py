@@ -319,7 +319,7 @@ class Worker(WorkerBase):
         # sampling related tensors of max possible shape to avoid memory
         # fragmentation issue.
         # NOTE: This is called after `capture_model` on purpose to prevent
-        # memory buffers from being cleared by `torch.cuda.empty_cache`.
+        # memory buffers from being cleared by `current_platform.empty_cache`.
         if get_pp_group().is_last_rank:
             max_num_reqs = min(self.scheduler_config.max_num_seqs,
                                self.scheduler_config.max_num_batched_tokens)
