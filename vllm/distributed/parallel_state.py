@@ -782,7 +782,6 @@ class GroupCoordinator:
 
     def prepare_communication_buffer_for_model(self, model: torch.nn.Module):
         if self.device_communicator is not None:
-            torch.distributed.barrier(self.device_communicator)
             self.device_communicator.prepare_communication_buffer_for_model(
                 model)
 
@@ -1116,6 +1115,7 @@ def prepare_communication_buffer_for_model(model: torch.nn.Module):
     MoE all2all (DeepEP) usually allocate the communication buffer
     based on the model shape for optimal performance.
     """
+    get_world_group().barrier()
     if _TP is not None:
         _TP.prepare_communication_buffer_for_model(model)
     if _PP is not None:
