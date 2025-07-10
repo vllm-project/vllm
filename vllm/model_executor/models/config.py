@@ -170,6 +170,15 @@ class Qwen3ForSequenceClassificationConfig(VerifyAndUpdateConfig):
         vllm_config.model_config.hf_config.method = "from_2_way_softmax"
 
 
+class JinaVLForSequenceClassificationConfig(VerifyAndUpdateConfig):
+
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        config = vllm_config.model_config.hf_config
+
+        config.num_labels = 1
+
+
 class SnowflakeGteNewModelConfig(VerifyAndUpdateConfig):
 
     @staticmethod
@@ -197,4 +206,5 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "NomicBertModel": NomicBertModelConfig,
     "Qwen3ForSequenceClassification": Qwen3ForSequenceClassificationConfig,
     "XLMRobertaModel": JinaRobertaModelConfig,
+    "JinaVLForRanking": JinaVLForSequenceClassificationConfig,
 }

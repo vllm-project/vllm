@@ -24,6 +24,7 @@ from typing_extensions import TypeAlias
 from vllm import envs
 from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
                                          random_tool_call_id)
+from vllm.entrypoints.score_utils import ScoreMultiModalParam
 from vllm.logger import init_logger
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import (BeamSearchParams, GuidedDecodingParams,
@@ -1282,8 +1283,8 @@ PoolingRequest = Union[PoolingCompletionRequest, PoolingChatRequest]
 
 class ScoreRequest(OpenAIBaseModel):
     model: Optional[str] = None
-    text_1: Union[list[str], str]
-    text_2: Union[list[str], str]
+    text_1: Union[list[str], str, ScoreMultiModalParam]
+    text_2: Union[list[str], str, ScoreMultiModalParam]
     truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None
 
     # --8<-- [start:score-pooling-params]
@@ -1291,6 +1292,12 @@ class ScoreRequest(OpenAIBaseModel):
     # --8<-- [end:score-pooling-params]
 
     # --8<-- [start:score-extra-params]
+
+    mm_processor_kwargs: Optional[dict[str, Any]] = Field(
+        default=None,
+        description=("Additional kwargs to pass to the HF processor."),
+    )
+
     priority: int = Field(
         default=0,
         description=(
@@ -1308,8 +1315,8 @@ class ScoreRequest(OpenAIBaseModel):
 
 class RerankRequest(OpenAIBaseModel):
     model: Optional[str] = None
-    query: str
-    documents: list[str]
+    query: Union[str, ScoreMultiModalParam]
+    documents: Union[list[str], ScoreMultiModalParam]
     top_n: int = Field(default_factory=lambda: 0)
     truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None
 
@@ -1318,6 +1325,12 @@ class RerankRequest(OpenAIBaseModel):
     # --8<-- [end:rerank-pooling-params]
 
     # --8<-- [start:rerank-extra-params]
+
+    mm_processor_kwargs: Optional[dict[str, Any]] = Field(
+        default=None,
+        description=("Additional kwargs to pass to the HF processor."),
+    )
+
     priority: int = Field(
         default=0,
         description=(
@@ -1334,7 +1347,8 @@ class RerankRequest(OpenAIBaseModel):
 
 
 class RerankDocument(BaseModel):
-    text: str
+    text: Optional[str] = None
+    multi_modal: Optional[ScoreMultiModalParam] = None
 
 
 class RerankResult(BaseModel):
