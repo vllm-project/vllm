@@ -228,7 +228,6 @@ except ImportError:
 
 try:
     from flashinfer import BatchPrefillWithRaggedKVCacheWrapper
-    from flashinfer.utils import is_sm100a_supported
     flashinfer_available = True
 except ImportError:
     flashinfer_available = False
@@ -360,7 +359,9 @@ M = TypeVar("M", bound=MLACommonMetadata)
 
 def use_flashinfer_prefill() -> bool:
     if flashinfer_available:
-        return is_sm100a_supported(torch.device("cuda"))
+        # For blackwell default to flashinfer prefill if its available since
+        #  its faster than FA2.
+        return current_platform.has_device_capability(100)
     return False
 
 
