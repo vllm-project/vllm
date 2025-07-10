@@ -87,6 +87,7 @@ from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
 from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import (BaseModelPath,
+                                                    LoRAModulePath,
                                                     OpenAIServingModels)
 from vllm.entrypoints.openai.serving_pooling import OpenAIServingPooling
 from vllm.entrypoints.openai.serving_responses import OpenAIServingResponses
@@ -1481,11 +1482,28 @@ async def init_app_state(
                     "This discrepancy may lead to performance degradation.",
                     resolved_chat_template, args.model)
 
+    # Merge default_mm_loras into the static lora_modules
+    default_mm_loras = (vllm_config.lora_config.default_mm_loras
+                        if vllm_config.lora_config is not None else {})
+
+    lora_modules = args.lora_modules
+    if default_mm_loras:
+        default_mm_lora_paths = [
+            LoRAModulePath(
+                name=modality,
+                path=lora_path,
+            ) for modality, lora_path in default_mm_loras.items()
+        ]
+        if args.lora_modules is None:
+            lora_modules = default_mm_lora_paths
+        else:
+            lora_modules += default_mm_lora_paths
+
     state.openai_serving_models = OpenAIServingModels(
         engine_client=engine_client,
         model_config=model_config,
         base_model_paths=base_model_paths,
-        lora_modules=args.lora_modules,
+        lora_modules=lora_modules,
         prompt_adapters=args.prompt_adapters,
     )
     await state.openai_serving_models.init_static_loras()
