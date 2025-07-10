@@ -82,10 +82,10 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
                 "Both implementations should agree on WeightAndReduce impls. "
                 f"Got dge_war: {dge_war}, and te_war: {te_war}")
 
-        if is_dge_war:
+        if dge_war is not None:
             return dge_war
 
-        assert is_te_war
+        assert te_war is not None
         return te_war
 
     def workspace_shapes(
