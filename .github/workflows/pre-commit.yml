@@ -16,6 +16,11 @@ jobs:
     - run: echo "::add-matcher::.github/workflows/matchers/actionlint.json"
     - run: echo "::add-matcher::.github/workflows/matchers/mypy.json"
     
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libnuma-dev
+    
     - name: Install PyTorch for CPU and NumPy
       run: |
         pip install numpy
