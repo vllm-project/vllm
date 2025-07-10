@@ -216,9 +216,9 @@ class MultiConnector(KVConnectorBase_V1):
             "connectors")
         assert ktcs is not None
         layouts: set[str] = set()
+        temp_vllm_config = copy.copy(vllm_config)
         for ktc in ktcs:
             kv_transfer_config = KVTransferConfig(**ktc)
-            temp_vllm_config = copy.copy(vllm_config)
             temp_vllm_config.kv_transfer_config = kv_transfer_config
             required_kvcache_layout = KVConnectorFactory.get_connector_class(
                 kv_transfer_config).get_required_kvcache_layout(
@@ -227,7 +227,8 @@ class MultiConnector(KVConnectorBase_V1):
                 layouts.add(required_kvcache_layout)
 
         if len(layouts) > 1:
-            raise ValueError(
-                "Multiple connectors require different KV cache layouts: "
-                f"{layouts}")
+            raise ValueError(f"KV cache layout mismatch: "
+                             f"found {len(layouts)} different layouts "
+                             f"({', '.join(layouts) })."
+                             f"All connectors must use the same layout.")
         return next(iter(layouts), None)
