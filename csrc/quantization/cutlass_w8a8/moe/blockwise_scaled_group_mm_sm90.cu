@@ -4,11 +4,11 @@
 #include <torch/all.h>
 
 #include "cutlass/cutlass.h"
-#include "grouped_mm_c3x_with_blockwise_scaling.cuh"
+#include "blockwise_scaled_group_mm_sm90.cuh"
 
 using namespace cute;
 
-namespace vllm::cutlass_moe::blockwise_scaling {
+namespace vllm::cutlass_moe::blockwise_scaling_sm90 {
 
 template <typename InType, typename OutType,
           template <typename, typename, typename> typename Epilogue>
@@ -53,7 +53,7 @@ void run_cutlass_moe_blockwise_mm_sm90(
   uint32_t const n = out_tensors.size(1);
   uint32_t const k = a_tensors.size(1);
 
-  cutlass_blockwise_group_gemm_caller<Cutlass3xGemmDefault>(
+  cutlass_blockwise_group_gemm_caller_sm90<Cutlass3xGemmDefault>(
       out_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
       problem_sizes, a_strides, b_strides, c_strides, per_act_block);
 }
@@ -77,7 +77,7 @@ void dispatch_moe_blockwise_mm_sm90(
   }
 }
 
-}  // namespace vllm::cutlass_moe::blockwise_scaling
+}  // namespace vllm::cutlass_moe::blockwise_scaling_sm90
 
 void cutlass_moe_blockwise_mm_sm90(
     torch::Tensor& out_tensors, torch::Tensor const& a_tensors,
@@ -86,7 +86,7 @@ void cutlass_moe_blockwise_mm_sm90(
     torch::Tensor const& problem_sizes, torch::Tensor const& a_strides,
     torch::Tensor const& b_strides, torch::Tensor const& c_strides,
     bool per_act_block) {
-  vllm::cutlass_moe::blockwise_scaling::dispatch_moe_blockwise_mm_sm90(
+  vllm::cutlass_moe::blockwise_scaling_sm90::dispatch_moe_blockwise_mm_sm90(
       out_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
       problem_sizes, a_strides, b_strides, c_strides, per_act_block);
 }

@@ -126,7 +126,7 @@ void run_get_ggemm_starts(
 }
 
 template <typename OutType, typename ScheduleConfig, typename LayoutD>
-void run_blockwise_scaled_group_mm(
+void run_blockwise_scaled_group_mm_sm100(
     torch::Tensor& out_ptrs, const torch::Tensor& a_ptrs,
     const torch::Tensor& b_ptrs, const torch::Tensor& a_scales_ptrs,
     const torch::Tensor& b_scales_ptrs, const torch::Tensor& stride_a,
@@ -247,7 +247,7 @@ void run_blockwise_scaled_group_mm(
 }
 
 template <typename OutType>
-void blockwise_scaled_group_mm_dispatch_shape(
+void blockwise_scaled_group_mm_sm100_dispatch_shape(
     torch::Tensor& output, const torch::Tensor& a, const torch::Tensor& b,
     const torch::Tensor& scales_a, const torch::Tensor& scales_b,
     const torch::Tensor& problem_sizes, const torch::Tensor& expert_offsets) {
@@ -309,14 +309,14 @@ void blockwise_scaled_group_mm_dispatch_shape(
       expert_offsets, a_ptrs, b_ptrs, out_ptrs, a_scales_ptrs, b_scales_ptrs, a,
       b, output, scales_a, scales_b, layout_sfa, layout_sfb, problem_sizes);
 
-  run_blockwise_scaled_group_mm<OutType, MmaConfig,
-                                typename MmaConfig::LayoutC>(
+  run_blockwise_scaled_group_mm_sm100<OutType, MmaConfig,
+                                      typename MmaConfig::LayoutC>(
       out_ptrs, a_ptrs, b_ptrs, a_scales_ptrs, b_scales_ptrs, stride_a,
       stride_b, stride_c, layout_sfa, layout_sfb, problem_sizes,
       expert_offsets);
 }
 
-void cutlass_blockwise_scaled_grouped_mm(
+void cutlass_blockwise_scaled_grouped_mm_sm100(
     torch::Tensor& output, const torch::Tensor& a, const torch::Tensor& b,
     const torch::Tensor& scales_a, const torch::Tensor& scales_b,
     const torch::Tensor& problem_sizes, const torch::Tensor& expert_offsets) {
@@ -357,10 +357,10 @@ void cutlass_blockwise_scaled_grouped_mm(
 
 #if defined(ENABLE_CUTLASS_MOE_SM100) && ENABLE_CUTLASS_MOE_SM100
   if (output.scalar_type() == torch::kBFloat16) {
-    blockwise_scaled_group_mm_dispatch_shape<cutlass::bfloat16_t>(
+    blockwise_scaled_group_mm_sm100_dispatch_shape<cutlass::bfloat16_t>(
         output, a, b, scales_a, scales_b, problem_sizes, expert_offsets);
   } else if (output.scalar_type() == torch::kFloat16) {
-    blockwise_scaled_group_mm_dispatch_shape<cutlass::half_t>(
+    blockwise_scaled_group_mm_sm100_dispatch_shape<cutlass::half_t>(
         output, a, b, scales_a, scales_b, problem_sizes, expert_offsets);
   } else {
     TORCH_CHECK(false, "Unsupported output tensor type");
@@ -369,6 +369,6 @@ void cutlass_blockwise_scaled_grouped_mm(
 }
 
 TORCH_LIBRARY_IMPL_EXPAND(TORCH_EXTENSION_NAME, CUDA, m) {
-  m.impl("cutlass_blockwise_scaled_grouped_mm",
-         &cutlass_blockwise_scaled_grouped_mm);
+  m.impl("cutlass_blockwise_scaled_grouped_mm_sm100",
+         &cutlass_blockwise_scaled_grouped_mm_sm100);
 }

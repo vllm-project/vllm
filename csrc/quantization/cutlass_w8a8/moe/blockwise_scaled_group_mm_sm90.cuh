@@ -12,7 +12,7 @@
 
 using namespace cute;
 
-namespace vllm::cutlass_moe::blockwise_scaling {
+namespace vllm::cutlass_moe::blockwise_scaling_sm90 {
 
 using ProblemShape =
     cutlass::gemm::GroupProblemShape<cute::Shape<int, int, int>>;
@@ -94,7 +94,7 @@ struct cutlass_3x_blockwise_group_gemm {
 };
 
 template <typename Gemm>
-void cutlass_blockwise_group_gemm_caller(
+void cutlass_blockwise_group_gemm_caller_sm90(
     torch::Tensor& out_tensors, torch::Tensor const& a_tensors,
     torch::Tensor const& b_tensors, torch::Tensor const& a_scales,
     torch::Tensor const& b_scales, torch::Tensor const& expert_offsets,
@@ -178,4 +178,4 @@ void cutlass_blockwise_group_gemm_caller(
   CUTLASS_CHECK(status);
 }
 
-}  // namespace vllm::cutlass_moe::blockwise_scaling
+}  // namespace vllm::cutlass_moe::blockwise_scaling_sm90

@@ -10,7 +10,7 @@ from tests.kernels.utils import torch_moe
 from vllm import _custom_ops as ops
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe.cutlass_moe import (
-    cutlass_moe_blocked_fp8, cutlass_moe_fp8)
+    block_scaled_cutlass_moe_fp8_sm90, cutlass_moe_fp8)
 from vllm.model_executor.layers.fused_moe.fused_moe import (fused_experts,
                                                             fused_topk)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
@@ -327,7 +327,7 @@ def run_blocked_8_bit(moe_tensors: MOETensors8Bit, topk_weights: torch.Tensor,
         'block_shape': [128, 128],
     }
 
-    return cutlass_moe_blocked_fp8(**kwargs)
+    return block_scaled_cutlass_moe_fp8_sm90(**kwargs)
 
 
 @pytest.mark.parametrize("m,n,k", MNK_FACTORS)

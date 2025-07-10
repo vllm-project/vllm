@@ -395,8 +395,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 
   // cutlass blockwise scaledgroup GEMM
   ops.def(
-      "cutlass_blockwise_scaled_grouped_mm(Tensor! output, Tensor a, Tensor b, "
-      "Tensor scales_a, Tensor scales_b, "
+      "cutlass_blockwise_scaled_grouped_mm_sm100(Tensor! output, "
+      "Tensor a, Tensor b, Tensor scales_a, Tensor scales_b, "
       "Tensor problem_sizes, Tensor expert_offsets) -> ()",
       {stride_tag});
   // conditionally compiled so impl registration is in source file
@@ -454,13 +454,15 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // 128-elements-blocked scales (equivalent to block size 1x128).
   // When it's false, the input is quantized with per-tensor scales.
   ops.def(
-      "cutlass_moe_blockwise_mm(Tensor! out_tensors, Tensor a_tensors, "
-      "               Tensor b_tensors, Tensor a_scales, Tensor b_scales, "
-      "               Tensor expert_offsets, Tensor problem_sizes, "
-      "               Tensor a_strides, Tensor b_strides, Tensor c_strides, "
+      "cutlass_blockwise_scaled_grouped_mm_sm90(Tensor! out_tensors, "
+      "               Tensor a_tensors, Tensor b_tensors, Tensor a_scales, "
+      "               Tensor b_scales, Tensor expert_offsets, "
+      "               Tensor problem_sizes, Tensor a_strides, "
+      "               Tensor b_strides, Tensor c_strides, "
       "               bool per_act_block) -> ()",
       {stride_tag});
-  ops.impl("cutlass_moe_blockwise_mm", torch::kCUDA, &cutlass_moe_blockwise_mm);
+  ops.impl("cutlass_blockwise_scaled_grouped_mm_sm90", torch::kCUDA,
+           &cutlass_blockwise_scaled_grouped_mm_sm90);
 
   // A function that computes data required to run fused MoE with w8a8 grouped
   // GEMM. It takes topk_ids as an input, and computes expert_offsets

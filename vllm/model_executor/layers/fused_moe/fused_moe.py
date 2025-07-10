@@ -17,7 +17,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig, get_config_quant_dtype)
 from vllm.model_executor.layers.fused_moe.cutlass_moe import (
     _valid_cutlass_block_scaled_grouped_gemm,
-    run_cutlass_block_scaled_fused_experts)
+    run_block_scaled_cutlass_moe_fp8_sm100)
 # yapf: enable
 from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
     _valid_deep_gemm, deep_gemm_moe_fp8)
@@ -1182,7 +1182,7 @@ def fused_experts(
     elif (allow_cutlass_block_scaled_grouped_gemm and use_fp8_w8a8
           and _valid_cutlass_block_scaled_grouped_gemm(hidden_states, w1, w2)):
         assert apply_router_weight_on_input is False
-        return run_cutlass_block_scaled_fused_experts(
+        return run_block_scaled_cutlass_moe_fp8_sm100(
             a=hidden_states,
             w1=w1,
             w2=w2,

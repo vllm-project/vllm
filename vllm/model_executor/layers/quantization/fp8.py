@@ -448,16 +448,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         from vllm.model_executor.layers.fused_moe import fused_experts
         self.quant_config = quant_config
         self.block_quant = self.quant_config.weight_block_size is not None
-        self.cutlass_block_fp8_supported = cutlass_block_fp8_supported()
-
-        # For GPUs that lack FP8 hardware support, we can leverage the Marlin
-        # kernel for fast weight-only FP8 quantization
-        self.use_marlin = (not self.cutlass_block_fp8_supported
-                           and not current_platform.has_device_capability(89)
-                           or envs.VLLM_TEST_FORCE_FP8_MARLIN)
-        # Disable marlin for rocm
-        if current_platform.is_rocm():
-            self.use_marlin = False
 
         # Check for DeepGemm support.
         self.allow_deep_gemm = False
@@ -476,7 +466,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     "DeepGemm not supported on the current platform.")
 
         # Check for CutlassBlockScaledGroupedGemm support.
-        self.allow_cutlass_block_scaled_grouped_gemm = False
+        self.allow_cutlass_block_scaled_grouped_gemm_sm100 = False
+        self.allow_cutlass_block_scaled_grouped_gemm_sm90 = False
         if not self.block_quant:
             logger.warning_once("Model is not block quantized. Not using "
                                 "CutlassBlockScaledGroupedGemm kernels")
@@ -485,11 +476,28 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             logger.info_once(
                 "Using CutlassBlockScaledGroupedGemm kernels for Fp8MoEMethod."
             )
-            self.allow_cutlass_block_scaled_grouped_gemm = True
+            self.allow_cutlass_block_scaled_grouped_gemm_sm100 = True
+        elif (current_platform.is_cuda()
+              and current_platform.has_device_capability(90)):
+            logger.info_once(
+                "Using CutlassBlockScaledGroupedGemm kernels for Fp8MoEMethod."
+            )
+            self.allow_cutlass_block_scaled_grouped_gemm_sm90 = True
         else:
             logger.warning_once(
                 "CutlassBlockScaledGroupedGemm not supported on the current "
                 "platform.")
+
+        # For GPUs that lack FP8 hardware support, we can leverage the Marlin
+        # kernel for fast weight-only FP8 quantization
+        self.use_marlin = (
+            not self.allow_cutlass_block_scaled_grouped_gemm_sm100
+            and not self.allow_cutlass_block_scaled_grouped_gemm_sm90
+            and not current_platform.has_device_capability(89)
+            or envs.VLLM_TEST_FORCE_FP8_MARLIN)
+        # Disable marlin for rocm
+        if current_platform.is_rocm():
+            self.use_marlin = False
 
         self.topk_indices_dtype = None
         self.fused_experts = functools.partial(  # type: ignore
@@ -498,7 +506,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             block_shape=self.quant_config.weight_block_size,
             allow_deep_gemm=self.allow_deep_gemm,
             allow_cutlass_block_scaled_grouped_gemm=(
-                self.allow_cutlass_block_scaled_grouped_gemm))
+                self.allow_cutlass_block_scaled_grouped_gemm_sm100))
 
     def create_weights(self, layer: Module, num_experts: int, hidden_size: int,
                        intermediate_size_per_partition: int,
@@ -799,7 +807,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             del layer.w13_input_scale
             del layer.w2_input_scale
 
-        if not self.rocm_aiter_moe_enabled and self.cutlass_block_fp8_supported:
+        if (not self.rocm_aiter_moe_enabled
+                and self.allow_cutlass_block_scaled_grouped_gemm_sm90):
             device = w13_weight.device
             layer.ab_strides1 = torch.full((layer.local_num_experts, ),
                                            layer.hidden_size,
@@ -933,12 +942,12 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 a2_scale=layer.w2_input_scale,
                 block_shape=self.quant_config.weight_block_size,
                 expert_map=expert_map)
-        elif self.cutlass_block_fp8_supported:
+        elif self.allow_cutlass_block_scaled_grouped_gemm_sm90:
             from vllm.model_executor.layers.fused_moe.cutlass_moe import (
-                cutlass_moe_blocked_fp8)
+                block_scaled_cutlass_moe_fp8_sm90)
             block_shape = self.quant_config.weight_block_size
             assert block_shape is not None, "block_shape must not be None for blockwise MoE"  #noqa: E501
-            return cutlass_moe_blocked_fp8(
+            return block_scaled_cutlass_moe_fp8_sm90(
                 x,
                 layer.w13_weight,
                 layer.w2_weight,

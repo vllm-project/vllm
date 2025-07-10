@@ -259,7 +259,7 @@ void cutlass_moe_mm(
       ". Required capability: 90");
 }
 
-void cutlass_moe_blockwise_mm(
+void cutlass_blockwise_scaled_grouped_mm_sm90(
     torch::Tensor& out_tensors, torch::Tensor const& a_tensors,
     torch::Tensor const& b_tensors, torch::Tensor const& a_scales,
     torch::Tensor const& b_scales, torch::Tensor const& expert_offsets,

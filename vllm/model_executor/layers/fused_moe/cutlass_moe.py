@@ -540,7 +540,7 @@ def _valid_cutlass_block_scaled_grouped_gemm(hidden_states: torch.Tensor,
     return True
 
 
-def run_cutlass_block_scaled_fused_experts(
+def run_block_scaled_cutlass_moe_fp8_sm100(
     a: torch.Tensor,
     w1: torch.Tensor,
     w2: torch.Tensor,
@@ -613,7 +613,7 @@ def run_cutlass_block_scaled_fused_experts(
     c1 = torch.empty((m * topk, n * 2), dtype=out_dtype, device=device)
     c2 = torch.empty((m * topk, k), dtype=out_dtype, device=device)
 
-    ops.cutlass_blockwise_scaled_grouped_mm(
+    ops.cutlass_blockwise_scaled_grouped_mm_sm100(
         c1,
         rep_a_q,
         w1_q,
@@ -631,7 +631,7 @@ def run_cutlass_block_scaled_fused_experts(
                                              per_act_token=False,
                                              block_shape=[128, 128])
 
-    ops.cutlass_blockwise_scaled_grouped_mm(
+    ops.cutlass_blockwise_scaled_grouped_mm_sm100(
         c2,
         intermediate_q,
         w2_q,
@@ -645,7 +645,7 @@ def run_cutlass_block_scaled_fused_experts(
             topk_weights.view(m, topk, 1).to(out_dtype)).sum(dim=1)
 
 
-def run_blocked_cutlass_moe_fp8(
+def run_block_scaled_cutlass_moe_fp8_sm90(
     output: torch.Tensor,
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
@@ -768,9 +768,11 @@ def run_blocked_cutlass_moe_fp8(
     if expert_map is not None:
         c1.fill_(0)
 
-    ops.cutlass_moe_blockwise_mm(c1, a1q, w1, a1q_scale, w1_scale,
-                                 expert_offsets, problem_sizes1, ab_strides1,
-                                 ab_strides1, c_strides1, per_act_block)
+    ops.cutlass_blockwise_scaled_grouped_mm_sm90(c1, a1q, w1, a1q_scale,
+                                                 w1_scale, expert_offsets,
+                                                 problem_sizes1, ab_strides1,
+                                                 ab_strides1, c_strides1,
+                                                 per_act_block)
 
     activation_callable(c2, c1)
 
@@ -791,15 +793,17 @@ def run_blocked_cutlass_moe_fp8(
     if expert_map is not None:
         c3.fill_(0)
 
-    ops.cutlass_moe_blockwise_mm(c3, a2q, w2, a2q_scale, w2_scale,
-                                 expert_offsets, problem_sizes2, ab_strides2,
-                                 ab_strides2, c_strides2, per_act_block)
+    ops.cutlass_blockwise_scaled_grouped_mm_sm90(c3, a2q, w2, a2q_scale,
+                                                 w2_scale, expert_offsets,
+                                                 problem_sizes2, ab_strides2,
+                                                 ab_strides2, c_strides2,
+                                                 per_act_block)
 
     output.copy_(ops.shuffle_rows(c3, c_map).view(M * topk, K),
                  non_blocking=True)
 
 
-class CutlassExpertsBlockedFp8(mk.FusedMoEPermuteExpertsUnpermute):
+class CutlassExpertsBlockedFp8SM90(mk.FusedMoEPermuteExpertsUnpermute):
 
     def __init__(
         self,
@@ -883,7 +887,7 @@ class CutlassExpertsBlockedFp8(mk.FusedMoEPermuteExpertsUnpermute):
         assert w2_zp is None, "w2_zp is not supported in CUTLASS MoE"
         activation_callable = lambda i, o: self.activation(activation, i, o)
         assert expert_num_tokens is None, "PPLX is not supported in blocked CUTLASS MoE"  # noqa: E501
-        return run_blocked_cutlass_moe_fp8(
+        return run_block_scaled_cutlass_moe_fp8_sm90(
             output, hidden_states, w1, w2, topk_ids, activation_callable,
             global_num_experts, expert_map, w1_scale, w2_scale, a1q_scale,
             a2_scale, self.ab_strides1, self.ab_strides2, self.c_strides1,
@@ -891,7 +895,7 @@ class CutlassExpertsBlockedFp8(mk.FusedMoEPermuteExpertsUnpermute):
             self.per_act_block)
 
 
-def cutlass_moe_blocked_fp8(
+def block_scaled_cutlass_moe_fp8_sm90(
     a: torch.Tensor,
     w1_q: torch.Tensor,
     w2_q: torch.Tensor,
@@ -947,7 +951,7 @@ def cutlass_moe_blocked_fp8(
 
     fn = mk.FusedMoEModularKernel(
         MoEPrepareAndFinalizeNoEP(),
-        CutlassExpertsBlockedFp8(
+        CutlassExpertsBlockedFp8SM90(
             max_experts_per_worker=global_num_experts,
             out_dtype=out_dtype,
             per_act_block=per_act_block,

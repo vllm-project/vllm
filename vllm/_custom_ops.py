@@ -647,7 +647,7 @@ def cutlass_scaled_mm_supports_fp4(cuda_device_capability: int) -> bool:
     return torch.ops._C.cutlass_scaled_mm_supports_fp4(cuda_device_capability)
 
 
-def cutlass_blockwise_scaled_grouped_mm(
+def cutlass_blockwise_scaled_grouped_mm_sm100(
     output: torch.Tensor,
     a: torch.Tensor,
     b: torch.Tensor,
@@ -656,9 +656,8 @@ def cutlass_blockwise_scaled_grouped_mm(
     problem_sizes: torch.Tensor,
     expert_offsets: torch.Tensor,
 ):
-    torch.ops._C.cutlass_blockwise_scaled_grouped_mm(output, a, b, scales_a,
-                                                     scales_b, problem_sizes,
-                                                     expert_offsets)
+    torch.ops._C.cutlass_blockwise_scaled_grouped_mm_sm100(
+        output, a, b, scales_a, scales_b, problem_sizes, expert_offsets)
 
 
 def cutlass_scaled_fp4_mm(a: torch.Tensor, b: torch.Tensor,
@@ -975,13 +974,12 @@ def cutlass_moe_mm(out_tensors: torch.Tensor, a_tensors: torch.Tensor,
                                        c_strides, per_act_token, per_out_ch)
 
 
-def cutlass_moe_blockwise_mm(out_tensors: torch.Tensor,
-                             a_tensors: torch.Tensor, b_tensors: torch.Tensor,
-                             a_scales: torch.Tensor, b_scales: torch.Tensor,
-                             expert_offsets: torch.Tensor,
-                             problem_sizes: torch.Tensor,
-                             a_strides: torch.Tensor, b_strides: torch.Tensor,
-                             c_strides: torch.Tensor, per_act_block: bool):
+def cutlass_blockwise_scaled_grouped_mm_sm90(
+        out_tensors: torch.Tensor, a_tensors: torch.Tensor,
+        b_tensors: torch.Tensor, a_scales: torch.Tensor,
+        b_scales: torch.Tensor, expert_offsets: torch.Tensor,
+        problem_sizes: torch.Tensor, a_strides: torch.Tensor,
+        b_strides: torch.Tensor, c_strides: torch.Tensor, per_act_block: bool):
     """
     A single grouped matrix multiplication used in CUTLASS-based
     blockwise-scaled fused MoE.
@@ -994,11 +992,9 @@ def cutlass_moe_blockwise_mm(out_tensors: torch.Tensor,
                      MMs used in the fused MoE operation.
     - a/b/c_strides: The data strides passed to grouped matrix multiplication.
     """
-    return torch.ops._C.cutlass_moe_blockwise_mm(out_tensors, a_tensors,
-                                                 b_tensors, a_scales, b_scales,
-                                                 expert_offsets, problem_sizes,
-                                                 a_strides, b_strides,
-                                                 c_strides, per_act_block)
+    return torch.ops._C.cutlass_blockwise_scaled_grouped_mm_sm90(
+        out_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
+        problem_sizes, a_strides, b_strides, c_strides, per_act_block)
 
 
 def cutlass_fp4_moe_mm(a_tensors: torch.Tensor, b_tensors: torch.Tensor,

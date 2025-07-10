@@ -14,7 +14,9 @@ from deep_gemm import calc_diff, ceil_div
 from vllm import _custom_ops as ops
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.fused_moe.cutlass_moe import cutlass_moe_blocked_fp8
+from vllm.model_executor.layers.fused_moe.cutlass_moe import (
+    block_scaled_cutlass_moe_fp8_sm90,
+)
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     fused_topk,
     modular_triton_fused_moe,
@@ -262,7 +264,7 @@ def benchmark_shape(e: int,
 
     # === vLLM CUTLASS Implementation ===
     def vllm_cutlass_gemm():
-        return cutlass_moe_blocked_fp8(
+        return block_scaled_cutlass_moe_fp8_sm90(
                     a,
                     w1,
                     w2,
