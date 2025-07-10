@@ -61,47 +61,27 @@ else()
     " before running cmake configure.")
 endif()
 
+if (VLLM_TARGET_DEVICE STREQUAL "cpu")
+    message(STATUS "VLLM: Building for CPU. Skipping all CUDA/HIP related configuration.")
+    
+    # For CPU builds, we need to find Torch but without triggering CUDA detection
+    # Set these variables to prevent CUDA detection
+    set(CUDA_FOUND FALSE CACHE INTERNAL "Force CUDA to be not found for CPU build" FORCE)
+    set(HIP_FOUND FALSE CACHE INTERNAL "Force HIP to be not found for CPU build" FORCE)
+    set(CAFFE2_USE_CUDA OFF CACHE BOOL "Disable CUDA for CPU build" FORCE)
+    
+    # Find Torch with minimal requirements for CPU
+    find_package(Torch REQUIRED)
+    
+    # Include the CPU extension cmake and return early
+    include(${CMAKE_CURRENT_LIST_DIR}/cmake/cpu_extension.cmake)
+    return()
+endif()
+
 #
 # Update cmake's `CMAKE_PREFIX_PATH` with torch location.
 #
 append_cmake_prefix_path("torch" "torch.utils.cmake_prefix_path")
-
-
-
-# Move the core logic for CPU-only builds much earlier.
-# If building for CPU, we will handle Torch finding differently and then exit.
-if (VLLM_TARGET_DEVICE STREQUAL "cpu")
-    message(STATUS "VLLM: Building for CPU. Skipping all CUDA/HIP related configuration.")
-
-    # Explicitly set CUDA_FOUND and HIP_FOUND to FALSE for CPU builds.
-    # This prevents 'find_package(Torch)' from potentially setting them based on
-    # system-wide detections or the Torch config's internal checks for CUDA components.
-    set(CUDA_FOUND FALSE CACHE INTERNAL "Force CUDA to be not found for CPU build" FORCE)
-    set(HIP_FOUND FALSE CACHE INTERNAL "Force HIP to be not found for CPU build" FORCE)
-
-    # Set VLLM_GPU_LANG to an empty string or a placeholder
-    set(VLLM_GPU_LANG "" CACHE INTERNAL "No GPU language for CPU build" FORCE)
-
-    # Now, find Torch, but with explicit instructions to not look for CUDA/HIP
-    # This might still trigger Caffe2 warnings, but it's the correct way to try.
-    # If the Caffe2 error persists here, it means the PyTorch CPU wheel's CMake
-    # config is truly stubborn.
-    find_package(Torch REQUIRED COMPONENTS Python) # Only require Python components
-
-    # Ensure the 'nvcc' command is NOT searched for or checked for CPU builds.
-    # This whole 'find_program(NVCC_EXECUTABLE nvcc)' block is now unnecessary for CPU.
-    # We will simply not define NVCC_EXECUTABLE or let it be 'NOTFOUND'.
-
-    # Include the cpu_extension.cmake directly and then return/exit this CMakeList.
-    # This ensures no further GPU-specific code is processed.
-    include(${CMAKE_CURRENT_LIST_DIR}/cmake/cpu_extension.cmake)
-
-    # After configuring for CPU, we don't need to process any GPU-specific logic.
-    # This `return()` effectively stops CMake processing this file for GPU-related sections.
-    return()
-endif()
-
-
 
 # The following blocks will ONLY be processed if VLLM_TARGET_DEVICE is NOT "cpu"
 # (i.e., it's "cuda" or "rocm" or potentially some other future GPU target)
@@ -121,41 +101,6 @@ endif()
 #
 # This find_package(Torch REQUIRED) call only happens for GPU builds now.
 find_package(Torch REQUIRED)
-
-#
-# Forward the non-CUDA device extensions to external CMake scripts.
-# This block should now logically only hit for HIP if VLLM_TARGET_DEVICE is not "cpu"
-# and also not "cuda". But your structure handles it well.
-if (VLLM_TARGET_DEVICE STREQUAL "cpu")
-    message(STATUS "VLLM: Building for CPU. Skipping all CUDA/HIP related configuration.")
-
-    # Explicitly set CUDA_FOUND and HIP_FOUND to FALSE for CPU builds.
-    # This prevents 'find_package(Torch)' from potentially setting them based on
-    # system-wide detections or the Torch config's internal checks for CUDA components.
-    set(CUDA_FOUND FALSE CACHE INTERNAL "Force CUDA to be not found for CPU build" FORCE)
-    set(HIP_FOUND FALSE CACHE INTERNAL "Force HIP to be not found for CPU build" FORCE)
-
-    # Set VLLM_GPU_LANG to an empty string or a placeholder
-    set(VLLM_GPU_LANG "" CACHE INTERNAL "No GPU language for CPU build" FORCE)
-
-    # Set environment variables to disable CUDA detection in PyTorch
-    set(ENV{USE_CUDA} OFF)
-    set(ENV{CUDA_VISIBLE_DEVICES} "")
-    
-    # Try to find Torch with CUDA explicitly disabled
-    set(CAFFE2_USE_CUDA OFF CACHE BOOL "Disable CUDA for CPU build" FORCE)
-    
-    # Now, find Torch, but with explicit instructions to not look for CUDA/HIP
-    find_package(Torch REQUIRED)
-
-    # Include the cpu_extension.cmake directly and then return/exit this CMakeList.
-    # This ensures no further GPU-specific code is processed.
-    include(${CMAKE_CURRENT_LIST_DIR}/cmake/cpu_extension.cmake)
-
-    # After configuring for CPU, we don't need to process any GPU-specific logic.
-    # This `return()` effectively stops CMake processing this file for GPU-related sections.
-    return()
-endif()
 
 #
 # Set up GPU language and check the torch version and warn if it isn't
