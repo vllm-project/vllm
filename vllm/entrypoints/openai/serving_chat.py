@@ -153,7 +153,8 @@ class OpenAIServingChat(OpenAIServing):
             (
                 lora_request,
                 prompt_adapter_request,
-            ) = self._maybe_get_adapters(request)
+            ) = self._maybe_get_adapters(request,
+                                         supports_default_mm_loras=True)
 
             model_name = self._get_model_name(request.model, lora_request)
 
