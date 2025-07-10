@@ -4116,10 +4116,9 @@ class CompilationConfig:
 
     Currently, the cudagraph mode is only used for the v1 engine.
     Note that the cudagraph logic is generally orthogonal to the 
-    compilation logic. For piecewise cudagraph, the logic is kept
-    inside the compilation. Meanwhile, the full cudagraph is captured
-    outside the compilation, and it further supports cudagraph 
-    without compilation.
+    compilation logic. While piecewise cudagraphs require piecewise 
+    compilation (level=PIECEWISE and non-empty splitting_ops), full
+    cudagraphs are supported with and without compilation.
     """
     cudagraph_num_of_warmups: int = 0
     """Number of warmup runs for cudagraph.
