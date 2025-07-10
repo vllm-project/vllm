@@ -109,13 +109,11 @@ def kernel_unified_attention_2d(
 
     offs_m = tl.arange(0, BLOCK_M)
     offs_d = tl.arange(0, HEAD_SIZE_PADDED)
-
     query_pos = q_block_local_idx * BLOCK_Q + offs_m // num_queries_per_kv
 
     query_offset_0 = cur_batch_in_all_start_index + query_pos
     query_offset_1 = kv_head_idx * num_queries_per_kv + \
         offs_m % num_queries_per_kv
-
     query_offset = (query_offset_0[:, None] * query_stride_0 +
                     query_offset_1[:, None] * query_stride_1 + offs_d[None, :])
 
@@ -160,6 +158,8 @@ def kernel_unified_attention_2d(
     offs_n = tl.arange(0, BLOCK_N)
 
     # iterate through tiles (below the mask)
+    # The loop iterates only until the longest sequence. Due to causal
+    # masking, blocks beyond this prefix can be skipped.
     for start_n in range(0, max_seq_prefix_len, BLOCK_N):
 
         start_n = tl.multiple_of(start_n, BLOCK_N)
@@ -179,7 +179,7 @@ def kernel_unified_attention_2d(
                     offs_d[:, None] * stride_k_cache_3 +
                     (offs_n[None, :] % BLOCK_SIZE) * stride_k_cache_1)
 
-        # K : (HEAD_SIZE, BLOCK_SIZE)
+        # K : (HEAD_SIZE_PADDED, BLOCK_N)
         K_load = tl.load(key_cache_ptr + k_offset,
                          mask=dim_mask[:, None],
                          other=0.0)
@@ -192,7 +192,7 @@ def kernel_unified_attention_2d(
         else:
             K = K_load
 
-        # V : (BLOCK_SIZE, HEAD_SIZE)
+        # V : (BLOCK_N, HEAD_SIZE_PADDED)
         V_load = tl.load(value_cache_ptr + v_offset,
                          mask=dim_mask[None, :],
                          other=0.0)
@@ -207,9 +207,10 @@ def kernel_unified_attention_2d(
 
         seq_offset = start_n + tl.arange(0, BLOCK_N)
 
+        # seq_mask: (BLOCK_M, BLOCK_N)
         seq_mask = seq_offset[None, :] < context_len + query_pos[:, None] + 1
 
-        # S : (BLOCK_M, BLOCK_SIZE)
+        # S : (BLOCK_M, BLOCK_N)
         S = tl.zeros(shape=(BLOCK_M, BLOCK_N), dtype=tl.float32)
 
         S += scale * tl.dot(Q, K)
@@ -234,7 +235,7 @@ def kernel_unified_attention_2d(
         # the entire row. In this case we need to set m_j 0 to avoid NaN
         m_j = tl.where(m_j > float("-inf"), m_j, 0.0)
 
-        # P : (BLOCK_M, BLOCK_SIZE)
+        # P : (BLOCK_M, BLOCK_N)
         P = tl.exp(S - m_j[:, None])
 
         # l_j : (BLOCK_M,)
@@ -608,7 +609,7 @@ def unified_attention(
     head_size = q.shape[2]
 
     BLOCK_M = 64 if max_seqlen_q > 1 else 16
-    BLOCK_Q = BLOCK_M // num_queries_per_kv  # for 3d
+    BLOCK_Q = BLOCK_M // num_queries_per_kv
 
     # Ideally we would launch with kernel with:
     # \sum_i[ceil(query_len[i] / BLOCK_Q)] blocks.
