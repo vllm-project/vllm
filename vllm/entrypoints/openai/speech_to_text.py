@@ -376,6 +376,7 @@ class OpenAISpeechToText(OpenAIServing):
         min_energy = math.inf
         quietest_idx = 0
         min_energy_window = self.asr_config.min_energy_split_window_size
+        assert min_energy_window is not None
         for i in range(0, len(segment) - min_energy_window, min_energy_window):
             window = segment[i:i + min_energy_window]
             energy = (window**2).mean()**0.5
