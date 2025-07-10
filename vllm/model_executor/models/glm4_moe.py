@@ -97,7 +97,7 @@ class Glm4MoeMLP(nn.Module):
         return x
 
 
-class Glm4MoeE(nn.Module):
+class Glm4MoE(nn.Module):
 
     def __init__(
         self,
@@ -107,20 +107,12 @@ class Glm4MoeE(nn.Module):
     ):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
-        self.config = config
-        self.num_experts = config.n_routed_experts
         self.routed_scaling_factor = config.routed_scaling_factor
-        self.norm_topk_prob = config.norm_topk_prob
         self.n_shared_experts = config.n_shared_experts
 
         if config.hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {config.hidden_act}. "
                              "Only silu is supported for now.")
-
-        if self.tp_size > self.num_experts:
-            raise ValueError(
-                f"Tensor parallel size {self.tp_size} is greater than "
-                f"the number of experts {self.num_experts}.")
 
         self.gate = ReplicatedLinear(config.hidden_size,
                                      config.n_routed_experts,
@@ -128,7 +120,7 @@ class Glm4MoeE(nn.Module):
                                      quant_config=None,
                                      prefix=f"{prefix}.gate")
 
-        # noaux_tc is not set in config now
+        # noaux_tc is not set in transformers new config now
         self.gate.e_score_correction_bias = (nn.Parameter(
             torch.empty(config.n_routed_experts)))
 
@@ -236,16 +228,19 @@ class Glm4MoeAttention(nn.Module):
             self.head_dim,
             rotary_dim=self.head_dim,
             max_position=max_position_embeddings,
+            partial_rotary_factor=0.5,
             base=rope_theta,
             rope_scaling=rope_scaling,
         )
-        self.attn = Attention(self.num_heads,
-                              self.head_dim,
-                              self.scaling,
-                              num_kv_heads=self.num_kv_heads,
-                              cache_config=cache_config,
-                              quant_config=quant_config,
-                              prefix=f"{prefix}.attn")
+        self.attn = Attention(
+            self.num_heads,
+            self.head_dim,
+            self.scaling,
+            num_kv_heads=self.num_kv_heads,
+            cache_config=cache_config,
+            quant_config=quant_config,
+            prefix=f"{prefix}.attn",
+        )
 
         if self.add_qk_norm:
             self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
@@ -259,15 +254,10 @@ class Glm4MoeAttention(nn.Module):
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         if self.add_qk_norm:
-            q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim,
-                               self.head_dim)
-            q_by_head = self.q_norm(q_by_head)
-            q = q_by_head.view(q.shape)
-
-            k_by_head = k.view(*k.shape[:-1], k.shape[-1] // self.head_dim,
-                               self.head_dim)
-            k_by_head = self.k_norm(k_by_head)
-            k = k_by_head.view(k.shape)
+            q = self.q_norm(q.reshape(-1, self.num_heads,
+                                      self.head_dim)).reshape(q.shape)
+            k = self.k_norm(k.reshape(-1, self.num_kv_heads,
+                                      self.head_dim)).reshape(k.shape)
 
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
@@ -309,9 +299,9 @@ class Glm4MoeDecoderLayer(nn.Module):
 
         if (config.n_routed_experts is not None
                 and layer_idx >= config.first_k_dense_replace):
-            self.mlp = Glm4MoeE(config=config,
-                                quant_config=quant_config,
-                                prefix=f"{prefix}.mlp")
+            self.mlp = Glm4MoE(config=config,
+                               quant_config=quant_config,
+                               prefix=f"{prefix}.mlp")
         else:
             self.mlp = Glm4MoeMLP(hidden_size=config.hidden_size,
                                   intermediate_size=config.intermediate_size,
@@ -438,10 +428,6 @@ class Glm4MoeModel(nn.Module):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
-            spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)
-            if spec_layer is not None:
-                continue  # skip spec decode layers for main model
-
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 # Skip non-stacked layers and experts (experts handled below).
                 if weight_name not in name:
@@ -589,15 +575,3 @@ class Glm4MoeForCausalLM(nn.Module, SupportsPP):
                                                    torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
-
-
-def get_spec_layer_idx_from_weight_name(config: PretrainedConfig,
-                                        weight_name: str) -> Optional[int]:
-    if hasattr(config,
-               "num_nextn_predict_layers") and (config.num_nextn_predict_layers
-                                                > 0):
-        layer_idx = config.num_hidden_layers
-        for i in range(config.num_nextn_predict_layers):
-            if weight_name.startswith(f"model.layers.{layer_idx+i}."):
-                return layer_idx + i
-    return None
