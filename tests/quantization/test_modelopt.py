@@ -24,12 +24,12 @@ def use_v0_only(monkeypatch):
 @pytest.mark.skipif(not is_quant_method_supported("modelopt"),
                     reason="ModelOpt FP8 is not supported on this GPU type.")
 def test_modelopt_fp8_checkpoint_setup(vllm_runner):
-    """Test ModelOpt FP8 checkpoint loading and internal structure validation."""
+    """Test ModelOpt FP8 checkpoint loading and structure validation."""
     # TODO: provide a small publically available test checkpoint
-    model_path = "/home/scratch.omniml_data_1/zhiyu/ckpts/test_ckpts/TinyLlama-1.1B-Chat-v1.0-fp8-0710"
+    model_path = ("/home/scratch.omniml_data_1/zhiyu/ckpts/test_ckpts/"
+                  "TinyLlama-1.1B-Chat-v1.0-fp8-0710")
 
-    with vllm_runner(model_path,
-                     quantization="modelopt",
+    with vllm_runner(model_path, quantization="modelopt",
                      enforce_eager=True) as llm:
 
         def check_model(model):
@@ -41,10 +41,12 @@ def test_modelopt_fp8_checkpoint_setup(vllm_runner):
             down_proj = layer.mlp.down_proj
 
             # Check that ModelOpt quantization method is properly applied
-            from vllm.model_executor.layers.quantization.modelopt import ModelOptFp8LinearMethod
+            from vllm.model_executor.layers.quantization.modelopt import (
+                ModelOptFp8LinearMethod)
             assert isinstance(qkv_proj.quant_method, ModelOptFp8LinearMethod)
             assert isinstance(o_proj.quant_method, ModelOptFp8LinearMethod)
-            assert isinstance(gate_up_proj.quant_method, ModelOptFp8LinearMethod)
+            assert isinstance(gate_up_proj.quant_method,
+                              ModelOptFp8LinearMethod)
             assert isinstance(down_proj.quant_method, ModelOptFp8LinearMethod)
 
             # Check weight dtype is FP8
