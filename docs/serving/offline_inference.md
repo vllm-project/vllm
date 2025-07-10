@@ -1,7 +1,4 @@
----
-title: Offline Inference
----
-[](){ #offline-inference }
+# Offline Inference
 
 Offline inference is possible in your own code using vLLM's [`LLM`][vllm.LLM] class.
 
@@ -18,13 +15,13 @@ llm = LLM(model="facebook/opt-125m")
 After initializing the `LLM` instance, use the available APIs to perform model inference.
 The available APIs depend on the model type:
 
-- [Generative models][generative-models] output logprobs which are sampled from to obtain the final output text.
-- [Pooling models][pooling-models] output their hidden states directly.
+- [Generative models](../models/generative_models.md) output logprobs which are sampled from to obtain the final output text.
+- [Pooling models](../models/pooling_models.md) output their hidden states directly.
 
 !!! info
     [API Reference][offline-inference-api]
 
-### Ray Data LLM API
+## Ray Data LLM API
 
 Ray Data LLM is an alternative offline inference API that uses vLLM as the underlying engine.
 This API adds several batteries-included capabilities that simplify large-scale, GPU-efficient inference:

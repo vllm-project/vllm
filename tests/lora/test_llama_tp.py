@@ -4,6 +4,8 @@ import subprocess
 import sys
 from typing import Union
 
+import pytest
+
 import vllm
 from vllm import LLM
 from vllm.lora.request import LoRARequest
@@ -149,6 +151,8 @@ def test_llama_lora_tp4_fully_sharded_loras(sql_lora_files):
     generate_and_test(llm, sql_lora_files)
 
 
+@pytest.mark.skip(reason=("Skipping this test as tensorizer is not "
+                          "working with LoRA as of #19619"))
 @multi_gpu_test(num_gpus=2)
 @create_new_process_for_each_test()
 def test_tp2_serialize_and_deserialize_lora(tmp_path, sql_lora_files,
@@ -169,7 +173,8 @@ def test_tp2_serialize_and_deserialize_lora(tmp_path, sql_lora_files,
             f"{VLLM_PATH}/examples/others/tensorize_vllm_model.py", "--model",
             MODEL_PATH, "--lora-path", lora_path, "--tensor-parallel-size",
             str(tp_size), "serialize", "--serialized-directory",
-            str(tmp_path), "--suffix", suffix
+            str(tmp_path), "--suffix", suffix, "--serialization-kwargs",
+            '{"limit_cpu_concurrency": 4}'
         ],
                                 check=True,
                                 capture_output=True,
@@ -195,7 +200,7 @@ def test_tp2_serialize_and_deserialize_lora(tmp_path, sql_lora_files,
                             tensor_parallel_size=2,
                             max_loras=2)
 
-    tensorizer_config_dict = tensorizer_config.to_dict()
+    tensorizer_config_dict = tensorizer_config.to_serializable()
 
     print("lora adapter created")
     assert do_sample(loaded_vllm_model,

@@ -1,7 +1,4 @@
----
-title: Using Kubernetes
----
-[](){ #deployment-k8s }
+# Using Kubernetes
 
 Deploying vLLM on Kubernetes is a scalable and efficient way to serve machine learning models. This guide walks you through deploying vLLM using native Kubernetes.
 

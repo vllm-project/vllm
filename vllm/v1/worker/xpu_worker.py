@@ -132,7 +132,7 @@ class XPUWorker(Worker):
         if self.device_config.device.type == "xpu" and current_platform.is_xpu(
         ):
             self.device = torch.device(f"xpu:{self.local_rank}")
-            torch.xpu.set_device(self.device)
+            current_platform.set_device(self.device)
             torch.xpu.empty_cache()
             self.init_gpu_memory = torch.xpu.get_device_properties(
                 self.local_rank).total_memory
@@ -148,11 +148,11 @@ class XPUWorker(Worker):
         os.environ["CCL_ATL_TRANSPORT"] = ENV_CCL_ATL_TRANSPORT
         os.environ["LOCAL_WORLD_SIZE"] = ENV_LOCAL_WORLD_SIZE
         os.environ["LOCAL_RANK"] = str(self.local_rank)
-        dist_backend = "ccl"
 
         init_worker_distributed_environment(self.vllm_config, self.rank,
                                             self.distributed_init_method,
-                                            self.local_rank, dist_backend)
+                                            self.local_rank,
+                                            current_platform.dist_backend)
 
         # global all_reduce needed for overall oneccl warm up
         torch.distributed.all_reduce(torch.zeros(1).xpu())
