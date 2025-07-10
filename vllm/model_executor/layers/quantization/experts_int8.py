@@ -190,8 +190,6 @@ class ExpertsInt8MoEMethod(FusedMoEMethodBase):
             weight_loader(param, loaded_weight, weight_name, shard_id,
                           expert_id)
 
-        # Mark as supporting MoE-specific loading to avoid expensive reflection
-        quantize_and_call_weight_loader.supports_moe_loading = True  # type: ignore[attr-defined]
         return quantize_and_call_weight_loader
 
 

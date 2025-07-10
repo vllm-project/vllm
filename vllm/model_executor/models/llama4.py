@@ -476,33 +476,28 @@ class Llama4Model(LlamaModel):
                         weight_loader = getattr(param, "weight_loader",
                                                 default_weight_loader)
 
-                        # Check if this is a MoE-specific weight loader that
-                        # needs extra arguments
-                        if hasattr(param, 'weight_loader'):
-                            # Check for MoE-specific loading support via
-                            # attribute instead of expensive runtime reflection
-                            supports_moe = getattr(weight_loader,
-                                                   'supports_moe_loading',
-                                                   False)
+                        # Check for MoE-specific loading support via
+                        # attribute instead of expensive runtime reflection
+                        supports_moe = getattr(weight_loader,
+                                               'supports_moe_loading', False)
 
-                            if supports_moe:
-                                # This is a MoE weight loader
-                                if "w13_" in name:
-                                    shard_id = "w1"
-                                elif "w2_" in name:
-                                    shard_id = "w2"
-                                else:
-                                    shard_id = "w1"
-
-                                weight_loader(param,
-                                              loaded_weight,
-                                              name,
-                                              shard_id=shard_id,
-                                              expert_id=0)
+                        if supports_moe:
+                            # This is a MoE weight loader
+                            if "w13_" in name:
+                                shard_id = "w1"
+                            elif "w2_" in name:
+                                shard_id = "w2"
                             else:
-                                # Regular weight loader
-                                weight_loader(param, loaded_weight)
+                                shard_id = "w1"
+
+                            weight_loader(param,
+                                          loaded_weight,
+                                          name,
+                                          shard_id=shard_id,
+                                          expert_id=0)
                         else:
+                            # Regular weight loader (handles both
+                            # param.weight_loader and default_weight_loader)
                             weight_loader(param, loaded_weight)
                         loaded_params.add(name)
                         continue
