@@ -78,7 +78,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         return self.max_num_tokens
 
     def topk_indices_dtype(self) -> Optional[torch.dtype]:
-        return torch.uint32
+        return torch.int32
 
     def num_dispatchers(self) -> int:
         return self.num_dispatchers_
@@ -94,13 +94,16 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         expert_map: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor],
-               Optional[torch.Tensor], Optional[torch.Tensor]]:
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor],
+               Optional[mk.ExpertTokensMetadata], Optional[torch.Tensor],
+               Optional[torch.Tensor]]:
         num_tokens = a1.size(0)  # M
         hidden_dim = a1.size(-1)  # K
 
         assert topk_ids.size(0) == num_tokens
-        # assert expert_map is None, "NYI"
+        assert expert_map is None, """with expert map, -1 id is used for
+            non-local token; this causes error when casting ids to the
+            topk_indices_dtype() uint32"""
 
         # Is this always going to be a1.device?
         device = a1.device
@@ -198,7 +201,10 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             expert_x_scale = expert_x_scale[:, :, :orig_a_scale_block_shape]
             assert expert_x_scale.ndim == 3
 
-        return expert_x, expert_x_scale, expert_num_tokens, None, None
+        expert_tokens_meta = mk.ExpertTokensMetadata(
+            expert_num_tokens=expert_num_tokens, expert_num_tokens_cpu=None)
+
+        return expert_x, expert_x_scale, expert_tokens_meta, None, None
 
     def finalize(
         self,
