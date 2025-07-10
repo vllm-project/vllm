@@ -21,7 +21,6 @@ jobs:
         echo "VLLM_TARGET_DEVICE=cpu" >> $GITHUB_ENV
         # Crucial: Tell CMake to explicitly disable CUDA usage.
         # This should override PyTorch/Caffe2's internal checks for CUDA libraries.
-        echo "VLLM_CMAKE_ARGS=-DUSE_CUDA=OFF" >> $GITHUB_ENV
     - name: Install PyTorch for CPU
       run: pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cpu
     - name: Install vLLM Build Dependencies (excluding torch and comments)

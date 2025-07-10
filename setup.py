@@ -149,6 +149,9 @@ class cmake_build_ext(build_ext):
             '-DVLLM_TARGET_DEVICE={}'.format(VLLM_TARGET_DEVICE),
         ]
 
+        if VLLM_TARGET_DEVICE == "cpu":
+            cmake_args.append("-DUSE_CUDA=OFF")
+
         verbose = envs.VERBOSE
         if verbose:
             cmake_args += ['-DCMAKE_VERBOSE_MAKEFILE=ON']
@@ -237,9 +240,6 @@ class cmake_build_ext(build_ext):
             f"-j={num_jobs}",
             *[f"--target={name}" for name in targets],
         ]
-
-        if VLLM_TARGET_DEVICE == "cpu":
-            build_args.append("-DUSE_CUDA=OFF")
 
         subprocess.check_call(["cmake", *build_args], cwd=self.build_temp)
 
