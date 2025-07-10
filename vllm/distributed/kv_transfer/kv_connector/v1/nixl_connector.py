@@ -881,7 +881,7 @@ class NixlConnectorWorker:
                     logger.info("========== transmission time: %s ==========", time.perf_counter() - start_time) 
 
             else:
-                transfers[req_id] = (new_handles, agent_name, notif_id)
+                transfers[req_id] = (new_handles, agent_name, notif_id, start_time)
 
         return done_req_ids
 
