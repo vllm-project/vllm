@@ -11,7 +11,7 @@ from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
     deep_gemm_block_shape)
 from vllm.model_executor.layers.fused_moe.fused_moe import TritonExperts
 from vllm.utils.deep_gemm import is_blackwell_deep_gemm_used
-
+from vllm.model_executor.layers.quantization.utils.mxfp4_utils import OCP_MX_Scheme
 
 class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
@@ -21,7 +21,7 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         use_int8_w8a8: bool = False,
         use_int8_w8a16: bool = False,
         use_int4_w4a16: bool = False,
-        use_mxfp4_w4a4: bool = False,
+        ocp_mx_scheme: Optional[OCP_MX_Scheme] = None,
         per_act_token_quant: bool = False,
         block_shape: Optional[list[int]] = None,
         allow_deep_gemm: bool = False,
@@ -32,7 +32,7 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
                 use_int8_w8a8=use_int8_w8a8,
                 use_int8_w8a16=use_int8_w8a16,
                 use_int4_w4a16=use_int4_w4a16,
-                use_mxfp4_w4a4=use_mxfp4_w4a4,
+                ocp_mx_scheme=ocp_mx_scheme,
                 per_act_token_quant=per_act_token_quant,
                 block_shape=block_shape,
             ))
@@ -41,7 +41,7 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
             use_int8_w8a8=use_int8_w8a8,
             use_int4_w4a16=use_int4_w4a16,
             use_int8_w8a16=use_int8_w8a16,
-            use_mxfp4_w4a4=use_mxfp4_w4a4,
+            ocp_mx_scheme=ocp_mx_scheme,
             per_act_token_quant=per_act_token_quant,
             block_shape=block_shape,
         )

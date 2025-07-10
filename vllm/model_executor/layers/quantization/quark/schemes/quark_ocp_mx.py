@@ -8,7 +8,7 @@ import torch.nn.functional as F
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.quark.schemes import QuarkScheme
-from vllm.model_executor.layers.quantization.utils.mxfp4_utils import OCP_MX_BLOCK_SIZE, quant_dequant_mxfp6, quant_dequant_mxfp4, dequant_mxfp4
+from vllm.model_executor.layers.quantization.utils.mxfp4_utils import OCP_MX_BLOCK_SIZE, quant_dequant_mxfp6, quant_dequant_mxfp4, dequant_mxfp4, OCP_MX_Scheme
 from vllm.model_executor.parameter import (GroupQuantScaleParameter,
                                            PackedvLLMParameter)
 from vllm.platforms import current_platform
@@ -30,6 +30,8 @@ class QuarkOCP_MX(QuarkScheme):
 
         self.weight_dtype = weight_quant_spec["dtype"]
         self.input_dtype = input_quant_spec["dtype"]
+
+        self.ocp_mx_scheme = OCP_MX_Scheme.from_quant_dtype(self.input_dtype, self.weight_dtype)
 
         if self.weight_dtype == "fp4":
             self.packed_factor = 2

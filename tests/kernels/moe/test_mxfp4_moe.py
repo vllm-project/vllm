@@ -47,7 +47,7 @@ def test_mxfp4_loading_and_execution_moe(vllm_runner, model_case: ModelCase):
         #     assert isinstance(qkv_proj.scheme, QuarkW4A4MXFP4)
 
         #     assert isinstance(layer.mlp.experts.quant_method,
-        #                       QuarkW4A4MXFp4MoEMethod)
+        #                       QuarkOCP_MX_MoEMethod)
 
         # if model_case.model_id == "fxmarty/qwen_1.5-moe-a2.7b-mxfp4":
         #     llm.apply_model(check_model)
