@@ -150,7 +150,6 @@ class MLPBlock(torch.nn.Module):
                                 renormalize=True,
                                 quant_config=quant_config,
                                 prefix=f"{prefix}.experts",
-                                use_triton_kernels=True,
                                 apply_router_weight_on_input=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -246,6 +245,7 @@ class OpenAIMoeForCausalLM(nn.Module):
 
         my_rank = dist.get_rank() if dist.is_initialized() else 0
         world_size = dist.get_world_size() if dist.is_initialized() else 1
+        num_experts = self.config.num_experts
         intermediate_size = self.config.intermediate_size
         per_rank_intermediate_size = intermediate_size // world_size
 
@@ -258,18 +258,19 @@ class OpenAIMoeForCausalLM(nn.Module):
         head_start = my_rank * heads_per_rank
 
         for name, weight in weights:
-            # MoE kernels needs these on GPU for shuffle, quant, and swizzling
             weight = weight.cuda()
 
-            if "mlp1_weight" in name:
+            if "mlp1_weight.blocks" in name:
                 # Handle MLP gate and up projection weights
-                new_name = name.replace("mlp1_weight", "experts.w13_weight")
+                new_name = name.replace("mlp1_weight.blocks", "experts.w13_weight")
+
+                # flat weight from (E, 2 * N, block_size, entry_per_block)
+                # to (E, 2 * N, -1), shouldn't trigger copy for contiguous
+                weight = weight.view(num_experts, 2 * intermediate_size, -1).contiguous()
 
                 # Extract gate and up projection parts
-                gate_part = weight[:, rank_start:rank_end, ...]
-                up_part = weight[:, rank_start + intermediate_size:rank_end +
-                                 intermediate_size, ...]
-                narrow_weight = torch.cat((gate_part, up_part), dim=1)
+                # since the weight is shuffled, we can slice directly
+                narrow_weight = weight[:, 2 * rank_start: 2 * rank_end, ...]
 
                 param = params_dict[new_name]
                 weight_loader = getattr(param, "weight_loader",
@@ -281,9 +282,12 @@ class OpenAIMoeForCausalLM(nn.Module):
                               expert_id=None)
                 loaded_params.add(new_name)
 
-            elif "mlp2_weight" in name:
+            elif "mlp2_weight.blocks" in name:
                 # Handle MLP down projection weights
-                new_name = name.replace("mlp2_weight", "experts.w2_weight")
+                new_name = name.replace("mlp2_weight.blocks", "experts.w2_weight")
+                # same flatten here, but since 2 mx4 value are packed in 1 uint8, 
+                # divide by 2
+                weight = weight.view(num_experts, -1, intermediate_size // 2).contiguous()
                 narrow_weight = weight[..., rank_start:rank_end]
 
                 param = params_dict[new_name]
@@ -296,15 +300,41 @@ class OpenAIMoeForCausalLM(nn.Module):
                               expert_id=None)
                 loaded_params.add(new_name)
 
+            elif "mlp1_weight.scales" in name:
+                # Handle MLP gate and up projection weights scale
+                new_name = name.replace("mlp1_weight.scales", "experts.w13_weight_scale")
+                narrow_weight = weight[:, 2 * rank_start: 2 * rank_end, ...]
+
+                param = params_dict[new_name]
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                weight_loader(param,
+                              narrow_weight,
+                              weight_name=new_name,
+                              shard_id=None,
+                              expert_id=None)
+                loaded_params.add(new_name)
+                
+            elif "mlp2_weight.scales" in name:
+                # Handle MLP down projection weights
+                new_name = name.replace("mlp2_weight.scales", "experts.w2_weight_scale")
+                narrow_weight = weight[..., rank_start:rank_end]
+
+                param = params_dict[new_name]
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                weight_loader(param,
+                              narrow_weight,
+                              weight_name=new_name,
+                              shard_id=None,
+                              expert_id=None)
+                loaded_params.add(new_name)
             elif "mlp1_bias" in name:
                 # Handle MLP gate and up projection biases
                 new_name = name.replace("mlp1_bias", "experts.w13_bias")
 
                 # Extract gate and up projection bias parts
-                gate_bias = weight[:, rank_start:rank_end]
-                up_bias = weight[:, rank_start + intermediate_size:rank_end +
-                                 intermediate_size]
-                narrow_weight = torch.cat((gate_bias, up_bias), dim=1)
+                narrow_weight = narrow_weight = weight[:, 2 * rank_start: 2 * rank_end]
 
                 param = params_dict[new_name]
                 weight_loader = getattr(param, "weight_loader",
