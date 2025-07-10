@@ -96,16 +96,22 @@ class FlashInferBackend(AttentionBackend):
         return stride_order
 
     @staticmethod
-    def use_trtllm_decode_attention(batch_size: int,
-                                    max_seq_len: int,
-                                    attn_head_size: int = 128,
-                                    kv_cache_dtype: str = "auto") -> bool:
+    def use_trtllm_decode_attention(
+        batch_size: int,
+        max_seq_len: int,
+        kv_cache_dtype: str,
+        num_qo_heads: int,
+        num_kv_heads: int,
+        attn_head_size: int,
+    ) -> bool:
         if FlashInferBackend.cached_sm100a_supported is None:
             FlashInferBackend.cached_sm100a_supported = (
                 current_platform.has_device_capability(100))
         if not FlashInferBackend.cached_sm100a_supported:
             return False
-
+        if (num_qo_heads // num_kv_heads > 8
+                or num_qo_heads % num_kv_heads != 0 or attn_head_size != 128):
+            return False
         env_value = envs.VLLM_USE_TRTLLM_DECODE_ATTENTION
         if env_value is not None:
             logger.info_once("VLLM_USE_TRTLLM_DECODE_ATTENTION is set to %s",
@@ -125,8 +131,7 @@ class FlashInferBackend(AttentionBackend):
             # Only supports attention head size of 128
             use_trtllm = (FlashInferBackend.cached_sm100a_supported
                           and batch_size <= 256 and max_seq_len < 131072
-                          and kv_cache_dtype == "auto"
-                          and attn_head_size == 128)
+                          and kv_cache_dtype == "auto")
             if use_trtllm:
                 logger.warning_once(
                     "Using TRTLLM decode attention (auto-detected).")
@@ -461,7 +466,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 attn_metadata.decode_wrapper = self._get_decode_wrapper()
                 if not FlashInferBackend.use_trtllm_decode_attention(
                         self._num_decodes, attn_metadata.max_seq_len,
-                        attn_metadata.head_dim):
+                        attn_metadata.kv_data_type, attn_metadata.head_dim,
+                        attn_metadata.num_qo_heads,
+                        attn_metadata.num_kv_heads):
                     attn_metadata.decode_wrapper.plan(
                         attn_metadata.paged_kv_indptr[:self._num_decodes + 1],
                         attn_metadata.paged_kv_indices,
@@ -747,7 +754,8 @@ class FlashInferImpl(AttentionImpl):
             assert decode_query.shape[0] == num_decode_tokens
             if not FlashInferBackend.use_trtllm_decode_attention(
                     attn_metadata.num_decodes, attn_metadata.max_seq_len,
-                    attn_metadata.head_dim, self.kv_cache_dtype):
+                    self.kv_cache_dtype, attn_metadata.num_qo_heads,
+                    attn_metadata.num_kv_heads, attn_metadata.head_dim):
                 assert decode_wrapper is not None
                 assert decode_wrapper._window_left == window_left
                 assert decode_wrapper._logits_soft_cap == (self.logits_soft_cap
