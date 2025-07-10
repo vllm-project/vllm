@@ -506,7 +506,7 @@ class HPUWorker(LocalOrDistributedWorkerBase):
             "Prompt Adapter is not implemented for HPU backend.")
 
     def shutdown(self):
-        self.model_runner.shutdown_inc()
+        getattr(self.model_runner, 'shutdown_inc', lambda: None)()
 
     @property
     def max_model_len(self) -> int:
