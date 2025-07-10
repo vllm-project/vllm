@@ -179,9 +179,12 @@ def kernel_unified_attention_2d(
                     offs_d[:, None] * stride_k_cache_3 +
                     (offs_n[None, :] % BLOCK_SIZE) * stride_k_cache_1)
 
+        seq_offset_load = start_n + offs_n
+        load_mask = seq_offset_load < max_seq_prefix_len
+
         # K : (HEAD_SIZE_PADDED, BLOCK_N)
         K_load = tl.load(key_cache_ptr + k_offset,
-                         mask=dim_mask[:, None],
+                         mask=dim_mask[:, None] & load_mask[None, :],
                          other=0.0)
 
         if K_load.dtype.is_fp8():
@@ -194,7 +197,7 @@ def kernel_unified_attention_2d(
 
         # V : (BLOCK_N, HEAD_SIZE_PADDED)
         V_load = tl.load(value_cache_ptr + v_offset,
-                         mask=dim_mask[None, :],
+                         mask=dim_mask[None, :] & load_mask[:, None],
                          other=0.0)
 
         if V_load.dtype.is_fp8():
