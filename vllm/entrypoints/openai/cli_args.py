@@ -112,11 +112,14 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
                         type=json.loads,
                         default=["*"],
                         help="Allowed headers.")
-    parser.add_argument("--api-key",
-                        type=optional_type(str),
-                        default=None,
-                        help="If provided, the server will require this key "
-                        "to be presented in the header.")
+    parser.add_argument(
+        "--api-key",
+        type=optional_type(str),
+        default=None,
+        nargs="+",
+        help="If provided, the server will require this key (or one of the "
+        "keys) to be presented in the header.",
+    )
     parser.add_argument(
         "--lora-modules",
         type=optional_type(str),
