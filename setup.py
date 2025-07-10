@@ -623,7 +623,7 @@ def get_requirements() -> list[str]:
         requirements = modified_requirements
         # Add direct dependency on TKE project for CUDA builds
         requirements.append(
-            "trtllm-kernel-export @ git+ssh://git@gitlab.com/nvidia/tensorrt-llm/private/tensorrt-llm-kernel-export.git@api_improvements"
+            "trtllm-kernel-export @ git+ssh://git@gitlab.com/nvidia/tensorrt-llm/private/tensorrt-llm-kernel-export.git"
         )
     elif _is_hip():
         requirements = _read_requirements("rocm.txt")
@@ -699,7 +699,7 @@ setup(
         "audio": ["librosa", "soundfile"],  # Required for audio processing
         "video": [],  # Kept for backwards compatibility
         "tke": [
-            "trtllm-kernel-export @ git+ssh://git@gitlab.com/nvidia/tensorrt-llm/private/tensorrt-llm-kernel-export.git@api_improvements"
+            "trtllm-kernel-export @ git+ssh://git@gitlab.com/nvidia/tensorrt-llm/private/tensorrt-llm-kernel-export.git"
         ],  # TKE project for CUDA builds
     },
     cmdclass=cmdclass,
