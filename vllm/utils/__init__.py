@@ -2636,10 +2636,10 @@ class MemorySnapshot:
 
     def measure(self):
         # we measure the torch peak memory usage via allocated_bytes,
-        # rather than `torch.cuda.memory_reserved()` .
-        # After `torch.cuda.reset_peak_memory_stats()`,
-        # `torch.cuda.memory_reserved()` will keep growing, and only shrink
-        # when we call `current_platform.empty_cache()` or OOM happens.
+        # rather than `current_platform.memory_reserved()` .
+        # After `current_platform.reset_peak_memory_stats()`,
+        # `current_platform.memory_reserved()` will keep growing, and only
+        # shrink when we call `current_platform.empty_cache()` or OOM happens.
         from vllm.platforms import current_platform
 
         self.torch_peak = current_platform.memory_stats().get(
@@ -2648,7 +2648,7 @@ class MemorySnapshot:
         self.free_memory, self.total_memory = current_platform.mem_get_info()
         self.cuda_memory = self.total_memory - self.free_memory
 
-        # torch.cuda.memory_reserved() is how many bytes
+        # current_platform.memory_reserved() is how many bytes
         # PyTorch gets from cuda (by calling cudaMalloc, etc.)
         # this is used to measure the non-torch memory usage
         self.torch_memory = current_platform.memory_reserved()
