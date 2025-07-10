@@ -99,16 +99,16 @@ Once your `CMakeUserPresets.json` is configured:
 1. **Initialize the CMake build environment:**
    This step configures the build system according to your chosen preset (e.g., `release`) and creates the build directory at `binaryDir`
 
-   ```console
-   cmake --preset release
-   ```
+    ```console
+    cmake --preset release
+    ```
 
 2. **Build and install the vLLM components:**
    This command compiles the code and installs the resulting binaries into your vLLM source directory, making them available to your editable Python installation.
 
-   ```console
-   cmake --build --preset release --target install
-   ```
+    ```console
+    cmake --build --preset release --target install
+    ```
 
 3. **Make changes and repeat!**
     Now you start using your editable install of vLLM, testing and making changes as needed. If you need to build again to update based on changes, simply run the CMake command again to build only the affected files.
