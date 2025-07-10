@@ -96,7 +96,8 @@ class CpuPlatform(Platform):
         from vllm.utils import GiB_bytes
         model_config = vllm_config.model_config
 
-        model_config.disable_cascade_attn = True
+        if model_config is not None:
+            model_config.disable_cascade_attn = True
 
         cache_config = vllm_config.cache_config
 
@@ -123,7 +124,7 @@ class CpuPlatform(Platform):
                 "CPU backend doesn't support fp8_e4m3 KV cache type, "
                 "cast to fp8_e5m2.")
 
-        if (cache_config.cache_dtype != "auto"
+        if (cache_config.cache_dtype != "auto" and model_config is not None
                 and model_config.dtype == torch.half):
             logger.warning("FP8 KV cache on the CPU backend only does not"
                            " support fp16 for now, cast to bf16.")
@@ -229,7 +230,7 @@ class CpuPlatform(Platform):
         os.environ["LOCAL_WORLD_SIZE"] = str(
             vllm_config.parallel_config.tensor_parallel_size)
 
-        if vllm_config.model_config and vllm_config.model_config.use_mla:
+        if model_config is not None and model_config.use_mla:
             logger.info(
                 "MLA is enabled on a non-GPU platform; forcing chunked "
                 "prefill and prefix caching to be disabled.")
