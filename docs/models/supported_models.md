@@ -712,6 +712,14 @@ The following table lists those that are tested in vLLM.
 
 ---
 
+#### Scoring
+
+Specified using `--task score`.
+
+| Architecture                        | Models             | Inputs   | Example HF Models        | [LoRA][lora-adapter]   | [PP][distributed-serving]   | [V1](gh-issue:8779)   |
+|-------------------------------------|--------------------|----------|--------------------------|------------------------|-----------------------------|-----------------------|
+| `JinaVLForSequenceClassification` | JinaVL-based | T + I<sup>E+</sup> | `jinaai/jina-reranker-m0`, etc. | | | ✅︎ |
+
 ## Model Support Policy
 
 At vLLM, we are committed to facilitating the integration and support of third-party models within our ecosystem. Our approach is designed to balance the need for robustness and the practical limitations of supporting a wide range of models. Here’s how we manage third-party model support:

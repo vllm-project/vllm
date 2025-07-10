@@ -181,6 +181,7 @@ _CROSS_ENCODER_MODELS = {
     "GemmaForSequenceClassification": ("gemma", "GemmaForSequenceClassification"), # noqa: E501
     "Qwen2ForSequenceClassification": ("qwen2", "Qwen2ForSequenceClassification"), # noqa: E501
     "Qwen3ForSequenceClassification": ("qwen3", "Qwen3ForSequenceClassification"), # noqa: E501
+    "JinaVLForRanking": ("jina_vl", "JinaVLForSequenceClassification"), # noqa: E501
 }
 
 _MULTIMODAL_MODELS = {
