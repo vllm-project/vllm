@@ -163,7 +163,8 @@ schema. Example: ``[{"type": "text", "text": "Hello world!"}]``"""
     tool_call_parser: Optional[str] = None
     """Select the tool call parser depending on the model that you're using. 
     This is used to parse the model-generated tool call into OpenAI API format. 
-    Required for ``--enable-auto-tool-choice``."""
+    Required for ``--enable-auto-tool-choice``. You can choose any option from 
+    the built-in parsers or register a plugin via ``--tool-parser-plugin``."""
     tool_parser_plugin: str = ""
     """Special the tool parser plugin write to parse the model-generated tool 
     into OpenAI API format, the name register in this plugin can be used in 
@@ -195,83 +196,42 @@ schema. Example: ``[{"type": "text", "text": "Hello world!"}]``"""
 
         frontend_kwargs = get_kwargs(FrontendArgs)
 
-        # These are special cases that need custom parser args since get_kwargs
-        # cannot handle them while keeping its generality.
-        valid_tool_parsers = ToolParserManager.tool_parsers.keys()
-        special_cases = {
-            # Need json.loads type
-            "allowed_origins": {
-                "type": json.loads,
-                "default": ["*"],
-                "help": frontend_kwargs["allowed_origins"]["help"]
-            },
-            "allowed_methods": {
-                "type": json.loads,
-                "default": ["*"],
-                "help": frontend_kwargs["allowed_methods"]["help"]
-            },
-            "allowed_headers": {
-                "type": json.loads,
-                "default": ["*"],
-                "help": frontend_kwargs["allowed_headers"]["help"]
-            },
-            # Special case: LoRA modules need custom parser action
-            "lora_modules": {
-                "type": optional_type(str),
-                "default": None,
-                "nargs": "+",
-                "action": LoRAParserAction,
-                "help": frontend_kwargs["lora_modules"]["help"]
-            },
-            # Special case: Prompt adapters need custom parser action
-            "prompt_adapters": {
-                "type": optional_type(str),
-                "default": None,
-                "nargs": '+',
-                "action": PromptAdapterParserAction,
-                "help": frontend_kwargs["prompt_adapters"]["help"]
-            },
-            # Special case: Middleware needs append action
-            "middleware": {
-                "action": "append",
-                **frontend_kwargs["middleware"],
-            },
-            # Special case: Tool call parser needs custom metavar
-            "tool_call_parser": {
-                "type":
-                str,
-                "metavar":
-                "{" + ",".join(valid_tool_parsers) + "} or name registered in "
-                "--tool-parser-plugin",
-                "default":
-                frontend_kwargs["tool_call_parser"]["default"],
-                "help":
-                frontend_kwargs["tool_call_parser"]["help"]
-            },
-            # Special case for expand-tools-even-if-tool-choice-none because of
-            # the deprecation field
-            "expand_tools_even_if_tool_choice_none": {
-                "deprecated": True,
-                **frontend_kwargs["expand_tools_even_if_tool_choice_none"],
-            }
-        }
+        # Special case: allowed_origins, allowed_methods, allowed_headers all
+        # need json.loads type
+        frontend_kwargs["allowed_origins"]["type"] = json.loads
+        frontend_kwargs["allowed_methods"]["type"] = json.loads
+        frontend_kwargs["allowed_headers"]["type"] = json.loads
+
+        # Special case: LoRA modules need custom parser action and
+        # optional_type(str)
+        frontend_kwargs["lora_modules"]["type"] = optional_type(str)
+        frontend_kwargs["lora_modules"]["action"] = LoRAParserAction
+
+        # Special case: Prompt adapters need custom parser action and
+        # optional_type(str)
+        frontend_kwargs["prompt_adapters"]["type"] = optional_type(str)
+        frontend_kwargs["prompt_adapters"][
+            "action"] = PromptAdapterParserAction
+
+        # Special case: Middleware needs append action
+        frontend_kwargs["middleware"]["action"] = "append"
+
+        # Special case: Tool call parser shows built-in options.
+        valid_tool_parsers = list(ToolParserManager.tool_parsers.keys())
+        frontend_kwargs["tool_call_parser"]["choices"] = valid_tool_parsers
+
+        # Special case for expand-tools-even-if-tool-choice-none because of
+        # the deprecation field
+        frontend_kwargs["expand_tools_even_if_tool_choice_none"]\
+            ["deprecated"] = True
 
         frontend_group = parser.add_argument_group(
             title="Frontend",
             description=FrontendArgs.__doc__,
         )
 
-        # Sanity assertion for special cases
-        assert all(key in frontend_kwargs for key in special_cases), \
-            "Not all special cases keys are in frontend_kwargs."
-
         for key, value in frontend_kwargs.items():
-            if key in special_cases:
-                frontend_group.add_argument(f"--{key.replace('_', '-')}",
-                                            **special_cases[key])
-            else:
-                frontend_group.add_argument(f"--{key.replace('_', '-')}",
-                                            **value)
+            frontend_group.add_argument(f"--{key.replace('_', '-')}", **value)
 
         return parser
 
