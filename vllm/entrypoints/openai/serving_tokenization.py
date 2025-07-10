@@ -181,9 +181,7 @@ class TokenizerInfo:
 
     def _get_tokenizer_config(self) -> dict[str, Any]:
         """Get tokenizer configuration directly from the tokenizer object."""
-        config = (dict(self.tokenizer.init_kwargs)
-                  if hasattr(self.tokenizer, "init_kwargs")
-                  and self.tokenizer.init_kwargs else {})
+        config = dict(getattr(self.tokenizer, "init_kwargs", None) or {})
 
         # Remove file path fields
         config.pop("vocab_file", None)
