@@ -33,7 +33,7 @@ class ScoreMultiModalParam(TypedDict, total=False):
     1. Score tasks don't need the 'role' field (user/assistant/system) that's required in chat completions
     2. Including chat-specific fields would confuse users about their purpose in scoring
     3. This is a more focused interface that only exposes what's needed for scoring
-    """
+    """ # noqa: E501
     content: Required[list[ScoreContentPartParam]]
     """The multimodal contents"""
 

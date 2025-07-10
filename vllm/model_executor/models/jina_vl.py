@@ -55,9 +55,10 @@ class JinaVLMultiModalProcessor(Qwen2VLMultiModalProcessor):
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
 
-        # NOTE: We should reverse the order of the mm_data because the query prompt is
-        # placed after the document prompt in the score template for JinaVLForRanking model,
-        # but in mm_data they are stored in the opposite order (query first, then document).
+        # NOTE: We should reverse the order of the mm_data because the
+        # query prompt is placed after the document prompt in the score
+        # template for JinaVLForRanking model, but in mm_data they are
+        # stored in the opposite order (query first, then document).
         for _, value in mm_data.items():
             value.reverse()
         return super()._call_hf_processor(prompt, mm_data, mm_kwargs,

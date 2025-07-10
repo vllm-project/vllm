@@ -1306,7 +1306,7 @@ class LLM:
         Returns:
             A list of `ScoringRequestOutput` objects containing the
             generated scores in the same order as the input prompts.
-        """
+        """ # noqa: E501
         runner_type = self.llm_engine.model_config.runner_type
         if runner_type != "pooling":
             messages = ["LLM.score() is only supported for pooling models."]
@@ -1342,7 +1342,7 @@ class LLM:
                                             ScoreMultiModalParam]):
                 if isinstance(data, dict) and "content" in data:
                     raise ValueError(
-                        f"ScoreMultiModalParam is not supported for {self.llm_engine.model_config.architectures}",
+                        f"ScoreMultiModalParam is not supported for {self.llm_engine.model_config.architecture}",  # noqa: E501
                     )
 
             check_data_type(data_1)

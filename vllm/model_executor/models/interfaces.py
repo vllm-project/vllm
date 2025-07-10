@@ -159,7 +159,7 @@ class SupportsScoreTemplate(Protocol):
     def get_score_template(cls, query: str, document: str) -> Optional[str]:
         """
         Generate a full prompt by populating the score template with query and document content.
-        """
+        """ # noqa: E501
         ...
 
     @classmethod

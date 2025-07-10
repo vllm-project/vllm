@@ -95,7 +95,16 @@ def test_model_text_text(model_name):
 
     query = ["slm markdown"]
     documents = [
-        "We present ReaderLM-v2, a compact 1.5 billion parameter language model designed for efficient web content extraction. Our model processes documents up to 512K tokens, transforming messy HTML into clean Markdown or JSON formats with high accuracy -- making it an ideal tool for grounding large language models. The models effectiveness results from two key innovations: (1) a three-stage data synthesis pipeline that generates high quality, diverse training data by iteratively drafting, refining, and critiquing web content extraction; and (2) a unified training framework combining continuous pre-training with multi-objective optimization. Intensive evaluation demonstrates that ReaderLM-v2 outperforms GPT-4o-2024-08-06 and other larger models by 15-20% on carefully curated benchmarks, particularly excelling at documents exceeding 100K tokens, while maintaining significantly lower computational requirements.",
+        """We present ReaderLM-v2, a compact 1.5 billion parameter language model designed for efficient 
+        web content extraction. Our model processes documents up to 512K tokens, transforming messy HTML 
+        into clean Markdown or JSON formats with high accuracy -- making it an ideal tool for grounding 
+        large language models. The models effectiveness results from two key innovations: (1) a three-stage 
+        data synthesis pipeline that generates high quality, diverse training data by iteratively drafting, 
+        refining, and critiquing web content extraction; and (2) a unified training framework combining 
+        continuous pre-training with multi-objective optimization. Intensive evaluation demonstrates that 
+        ReaderLM-v2 outperforms GPT-4o-2024-08-06 and other larger models by 15-20% on carefully curated 
+        benchmarks, particularly excelling at documents exceeding 100K tokens, while maintaining significantly 
+        lower computational requirements.""",  # noqa: E501
         "数据提取么？为什么不用正则啊，你用正则不就全解决了么？",
     ]
 
@@ -114,7 +123,16 @@ def test_model_image_text(model_name):
         "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/paper-11.png"
     ]
     documents = [
-        "We present ReaderLM-v2, a compact 1.5 billion parameter language model designed for efficient web content extraction. Our model processes documents up to 512K tokens, transforming messy HTML into clean Markdown or JSON formats with high accuracy -- making it an ideal tool for grounding large language models. The models effectiveness results from two key innovations: (1) a three-stage data synthesis pipeline that generates high quality, diverse training data by iteratively drafting, refining, and critiquing web content extraction; and (2) a unified training framework combining continuous pre-training with multi-objective optimization. Intensive evaluation demonstrates that ReaderLM-v2 outperforms GPT-4o-2024-08-06 and other larger models by 15-20% on carefully curated benchmarks, particularly excelling at documents exceeding 100K tokens, while maintaining significantly lower computational requirements.",
+        """We present ReaderLM-v2, a compact 1.5 billion parameter language model designed for efficient
+        web content extraction. Our model processes documents up to 512K tokens, transforming messy HTML
+        into clean Markdown or JSON formats with high accuracy -- making it an ideal tool for grounding
+        large language models. The models effectiveness results from two key innovations: (1) a three-stage
+        data synthesis pipeline that generates high quality, diverse training data by iteratively drafting,
+        refining, and critiquing web content extraction; and (2) a unified training framework combining
+        continuous pre-training with multi-objective optimization. Intensive evaluation demonstrates that
+        ReaderLM-v2 outperforms GPT-4o-2024-08-06 and other larger models by 15-20% on carefully curated
+        benchmarks, particularly excelling at documents exceeding 100K tokens, while maintaining significantly
+        lower computational requirements.""",  # noqa: E501
         "数据提取么？为什么不用正则啊，你用正则不就全解决了么？",
     ]
 
