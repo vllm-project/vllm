@@ -16,6 +16,19 @@ import vllm.envs as envs
 from vllm.utils import cuda_get_device_properties, has_deep_gemm
 
 
+@functools.cache
+def is_blackwell_deep_gemm_used() -> bool:
+    """Return ``True`` if vLLM is configured to use DeepGEMM on a
+    Blackwell-class GPU.
+    """
+
+    if not (envs.VLLM_USE_DEEP_GEMM and has_deep_gemm()
+            and _per_block_cast_impl is not None):
+        return False
+
+    return cuda_get_device_properties(0, ("major", ))[0] == 10
+
+
 def _missing(*_: Any, **__: Any) -> NoReturn:
     """Placeholder for unavailable DeepGEMM backend."""
     raise RuntimeError(
@@ -94,7 +107,8 @@ def per_token_group_cast_to_fp8(x, group_size, *args, **kwargs):
     • If DeepGEMM provides ``per_token_cast_to_fp8`` (new API), use it.
     • Otherwise, fall back to vLLM's ``per_token_group_quant_fp8``
     """
-    if _per_token_cast_impl is not None:
+
+    if _per_token_cast_impl is not None and is_blackwell_deep_gemm_used():
         assert group_size == 128, "group_size must be 128 for deepgemm"
         return _per_token_cast_impl(x)
 
@@ -104,7 +118,7 @@ def per_token_group_cast_to_fp8(x, group_size, *args, **kwargs):
 
 
 def per_block_cast_to_fp8(x, *args, **kwargs):
-    if _per_block_cast_impl is not None:
+    if _per_block_cast_impl is not None and is_blackwell_deep_gemm_used():
         return _per_block_cast_impl(x)
     # TODO: refactor the `per_block_cast_to_fp8` from tests to vllm utils
     from tests.kernels.quant_utils import per_block_cast_to_fp8 as _pbcf
@@ -116,19 +130,6 @@ def calc_diff(x: torch.Tensor, y: torch.Tensor):
     denominator = (x * x + y * y).sum()
     sim = 2 * (x * y).sum() / denominator
     return 1 - sim
-
-
-@functools.cache
-def is_blackwell_deep_gemm_used() -> bool:
-    """Return ``True`` if vLLM is configured to use DeepGEMM on a
-    Blackwell-class GPU.
-    """
-
-    if not (envs.VLLM_USE_DEEP_GEMM and has_deep_gemm()
-            and _per_block_cast_impl is not None):
-        return False
-
-    return cuda_get_device_properties(0, ("major", ))[0] == 10
 
 
 __all__ = [
