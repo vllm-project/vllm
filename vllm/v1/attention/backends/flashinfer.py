@@ -466,9 +466,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 attn_metadata.decode_wrapper = self._get_decode_wrapper()
                 if not FlashInferBackend.use_trtllm_decode_attention(
                         self._num_decodes, attn_metadata.max_seq_len,
-                        attn_metadata.kv_data_type, attn_metadata.head_dim,
-                        attn_metadata.num_qo_heads,
-                        attn_metadata.num_kv_heads):
+                        attn_metadata.kv_data_type, attn_metadata.num_qo_heads,
+                        attn_metadata.num_kv_heads, attn_metadata.head_dim):
                     attn_metadata.decode_wrapper.plan(
                         attn_metadata.paged_kv_indptr[:self._num_decodes + 1],
                         attn_metadata.paged_kv_indices,
