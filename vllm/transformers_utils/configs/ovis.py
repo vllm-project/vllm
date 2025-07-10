@@ -73,7 +73,7 @@ IMAGE_TOKEN = "<image>"
 IMAGE_ATOM_ID = -300
 IMAGE_INDICATOR_IDS = [-301, -302, -303, -304, -305]
 
-AutoConfig.register("aimv2", AIMv2Config)
+# AutoConfig.register("aimv2", AIMv2Config)
 
 
 # ----------------------------------------------------------------------

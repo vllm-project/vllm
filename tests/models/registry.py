@@ -348,6 +348,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                         trust_remote_code=True,
                                         hf_overrides={"architectures": ["GLM4VForCausalLM"]}),  # noqa: E501
     "Glm4vForConditionalGeneration": _HfExamplesInfo("THUDM/GLM-4.1V-9B-Thinking", min_transformers_version="4.53"),  # noqa: E501
+    "Glm4MoeForCausalLM": _HfExamplesInfo("/model/GLM-4-MoE-100B-A10B", min_transformers_version="4.54"),   # noqa: E501
     "H2OVLChatModel": _HfExamplesInfo("h2oai/h2ovl-mississippi-800m",
                                       extras={"2b": "h2oai/h2ovl-mississippi-2b"},  # noqa: E501
                                       max_transformers_version="4.48",  # noqa: E501
