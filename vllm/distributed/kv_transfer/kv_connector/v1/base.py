@@ -190,7 +190,9 @@ class KVConnectorBase_V1(ABC):
     ) -> tuple[Optional[set[str]], Optional[set[str]]]:
         """
         Notifies worker-side connector ids of requests that have
-        finished generating tokens.
+        finished generating tokens on the worker.
+        The scheduler process (via the MultiprocExecutor) will use this output
+        to track which workers are done.
 
         Returns:
             ids of requests that have finished asynchronous transfer
