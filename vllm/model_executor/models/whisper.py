@@ -794,9 +794,10 @@ class WhisperForConditionalGeneration(nn.Module, SupportsTranscription,
                     "audio": (audio, stt_config.sample_rate),
                 },
             },
-            "decoder_prompt": (f"<|prev|>{request_prompt}" +
-                               f"<|startoftranscript|><|{language}|>" +
-                               f"<|{task_type}|><|notimestamps|>")
+            "decoder_prompt":
+            ((f"<|prev|>{request_prompt}" if request_prompt else "") +
+             f"<|startoftranscript|><|{language}|>" +
+             f"<|{task_type}|><|notimestamps|>")
         }
         return cast(PromptType, prompt)
 

@@ -57,10 +57,10 @@ from vllm.utils import (DEFAULT_MAX_NUM_BATCHED_TOKENS,
 if TYPE_CHECKING:
     from _typeshed import DataclassInstance
     from ray.util.placement_group import PlacementGroup
-    from transformers.configuration_utils import PretrainedConfig
 
     import vllm.model_executor.layers.quantization as me_quant
     import vllm.model_executor.models as me_models
+    from transformers.configuration_utils import PretrainedConfig
     from vllm.executor.executor_base import ExecutorBase
     from vllm.model_executor.layers.quantization import QuantizationMethods
     from vllm.model_executor.layers.quantization.base_config import (
@@ -839,7 +839,7 @@ class ModelConfig:
             for task in _RUNNER_TASKS[runner_type]
         ]
         supported_tasks = set(supported_tasks_lst)
-        # TODO here
+
         if task_option == "auto":
             selected_task = next(iter(supported_tasks_lst))
 
