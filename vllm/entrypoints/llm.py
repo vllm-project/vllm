@@ -9,6 +9,7 @@ from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Optional, Union,
                     cast, overload)
 
 import cloudpickle
+import os
 import torch.nn as nn
 from pydantic import ValidationError
 from tqdm.auto import tqdm
@@ -75,6 +76,9 @@ class LLM:
         skip_tokenizer_init: If true, skip initialization of tokenizer and
             detokenizer. Expect valid prompt_token_ids and None for prompt
             from the input.
+        gpu_ids: A list of GPU device IDs or a comma-separated string to use
+            for vLLM execution. Overrides the CUDA_VISIBLE_DEVICES environment
+            variable.
         trust_remote_code: Trust remote code (e.g., from HuggingFace) when
             downloading the model and tokenizer.
         allowed_local_media_path: Allowing API requests to read local images
@@ -170,6 +174,7 @@ class LLM:
         tokenizer: Optional[str] = None,
         tokenizer_mode: TokenizerMode = "auto",
         skip_tokenizer_init: bool = False,
+        gpu_ids: Optional[Union[Sequence[int], str]] = None,
         trust_remote_code: bool = False,
         allowed_local_media_path: str = "",
         tensor_parallel_size: int = 1,
@@ -198,6 +203,13 @@ class LLM:
         if "disable_log_stats" not in kwargs:
             kwargs["disable_log_stats"] = True
 
+        # Allow specifying GPU device IDs without using CUDA_VISIBLE_DEVICES env var
+        if gpu_ids is not None:
+            # gpu_ids can be a sequence of ints or a string
+            os.environ["CUDA_VISIBLE_DEVICES"] = (
+                ",".join(map(str, gpu_ids)) if isinstance(gpu_ids, (list, tuple))
+                else str(gpu_ids)
+            )
         if "worker_cls" in kwargs:
             worker_cls = kwargs["worker_cls"]
             # if the worker_cls is not qualified string name,

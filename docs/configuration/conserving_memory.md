@@ -19,7 +19,20 @@ llm = LLM(model="ibm-granite/granite-3.1-8b-instruct",
     To ensure that vLLM initializes CUDA correctly, you should avoid calling related functions (e.g. [torch.cuda.set_device][])
     before initializing vLLM. Otherwise, you may run into an error like `RuntimeError: Cannot re-initialize CUDA in forked subprocess`.
 
-    To control which devices are used, please instead set the `CUDA_VISIBLE_DEVICES` environment variable.
+
+    To control which devices are used, you can either set the `CUDA_VISIBLE_DEVICES`
+    environment variable, pass the `gpu_ids` parameter to the [LLM] constructor,
+    or use the `--gpu-ids` option with `vllm serve`.
+
+    ```python
+    from vllm import LLM
+
+    # Use GPUs 0 and 2 for execution without setting CUDA_VISIBLE_DEVICES env var
+    llm = LLM(
+        model="your-model",
+        gpu_ids=[0, 2],
+    )
+    ```
 
 !!! note
     With tensor parallelism enabled, each process will read the whole model and split it into chunks, which makes the disk reading time even longer (proportional to the size of tensor parallelism).
