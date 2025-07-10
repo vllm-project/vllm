@@ -102,7 +102,7 @@ class PEFTHelper:
             tensorizer_config = TensorizerConfig(**tensorizer_config_dict)
             tensorizer_args = tensorizer_config._construct_tensorizer_args()
             from tensorizer.stream_io import open_stream
-            lora_config_path = os.path.join(tensorizer_config.lora_dir,
+            lora_config_path = os.path.join(tensorizer_config.tensorizer_dir,
                                             "adapter_config.json")
             with open_stream(lora_config_path,
                              mode="rb",
@@ -110,7 +110,7 @@ class PEFTHelper:
                 config = json.load(f)
 
             logger.info("Successfully deserialized LoRA config from %s",
-                        tensorizer_config.lora_dir)
+                        tensorizer_config.tensorizer_dir)
 
         else:
             with open(lora_config_path) as f:
