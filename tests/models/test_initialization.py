@@ -12,11 +12,20 @@ from vllm.utils import GiB_bytes
 from vllm.v1.core.kv_cache_utils import get_kv_cache_config
 from vllm.v1.engine.core import EngineCore as V1EngineCore
 
+from ..utils import create_new_process_for_each_test
 from .registry import HF_EXAMPLE_MODELS
 
 
 @pytest.mark.parametrize("model_arch", HF_EXAMPLE_MODELS.get_supported_archs())
+@create_new_process_for_each_test()
 def test_can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch):
+    """The reason for using create_new_process_for_each_test is to avoid 
+    the WARNING: 
+        "We must use the 'spawn' multiprocessing start method. Overriding 
+        VLLM_WORKER_MULTIPROC_METHOD to 'spawn'."
+    The spawn process causes the _initialize_kv_caches_v1 function below to 
+    become ineffective.
+    """
     model_info = HF_EXAMPLE_MODELS.get_hf_info(model_arch)
     model_info.check_available_online(on_fail="skip")
     model_info.check_transformers_version(on_fail="skip")
