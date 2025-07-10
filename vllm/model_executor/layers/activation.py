@@ -14,56 +14,49 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.utils import LazyDict
 
-from torch._dynamo import allow_in_graph
-import warnings
 
 @CustomOp.register("xielu")
-class XIELU(CustomOp):
+class XIELU(nn.Module):
     """
-    Applies the xIELU activation function
-
-    Shapes:
-        x: (num_tokens, d) or (batch_size, seq_len, d)
-        return: (num_tokens, d) or (batch_size, seq_len, d)
+    xIELU activation function for vLLM (adapted from https://arxiv.org/abs/2411.13010)
     """
-
-    def __init__(self, alpha_p_init=0.8, alpha_n_init=0.8, beta=0.5, eps=-1e-6):
+    
+    def __init__(self, alpha_p_init: float = 0.8, alpha_n_init: float = 0.8,
+                 beta: float = 0.5, eps: float = -1e-6, 
+                 with_vector_loads: bool = True) -> None:
         super().__init__()
-        self.alpha_p = nn.Parameter(torch.log(torch.exp(torch.tensor(alpha_p_init)) - 1.0).unsqueeze(0))
-        self.alpha_n = nn.Parameter(torch.log(torch.exp(torch.tensor(alpha_n_init - beta)) - 1.0).unsqueeze(0))
-        self.beta = beta
-        self.eps = torch.tensor(eps, dtype=torch.bfloat16, device='cuda')
+        # Initialize parameters with proper device placement
+        self.alpha_p = nn.Parameter(
+            torch.log(torch.exp(torch.tensor(alpha_p_init)) - 1).unsqueeze(0))
+        self.alpha_n = nn.Parameter(
+            torch.log(torch.exp(torch.tensor(alpha_n_init - beta)) - 1).unsqueeze(0))
+        self.register_buffer("beta", torch.tensor(beta))
+        self.register_buffer("eps", torch.tensor(eps, dtype=torch.float16))  # Using float16 for vLLM compatibility
+        
+        self.cuda_obj = None
+        try:
+            import xielu.ops
+            self.cuda_obj = torch.classes.xielu.XIELU()
+        except Exception as err:
+            print(f"CUDA-fused xIELU not available ({err}) - using Python implementation. "
+                  "Install with: pip install git+https://github.com/nickjbrowning/XIELU")
 
-        self._forward_method = self.forward_native
-        if current_platform.is_cuda_alike():
-            try:
-                from xielu.ops.wrappers import XIELU as XIELUCUDA
-                # Create CUDA instance without Dynamo interference first
-                self._xielu_cuda = XIELUCUDA(
-                    alpha_p=self.alpha_p,
-                    alpha_n=self.alpha_n,
-                    beta=self.beta,
-                    eps=self.eps
-                )
-                
-                # Mark the forward method as Dynamo-compatible
-                self.forward_cuda = allow_in_graph(self._xielu_cuda.forward)
-                self._forward_method = self.forward_cuda
-                
-            except Exception as e:
-                warnings.warn(f"CUDA xIELU not available: {e}")
+    def _xielu_cuda(self, x: torch.Tensor) -> torch.Tensor:
+        return self.cuda_obj.forward(x, self.alpha_p, self.alpha_n, self.beta, self.eps)
 
-    def forward_native(self, x: torch.Tensor) -> torch.Tensor:
-        alpha_p = F.softplus(self.alpha_p)
-        alpha_n = self.beta + F.softplus(self.alpha_n)
+    def _xielu_python(self, x: torch.Tensor) -> torch.Tensor:
+        alpha_p = nn.functional.softplus(self.alpha_p)
+        alpha_n = self.beta + nn.functional.softplus(self.alpha_n)
         return torch.where(
             x > 0,
-            alpha_p * x * x + self.beta * x,
-            alpha_n * torch.expm1(torch.min(x, self.eps)) - alpha_n * x + self.beta * x
+            x * (self.beta + alpha_p * x),
+            alpha_n * torch.expm1(torch.min(x, self.eps)) + ((self.beta - alpha_n) * x)
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self._forward_method(x)
+        if self.cuda_obj is not None and not torch.compiler.is_compiling():
+            return self._xielu_cuda(x)
+        return self._xielu_python(x)
 
 
 @CustomOp.register("fatrelu_and_mul")
