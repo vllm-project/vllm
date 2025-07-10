@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from vllm.transformers_utils.configs.bailing_moe import BailingMoeConfig
 from vllm.transformers_utils.configs.chatglm import ChatGLMConfig
 from vllm.transformers_utils.configs.cohere2 import Cohere2Config
 from vllm.transformers_utils.configs.dbrx import DbrxConfig
@@ -31,7 +30,6 @@ from vllm.transformers_utils.configs.telechat2 import Telechat2Config
 from vllm.transformers_utils.configs.ultravox import UltravoxConfig
 
 __all__ = [
-    "BailingMoeConfig",
     "ChatGLMConfig",
     "Cohere2Config",
     "DbrxConfig",
