@@ -108,7 +108,7 @@ def test_ngram_correctness(
      "yuhuili/EAGLE-LLaMA3.1-Instruct-8B", 1),
     ("eagle3", "meta-llama/Llama-3.1-8B-Instruct",
      "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B", 1),
-    ("eagle", "/home/zhiweiz/local/models/scout_base_HF_20250605_201140",
+    ("eagle", "meta-llama/Llama-4-Scout-17B-16E-Instruct",
      "morgendave/EAGLE-Llama-4-Scout-17B-16E-Instruct", 4),
 ],
                          ids=["llama3_eagle", "llama3_eagle3", "llama4_eagle"])
