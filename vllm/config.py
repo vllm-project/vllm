@@ -1503,7 +1503,7 @@ class ModelConfig:
 
 BlockSize = Literal[1, 8, 16, 32, 64, 128]
 CacheDType = Literal["auto", "fp8", "fp8_e4m3", "fp8_e5m2"]
-PrefixCachingHashAlgo = Literal["builtin", "sha256", "sha256_cbor"]
+PrefixCachingHashAlgo = Literal["builtin", "sha256", "sha256_cbor_64bit"]
 
 
 @config
@@ -1550,10 +1550,10 @@ class CacheConfig:
     - "builtin" is Python's built-in hash.\n
     - "sha256" is collision resistant but with certain overheads.
     This option uses Pickle for object serialization before hashing.\n
-    - "sha256_cbor" provides a reproducible, cross-language compatible hash. 
-    It serializes objects using canonical CBOR and hashes them with SHA-256. 
-    The resulting hash is truncated to 64 bits for compatibility with certain
-    vLLM components."""
+    - "sha256_cbor_64bit" provides a reproducible, cross-language compatible 
+    hash. It serializes objects using canonical CBOR and hashes them with 
+    SHA-256. The resulting hash consists of the lower 64 bits of the SHA-256
+    digest."""
     cpu_offload_gb: float = 0
     """The space in GiB to offload to CPU, per GPU. Default is 0, which means
     no offloading. Intuitively, this argument can be seen as a virtual way to

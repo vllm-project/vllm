@@ -3178,12 +3178,11 @@ def sha256(input) -> int:
                           byteorder="big")
 
 
-def sha256_cbor(input) -> int:
+def sha256_cbor_64bit(input) -> int:
     """
     Hash objects using CBOR serialization and SHA-256, then truncate to 64bits.
 
-    This option is useful for non-Python-dependent serialization and hashing,
-    while ensuring the result fits within a 64-bit unsigned integer.
+    This option is useful for non-Python-dependent serialization and hashing.
 
     Args:
         input: Object to be serialized and hashed. Supported types include
@@ -3193,13 +3192,12 @@ def sha256_cbor(input) -> int:
 
     Returns:
         An integer in the range [0, 2^64-1] representing the lower 64 bits
-        of the SHA-256 hash of the serialized input.
+        of the SHA-256 hash of the CBOR serialized input.
     """
     input_bytes = cbor2.dumps(input, canonical=True)
     full_hash = int.from_bytes(hashlib.sha256(input_bytes).digest(),
                                byteorder="big")
-    # Truncate to 64 bits for compatibility with 64-bit serializers (KVEvents)
-    # TODO: KVEvents hash type to support arbitrary length hashes
+
     return full_hash & ((1 << 64) - 1)
 
 

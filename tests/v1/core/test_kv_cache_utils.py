@@ -8,7 +8,7 @@ import torch
 from vllm.config import ModelConfig, SchedulerConfig, VllmConfig
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.sampling_params import SamplingParams
-from vllm.utils import GiB_bytes, sha256, sha256_cbor
+from vllm.utils import GiB_bytes, sha256, sha256_cbor_64bit
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 # disable yapf here as it formats differently than isort such that both fail
 # yapf: disable
@@ -79,7 +79,7 @@ def new_sliding_window_spec(block_size=16,
                              sliding_window=sliding_window)
 
 
-@pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor, hash])
+@pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor_64bit, hash])
 def test_none_hash(monkeypatch, hash_fn):
     import vllm.v1.core.kv_cache_utils
 
@@ -291,7 +291,7 @@ def test_generate_block_hash_extra_keys_cache_salt():
     assert next_mm_idx == 1
 
 
-@pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor, hash])
+@pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor_64bit, hash])
 def test_hash_block_tokens(hash_fn):
     import vllm.v1.core.kv_cache_utils
     init_none_hash(hash_fn)
@@ -308,7 +308,7 @@ def test_hash_block_tokens(hash_fn):
     assert block_hash.extra_keys == extra_keys
 
 
-@pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor, hash])
+@pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor_64bit, hash])
 def test_hash_request_tokens(hash_fn):
     import vllm.v1.core.kv_cache_utils
     init_none_hash(hash_fn)
@@ -338,7 +338,7 @@ def test_hash_request_tokens(hash_fn):
     assert block_hashes[1].extra_keys == ("hash2", )
 
 
-@pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor, hash])
+@pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor_64bit, hash])
 def test_hash_tokens_different_mm_input(hash_fn):
     init_none_hash(hash_fn)
 
@@ -367,7 +367,7 @@ def test_hash_tokens_different_mm_input(hash_fn):
     assert block_hashes1[1] != block_hashes2[1]
 
 
-@pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor, hash])
+@pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor_64bit, hash])
 def test_hash_request_tokens_no_mm_inputs(hash_fn):
     init_none_hash(hash_fn)
 
