@@ -168,7 +168,7 @@ class CudaPlatformBase(Platform):
 
         # lazy import to avoid circular import
         from vllm.config import CUDAGraphMode
-        
+
         if (envs.VLLM_ALL2ALL_BACKEND == "deepep_high_throughput"
                 and parallel_config.data_parallel_size > 1
                 and vllm_config.compilation_config.cudagraph_mode
