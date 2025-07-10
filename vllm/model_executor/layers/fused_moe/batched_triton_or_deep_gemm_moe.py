@@ -129,7 +129,7 @@ class BatchedTritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         a2_scale: Optional[torch.Tensor],
         workspace13: torch.Tensor,
         workspace2: torch.Tensor,
-        expert_num_tokens: Optional[torch.Tensor],
+        expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
     ):
         experts = (self.batched_deep_gemm_experts
                    if self.allow_deep_gemm else self.batched_triton_experts)
@@ -137,4 +137,4 @@ class BatchedTritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         experts.apply(output, hidden_states, w1, w2, topk_ids, activation,
                       global_num_experts, expert_map, w1_scale, w2_scale,
                       w1_zp, w2_zp, a1q_scale, a2_scale, workspace13,
-                      workspace2, expert_num_tokens)
+                      workspace2, expert_tokens_meta)
