@@ -786,10 +786,6 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             self._run_prefill_new_tokens = self._run_prefill_new_tokens_fi
             self._pad_v = False
         else:  # Use FlashAttention
-            # For MLA the v head dim is smaller than qk head dim so we pad out
-            # v with 0s to match the qk head dim for attention backends that do
-            # not support different headdims
-            # We don't need to pad V if we are on a hopper system with FA3
             logger.debug_once("Using FlashAttention prefill for MLA")
             self._run_prefill_context_chunk = self._run_prefill_context_chunk_fa
             self._run_prefill_new_tokens = self._run_prefill_new_tokens_fa
@@ -805,6 +801,10 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                     functools.partial(flash_attn_varlen_func,
                                     fa_version=self.vllm_flash_attn_version)
 
+            # For MLA the v head dim is smaller than qk head dim so we pad out
+            # v with 0s to match the qk head dim for attention backends that do
+            # not support different headdims
+            # We don't need to pad V if we are on a hopper system with FA3
             self._pad_v = self.vllm_flash_attn_version is None or not (
                 self.vllm_flash_attn_version == 3
                 and current_platform.get_device_capability()[0] == 9)
