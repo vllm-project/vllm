@@ -27,7 +27,6 @@ from collections.abc import Iterable
 from typing import Any, Optional, Union
 
 import torch
-import torch.nn.functional as F
 from torch import nn
 from transformers import PretrainedConfig
 
@@ -41,6 +40,7 @@ from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                QKVParallelLinear,
+                                               ReplicatedLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -95,76 +95,6 @@ class Glm4MoeMLP(nn.Module):
         return x
 
 
-class Glm4MoeTopkRouter(nn.Module):
-
-    def __init__(
-        self,
-        config: PretrainedConfig,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
-    ):
-        super().__init__()
-        self.config = config
-        self.top_k = config.num_experts_per_tok
-        self.n_routed_experts = config.n_routed_experts
-        self.routed_scaling_factor = config.routed_scaling_factor
-        self.n_group = config.n_group
-        self.topk_group = config.topk_group
-        self.norm_topk_prob = config.norm_topk_prob
-
-        self.weight = nn.Parameter(
-            torch.empty((self.n_routed_experts, config.hidden_size)))
-        self.register_buffer(
-            "e_score_correction_bias",
-            torch.zeros((self.n_routed_experts), dtype=torch.float32))
-
-    @torch.no_grad()
-    def get_topk_indices(self, scores):
-        scores_for_choice = scores.view(
-            -1,
-            self.n_routed_experts) + self.e_score_correction_bias.unsqueeze(0)
-
-        group_scores = (scores_for_choice.view(
-            -1, self.n_group,
-            self.n_routed_experts // self.n_group).topk(2,
-                                                        dim=-1)[0].sum(dim=-1))
-
-        group_idx = torch.topk(group_scores,
-                               k=self.topk_group,
-                               dim=-1,
-                               sorted=False)[1]
-        group_mask = torch.zeros_like(group_scores)
-        group_mask.scatter_(1, group_idx, 1)
-
-        score_mask = (group_mask.unsqueeze(-1).expand(
-            -1, self.n_group, self.n_routed_experts // self.n_group).reshape(
-                -1, self.n_routed_experts))
-
-        scores_for_choice = scores_for_choice.masked_fill(
-            ~score_mask.bool(), 0.0)
-        topk_indices = torch.topk(scores_for_choice,
-                                  k=self.top_k,
-                                  dim=-1,
-                                  sorted=False)[1]
-        return topk_indices
-
-    def forward(self, hidden_states):
-        hidden_states = hidden_states.view(-1, self.config.hidden_size)
-        router_logits = F.linear(hidden_states.type(torch.float32),
-                                 self.weight.type(torch.float32))
-        scores = router_logits.sigmoid()
-
-        topk_indices = self.get_topk_indices(scores)
-        topk_weights = scores.gather(1, topk_indices)
-
-        if self.norm_topk_prob:
-            denominator = topk_weights.sum(dim=-1, keepdim=True) + 1e-20
-            topk_weights /= denominator
-
-        topk_weights = topk_weights * self.routed_scaling_factor
-        return topk_indices, topk_weights
-
-
 class Glm4MoeSparseMoeBlock(nn.Module):
 
     def __init__(
@@ -178,6 +108,7 @@ class Glm4MoeSparseMoeBlock(nn.Module):
         self.config = config
         self.num_experts = config.n_routed_experts
         self.top_k = config.num_experts_per_tok
+        self.routed_scaling_factor = config.routed_scaling_factor
         self.norm_topk_prob = config.norm_topk_prob
 
         if self.tp_size > self.num_experts:
@@ -185,18 +116,29 @@ class Glm4MoeSparseMoeBlock(nn.Module):
                 f"Tensor parallel size {self.tp_size} is greater than "
                 f"the number of experts {self.num_experts}.")
 
-        self.gate = Glm4MoeTopkRouter(config=config,
-                                      quant_config=quant_config,
-                                      prefix=f"{prefix}.gate")
+        self.gate = ReplicatedLinear(config.hidden_size,
+                                     config.n_routed_experts,
+                                     bias=False,
+                                     quant_config=None,
+                                     prefix=f"{prefix}.gate")
 
-        self.experts = FusedMoE(num_experts=self.num_experts,
-                                top_k=self.top_k,
-                                hidden_size=config.hidden_size,
-                                intermediate_size=config.moe_intermediate_size,
-                                reduce_results=False,
-                                renormalize=self.norm_topk_prob,
-                                quant_config=quant_config,
-                                prefix=f"{prefix}.experts")
+        self.gate.e_score_correction_bias = nn.Parameter(
+            torch.zeros(config.n_routed_experts, dtype=torch.float32))
+
+        self.experts = FusedMoE(
+            num_experts=self.num_experts,
+            top_k=self.top_k,
+            hidden_size=config.hidden_size,
+            intermediate_size=config.moe_intermediate_size,
+            reduce_results=False,
+            renormalize=self.norm_topk_prob,
+            quant_config=quant_config,
+            use_grouped_topk=True,
+            num_expert_group=config.n_group,
+            topk_group=config.topk_group,
+            prefix=f"{prefix}.experts",
+            scoring_func=getattr(config, 'scoring_func', 'sigmoid'),
+            e_score_correction_bias=self.gate.e_score_correction_bias)
 
         self.shared_experts = Glm4MoeMLP(
             hidden_size=config.hidden_size,
@@ -208,31 +150,25 @@ class Glm4MoeSparseMoeBlock(nn.Module):
             prefix=f"{prefix}.shared_experts")
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-
-        residuals = hidden_states
-        orig_shape = hidden_states.shape
-        hidden_dim = hidden_states.shape[-1]
+        num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
-        topk_indices, topk_weights = self.gate(hidden_states)
-        batch_size = hidden_states.shape[0]
-        router_logits = torch.zeros(batch_size,
-                                    self.num_experts,
-                                    device=hidden_states.device,
-                                    dtype=hidden_states.dtype)
 
-        for i in range(batch_size):
-            router_logits[i, topk_indices[i]] = topk_weights[i]
-        routed_output = self.experts(hidden_states=hidden_states,
-                                     router_logits=router_logits)
+        shared_output = self.shared_experts(hidden_states)
+
+        # router_logits: (num_tokens, n_experts)
+        router_logits, _ = self.gate(hidden_states)
+
+        routed_output = self.experts(
+            hidden_states=hidden_states,
+            router_logits=router_logits) * self.routed_scaling_factor
 
         if self.tp_size > 1:
             routed_output = self.experts.maybe_all_reduce_tensor_model_parallel(
                 routed_output)
 
-        shared_output = self.shared_experts(residuals.view(-1, hidden_dim))
         final_output = routed_output + shared_output
 
-        return final_output.view(orig_shape)
+        return final_output.view(num_tokens, hidden_dim)
 
 
 class Glm4MoeAttention(nn.Module):
@@ -317,7 +253,7 @@ class Glm4MoeAttention(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-
+        # Add qk-norm
         if self.add_qk_norm:
             q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim,
                                self.head_dim)
@@ -367,6 +303,7 @@ class Glm4MoeDecoderLayer(nn.Module):
             prefix=f"{prefix}.self_attn",
         )
 
+        # `mlp_only_layers` in the config.
         layer_idx = extract_layer_index(prefix)
         if layer_idx >= getattr(config, "first_k_dense_replace", 1):
             self.mlp = Glm4MoeSparseMoeBlock(config=config,
@@ -390,6 +327,7 @@ class Glm4MoeDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         residual: Optional[torch.Tensor],
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        # Self Attention
         if residual is None:
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
@@ -402,6 +340,7 @@ class Glm4MoeDecoderLayer(nn.Module):
             hidden_states=hidden_states,
         )
 
+        # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
@@ -555,8 +494,10 @@ class Glm4MoeModel(nn.Module):
                         if weight_name not in name:
                             continue
                         name = name.replace(weight_name, param_name)
+                        # Skip layers on other devices.
                         if is_pp_missing_parameter(name, self):
                             continue
+                        # Skip loading extra parameters for GPTQ/modelopt models.
                         if name.endswith(
                                 ignore_suffixes) and name not in params_dict:
                             continue
@@ -573,15 +514,14 @@ class Glm4MoeModel(nn.Module):
                         loaded_params.add(name)
                         break
                 else:
-                    # Handle other parameters
+                    # Skip loading extra parameters for GPTQ/modelopt models.
                     if name.endswith(
                             ignore_suffixes) and name not in params_dict:
                         continue
                     # Skip layers on other devices.
                     if is_pp_missing_parameter(name, self):
                         continue
-
-                    # Remapping for FP8 kv-scale
+                    # Remapping the name of FP8 kv-scale.
                     if name.endswith("kv_scale"):
                         remapped_kv_scale_name = name.replace(
                             ".kv_scale", ".attn.kv_scale")
