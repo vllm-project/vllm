@@ -129,6 +129,15 @@ class FlashInferBackend(AttentionBackend):
                     "accurate results.")
         return FlashInferBackend.cached_use_trtllm
 
+    @staticmethod
+    def get_fp8_dtype_for_flashinfer(kv_cache_dtype: str) -> torch.dtype:
+        if kv_cache_dtype in ("fp8", "fp8_e4m3"):
+            return torch.float8_e4m3fn
+        elif kv_cache_dtype == "fp8_e5m2":
+            return torch.float8_e5m2
+        else:
+            raise ValueError(f"Unrecognized FP8 dtype: {kv_cache_dtype}")
+
 
 @dataclass
 class PerLayerParameters:
@@ -380,6 +389,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         if self.global_hyperparameters is None:
             self.global_hyperparameters = infer_global_hyperparameters(
                 get_per_layer_parameters(self.vllm_config))
+        if attn_metadata.kv_data_type == torch.uint8:
+            attn_metadata.kv_data_type = torch.float8_e4m3fn
         if attn_metadata.use_cascade:
             attn_metadata.cascade_wrapper = self._get_cascade_wrapper()
             attn_metadata.cascade_wrapper.plan(
@@ -405,6 +416,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 window_left=self.global_hyperparameters.window_left,
                 logits_soft_cap=self.global_hyperparameters.logits_soft_cap,
                 q_data_type=attn_metadata.q_data_type,
+                kv_data_type=attn_metadata.kv_data_type,
             )
         else:
             # Regular attention (common case).
@@ -677,6 +689,13 @@ class FlashInferImpl(AttentionImpl):
                 layer._k_scale,
                 layer._v_scale,
             )
+
+            # The FlashInfer api requires data to be in fp8_e4m3 or fp8_e5m2
+            # to process the cache when the kv_cache_dtype is fp8
+            if self.kv_cache_dtype.startswith("fp8"):
+                torch_dtype = FlashInferBackend.get_fp8_dtype_for_flashinfer(
+                    self.kv_cache_dtype)
+                kv_cache = kv_cache.view(torch_dtype)
 
         window_left = (self.sliding_window[0]
                        if self.sliding_window is not None else -1)
