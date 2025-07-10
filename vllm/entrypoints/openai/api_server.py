@@ -1064,8 +1064,8 @@ async def invocations(raw_request: Request):
             continue
     else:
         type_names = [
-            t.__name__ if isinstance(t, type) else str(t)
-            for t in valid_endpoints
+            t.__name__ if isinstance(t := validator._type, type) else str(t)
+            for validator in valid_endpoints
         ]
         msg = ("Cannot find suitable handler for request. "
                f"Expected one of: {type_names}")
