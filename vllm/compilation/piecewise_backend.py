@@ -2,18 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import dataclasses
-from typing import Any, Callable, Optional
+from typing import Any, Callable
 
 import torch.fx as fx
 
 import vllm.envs as envs
 from vllm.compilation.backends import VllmBackend
 from vllm.compilation.monitor import end_monitoring_torch_compile
-from vllm.config import CUDAGraphRuntimeStyle, VllmConfig
+from vllm.config import VllmConfig
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
-from vllm.utils import resolve_obj_by_qualname
 
 logger = init_logger(__name__)
 
@@ -70,7 +68,7 @@ class PiecewiseBackend:
         # to_be_compiled_sizes tracks the remaining sizes to compile,
         # and updates during the compilation process, so we need to copy it
         self.to_be_compiled_sizes: set[int] = self.compile_sizes.copy()
-        
+
         # We only keep compilation management inside this class directly.
         for shape in self.compile_sizes:
             self.concrete_size_entries[shape] = ConcreteSizeEntry(

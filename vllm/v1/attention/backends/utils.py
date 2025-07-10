@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import abc
+import enum
 import functools
 from abc import abstractmethod
 from dataclasses import dataclass
-import enum
-from typing import TYPE_CHECKING, ClassVar, Generic, Optional, TypeVar
+from typing import TYPE_CHECKING, ClassVar, Generic, TypeVar
 
 import numpy as np
 import torch

@@ -6,7 +6,7 @@ import gc
 import time
 import weakref
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any, Literal, Optional, Union
+from typing import TYPE_CHECKING, Any, Optional, Union
 
 import numpy as np
 import torch
@@ -19,7 +19,6 @@ from vllm.attention import AttentionType, get_attn_backend
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.attention.layer import Attention
 from vllm.compilation.counter import compilation_counter
-from vllm.compilation.cuda_graph import CUDAGraphWrapper
 from vllm.config import (CompilationLevel, CUDAGraphMode,
                          CUDAGraphRuntimeStyle, VllmConfig,
                          get_layers_from_vllm_config)
@@ -53,6 +52,7 @@ from vllm.v1.attention.backends.utils import (AttentionCGSupport,
                                               AttentionMetadataBuilder,
                                               CommonAttentionMetadata)
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
+from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.v1.kv_cache_interface import (AttentionSpec, FullAttentionSpec,
                                         KVCacheConfig, KVCacheSpec, MambaSpec,
                                         SlidingWindowSpec)
@@ -70,7 +70,6 @@ from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.block_table import BlockTable
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
-from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 
 from ..sample.logits_processor import LogitsProcessorManager
 from .utils import (gather_mm_placeholders, initialize_kv_cache_for_kv_sharing,
@@ -89,7 +88,6 @@ else:
         "xgrammar.kernels.apply_token_bitmask_inplace_torch_compile")
 
 logger = init_logger(__name__)
-
 
 
 class GPUModelRunner(LoRAModelRunnerMixin):
@@ -327,7 +325,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.capture_mixed_batches = True
         self.no_compilation = self.compilation_config.level != \
             CompilationLevel.PIECEWISE or self.model_config.enforce_eager
-        
+
         # Cudagraph dispatcher for runtime cudagraph dispatching.
         self.cudagraph_dispatcher = CudagraphDispatcher(self, self.vllm_config)
 
@@ -1387,9 +1385,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 cudagraph_runtime_style=cudagraph_runtime_style):
             self.maybe_setup_kv_connector(scheduler_output)
 
-            model = self.cudagraph_dispatcher.dispatch(
-                cudagraph_runtime_style,
-                is_pure_decode)
+            model = self.cudagraph_dispatcher.dispatch(cudagraph_runtime_style,
+                                                       is_pure_decode)
 
             model_output = model(
                 input_ids=input_ids,
@@ -1993,7 +1990,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def _dummy_run(
         self,
         num_tokens: int,
-        cudagraph_runtime_style: CUDAGraphRuntimeStyle = CUDAGraphRuntimeStyle.NONE, # noqa
+        cudagraph_runtime_style: CUDAGraphRuntimeStyle = (
+            CUDAGraphRuntimeStyle.NONE),
         is_pure_decode: bool = False,
         skip_eplb: bool = False,
         is_profile: bool = False,
@@ -2026,7 +2024,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         max_query_len = 1 if is_pure_decode else num_tokens
 
         attn_metadata: Optional[dict[str, Any]] = None
-        
 
         if cudagraph_runtime_style == CUDAGraphRuntimeStyle.FULL:
             attn_metadata = {}
@@ -2046,7 +2043,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_actual_tokens=num_tokens,
                 max_query_len=max_query_len,
             )
-            
+
             for kv_cache_group_id, kv_cache_group_spec in enumerate(
                     self.kv_cache_config.kv_cache_groups):
 
@@ -2373,10 +2370,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     for _ in range(
                             self.compilation_config.cudagraph_num_of_warmups):
                         # use CUDAGraphRuntimeStyle.NONE (default) for warmup
-                        self._dummy_run(
-                            num_tokens,
-                            is_pure_decode=False,
-                            skip_eplb=True)
+                        self._dummy_run(num_tokens,
+                                        is_pure_decode=False,
+                                        skip_eplb=True)
                     self._dummy_run(
                         num_tokens,
                         cudagraph_runtime_style=cudagraph_runtime_style,
@@ -2477,8 +2473,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     assert attn_cg in [
                         AttentionCGSupport.ALWAYS_UNIFIED,
                         AttentionCGSupport.ALWAYS_SEPARATE,
-                    ], (
-                        f"Full CUDAGraph not supported for "
+                    ], (f"Full CUDAGraph not supported for "
                         f"{attn_backend_i.__name__} with "
                         f"CompilationConfig.splitting_ops = []. "
                         f"Set it to None (default values) "

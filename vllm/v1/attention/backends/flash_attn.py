@@ -22,7 +22,7 @@ if is_flash_attn_varlen_func_available():
                                                get_scheduler_metadata,
                                                reshape_and_cache_flash)
 
-from vllm.config import VllmConfig, get_layers_from_vllm_config, CUDAGraphMode
+from vllm.config import CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
 from vllm.utils import cdiv
 from vllm.v1.attention.backends.utils import (
@@ -155,7 +155,7 @@ def _get_sliding_window_configs(
 
 
 class FlashAttentionMetadataBuilder(
-        AttentionMetadataBuilder[FlashAttentionMetadata]): 
+        AttentionMetadataBuilder[FlashAttentionMetadata]):
     # FA2 launches separte routines for prefill-decode and pure decode batches,
     # while FA3 launches a unified varlen fwd kernel for both prefill-decode
     # and pure decode batches.
@@ -180,7 +180,7 @@ class FlashAttentionMetadataBuilder(
 
         self.max_num_splits = 0  # No upper bound on the number of splits.
         self.aot_schedule = (get_flash_attn_version() == 3)
-        
+
         self.use_full_cuda_graph = (
             compilation_config.cudagraph_mode == CUDAGraphMode.FULL)
 
@@ -348,7 +348,7 @@ class FlashAttentionMetadataBuilder(
             # output buffer.
             self.scheduler_metadata[n:] = 0
             scheduler_metadata = self.scheduler_metadata[:n]
-        
+
             if num_actual_tokens <= self.max_cudagraph_size:
                 # NOTE(woosuk): Setting num_splits > 1 may increase the memory
                 # usage, because the intermediate buffers of size [num_splits,

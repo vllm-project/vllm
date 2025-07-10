@@ -13,8 +13,8 @@ from vllm.compilation.counter import compilation_counter
 from vllm.config import CUDAGraphRuntimeStyle, VllmConfig
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
-from vllm.utils import weak_ref_tensors
 from vllm.platforms import current_platform
+from vllm.utils import weak_ref_tensors
 
 logger = init_logger(__name__)
 
@@ -27,7 +27,7 @@ class CUDAGraphEntry:
 
     # for cudagraph debugging, track the input addresses
     # during capture, and check if they are the same during replay
-    input_addresses: Optional[list[int]] = None  
+    input_addresses: Optional[list[int]] = None
 
 
 @dataclasses.dataclass
@@ -35,7 +35,7 @@ class CUDAGraphOptions:
     debug_log_enable: bool = True
     gc_disable: bool = False
     weak_ref_output: bool = True
-    usage_str: Optional[str] = None # For debug logging only
+    usage_str: Optional[str] = None  # For debug logging only
 
 
 class CUDAGraphWrapper:
@@ -48,7 +48,7 @@ class CUDAGraphWrapper:
                  runnable: Callable,
                  vllm_config: VllmConfig,
                  runtime_style: CUDAGraphRuntimeStyle,
-                 graph_pool: Any = current_platform.get_global_graph_pool(),
+                 graph_pool: Any = None,
                  cudagraph_options: Optional[CUDAGraphOptions] = None):
         self.runnable = runnable
         self.vllm_config = vllm_config
@@ -62,12 +62,13 @@ class CUDAGraphWrapper:
         # assert runtime_style is not NONE(no cudagraph), otherwise, we don't
         # need to initialize a CUDAGraphWrapper.
         assert self.runtime_style != CUDAGraphRuntimeStyle.NONE
-        assert self.graph_pool is not None
+        if self.graph_pool is None:
+            self.graph_pool = current_platform.get_default_cudagraph_pool()
 
         if cudagraph_options is None:
             cudagraph_options = CUDAGraphOptions()
         self.cudagraph_options = cudagraph_options
-        
+
         self.cudagraph_capture_sizes: set[int] = set(
             self.compilation_config.cudagraph_capture_sizes)
         # the entries for different shapes that we need to capture cudagraph

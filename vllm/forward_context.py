@@ -112,14 +112,13 @@ def get_forward_context() -> ForwardContext:
 
 
 @contextmanager
-def set_forward_context(
-    attn_metadata: Any,
-    vllm_config: VllmConfig,
-    virtual_engine: int = 0,
-    num_tokens: Optional[int] = None,
-    num_tokens_across_dp: Optional[torch.Tensor] = None,
-    cudagraph_runtime_style: CUDAGraphRuntimeStyle = CUDAGraphRuntimeStyle.NONE,
-):
+def set_forward_context(attn_metadata: Any,
+                        vllm_config: VllmConfig,
+                        virtual_engine: int = 0,
+                        num_tokens: Optional[int] = None,
+                        num_tokens_across_dp: Optional[torch.Tensor] = None,
+                        cudagraph_runtime_style: CUDAGraphRuntimeStyle = (
+                            CUDAGraphRuntimeStyle.NONE)):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
     Here we can inject common logic for every model forward pass.

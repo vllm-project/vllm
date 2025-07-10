@@ -3922,7 +3922,7 @@ class CompilationLevel:
 
 
 class CUDAGraphMode(enum.Enum):
-    # constants for the config of the cudagraph mode. 
+    # constants for the config of the cudagraph mode.
     NONE = 0
     PIECEWISE = 1
     FULL = 2
@@ -4094,8 +4094,8 @@ class CompilationConfig:
 
     # CudaGraph compilation
     cudagraph_mode: CUDAGraphMode = field(
-        default_factory=lambda: CUDAGraphMode.PIECEWISE if envs.VLLM_USE_V1
-            else CUDAGraphMode.NONE)
+        default_factory=lambda: CUDAGraphMode.PIECEWISE
+        if envs.VLLM_USE_V1 else CUDAGraphMode.NONE)
     """
     The mode of the cudagraph.
     - NONE, no cudagraph capture.

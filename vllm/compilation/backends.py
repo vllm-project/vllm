@@ -15,8 +15,8 @@ import torch.fx as fx
 from torch._dispatch.python import enable_python_dispatcher
 
 import vllm.envs as envs
-from vllm.config import (CompilationConfig, VllmConfig, CUDAGraphMode,
-                         CUDAGraphRuntimeStyle)
+from vllm.config import (CompilationConfig, CUDAGraphMode,
+                         CUDAGraphRuntimeStyle, VllmConfig)
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils import is_torch_equal_or_newer, resolve_obj_by_qualname
@@ -277,7 +277,6 @@ def split_graph(graph: fx.GraphModule,
     return split_gm, outputs
 
 
-
 compilation_start_time = 0.0
 
 
@@ -338,20 +337,20 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
                 num_graphs=len(self.compile_submod_names),
                 runtime_shape=None)
             # Lazy import here to avoid circular import
-            from .piecewise_backend import PiecewiseBackend
             from .cuda_graph import CUDAGraphOptions
-            
+            from .piecewise_backend import PiecewiseBackend
+
             piecewise_backend = PiecewiseBackend(
                 submod, self.vllm_config, index,
                 len(self.compile_submod_names), sym_shape_indices,
-                compiled_graph_for_general_shape, self.vllm_backend)
-            
+                compiled_graph_for_dynamic_shape, self.vllm_backend)
+
             if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
                 # resolve the static graph wrapper class (e.g. CUDAGraphWrapper
                 # class) as platform dependent.
                 static_graph_wrapper_class = resolve_obj_by_qualname(
                     current_platform.get_static_graph_wrapper_cls())
-                
+
                 # Always assign PIECEWISE runtime style to the
                 # CUDAGraphWrapper for piecewise_backend, to distinguish
                 # it from the FULL cudagraph runtime style, no matter it
@@ -361,12 +360,11 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
                     self.vllm_config,
                     CUDAGraphRuntimeStyle.PIECEWISE,
                     self.graph_pool,
-                    cudagraph_options = CUDAGraphOptions(
+                    cudagraph_options=CUDAGraphOptions(
                         debug_log_enable=piecewise_backend.is_first_graph,
                         gc_disable=not piecewise_backend.is_first_graph,
                         weak_ref_output=piecewise_backend.is_last_graph,
-                        usage_str="piecewise"
-                    ))
+                        usage_str="piecewise"))
             else:
                 self.module.__dict__[target] = piecewise_backend
 

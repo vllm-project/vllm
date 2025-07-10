@@ -521,7 +521,7 @@ class Platform:
             logger.warning("Current platform %s does not have '%s'" \
             " attribute.", self.device_type, key)
             return None
-        
+
     def get_global_graph_pool(self) -> Any:
         """
         Return the global graph pool for the this platform.

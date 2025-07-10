@@ -237,8 +237,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self._decode_wrapper = None  # Wrapper for decode (general shape)
 
         compilation_config = self.vllm_config.compilation_config
-        self.enable_cuda_graph = (compilation_config.cudagraph_mode ==
-                                  CUDAGraphMode.FULL)
+        self.enable_cuda_graph = (
+            compilation_config.cudagraph_mode == CUDAGraphMode.FULL)
         if self.enable_cuda_graph:
             # For full cudagraph capture, one `decode_wrapper` for each batch
             # size is needed for FlashInfer.
