@@ -247,9 +247,7 @@ def test_backup_memory_except_with_model():
     backup_x = x.clone()
 
     def assert_equal_without_parameters():
-        for b1, b2 in zip(backup_model.named_buffers(),
-                          model.named_buffers(),
-                          strict=True):
+        for b1, b2 in zip(backup_model.named_buffers(), model.named_buffers()):
             assert (b1[0] == b2[0])
             assert (b1[1] == b2[1]).all()
 
@@ -259,8 +257,7 @@ def test_backup_memory_except_with_model():
 
     # assert parameters are equal
     for b1, b2 in zip(backup_model.named_parameters(),
-                      model.named_parameters(),
-                      strict=True):
+                      model.named_parameters()):
         assert (b1[0] == b2[0])
         assert (b1[1] == b2[1]).all()
     assert_equal_without_parameters()

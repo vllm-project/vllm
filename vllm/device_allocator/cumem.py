@@ -12,7 +12,7 @@ import dataclasses
 import gc
 import os
 from contextlib import contextmanager
-from typing import Any, Callable, Dict, Optional, Tuple, Union, List, NamedTuple
+from typing import Any, Callable, NamedTuple, Optional, Union
 
 import torch
 
@@ -78,7 +78,7 @@ class AllocationData:
     handle: HandleType
     tag: str
     cpu_backup_tensor: Optional[torch.Tensor] = None
-    backup_intervals: Optional[List[Interval]] = None
+    backup_intervals: Optional[list[Interval]] = None
 
 
 def create_and_map(allocation_handle: HandleType) -> None:
@@ -111,8 +111,8 @@ def use_memory_pool_with_allocator(
 
 
 def calc_interval_difference(
-        outer_intervals: List[Interval],
-        inner_intervals: List[Interval]) -> List[Tuple[int, List[Interval]]]:
+        outer_intervals: list[Interval],
+        inner_intervals: list[Interval]) -> list[tuple[int, list[Interval]]]:
     """
     :param outer_intervals: list of intervals, musted be sorted
     :param inner_intervals: list of intervals, musted be sorted
@@ -121,15 +121,16 @@ def calc_interval_difference(
     outer_intervals = sorted(outer_intervals)
     inner_intervals = sorted(inner_intervals)
     i = 0
-    outer_diff_intervals: List[(int, List[Interval])] = []
+    outer_diff_intervals: list[tuple[int, list[Interval]]] = []
     for ptr, size, _ in outer_intervals:
-        backup_intervals: List[Interval] = []
+        backup_intervals: list[Interval] = []
         last_offset = ptr
         while i < len(inner_intervals) and inner_intervals[i].ptr < ptr + size:
             _ptr, _size, _name = inner_intervals[i]
             assert _ptr >= ptr and _ptr + _size <= ptr + size, \
                 f"tensor {_name} is not fully covered by allocator, " \
-                f"tensor addrs: ({_ptr}, {_size}), allocator addrs: ({ptr}, {size})"
+                f"tensor addrs: ({_ptr=}, {_size=}), " \
+                f"allocator addrs: ({ptr=}, {size=})"
             diff = _ptr - last_offset
             if diff > 0:
                 backup_intervals.append(Interval(last_offset, diff))
@@ -212,17 +213,19 @@ class CuMemAllocator:
 
     def backup_memory_except(
             self,
-            named_tensors: List[Tuple[str, torch.Tensor]],
-            tags: Optional[Union[Tuple[str, ...], str]] = None) -> None:
+            named_tensors: list[tuple[str, torch.Tensor]],
+            tags: Optional[Union[tuple[str, ...], str]] = None) -> None:
         """
         Found all mem addresses from self.pointer_to_data which matches tags,
-        and backup the difference mem addresses except the ones in named_tensors.
-        The mem addresses in named_tensors should be all involved in the memory from tags.
-        After backup, the memory of the named_tensors will be discarded when calling sleep level=2
-        buf the difference mem fragments will be backuped and restored when calling wake_up.
-        This is useful for the case when we do not want to backup all the memory from tags,
-        e.g. sleep level 2 will use this feature to only backup the difference mem fragments
-        and discard the model parameters since they will be updated in the next step.
+        backup the difference mem addresses except the ones in named_tensors.
+        The mem addresses in named_tensors should be all involved in the memory
+        from tags. After backup, the memory of the named_tensors will be
+        discarded when calling sleep level=2 but the difference mem fragments
+        will be backuped and restored when calling wake_up. This is useful for
+        the case when we do not want to backup all the memory from tags,
+        e.g. sleep level 2 will use this feature to only backup the difference
+        mem fragments and discard the model parameters since they will be
+        updated in the next step.
         """
         if tags is None:
             # by default, allocated tensors's fragments will be backup
