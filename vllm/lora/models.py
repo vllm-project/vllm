@@ -7,6 +7,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional, Union
 
+import numpy as np
 import regex as re
 import safetensors.torch
 import torch
@@ -36,6 +37,8 @@ from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.utils import PPMissingLayer, WeightsMapper
 from vllm.model_executor.utils import get_packed_modules_mapping
 from vllm.utils import is_pin_memory_available
+from vllm.model_executor.layers.linear import LinearBase
+
 
 logger = init_logger(__name__)
 
@@ -382,6 +385,7 @@ class LoRAModelManager(AdapterModelManager):
         self._create_lora_modules()
         self.model.lora_manager = self
         self.adapter_type = 'LoRA'
+        self._post_reduction_lora_mapping: Optional[LoRAMapping] = None
 
     @property
     def capacity(self) -> int:
@@ -491,12 +495,9 @@ class LoRAModelManager(AdapterModelManager):
                 continue
             if not self._match_target_modules(module_name):
                 continue
-            # A temporary approach for multimodal models to support LoRA
-            # TODO: Remove this restriction
-            if self._filter_unsupported_mm_module(module_name):
+            if self._filter_unsupported_mm_module(module_name, module):
                 logger.warning(
-                    "Regarding multimodal models, vLLM currently only supports "
-                    "adding LoRA to language model, %s will be ignored.",
+                    "vLLM only supports LoRA for Linear layers, %s will be ignored.",
                     module_name,
                 )
                 continue
@@ -540,7 +541,52 @@ class LoRAModelManager(AdapterModelManager):
 
     def register_module(self, module_name: str, module: "BaseLayerWithLoRA"):
         assert isinstance(module, BaseLayerWithLoRA)
+        if (self.supports_mm and 
+            module_name == self.model.get_vision_token_reducer_layer() and 
+            self.model.get_vision_token_reduction_factor() > 1):
+            module.register_forward_pre_hook(self._on_vision_token_reduction_pre_hook)
         self.modules[module_name] = module
+
+    def prepare_for_vision_token_reduction(
+        self,
+        lora_mapping: LoRAMapping,
+        num_vision_tokens_pre_reduction: list[int],
+    ):
+        """
+        Pre-computes and stores the LoRA mapping that will be needed after token reduction. 
+        This method should be called from the model runner before the vision tower is executed.
+        """
+        reduction_factor = self.model.get_vision_token_reduction_factor()
+
+        if reduction_factor <= 1:
+            self._post_reduction_lora_mapping = None
+            return
+
+        lora_ids = np.array(lora_mapping.prompt_mapping, dtype=np.int32)
+        pre_reduction_counts = np.array(num_vision_tokens_pre_reduction, dtype=np.int32)
+
+        post_reduction_counts = pre_reduction_counts // reduction_factor
+
+        if np.sum(post_reduction_counts) == 0:
+            self._post_reduction_lora_mapping = None
+            return
+
+        new_token_indices = lora_ids.repeat(post_reduction_counts)
+
+        self._post_reduction_lora_mapping = LoRAMapping(
+            index_mapping=tuple(new_token_indices.tolist()),
+            prompt_mapping=lora_mapping.prompt_mapping,
+            is_prefill=lora_mapping.is_prefill,
+        )
+
+    def _on_vision_token_reduction_pre_hook(
+        self,
+        module: nn.Module,
+        args: tuple,
+    ) -> None:
+        if self._post_reduction_lora_mapping is not None:
+            self.set_adapter_mapping(self._post_reduction_lora_mapping)
+            self._post_reduction_lora_mapping = None
 
     def create_dummy_lora(
             self,
@@ -555,7 +601,7 @@ class LoRAModelManager(AdapterModelManager):
             if (not self._match_target_modules(module_name)
                     or not isinstance(module, BaseLayerWithLoRA)
                     or isinstance(module, LinearScalingRotaryEmbeddingWithLoRA)
-                    or self._filter_unsupported_mm_module(module_name)):
+                    or self._filter_unsupported_mm_module(module_name, module)):
                 continue
             parts = module_name.split(".")
             if module_name not in self.packed_modules:
@@ -619,17 +665,12 @@ class LoRAModelManager(AdapterModelManager):
                 module_name) or target_module == module_name
             for target_module in self.supported_lora_modules)
 
-    def _filter_unsupported_mm_module(self, module_name: str) -> bool:
+    def _filter_unsupported_mm_module(self, module_name: str, module: nn.Module) -> bool:
         """
-        Regarding multimodal models, vLLM currently only supports adding LoRA to
-        language model. LoRA for other modules, such as the vision tower, will
-        be filtered out.
+        All linear layers are supported
         """
-        if self.supports_mm:
-            module_mapping: MultiModelKeys = self.model.get_mm_mapping()
-            prefix_lst = module_mapping.connector + module_mapping.tower_model
-            return any(
-                [module_name.startswith(prefix) for prefix in prefix_lst])
+        if not isinstance(module, LinearBase):
+            return True
         return False
 
     def _register_packed_modules(self, module_full_name: str) -> None:
