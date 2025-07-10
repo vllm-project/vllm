@@ -48,7 +48,7 @@ from py_tke import (
 
 logger = init_logger(__name__)
 
-mapping_dict = {
+rope_scaling_type_mapping = {
     "none": RotaryScalingType.NONE,
     "linear": RotaryScalingType.LINEAR,
     "dynamic": RotaryScalingType.DYNAMIC,
@@ -93,6 +93,7 @@ class TkeAttentionBackend(AttentionBackend):
     def get_kv_cache_stride_order() -> tuple[int, ...]:
         # `stride_order` indicates the permutation that gets us from
         # `get_kv_cache_shape` to the actual memory layout we want.
+        # NOTE: 3 and 2 are swapped because the TRTLLM layout within blocks is [num_heads, num_tokens, dimension]
         return (0, 1, 3, 2, 4)
 
 
@@ -127,10 +128,13 @@ class TkeMetadata:
     # The number of sequences in context phase.
     num_context_sequences: int
 
+    # The number of context tokens in the batch.
     num_context_tokens: int
 
+    # The number of generation sequences in the batch.
     num_generation_sequences: int
 
+    # The number of generation tokens in the batch.
     num_generation_tokens: int
 
     # A buffer to store the fp8 attention outputs before converting them to bf16 and returning them.
@@ -177,9 +181,9 @@ class TkeMetadataBuilder(AttentionMetadataBuilder[TkeMetadata]):
         self.block_table = block_table
 
         # Internal quantity used to size the kv-cache TMA descriptor.
-        prefix_cache_configuration.maxNumSequences = (
-            2048  # TODO: calculate this value from the size of the kv-cache. It needs to be large enough that the TMA descriptor can fit the whole kv-cache tensor.
-        )
+        # TODO: calculate this value from the size of the kv-cache. It needs to be large enough that the TMA descriptor can fit the whole kv-cache tensor.
+        # I couldn't find a way to access the actual size of the kv-cache at this time. The 'num_blocks' on the kv-cache config is not set at this point.
+        prefix_cache_configuration.maxNumSequences = 4096
 
         # Store block size for debugging
         self.block_size = kv_cache_spec.block_size
@@ -191,7 +195,7 @@ class TkeMetadataBuilder(AttentionMetadataBuilder[TkeMetadata]):
             scaling_factor = rope_scaling.get("factor", 1.0)
             rotary_positional_embedding.rotaryEmbeddingScale = scaling_factor
 
-            rotary_positional_embedding.rotaryScalingType = mapping_dict[
+            rotary_positional_embedding.rotaryScalingType = rope_scaling_type_mapping[
                 rope_scaling.get("rope_type", "none")]
         else:
             rotary_positional_embedding.rotaryEmbeddingScale = 1.0
@@ -222,7 +226,7 @@ class TkeMetadataBuilder(AttentionMetadataBuilder[TkeMetadata]):
             requires_grad=False,
         ).contiguous()
 
-        # TODO: needs to be set correctly.
+        # TODO: needs to be set correctly on each batch. Move to forward. Seems to be always 1.0 though.
         self.output_scaling_factor = torch.tensor(
             [1.0],
             dtype=torch.float32,
@@ -230,7 +234,8 @@ class TkeMetadataBuilder(AttentionMetadataBuilder[TkeMetadata]):
             requires_grad=False,
         )
 
-        # According to modelopt team, 1.0 is almost always the optimal value.
+        # NOTE: According to modelopt team, 1.0 is almost always the optimal value.
+        # TODO: There should also be the equivalent dequantization factor. Add support for that.
         self.kv_cache_dequantization_factor = torch.tensor(
             [1.0],
             dtype=torch.float32,
@@ -245,14 +250,15 @@ class TkeMetadataBuilder(AttentionMetadataBuilder[TkeMetadata]):
             attentionLayerDimensions=self.attention_layer_dimensions,
             rotaryEmbedding=rotary_positional_embedding,
             prefixCacheConfiguration=prefix_cache_configuration,
-            qScaling=1.0,
+            qScaling=
+            1.0,  # TODO: seems to be 1.0 most of the time, still, set correctly ultimately.
             maxAttentionWindowSize=max_attention_window_size,
             cyclicAttentionWindowSize=cyclic_attention_window_size,
             outputScalingFactor=self.output_scaling_factor,
             kvCacheDequantizationFactor=self.kv_cache_dequantization_factor,
             multiBlockSemaphores=self.multi_block_semaphores,
             enableSpeculativeDecoding=False,
-            enablePDL=True,
+            enablePDL=True,  # TODO: remove and default to true internally.
         )
 
         # The size in bytes of the workspace needed by FMHA and XQA.
@@ -421,9 +427,9 @@ class TkeImpl(AttentionImpl):
 
         Args:
             query: shape = [num_tokens, num_heads, head_size]
-            key: shape = [num_tokens, num_kv_heads, head_size]
-            value: shape = [num_tokens, num_kv_heads, head_size]
-            kv_cache = [num_blocks, 2, block_size, num_kv_heads, head_size]
+            key: should be None for this backend, unused, qkv is passed as a single tensor as query.
+            value: should be None for this backend, unused, qkv is passed as a single tensor as query.
+            kv_cache = [num_blocks, 2, num_kv_heads, block_size, head_size]
             attn_metadata: Metadata for attention.
         Returns:
             shape = [num_tokens, num_heads * head_size]
@@ -434,67 +440,55 @@ class TkeImpl(AttentionImpl):
             return output
 
         input_sequence_lengths_device = attn_metadata.common_attn_metadata.query_start_loc.diff(
-        ).to(dtype=torch.uint32)
-        stream = current_stream()
-        output_buffer = _forward_tke_eager(query, kv_cache, attn_metadata,
-                                           input_sequence_lengths_device,
-                                           stream)
+        )
+        cuda_stream = current_stream()
+        if attn_metadata.num_context_sequences > 0:
+            max_sequence_length = attn_metadata.sequence_lengths_host[:
+                                                                      attn_metadata
+                                                                      .
+                                                                      num_context_sequences].max(
+                                                                      ).item()
+            run_context_inplace(
+                op=attn_metadata.op,
+                numContextSequences=attn_metadata.num_context_sequences,
+                numContextTokens=attn_metadata.num_context_tokens,
+                maxSequenceLength=int(max_sequence_length),
+                qkv=query,
+                sequenceLengthsDevice=attn_metadata.common_attn_metadata.
+                seq_lens,
+                inputSequenceLengthsDevice=input_sequence_lengths_device,
+                kvCacheBlockOffsets=attn_metadata.block_table.block_table,
+                kvCachePoolPtr=kv_cache.view(torch.int8),
+                rotaryCosSin=attn_metadata.rotary_cos_sin_cache,
+                output=attn_metadata.fp8_output_buffer.view(torch.int8),
+                workspace=attn_metadata.workspace,
+                stream=cuda_stream.cuda_stream,
+            )
+        if attn_metadata.num_generation_sequences > 0:
+            max_sequence_length = attn_metadata.sequence_lengths_host[
+                attn_metadata.num_context_sequences:].max().item()
+            run_generation_inplace(
+                op=attn_metadata.op,
+                numGenerationSequences=attn_metadata.num_generation_sequences,
+                numGenerationTokens=attn_metadata.num_generation_tokens,
+                maxSequenceLength=int(max_sequence_length),
+                qkv=query[attn_metadata.num_context_tokens:],
+                sequenceLengthsDevice=attn_metadata.common_attn_metadata.
+                seq_lens[attn_metadata.num_context_sequences:],
+                inputSequenceLengthsDevice=input_sequence_lengths_device[
+                    attn_metadata.num_context_sequences:],
+                kvCacheBlockOffsets=attn_metadata.block_table.
+                block_table[attn_metadata.num_context_sequences:],
+                kvCachePoolPtr=kv_cache.view(torch.int8),
+                rotaryCosSin=attn_metadata.rotary_cos_sin_cache,
+                output=attn_metadata.fp8_output_buffer.view(torch.int8),
+                workspace=attn_metadata.workspace,
+                stream=cuda_stream.cuda_stream,
+            )
 
         num_tokens = attn_metadata.common_attn_metadata.num_actual_tokens
-        output[:num_tokens].copy_(output_buffer[:num_tokens])
+        output[:num_tokens].copy_(attn_metadata.fp8_output_buffer[:num_tokens])
         return output
-
-
-def _forward_tke_eager(
-    query: torch.Tensor,
-    kv_cache: torch.Tensor,
-    attn_metadata: TkeMetadata,
-    input_sequence_lengths_device: torch.Tensor,
-    cuda_stream: torch.cuda.Stream,
-) -> torch.Tensor:
-    if attn_metadata.num_context_sequences > 0:
-        max_sequence_length = attn_metadata.sequence_lengths_host[:
-                                                                  attn_metadata
-                                                                  .
-                                                                  num_context_sequences].max(
-                                                                  ).item()
-        run_context_inplace(
-            op=attn_metadata.op,
-            numContextSequences=attn_metadata.num_context_sequences,
-            numContextTokens=attn_metadata.num_context_tokens,
-            maxSequenceLength=int(max_sequence_length),
-            qkv=query,
-            sequenceLengthsDevice=attn_metadata.common_attn_metadata.seq_lens,
-            inputSequenceLengthsDevice=input_sequence_lengths_device,
-            kvCacheBlockOffsets=attn_metadata.block_table.block_table,
-            kvCachePoolPtr=kv_cache.view(torch.int8),
-            rotaryCosSin=attn_metadata.rotary_cos_sin_cache,
-            output=attn_metadata.fp8_output_buffer.view(torch.int8),
-            workspace=attn_metadata.workspace,
-            stream=cuda_stream.cuda_stream,
-        )
-    if attn_metadata.num_generation_sequences > 0:
-        max_sequence_length = attn_metadata.sequence_lengths_host[
-            attn_metadata.num_context_sequences:].max().item()
-        run_generation_inplace(
-            op=attn_metadata.op,
-            numGenerationSequences=attn_metadata.num_generation_sequences,
-            numGenerationTokens=attn_metadata.num_generation_tokens,
-            maxSequenceLength=int(max_sequence_length),
-            qkv=query[attn_metadata.num_context_tokens:],
-            sequenceLengthsDevice=attn_metadata.common_attn_metadata.
-            seq_lens[attn_metadata.num_context_sequences:],
-            inputSequenceLengthsDevice=input_sequence_lengths_device[
-                attn_metadata.num_context_sequences:],
-            kvCacheBlockOffsets=attn_metadata.block_table.
-            block_table[attn_metadata.num_context_sequences:],
-            kvCachePoolPtr=kv_cache.view(torch.int8),
-            rotaryCosSin=attn_metadata.rotary_cos_sin_cache,
-            output=attn_metadata.fp8_output_buffer.view(torch.int8),
-            workspace=attn_metadata.workspace,
-            stream=cuda_stream.cuda_stream,
-        )
-    return attn_metadata.fp8_output_buffer
 
 
 def apply_llama3_scaling(inv_freqs: np.ndarray, rope_scaling_config: dict):

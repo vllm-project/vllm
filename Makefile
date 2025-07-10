@@ -1,12 +1,11 @@
-HF_TOKEN := $(shell cat token)
-UID := $(shell id -u)
-GID := $(shell id -g)
-DOCKER_PROGRESS    ?= auto
-USER_ID            ?= $(shell id --user)
-USER_NAME          ?= $(shell id --user --name)
-GROUP_ID           ?= $(shell id --group)
-GROUP_NAME         ?= $(shell id --group --name)
-IMAGE_TAG_SUFFIX   ?= -$(USER_NAME)
+OUTPUT_PATH ?= /scratch/usr/results
+MODEL_PATH ?= /scratch/usr/quantized_model
+TP_SIZE ?= 4
+
+LONG_MODEL_FLAG := VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+FLASH_ATTN_FLAGS := $(LONG_MODEL_FLAG) VLLM_ATTENTION_BACKEND=FLASH_ATTN_VLLM_V1
+TKE_FLAGS := $(LONG_MODEL_FLAG) VLLM_ATTENTION_BACKEND=TKE
+FLASH_INFER_FLAGS := $(LONG_MODEL_FLAG) VLLM_ATTENTION_BACKEND=FLASHINFER_VLLM_V1
 
 NSYS_PROFILE ?= 0
 ifeq ($(NSYS_PROFILE), 1)
@@ -14,19 +13,6 @@ ifeq ($(NSYS_PROFILE), 1)
 else
 	NSYS_PROFILE_CMD :=
 endif
-
-define add_local_user
-	docker build \
-		--progress $(DOCKER_PROGRESS) \
-		--build-arg BASE_IMAGE_WITH_TAG=$(1) \
-		--build-arg USER_ID=$(USER_ID) \
-		--build-arg USER_NAME=$(USER_NAME) \
-		--build-arg GROUP_ID=$(GROUP_ID) \
-		--build-arg GROUP_NAME=$(GROUP_NAME) \
-		--file Dockerfile \
-		--tag myimage$(IMAGE_TAG_SUFFIX) \
-		..
-endef
 
 build-vllm-image:
 	$(call add_local_user,flashinfer_vllm_dev:7204195724929729558)
@@ -104,8 +90,6 @@ trt-llm-setup:
 
 benchmark-latency: TKE_BACKEND := TKE
 benchmark-latency: FLASH_BACKEND := FLASH_ATTN
-benchmark-latency: MODEL_PATH := /scratch/usr/quantized_model
-benchmark-latency: TP_SIZE := 4
 benchmark-latency: INPUT_LEN := 80000
 benchmark-latency: MAX_MODEL_LEN := 131072
 benchmark-latency: NUM_ITERS_WARMUP := 1
@@ -139,11 +123,19 @@ benchmark-latency:
 		--kv-cache-dtype fp8 \
 		--enforce-eager
 
+###########################################################################################
+######################## Utilities ########################################################
+###########################################################################################
+
 delete-vllm-cache:
 	rm -rf ~/.cache/vllm
 
+###########################################################################################
+######################## Samples ##########################################################
+###########################################################################################
+
 vllm-sample-flashinfer-v1: delete-vllm-cache
-	VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 VLLM_ATTENTION_BACKEND=FLASHINFER_VLLM_V1 $(NSYS_PROFILE_CMD) python vllm_sample.py \
+	$(FLASH_INFER_FLAGS) $(NSYS_PROFILE_CMD) python vllm_sample.py \
 	--model /scratch/usr/quantized_model/ \
 	--batch-size 1 \
 	--prompts-file sample_prompts.txt \
@@ -152,7 +144,7 @@ vllm-sample-flashinfer-v1: delete-vllm-cache
 	--tensor-parallel-size 4 > flashinfer.txt 2>&1
 
 vllm-sample-tke: delete-vllm-cache
-	VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 VLLM_ATTENTION_BACKEND=TKE $(NSYS_PROFILE_CMD) python vllm_sample.py \
+	$(TKE_FLAGS) $(NSYS_PROFILE_CMD) python vllm_sample.py \
 	--model /scratch/usr/quantized_model/ \
 	--batch-size 1 \
 	--prompts-file sample_prompts.txt \
@@ -162,7 +154,7 @@ vllm-sample-tke: delete-vllm-cache
 	--tensor-parallel-size 4 > tke.txt 2>&1
 
 vllm-sample-flash-attn: delete-vllm-cache
-	VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 VLLM_ATTENTION_BACKEND=FLASH_ATTN_VLLM_V1 $(NSYS_PROFILE_CMD) python vllm_sample.py \
+	$(FLASH_ATTN_FLAGS) $(NSYS_PROFILE_CMD) python vllm_sample.py \
 	--model /scratch/usr/quantized_model/ \
 	--batch-size 1 \
 	--prompts-file sample_prompts.txt \
@@ -173,61 +165,111 @@ vllm-sample-flash-attn: delete-vllm-cache
 
 all-samples: vllm-sample-flash-attn vllm-sample-tke vllm-sample-flashinfer-v1
 
+###########################################################################################
+######################## Accuracy #########################################################
+###########################################################################################
+
+ACCURACY_BATCH_SIZE ?= 8
+
+# Infra
 install-lm-eval:
 	git clone --depth 1 https://github.com/EleutherAI/lm-evaluation-harness
 	cd lm-evaluation-harness
 	pip install -e .
 
-lm-eval-hellaswag:
-	VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 VLLM_ATTENTION_BACKEND=TKE lm_eval \
+# Small accuracy tests
+
+lm-eval-tiny-hellaswag-tke: delete-vllm-cache
+	$(TKE_FLAGS) lm_eval \
+		--model vllm \
+		--tasks tinyHellaswag \
+		--batch_size $(ACCURACY_BATCH_SIZE) \
+		--output_path $(OUTPUT_PATH)/lm-eval-results-tinyHellaswag-tke.json \
+		--model_args "pretrained=$(MODEL_PATH),tensor_parallel_size=$(TP_SIZE),quantization=modelopt,gpu_memory_utilization=0.95,kv_cache_dtype=fp8"
+
+lm-eval-tiny-hellaswag-flash-attn: delete-vllm-cache
+	$(FLASH_ATTN_FLAGS) lm_eval \
+		--model vllm \
+		--tasks tinyHellaswag \
+		--batch_size $(ACCURACY_BATCH_SIZE) \
+		--output_path $(OUTPUT_PATH)/lm-eval-results-tinyHellaswag-flash-attn.json \
+		--model_args "pretrained=$(MODEL_PATH),tensor_parallel_size=$(TP_SIZE),quantization=modelopt,gpu_memory_utilization=0.95,kv_cache_dtype=fp8"
+
+lm-eval-tiny-tinyGSM8k-tke: delete-vllm-cache
+	$(TKE_FLAGS) lm_eval \
+		--model vllm \
+		--tasks tinyGSM8k \
+		--batch_size $(ACCURACY_BATCH_SIZE) \
+		--output_path $(OUTPUT_PATH)/lm-eval-results-tinyGSM8k-tke.json \
+		--model_args "pretrained=$(MODEL_PATH),tensor_parallel_size=$(TP_SIZE),quantization=modelopt,gpu_memory_utilization=0.95,kv_cache_dtype=fp8"
+
+lm-eval-tiny-tinyGSM8k-flash-attn: delete-vllm-cache
+	$(FLASH_ATTN_FLAGS) lm_eval \
+		--model vllm \
+		--tasks tinyGSM8k \
+		--batch_size $(ACCURACY_BATCH_SIZE) \
+		--output_path $(OUTPUT_PATH)/lm-eval-results-tinyGSM8k-flash-attn.json \
+		--model_args "pretrained=$(MODEL_PATH),tensor_parallel_size=$(TP_SIZE),quantization=modelopt,gpu_memory_utilization=0.95,kv_cache_dtype=fp8"
+
+small-accuracy-tests: lm-eval-tiny-hellaswag-tke lm-eval-tiny-hellaswag-flash-attn lm-eval-tiny-tinyGSM8k-tke lm-eval-tiny-tinyGSM8k-flash-attn
+
+# Big accuracy tests
+
+lm-eval-hellaswag-tke: delete-vllm-cache
+	$(TKE_FLAGS) lm_eval \
 		--model vllm \
 		--tasks hellaswag \
-		--log_samples \
-		--output_path /scratch/usr/lm-eval-results-hellaswag.json \
-		--model_args "pretrained=/scratch/usr/quantized_model,tensor_parallel_size=4,quantization=modelopt"
+		--batch_size $(ACCURACY_BATCH_SIZE) \
+		--output_path $(OUTPUT_PATH)/lm-eval-results-hellaswag-tke.json \
+		--model_args "pretrained=$(MODEL_PATH),tensor_parallel_size=$(TP_SIZE),quantization=modelopt,gpu_memory_utilization=0.95,kv_cache_dtype=fp8"
 
-lm-eval-tiny-hellaswag-tke:
-	VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 VLLM_ATTENTION_BACKEND=TKE lm_eval \
+lm-eval-GSM8k-tke: delete-vllm-cache
+	$(TKE_FLAGS) lm_eval \
 		--model vllm \
-		--tasks tinyHellaswag \
-		--log_samples \
-		--batch_size 4 \
-		--output_path /scratch/usr/lm-eval-results-tiny-hellaswag.json \
-		--model_args "pretrained=/scratch/usr/quantized_model,tensor_parallel_size=4,quantization=modelopt,gpu_memory_utilization=0.95,kv_cache_dtype=fp8,block_size=32,enforce_eager=True"
+		--tasks GSM8k \
+		--batch_size $(ACCURACY_BATCH_SIZE) \
+		--output_path $(OUTPUT_PATH)/lm-eval-results-GSM8k-tke.json \
+		--model_args "pretrained=$(MODEL_PATH),tensor_parallel_size=$(TP_SIZE),quantization=modelopt,gpu_memory_utilization=0.95,kv_cache_dtype=fp8"
 
-lm-eval-tiny-hellaswag-flash-attn:
-	VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 VLLM_ATTENTION_BACKEND=FLASH_ATTN lm_eval \
+lm-eval-hellaswag-flash-attn: delete-vllm-cache
+	$(FLASH_ATTN_FLAGS) lm_eval \
 		--model vllm \
-		--tasks tinyHellaswag \
-		--log_samples \
-		--batch_size 1 \
-		--output_path /scratch/usr/lm-eval-results-tiny-hellaswag.json \
-		--model_args "pretrained=/scratch/usr/llama-8b-fp8,tensor_parallel_size=1,quantization=modelopt,gpu_memory_utilization=0.95,enforce_eager=True"
+		--tasks hellaswag \
+		--batch_size $(ACCURACY_BATCH_SIZE) \
+		--output_path $(OUTPUT_PATH)/lm-eval-results-hellaswag-flash-attn.json \
+		--model_args "pretrained=$(MODEL_PATH),tensor_parallel_size=$(TP_SIZE),quantization=modelopt,gpu_memory_utilization=0.95,kv_cache_dtype=fp8"
 
-lm-eval-gsm8k:
-	CUDA_LAUNCH_BLOCKING=1 VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 VLLM_ATTENTION_BACKEND=TKE lm_eval \
+lm-eval-GSM8k-flash-attn: delete-vllm-cache
+	$(FLASH_ATTN_FLAGS) lm_eval \
 		--model vllm \
-		--tasks gsm8k \
-		--log_samples \
-		--output_path /scratch/usr/lm-eval-results-gsm8k.json \
-		--model_args "pretrained=/scratch/usr/quantized_model,tensor_parallel_size=4,quantization=modelopt"
+		--tasks GSM8k \
+		--batch_size $(ACCURACY_BATCH_SIZE) \
+		--output_path $(OUTPUT_PATH)/lm-eval-results-GSM8k-flash-attn.json \
+		--model_args "pretrained=$(MODEL_PATH),tensor_parallel_size=$(TP_SIZE),quantization=modelopt,gpu_memory_utilization=0.95,kv_cache_dtype=fp8"
 
-make send-requests:
-	bash -c '
-	curl -s -X POST http://localhost:8000/v1/chat/completions \
-	-H "Content-Type: application/json" \
-	-d "{\"model\":\"meta-llama/Llama-3.1-8B\",\"messages\":[{\"role\":\"user\",\"content\":\"Write a short poem about the ocean.\"}],\"max_tokens\":10}" 
+big-accuracy-tests: lm-eval-hellaswag-tke lm-eval-GSM8k-tke lm-eval-hellaswag-flash-attn lm-eval-GSM8k-flash-attn
 
-	curl -s -X POST http://localhost:8000/v1/chat/completions \
-	-H "Content-Type: application/json" \
-	-d "{\"model\":\"meta-llama/Llama-3.1-8B\",\"messages\":[{\"role\":\"user\",\"content\":\"Explain quantum entanglement in simple terms.\"}],\"max_tokens\":10}" 
+all-accuracy-tests: small-accuracy-tests big-accuracy-tests
 
-	curl -s -X POST http://localhost:8000/v1/chat/completions \
-	-H "Content-Type: application/json" \
-	-d "{\"model\":\"meta-llama/Llama-3.1-8B\",\"messages\":[{\"role\":\"user\",\"content\":\"List three benefits of exercise.\"}],\"max_tokens\":10}" 
+###########################################################################################
+######################## Benchmarking ####################################################
+###########################################################################################
 
-	wait
-	echo "Request 1:"; cat req1.json; echo
-	echo "Request 2:"; cat req2.json; echo
-	echo "Request 3:"; cat req3.json
-	';
+# Serving benchmarks using Python script (recommended)
+benchmark-serving:
+	python benchmark_serving_runner.py \
+		--model $(MODEL_PATH) \
+		--tp-size $(TP_SIZE) \
+		--output-path $(OUTPUT_PATH)
+
+# Analyze benchmark results and create CSV summary
+analyze-results:
+	python analyze_benchmark_results.py \
+		--input-dir $(OUTPUT_PATH) \
+		--output $(OUTPUT_PATH)/benchmark_results_summary.csv
+
+# Run full benchmark and analysis pipeline
+benchmark-and-analyze: benchmark-serving analyze-results
+	@echo "Benchmark and analysis completed!"
+	@echo "Results saved in: $(OUTPUT_PATH)/"
+	@echo "CSV summary: $(OUTPUT_PATH)/benchmark_results_summary.csv"
