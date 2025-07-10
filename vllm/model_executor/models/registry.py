@@ -16,7 +16,6 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Callable, Optional, TypeVar, Union
 
-import cloudpickle
 import torch.nn as nn
 
 from vllm.logger import init_logger
@@ -182,6 +181,7 @@ _CROSS_ENCODER_MODELS = {
     "GemmaForSequenceClassification": ("gemma", "GemmaForSequenceClassification"), # noqa: E501
     "Qwen2ForSequenceClassification": ("qwen2", "Qwen2ForSequenceClassification"), # noqa: E501
     "Qwen3ForSequenceClassification": ("qwen3", "Qwen3ForSequenceClassification"), # noqa: E501
+    "JinaVLForRanking": ("jina_vl", "JinaVLForSequenceClassification"), # noqa: E501
 }
 
 _MULTIMODAL_MODELS = {
@@ -598,6 +598,7 @@ def _run_in_subprocess(fn: Callable[[], _T]) -> _T:
         output_filepath = os.path.join(tempdir, "registry_output.tmp")
 
         # `cloudpickle` allows pickling lambda functions directly
+        import cloudpickle
         input_bytes = cloudpickle.dumps((fn, output_filepath))
 
         # cannot use `sys.executable __file__` here because the script
