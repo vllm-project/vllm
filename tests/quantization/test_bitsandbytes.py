@@ -13,7 +13,7 @@ from transformers import BitsAndBytesConfig
 
 from tests.quantization.utils import is_quant_method_supported
 
-from ..models.utils import check_embeddings_close
+from ..models.utils import check_embeddings_close, check_logprobs_close
 from ..utils import compare_two_settings, create_new_process_for_each_test
 
 models_4bit_to_test = [
@@ -27,7 +27,7 @@ models_4bit_to_embedding_test = [
 ]
 
 models_4bit_to_moe_test = [
-    ("Qwen/Qwen1.5-MoE-A2.7B-Chat", "quantize moe model inflight"),
+    ("allenai/OLMoE-1B-7B-0125-Instruct", "quantize moe model inflight"),
 ]
 
 models_pre_qaunt_4bit_to_test = [
@@ -126,12 +126,9 @@ def test_load_pp_4bit_bnb_model(model_name, description) -> None:
     compare_two_settings(model_name, common_args, pp_args)
 
 
-@pytest.mark.skipif(torch.cuda.device_count() < 2,
-                    reason='Test requires at least 2 GPUs.')
 @pytest.mark.skipif(not is_quant_method_supported("bitsandbytes"),
                     reason='bitsandbytes is not supported on this GPU type.')
 @pytest.mark.parametrize("model_name, description", models_4bit_to_moe_test)
-@create_new_process_for_each_test()
 def test_4bit_bnb_moe_model(hf_runner, vllm_runner, example_prompts,
                             model_name, description) -> None:
 
@@ -140,14 +137,22 @@ def test_4bit_bnb_moe_model(hf_runner, vllm_runner, example_prompts,
         bnb_4bit_quant_type="nf4",
         bnb_4bit_use_double_quant=True,
     ))
-    validate_generated_texts(hf_runner,
-                             vllm_runner,
-                             example_prompts[:1],
-                             model_name,
-                             False,
-                             hf_model_kwargs,
-                             vllm_tp_size=2,
-                             max_tokens=6)
+    with vllm_runner(model_name,
+                     quantization='bitsandbytes',
+                     enforce_eager=False) as llm:
+        vllm_outputs = llm.generate_greedy_logprobs(example_prompts,
+                                                    max_tokens=32,
+                                                    num_logprobs=5)
+
+    with hf_runner(model_name, model_kwargs=hf_model_kwargs) as llm:
+        transformers_outputs = llm.generate_greedy_logprobs_limit(
+            example_prompts, max_tokens=32, num_logprobs=5)
+    check_logprobs_close(
+        outputs_0_lst=transformers_outputs,
+        outputs_1_lst=vllm_outputs,
+        name_0="transformers",
+        name_1="vllm",
+    )
 
 
 @pytest.mark.skipif(not is_quant_method_supported("bitsandbytes"),
@@ -245,7 +250,6 @@ def validate_generated_texts(hf_runner,
     # Clean up the GPU memory for the next test
     gc.collect()
     torch.cuda.empty_cache()
-
     # Compare the generated strings
     for hf_log, vllm_log in zip(hf_logs, vllm_logs):
         hf_str = hf_log["generated_text"]
