@@ -823,7 +823,7 @@ class ModelConfig:
         architectures = self.architectures
 
         if (registry.is_transcription_only_model(architectures) and\
-             task_option== "auto"):
+             task_option in ("auto", "transcription")):
             self.runner_type = "transcription_only"
             return {"transcription"}, "transcription"
 

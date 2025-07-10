@@ -98,6 +98,27 @@ def test_score_task(model_id, expected_runner_type, expected_task):
     assert config.task == expected_task
 
 
+@pytest.mark.parametrize(
+    ("model_id", "expected_runner_type", "expected_task"),
+    [
+        ("openai/whisper-small", "transcription_only", "transcription"),
+    ],
+)
+def test_transcription_task(model_id, expected_runner_type, expected_task):
+    config = ModelConfig(
+        model_id,
+        task="transcription",
+        tokenizer=model_id,
+        tokenizer_mode="auto",
+        trust_remote_code=False,
+        seed=0,
+        dtype="float16",
+    )
+
+    assert config.runner_type == expected_runner_type
+    assert config.task == expected_task
+
+
 @pytest.mark.parametrize(("model_id", "bad_task"), [
     ("Qwen/Qwen2.5-Math-RM-72B", "generate"),
     ("Qwen/Qwen3-0.6B", "transcription"),
