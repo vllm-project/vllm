@@ -16,7 +16,6 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Callable, Optional, TypeVar, Union
 
-import cloudpickle
 import torch.nn as nn
 
 from vllm.logger import init_logger
@@ -598,6 +597,7 @@ def _run_in_subprocess(fn: Callable[[], _T]) -> _T:
         output_filepath = os.path.join(tempdir, "registry_output.tmp")
 
         # `cloudpickle` allows pickling lambda functions directly
+        import cloudpickle
         input_bytes = cloudpickle.dumps((fn, output_filepath))
 
         # cannot use `sys.executable __file__` here because the script
