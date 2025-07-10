@@ -431,7 +431,8 @@ class FusedMoEModularKernel(torch.nn.Module):
             w1_zp: Optional[torch.Tensor], w2_zp: Optional[torch.Tensor],
             a1q_scale: Optional[torch.Tensor],
             a2_scale: Optional[torch.Tensor],
-            expert_num_tokens: Optional[torch.Tensor]) -> torch.Tensor:
+            expert_tokens_meta: Optional[ExpertTokensMetadata]
+    ) -> torch.Tensor:
 
         _, M, N, K, top_k = _moe_problem_size(a1q, w1, w2, topk_ids)
 
@@ -470,7 +471,7 @@ class FusedMoEModularKernel(torch.nn.Module):
                                  a2_scale=a2_scale,
                                  workspace13=workspace13,
                                  workspace2=workspace2,
-                                 expert_num_tokens=expert_num_tokens)
+                                 expert_tokens_meta=expert_tokens_meta)
 
         return fused_out
 
@@ -483,7 +484,8 @@ class FusedMoEModularKernel(torch.nn.Module):
             w1_zp: Optional[torch.Tensor], w2_zp: Optional[torch.Tensor],
             a1q_scale: Optional[torch.Tensor],
             a2_scale: Optional[torch.Tensor],
-            expert_num_tokens: Optional[torch.Tensor]) -> torch.Tensor:
+            expert_tokens_meta: Optional[ExpertTokensMetadata]
+    ) -> torch.Tensor:
 
         _, M, N, K, top_k = _moe_problem_size(a1q, w1, w2, topk_ids)
 
@@ -508,7 +510,7 @@ class FusedMoEModularKernel(torch.nn.Module):
                 w2_zp=w2_zp,
                 a1q_scale=a1q_scale,
                 a2_scale=a2_scale,
-                expert_num_tokens=expert_num_tokens)
+                expert_tokens_meta=expert_tokens_meta)
 
         # Chunking required case
         assert num_chunks > 1
@@ -540,23 +542,36 @@ class FusedMoEModularKernel(torch.nn.Module):
             e = min(s + out_chunk_size, fused_out.size(0))
             return fused_out[s:e]
 
-        def slice_expert_num_tokens(
+        def slice_expert_tokens_metadata(
+                full_expert_tokens_meta: ExpertTokensMetadata,
                 chunk_topk_ids: torch.Tensor, local_num_experts: int,
-                expert_map: Optional[torch.Tensor]) -> torch.Tensor:
+                expert_map: Optional[torch.Tensor]) -> ExpertTokensMetadata:
             # The existing expert_num_tokens is for the entire a1q
             # input. Chunking forces recomputation of the number
             # of tokens assigned to each expert.
-            return count_expert_num_tokens(chunk_topk_ids, local_num_experts,
-                                           expert_map)
+            c_expert_num_tokens = count_expert_num_tokens(
+                chunk_topk_ids, local_num_experts, expert_map)
+
+            c_expert_num_tokens_cpu = None
+            need_expert_num_tokens_cpu = (
+                full_expert_tokens_meta.expert_num_tokens_cpu is not None)
+            if need_expert_num_tokens_cpu:
+                c_expert_num_tokens_cpu = c_expert_num_tokens.to(
+                    "cpu", non_blocking=True)
+
+            return ExpertTokensMetadata(
+                expert_num_tokens=c_expert_num_tokens,
+                expert_num_tokens_cpu=c_expert_num_tokens_cpu)
 
         for chunk_idx in range(num_chunks):
             c_a1q, c_a1q_scale, c_a2_scale, c_topk_ids = (
                 slice_input_tensors(chunk_idx))
 
-            c_expert_num_tokens = None
-            if expert_num_tokens is not None:
-                c_expert_num_tokens = slice_expert_num_tokens(
-                    c_topk_ids, local_num_experts, expert_map)
+            c_expert_tokens_meta = None
+            if expert_tokens_meta is not None:
+                c_expert_tokens_meta = slice_expert_tokens_metadata(
+                    expert_tokens_meta, c_topk_ids, local_num_experts,
+                    expert_map)
 
             self._do_fused_experts(fused_out=slice_output_tensor(chunk_idx),
                                    a1=a1,
@@ -574,7 +589,7 @@ class FusedMoEModularKernel(torch.nn.Module):
                                    w2_zp=w2_zp,
                                    a1q_scale=c_a1q_scale,
                                    a2_scale=c_a2_scale,
-                                   expert_num_tokens=c_expert_num_tokens)
+                                   expert_tokens_meta=c_expert_tokens_meta)
 
         return fused_out
 
