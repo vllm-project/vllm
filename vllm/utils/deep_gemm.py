@@ -126,6 +126,15 @@ def per_block_cast_to_fp8(x, *args, **kwargs):
 
 
 def calc_diff(x: torch.Tensor, y: torch.Tensor):
+    """Return a global difference metric for unit tests.
+
+    DeepGEMM kernels on Blackwell/B200 currently exhibit noticeable per-element
+    error, causing ``torch.testing.assert_close`` to fail.  Instead of checking
+    every element, we compute a cosine-style similarity over the whole tensor
+    and report ``1 - sim``.  Once kernel accuracy improves this helper can be
+    removed.
+    """
+
     x, y = x.double(), y.double()
     denominator = (x * x + y * y).sum()
     sim = 2 * (x * y).sum() / denominator
