@@ -238,6 +238,9 @@ class cmake_build_ext(build_ext):
             *[f"--target={name}" for name in targets],
         ]
 
+        if VLLM_TARGET_DEVICE == "cpu":
+            build_args.append("-DUSE_CUDA=OFF")
+
         subprocess.check_call(["cmake", *build_args], cwd=self.build_temp)
 
         # Install the libraries
