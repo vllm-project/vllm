@@ -38,7 +38,6 @@ from typing_extensions import Required, TypeAlias, TypedDict
 
 from vllm.config import ModelConfig
 from vllm.logger import init_logger
-from vllm.model_executor.model_loader import get_model_cls
 from vllm.model_executor.models import SupportsMultiModal
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalDataDict
 from vllm.multimodal.utils import MediaConnector
@@ -524,6 +523,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
 
     @cached_property
     def model_cls(self):
+        from vllm.model_executor.model_loader import get_model_cls
         return get_model_cls(self.model_config)
 
     @property
