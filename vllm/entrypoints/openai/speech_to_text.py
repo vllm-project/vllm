@@ -252,7 +252,8 @@ class OpenAISpeechToText(OpenAIServing):
                     if res.prompt_token_ids is not None:
                         num_prompt_tokens = len(res.prompt_token_ids)
                         if audio_tokens := self.model_cls.get_num_audio_tokens(
-                                audio_duration_s, self.asr_config):
+                                audio_duration_s, self.asr_config,
+                                self.model_config):
                             num_prompt_tokens += audio_tokens
 
                     # We need to do it here, because if there are exceptions in

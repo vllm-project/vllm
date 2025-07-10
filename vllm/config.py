@@ -4966,12 +4966,6 @@ class SpeechToTextConfig:
     16kHz audio input. The input audio will be automatically resampled to this
     rate before processing."""
 
-    hop_length: Optional[int] = None
-    """Number of samples between successive frames in the log-mel spectrogram.
-    If None, uses the model's default hop length. This affects the temporal
-    resolution of the audio features and is used for calculating prompt token
-    counts."""
-
     max_audio_clip_s: int = 30
     """Maximum duration in seconds for a single audio clip without chunking.
     Audio longer than this will be split into smaller chunks if
