@@ -6,8 +6,9 @@ import deep_ep
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm import _custom_ops as ops
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
+    TopKWeightAndReduceContiguous, TopKWeightAndReduceDelegate)
 from vllm.model_executor.layers.fused_moe.utils import (
     moe_kernel_quantize_input)
 
@@ -187,45 +188,25 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         return (expert_x, expert_x_scale, expert_tokens_meta, expert_topk_ids,
                 expert_topk_weights)
 
-    def _apply_weights_and_reduce(self, num_tokens: int,
-                                  fused_expert_output: torch.Tensor,
-                                  topk_weights: torch.Tensor,
-                                  apply_router_weight_on_input: bool,
-                                  output_dtype: torch.dtype):
-
-        hidden_dim = fused_expert_output.size(-1)
-        if fused_expert_output.ndim == 2:
-            fused_expert_output = fused_expert_output.view(
-                num_tokens, -1, hidden_dim)
-
-        if not apply_router_weight_on_input:
-            # The DeepEP combine kernels don't do the topk weight
-            # multiplication. We multiply the weights locally.
-            m_x_topk = fused_expert_output.size(0)
-            fused_expert_output.mul_(topk_weights.view(m_x_topk, -1, 1))
-
-        out = torch.empty((num_tokens, hidden_dim),
-                          device=fused_expert_output.device,
-                          dtype=output_dtype)
-        ops.moe_sum(fused_expert_output, out)
-
-        return out
-
     def finalize(self, output: torch.Tensor, fused_expert_output: torch.Tensor,
                  topk_weights: torch.Tensor, topk_ids: torch.Tensor,
-                 apply_router_weight_on_input: bool) -> None:
+                 apply_router_weight_on_input: bool,
+                 weight_and_reduce_impl: mk.TopKWeightAndReduce) -> None:
 
         assert self.handle is not None
 
         # fused_expert_output can have 0 tokens - This happens when none of the
         # tokens from the all2all reach this EP rank.
         if fused_expert_output.numel() != 0:
-            fused_expert_output = self._apply_weights_and_reduce(
-                num_tokens=topk_ids.size(0),
+            if isinstance(weight_and_reduce_impl, TopKWeightAndReduceDelegate):
+                weight_and_reduce_impl = TopKWeightAndReduceContiguous()
+            fused_expert_output = weight_and_reduce_impl.apply(
+                output=None,
                 fused_expert_output=fused_expert_output,
                 topk_weights=topk_weights,
+                topk_ids=topk_ids,
                 apply_router_weight_on_input=apply_router_weight_on_input,
-                output_dtype=output.dtype)
+            )
 
         combined_x, _, event = self.buffer.combine(
             x=fused_expert_output,
