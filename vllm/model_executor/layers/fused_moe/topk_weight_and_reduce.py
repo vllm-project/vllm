@@ -102,7 +102,7 @@ class TopKWeightAndReduceNaiveBatched(mk.TopKWeightAndReduce):
         self.rank = rank
 
     def __eq__(self, other):
-        return (isinstance(other, TopKWeightAndReduceContiguous)
+        return (isinstance(other, TopKWeightAndReduceNaiveBatched)
                 and (other.rank == self.rank))
 
     def apply(self, output: Optional[torch.Tensor],
