@@ -2,6 +2,7 @@
 -r common.txt
 
 # Dependencies for HPU code
+accelerate
 ray
 triton==3.1.0
 setuptools>=77.0.3
