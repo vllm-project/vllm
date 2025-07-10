@@ -250,6 +250,9 @@ class CoreEngineActorManager:
     def create_dp_placement_groups(
             vllm_config: VllmConfig
     ) -> tuple[list["PlacementGroup"], list[int]]:
+        """
+        Create placement groups for data parallel.
+        """
 
         import ray
         from ray._private.state import available_resources_per_node
@@ -258,7 +261,7 @@ class CoreEngineActorManager:
         logger.info("Creating placement groups for data parallel")
         dp_master_ip = \
             vllm_config.parallel_config.data_parallel_master_ip
-        dp_size = vllm_config.parallel_config.data_parallel_size
+        num_pg_to_create = vllm_config.parallel_config.data_parallel_size
         local_engine_count = \
             vllm_config.parallel_config.data_parallel_size_local
 
@@ -302,7 +305,7 @@ class CoreEngineActorManager:
                     local_dp_ranks.append(i)
             else:
                 for i in range(available_engine_count):
-                    if len(placement_groups) == dp_size:
+                    if len(placement_groups) == num_pg_to_create:
                         break
                     bundles = [{"GPU": 1.0}] * world_size + [{"CPU": 1.0}]
                     pg = ray.util.placement_group(
@@ -315,18 +318,21 @@ class CoreEngineActorManager:
         return placement_groups, local_dp_ranks
 
     @staticmethod
-    def scale_up_create_dp_placement_groups(
+    def add_dp_placement_groups(
         old_vllm_config: VllmConfig, new_data_parallel_size: int
     ) -> tuple[list["PlacementGroup"], list[int]]:
+        """
+        Add placement groups for new data parallel size.
+        """
         import ray
         from ray._private.state import (available_resources_per_node,
                                         total_resources_per_node)
         from ray.util.state import list_nodes
 
         old_dp_size = old_vllm_config.parallel_config.data_parallel_size
-        num_new_engines = new_data_parallel_size - old_dp_size
+        num_pg_to_create = new_data_parallel_size - old_dp_size
 
-        if num_new_engines <= 0:
+        if num_pg_to_create <= 0:
             return [], []
 
         dp_master_ip = old_vllm_config.parallel_config.data_parallel_master_ip
@@ -344,10 +350,10 @@ class CoreEngineActorManager:
 
         placement_groups = []
         local_dp_ranks = []
-        engines_created = 0
+        num_pg_created = 0
 
         for node in nodes:
-            if engines_created >= num_new_engines:
+            if num_pg_created >= num_pg_to_create:
                 break
 
             node_ip = node.node_ip
@@ -367,10 +373,10 @@ class CoreEngineActorManager:
 
             # Create placement groups for new engines on this node
             for i in range(available_engine_count):
-                if engines_created >= num_new_engines:
+                if num_pg_created >= num_pg_to_create:
                     break
 
-                rank = old_dp_size + engines_created
+                rank = old_dp_size + num_pg_created
 
                 # Create bundles with node constraint for master node
                 if node_ip == dp_master_ip:
@@ -394,7 +400,7 @@ class CoreEngineActorManager:
                 # on this node
                 local_rank = used_engines_on_node + i
                 local_dp_ranks.append(local_rank)
-                engines_created += 1
+                num_pg_created += 1
 
         return placement_groups, local_dp_ranks
 
@@ -416,7 +422,7 @@ class CoreEngineActorManager:
             return
 
         placement_groups, local_dp_ranks = \
-            self.scale_up_create_dp_placement_groups(
+            self.add_dp_placement_groups(
                 old_vllm_config, new_data_parallel_size)
 
         world_size = old_vllm_config.parallel_config.world_size
