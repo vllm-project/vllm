@@ -717,6 +717,16 @@ class SupportsTranscription(Protocol):
         """Get the speech to text config for the ASR model."""
         ...
 
+    @classmethod
+    def get_num_audio_tokens(cls, audio_duration_s: float,
+                             stt_config: SpeechToTextConfig) -> Optional[int]:
+        """
+        Map from audio duration to number of audio tokens produced by the ASR 
+        model, without running a forward pass.
+        This is used for estimating the amount of processing for this audio.
+        """
+        return None
+
 
 @overload
 def supports_transcription(

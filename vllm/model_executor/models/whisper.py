@@ -8,10 +8,10 @@ from typing import Optional, TypedDict, Union, cast
 import numpy as np
 import torch
 from torch import nn
+
 from transformers import (BatchFeature, WhisperConfig, WhisperFeatureExtractor,
                           WhisperProcessor)
 from transformers.models.whisper.modeling_whisper import sinusoids
-
 from vllm.attention import Attention, AttentionType
 from vllm.config import (CacheConfig, ModelConfig, SpeechToTextConfig,
                          VllmConfig)
@@ -817,6 +817,16 @@ class WhisperForConditionalGeneration(nn.Module, SupportsTranscription,
             sample_rate=processor.feature_extractor.sampling_rate,
             hop_length=processor.feature_extractor.hop_length,
         )
+
+    @classmethod
+    def get_num_audio_tokens(cls, audio_duration_s: float,
+                             stt_config: SpeechToTextConfig) -> Optional[int]:
+        # NOTE(NickLucche) user can't pass encoder
+        # prompts directly at least not to Whisper.
+        # One indicator of the encoder amount of processing
+        # is the log-mel spectogram length.
+        return math.ceil(audio_duration_s * stt_config.sample_rate /
+                         stt_config.hop_length)
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()

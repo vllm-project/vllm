@@ -6,7 +6,6 @@ import math
 import time
 from collections.abc import AsyncGenerator
 from functools import cached_property
-from math import ceil
 from typing import Callable, Literal, Optional, TypeVar, Union, cast
 
 import numpy as np
@@ -251,18 +250,10 @@ class OpenAISpeechToText(OpenAIServing):
                 async for res in result_generator:
                     # On first result.
                     if res.prompt_token_ids is not None:
-                        # TODO (NickLucche): Account for preamble-tokens in
-                        # result, and better yet remove them in post-processing
                         num_prompt_tokens = len(res.prompt_token_ids)
-                        if self.asr_config.hop_length is not None:
-                            # NOTE(NickLucche) user can't pass encoder
-                            # prompts directly at least not to Whisper.
-                            # One indicator of the encoder amount of processing
-                            # is the log-mel spectogram length.
-                            num_prompt_tokens += ceil(
-                                audio_duration_s *
-                                self.asr_config.sample_rate /
-                                self.asr_config.hop_length)
+                        if audio_tokens := self.model_cls.get_num_audio_tokens(
+                                audio_duration_s, self.asr_config):
+                            num_prompt_tokens += audio_tokens
 
                     # We need to do it here, because if there are exceptions in
                     # the result_generator, it needs to be sent as the FIRST
