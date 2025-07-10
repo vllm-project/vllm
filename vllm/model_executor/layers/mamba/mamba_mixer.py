@@ -159,7 +159,7 @@ class MambaMixer(CustomOp):
             hidden_states = causal_conv1d_fn(
                 hidden_states,
                 conv_weights,
-                self.conv1d.bias,
+                bias=self.conv1d.bias,
                 activation=self.activation,
                 conv_states=mamba_cache_params.conv_state,
                 has_initial_state=attn_metadata.context_lens_tensor > 0,
