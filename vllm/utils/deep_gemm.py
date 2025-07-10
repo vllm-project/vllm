@@ -12,7 +12,8 @@ from typing import Any, Callable, NoReturn
 
 import torch
 
-from vllm.utils import has_deep_gemm
+import vllm.envs as envs
+from vllm.utils import cuda_get_device_properties, has_deep_gemm
 
 
 def _missing(*_: Any, **__: Any) -> NoReturn:
@@ -118,10 +119,16 @@ def calc_diff(x: torch.Tensor, y: torch.Tensor):
 
 
 @functools.cache
-def is_blackwell_deep_gemm_used():
-    import vllm.envs as envs
-    return envs.VLLM_USE_DEEP_GEMM and has_deep_gemm(
-    ) and _per_block_cast_impl is not None
+def is_blackwell_deep_gemm_used() -> bool:
+    """Return ``True`` if vLLM is configured to use DeepGEMM on a
+    Blackwell-class GPU.
+    """
+
+    if not (envs.VLLM_USE_DEEP_GEMM and has_deep_gemm()
+            and _per_block_cast_impl is not None):
+        return False
+
+    return cuda_get_device_properties(0, ("major", ))[0] == 10
 
 
 __all__ = [
