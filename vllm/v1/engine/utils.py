@@ -430,7 +430,7 @@ class CoreEngineActorManager:
         new_local_engines = 0
 
         runtime_env = RuntimeEnv(env_vars=self.env_vars_dict
-                                 | {"VLLM_EEP_RECONFIGURE_LAUNCH": "1"})
+                                 | {"VLLM_EEP_SCALE_UP_LAUNCH": "1"})
         for i, (pg,
                 local_rank) in enumerate(zip(placement_groups,
                                              local_dp_ranks)):

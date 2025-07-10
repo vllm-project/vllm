@@ -183,9 +183,9 @@ class Worker(WorkerBase):
         else:
             from contextlib import nullcontext
             context = nullcontext()
-        reconfigure = os.environ.get("VLLM_EEP_RECONFIGURE_LAUNCH") == "1"
+        eep_scale_up = os.environ.get("VLLM_EEP_SCALE_UP_LAUNCH") == "1"
         with context:
-            self.model_runner.load_model(reconfigure=reconfigure)
+            self.model_runner.load_model(eep_scale_up=eep_scale_up)
 
     @torch.inference_mode()
     def determine_available_memory(self) -> int:

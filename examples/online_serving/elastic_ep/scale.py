@@ -9,7 +9,7 @@ import sys
 import requests
 
 
-def test_scale(host, port, new_dp_size):
+def scale(host, port, new_dp_size):
     url = f"http://{host}:{port}/scale"
     payload = {"new_data_parallel_size": new_dp_size}
     headers = {"Content-Type": "application/json"}
@@ -40,12 +40,12 @@ def main():
     parser.add_argument("--host", default="localhost", help="API server host")
     parser.add_argument("--port", type=int, default=8006, help="API server port")
     parser.add_argument(
-        "--new_dp_size", type=int, default=2, help="New data parallel size"
+        "--new-dp-size", type=int, default=2, help="New data parallel size"
     )
 
     args = parser.parse_args()
 
-    success = test_scale(args.host, args.port, args.new_dp_size)
+    success = scale(args.host, args.port, args.new_dp_size)
     sys.exit(0 if success else 1)
 
 

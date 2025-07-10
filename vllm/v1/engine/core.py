@@ -140,11 +140,13 @@ class EngineCore:
         # Get all kv cache needed by the model
         kv_cache_specs = self.model_executor.get_kv_cache_specs()
 
-        if os.environ.get("VLLM_EEP_RECONFIGURE_LAUNCH") == "1":
+        if os.environ.get("VLLM_EEP_SCALE_UP_LAUNCH") == "1":
             dp_group = getattr(self, "dp_group", None)
             assert dp_group is not None
-            kv_cache_memory = ParallelConfig.sync_kv_cache_memory(dp_group, -1)
-            available_gpu_memory = [kv_cache_memory] * len(kv_cache_specs)
+            kv_cache_memory_size = ParallelConfig.sync_kv_cache_memory_size(
+                dp_group, -1)
+            available_gpu_memory = [kv_cache_memory_size] * \
+                len(kv_cache_specs)
         else:
             # Profiles the peak memory usage of the model to determine how much
             # memory can be allocated for kv cache.
@@ -1015,9 +1017,10 @@ class DPEngineCoreProc(EngineCoreProc):
         self.model_executor.reinitialize_distributed(reconfig_request)
         if reconfig_request.new_data_parallel_size > old_dp_size:
             assert self.available_gpu_memory_for_kv_cache > 0
-            # broadcast KV cache available memory for _initialize_kv_caches
-            # on new EngineCore
-            ParallelConfig.sync_kv_cache_memory(
+            # pass available_gpu_memory_for_kv_cache from existing
+            # engine-cores to new engine-cores so they can directly
+            # use it in _initialize_kv_caches() rather than profiling.
+            ParallelConfig.sync_kv_cache_memory_size(
                 self.dp_group, self.available_gpu_memory_for_kv_cache)
             # NOTE(yongji): newly joined workers require dummy_run even
             # CUDA graph is not used

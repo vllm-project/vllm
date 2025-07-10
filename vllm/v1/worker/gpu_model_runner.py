@@ -1766,9 +1766,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 draft_token_ids.append(drafter_output.tolist())
         return draft_token_ids
 
-    def load_model(self, reconfigure: bool = False) -> None:
+    def load_model(self, eep_scale_up: bool = False) -> None:
+        """
+        Args:
+            eep_scale_up: the model loading is for elastic EP scale up.
+        """
         logger.info("Starting to load model %s...", self.model_config.model)
-        if reconfigure:
+        if eep_scale_up:
             from vllm.distributed.parallel_state import get_ep_group
             num_local_physical_experts = torch.empty(1,
                                                      dtype=torch.int32,
@@ -1776,7 +1780,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             torch.distributed.broadcast(num_local_physical_experts,
                                         group=get_ep_group().cpu_group,
                                         group_src=0)
-            num_local_physical_experts = num_local_physical_experts.item()
+            num_local_physical_experts = int(num_local_physical_experts.item())
             new_ep_size = get_ep_group().world_size
             global_expert_load, old_global_expert_indices = (
                 EplbState.recv_state())
