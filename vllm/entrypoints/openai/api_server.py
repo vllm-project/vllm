@@ -1059,20 +1059,19 @@ async def invocations(raw_request: Request):
     for request_validator, endpoint in valid_endpoints.items():
         try:
             request = request_validator.validate_python(body)
-            break
         except pydantic.ValidationError:
             continue
-    else:
-        type_names = [
-            t.__name__ if isinstance(t := validator._type, type) else str(t)
-            for validator in valid_endpoints
-        ]
-        msg = ("Cannot find suitable handler for request. "
-               f"Expected one of: {type_names}")
-        res = base(raw_request).create_error_response(message=msg)
-        return JSONResponse(content=res.model_dump(), status_code=res.code)
 
-    return await endpoint(request, raw_request)
+        return await endpoint(request, raw_request)
+
+    type_names = [
+        t.__name__ if isinstance(t := validator._type, type) else str(t)
+        for validator in valid_endpoints
+    ]
+    msg = ("Cannot find suitable handler for request. "
+           f"Expected one of: {type_names}")
+    res = base(raw_request).create_error_response(message=msg)
+    return JSONResponse(content=res.model_dump(), status_code=res.code)
 
 
 if envs.VLLM_TORCH_PROFILER_DIR:
