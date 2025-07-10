@@ -116,7 +116,7 @@ def test_w8a8_block_fp8_deep_gemm_matmul(M, N, K, block_size, out_dtype, seed):
     A_fp32 = (torch.rand(M, K, dtype=torch.float32) - 0.5) * 2 * fp8_max
     B_fp32 = (torch.rand(N, K, dtype=torch.float32) - 0.5) * 2 * fp8_max
 
-    A_fp8, As_fp8 = per_token_group_cast_to_fp8(A_fp32)
+    A_fp8, As_fp8 = per_token_group_cast_to_fp8(A_fp32, block_size[1])
     B_fp8, Bs_fp8 = per_block_cast_to_fp8(B_fp32)
 
     As = As_fp8.to(torch.float32)

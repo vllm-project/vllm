@@ -46,7 +46,7 @@ def _fp8_quantize(
         assert len(block_shape) == 2
         _, block_k = block_shape[0], block_shape[1]
         if is_blackwell_deep_gemm_used():
-            A, A_scale = per_token_group_cast_to_fp8(A)
+            A, A_scale = per_token_group_cast_to_fp8(A, block_k)
         else:
             A, A_scale = per_token_group_quant_fp8(A, block_k)
         assert cdiv(A.size(-1), block_k) == A_scale.size(-1)

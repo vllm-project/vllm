@@ -87,18 +87,19 @@ def fp8_m_grouped_gemm_nt_masked(*args, **kwargs):
     return _grouped_masked_impl(*args, **kwargs)
 
 
-def per_token_group_cast_to_fp8(x, *args, **kwargs):
+def per_token_group_cast_to_fp8(x, group_size, *args, **kwargs):
     """Wrapper for token-wise FP8 quantisation.
 
     • If DeepGEMM provides ``per_token_cast_to_fp8`` (new API), use it.
     • Otherwise, fall back to vLLM's ``per_token_group_quant_fp8``
     """
     if _per_token_cast_impl is not None:
+        assert group_size == 128, "group_size must be 128 for deepgemm"
         return _per_token_cast_impl(x)
 
     from vllm.model_executor.layers.quantization.utils.fp8_utils import (
         per_token_group_quant_fp8 as _ptg)
-    return _ptg(x, *args, **kwargs)
+    return _ptg(x, group_size, *args, **kwargs)
 
 
 def per_block_cast_to_fp8(x, *args, **kwargs):

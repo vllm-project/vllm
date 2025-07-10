@@ -82,7 +82,7 @@ def run_single_case(m, n, k, topk, num_experts, block_size):
     """
     tokens_bf16 = torch.randn(
         m, k, device="cuda", dtype=torch.bfloat16).clamp_min_(-1).clamp_max_(1)
-    _, a1_scale = per_token_group_cast_to_fp8(tokens_bf16)
+    _, a1_scale = per_token_group_cast_to_fp8(tokens_bf16, block_size[1])
 
     # expert weight tensors
     w1, w2, w1_s, w2_s = make_block_quant_fp8_weights(num_experts, n, k,
@@ -173,7 +173,7 @@ def test_deepgemm_vs_triton(mnk, topk, num_experts, monkeypatch):
         _orig_ptgg = _moe_utils.per_token_group_quant_fp8
 
         def _patched_ptgg(x, *args, **kwargs):
-            return per_token_group_cast_to_fp8(x)
+            return per_token_group_cast_to_fp8(x, BLOCK_SIZE[1])
 
         m.setattr(_moe_utils,
                   "per_token_group_quant_fp8",
