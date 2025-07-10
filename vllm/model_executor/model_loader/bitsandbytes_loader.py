@@ -585,7 +585,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                 if self.load_8bit:
                     set_weight_attrs(
                         param, {"matmul_state": [None] * len(quant_states)})
-        torch.cuda.empty_cache()
+        current_platform.empty_cache()
 
     def download_model(self, model_config: ModelConfig) -> None:
         self._prepare_weights(model_config.model, model_config.revision)
