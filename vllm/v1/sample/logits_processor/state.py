@@ -51,7 +51,6 @@ class BatchUpdate:
 class BatchUpdateBuilder:
     """Helps track persistent batch state changes and build
     a batch update data structure for logitsprocs
-
     Assumptions:
     * All information about requests removed from persistent batch
       during a step is aggregated in self._removed through calls to
@@ -64,7 +63,6 @@ class BatchUpdateBuilder:
     * Elements of self._removed are never directly modified, added or
       removed (i.e. modification is only via self.removed_append() and
       self.pop_removed())
-
     Guarantees under above assumptions:
     * self.removed is always sorted in descending order
     * self.pop_removed() and self.peek_removed() both return
@@ -90,7 +88,6 @@ class BatchUpdateBuilder:
     def _ensure_removed_sorted(self) -> None:
         """Sort removed request indices in
         descending order.
-
         Idempotent after first call in a
         given step, until reset.
         """
@@ -112,7 +109,6 @@ class BatchUpdateBuilder:
         Must not be called after the first time
         self.removed, self.pop_removed() or
         self.peek_removed() are invoked.
-
         Args:
           index: request index
         """
@@ -141,7 +137,6 @@ class BatchUpdateBuilder:
     def get_and_reset(self, batch_size: int) -> Optional[BatchUpdate]:
         """Generate a logitsprocs batch update data structure
         and reset internal batch update builder state.
-
         Args:
           batch_size: current persistent batch size
 
