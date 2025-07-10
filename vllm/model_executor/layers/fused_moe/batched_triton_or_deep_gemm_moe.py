@@ -88,9 +88,24 @@ class BatchedTritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         return ((bdge is None or bdge.supports_expert_map())
                 and (bte is None or bte.supports_expert_map()))
 
-    def weight_and_reduce_impl(self) -> Optional[mk.WeightAndReduce]:
-        # Let PrepareAndFinalize::finalize() decide the impl.
-        return None
+    def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
+        bdge = self.batched_deep_gemm_experts
+        bte = self.batched_triton_experts
+        bdge_war = bdge.finalize_weight_and_reduce_impl() if bdge else None
+        bte_war = bte.finalize_weight_and_reduce_impl() if bte else None
+        is_bdge_war = bdge_war is not None
+        is_bte_war = bte_war is not None
+
+        if is_bdge_war and is_bte_war:
+            assert bdge_war == bte_war, (
+                "Both implementations should agree on WeightAndReduce impls. "
+                f"Got bdge_war: {bdge_war}, and bte_war: {bte_war}")
+
+        if is_bdge_war:
+            return bdge_war
+
+        assert is_bte_war
+        return bte_war
 
     def workspace_shapes(
         self,

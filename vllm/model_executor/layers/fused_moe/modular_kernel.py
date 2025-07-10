@@ -37,11 +37,11 @@ from vllm.utils import cdiv
 #   MoE operation, i.e matmul + act_mul + optionally quant + matmul.
 #   Some FusedMoEPermuteExpertsUnpermute implementations may choose to do
 #   the weight application and/or reduction. The class communicates this
-#   to [Finalize] via a WeightAndReduce object.
+#   to [Finalize] via a TopKWeightAndReduce object.
 # * FusedMoEModularKernel - an interface class that combines a
 #   FusedMoEPrepareAndFinalize and a FusedMoEPermuteExpertsUnpermute to
 #   provide the standard fused MoE kernel interface.
-# * WeightAndReduce - A WeightAndReduce implementation chosen
+# * TopKWeightAndReduce - A TopKWeightAndReduce implementation chosen
 #   by the FusedMoEPermuteExpertsUnpermute implementation that is passed
 #   on to [Finalize].
 #
@@ -121,9 +121,10 @@ class ExpertTokensMetadata:
                                                        non_blocking=True),
             expert_num_tokens_cpu=expert_num_tokens_cpu)
 
-class WeightAndReduce(ABC):
+
+class TopKWeightAndReduce(ABC):
     """
-    An abstract base class for Weight application and reduction implementations.
+    An abstract base class for weight application and reduction implementations.
     """
 
     @abstractmethod
@@ -195,7 +196,7 @@ class FusedMoEPrepareAndFinalize(ABC):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
-        weight_and_reduce_impl: Optional[WeightAndReduce],
+        weight_and_reduce_impl: TopKWeightAndReduce,
     ) -> None:
         """
         Perform any combine plus apply weights and perform a reduction on the
@@ -207,7 +208,8 @@ class FusedMoEPrepareAndFinalize(ABC):
         - topk_ids: The topk_ids.
         - apply_router_weight_on_input: When False, apply the weights to
           fused_expert_output.
-        - weight_and_reduce_impl: An optional WeightAndReduce implementation.
+        - weight_and_reduce_impl: An optional TopKWeightAndReduce
+          implementation.
         """
         raise NotImplementedError
 
@@ -347,7 +349,7 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         return envs.VLLM_ENABLE_FUSED_MOE_ACTIVATION_CHUNKING and \
           self.supports_chunking()
 
-    def weight_and_reduce_impl(self) -> Optional[WeightAndReduce]:
+    def finalize_weight_and_reduce_impl(self) -> TopKWeightAndReduce:
         raise NotImplementedError
 
     @abstractmethod
@@ -648,6 +650,6 @@ class FusedMoEModularKernel(torch.nn.Module):
         self.prepare_finalize.finalize(
             output, fused_out, topk_weights, topk_ids,
             apply_router_weight_on_input,
-            self.fused_experts.weight_and_reduce_impl())
+            self.fused_experts.finalize_weight_and_reduce_impl())
 
         return output

@@ -11,6 +11,8 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP)
+from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
+    TopKWeightAndReduceDelegate)
 from vllm.model_executor.layers.fused_moe.utils import (_fp8_perm,
                                                         _fp8_quantize,
                                                         _resize_cache)
@@ -255,9 +257,9 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
     def supports_expert_map(self) -> bool:
         return not self.use_batched_format
 
-    def weight_and_reduce_impl(self) -> Optional[mk.WeightAndReduce]:
+    def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         # Let PrepareAndFinalize::finalize() decide the impl.
-        return None
+        return TopKWeightAndReduceDelegate()
 
     def workspace_shapes(
         self,

@@ -11,11 +11,11 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     get_config_dtype_str, try_get_optimal_moe_config)
+from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
+    TopKWeightAndReduceDelegate, TopKWeightAndReduceNaiveBatched)
 from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache, moe_kernel_quantize_input, normalize_batched_scales_shape,
     normalize_scales_shape)
-from vllm.model_executor.layers.fused_moe.weight_and_reduce import (
-    NaiveBatchedWeightAndReduce)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     group_broadcast)
 
@@ -602,10 +602,10 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
-        weight_and_reduce_impl: Optional[mk.WeightAndReduce],
+        weight_and_reduce_impl: mk.TopKWeightAndReduce,
     ) -> None:
-        if weight_and_reduce_impl is None:
-            weight_and_reduce_impl = NaiveBatchedWeightAndReduce(self.rank)
+        if isinstance(weight_and_reduce_impl, TopKWeightAndReduceDelegate):
+            weight_and_reduce_impl = TopKWeightAndReduceNaiveBatched(self.rank)
         weight_and_reduce_impl.apply(
             output=output,
             fused_expert_output=fused_expert_output,
@@ -664,9 +664,9 @@ class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def supports_expert_map(self) -> bool:
         return False
 
-    def weight_and_reduce_impl(self) -> Optional[mk.WeightAndReduce]:
+    def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         # Let PrepareAndFinalize::finalize() decide the impl.
-        return None
+        return TopKWeightAndReduceDelegate()
 
     def workspace_shapes(
         self,
@@ -875,9 +875,9 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def supports_expert_map(self) -> bool:
         return False
 
-    def weight_and_reduce_impl(self) -> Optional[mk.WeightAndReduce]:
+    def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         # Let PrepareAndFinalize::finalize() decide the impl.
-        return None
+        return TopKWeightAndReduceDelegate()
 
     def workspace_shapes(
         self,

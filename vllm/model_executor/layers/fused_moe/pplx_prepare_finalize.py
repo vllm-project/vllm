@@ -7,6 +7,8 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
+    TopKWeightAndReduceDelegate)
 from vllm.model_executor.layers.fused_moe.utils import (
     _validate_scale_shape, moe_kernel_quantize_input)
 from vllm.utils import cdiv, round_up
@@ -213,10 +215,11 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
-        weight_and_reduce_impl: Optional[mk.WeightAndReduce],
+        weight_and_reduce_impl: mk.TopKWeightAndReduce,
     ) -> None:
-        # The weight application and reduction happens in the combine kernel.
-        assert weight_and_reduce_impl is None
+        assert isinstance(
+            weight_and_reduce_impl, TopKWeightAndReduceDelegate
+        ), ("Weight application and reduction happens in the combine kernel.")
 
         # This argument is optional
         # There's not much point setting this unless it is != topk_ids.size(0)

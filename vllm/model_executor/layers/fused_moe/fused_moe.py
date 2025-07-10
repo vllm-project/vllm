@@ -25,6 +25,8 @@ from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_align_block_size)
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP)
+from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
+    TopKWeightAndReduceDelegate)
 from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache, moe_kernel_quantize_input)
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
@@ -1596,9 +1598,9 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def supports_expert_map(self) -> bool:
         return True
 
-    def weight_and_reduce_impl(self) -> Optional[mk.WeightAndReduce]:
+    def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         # Let PrepareAndFinalize::finalize() decide the impl.
-        return None
+        return TopKWeightAndReduceDelegate()
 
     def workspace_shapes(
         self,

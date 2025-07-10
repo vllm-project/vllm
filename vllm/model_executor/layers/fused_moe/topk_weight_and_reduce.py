@@ -9,7 +9,34 @@ import vllm._custom_ops as ops
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 
 
-class WeightAndReduceNoOP(mk.WeightAndReduce):
+class TopKWeightAndReduceDelegate(mk.TopKWeightAndReduce):
+    """
+    Useful in the case when some FusedMoEPermuteExpertsUnpermute
+    implementation does not perform weight application and reduction
+    but cannot address the needs of all the compatible PrepareAndFinalize
+    implementations.
+    For example, BatchedTritonExperts is compatible with both
+    PplxPrepareAndFinalize and BatchedPrepareAndFinalize. PplxPrepareAndFinalize
+    does the weight-application + reduction as part of the pplx combine kernel.
+    But the BatchedPrepareAndFinalize needs an implementation. To facilitate
+    this case, the BatchedTritonExperts could use TopKWeightAndReduceDelegate 
+    so the PrepareAndFinalize implementations could choose how to
+    weight + reduce.
+    """
+
+    def apply(self, output: Optional[torch.Tensor],
+              fused_expert_output: torch.Tensor, topk_weights: torch.Tensor,
+              topk_ids: torch.Tensor,
+              apply_router_weight_on_input: bool) -> torch.Tensor:
+        raise RuntimeError("The caller is expected to choose an appropriate "
+                           "TopKWeightAndReduce implementation.")
+
+
+class TopKWeightAndReduceNoOP(mk.TopKWeightAndReduce):
+    """
+    The fused_experts outputs have already been weight applied and reduced.
+    This implementation is a no-op.
+    """
 
     def apply(self, output: Optional[torch.Tensor],
               fused_expert_output: torch.Tensor, topk_weights: torch.Tensor,
@@ -22,7 +49,11 @@ class WeightAndReduceNoOP(mk.WeightAndReduce):
         return fused_expert_output
 
 
-class ContiguousWeightAndReduce(mk.WeightAndReduce):
+class TopKWeightAndReduceContiguous(mk.TopKWeightAndReduce):
+    """
+    TopKWeightAndReduce implementation for a fused_experts output
+    of shape (m, topk, K)
+    """
 
     def apply(self, output: Optional[torch.Tensor],
               fused_expert_output: torch.Tensor, topk_weights: torch.Tensor,
@@ -52,7 +83,11 @@ class ContiguousWeightAndReduce(mk.WeightAndReduce):
         return output
 
 
-class NaiveBatchedWeightAndReduce(mk.WeightAndReduce):
+class TopKWeightAndReduceNaiveBatched(mk.TopKWeightAndReduce):
+    """
+    TopKWeightAndReduce implementation for a fused_experts output
+    of shape (num_experts, batch_size, K)
+    """
 
     def __init__(self, rank: int):
         self.rank = rank

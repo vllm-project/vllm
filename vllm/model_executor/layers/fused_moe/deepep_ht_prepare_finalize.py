@@ -7,10 +7,10 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
+    TopKWeightAndReduceContiguous, TopKWeightAndReduceDelegate)
 from vllm.model_executor.layers.fused_moe.utils import (
     moe_kernel_quantize_input)
-from vllm.model_executor.layers.fused_moe.weight_and_reduce import (
-    ContiguousWeightAndReduce)
 
 
 class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
@@ -191,15 +191,15 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     def finalize(self, output: torch.Tensor, fused_expert_output: torch.Tensor,
                  topk_weights: torch.Tensor, topk_ids: torch.Tensor,
                  apply_router_weight_on_input: bool,
-                 weight_and_reduce_impl: Optional[mk.WeightAndReduce]) -> None:
+                 weight_and_reduce_impl: mk.TopKWeightAndReduce) -> None:
 
         assert self.handle is not None
 
         # fused_expert_output can have 0 tokens - This happens when none of the
         # tokens from the all2all reach this EP rank.
         if fused_expert_output.numel() != 0:
-            if weight_and_reduce_impl is None:
-                weight_and_reduce_impl = ContiguousWeightAndReduce()
+            if isinstance(weight_and_reduce_impl, TopKWeightAndReduceDelegate):
+                weight_and_reduce_impl = TopKWeightAndReduceContiguous()
             fused_expert_output = weight_and_reduce_impl.apply(
                 output=None,
                 fused_expert_output=fused_expert_output,

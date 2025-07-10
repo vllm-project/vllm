@@ -6,10 +6,10 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
+    TopKWeightAndReduceContiguous, TopKWeightAndReduceDelegate)
 from vllm.model_executor.layers.fused_moe.utils import (
     moe_kernel_quantize_input)
-from vllm.model_executor.layers.fused_moe.weight_and_reduce import (
-    ContiguousWeightAndReduce)
 
 
 class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
@@ -62,10 +62,10 @@ class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
-        weight_and_reduce_impl: Optional[mk.WeightAndReduce],
+        weight_and_reduce_impl: mk.TopKWeightAndReduce,
     ) -> None:
-        if weight_and_reduce_impl is None:
-            weight_and_reduce_impl = ContiguousWeightAndReduce()
+        if isinstance(weight_and_reduce_impl, TopKWeightAndReduceDelegate):
+            weight_and_reduce_impl = TopKWeightAndReduceContiguous()
         weight_and_reduce_impl.apply(
             output=output,
             fused_expert_output=fused_expert_output,
