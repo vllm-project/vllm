@@ -49,6 +49,14 @@ def is_weak_contiguous(inp: torch.Tensor):
 class CustomAllreduce:
 
     _SUPPORTED_WORLD_SIZES = [2, 4, 6, 8]
+    MB = 1024 * 1024
+    # Max sizes for each world size in case symmetric memory is available
+    _MAX_SIZES = {
+        2: MB,  # 1 MB
+        4: MB,  # 1 MB
+        6: MB // 2,  # 512 KB
+        8: MB // 2,  # 512 KB
+    }
 
     # max_size: max supported allreduce size
     def __init__(self,
@@ -109,6 +117,8 @@ class CustomAllreduce:
         # now `device` is a `torch.device` object
         assert isinstance(device, torch.device)
         self.device = device
+        if current_platform.is_cuda() and envs.VLLM_USE_SYMM_MEM:
+            max_size = CustomAllreduce._MAX_SIZES[world_size]
 
         cuda_visible_devices = envs.CUDA_VISIBLE_DEVICES
         if cuda_visible_devices:
