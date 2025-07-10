@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from math import prod
-from typing import Optional
+from typing import Optional, Union
 
 import torch
 
@@ -10,6 +10,9 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8)
 from vllm.model_executor.layers.quantization.utils.int8_utils import (
     per_token_group_quant_int8, per_token_quant_int8)
+from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+    quant_dequant_mxfp4)
+from vllm.platforms import current_platform
 from vllm.utils import cdiv
 
 
@@ -74,10 +77,25 @@ def _int8_quantize(
     return A, A_scale
 
 
+def _mxfp4_quantize(
+    A: torch.Tensor,
+    A_scale: Optional[torch.Tensor],
+    per_act_token_quant: bool,
+    block_shape: Optional[list[int]] = None,
+) -> tuple[torch.Tensor, None]:
+    assert block_shape is None
+    if not current_platform.supports_mx():
+        A = quant_dequant_mxfp4(A)
+    else:
+        raise NotImplementedError()
+
+    return A, None
+
+
 def moe_kernel_quantize_input(
     A: torch.Tensor,
     A_scale: Optional[torch.Tensor],
-    quant_dtype: Optional[torch.dtype],
+    quant_dtype: Union[None, torch.dtype, str],
     per_act_token_quant: bool,
     block_shape: Optional[list[int]] = None,
 ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
@@ -85,6 +103,8 @@ def moe_kernel_quantize_input(
         return _fp8_quantize(A, A_scale, per_act_token_quant, block_shape)
     elif quant_dtype == torch.int8:
         return _int8_quantize(A, A_scale, per_act_token_quant, block_shape)
+    elif quant_dtype == "mxfp4":
+        return _mxfp4_quantize(A, A_scale, per_act_token_quant, block_shape)
     else:
         return A, A_scale
 
