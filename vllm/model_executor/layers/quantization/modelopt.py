@@ -839,6 +839,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
               'g1_alphas': layer.g1_alphas,
               'g2_alphas': layer.g2_alphas,
               'out_dtype': x.dtype,
+              # Avoid confusion with a1_scale and a2_scale whare are batch size 
+              # related.
               'a1_scale': torch.min(layer.w13_input_scale_quant),
             }
             extra_prepare_args = {
@@ -881,8 +883,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 w2_blockscale=layer.w2_blockscale_swizzled,
                 g1_alphas=layer.g1_alphas,
                 g2_alphas=layer.g2_alphas,
-                a1_scale=layer.w13_input_scale_quant,
-                a2_scale=layer.w2_input_scale_quant,
+                a1_gscale=layer.w13_input_scale_quant,
+                a2_gscale=layer.w2_input_scale_quant,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
                 m=x.shape[0],
