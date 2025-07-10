@@ -1,11 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import logging
 
 import pytest
 from transformers import AutoModel
-
-logger = logging.getLogger(__name__)
 
 model_name = "jinaai/jina-reranker-m0"
 

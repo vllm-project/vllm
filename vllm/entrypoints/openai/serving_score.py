@@ -214,15 +214,18 @@ class ServingScores(OpenAIServing):
 
             if use_pad_token:
                 # cross_encoder models defaults to using pad_token.
-                tokenized_prompts = await asyncio.gather(
-                    *(tokenize_async(
-                        text=t1, text_pair=t2, **tokenization_kwargs) # type: ignore[arg-type]
-                      for t1, t2 in input_pairs))
+                tokenized_prompts = await asyncio.gather(*(
+                    tokenize_async(
+                        text=t1, # type: ignore[arg-type]
+                        text_pair=t2, # type: ignore[arg-type]
+                        **tokenization_kwargs) for t1, t2 in input_pairs))
             else:
                 # `llm as reranker` models defaults to not using pad_token.
-                tokenized_prompts = await asyncio.gather(
-                    *(tokenize_async(text=t1 + t2, **tokenization_kwargs) # type: ignore[operator]
-                      for t1, t2 in input_pairs))
+                tokenized_prompts = await asyncio.gather(*(
+                    tokenize_async(
+                        text=t1 +  # type: ignore[operator]
+                        t2,
+                        **tokenization_kwargs) for t1, t2 in input_pairs))
 
             for prompt_inputs, (t1, t2) in zip(tokenized_prompts, input_pairs):
                 sep_token = tokenizer.sep_token if (tokenizer.sep_token
@@ -312,20 +315,20 @@ class ServingScores(OpenAIServing):
         if isinstance(data_1, str):
             data_1 = [data_1]
         elif isinstance(data_1, dict):
-            data_1 = data_1.get("content") # type: ignore[assignment]
+            data_1 = data_1.get("content")  # type: ignore[assignment]
 
         if isinstance(data_2, str):
             data_2 = [data_2]
         elif isinstance(data_2, dict):
-            data_2 = data_2.get("content") # type: ignore[assignment]
+            data_2 = data_2.get("content")  # type: ignore[assignment]
 
-        _validate_score_input_lens(data_1, data_2) # type: ignore[arg-type]
+        _validate_score_input_lens(data_1, data_2)  # type: ignore[arg-type]
 
         if self.model_config.is_cross_encoder:
             return await self._cross_encoding_score(
                 tokenizer=tokenizer,
-                data_1=data_1, # type: ignore[arg-type]
-                data_2=data_2, # type: ignore[arg-type]
+                data_1=data_1,  # type: ignore[arg-type]
+                data_2=data_2,  # type: ignore[arg-type]
                 request=request,
                 request_id=request_id,
                 tokenization_kwargs=tokenization_kwargs,
@@ -336,8 +339,8 @@ class ServingScores(OpenAIServing):
         else:
             return await self._embedding_score(
                 tokenizer=tokenizer,
-                texts_1=data_1, # type: ignore[arg-type]
-                texts_2=data_2, # type: ignore[arg-type]
+                texts_1=data_1,  # type: ignore[arg-type]
+                texts_2=data_2,  # type: ignore[arg-type]
                 request=request,
                 request_id=request_id,
                 tokenization_kwargs=tokenization_kwargs,

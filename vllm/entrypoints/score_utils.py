@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Sequence
 from typing import Any, Optional, Union, cast
 
 from torch.nn import CosineSimilarity
@@ -10,8 +9,8 @@ from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import (
     BaseMultiModalItemTracker, ChatCompletionContentPartImageEmbedsParam,
     ChatCompletionContentPartImageParam, ChatCompletionContentPartTextParam,
-    MultiModalItemTracker, _parse_chat_message_content_part)
-from vllm.inputs import SingletonPrompt, TokensPrompt
+    MultiModalItemTracker, _ContentPart, _parse_chat_message_content_part)
+from vllm.inputs import TokensPrompt
 from vllm.model_executor.model_loader import get_model_cls
 from vllm.model_executor.models.interfaces import supports_score_template
 from vllm.multimodal.inputs import MultiModalDataDict
@@ -19,7 +18,6 @@ from vllm.outputs import PoolingRequestOutput
 from vllm.transformers_utils.tokenizer import (AnyTokenizer,
                                                PreTrainedTokenizer,
                                                PreTrainedTokenizerFast)
-from vllm.entrypoints.chat_utils import _ContentPart
 
 ScoreContentPartParam: TypeAlias = Union[
     ChatCompletionContentPartImageParam,
@@ -96,7 +94,7 @@ def parse_score_data(
     content_2 = _parse_score_content(data_2, mm_tracker)
 
     def ensure_str(content: Optional[_ContentPart]) -> str:
-        if content and isinstance(content, str):
+        if content is not None and isinstance(content, str):
             return cast(str, content)
         else:
             raise ValueError(

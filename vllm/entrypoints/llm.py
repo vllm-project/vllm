@@ -1234,13 +1234,15 @@ class LLM:
             for q, t in input_pairs:
                 if self.llm_engine.model_config.use_pad_token:
                     # cross_encoder models defaults to using pad_token.
-                    prompt_inputs = tokenizer(text=q,   # type: ignore[arg-type]
-                                              text_pair=t, # type: ignore[arg-type]
-                                              **tokenization_kwargs)
+                    prompt_inputs = tokenizer(
+                        text=q,  # type: ignore[arg-type]
+                        text_pair=t,  # type: ignore[arg-type]
+                        **tokenization_kwargs)
                 else:
                     # `llm as reranker` models defaults to not using pad_token.
-                    prompt_inputs = tokenizer(text=q + t,   # type: ignore[operator]
-                                              **tokenization_kwargs)
+                    prompt_inputs = tokenizer(
+                        text=q + t,  # type: ignore[operator]
+                        **tokenization_kwargs)
                 engine_prompt = TokensPrompt(
                     prompt_token_ids=prompt_inputs["input_ids"],
                     token_type_ids=prompt_inputs.get("token_type_ids"))
@@ -1285,16 +1287,18 @@ class LLM:
         of your inputs into a single list and pass it to this method.
 
         Supports both text and multi-modal data (images, etc.) when used with
-        appropriate multi-modal models. For multi-modal inputs, ensure the prompt
-        structure matches the model's expected input format.
+        appropriate multi-modal models. For multi-modal inputs, ensure the 
+        prompt structure matches the model's expected input format.
 
         Args:
-            data_1: Can be a single prompt, a list of prompts or `ScoreMultiModalParam`, which can contain
-                either text or multi-modal data. When a list, it must have the same
-                length as the `data_2` list.
-            data_2: The data to pair with the query to form the input to the LLM.
-                Can be text or multi-modal data. See [PromptType][vllm.inputs.PromptType]
-                for more details about the format of each prompt.
+            data_1: Can be a single prompt, a list of prompts or 
+                `ScoreMultiModalParam`, which can contain either text or 
+                multi-modal data. When a list, it must have the same length as 
+                the `data_2` list.
+            data_2: The data to pair with the query to form the input to 
+                the LLM. Can be text or multi-modal data. See [PromptType]
+                [vllm.inputs.PromptType] for more details about the format of 
+                each prompt.
             use_tqdm: If `True`, shows a tqdm progress bar.
                 If a callable (e.g., `functools.partial(tqdm, leave=False)`),
                 it is used to create the progress bar.
@@ -1306,7 +1310,7 @@ class LLM:
         Returns:
             A list of `ScoringRequestOutput` objects containing the
             generated scores in the same order as the input prompts.
-        """ # noqa: E501
+        """
         runner_type = self.llm_engine.model_config.runner_type
         if runner_type != "pooling":
             messages = ["LLM.score() is only supported for pooling models."]
@@ -1386,10 +1390,14 @@ class LLM:
         _validate_score_input_lens(data_1, data_2)  # type: ignore[arg-type]
 
         if self.llm_engine.model_config.is_cross_encoder:
-            return self._cross_encoding_score(tokenizer, data_1, data_2, # type: ignore[arg-type]
-                                              truncate_prompt_tokens, use_tqdm,
-                                              lora_request,
-                                              prompt_adapter_request)
+            return self._cross_encoding_score(
+                tokenizer,
+                data_1,  # type: ignore[arg-type]
+                data_2,  # type: ignore[arg-type]
+                truncate_prompt_tokens,
+                use_tqdm,
+                lora_request,
+                prompt_adapter_request)
         else:
             return self._embedding_score(
                 tokenizer,
