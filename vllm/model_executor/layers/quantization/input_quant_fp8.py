@@ -55,7 +55,7 @@ class QuantFP8(CustomOp):
         assert (scale is not None) == self.static
         assert scale_ub is None or (not self.static and self.group_shape
                                     == GroupShape.PER_TOKEN
-                                    and scale_ub.size() == (1, ))
+                                    and scale_ub.numel() == 1)
 
         return ops.scaled_fp8_quant(
             x,
@@ -73,7 +73,7 @@ class QuantFP8(CustomOp):
         assert (scale is not None) == self.static
         assert scale_ub is None or (not self.static and self.group_shape
                                     == GroupShape.PER_TOKEN
-                                    and scale_ub.size() == (1, ))
+                                    and scale_ub.numel() == 1)
 
         if scale is None:
             if self.group_shape == GroupShape.PER_TOKEN:
@@ -82,7 +82,7 @@ class QuantFP8(CustomOp):
                 if scale_ub is not None:
                     x_max = x_max.clamp(max=scale_ub)
             else:
-                x_max = x.abs().max().to(torch.float32)
+                x_max = x.abs().max().unsqueeze(-1).to(torch.float32)
 
             scale = x_max / _FP8_MAX
             scale = scale.clamp(min=_FP8_MIN_SCALING_FACTOR)
