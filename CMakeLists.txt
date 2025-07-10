@@ -69,8 +69,19 @@ append_cmake_prefix_path("torch" "torch.utils.cmake_prefix_path")
 if (VLLM_TARGET_DEVICE STREQUAL "cpu")
     message(STATUS "VLLM: Building for CPU. Skipping all CUDA/HIP related configuration.")
     
-    # For CPU builds, we don't need to find Torch through CMake
-    # The CPU extension will handle torch headers through the Python environment
+    # For CPU builds, we need to get torch include directories without full CMake config
+    # Use Python to get torch include paths
+    execute_process(
+        COMMAND ${Python_EXECUTABLE} -c "import torch; print(';'.join(torch.utils.cpp_extension.include_paths()), end='')"
+        OUTPUT_VARIABLE TORCH_INCLUDE_DIRS
+        RESULT_VARIABLE TORCH_INCLUDE_RESULT
+    )
+    
+    if(NOT TORCH_INCLUDE_RESULT EQUAL 0)
+        message(FATAL_ERROR "Failed to get torch include directories")
+    endif()
+    
+    message(STATUS "Torch include directories: ${TORCH_INCLUDE_DIRS}")
     
     # Include the CPU extension cmake and return early
     include(${CMAKE_CURRENT_LIST_DIR}/cmake/cpu_extension.cmake)
