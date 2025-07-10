@@ -61,6 +61,11 @@ else()
     " before running cmake configure.")
 endif()
 
+#
+# Update cmake's `CMAKE_PREFIX_PATH` with torch location.
+#
+append_cmake_prefix_path("torch" "torch.utils.cmake_prefix_path")
+
 if (VLLM_TARGET_DEVICE STREQUAL "cpu")
     message(STATUS "VLLM: Building for CPU. Skipping all CUDA/HIP related configuration.")
     
@@ -77,11 +82,6 @@ if (VLLM_TARGET_DEVICE STREQUAL "cpu")
     include(${CMAKE_CURRENT_LIST_DIR}/cmake/cpu_extension.cmake)
     return()
 endif()
-
-#
-# Update cmake's `CMAKE_PREFIX_PATH` with torch location.
-#
-append_cmake_prefix_path("torch" "torch.utils.cmake_prefix_path")
 
 # The following blocks will ONLY be processed if VLLM_TARGET_DEVICE is NOT "cpu"
 # (i.e., it's "cuda" or "rocm" or potentially some other future GPU target)
