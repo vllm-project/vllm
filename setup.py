@@ -149,6 +149,12 @@ class cmake_build_ext(build_ext):
             '-DVLLM_TARGET_DEVICE={}'.format(VLLM_TARGET_DEVICE),
         ]
 
+        if VLLM_TARGET_DEVICE == "cpu":
+            cmake_args.append("-DUSE_CUDA=OFF")
+            cmake_args.append("-DBUILD_CUDA_LIBS=OFF")
+            cmake_args.append("-DUSE_CUDNN=OFF")
+            cmake_args.append("-DTORCH_CUDA_ARCH_LIST=NoCUDA")
+
         verbose = envs.VERBOSE
         if verbose:
             cmake_args += ['-DCMAKE_VERBOSE_MAKEFILE=ON']
@@ -523,7 +529,10 @@ def get_nvcc_cuda_version() -> Version:
 
     Adapted from https://github.com/NVIDIA/apex/blob/8b7a1ff183741dd8f9b87e7bafd04cfde99cea28/setup.py
     """
-    assert CUDA_HOME is not None, "CUDA_HOME is not set"
+    if VLLM_TARGET_DEVICE == "cpu":
+        return Version("0.0")
+
+    assert CUDA_HOME is not None, "CUDA_HOME is not set for a CUDA/HIP build target."
     nvcc_output = subprocess.check_output([CUDA_HOME + "/bin/nvcc", "-V"],
                                           universal_newlines=True)
     output = nvcc_output.split()
@@ -585,8 +594,9 @@ def get_vllm_version() -> str:
     elif _is_tpu():
         version += f"{sep}tpu"
     elif _is_cpu():
-        if envs.VLLM_TARGET_DEVICE == "cpu":
-            version += f"{sep}cpu"
+        # For CPU builds, we don't append a suffix to the version.
+        # The standard PyPI `torch` package is CPU-only by default.
+        pass # Do not append +cpu to the version string
     elif _is_xpu():
         version += f"{sep}xpu"
     else:

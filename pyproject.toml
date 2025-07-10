@@ -31,7 +31,7 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Information Analysis",
 ]
 requires-python = ">=3.9,<3.13"
-dynamic = [ "version", "dependencies", "optional-dependencies"]
+dynamic = [ "version", "dependencies"]
 
 [project.urls]
 Homepage="https://github.com/vllm-project/vllm"
@@ -40,6 +40,13 @@ Slack="http://slack.vllm.ai/"
 
 [project.scripts]
 vllm = "vllm.entrypoints.cli.main:main"
+
+[project.optional-dependencies]
+dev = [
+    "types-setuptools",  # Required by MyPy for pkg_resources module
+    # Other development-specific tools might go here too,
+    # e.g., "mypy", "ruff", "pre-commit" if not otherwise managed.
+]
 
 [tool.setuptools_scm]
 # no extra settings needed, presence enables setuptools-scm
