@@ -100,12 +100,11 @@ def get_kv_connector_cache_layout():
     vllm_config = get_current_vllm_config()
     kv_config = vllm_config.kv_transfer_config
     if kv_config is not None:
-        if vllm_config.model_config is not None:
-            connector_cls = KVConnectorFactory.get_connector_class(kv_config)
-            required_kvcache_layout = connector_cls.get_required_kvcache_layout(
-                vllm_config)
-            if required_kvcache_layout is not None:
-                return required_kvcache_layout
-        logger.warning_once("Unable to detect current VLLM config. " \
-                            "Defaulting to NHD kv cache layout.")
+        connector_cls = KVConnectorFactory.get_connector_class(kv_config)
+        required_kvcache_layout = connector_cls.get_required_kvcache_layout(
+            vllm_config)
+        if required_kvcache_layout is not None:
+            return required_kvcache_layout
+        logger.info_once("Connectors do not specify a " \
+                         "kv cache layout, defaulting to NHD.")
     return "NHD"
