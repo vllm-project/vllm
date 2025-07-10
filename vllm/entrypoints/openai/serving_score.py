@@ -216,7 +216,7 @@ class ServingScores(OpenAIServing):
                 # cross_encoder models defaults to using pad_token.
                 tokenized_prompts = await asyncio.gather(*(
                     tokenize_async(
-                        text=t1,  #  type: ignore[arg-type]
+                        text=t1,  # type: ignore[arg-type]
                         text_pair=t2,  # type: ignore[arg-type]
                         **tokenization_kwargs) for t1, t2 in input_pairs))
             else:
