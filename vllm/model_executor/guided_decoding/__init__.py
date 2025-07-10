@@ -79,20 +79,33 @@ def maybe_backend_fallback(
                 fallback_or_error(
                     guided_params,
                     "xgrammar does not support Lark grammars and the "
-                    "grammar failed to convert to GBNF.", "outlines")
+                    "grammar failed to convert to GBNF.", "guidance")
 
         # If the xgrammar module cannot be imported successfully,
         # we should still allow users to use guided decoding with a fallback.
         elif not xgr_installed:
             fallback_or_error(
                 guided_params,
-                "xgrammar module cannot be imported successfully.", "outlines")
+                "xgrammar module cannot be imported successfully.", "guidance")
 
-    if (guided_params.backend == "outlines"
-            and guided_params.json_object is not None):
-        # outlines doesn't support json_object, fallback to guidance
-        fallback_or_error(guided_params,
-                          "outlines does not support json_object.", "guidance")
+    if guided_params.backend == "outlines":
+        if guided_params.json_object is not None:
+            # outlines doesn't support json_object, fallback to guidance
+            fallback_or_error(guided_params,
+                              "outlines does not support json_object.",
+                              "guidance")
+        elif guided_params.grammar is not None:
+            # outlines grammar support has been removed, fallback to guidance
+            # if it is a lark-based grammar and xgrammar otherwise
+            if grammar_is_likely_lark(guided_params.grammar):
+                fallback_or_error(guided_params,
+                                  "outlines no longer supports grammars.",
+                                  "guidance")
+            else:
+                # The grammar is likely already GBNF format.
+                fallback_or_error(guided_params,
+                                  "outlines no longer supports grammars.",
+                                  "xgrammar")
 
     return guided_params
 
@@ -111,7 +124,6 @@ async def get_guided_decoding_logits_processor(
 
     guided_params = maybe_backend_fallback(guided_params)
 
-    # CFG grammar not supported by LMFE, so we use outlines instead
     if guided_params.backend == 'outlines':
         # NOTE: lazy import outlines to avoid https://github.com/vllm-project/vllm/issues/4193
         from vllm.model_executor.guided_decoding.outlines_decoding import (  # noqa
@@ -152,7 +164,6 @@ def get_local_guided_decoding_logits_processor(
             reasoning_backend)
         reasoner = reasoner_class(tokenizer)
 
-    # CFG grammar not supported by LMFE, so we use outlines instead
     if guided_params.backend == 'outlines':
         # NOTE: lazy import outlines to avoid https://github.com/vllm-project/vllm/issues/4193
         from vllm.model_executor.guided_decoding.outlines_decoding import (  # noqa

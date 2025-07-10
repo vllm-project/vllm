@@ -16,13 +16,17 @@ from vllm.outputs import RequestOutput
 from vllm.sampling_params import GuidedDecodingParams, SamplingParams
 
 MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct"
-GUIDED_DECODING_BACKENDS = [
+
+# Separate backends which support grammars vs ones
+# which only support regex based constraints in tests.
+GRAMMAR_DECODING_BACKENDS = [
     # (backend, disable_any_whitespace),
-    ("outlines", False),
     ("lm-format-enforcer", False),
     ("xgrammar", True),
     ("guidance", True),
 ]
+
+ALL_DECODING_BACKENDS = ([("outlines", False)] + GRAMMAR_DECODING_BACKENDS)
 
 
 @pytest.fixture(scope="module")
@@ -39,7 +43,7 @@ def llm():
 
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("guided_decoding_backend,disable_any_whitespace",
-                         GUIDED_DECODING_BACKENDS)
+                         ALL_DECODING_BACKENDS)
 def test_guided_regex(sample_regex, llm, guided_decoding_backend: str,
                       disable_any_whitespace: bool):
     sampling_params = SamplingParams(
@@ -49,6 +53,7 @@ def test_guided_regex(sample_regex, llm, guided_decoding_backend: str,
             regex=sample_regex,
             backend=guided_decoding_backend,
             disable_any_whitespace=disable_any_whitespace))
+
     outputs = llm.generate(prompts=[
         f"Give an example IPv4 address with this regex: {sample_regex}"
     ] * 2,
@@ -69,7 +74,7 @@ def test_guided_regex(sample_regex, llm, guided_decoding_backend: str,
 
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("guided_decoding_backend,disable_any_whitespace",
-                         GUIDED_DECODING_BACKENDS)
+                         ALL_DECODING_BACKENDS)
 def test_guided_json_completion(sample_json_schema, llm,
                                 guided_decoding_backend: str,
                                 disable_any_whitespace: bool):
@@ -103,7 +108,7 @@ def test_guided_json_completion(sample_json_schema, llm,
 
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("guided_decoding_backend,disable_any_whitespace",
-                         GUIDED_DECODING_BACKENDS)
+                         ALL_DECODING_BACKENDS)
 def test_guided_complex_json_completion(sample_complex_json_schema, llm,
                                         guided_decoding_backend: str,
                                         disable_any_whitespace: bool):
@@ -138,7 +143,7 @@ def test_guided_complex_json_completion(sample_complex_json_schema, llm,
 
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("guided_decoding_backend,disable_any_whitespace",
-                         GUIDED_DECODING_BACKENDS)
+                         ALL_DECODING_BACKENDS)
 def test_guided_definition_json_completion(sample_definition_json_schema, llm,
                                            guided_decoding_backend: str,
                                            disable_any_whitespace: bool):
@@ -173,7 +178,7 @@ def test_guided_definition_json_completion(sample_definition_json_schema, llm,
 
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("guided_decoding_backend,disable_any_whitespace",
-                         GUIDED_DECODING_BACKENDS)
+                         ALL_DECODING_BACKENDS)
 def test_guided_enum_json_completion(sample_enum_json_schema, llm,
                                      guided_decoding_backend: str,
                                      disable_any_whitespace: bool):
@@ -218,7 +223,7 @@ def test_guided_enum_json_completion(sample_enum_json_schema, llm,
 
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("guided_decoding_backend,disable_any_whitespace",
-                         GUIDED_DECODING_BACKENDS)
+                         ALL_DECODING_BACKENDS)
 def test_guided_choice_completion(sample_guided_choice, llm,
                                   guided_decoding_backend: str,
                                   disable_any_whitespace: bool):
@@ -248,7 +253,7 @@ def test_guided_choice_completion(sample_guided_choice, llm,
 
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("guided_decoding_backend,disable_any_whitespace",
-                         GUIDED_DECODING_BACKENDS)
+                         GRAMMAR_DECODING_BACKENDS)
 def test_guided_grammar(sample_sql_statements, llm,
                         guided_decoding_backend: str,
                         disable_any_whitespace: bool):
@@ -344,7 +349,7 @@ def test_disable_guided_decoding_fallback(sample_regex, llm):
 
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("guided_decoding_backend,disable_any_whitespace",
-                         GUIDED_DECODING_BACKENDS)
+                         GRAMMAR_DECODING_BACKENDS)
 def test_guided_json_object(llm, guided_decoding_backend: str,
                             disable_any_whitespace: bool):
     sampling_params = SamplingParams(
@@ -377,7 +382,9 @@ def test_guided_json_object(llm, guided_decoding_backend: str,
 
             # Parse to verify it is valid JSON
             parsed_json = json.loads(generated_text)
-            assert isinstance(parsed_json, dict)
+            # A list is not what was intended, but is still valid
+            # json.
+            assert isinstance(parsed_json, (dict, list))
 
 
 class CarType(str, Enum):
@@ -395,7 +402,7 @@ class CarDescription(BaseModel):
 
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("guided_decoding_backend,disable_any_whitespace",
-                         GUIDED_DECODING_BACKENDS)
+                         ALL_DECODING_BACKENDS)
 def test_guided_json_completion_with_enum(llm, guided_decoding_backend: str,
                                           disable_any_whitespace: bool):
     json_schema = CarDescription.model_json_schema()
@@ -427,7 +434,7 @@ def test_guided_json_completion_with_enum(llm, guided_decoding_backend: str,
 
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("guided_decoding_backend,disable_any_whitespace",
-                         GUIDED_DECODING_BACKENDS)
+                         ALL_DECODING_BACKENDS)
 def test_guided_number_range_json_completion(llm, guided_decoding_backend: str,
                                              disable_any_whitespace: bool):
     sample_output_schema = {
