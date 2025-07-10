@@ -5,7 +5,7 @@ import sys
 
 import yaml
 from entrypoints.script_generator import ScriptGenerator
-from server_autoconfig.vllm_autocalc import VarsGenerator
+from server.vllm_autocalc import VarsGenerator
 
 
 class EntrypointMain:
@@ -37,15 +37,14 @@ class EntrypointMain:
         If no section matches, loads nothing.
         If the file does not exist, it returns an empty dictionary.
         """
-        defaults_file = ("server_configurations/defaults.yaml"
-                         if self.mode == "server" else
-                         "benchmark_configurations/defaults.yaml")
+        defaults_file = ("server/server_defaults.yaml" if self.mode == "server"
+                         else "benchmark/benchmark_defaults.yaml")
         try:
             with open(defaults_file) as f:
                 config = yaml.safe_load(f)
                 found = False
                 for section_name, section in config.items():
-                    if section_name.startswith("defaults_") and isinstance(
+                    if section_name.startswith("model_") and isinstance(
                             section, dict):
                         models = section.get("MODELS", [])
                         if (isinstance(models, list)
@@ -114,35 +113,44 @@ class EntrypointMain:
 
     def _update_benchmark_envs_from_user_vars(self):
         """
-        Loads a list of variable names from a YAML file and, for each variable
-        present in the current environment, updates the internal configuration
-        dictionary with the environment value. If the YAML file is missing or
-        empty, no variables are updated.
+        Loads variable names from the benchmark/benchmark_user.env file (one per
+        line, or KEY=...), then for each variable, if it exists in the
+        environment, updates self.config_envs with its value. Tries to eval the
+        value, falls back to string if eval fails.
         """
-        user_vars_file = "benchmark_configurations/user_vars.yaml"
+        env_file = "benchmark/benchmark_user.env"
+        env_vars = []
+
+        # Parse .env file to get variable names
         try:
-            with open(user_vars_file) as f:
-                user_vars = yaml.safe_load(f)
-                if user_vars and isinstance(user_vars, dict):
-                    variables = user_vars.get("variables", [])
-                    for var in variables:
-                        if var in os.environ:
-                            self.config_envs[var] = os.environ[var]
-                            print(f"[INFO] Overwriting {var} with value from "
-                                  f"environment: {self.config_envs[var]}")
-                else:
-                    print(f"[WARNING] No user-defined variables found in "
-                          f"'{user_vars_file}'.")
+            with open(env_file) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    if "=" in line:
+                        key, _ = line.split("=", 1)
+                        key = key.strip()
+                    else:
+                        key = line
+                    if key:
+                        env_vars.append(key)
         except FileNotFoundError:
-            print(
-                f"[WARNING] User variables file '{user_vars_file}' not found. "
-                "No user-defined variables loaded.")
-        except Exception as e:
-            print(
-                f"[ERROR] Failed to load user-defined variables: {e}",
-                file=sys.stderr,
-            )
-            sys.exit(1)
+            print(f"[WARNING] .env file '{env_file}' not found. "
+                  "No user-defined variables loaded from .env.")
+
+        # For each variable, if present in environment, update config_envs
+        for param in env_vars:
+            if os.environ.get(param) is not None:
+                try:
+                    self.config_envs[param] = eval(os.environ[param])
+                except Exception:
+                    self.config_envs[param] = os.environ[param]
+                print(
+                    f"[INFO] Overwriting {param} with value from environment: "
+                    f"{self.config_envs[param]}")
+        if not env_vars:
+            print(f"[WARNING] No variables loaded from '{env_file}'.")
 
     def run(self):
 
@@ -181,10 +189,9 @@ class EntrypointMain:
             for key, value in self.config_envs.items():
                 os.environ[str(key)] = str(value)
             variables = VarsGenerator(
-                defaults_path="server_autoconfig/defaults.yaml",
-                varlist_conf_path="server_autoconfig/varlist_conf.yaml",
-                model_def_settings_path=(
-                    "server_autoconfig/settings_vllm.csv"),
+                defaults_path="server/server_defaults.yaml",
+                varlist_conf_path="server/server_user.env",
+                model_def_settings_path="server/settings_vllm.csv",
             ).calculate_variables()
             ScriptGenerator(
                 template_script_path="templates/template_vllm_server.sh",
