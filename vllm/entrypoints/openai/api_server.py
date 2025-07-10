@@ -1021,6 +1021,7 @@ INVOCATION_TYPES: dict[RequestType, tuple[GetHandlerFn, EndpointFn]] = {
     PoolingRequest: (pooling, create_pooling),
 }
 
+# NOTE: Construct the TypeAdapters only once
 INVOCATION_VALIDATORS = {
     pydantic.TypeAdapter(request_type): (get_handler, endpoint)
     for request_type, (get_handler, endpoint) in INVOCATION_TYPES.items()
