@@ -15,8 +15,10 @@ jobs:
         python-version: "3.12"
     - run: echo "::add-matcher::.github/workflows/matchers/actionlint.json"
     - run: echo "::add-matcher::.github/workflows/matchers/mypy.json"
+    - name: Set VLLM_TARGET_DEVICE to CPU for pre-commit checks
+      run: echo "VLLM_TARGET_DEVICE=cpu" >> $GITHUB_ENV
     - name: Install vLLM Build Dependencies
-      run: pip install --requirement requirements/build.txt
+      run: pip install -r requirements/build.txt
     - name: Install vLLM Project and Dev Dependencies
       run: pip install -e ".[dev]"
     - uses: pre-commit/action@v3.0.1 # Use the latest stable version tag
