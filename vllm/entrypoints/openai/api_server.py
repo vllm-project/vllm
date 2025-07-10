@@ -18,7 +18,7 @@ from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
 from functools import partial
 from http import HTTPStatus
-from typing import Annotated, Any, Callable, Optional, Union
+from typing import Annotated, Any, Callable, Optional
 
 import prometheus_client
 import pydantic
@@ -34,7 +34,7 @@ from starlette.concurrency import iterate_in_threadpool
 from starlette.datastructures import URL, Headers, MutableHeaders, State
 from starlette.routing import Mount
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
-from typing_extensions import TypeAlias, assert_never
+from typing_extensions import assert_never
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
@@ -1020,8 +1020,6 @@ INVOCATION_TYPES: dict[RequestType, tuple[GetHandlerFn, EndpointFn]] = {
     RerankRequest: (rerank, do_rerank),
     PoolingRequest: (pooling, create_pooling),
 }
-
-InvocationRequest: TypeAlias = Union[tuple(INVOCATION_TYPES)]
 
 
 @router.post("/invocations",
