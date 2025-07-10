@@ -1539,10 +1539,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 attn_metadata,
             )
 
-        # Clear KVConnector state after all KVs are generated.
-        if has_kv_transfer_group():
-            get_kv_transfer_group().clear_connector_metadata()
-
         self.eplb_step()
 
         return ModelRunnerOutput(
