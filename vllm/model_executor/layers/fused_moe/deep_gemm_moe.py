@@ -15,9 +15,10 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize import (
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate)
 from vllm.model_executor.layers.fused_moe.utils import _resize_cache
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    per_token_group_quant_fp8)
 from vllm.utils import has_deep_gemm, round_up
-from vllm.utils.deep_gemm import (m_grouped_fp8_gemm_nt_contiguous,
-                                  per_token_group_cast_to_fp8)
+from vllm.utils.deep_gemm import m_grouped_fp8_gemm_nt_contiguous
 
 logger = init_logger(__name__)
 
@@ -170,10 +171,10 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         self.activation(activation, act_out, mm1_out.view(-1, N))
 
         a2q_scale: Optional[torch.Tensor] = None
-        a2q, a2q_scale = per_token_group_cast_to_fp8(act_out,
-                                                     self.block_shape[1],
-                                                     column_major_scales=True,
-                                                     out_q=quant_out)
+        a2q, a2q_scale = per_token_group_quant_fp8(act_out,
+                                                   self.block_shape[1],
+                                                   column_major_scales=True,
+                                                   out_q=quant_out)
 
         m_grouped_fp8_gemm_nt_contiguous((a2q, a2q_scale), (w2, w2_scale),
                                          mm2_out, expert_ids)
