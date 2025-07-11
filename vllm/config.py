@@ -16,7 +16,6 @@ from dataclasses import (MISSING, Field, asdict, field, fields, is_dataclass,
                          replace)
 from functools import cached_property
 from importlib.util import find_spec
-from pathlib import Path
 from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Literal, Optional,
                     Protocol, TypeVar, Union, cast, get_args)
 
@@ -3953,11 +3952,6 @@ class PassConfig:
     don't all have access to full configuration - that would create a cycle as
     the `PassManager` is set as a property of config."""
 
-    dump_graph_stages: list[str] = field(default_factory=list)
-    """List of stages for which we want to dump the graph. Each pass defines
-    its own stages (before, after, maybe in-between)."""
-    dump_graph_dir: Path = Path(".")
-    """Directory to dump the graphs."""
     enable_fusion: bool = field(default_factory=lambda: not envs.VLLM_USE_V1)
     """Whether to enable the custom fusion (RMSNorm/SiluMul+quant) pass."""
     enable_attn_fusion: bool = False
@@ -3975,12 +3969,9 @@ class PassConfig:
         """
         Produces a hash unique to the pass configuration.
         Any new fields that affect compilation should be added to the hash.
-        Do not include dump_graph_* in the hash - they don't affect
-        compilation.
+        Any future fields that don't affect compilation should be excluded.
         """
-        exclude = {"dump_graph_stages", "dump_graph_dir"}
-        dict_ = {k: v for k, v in asdict(self).items() if k not in exclude}
-        return InductorPass.hash_dict(dict_)
+        return InductorPass.hash_dict(asdict(self))
 
     def __post_init__(self) -> None:
         if not self.enable_noop:
