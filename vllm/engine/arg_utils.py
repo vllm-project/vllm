@@ -608,7 +608,7 @@ class EngineArgs:
         model_group.add_argument(
             "--logits-processors",
             nargs='+',
-            help="List of logits processors' fully-qualified names (FQNs).")
+            help="One or more logits processors' fully-qualified class names.")
 
         # Model loading arguments
         load_kwargs = get_kwargs(LoadConfig)
