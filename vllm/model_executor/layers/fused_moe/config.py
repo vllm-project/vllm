@@ -14,7 +14,7 @@ from vllm.distributed import get_dp_group, get_tensor_model_parallel_rank
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
-from vllm.model_executor.layers.quantization.utils.mxfp4_utils import OCP_MX_Scheme
+from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import OCP_MX_Scheme
 from vllm.utils import cdiv
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
 

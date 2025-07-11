@@ -29,8 +29,8 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP)
 from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache, moe_kernel_quantize_input)
-from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
-    dequant_mxfp4, OCP_MX_Scheme, dequant_mxfp6_e3m2)
+from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
+    dequant_mxfp4, OCP_MX_Scheme, dequant_mxfp6)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils import direct_register_custom_op
@@ -1345,19 +1345,23 @@ def fused_experts_impl(
     else:
         out_hidden_states = torch.empty_like(hidden_states)
 
-    if ocp_mx_scheme == OCP_MX_Scheme.w_fp4_a_fp4:
-        # Weight has to be dequantized for mxfp4 emulation.
-        w1 = dequant_mxfp4(w1, w1_scale, hidden_states.dtype)
-        w1_scale = None
-        w2 = dequant_mxfp4(w2, w2_scale, hidden_states.dtype)
-        w2_scale = None
-    elif ocp_mx_scheme == OCP_MX_Scheme.w_fp4_a_fp6_e3m2:
-        w1 = dequant_mxfp6_e3m2(w1, w1_scale, hidden_states.dtype)
-        w1_scale = None
-        w2 = dequant_mxfp6_e3m2(w2, w2_scale, hidden_states.dtype)
-        w2_scale = None
-    elif ocp_mx_scheme is not None:
-        raise NotImplementedError("to implement")
+    if ocp_mx_scheme is not None:
+        if ocp_mx_scheme in {OCP_MX_Scheme.w_fp4_a_fp4, OCP_MX_Scheme.w_fp4_a_fp6_e3m2}:
+            # Weight has to be dequantized for mxfp4 emulation.
+            w1 = dequant_mxfp4(w1, w1_scale, hidden_states.dtype)
+            w1_scale = None
+            w2 = dequant_mxfp4(w2, w2_scale, hidden_states.dtype)
+            w2_scale = None
+        elif ocp_mx_scheme == OCP_MX_Scheme.w_fp6_e3m2_a_fp6_e3m2:
+            w1 = dequant_mxfp6(w1, w1_scale, quant_dtype="fp6_e3m2", float_dtype=hidden_states.dtype)
+            w1_scale = None
+            w2 = dequant_mxfp6(w2, w2_scale, quant_dtype="fp6_e3m2", float_dtype=hidden_states.dtype)
+            w2_scale = None
+        elif ocp_mx_scheme == OCP_MX_Scheme.w_fp6_e2m3_a_fp6_e2m3:
+            w1 = dequant_mxfp6(w1, w1_scale, quant_dtype="fp6_e3m2", float_dtype=hidden_states.dtype)
+            w1_scale = None
+            w2 = dequant_mxfp6(w2, w2_scale, quant_dtype="fp6_e3m2", float_dtype=hidden_states.dtype)
+            w2_scale = None
 
     for chunk in range((num_tokens // CHUNK_SIZE) + 1):
         begin_chunk_idx, end_chunk_idx = (chunk * CHUNK_SIZE,

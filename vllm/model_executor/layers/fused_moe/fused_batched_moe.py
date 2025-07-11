@@ -17,7 +17,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     group_broadcast)
 from vllm.triton_utils import tl, triton
-from vllm.model_executor.layers.quantization.utils.mxfp4_utils import OCP_MX_Scheme
+from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import OCP_MX_Scheme
 
 @triton.jit
 def moe_mmk(

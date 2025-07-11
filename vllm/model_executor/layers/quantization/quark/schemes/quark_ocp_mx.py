@@ -8,7 +8,7 @@ import torch.nn.functional as F
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.quark.schemes import QuarkScheme
-from vllm.model_executor.layers.quantization.utils.mxfp4_utils import OCP_MX_BLOCK_SIZE, quant_dequant_mxfp6, quant_dequant_mxfp4, dequant_mxfp4, OCP_MX_Scheme
+from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import OCP_MX_BLOCK_SIZE, quant_dequant_mxfp6, quant_dequant_mxfp4, dequant_mxfp4, OCP_MX_Scheme
 from vllm.model_executor.parameter import (GroupQuantScaleParameter,
                                            PackedvLLMParameter)
 from vllm.platforms import current_platform

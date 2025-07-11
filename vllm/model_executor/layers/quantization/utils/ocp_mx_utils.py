@@ -8,8 +8,6 @@ from vllm.utils import direct_register_custom_op
 
 OCP_MX_BLOCK_SIZE = 32
 
-# TODO: add missing dequant_mxfp6_e3m2, dequant_mxfp6_e2m3, rename this file.
-
 class OCP_MX_Scheme(str, Enum):
     w_fp4_a_fp4 = "w4a4_fp4"
     w_fp4_a_fp6_e3m2 = "w_fp4_a_fp6_e3m2"
@@ -66,6 +64,30 @@ def quant_dequant_mxfp6(x: torch.Tensor,
     )
 
     return x
+
+def dequant_mxfp6(x: torch.Tensor, scale: torch.Tensor, quant_dtype: str, float_dtype: torch.dtype) -> torch.Tensor:
+    try:
+        from quark.torch.kernel.hw_emulation.hw_emulation_interface import (
+            dequantize_fp4_fp6_per_group)
+        from quark.torch.utils import create_pack_method
+    except ImportError as e:
+        raise ImportError("The package `amd-quark` is required to use "
+                        "MX-FP6 models. Please install it with `pip install "
+                        "amd-quark`.") from e
+
+    # TODO: Both arguments are unused.
+    pack_method = create_pack_method(None, dtype=quant_dtype)
+    # TODO: Both 'reorder' and 'origin_packed_axis_size' are unused.
+    unpacked_x = pack_method.unpack(x, reorder=False)
+
+    scale = 2**(scale.view(torch.uint8).to(torch.int16) - 127).to(float_dtype)
+
+    # TODO: `dequantize_fp4_fp6_per_group` and `prepare_inputs_per_group` always return fp32.
+    return dequantize_fp4_fp6_per_group(unpacked_x,
+                                        scale,
+                                        axis=-1,
+                                        group_size=OCP_MX_BLOCK_SIZE,
+                                        quant_dtype=quant_dtype).to(float_dtype)
 
 def _dequant_mxfp4(x: torch.Tensor, scale: torch.Tensor,
                    float_dtype: torch.dtype) -> torch.Tensor:
