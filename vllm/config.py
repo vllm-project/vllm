@@ -1331,6 +1331,17 @@ class ModelConfig:
 
             return sum(t == 1 for t in attn_type_list[start:end])
 
+    def get_mamba_chunk_size(self) -> Optional[int]:
+        """
+        Returns the mamba chunk size if it exists
+        """
+        # used by e.g. Bamba, FalconH1, Granite, PLaMo2
+        chunk_size = getattr(self.hf_text_config, "mamba_chunk_size", None)
+        if chunk_size is None:
+            # used by e.g. Mamba2, NemotronH, Zamba
+            chunk_size = getattr(self.hf_text_config, "chunk_size", None)
+        return chunk_size
+
     def get_multimodal_config(self) -> "MultiModalConfig":
         """
         Get the multimodal configuration of the model.
