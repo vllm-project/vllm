@@ -212,7 +212,7 @@ from vllm.utils import cdiv, round_down
 from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder, CommonAttentionMetadata,
     get_per_layer_parameters, infer_global_hyperparameters,
-    reoder_batch_to_split_decodes_and_prefills, split_decodes_and_prefills)
+    reorder_batch_to_split_decodes_and_prefills, split_decodes_and_prefills)
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 try:
@@ -559,9 +559,9 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
 
     def reorder_batch(self, input_batch: "InputBatch",
                       scheduler_output: "SchedulerOutput") -> bool:
-        return reoder_batch_to_split_decodes_and_prefills(input_batch,
-                                                          scheduler_output,
-                                                          decode_threshold=1)
+        return reorder_batch_to_split_decodes_and_prefills(input_batch,
+                                                           scheduler_output,
+                                                           decode_threshold=1)
 
     def _build_decode(self, block_table_tensor: torch.Tensor,
                       seq_lens: torch.Tensor):

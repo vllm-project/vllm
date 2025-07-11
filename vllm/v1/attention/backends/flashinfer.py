@@ -8,12 +8,11 @@ from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 
+import vllm.envs as envs
 from flashinfer import (BatchDecodeWithPagedKVCacheWrapper,
                         BatchPrefillWithPagedKVCacheWrapper,
                         MultiLevelCascadeAttentionWrapper)
 from flashinfer.decode import trtllm_batch_decode_with_kv_cache
-
-import vllm.envs as envs
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionType)
 from vllm.config import VllmConfig
@@ -23,7 +22,7 @@ from vllm.v1.attention.backends.flash_attn import use_cascade_attention
 from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder, CommonAttentionMetadata, PerLayerParameters,
     get_kv_cache_layout, get_per_layer_parameters,
-    infer_global_hyperparameters, reoder_batch_to_split_decodes_and_prefills,
+    infer_global_hyperparameters, reorder_batch_to_split_decodes_and_prefills,
     split_decodes_and_prefills)
 from vllm.v1.kv_cache_interface import AttentionSpec
 
@@ -237,13 +236,14 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.global_hyperparameters: Optional[PerLayerParameters] = None
 
         self.vllm_config = vllm_config
+        self.cache_config = vllm_config.cache_config
         self.kv_cache_spec = kv_cache_spec
 
     def reorder_batch(self, input_batch: InputBatch,
                       scheduler_output: SchedulerOutput) -> bool:
-        return reoder_batch_to_split_decodes_and_prefills(input_batch,
-                                                          scheduler_output,
-                                                          decode_threshold=1)
+        return reorder_batch_to_split_decodes_and_prefills(input_batch,
+                                                           scheduler_output,
+                                                           decode_threshold=1)
 
     def _get_workspace_buffer(self):
         if self._workspace_buffer is None:
@@ -384,7 +384,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         page_size = self.kv_cache_spec.block_size
         device = self.device
         qo_indptr = common_attn_metadata.query_start_loc
-        max_seq_len = int(self.runner.seq_lens_np[:num_reqs].max())
+        max_seq_len = common_attn_metadata.seq_lens_cpu.max()
         seq_lens = common_attn_metadata.seq_lens
         block_table_tensor = common_attn_metadata.block_table_tensor
 
@@ -431,7 +431,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         paged_kv_last_page_len = seq_lens % page_size
         paged_kv_last_page_len = torch.where(paged_kv_last_page_len == 0,
                                              page_size, paged_kv_last_page_len)
-        cache_dtype = self.runner.cache_config.cache_dtype
+        cache_dtype = self.cache_config.cache_dtype
         if cache_dtype.startswith("fp8"):
             kv_cache_dtype = FlashInferBackend.get_fp8_dtype_for_flashinfer(
                 cache_dtype)

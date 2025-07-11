@@ -6,8 +6,8 @@ from typing import TYPE_CHECKING, Optional
 
 import torch
 
-from vllm.config import VllmConfig
 from vllm.attention.backends.abstract import AttentionBackend
+from vllm.config import VllmConfig
 from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
                                               CommonAttentionMetadata)
 from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
@@ -90,8 +90,7 @@ class Mamba2AttentionMetadataBuilder(
                  device: torch.device):
         assert isinstance(kv_cache_spec, MambaSpec)
         self.kv_cache_spec = kv_cache_spec
-        self.chunk_size = vllm_config.model_config.get_mamba_chunk_size(
-        )
+        self.chunk_size = vllm_config.model_config.get_mamba_chunk_size()
         assert self.chunk_size is not None, (
             "chunk_size needs to be set in the model config for Mamba2 models")
 

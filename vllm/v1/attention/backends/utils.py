@@ -426,7 +426,7 @@ def split_decodes_and_prefills(
     return (num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens)
 
 
-def reoder_batch_to_split_decodes_and_prefills(
+def reorder_batch_to_split_decodes_and_prefills(
     input_batch: "InputBatch",
     scheduler_output: "SchedulerOutput",
     decode_threshold: int = 1,
