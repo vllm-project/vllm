@@ -218,6 +218,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                          trust_remote_code=True),
     "MiniCPM3ForCausalLM": _HfExamplesInfo("openbmb/MiniCPM3-4B",
                                          trust_remote_code=True),
+    "MiniMaxForCausalLM": _HfExamplesInfo("MiniMaxAI/MiniMax-Text-01-hf",
+                                          min_transformers_version="4.53"),
     "MiniMaxText01ForCausalLM": _HfExamplesInfo("MiniMaxAI/MiniMax-Text-01",
                                                 trust_remote_code=True,
                                                 revision="a59aa9cbc53b9fb8742ca4e9e1531b9802b6fdc3"),  # noqa: E501
@@ -432,6 +434,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                                          trust_remote_code=True),  # noqa: E501
     "MllamaForConditionalGeneration": _HfExamplesInfo("meta-llama/Llama-3.2-11B-Vision-Instruct"),  # noqa: E501
     "WhisperForConditionalGeneration": _HfExamplesInfo("openai/whisper-large-v3"),  # noqa: E501
+
+    # [Cross-encoder]
+    "JinaVLForRanking": _HfExamplesInfo("jinaai/jina-reranker-m0"),   # noqa: E501
 }
 
 _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
