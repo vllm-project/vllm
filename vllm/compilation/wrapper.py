@@ -34,6 +34,7 @@ class TorchCompileWrapperWithCustomDispatcher:
                  compiled_callable: Optional[Callable] = None,
                  compilation_level: int = 0):
 
+        self.overwrite_compiler_configs()
         vllm_config = get_current_vllm_config()
         self.vllm_config = vllm_config
         if compiled_callable is None:
@@ -62,6 +63,16 @@ class TorchCompileWrapperWithCustomDispatcher:
         # and the default Dynamo guard mechanism.
         self.use_custom_dispatcher: bool = \
             compilation_level >= CompilationLevel.DYNAMO_ONCE
+
+    def overwrite_compiler_configs(self):
+        """
+        This method overwrites the torch.compile config flags in case the
+        default values are not the best defaults in the context of vllm.
+        """
+        # Disable the C++ compilation of symbolic shapes because vllm skips the
+        # guards completely.
+        torch._dynamo.config.enable_cpp_symbolic_shape_guards = False
+
 
     def __call__(self, *args, **kwargs):
         """Implement the dispatch logic here, beyond the torch.compile level.
