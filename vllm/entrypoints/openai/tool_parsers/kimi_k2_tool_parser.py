@@ -252,9 +252,9 @@ class KimiK2ToolParser(ToolParser):
                         self.stream_tool_call_name_regex.match(
                             tool_call_portion))
                     if current_tool_call_name_matches:
-                        tool_id = (current_tool_call_name_matches.groups())
-                        tool_name = tool_id.split('.')[1].split
-                        current_tool_call['id'] = tool_id
+                        tool_id_str = current_tool_call_name_matches.groups()
+                        tool_name = tool_id_str.split('.')[1].split
+                        current_tool_call['id'] = tool_id_str
                         current_tool_call["name"] = tool_name
                         current_tool_call["arguments"] = ""
                     else:
