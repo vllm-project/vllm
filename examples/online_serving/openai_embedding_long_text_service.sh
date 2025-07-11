@@ -10,6 +10,7 @@ set -euo pipefail
 
 # Configuration
 MODEL_NAME=${MODEL_NAME:-"intfloat/multilingual-e5-large"}
+MODEL_CODE=${MODEL_CODE:-"multilingual-e5-large"}
 PORT=${PORT:-31090}
 GPU_COUNT=${GPU_COUNT:-1}
 MAX_MODEL_LEN=${MAX_MODEL_LEN:-10240}
@@ -54,7 +55,7 @@ vllm serve "$MODEL_NAME" \
   --enforce-eager \
   --max-model-len "$MAX_MODEL_LEN" \
   --override-pooler-config '{"pooling_type": "CLS", "normalize": true, "enable_chunked_processing": true}' \
-  --served-model-name multilingual-e5-large \
+  --served-model-name ${MODEL_CODE} \
   --task embed \
   --use-v2-block-manager \
   --api-key "$API_KEY" \
@@ -67,7 +68,7 @@ echo "✅ vLLM Embedding Server started successfully!"
 echo ""
 echo "📡 Server Information:"
 echo "   - Base URL: http://localhost:$PORT"
-echo "   - Model Name: multilingual-e5-large"
+echo "   - Model Code: ${MODEL_CODE}"
 echo "   - API Key: $API_KEY"
 echo ""
 echo "🧪 Test the server with:"
