@@ -1348,6 +1348,9 @@ def fused_experts_impl(
         out_hidden_states = torch.empty_like(hidden_states)
 
     if ocp_mx_scheme is not None:
+        # TODO: On platforms for which `current_platform.supports_mx()` is True
+        # and for which we have a native OCP mx fused MOE kernel,
+        # this dequantization step should not be done.
         if ocp_mx_scheme in {OCP_MX_Scheme.w_fp4_a_fp4, OCP_MX_Scheme.w_fp4_a_fp6_e3m2, OCP_MX_Scheme.w_fp4_a_fp6_e2m3}:
             # Weight has to be dequantized for mxfp4 emulation.
             w1 = dequant_mxfp4(w1, w1_scale, hidden_states.dtype)

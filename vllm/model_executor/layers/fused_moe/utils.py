@@ -172,7 +172,8 @@ def _mxfp4_quantize(
     if not current_platform.supports_mx():
         A = quant_dequant_mxfp4(A)
     else:
-        raise NotImplementedError()
+        # TODO: native mxfp4 is currently not integrated in vllm, so simulating even on devices supporting this data type natively.
+        A = quant_dequant_mxfp4(A)
 
     return A, None
 
@@ -187,7 +188,8 @@ def _mxfp6_quantize(
     if not current_platform.supports_mx():
         A = quant_dequant_mxfp6(A, quant_dtype=quant_dtype)
     else:
-        raise NotImplementedError()
+        # TODO: native mxfp6 is currently not integrated in vllm, so simulating even on devices supporting this data type natively.
+        A = quant_dequant_mxfp6(A, quant_dtype=quant_dtype)
 
     return A, None
 
