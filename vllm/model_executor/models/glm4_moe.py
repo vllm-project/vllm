@@ -305,6 +305,8 @@ class Glm4MoeDecoderLayer(nn.Module):
         rope_scaling = getattr(config, "rope_scaling", None)
         max_position_embeddings = getattr(config, "max_position_embeddings",
                                           131072)
+        # DecoderLayers are created with `make_layers` which passes the prefix
+        # with the layer's index.
         layer_idx = int(prefix.split(sep='.')[-1])
         self.layer_idx = layer_idx
 
@@ -341,6 +343,7 @@ class Glm4MoeDecoderLayer(nn.Module):
                                        eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size,
                                                 eps=config.rms_norm_eps)
+        self.routed_scaling_factor = config.routed_scaling_factor
 
     def forward(
         self,
@@ -579,6 +582,45 @@ class Glm4MoeForCausalLM(nn.Module, SupportsPP):
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
+
+        self.expert_weights = []
+
+        # Set MoE hyperparameters
+        self.num_moe_layers = (config.num_hidden_layers -
+                               config.first_k_dense_replace)
+        self.num_expert_groups = config.n_group
+
+        self.moe_layers: list[FusedMoE] = []
+        for layer in self.model.layers:
+            assert isinstance(layer, Glm4MoeDecoderLayer)
+            if isinstance(layer.mlp, Glm4MoE):
+                self.moe_layers.append(layer.mlp.experts)
+
+        # Pick last one layer since the first ones may be dense layers.
+        example_moe = typing.cast(
+            Glm4MoE, self.model.layers[config.num_hidden_layers - 1].mlp)
+        self.num_logical_experts = example_moe.n_logical_experts
+        self.num_physical_experts = example_moe.n_physical_experts
+        self.num_local_physical_experts = example_moe.n_local_physical_experts
+        self.num_routed_experts = example_moe.n_routed_experts
+        self.num_shared_experts = example_moe.n_shared_experts
+        self.num_redundant_experts = example_moe.n_redundant_experts
+
+    def set_eplb_state(
+        self,
+        expert_load_view: torch.Tensor,
+        logical_to_physical_map: torch.Tensor,
+        logical_replica_count: torch.Tensor,
+    ) -> None:
+        for layer_idx, layer in enumerate(self.moe_layers):
+            # Register the expert weights.
+            self.expert_weights.append(layer.get_expert_weights())
+            layer.set_eplb_state(
+                moe_layer_idx=layer_idx,
+                expert_load_view=expert_load_view,
+                logical_to_physical_map=logical_to_physical_map,
+                logical_replica_count=logical_replica_count,
+            )
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
