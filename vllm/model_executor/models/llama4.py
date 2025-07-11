@@ -37,9 +37,10 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
+from .interfaces import MixtureOfExperts
 from .llama import LlamaForCausalLM, LlamaMLP, LlamaModel
-from .utils import (AutoWeightsLoader, extract_layer_index, fast_topk,
-                    is_pp_missing_parameter)
+from .utils import (AutoWeightsLoader, PPMissingLayer, extract_layer_index,
+                    fast_topk, is_pp_missing_parameter)
 
 
 class Llama4MoE(nn.Module):
@@ -59,7 +60,8 @@ class Llama4MoE(nn.Module):
     def __init__(self,
                  config: Llama4TextConfig,
                  quant_config: Optional[QuantizationConfig] = None,
-                 prefix: str = ""):
+                 prefix: str = "",
+                 enable_eplb: bool = False):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
         self.top_k = config.num_experts_per_tok
@@ -81,7 +83,8 @@ class Llama4MoE(nn.Module):
             reduce_results=False,
             renormalize=False,
             quant_config=quant_config,
-            prefix=f"{prefix}.experts")
+            prefix=f"{prefix}.experts",
+            enable_eplb=enable_eplb)
 
         self.shared_expert = LlamaMLP(
             hidden_size=config.hidden_size,
@@ -251,6 +254,7 @@ class Llama4DecoderLayer(nn.Module):
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
+        enable_eplb: bool = False,
     ) -> None:
         super().__init__()
 
@@ -281,6 +285,7 @@ class Llama4DecoderLayer(nn.Module):
                 config=config,
                 quant_config=quant_config,
                 prefix=f"{prefix}.feed_forward",
+                enable_eplb=enable_eplb,
             )
         else:
             self.feed_forward = LlamaMLP(
@@ -328,9 +333,52 @@ class Llama4Model(LlamaModel):
                  prefix: str = "",
                  layer_type: type[Llama4DecoderLayer] = Llama4DecoderLayer):
         self.num_experts = vllm_config.model_config.hf_config.num_local_experts
+        self.enable_eplb = vllm_config.parallel_config.enable_eplb if hasattr(
+            vllm_config.parallel_config, 'enable_eplb') else False
+
+        # Create layers with enable_eplb parameter
+        self.vllm_config = vllm_config
+        self.layer_type = layer_type
+
         super().__init__(vllm_config=vllm_config,
                          prefix=prefix,
                          layer_type=layer_type)
+
+        # Track MoE layers for EPLB
+        self.moe_layers = []
+        config = vllm_config.model_config.hf_config
+        for i, layer in enumerate(self.layers):
+            if isinstance(layer, layer_type):
+                is_moe_layer = (config.interleave_moe_layer_step > 0
+                                and (i + 1) % config.interleave_moe_layer_step
+                                == 0)
+                if is_moe_layer:
+                    self.moe_layers.append(layer)
+
+    def make_layers(
+        self,
+        num_hidden_layers: int,
+        layer_type: type[nn.Module],
+        prefix: str,
+    ) -> list[nn.Module]:
+        """Override to pass enable_eplb to decoder layers."""
+        layers = []
+        for layer_idx in range(num_hidden_layers):
+            if isinstance(self.start_layer,
+                          int) and layer_idx < self.start_layer or (
+                              isinstance(self.end_layer, int)
+                              and layer_idx >= self.end_layer):
+                layers.append(PPMissingLayer())
+            else:
+                layer = layer_type(
+                    config=self.config,
+                    cache_config=self.cache_config,
+                    quant_config=self.quant_config,
+                    prefix=f"{prefix}.{layer_idx}",
+                    enable_eplb=self.enable_eplb,
+                )
+                layers.append(layer)
+        return layers
 
     def load_moe_expert_weights(
         self,
@@ -460,7 +508,7 @@ class Llama4Model(LlamaModel):
         return loaded_params
 
 
-class Llama4ForCausalLM(LlamaForCausalLM):
+class Llama4ForCausalLM(LlamaForCausalLM, MixtureOfExperts):
 
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
@@ -481,6 +529,87 @@ class Llama4ForCausalLM(LlamaForCausalLM):
         super().__init__(vllm_config=vllm_config,
                          prefix=prefix,
                          layer_type=Llama4DecoderLayer)
+
+        # For MixtureOfExperts protocol
+        self._num_redundant_experts = 0
+
+    @property
+    def expert_weights(self) -> list[torch.nn.Module]:
+        """Get all MoE layers"""
+        return self.model.moe_layers
+
+    @property
+    def num_moe_layers(self) -> int:
+        """Get number of MoE layers"""
+        return len(self.model.moe_layers)
+
+    @property
+    def num_expert_groups(self) -> int:
+        """Get number of expert groups (1 for Llama4)"""
+        return 1
+
+    @property
+    def num_logical_experts(self) -> int:
+        """Get number of logical experts"""
+        return self.config.num_local_experts
+
+    @property
+    def num_physical_experts(self) -> int:
+        """Get number of physical experts (includes redundant)"""
+        return self.config.num_local_experts + self._num_redundant_experts
+
+    @property
+    def num_local_physical_experts(self) -> int:
+        """Get number of local physical experts"""
+        if hasattr(self.model, 'moe_layers') and len(
+                self.model.moe_layers) > 0:
+            moe_layer = self.model.moe_layers[0]
+            if hasattr(moe_layer.feed_forward, 'experts'):
+                return moe_layer.feed_forward.experts.local_num_experts
+        return self.config.num_local_experts
+
+    @property
+    def num_routed_experts(self) -> int:
+        """Get number of routed experts (excludes shared experts)"""
+        return self.config.num_local_experts
+
+    @property
+    def num_shared_experts(self) -> int:
+        """Get number of shared experts"""
+        # Llama4 has 1 shared expert per MoE layer
+        return 1 if self.num_moe_layers > 0 else 0
+
+    @property
+    def num_redundant_experts(self) -> int:
+        """Get number of redundant experts"""
+        return self._num_redundant_experts
+
+    def set_eplb_state(
+        self,
+        moe_layer_indices: list[int],
+        expert_load_view: torch.Tensor,
+        logical_to_physical_map: torch.Tensor,
+        logical_replica_count: torch.Tensor,
+    ) -> None:
+        """Set EPLB state for MoE layers"""
+        for i, moe_layer_idx in enumerate(moe_layer_indices):
+            moe_layer = self.model.moe_layers[i]
+            if hasattr(moe_layer.feed_forward, 'experts'):
+                moe_layer.feed_forward.experts.set_eplb_state(
+                    moe_layer_idx=i,
+                    expert_load_view=expert_load_view,
+                    logical_to_physical_map=logical_to_physical_map,
+                    logical_replica_count=logical_replica_count,
+                )
+
+    def get_expert_weights(self) -> list[list[torch.Tensor]]:
+        """Get expert weights from all MoE layers"""
+        expert_weights = []
+        for moe_layer in self.model.moe_layers:
+            if hasattr(moe_layer.feed_forward, 'experts'):
+                expert_weights.append(
+                    list(moe_layer.feed_forward.experts.get_expert_weights()))
+        return expert_weights
 
     def _init_model(self,
                     vllm_config: VllmConfig,
