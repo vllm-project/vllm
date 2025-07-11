@@ -6,13 +6,14 @@ import signal
 import sys
 import threading
 import time
+import torch
 from collections import deque
 from collections.abc import Generator
 from concurrent.futures import Future
 from contextlib import ExitStack, contextmanager
 from inspect import isclass, signature
 from logging import DEBUG
-from typing import Any, Callable, Optional, TypeVar, Union
+from typing import Any, Callable, Optional, Tuple, TypeVar, Union
 
 import msgspec
 import zmq
@@ -68,6 +69,11 @@ class EngineCore:
         self.vllm_config = vllm_config
         logger.info("Initializing a V1 LLM engine (v%s) with config: %s",
                     VLLM_VERSION, vllm_config)
+
+        self._profile_current_step = 0
+        self.profiler_start_iters, self.profiler_stop_iters = (
+            self._get_profiler_iteration_index_env_var("VLLM_PROFILE_START_STOP")
+        )
 
         self.log_stats = log_stats
 
@@ -231,6 +237,14 @@ class EngineCore:
         # or finished and not yet removed from the batch.
         if not self.scheduler.has_requests():
             return {}, False
+
+        self._profile_current_step = self._profile_current_step + 1
+        if self._profile_current_step in self.profiler_start_iters:
+            torch.cuda.cudart().cudaProfilerStart()
+
+        if self._profile_current_step in self.profiler_stop_iters:
+            torch.cuda.cudart().cudaProfilerStop()
+
         scheduler_output = self.scheduler.schedule()
         model_output = self.execute_model(scheduler_output)
         engine_core_outputs = self.scheduler.update_from_output(
@@ -350,6 +364,32 @@ class EngineCore:
                        kwargs: Optional[dict[str, Any]] = None) -> list[_R]:
         return self.model_executor.collective_rpc(method, timeout, args,
                                                   kwargs)
+
+    def _get_profiler_iteration_index_env_var(
+        self, name: str
+        ) -> Tuple[frozenset[int], frozenset[int]]:
+        spans = os.environ.get(name, None)
+        starts, stops = [], []
+
+        if spans:
+            spans = spans.split(",")
+
+            for span in spans:
+                try:
+                    if "-" in span:
+                        start, stop = span.strip().split("-")
+                        starts.append(int(start))
+                        stops.append(int(stop))
+                    else:
+                        it = int(span.strip())
+                        starts.append(it)
+                        stops.append(it)
+                except ValueError as e:
+                    raise ValueError(
+                        f"Cannot parse span in environment variable `{name}`: {e}"
+                    ) from None
+
+        return frozenset(starts), frozenset(stops)
 
     def save_tensorized_model(
         self,
