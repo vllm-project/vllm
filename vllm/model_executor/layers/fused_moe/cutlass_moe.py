@@ -904,6 +904,10 @@ class CutlassExpertsBlockedFp8SM90(mk.FusedMoEPermuteExpertsUnpermute):
     def supports_expert_map(self) -> bool:
         return True
 
+    def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
+        # Let PrepareAndFinalize::finalize() decide the impl.
+        return TopKWeightAndReduceDelegate()
+
     def workspace_shapes(
         self,
         a: torch.Tensor,
@@ -939,12 +943,13 @@ class CutlassExpertsBlockedFp8SM90(mk.FusedMoEPermuteExpertsUnpermute):
         a2_scale: Optional[torch.Tensor],
         workspace13: torch.Tensor,
         workspace2: torch.Tensor,
-        expert_num_tokens: Optional[torch.Tensor],
+        expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
     ) -> torch.Tensor:
         assert w1_zp is None, "w1_zp is not supported in CUTLASS MoE"
         assert w2_zp is None, "w2_zp is not supported in CUTLASS MoE"
         activation_callable = lambda i, o: self.activation(activation, i, o)
-        assert expert_num_tokens is None, "PPLX is not supported in blocked CUTLASS MoE"  # noqa: E501
+        if expert_tokens_meta is not None:
+            assert expert_tokens_meta.expert_num_tokens is None, "PPLX is not supported in blocked CUTLASS MoE"  # noqa: E501
         return run_block_scaled_cutlass_moe_fp8_sm90(
             output, hidden_states, w1, w2, topk_ids, activation_callable,
             global_num_experts, expert_map, w1_scale, w2_scale, a1q_scale,
