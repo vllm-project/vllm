@@ -107,6 +107,10 @@ def load_aware_call(func):
                        False):
             return await func(*args, **kwargs)
 
+        # ensure the counter exists
+        if not hasattr(raw_request.app.state, "server_load_metrics"):
+            raw_request.app.state.server_load_metrics = 0
+
         raw_request.app.state.server_load_metrics += 1
         try:
             response = await func(*args, **kwargs)
