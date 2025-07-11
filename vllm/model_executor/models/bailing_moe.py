@@ -59,8 +59,6 @@ from .utils import (AutoWeightsLoader, PPMissingLayer, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
 
-KVCache = tuple[torch.Tensor, torch.Tensor]
-
 
 class BailingAttention(nn.Module):
 
@@ -131,10 +129,10 @@ class BailingAttention(nn.Module):
     ) -> torch.Tensor:
 
         qkv, _ = self.query_key_value(hidden_states)
-        q, k, v = qkv.split(
-            [self.q_size_per_rank, self.kv_size_per_rank, self.kv_size_per_rank],
-            dim=-1
-        )
+        q, k, v = qkv.split([
+            self.q_size_per_rank, self.kv_size_per_rank, self.kv_size_per_rank
+        ],
+                            dim=-1)
 
         q, k = self.rotary_emb(position_ids, q, k)
 
