@@ -11,6 +11,7 @@ import openai  # use the official client for correctness check
 import pytest
 import pytest_asyncio
 import regex as re
+import requests
 # downloading lora to test lora requests
 from huggingface_hub import snapshot_download
 from openai import BadRequestError
@@ -833,3 +834,27 @@ async def test_echo_stream_completion(client: openai.AsyncOpenAI,
             assert content is not None and saying in content
         else:
             assert content is not None and saying not in content
+
+
+@pytest.mark.asyncio
+async def test_invocations(server: RemoteOpenAIServer,
+                           client: openai.AsyncOpenAI):
+    request_args = {
+        "model": MODEL_NAME,
+        "prompt": "Hello, my name is",
+        "max_tokens": 5,
+        "temperature": 0.0,
+        "logprobs": None,
+    }
+
+    completion = await client.completions.create(**request_args)
+
+    invocation_response = requests.post(server.url_for("invocations"),
+                                        json=request_args)
+    invocation_response.raise_for_status()
+
+    completion_output = completion.model_dump()
+    invocation_output = invocation_response.json()
+
+    assert completion_output.keys() == invocation_output.keys()
+    assert completion_output["choices"] == invocation_output["choices"]
