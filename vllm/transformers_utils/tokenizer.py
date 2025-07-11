@@ -16,7 +16,8 @@ from transformers import (AutoTokenizer, PreTrainedTokenizer,
 
 from vllm import envs
 from vllm.logger import init_logger
-from vllm.transformers_utils.config import get_sentence_transformer_tokenizer_config
+from vllm.transformers_utils.config import (
+    get_sentence_transformer_tokenizer_config)
 from vllm.transformers_utils.tokenizers import MistralTokenizer
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.utils import make_async
