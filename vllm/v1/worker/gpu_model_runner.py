@@ -1801,19 +1801,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     self.model.get_eagle3_aux_hidden_state_layers())
             time_after_load = time.perf_counter()
 
-            max_M = self.model_config.max_seq_len_to_capture * 2
+            max_M = self.model_config.max_seq_len_to_capture * 4
             input_tensor = torch.empty([max_M, self.model.model.embed_tokens.embedding_dim], dtype=self.model_config.dtype, device="meta")
             print(f"Creating allreduce context for model loading: {input_tensor.shape}")
             WORLD_SIZE = int(get_tp_group().world_size)
             TP_GROUP = torch.distributed.new_group(ranks=list(range(WORLD_SIZE)), backend="nccl")
             pynvshmem.init_nvshmem_by_uniqueid(TP_GROUP)
-            # self.ctx = {}
-            # for M in [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]:
-            #     self.ctx[M] = create_allreduce_ctx(
-            #         input=input_tensor[:M],
-            #         method=AllReduceMethod.TwoShot,
-            #         signal_stages=1,
-            #     )
             self.ctx = create_allreduce_ctx(
                     input=input_tensor,
                     method=AllReduceMethod.TwoShot,

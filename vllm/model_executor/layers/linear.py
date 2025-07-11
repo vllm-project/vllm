@@ -4,7 +4,7 @@
 import itertools
 from abc import abstractmethod
 from typing import Any, Literal, Optional, Union
-
+import os
 import torch
 import torch.nn as nn
 from torch.nn.parameter import Parameter, UninitializedParameter
@@ -1245,6 +1245,8 @@ class RowParallelLinear(LinearBase):
         else:
             self.register_parameter("bias", None)
 
+        self.ar_option = os.getenv("AR_METHOD", "vllm")
+
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
         tp_rank = get_tensor_model_parallel_rank()
         tp_size = get_tensor_model_parallel_world_size()
@@ -1314,18 +1316,29 @@ class RowParallelLinear(LinearBase):
                                                   input_parallel,
                                                   bias=bias_)
         if self.reduce_results and self.tp_size > 1:
-            # output = tensor_model_parallel_all_reduce(output_parallel)
-            M, N = output_parallel.shape
-            # print(output_parallel.shape, self.ar_output.shape, self.ar_output[:M].contiguous().shape)
-            self.ctx.M = M
-            self.ctx.buf_M = M
-            self.ctx.scatter_bufs = self.ctx._scatter_bufs[:M]
-            output = all_reduce(
-                input=output_parallel.contiguous(),
-                output=self.ar_output[:M].contiguous(),
-                method=self.ar_method,
-                ctx=self.ctx,
-            )
+            if self.ar_option == 'torch':
+                # torch AR
+                output = torch.distributed.all_reduce(output_parallel)
+
+            elif self.ar_option == 'vllm':
+                # vllm AR
+                output = tensor_model_parallel_all_reduce(output_parallel)
+
+            elif self.ar_option == 'triton_dist':
+                # triton dist AR
+                M, N = output_parallel.shape
+                self.ctx.M = M
+                self.ctx.buf_M = M
+                self.ctx.scatter_bufs = self.ctx._scatter_bufs[:M].contiguous()
+                assert self.ctx.scatter_bufs.shape[0] == M, (self.ctx.scatter_bufs.shape, M)
+                output = all_reduce(
+                    input=output_parallel.contiguous(),
+                    output=self.ar_output[:M].contiguous(),
+                    method=self.ar_method,
+                    ctx=self.ctx,
+                )
+            else:
+                raise ValueError(f"Unknown all-reduce method: {self.ar_option}")
         else:
             output = output_parallel
 
