@@ -2269,7 +2269,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             full_cg = self.full_cuda_graph
             # Only rank 0 should print progress bar during capture
             compilation_cases = reversed(self.cudagraph_batch_sizes)
-            if is_global_first_rank() and self.load_config.use_tqdm_on_load:
+            if (self.load_config.use_tqdm_on_load and is_global_first_rank()):
                 compilation_cases = tqdm(list(compilation_cases),
                                          desc="Capturing CUDA graph shapes")
             for num_tokens in compilation_cases:
