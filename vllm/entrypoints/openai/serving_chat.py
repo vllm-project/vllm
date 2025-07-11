@@ -491,20 +491,21 @@ class OpenAIServingChat(OpenAIServing):
         all_previous_token_ids: Optional[list[list[int]]]
         function_name_returned = [False] * num_choices
 
+        # Always track previous_texts for comprehensive output logging
+        previous_texts = [""] * num_choices
+        
         # Only one of these will be used, thus previous_texts and
         # all_previous_token_ids will not be used twice in the same iteration.
         if tool_choice_auto or self.reasoning_parser:
             # These are only required in "auto" tool choice case
-            previous_texts = [""] * num_choices
             all_previous_token_ids = [[]] * num_choices
             # For reasoning parser and tool call all enabled
             added_content_delta_arr = [False] * num_choices
             reasoning_end_arr = [False] * num_choices
         elif request.tool_choice == "required":
-            previous_texts = [""] * num_choices
             all_previous_token_ids = None
         else:
-            previous_texts, all_previous_token_ids = None, None
+            all_previous_token_ids = None
 
         try:
             if self.reasoning_parser:
@@ -847,6 +848,10 @@ class OpenAIServingChat(OpenAIServing):
                         assert all_previous_token_ids is not None
                         previous_texts[i] = current_text
                         all_previous_token_ids[i] = current_token_ids
+                    else:
+                        # Update previous_texts for comprehensive logging even in simple content case
+                        assert previous_texts is not None
+                        previous_texts[i] += delta_text
 
                     # set the previous values for the next iteration
                     previous_num_tokens[i] += len(output.token_ids)
@@ -1014,17 +1019,20 @@ class OpenAIServingChat(OpenAIServing):
 
             # Log complete streaming response if output logging is enabled
             if self.enable_log_outputs and self.request_logger:
-                # Collect all generated text from the SSE decoder if available
-                # For now, we'll log the completion tokens count as final output
-                self.request_logger.log_outputs(
-                    request_id=request_id,
-                    outputs=
-                    f"<streaming_complete: {num_completion_tokens} tokens>",
-                    output_token_ids=None,
-                    finish_reason="streaming_complete",
-                    is_streaming=True,
-                    delta=False,
-                )
+                # Log the complete response for each choice
+                for i in range(num_choices):
+                    full_text = (previous_texts[i] if previous_texts
+                                 and i < len(previous_texts) else
+                                 f"<streaming_complete: {previous_num_tokens[i]} tokens>"
+                                 )
+                    self.request_logger.log_outputs(
+                        request_id=request_id,
+                        outputs=full_text,
+                        output_token_ids=None,  # Consider also logging all token IDs
+                        finish_reason="streaming_complete",
+                        is_streaming=True,
+                        delta=False,
+                    )
 
         except Exception as e:
             # TODO: Use a vllm-specific Validation Error

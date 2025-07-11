@@ -476,3 +476,36 @@ def test_request_logger_log_outputs_integration():
         # Check output call: logger.info(format_string, request_id, stream_info, outputs, ...)
         assert "Generated response %s%s" in output_call[0]
         assert output_call[1] == "test-integration"
+
+
+def test_streaming_complete_logs_full_text_content():
+    """Test that streaming complete logging includes full accumulated text, not just token count."""
+    mock_logger = MagicMock()
+
+    with patch("vllm.entrypoints.logger.logger", mock_logger):
+        request_logger = RequestLogger(max_log_len=None)
+
+        # Test with actual content instead of token count format
+        full_response = "This is a complete response from streaming"
+        request_logger.log_outputs(
+            request_id="test-streaming-full-text",
+            outputs=full_response,
+            output_token_ids=None,
+            finish_reason="streaming_complete",
+            is_streaming=True,
+            delta=False,
+        )
+
+        mock_logger.info.assert_called_once()
+        call_args = mock_logger.info.call_args.args
+        
+        # Verify the logged output is the full text, not a token count format
+        logged_output = call_args[3]
+        assert logged_output == full_response
+        assert "tokens>" not in logged_output  # Ensure it's not the old token count format
+        assert "streaming_complete" not in logged_output  # Ensure it's not the fallback format
+        
+        # Verify other parameters
+        assert call_args[1] == "test-streaming-full-text"
+        assert call_args[2] == " (streaming complete)"
+        assert call_args[5] == "streaming_complete"
