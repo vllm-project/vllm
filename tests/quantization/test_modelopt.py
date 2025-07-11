@@ -6,6 +6,7 @@ Run `pytest tests/quantization/test_modelopt.py`.
 """
 
 import os
+
 import pytest
 import torch
 
@@ -33,7 +34,7 @@ def test_modelopt_fp8_checkpoint_setup(vllm_runner):
     # Skip test if checkpoint doesn't exist
     if not os.path.exists(model_path):
         pytest.skip(f"Test checkpoint not found at {model_path}. "
-                   "This test requires a local ModelOpt FP8 checkpoint.")
+                    "This test requires a local ModelOpt FP8 checkpoint.")
 
     with vllm_runner(model_path, quantization="modelopt",
                      enforce_eager=True) as llm:
