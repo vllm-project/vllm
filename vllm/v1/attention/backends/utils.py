@@ -19,7 +19,6 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu_input_batch import InputBatch
 
 import vllm.envs as envs
-from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     get_kv_connector_cache_layout)
 from vllm.logger import init_logger
