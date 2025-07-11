@@ -199,7 +199,7 @@ def all_gatherv_worker_fn():
         for r in range(world_size)
     ]).to(device)
 
-    pynccl_comm.all_gather(result, tensor, sizes=sizes)
+    pynccl_comm.all_gatherv(result, tensor, sizes=sizes)
     torch.cuda.synchronize()
     torch.testing.assert_close(result, expected, rtol=1e-5, atol=1e-8)
 
@@ -273,7 +273,7 @@ def reduce_scatterv_worker_fn():
     end = sizes_cumsum[rank]
     expected = sum(tensor[start:end] for tensor in all_tensors).to(device)
 
-    pynccl_comm.reduce_scatter(result, tensor, sizes=sizes)
+    pynccl_comm.reduce_scatterv(result, tensor, sizes=sizes)
     torch.cuda.synchronize()
     torch.testing.assert_close(result, expected, rtol=1e-5, atol=1e-8)
 
