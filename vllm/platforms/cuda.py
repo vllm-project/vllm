@@ -244,6 +244,10 @@ class CudaPlatformBase(Platform):
 
             if selected_backend == _Backend.FLASHINFER:
                 logger.info_once("Using FlashInfer backend on V1 engine.")
+                if cls.has_device_capability(100):
+                    from vllm.v1.attention.backends.utils import (
+                        set_kv_cache_layout)
+                    set_kv_cache_layout("HND")
                 return FLASHINFER_V1
             elif selected_backend == _Backend.FLEX_ATTENTION:
                 logger.info_once("Using FlexAttention backend on V1 engine.")
@@ -271,9 +275,13 @@ class CudaPlatformBase(Platform):
                 supports_head_size(FLASHINFER_V1, head_size):
                 try:
                     import flashinfer  # noqa: F401
+
+                    from vllm.v1.attention.backends.utils import (
+                        set_kv_cache_layout)
                     logger.info_once(
-                        "Using FlashInfer backend on V1 engine by default for "
-                        "Blackwell (SM 10.0) GPUs.")
+                        "Using FlashInfer backend with HND KV cache layout on "
+                        "V1 engine by default for Blackwell (SM 10.0) GPUs.")
+                    set_kv_cache_layout("HND")
                     return FLASHINFER_V1
                 except ImportError:
                     logger.info_once(
@@ -293,6 +301,13 @@ class CudaPlatformBase(Platform):
         # Backends for V0 engine
         if selected_backend == _Backend.FLASHINFER:
             logger.info("Using FlashInfer backend.")
+            if cls.has_device_capability(100):
+                from vllm.v1.attention.backends.utils import (
+                    set_kv_cache_layout)
+                logger.info_once(
+                    "Using HND KV cache layout on V1 engine by default for "
+                    "Blackwell (SM 10.0) GPUs.")
+                set_kv_cache_layout("HND")
             return "vllm.attention.backends.flashinfer.FlashInferBackend"
         elif selected_backend == _Backend.XFORMERS:
             logger.info("Using XFormers backend.")
