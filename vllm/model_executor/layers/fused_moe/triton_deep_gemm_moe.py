@@ -9,6 +9,7 @@ from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
     DeepGemmExperts, _valid_deep_gemm, _valid_deep_gemm_shape)
 from vllm.model_executor.layers.fused_moe.fused_moe import TritonExperts
+from vllm.utils.deep_gemm import is_blackwell_deep_gemm_used
 
 
 class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
@@ -69,6 +70,25 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         return ((dge is None or dge.supports_expert_map())
                 and (te is None or te.supports_expert_map()))
 
+    def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
+        dge = self.deep_gemm_expert
+        te = self.triton_expert
+        dge_war = dge.finalize_weight_and_reduce_impl() if dge else None
+        te_war = te.finalize_weight_and_reduce_impl() if te else None
+        is_dge_war = dge_war is not None
+        is_te_war = te_war is not None
+
+        if is_dge_war and is_te_war:
+            assert dge_war == te_war, (
+                "Both implementations should agree on WeightAndReduce impls. "
+                f"Got dge_war: {dge_war}, and te_war: {te_war}")
+
+        if dge_war is not None:
+            return dge_war
+
+        assert te_war is not None
+        return te_war
+
     def workspace_shapes(
         self,
         a: torch.Tensor,
@@ -83,7 +103,8 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         # Note: the deep gemm workspaces are strictly larger than the triton
         # workspaces so we can be pessimistic here and allocate for DeepGemm
         # even if we fall back to triton later, e.g. if expert maps are set.
-        if self.allow_deep_gemm and _valid_deep_gemm_shape(M, N, K):
+        if self.allow_deep_gemm and (_valid_deep_gemm_shape(M, N, K)
+                                     or is_blackwell_deep_gemm_used()):
             assert self.deep_gemm_expert is not None
             return self.deep_gemm_expert.workspace_shapes(
                 a, aq, M, N, K, topk, global_num_experts, local_num_experts)
@@ -113,7 +134,8 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
     ):
         use_deep_gemm = (self.allow_deep_gemm
-                         and _valid_deep_gemm(hidden_states, w1, w2))
+                         and (_valid_deep_gemm(hidden_states, w1, w2)
+                              or is_blackwell_deep_gemm_used()))
 
         experts = self.deep_gemm_expert if use_deep_gemm else self.triton_expert
         assert experts is not None
