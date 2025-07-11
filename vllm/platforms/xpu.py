@@ -144,6 +144,9 @@ class XPUPlatform(Platform):
                 vllm_config.scheduler_config.max_model_len,
                 DEFAULT_MAX_NUM_BATCHED_TOKENS)
 
+    def is_sleep_mode_available(self) -> bool:
+        return True
+
     @classmethod
     def is_pin_memory_available(cls):
         return True
