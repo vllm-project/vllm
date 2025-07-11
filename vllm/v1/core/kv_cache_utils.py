@@ -759,6 +759,8 @@ def is_kv_cache_type_attention_free(
     if not kv_cache_spec:
         return True
 
+    return False
+
 def _get_kv_cache_config_uniform_page_size(
         vllm_config: VllmConfig, kv_cache_spec: dict[str, KVCacheSpec],
         available_memory: int) -> KVCacheConfig:
