@@ -849,6 +849,17 @@ class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid):
         vllm_config: "VllmConfig",
         use_v1: bool = True,
     ) -> tuple[tuple[int, int], tuple[int, int]]:
+        """Calculate shapes for Mamba's convolutional and state caches.
+
+        Args:
+            vllm_config: vLLM config
+            use_v1: Get shapes for V1 (or V0)
+
+        Returns:
+            Tuple containing:
+            - conv_state_shape: Shape for convolutional state cache
+            - temporal_state_shape: Shape for state space model cache
+        """
 
         parallel_config = vllm_config.parallel_config
         hf_config = vllm_config.model_config.hf_config
