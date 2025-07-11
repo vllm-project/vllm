@@ -111,6 +111,8 @@ def _fp8_quantize(
     is provided, the output will be blocked.
     """
     if block_shape is None:
+        # TODO(luka): use QuantFP8 custom op
+        #  https://github.com/vllm-project/vllm/issues/20711
         A, A_scale = ops.scaled_fp8_quant(
             A, A_scale, use_per_token_if_dynamic=per_act_token)
     else:
