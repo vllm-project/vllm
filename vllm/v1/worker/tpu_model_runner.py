@@ -1113,6 +1113,8 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         return model_runner_output
 
     def update_config(self, overrides: dict[str, Any]) -> None:
+        # TODO: TPU config may need extra validation
+        # https://github.com/vllm-project/vllm/pull/20095#discussion_r2201497754
         allowed_config_names = {"load_config", "model_config"}
         for config_name, config_overrides in overrides.items():
             assert config_name in allowed_config_names, \
