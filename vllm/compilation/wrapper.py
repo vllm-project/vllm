@@ -95,8 +95,12 @@ class TorchCompileWrapperWithCustomDispatcher:
         self.compiled_codes.append(new_code)
         local_cache_dir = self.vllm_config.compilation_config.local_cache_dir
         if isinstance(local_cache_dir, str):
+            decompiled_file_name = ("transformed_code.py"
+                                    if envs.VLLM_COMPILE_DEPYF else
+                                    "transformed_code_README.txt")
+
             decompiled_file = os.path.join(local_cache_dir,
-                                           "transformed_code.py")
+                                           decompiled_file_name)
             if not os.path.exists(decompiled_file):
                 try:
                     # usually the decompilation will succeed for most models,
@@ -107,8 +111,9 @@ class TorchCompileWrapperWithCustomDispatcher:
                         import depyf
                         src = depyf.decompile(new_code)
                     else:
-                        src = ("Please set VLLM_COMPILE_DEPYF=1 to populate "
-                               "this file")
+                        src = (
+                            "To get a transformed_code.py file, re-run with "
+                            "VLLM_COMPILE_DEPYF=1")
 
                     with open(decompiled_file, "w") as f:
                         f.write(src)
