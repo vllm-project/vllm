@@ -326,8 +326,9 @@ class JinaVLForEmbedding(Qwen2VLForConditionalGeneration,
         
         # Validate lengths match
         if len(token_ids_list) != len(prompt_lens):
-            logger.error(f"Mismatch: {len(token_ids_list)} sequences vs {len(prompt_lens)} lengths")
-            return self._base_pooler(hidden_states, pooling_metadata)
+            raise AssertionError(
+                f"Mismatch: {len(token_ids_list)} sequences vs {len(prompt_lens)} lengths"
+            )
         
         # Apply pooling based on configured backend
         if self.pooling_backend == "triton":
