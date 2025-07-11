@@ -2,9 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import base64
+from collections.abc import AsyncGenerator
 from typing import Final, Literal, Optional, Union, cast
 
 import numpy as np
+import torch
 from fastapi import Request
 from typing_extensions import assert_never, override
 
@@ -13,17 +15,21 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (EmbeddingChatRequest,
+                                              EmbeddingCompletionRequest,
                                               EmbeddingRequest,
                                               EmbeddingResponse,
                                               EmbeddingResponseData,
                                               ErrorResponse, UsageInfo)
 from vllm.entrypoints.openai.serving_engine import (EmbeddingServeContext,
                                                     OpenAIServing,
-                                                    ServeContext)
+                                                    ServeContext,
+                                                    TextTokensPrompt)
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
+from vllm.inputs.data import EmbedsPrompt as EngineEmbedsPrompt
+from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
 from vllm.logger import init_logger
 from vllm.outputs import (EmbeddingOutput, EmbeddingRequestOutput,
-                          PoolingRequestOutput)
+                          PoolingOutput, PoolingRequestOutput, RequestOutput)
 
 logger = init_logger(__name__)
 
@@ -132,6 +138,415 @@ class EmbeddingMixin(OpenAIServing):
             data=items,
             usage=usage,
         )
+
+    def _get_max_position_embeddings(self) -> int:
+        """Get the model's effective maximum sequence length for chunking.
+        
+        This uses the same logic as vLLM's _get_and_verify_max_len to determine
+        the actual sequence length limit,
+        considering both model config and tokenizer config.
+        """
+        hf_config = self.model_config.hf_config
+
+        # Start with max_position_embeddings from model config
+        derived_max_len = getattr(hf_config, 'max_position_embeddings', 2048)
+
+        # Get tokenizer config for pooling models (embedding models)
+        if self.model_config.runner_type == "pooling":
+            from vllm.transformers_utils.config import try_get_tokenizer_config
+            tokenizer_config = try_get_tokenizer_config(
+                self.model_config.tokenizer,
+                trust_remote_code=self.model_config.trust_remote_code,
+                revision=self.model_config.tokenizer_revision)
+
+            # Consider model_max_length in tokenizer_config
+            # (same logic as _get_and_verify_max_len)
+            if tokenizer_config:
+                tokenizer_model_max_length = tokenizer_config.get(
+                    'model_max_length', derived_max_len)
+                derived_max_len = min(derived_max_len,
+                                      tokenizer_model_max_length)
+
+        return int(derived_max_len)
+
+    def _should_use_chunked_processing(self, request) -> bool:
+        """Check if chunked processing should be used for this request."""
+        if not isinstance(request,
+                          (EmbeddingChatRequest, EmbeddingCompletionRequest)):
+            return False
+
+        pooler_config = getattr(self.model_config, 'pooler_config', None)
+        return (pooler_config is not None
+                and getattr(pooler_config, 'enable_chunked_processing', False))
+
+    def _chunk_token_ids(self, token_ids: list[int],
+                         chunk_size: int) -> list[list[int]]:
+        """Split token IDs into chunks of specified size."""
+        if len(token_ids) <= chunk_size:
+            return [token_ids]
+
+        chunks = []
+        for i in range(0, len(token_ids), chunk_size):
+            chunk = token_ids[i:i + chunk_size]
+            chunks.append(chunk)
+        return chunks
+
+    async def _process_chunked_request(
+        self,
+        ctx: EmbeddingServeContext,
+        original_prompt: TextTokensPrompt,
+        pooling_params,
+        trace_headers,
+    ) -> list[AsyncGenerator[Union[RequestOutput, PoolingRequestOutput],
+                             None]]:
+        """Process a single prompt using chunked processing."""
+        generators = []
+        token_ids = original_prompt["prompt_token_ids"]
+
+        # Split into chunks using max_position_embeddings
+        max_pos_embeddings = self._get_max_position_embeddings()
+        chunks = self._chunk_token_ids(token_ids, max_pos_embeddings)
+
+        logger.info(
+            "Split input of %s tokens into %s chunks (max_chunk_size: %s)",
+            len(token_ids), len(chunks), max_pos_embeddings)
+
+        for chunk_idx, chunk_tokens in enumerate(chunks):
+            # Create a request ID for this chunk
+            chunk_request_id = f"{ctx.request_id}-chunk-{chunk_idx}"
+
+            # Create engine prompt for this chunk
+            chunk_engine_prompt = EngineTokensPrompt(
+                prompt_token_ids=chunk_tokens)
+
+            # Create chunk request prompt for logging
+            chunk_text = ""
+            chunk_request_prompt = TextTokensPrompt(
+                prompt=chunk_text, prompt_token_ids=chunk_tokens)
+
+            # Log the chunk
+            self._log_inputs(chunk_request_id,
+                             chunk_request_prompt,
+                             params=pooling_params,
+                             lora_request=ctx.lora_request,
+                             prompt_adapter_request=ctx.prompt_adapter_request)
+
+            # Create generator for this chunk
+            generator = self.engine_client.encode(
+                chunk_engine_prompt,
+                pooling_params,
+                chunk_request_id,
+                lora_request=ctx.lora_request,
+                trace_headers=trace_headers,
+                priority=getattr(ctx.request, "priority", 0),
+            )
+
+            generators.append(generator)
+
+        return generators
+
+    async def _aggregate_chunked_results(
+        self,
+        ctx: EmbeddingServeContext,
+        chunk_results: list[PoolingRequestOutput],
+        original_token_count: int,
+        original_prompt_token_ids: Optional[list[int]] = None,
+    ) -> PoolingRequestOutput:
+        """Aggregate results from multiple chunks
+        using vLLM-compatible weighted averaging."""
+        if len(chunk_results) == 1:
+            return chunk_results[0]
+
+        # Extract embeddings and use vLLM's token counting approach
+        chunk_embeddings = []
+        chunk_weights = []
+
+        for result in chunk_results:
+            # PoolingRequestOutput.outputs is a PoolingOutput object
+            if hasattr(result, 'outputs') and hasattr(result.outputs, 'data'):
+                # Get the embedding tensor from PoolingOutput.data
+                embedding_data = result.outputs.data
+                if not isinstance(embedding_data, torch.Tensor):
+                    embedding_data = torch.tensor(embedding_data,
+                                                  dtype=torch.float32)
+                chunk_embeddings.append(embedding_data)
+
+                # Use actual effective token count
+                # this is what vLLM uses internally
+                effective_token_count = len(result.prompt_token_ids)
+                chunk_weights.append(effective_token_count)
+
+        if not chunk_embeddings:
+            raise ValueError("No valid embeddings found in chunk results")
+
+        # Simple weighted averaging compatible with vLLM's approach
+        # This is similar to what MeanPool does for multiple sequences
+        device = chunk_embeddings[0].device
+        # Use float32 for precision, as done in vLLM's PoolerHead
+        dtype = torch.float32
+
+        # Weighted sum following vLLM's internal logic
+        weighted_sum = torch.zeros_like(chunk_embeddings[0],
+                                        dtype=dtype,
+                                        device=device)
+        total_weight = 0
+
+        for embedding, weight in zip(chunk_embeddings, chunk_weights):
+            embedding = embedding.to(dtype=dtype, device=device)
+            weighted_sum += embedding * weight
+            total_weight += weight
+
+        # Final averaged embedding - let vLLM handle the rest
+        aggregated_embedding = weighted_sum / total_weight
+
+        # NOTE: Don't manually normalize here
+        # let vLLM's PoolerHead handle normalization
+        # based on the model's pooler_config.normalize setting.
+        # This ensures consistency with vLLM's standard pooling behavior.
+
+        # Create aggregated result using vLLM's standard output structure
+        first_result = chunk_results[0]
+
+        # Create new PoolingOutput with aggregated embedding
+        aggregated_output = PoolingOutput(data=aggregated_embedding)
+
+        # Preserve original prompt token ids for consistency
+        result_prompt_token_ids = (original_prompt_token_ids
+                                   if original_prompt_token_ids is not None
+                                   else first_result.prompt_token_ids)
+
+        aggregated_result = PoolingRequestOutput(
+            request_id=first_result.request_id,
+            outputs=aggregated_output,
+            prompt_token_ids=result_prompt_token_ids,
+            finished=True,
+        )
+
+        return aggregated_result
+
+    def _validate_input(
+        self,
+        request,
+        input_ids: list[int],
+        input_text: str,
+    ) -> TextTokensPrompt:
+        """Override to support chunked processing for embedding requests."""
+        token_num = len(input_ids)
+
+        # Note: EmbeddingRequest doesn't have max_tokens
+        if isinstance(request,
+                      (EmbeddingChatRequest, EmbeddingCompletionRequest)):
+            # Check if chunked processing is enabled for pooling models
+            pooler_config = getattr(self.model_config, 'pooler_config', None)
+            enable_chunked = (pooler_config is not None and getattr(
+                pooler_config, 'enable_chunked_processing', False))
+
+            # Use max_position_embeddings for chunked processing decisions
+            max_pos_embeddings = self._get_max_position_embeddings()
+
+            if token_num > max_pos_embeddings:
+                if enable_chunked:
+                    # Allow long inputs when chunked processing is enabled
+                    logger.info(
+                        "Input length %s exceeds max_position_embeddings "
+                        "%s, will use chunked processing", token_num,
+                        max_pos_embeddings)
+                else:
+                    raise ValueError(
+                        f"This model's maximum position embeddings length is "
+                        f"{max_pos_embeddings} tokens. However, you requested "
+                        f"{token_num} tokens in the input for embedding "
+                        f"generation. Please reduce the length of the input or "
+                        f"enable chunked processing.")
+
+            return TextTokensPrompt(prompt=input_text,
+                                    prompt_token_ids=input_ids)
+
+        # For other request types, use the parent's implementation
+        return super()._validate_input(request, input_ids, input_text)
+
+    async def _prepare_generators(
+        self,
+        ctx: ServeContext,
+    ) -> Optional[ErrorResponse]:
+        """Override to support chunked processing."""
+        ctx = cast(EmbeddingServeContext, ctx)
+        generators: list[AsyncGenerator[Union[RequestOutput,
+                                              PoolingRequestOutput],
+                                        None]] = []
+
+        try:
+            trace_headers = (None if ctx.raw_request is None else await
+                             self._get_trace_headers(ctx.raw_request.headers))
+
+            if not hasattr(ctx.request, "to_pooling_params"):
+                return self.create_error_response(
+                    "Request type does not support pooling parameters")
+
+            pooling_params = ctx.request.to_pooling_params()
+
+            if ctx.engine_prompts is None:
+                return self.create_error_response(
+                    "Engine prompts not available")
+
+            if ctx.request_prompts is None:
+                return self.create_error_response(
+                    "Request prompts not available")
+
+            # Check if we should use chunked processing
+            use_chunked = self._should_use_chunked_processing(ctx.request)
+
+            for i, engine_prompt in enumerate(ctx.engine_prompts):
+                request_prompt = ctx.request_prompts[i]
+
+                # Check if this specific prompt needs chunked processing
+                max_pos_embeddings = self._get_max_position_embeddings()
+                if (use_chunked and isinstance(request_prompt, dict)
+                        and "prompt_token_ids" in request_prompt
+                        and len(request_prompt["prompt_token_ids"])
+                        > max_pos_embeddings):
+
+                    # Use chunked processing for this prompt
+                    chunk_generators = await self._process_chunked_request(
+                        ctx, request_prompt, pooling_params, trace_headers)
+                    generators.extend(chunk_generators)
+                else:
+                    # Normal processing for short prompts
+                    request_id_item = f"{ctx.request_id}-{i}"
+
+                    self._log_inputs(
+                        request_id_item,
+                        request_prompt,
+                        params=pooling_params,
+                        lora_request=ctx.lora_request,
+                        prompt_adapter_request=ctx.prompt_adapter_request)
+
+                    # Mypy has an existing bug related to inferring the variance
+                    # of TypedDicts with `builtins.enumerate`:
+                    # https://github.com/python/mypy/issues/8586#issuecomment-2867698435
+                    engine_prompt = cast(
+                        Union[EngineTokensPrompt, EngineEmbedsPrompt],
+                        engine_prompt)
+                    generator = self.engine_client.encode(
+                        engine_prompt,
+                        pooling_params,
+                        request_id_item,
+                        lora_request=ctx.lora_request,
+                        trace_headers=trace_headers,
+                        priority=getattr(ctx.request, "priority", 0),
+                    )
+
+                    generators.append(generator)
+
+            from vllm.utils import merge_async_iterators
+            ctx.result_generator = merge_async_iterators(*generators)
+
+            return None
+
+        except Exception as e:
+            # TODO: Use a vllm-specific Validation Error
+            return self.create_error_response(str(e))
+
+    async def _collect_batch(
+        self,
+        ctx: ServeContext,
+    ) -> Optional[ErrorResponse]:
+        """Override to support chunked processing."""
+        ctx = cast(EmbeddingServeContext, ctx)
+        try:
+            if ctx.engine_prompts is None:
+                return self.create_error_response(
+                    "Engine prompts not available")
+
+            if ctx.request_prompts is None:
+                return self.create_error_response(
+                    "Request prompts not available")
+
+            if ctx.result_generator is None:
+                return self.create_error_response(
+                    "Result generator not available")
+
+            # Check if we used chunked processing
+            use_chunked = self._should_use_chunked_processing(ctx.request)
+
+            # Collect all results first
+            all_results = []
+            async for i, res in ctx.result_generator:
+                all_results.append((i, res))
+
+            # Group results by original prompt
+            if use_chunked:
+                # For chunked processing, we need to group chunk results by
+                # original prompt
+                final_res_batch = []
+
+                max_pos_embeddings = self._get_max_position_embeddings()
+                for prompt_idx, request_prompt in enumerate(
+                        ctx.request_prompts):
+                    if (isinstance(request_prompt, dict)
+                            and "prompt_token_ids" in request_prompt
+                            and len(request_prompt["prompt_token_ids"])
+                            > max_pos_embeddings):
+
+                        # This prompt was chunked, collect all its chunk results
+                        chunk_results = []
+                        chunk_prefix = f"{ctx.request_id}-chunk-"
+
+                        for result_idx, result in all_results:
+                            if result.request_id.startswith(chunk_prefix):
+                                chunk_results.append(result)
+
+                        if chunk_results:
+                            # Aggregate chunk results
+                            original_token_count = len(
+                                request_prompt["prompt_token_ids"])
+                            aggregated_result = await \
+                                self._aggregate_chunked_results(
+                                    ctx, chunk_results, original_token_count,
+                                    request_prompt["prompt_token_ids"])
+                            final_res_batch.append(aggregated_result)
+                        else:
+                            return self.create_error_response(
+                                f"No chunk results found for prompt "
+                                f"{prompt_idx}")
+                    else:
+                        # Normal prompt, find its result
+                        expected_id = f"{ctx.request_id}-{prompt_idx}"
+                        found = False
+                        for result_idx, result in all_results:
+                            if result.request_id == expected_id:
+                                final_res_batch.append(result)
+                                found = True
+                                break
+
+                        if not found:
+                            return self.create_error_response(
+                                f"Result not found for prompt {prompt_idx}")
+
+                ctx.final_res_batch = final_res_batch
+            else:
+                # Normal processing - original logic
+                num_prompts = len(ctx.engine_prompts)
+                final_res_batch: list[Optional[Union[RequestOutput,
+                                                     PoolingRequestOutput]]]
+                final_res_batch = [None] * num_prompts
+
+                for result_idx, result in all_results:
+                    if result_idx < num_prompts:
+                        final_res_batch[result_idx] = result
+
+                if None in final_res_batch:
+                    return self.create_error_response(
+                        "Failed to generate results for all prompts")
+
+                ctx.final_res_batch = [
+                    res for res in final_res_batch if res is not None
+                ]
+
+            return None
+
+        except Exception as e:
+            return self.create_error_response(str(e))
 
 
 class OpenAIServingEmbedding(EmbeddingMixin):

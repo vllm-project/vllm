@@ -418,7 +418,7 @@ Specified using `--task embed`.
 | `GteNewModel` | mGTE-TRM (see note) | `Alibaba-NLP/gte-multilingual-base`, etc. |  |  |  |
 | `ModernBertModel` | ModernBERT-based | `Alibaba-NLP/gte-modernbert-base`, etc. |  |  |  |
 | `NomicBertModel` | Nomic BERT | `nomic-ai/nomic-embed-text-v1`, `nomic-ai/nomic-embed-text-v2-moe`, `Snowflake/snowflake-arctic-embed-m-long`, etc. |  |  |  |
-| `LlamaModel`, `LlamaForCausalLM`, `MistralModel`, etc. | Llama-based | `intfloat/e5-mistral-7b-instruct`, etc. | ✅︎ | ✅︎ | ✅︎ |
+| `LlamaModel`, `LlamaForCausalLM`, `MistralModel`, etc. | Llama-based | `intfloat/e5-mistral-7b-instruct`, `intfloat/multilingual-e5-large` (see note), etc. | ✅︎ | ✅︎ | ✅︎ |
 | `Qwen2Model`, `Qwen2ForCausalLM` | Qwen2-based | `ssmits/Qwen2-7B-Instruct-embed-base` (see note), `Alibaba-NLP/gte-Qwen2-7B-instruct` (see note), etc. | ✅︎ | ✅︎ | ✅︎ |
 | `Qwen3Model`, `Qwen3ForCausalLM` | Qwen3-based | `Qwen/Qwen3-Embedding-0.6B`, etc. | ✅︎ | ✅︎ | ✅︎ |
 | `RobertaModel`, `RobertaForMaskedLM` | RoBERTa-based | `sentence-transformers/all-roberta-large-v1`, etc. | | | |
@@ -436,6 +436,9 @@ Specified using `--task embed`.
 
 !!! note
     The second-generation GTE model (mGTE-TRM) is named `NewModel`. The name `NewModel` is too generic, you should set `--hf-overrides '{"architectures": ["GteNewModel"]}'` to specify the use of the `GteNewModel` architecture.
+
+!!! note
+    `intfloat/multilingual-e5-large` supports **long text embedding** with chunked processing. When input text exceeds the model's maximum length, the model automatically splits the input into chunks and processes them separately, then aggregates the results. Enable this feature with `--override-pooler-config '{"pooling_type": "CLS", "normalize": true, "enable_chunked_processing": true}'`. See the [Chunked Processing section](pooling_models.md#chunked-processing-for-long-text) for more details.
 
 If your model is not in the above list, we will try to automatically convert the model using
 [as_embedding_model][vllm.model_executor.models.adapters.as_embedding_model]. By default, the embeddings
