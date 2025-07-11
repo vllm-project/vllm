@@ -105,7 +105,7 @@ def test_score_task(model_id, expected_runner_type, expected_task):
 @pytest.mark.parametrize(
     ("model_id", "expected_runner_type", "expected_task"),
     [
-        ("openai/whisper-small", "transcription_only", "transcription"),
+        ("openai/whisper-small", "generate", "transcription"),
     ],
 )
 def test_transcription_task(model_id, expected_runner_type, expected_task):
