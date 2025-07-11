@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional, Union, Sequence
+from collections.abc import Sequence
+from typing import Optional, Union
 
 import torch
 
@@ -44,10 +45,15 @@ class RequestLogger:
             "Received request %s: prompt: %r, "
             "params: %s, prompt_token_ids: %s, "
             "prompt_embeds shape: %s, "
-            "lora_request: %s, prompt_adapter_request: %s.", request_id,
-            prompt, params, prompt_token_ids,
+            "lora_request: %s, prompt_adapter_request: %s.",
+            request_id,
+            prompt,
+            params,
+            prompt_token_ids,
             prompt_embeds.shape if prompt_embeds is not None else None,
-            lora_request, prompt_adapter_request)
+            lora_request,
+            prompt_adapter_request,
+        )
 
     def log_outputs(
         self,
@@ -69,10 +75,15 @@ class RequestLogger:
 
         stream_info = ""
         if is_streaming:
-            stream_info = (" (streaming delta)" if delta else 
-                          " (streaming complete)")
+            stream_info = (" (streaming delta)"
+                           if delta else " (streaming complete)")
 
         logger.info(
             "Generated response %s%s: output: %r, "
-            "output_token_ids: %s, finish_reason: %s", 
-            request_id, stream_info, outputs, output_token_ids, finish_reason)
+            "output_token_ids: %s, finish_reason: %s",
+            request_id,
+            stream_info,
+            outputs,
+            output_token_ids,
+            finish_reason,
+        )
