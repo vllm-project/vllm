@@ -15,6 +15,10 @@ After you provision sufficient resources to fit the model, run vLLM. Look for a 
 !!! note
     Edge case: If the model fits within a single node but the GPU count does not evenly divide the model size, enable pipeline parallelism, which splits the model along layers and supports uneven splits. In this scenario, set `tensor_parallel_size=1` and `pipeline_parallel_size` to the number of GPUs.
 
+### Distributed serving of MoE (Mixture of Experts) models
+
+It is often advantageous to exploit the inherent parallelism of experts by using a separate parallelism strategy for the expert layers. vLLM supports large-scale deployment combining Data Parallel attention with Expert or Tensor Parallel MoE layers. See the page on [Data Parallel Deployment](data_parallel_deployment.md) for more information.
+
 ## Single node deployment
 
 vLLM supports distributed tensor-parallel and pipeline-parallel inference and serving. The current implementation includes [Megatron-LM's tensor parallel algorithm](https://arxiv.org/pdf/1909.08053.pdf).
