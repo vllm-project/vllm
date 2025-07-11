@@ -184,10 +184,11 @@ class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
                  enable_kv_cache_events: bool):
         super().__init__(kv_cache_config, max_model_len, use_eagle, False,
                          caching_hash_fn, enable_kv_cache_events)
+        self.num_single_type_manager = len(self.single_type_managers)
 
     def get_num_common_prefix_blocks(self, request_id: str,
                                      num_running_requests: int) -> list[int]:
-        return [0] * len(self.single_type_managers)
+        return [0] * self.num_single_type_manager
 
     def find_longest_cache_hit(
         self,
@@ -195,7 +196,7 @@ class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
         max_cache_hit_length: int,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         blocks: tuple[list[KVCacheBlock], ...] = tuple(
-            [] for _ in range(len(self.single_type_managers)))
+            [] for _ in range(self.num_single_type_manager))
         return blocks, 0
 
 
