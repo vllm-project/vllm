@@ -4,8 +4,7 @@ from vllm.v1.sample.logits_processor.core import LogitsProcessor
 from vllm.v1.sample.logits_processor.impls import (LogitBiasLogitsProcessor,
                                                    MinPLogitsProcessor,
                                                    MinTokensLogitsProcessor)
-from vllm.v1.sample.logits_processor.load import (LogitprocCtor,
-                                                  LogitProcessorCtorArgs,
+from vllm.v1.sample.logits_processor.load import (LogitProcessorCtorArgs,
                                                   build_logitsprocs,
                                                   load_custom_logitsprocs)
 from vllm.v1.sample.logits_processor.state import (BatchUpdate,
@@ -18,7 +17,6 @@ __all__ = [
     "LogitBiasLogitsProcessor",
     "MinPLogitsProcessor",
     "MinTokensLogitsProcessor",
-    "LogitprocCtor",
     "BatchUpdate",
     "BatchUpdateBuilder",
     "MoveDirectionality",

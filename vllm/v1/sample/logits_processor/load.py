@@ -3,7 +3,7 @@
 import importlib
 import itertools
 import logging
-from typing import Callable, Optional, Union
+from typing import Optional, Union
 
 from vllm.v1.sample.logits_processor import LogitsProcessor
 from vllm.v1.sample.logits_processor.impls import (LogitBiasLogitsProcessor,
@@ -15,9 +15,8 @@ from vllm.v1.sample.logits_processor.utils import LogitProcessorCtorArgs
 logger = logging.getLogger(__name__)
 
 LOGITSPROCS_GROUP = 'vllm.logits_processors'
-LogitprocCtor = Callable[[LogitProcessorCtorArgs], LogitsProcessor]
 
-_builtin_logitsprocs_ctors: list[LogitprocCtor] = [
+_builtin_logitsprocs_classes: list[type[LogitsProcessor]] = [
     MinTokensLogitsProcessor,
     LogitBiasLogitsProcessor,
     MinPLogitsProcessor,
@@ -52,7 +51,7 @@ def _load_logitsprocs_by_fqns(
         "%s additional custom logits processors specified, checking whether "
         "they need to be loaded.", len(logits_processors))
 
-    constructors: list[type[LogitsProcessor]] = []
+    classes: list[type[LogitsProcessor]] = []
     for ldx, logitproc in enumerate(logits_processors):
         if isinstance(logitproc, type):
             logger.info(" - Already loaded logit processor: %s",
@@ -61,7 +60,7 @@ def _load_logitsprocs_by_fqns(
                 raise ValueError(
                     f"{logitproc.__name__} is not a subclass of LogitsProcessor"
                 )
-            constructors.append(logitproc)
+            classes.append(logitproc)
             continue
 
         logger.info("- Loading logits processor %s", logitproc)
@@ -69,7 +68,7 @@ def _load_logitsprocs_by_fqns(
             module_path, qualname = logitproc.split(":")
             # Load module
             module = importlib.import_module(module_path)
-            # Walk down dotted name to get logitproc constructor
+            # Walk down dotted name to get logitproc class
             obj = module
             for attr in qualname.split("."):
                 obj = getattr(obj, attr)
@@ -78,13 +77,13 @@ def _load_logitsprocs_by_fqns(
             if not issubclass(obj, LogitsProcessor):
                 raise ValueError(
                     f"{obj.__name__} must be a subclass of LogitsProcessor")
-            constructors.append(obj)
+            classes.append(obj)
         except Exception as e:
             logger.exception("Failed to load %sth logits processor %s", ldx,
                              logitproc)
             raise e
 
-    return constructors
+    return classes
 
 
 def _load_logitsprocs_plugins() -> list[type[LogitsProcessor]]:
@@ -104,16 +103,16 @@ def _load_logitsprocs_plugins() -> list[type[LogitsProcessor]]:
     # Load logitsprocs plugins
     logger.info("Loading installed logitsprocs plugins (group %s):",
                 LOGITSPROCS_GROUP)
-    constructors: list[type[LogitsProcessor]] = []
+    classes: list[type[LogitsProcessor]] = []
     for entrypoint in installed_logitsprocs_plugins:
         try:
             logger.info("- Loading logitproc plugin entrypoint=%s target=%s",
                         entrypoint.name, entrypoint.value)
-            constructors.append(entrypoint.load())
+            classes.append(entrypoint.load())
         except Exception as e:
             logger.exception("Failed to load plugin %s", entrypoint)
             raise e
-    return constructors
+    return classes
 
 
 def load_custom_logitsprocs(
@@ -145,4 +144,4 @@ def load_custom_logitsprocs(
 def build_logitsprocs(args: LogitProcessorCtorArgs) -> LogitsProcessors:
     return LogitsProcessors(
         ctor(args) for ctor in itertools.chain(
-            _builtin_logitsprocs_ctors, args.vllm_config.logits_processors))
+            _builtin_logitsprocs_classes, args.vllm_config.logits_processors))
