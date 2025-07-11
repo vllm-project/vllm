@@ -18,7 +18,7 @@
 # limitations under the License.
 """Inference-only LLaMA model compatible with HuggingFace weights."""
 from collections.abc import Iterable
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 import torch
 from torch import nn
@@ -335,6 +335,8 @@ class Llama4Model(LlamaModel):
         self.num_experts = vllm_config.model_config.hf_config.num_local_experts
         self.enable_eplb = vllm_config.parallel_config.enable_eplb if hasattr(
             vllm_config.parallel_config, 'enable_eplb') else False
+        self._num_redundant_experts = getattr(
+            vllm_config.parallel_config, 'num_redundant_experts', 0)
 
         # Create layers with enable_eplb parameter
         self.vllm_config = vllm_config
@@ -390,53 +392,69 @@ class Llama4Model(LlamaModel):
         fused: bool = True,
     ) -> bool:
         expert_param_loaded = False
+        is_expert_weight = False
+        loaded_weight_list = [loaded_weight]
         if "experts.gate_up_proj" in name:
-            loaded_weight = loaded_weight.chunk(2, dim=-1)
+            loaded_weight_list = list(loaded_weight.chunk(2, dim=-1))
+        
         for (param_name, weight_name, expert_id,
              shard_id) in expert_params_mapping:
-            new_loaded_weight = loaded_weight
+            if weight_name not in name:
+                continue
+            
+            is_expert_weight = True
+            new_loaded_weight = loaded_weight_list[0]
+            
             if fused:
                 e_str, _, proj_str, _ = weight_name.split('.')
                 weight_name = f"{e_str}.{proj_str}"
                 param_name = f"{param_name}weight"
-            if weight_name not in name:
-                continue
+                
             full_param_name = name.replace(weight_name, param_name)
+            
             # Skip layers on other devices.
-            if is_pp_missing_parameter(name, self):
+            if is_pp_missing_parameter(full_param_name, self):
                 continue
-            if ((name.endswith(".bias") or name.endswith("_bias"))
-                    and name not in params_dict):
+            if ((full_param_name.endswith(".bias") or full_param_name.endswith("_bias"))
+                    and full_param_name not in params_dict):
                 continue
+            
             param = params_dict[full_param_name]
-            weight_loader = param.weight_loader
+            weight_loader = getattr(param, "weight_loader", default_weight_loader)
+            
             if fused:
                 if "w13" in full_param_name:
                     shard_idx = 0 if shard_id == "w1" else 1
-                    new_loaded_weight = new_loaded_weight[shard_idx]
+                    new_loaded_weight = loaded_weight_list[shard_idx]
                 new_loaded_weight = new_loaded_weight.transpose(-1, -2)
-                layer_idx = extract_layer_index(name)
-                # EP mapping
-                expert_map = self.layers[
-                    layer_idx].feed_forward.experts.expert_map
-                if expert_map is not None:
-                    local_expert_indices = (expert_map != -1) \
-                                            .nonzero() \
-                                            .flatten() \
-                                            .to(new_loaded_weight.device)
-                    new_loaded_weight = new_loaded_weight[local_expert_indices]
-                    expert_id = local_expert_indices[0].item()
-            else:
-                # TODO: add EP support for non fused weights
-                pass
-            weight_loader(param,
-                          new_loaded_weight,
-                          full_param_name,
-                          shard_id=shard_id,
-                          expert_id=expert_id)
-
-            loaded_params.add(full_param_name)
-            expert_param_loaded = True
+                
+            # Use return_success to check if weight loading succeeded
+            if hasattr(weight_loader, '__call__'):
+                # Check if weight_loader supports return_success parameter
+                import inspect
+                sig = inspect.signature(weight_loader)
+                if 'return_success' in sig.parameters:
+                    success = weight_loader(param,
+                                          new_loaded_weight,
+                                          full_param_name,
+                                          shard_id=shard_id,
+                                          expert_id=expert_id,
+                                          return_success=True)
+                    if success:
+                        loaded_params.add(full_param_name)
+                        expert_param_loaded = True
+                        break
+                else:
+                    # Fallback for weight loaders without return_success
+                    weight_loader(param,
+                                new_loaded_weight,
+                                full_param_name,
+                                shard_id=shard_id,
+                                expert_id=expert_id)
+                    loaded_params.add(full_param_name)
+                    expert_param_loaded = True
+                    break
+                    
         return expert_param_loaded
 
     def load_weights(self, weights: Iterable[tuple[str,
@@ -450,16 +468,19 @@ class Llama4Model(LlamaModel):
             (".gate_up_proj", ".up_proj", 1),
         ]
         fused_experts_params = False
+        # Pass num_redundant_experts for EPLB support
         expert_params_mapping = FusedMoE.make_expert_params_mapping(
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
-            num_experts=self.num_experts)
+            num_experts=self.num_experts,
+            num_redundant_experts=self._num_redundant_experts)
         expert_params_mapping_fused = FusedMoE.make_expert_params_mapping(
             ckpt_gate_proj_name="gate_up_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="gate_up_proj",
-            num_experts=1)
+            num_experts=1,
+            num_redundant_experts=0)
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
@@ -531,7 +552,9 @@ class Llama4ForCausalLM(LlamaForCausalLM, MixtureOfExperts):
                          layer_type=Llama4DecoderLayer)
 
         # For MixtureOfExperts protocol
-        self._num_redundant_experts = 0
+        parallel_config = vllm_config.parallel_config
+        self._num_redundant_experts = getattr(parallel_config, 'num_redundant_experts', 0)
+        self.expert_weights = []
 
         # Track FusedMoE layers for EPLB
         self.moe_layers: list[FusedMoE] = []
@@ -544,11 +567,6 @@ class Llama4ForCausalLM(LlamaForCausalLM, MixtureOfExperts):
                 if is_moe_layer and hasattr(layer, 'feed_forward') and hasattr(
                         layer.feed_forward, 'experts'):
                     self.moe_layers.append(layer.feed_forward.experts)
-
-    @property
-    def expert_weights(self) -> list[torch.nn.Module]:
-        """Get all MoE layers"""
-        return self.moe_layers
 
     @property
     def num_moe_layers(self) -> int:
@@ -595,15 +613,16 @@ class Llama4ForCausalLM(LlamaForCausalLM, MixtureOfExperts):
 
     def set_eplb_state(
         self,
-        moe_layer_indices: list[int],
         expert_load_view: torch.Tensor,
         logical_to_physical_map: torch.Tensor,
         logical_replica_count: torch.Tensor,
     ) -> None:
         """Set EPLB state for MoE layers"""
-        for i, moe_layer_idx in enumerate(moe_layer_indices):
-            self.moe_layers[i].set_eplb_state(
-                moe_layer_idx=i,
+        for layer_idx, layer in enumerate(self.moe_layers):
+            # Register the expert weights.
+            self.expert_weights.append(layer.get_expert_weights())
+            layer.set_eplb_state(
+                moe_layer_idx=layer_idx,
                 expert_load_view=expert_load_view,
                 logical_to_physical_map=logical_to_physical_map,
                 logical_replica_count=logical_replica_count,
