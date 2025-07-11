@@ -2918,13 +2918,15 @@ def bind_kv_cache(
             extract_layer_index(layer_name)
             for layer_name in layer_need_kv_cache))
 
+    # Map from layer_name to the kv cache layer idx.
+    layer_name_2_kv_cache_index = dict()
     for layer_name in layer_need_kv_cache:
-        # 1. Get the kv_cache_idx of the target_layer_name.
         target_layer_name = shared_kv_cache_layers.get(layer_name, layer_name)
         kv_cache_idx = layer_index_sorted.index(
             extract_layer_index(target_layer_name))
+        layer_name_2_kv_cache_index[layer_name] = kv_cache_idx
 
-        # 2. Bind kv_cache to forward_ctx.
+    for layer_name, kv_cache_idx in layer_name_2_kv_cache_index.items():
         forward_ctx = ctx[layer_name]
         assert len(forward_ctx.kv_cache) == len(kv_cache)
         for ve, ve_kv_cache in enumerate(kv_cache):
