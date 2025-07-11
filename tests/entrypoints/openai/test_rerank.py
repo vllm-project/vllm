@@ -94,3 +94,30 @@ def test_rerank_max_model_len(server: RemoteOpenAIServer, model_name: str):
     # Assert just a small fragments of the response
     assert "Please reduce the length of the input." in \
         rerank_response.text
+
+
+def test_invocations(server: RemoteOpenAIServer):
+    query = "What is the capital of France?"
+    documents = [
+        "The capital of Brazil is Brasilia.", "The capital of France is Paris."
+    ]
+
+    request_args = {
+        "model": MODEL_NAME,
+        "query": query,
+        "documents": documents,
+    }
+
+    rerank_response = requests.post(server.url_for("rerank"),
+                                    json=request_args)
+    rerank_response.raise_for_status()
+
+    invocation_response = requests.post(server.url_for("invocations"),
+                                        json=request_args)
+    invocation_response.raise_for_status()
+
+    rerank_output = rerank_response.json()
+    invocation_output = invocation_response.json()
+
+    assert rerank_output.keys() == invocation_output.keys()
+    assert rerank_output["results"] == invocation_output["results"]
