@@ -585,6 +585,7 @@ def unified_attention(
     max_seqlen_q,
     seqused_k,
     max_seqlen_k,
+    avg_seqlen_q,
     softmax_scale,
     causal,
     window_size,
@@ -611,7 +612,9 @@ def unified_attention(
     num_queries_per_kv = num_query_heads // num_kv_heads
     head_size = q.shape[2]
 
-    BLOCK_M = 64 if max_seqlen_q > 1 else 16
+    # balancing the blocksizes for short and long prompts
+    BLOCK_M = 64 if max_seqlen_q > 1 and avg_seqlen_q >= 4096 else 16
+    BLOCK_N = 32 if max_seqlen_k <= 64 or avg_seqlen_q <= 4096 else 64
     BLOCK_Q = BLOCK_M // num_queries_per_kv
 
     # Ideally we would launch with kernel with:
@@ -627,8 +630,6 @@ def unified_attention(
 
     # if batch contains a prefill
     if max_seqlen_q > 1 or total_num_q_blocks * num_kv_heads > 128:
-
-        BLOCK_N = 16 if max_seqlen_k <= 64 else 64
 
         grid = lambda META: (q.shape[0] // (META[
             'BLOCK_M'] // num_queries_per_kv) + num_seqs, num_kv_heads)
@@ -671,6 +672,7 @@ def unified_attention(
             num_seqs=num_seqs,
             BLOCK_M=BLOCK_M,
             BLOCK_N=BLOCK_N,
+            num_stages=4 if BLOCK_M == 16 else 2,
         )
     else:
         # for initial version, NUM_SEGMENTS = 16 is chosen as a default
