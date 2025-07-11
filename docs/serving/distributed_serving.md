@@ -104,7 +104,7 @@ vllm serve /path/to/the/model/in/the/container \
      --pipeline-parallel-size 2
 ```
 
-Alternatively, you can siply set `tensor_parallel_size` to the total number of GPUs in the cluster:
+Alternatively, you can simply set `tensor_parallel_size` to the total number of GPUs in the cluster:
 
 ```bash
 vllm serve /path/to/the/model/in/the/container \
