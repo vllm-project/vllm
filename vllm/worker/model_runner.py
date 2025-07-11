@@ -1584,7 +1584,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     cudagraph_inputs_embeds,
                 )
                 # Only rank 0 should print progress bar during capture
-                if get_tensor_model_parallel_rank() == 0:
+                if (self.load_config.use_tqdm_on_load
+                        and get_tensor_model_parallel_rank() == 0):
                     compilation_cases = tqdm(
                         list(compilation_cases),
                         desc="Capturing CUDA graph shapes")
