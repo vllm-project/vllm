@@ -317,9 +317,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # from the KV cache of `shared_kv_cache_layers[layer_name]`.
         self.shared_kv_cache_layers: dict[str, str] = {}
 
-        self.decode_indices = torch.zeros(self.max_num_tokens,
-                                          dtype=torch.int32,
-                                          device=self.device)
+        self.decode_indices = None
+        if self.cache_config.kv_sharing_skip_prefill:
+            self.decode_indices = torch.zeros(self.max_num_tokens,
+                                            dtype=torch.int32,
+                                            device=self.device)
 
     def _may_reorder_batch(self, scheduler_output: "SchedulerOutput") -> None:
         """
@@ -583,7 +585,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         """
         Pads logits_indices to align with CUDA graph capture sizes
         """
-        if not self.cache_config.kv_sharing_skip_prefill:
+        if self.decode_indices is None:
             return None
 
         num_decode_reqs = 0

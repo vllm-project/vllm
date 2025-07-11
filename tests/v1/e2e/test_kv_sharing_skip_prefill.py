@@ -13,7 +13,7 @@ from transformers import Qwen2Config
 
 from vllm import LLM, SamplingParams
 from vllm.compilation.backends import set_model_tag
-from vllm.compilation.decorators import (skip_torch_compile,
+from vllm.compilation.decorators import (ignore_torch_compile,
                                          support_torch_compile)
 from vllm.config import (CacheConfig, CompilationConfig, CompilationLevel,
                          VllmConfig)
@@ -161,7 +161,7 @@ class SecondLayerGroup(nn.Module):
         return hidden_states, residual
 
 
-@skip_torch_compile
+@ignore_torch_compile
 class Qwen2ModelWithKVSharing(Qwen2Model):
 
     def __init__(self,
@@ -193,18 +193,17 @@ class Qwen2ModelWithKVSharing(Qwen2Model):
             )
 
         # Pre-allocate static buffers for CUDA graph
-        self.max_num_tokens =\
-            vllm_config.scheduler_config.max_num_batched_tokens
-        self.dtype = vllm_config.model_config.dtype
-        self.device = next(self.parameters()).device
-        self.hidden_size = vllm_config.model_config.get_hidden_size()
-        self.residual = torch.zeros((self.max_num_tokens, self.hidden_size),
-                                    dtype=self.dtype,
-                                    device=self.device)
+        max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        dtype = vllm_config.model_config.dtype
+        device = next(self.parameters()).device
+        hidden_size = vllm_config.model_config.get_hidden_size()
+        self.residual = torch.zeros((max_num_tokens, hidden_size),
+                                    dtype=dtype,
+                                    device=device)
         self.hidden_states = torch.zeros(
-            (self.max_num_tokens, self.hidden_size),
-            dtype=self.dtype,
-            device=self.device)
+            (max_num_tokens, hidden_size),
+            dtype=dtype,
+            device=device)
 
     def forward(
         self,
@@ -355,8 +354,7 @@ def test_kv_sharing_skip_prefill(
     sampling_params = SamplingParams(temperature=0.0, max_tokens=100)
     compilation_config = CompilationConfig(
         level=CompilationLevel.PIECEWISE
-        if not enforce_eager else CompilationLevel.NO_COMPILATION,
-        cudagraph_share_memory_pool=False)
+        if not enforce_eager else CompilationLevel.NO_COMPILATION)
 
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
