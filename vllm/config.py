@@ -872,7 +872,7 @@ class ModelConfig:
 
                 supported_tasks.append(preferred_task)
             elif task_option in _RUNNER_TASKS["pooling"]:
-                supported_tasks.append(task_option)
+                supported_tasks.append(cast(_ResolvedTask, task_option))
 
         return supported_tasks
 
@@ -922,13 +922,13 @@ class ModelConfig:
                 if task_option in runner_tasks:
                     return runner
             else:
-                runner: RunnerType = next(
+                task_runner: RunnerType = next(
                     runner for runner, tasks in _RUNNER_TASKS.items()
                     if task_option in tasks)
                 raise ValueError(
                     f"This model does not support task={task_option!r}. "
-                    f"Available tasks for runner={runner!r}: "
-                    f"{supported_tasks[runner]}")
+                    f"Available tasks for runner={task_runner!r}: "
+                    f"{supported_tasks[task_runner]}")
 
         suffix_to_preferred_runner: list[tuple[str, RunnerType]] = [
             ("ForCausalLM", "generate"),
