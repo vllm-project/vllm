@@ -51,7 +51,7 @@ from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.kv_cache_interface import (AttentionSpec, FullAttentionSpec,
                                         KVCacheConfig, KVCacheSpec, MambaSpec,
-                                        SlidingWindowSpec)
+                                        SlidingWindowSpec, ShortConvSpec)
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
                              ModelRunnerOutput)
 from vllm.v1.pool.metadata import PoolingMetadata
@@ -2325,7 +2325,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     raise NotImplementedError(
                         "Non-Attention backend is not supported by V1 "
                         "GPUModelRunner.")
-            elif isinstance(kv_cache_spec, MambaSpec):
+            elif isinstance(kv_cache_spec, MambaSpec) or isinstance(kv_cache_spec, ShortConvSpec):
+                # ShortConv uses many of the same attributes, excluding chunking logic from Mamba2
                 attn_backend_i = Mamba2AttentionBackend
             else:
                 raise ValueError(
@@ -2460,8 +2461,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     kv_caches[layer_name] = kv_cache_raw_tensors[
                         layer_name].view(dtype).view(kv_cache_shape).permute(
                             *inv_order)
-                elif isinstance(kv_cache_spec, MambaSpec):
-                    has_mamba = True
+                elif isinstance(kv_cache_spec, (MambaSpec, ShortConvSpec)):
+                    has_fixed_state_layers = True
                     raw_tensor = kv_cache_raw_tensors[layer_name]
                     dtype = kv_cache_spec.dtype
                     num_element_per_page = (kv_cache_spec.page_size_bytes //
@@ -2485,7 +2486,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 else:
                     raise NotImplementedError
 
-        if has_attn and has_mamba:
+        if has_attn and has_fixed_state_layers:
             self._verify_hybrid_attention_mamba_layout(kv_cache_config,
                                                        kv_cache_raw_tensors)
 
@@ -2629,7 +2630,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         mamba_layers = get_layers_from_vllm_config(self.vllm_config,
                                                    MambaMixer2)
-        if len(mamba_layers) > 0:
+        short_conv_layers = get_layers_from_vllm_config(self.vllm_config,
+                                                        ShortConv)
+
+        has_mamba      = len(mamba_layers) > 0
+        has_conv_layer = len(short_conv_layers) > 0
+        if has_mamba:
             if self.vllm_config.speculative_config is not None:
                 raise NotImplementedError(
                     "Mamba with speculative decoding is not supported yet.")
@@ -2641,9 +2647,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     "Prefix caching is not supported for Mamba yet.")
             max_model_len = self.vllm_config.model_config.max_model_len
 
-            page_size_padded = self._maybe_pad_mamba_page_size(
-                attn_layers, mamba_layers, kv_cache_spec, max_model_len,
-                block_size)
+            page_size_padded = self._maybe_pad_fixed_state_page_size(
+                attn_layers, mamba_layers, kv_cache_spec, MambaSpec,
+                max_model_len, block_size)
 
             # Set block_size to max_model_len, so that mamba model will always
             # have only one block in the KV cache.
@@ -2654,31 +2660,58 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     block_size=max_model_len,
                     page_size_padded=page_size_padded)
 
+        elif has_conv_layer:
+            if self.vllm_config.speculative_config is not None:
+                raise NotImplementedError(
+                    "ShortConv's with speculative decoding is not supported yet.")
+            if not self.vllm_config.model_config.enforce_eager:
+                raise NotImplementedError(
+                    "ShortConv's with cuda graph is not supported yet.")
+            if self.vllm_config.cache_config.enable_prefix_caching:
+                raise NotImplementedError(
+                    "Prefix caching is not supported for ShortConv's yet.")
+            max_model_len = self.vllm_config.model_config.max_model_len
+
+            page_size_padded = self._maybe_pad_fixed_state_page_size(
+                attn_layers, short_conv_layers, kv_cache_spec, ShortConvSpec,
+                max_model_len, block_size)
+
+            # Set block_size to max_model_len, so that mamba model will always
+            # have only one block in the KV cache.
+            for layer_name, short_conv_module in short_conv_layers.items():
+                kv_cache_spec[layer_name] = ShortConvSpec(
+                    shapes=short_conv_module.get_state_shape(),
+                    dtype=self.kv_cache_dtype,
+                    block_size=max_model_len,
+                    page_size_padded=page_size_padded)
+
         return kv_cache_spec
 
-    def _maybe_pad_mamba_page_size(
+    def _maybe_pad_fixed_state_page_size(
         self,
         attn_layers: dict[str, Attention],
-        mamba_layers: dict[str, MambaMixer2],
+        state_layers: dict[str, Union[MambaMixer2, ShortConv]],
         kv_cache_spec: dict[str, KVCacheSpec],
+        state_spec: type[MambaSpec | ShortConvSpec],
         max_model_len: int,
         block_size: int,
     ) -> Optional[int]:
         """
         Ensure that page size of attention KV cache groups is greater than or
-        equal to the mamba KV cache groups. If not, we suggest to the user
+        equal to the Mamba/ShortConv KV cache groups. If not, we suggest to the user
         how to set the attention block size to ensure that it is.
 
-        If the attention page size is strictly greater than the mamba page size,
-        we pad the mamba page size to make them equal.
+        If the attention page size is strictly greater than the fixed state page size,
+        we pad the fixed state page size to make them equal.
 
         Args:
             attn_layers: Attention layers
-            mamba_layers: Mamba layers
+            state_layers: Mamba or ShortConv layers
             kv_cache_spec: KV cache spec (populated with attention layers)
+            state_spec: MambaSpec or ShortConvSpec
 
         Returns:
-            Optional[int]: Mamba page size with padding (None if no padding).
+            Optional[int]: State page size with padding (None if no padding).
         """
 
         if len(attn_layers) == 0:
@@ -2686,23 +2719,23 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         attn_layer_name = next(iter(attn_layers))
         attn_page_size = kv_cache_spec[attn_layer_name].page_size_bytes
-        mamba_layer_name = next(iter(mamba_layers))
-        mamba_page_size = MambaSpec(
-            shapes=mamba_layers[mamba_layer_name].get_state_shape(),
+        state_layer_name = next(iter(state_layers))
+        state_page_size = state_spec(
+            shapes=state_layers[state_layer_name].get_state_shape(),
             dtype=self.kv_cache_dtype,
             block_size=max_model_len).page_size_bytes
-        if attn_page_size < mamba_page_size:
+        if attn_page_size < state_page_size:
             # attention page size (for 16 tokens)
             attn_page_size_16 = 16 * attn_page_size // block_size
             # some attention backends (e.g. FA) only support setting
             # block size to multiple of 16, so let's suggest a value
             # that would work (note: FA is currently not compatible
-            # with mamba layers, use FlashInfer instead).
-            suggest_attn_block_size = 16 * cdiv(mamba_page_size,
+            # with mamba or short-conv layers, use FlashInfer instead).
+            suggest_attn_block_size = 16 * cdiv(state_page_size,
                                                 attn_page_size_16)
             raise ValueError(
                 "Attention block size should be increased to at least "
                 f"{suggest_attn_block_size} in order to match "
-                "the mamba page size")
+                "the state page size")
 
         return attn_page_size
