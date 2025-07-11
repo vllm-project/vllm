@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from abc import ABC, abstractmethod
-from collections.abc import Iterable
 from typing import Optional, Union
 
 import torch
@@ -19,6 +17,7 @@ from vllm.forward_context import get_forward_context
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
+from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.mamba2_metadata import (Mamba2Metadata,
                                                               update_metadata)
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
@@ -219,32 +218,9 @@ def mamba_v2_sharded_weight_loader(
     return loader
 
 
-class Mamba2Layer(ABC):
-    """
-    Base class for all Mamba2 layers which support the v1 engine.
-    Inherit from this class if you implement a custom Mamba2 layer.
-    """
-
-    # Contains the KV cache (mamba state) for the layer
-    # in the shape specified by `self.get_state_shape`.
-    # The outer list is for v0 PP virtual engine. Though this code path
-    # only runs for v1, we have to do this to unify with the interface
-    # of Attention + v0 PP.
-    kv_cache: list[Iterable[torch.Tensor]]
-
-    @abstractmethod
-    def get_state_shape(self) -> Iterable[tuple[int, ...]]:
-        """
-        Defines the shape of the mamba state.
-        Usually, the mamba state is a (conv_state, ssm_state) tuple.
-        In this case, returns (conv_state_shape, ssm_state_shape).
-        """
-        pass
-
-
 # Adapted from transformers.models.mamba.modeling_mamba.MambaMixer
 @CustomOp.register("mamba_mixer2")
-class MambaMixer2(Mamba2Layer, CustomOp):
+class MambaMixer2(MambaBase, CustomOp):
     """
     Compute ∆, A, B, C, and D the state space parameters and compute
     the `contextualized_states`. A, D are input independent
