@@ -226,8 +226,7 @@ class JinaVLForEmbedding(Qwen2VLForConditionalGeneration,
                 output = seq_states.mean(dim=0)
 
             # Normalize and handle potential NaNs by replacing with zeros
-            output = F.normalize(output, p=2, dim=-1)
-            output = torch.nan_to_num(output)
+            output = F.normalize(output, p=2, dim=-1, eps=1e-12)
             pooled_outputs.append(output)
             
             offset += prompt_len
@@ -274,7 +273,7 @@ class JinaVLForEmbedding(Qwen2VLForConditionalGeneration,
                 pooled = seq_states.mean(dim=0)
             
             # Normalize embeddings
-            pooled = F.normalize(pooled, p=2, dim=-1)
+            pooled = F.normalize(pooled, p=2, dim=-1, eps=1e-12)
             pooled_outputs.append(pooled)
             
             offset += prompt_len
