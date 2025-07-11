@@ -128,7 +128,7 @@ def test_transcription_task(model_id, expected_runner_type, expected_task):
     ("Qwen/Qwen3-0.6B", "transcription"),
 ])
 def test_incorrect_task(model_id, bad_task):
-    with pytest.raises(ValueError, match=r"does not support the .* task"):
+    with pytest.raises(ValueError, match=r"does not support task=.*"):
         ModelConfig(
             model_id,
             task=bad_task,
