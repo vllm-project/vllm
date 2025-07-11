@@ -9,6 +9,7 @@ from .granite_tool_parser import GraniteToolParser
 from .hermes_tool_parser import Hermes2ProToolParser
 from .internlm2_tool_parser import Internlm2ToolParser
 from .jamba_tool_parser import JambaToolParser
+from .kimi_k2_tool_parser import KimiK2ToolParser
 from .llama4_pythonic_tool_parser import Llama4PythonicToolParser
 from .llama_tool_parser import Llama3JsonToolParser
 from .minimax_tool_parser import MinimaxToolParser
@@ -23,5 +24,5 @@ __all__ = [
     "Internlm2ToolParser", "Llama3JsonToolParser", "JambaToolParser",
     "Llama4PythonicToolParser", "PythonicToolParser", "Phi4MiniJsonToolParser",
     "DeepSeekV3ToolParser", "xLAMToolParser", "MinimaxToolParser",
-    "CommandToolParser"
+    "CommandToolParser", "KimiK2ToolParser"
 ]
