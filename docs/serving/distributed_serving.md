@@ -13,7 +13,7 @@ To choose a distributed inference strategy for a single model replica, use the f
 
 Increase the number of GPUs and nodes until there is enough GPU memory for the model. Set `tensor_parallel_size` to the number of GPUs per node and `pipeline_parallel_size` to the number of nodes.
 
-After you provision sufficient resources, run vLLM. Look for a log message similar to `# GPU blocks: 790`. Multiply that number by `16` (the block size) to estimate the maximum number of tokens the configuration can serve. If this estimate is inadequate, increase the number of GPUs or nodes until the block count satisfies your throughput target.
+After you provision sufficient resources, run vLLM. Look for a log message similar to `# GPU blocks: 790`. Multiply that number by `16` (the block size) to estimate the maximum number of tokens the configuration can serve. If this estimate is less than your throughput requirements, increase the number of GPUs in your cluster.
 
 !!! note
     Edge case: If the model fits within a single node but the GPU count does not evenly divide the model size, enable pipeline parallelism, which splits the model along layers and supports uneven splits. In this scenario, set `tensor_parallel_size=1` and `pipeline_parallel_size` to the number of GPUs.
@@ -75,18 +75,13 @@ bash run_cluster.sh \
                 <head_node_ip> \
                 --worker \
                 /path/to/the/huggingface/home/in/this/node \
-                -e VLLM_HOST_IP=<this_node_ip>
+                -e VLLM_HOST_IP=<head_node_ip>
 ```
 
-Keep the shells running these commands open; closing a shell terminates the cluster. Ensure that all nodes can communicate with each other through their IP addresses. Set `VLLM_HOST_IP` on each worker to its unique IP address.
+Note that `VLLM_HOST_IP` is unique for each worker. Keep the shells running these commands open; closing any shell terminates the cluster. Ensure that all nodes can communicate with each other through their IP addresses.
 
 !!! warning
     For security, set `VLLM_HOST_IP` to an address on a private network segment. Traffic sent over this network is unencrypted, and the endpoints exchange data in a format that can be exploited to execute arbitrary code if an adversary gains network access. Ensure that untrusted parties cannot reach the network.
-
-!!! warning
-    Download the model on every node (to the same path) or store the model on a distributed file system accessible by all nodes.
-
-    If you use Hugging Face models, downloading the model before starting vLLM is recommended. Then pass the path to the model in place of the repository ID. Otherwise, supply a Hugging Face token by appending `-e HF_TOKEN=<token>` to `run_cluster.sh`.
 
 From any node, enter a container and run `ray status` and `ray list nodes` to verify that the Ray cluster sees the expected number of nodes and GPUs.
 
@@ -174,6 +169,9 @@ Search the logs for the transport method. Entries containing `[send] via NET/Soc
 
 !!! warning
     After you start the Ray cluster, verify GPU-to-GPU communication across nodes. Proper configuration can be non-trivial. Refer to the [sanity check script][troubleshooting-incorrect-hardware-driver] for details. If you need additional environment variables for communication configuration, append them to `run_cluster.sh`, for example `-e NCCL_SOCKET_IFNAME=eth0`. Setting environment variables during cluster creation is recommended because the variables propagate to all nodes. In contrast, setting environment variables in the shell affects only the local node. See <gh-issue:6803> for more information.
+
+!!! warning
+    If you use Hugging Face models, downloading the model before starting vLLM is recommended. Download the model on every node to the same path or store the model on a distributed file system accessible by all nodes. Then pass the path to the model in place of the repository ID. Otherwise, supply a Hugging Face token by appending `-e HF_TOKEN=<token>` to `run_cluster.sh`.
 
 !!! warning
     The error message `Error: No available node types can fulfill resource request` can appear even when the cluster has enough GPUs. The issue often occurs when nodes have multiple IP addresses and vLLM cannot select the correct one. Ensure that vLLM and Ray use the same IP address by setting `VLLM_HOST_IP` in `run_cluster.sh` (with a different value on each node). Use `ray status` and `ray list nodes` to verify the chosen IP address. See <gh-issue:7815> for more information.
