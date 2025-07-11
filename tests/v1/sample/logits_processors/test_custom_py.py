@@ -51,7 +51,7 @@ def test_custom_logitsprocs_py(logitproc_source: str):
     kwargs = ({
         "logits_processors_entrypoints": [DUMMY_LOGITPROC_ENTRYPOINT]
     } if logitproc_source == LOGITPROC_SOURCE_ENTRYPOINT else {
-        "logits_processors_fqns": [DUMMY_LOGITPROC_FQN]
+        "logits_processors": [DUMMY_LOGITPROC_FQN]
     })
 
     # Create a vLLM instance and load custom logitproc
