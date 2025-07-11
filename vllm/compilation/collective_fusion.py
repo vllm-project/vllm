@@ -291,7 +291,7 @@ class AllReduceRMSNORMPattern(BasePattern):
         epsilon: float,
         dtype: torch.dtype,
         device: str,
-        allreduce_params: Optional[FlashInferFusedAllReduceParams],
+        allreduce_params: FlashInferFusedAllReduceParams,
     ):
         super().__init__(dtype, device)
         self.epsilon = epsilon
@@ -323,8 +323,6 @@ class AllReduceRMSNORMPattern(BasePattern):
         def replacement(input: torch.Tensor, rms_result: torch.Tensor,
                         weight: torch.Tensor):
             residual = torch.zeros_like(input)
-            assert (self.allreduce_params
-                    is not None), "No allreduce params for flashinfer provided"
             allreduce = auto_functionalized(
                 torch.ops.vllm.flashinfer_trtllm_fused_allreduce_norm.default,
                 allreduce_in=input,
@@ -348,7 +346,7 @@ class AllReduceFusedAddRMSNormPattern(BasePattern):
         epsilon: float,
         dtype: torch.dtype,
         device: str,
-        allreduce_params: Optional[FlashInferFusedAllReduceParams] = None,
+        allreduce_params: FlashInferFusedAllReduceParams,
     ):
         super().__init__(dtype, device)
         self.epsilon = epsilon
@@ -380,8 +378,6 @@ class AllReduceFusedAddRMSNormPattern(BasePattern):
 
         def replacement(residual: torch.Tensor, input: torch.Tensor,
                         weight: torch.Tensor):
-            assert (self.allreduce_params
-                    is not None), "No allreduce params for flashinfer provided"
             allreduce = auto_functionalized(
                 torch.ops.vllm.flashinfer_trtllm_fused_allreduce_norm.default,
                 allreduce_in=input,
