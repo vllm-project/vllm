@@ -209,7 +209,6 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                         extras={"guard": "meta-llama/Llama-Guard-3-1B",  # noqa: E501
                                                 "hermes": "NousResearch/Hermes-3-Llama-3.1-8B", # noqa: E501
                                                 "fp8": "RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8"}),  # noqa: E501
-    "LlamaForSequenceClassification": _HfExamplesInfo("Skywork/Skywork-Reward-V2-Llama-3.2-1B"),
     "LLaMAForCausalLM": _HfExamplesInfo("decapoda-research/llama-7b-hf",
                                         is_available_online=False),
     "MambaForCausalLM": _HfExamplesInfo("state-spaces/mamba-130m-hf"),
@@ -327,6 +326,7 @@ _CROSS_ENCODER_EXAMPLE_MODELS = {
                                                       hf_overrides={"architectures": ["GemmaForSequenceClassification"], # noqa: E501
                                                                     "classifier_from_token": ["Yes"], # noqa: E501
                                                                     "method": "no_post_processing"}), # noqa: E501
+    "LlamaForSequenceClassification": _HfExamplesInfo("Skywork/Skywork-Reward-V2-Llama-3.2-1B"),
     "ModernBertForSequenceClassification": _HfExamplesInfo("Alibaba-NLP/gte-reranker-modernbert-base", v0_only=True), # noqa: E501
     "RobertaForSequenceClassification": _HfExamplesInfo("cross-encoder/quora-roberta-base", v0_only=True),  # noqa: E501
     "XLMRobertaForSequenceClassification": _HfExamplesInfo("BAAI/bge-reranker-v2-m3", v0_only=True),  # noqa: E501
