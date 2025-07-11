@@ -13,7 +13,7 @@ To choose a distributed inference strategy for a single model replica, use the f
 
 Increase the number of GPUs and nodes until there is enough GPU memory for the model. Set `tensor_parallel_size` to the number of GPUs per node and `pipeline_parallel_size` to the number of nodes.
 
-After you provision sufficient resources, run vLLM. Look for a log message similar to `# GPU blocks: 790`. Multiply that number by `16` (the block size) to estimate the maximum number of tokens the configuration can serve. If this estimate is less than your throughput requirements, increase the number of GPUs in your cluster.
+After you provision sufficient resources to fit the model, run vLLM. Look for a log message similar to `# GPU blocks: 790`. Multiply that number by `16` (the block size) to estimate the maximum number of tokens the configuration can serve. If this estimate is less than your throughput requirements, increase the number of GPUs in your cluster.
 
 !!! note
     Edge case: If the model fits within a single node but the GPU count does not evenly divide the model size, enable pipeline parallelism, which splits the model along layers and supports uneven splits. In this scenario, set `tensor_parallel_size=1` and `pipeline_parallel_size` to the number of GPUs.
@@ -91,7 +91,7 @@ From any node, enter a container and run `ray status` and `ray list nodes` to ve
 ### Running vLLM on a Ray cluster
 
 !!! warning
-     If Ray is running inside containers, run the commands in the remainder of this guide *inside the containers*. To open a shell inside a container, connect to a node and use `docker exec -it <container_name> /bin/bash`.
+     If Ray is running inside containers, run the commands in the remainder of this guide *inside the containers*, not the host. To open a shell inside a container, connect to a node and use `docker exec -it <container_name> /bin/bash`.
 
 Once a Ray cluster is running, use vLLM as you would in a single-node setting. All resources across the Ray cluster are visible to vLLM, so a single `vllm` command on a single node is sufficient.
 
