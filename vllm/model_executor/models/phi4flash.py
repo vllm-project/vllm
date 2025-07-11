@@ -9,6 +9,7 @@ import torch.nn as nn
 from transformers.activations import ACT2FN
 
 from vllm.attention import Attention, AttentionMetadata, AttentionType
+from vllm.attention.selector import _Backend
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.forward_context import ForwardContext, get_forward_context
@@ -173,6 +174,8 @@ class SambaYAttention(nn.Module):
             attn_type=AttentionType.DECODER,
             kv_sharing_target_layer_name=kv_sharing_target_layer_name,
             **params)
+        assert self.attn.backend == _Backend.DIFFERENTIAL_FLASH_ATTN,\
+              "DIFFERENTIAL_FLASH_ATTN required"
 
     def lambda_init_fn(self, depth):
         return 0.8 - 0.6 * math.exp(-0.3 * depth)
@@ -433,8 +436,6 @@ class SambaYDecoderLayer(nn.Module):
 
         self.yoco_mb = False
         self.yoco_cross = False
-        assert config.num_hidden_layers % 4 == 0, \
-            'n_layer should be divisible by 4 for SambaY + yoco'
         if layer_idx >= config.num_hidden_layers // 2:
             self.yoco_mb = True
             self.yoco_cross = (layer_idx
@@ -608,11 +609,11 @@ class Phi4FlashForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsV0Only):
         scheduler_config = vllm_config.scheduler_config
         self.compilation_config = vllm_config.compilation_config
         self.vllm_config = vllm_config
-        # Prefix caching is not supported since there are mamba layers in this
-        # mode.
+        # Prefix caching and chunked prefill is not supported for this model.
         assert not cache_config.enable_prefix_caching, \
             "Phi4flash currently does not support prefix caching"
-
+        assert not scheduler_config.chunked_prefill_enabled, \
+            "Phi4Flash currently does not support prefix caching"
         super().__init__()
         self.config = config
         self.model_config = vllm_config.model_config
