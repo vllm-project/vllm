@@ -248,6 +248,7 @@ TEST_MODELS = [
     "meta-llama/Llama-3.2-1B-Instruct",
     "ArthurZ/Ilama-3.2-1B",
     "ibm/PowerLM-3b",
+    "deepseek-ai/DeepSeek-V2-Lite-Chat",
     # [LANGUAGE EMBEDDING]
     "intfloat/e5-mistral-7b-instruct",
     "BAAI/bge-multilingual-gemma2",
