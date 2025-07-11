@@ -411,10 +411,13 @@ def resolve_hf_chat_template(
                     "defined on HF Hub.", tokenizer.name_or_path)
         chat_template = load_chat_template(path)
     elif fallback_info is not None and fallback_info.override_exists:
-        logger.warning("Override existing template for %s as its defined ones "
-                       "on HF Hub is not compatible with OpenAI server.",
-                       tokenizer.name_or_path)
-        chat_template = load_chat_template(path)
+        chat_template_to_override = load_chat_template(path)
+        if chat_template_to_override != chat_template:
+            chat_template = chat_template_to_override
+            logger.warning("Override existing chat template for %s as "
+                           "its defined ones on HF Hub is not compatible "
+                           "with OpenAI server.",
+                            tokenizer.name_or_path)
     else:
         logger.debug("There is no chat template fallback for %s",
                      tokenizer.name_or_path)
