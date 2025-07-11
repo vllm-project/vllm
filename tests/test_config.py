@@ -54,7 +54,7 @@ def test_get_field():
         ("jason9693/Qwen2.5-1.5B-apeach", "pooling", "classify"),
         ("cross-encoder/ms-marco-MiniLM-L-6-v2", "pooling", "classify"),
         ("Qwen/Qwen2.5-Math-RM-72B", "pooling", "reward"),
-        ("openai/whisper-small", "transcription_only", "transcription"),
+        ("openai/whisper-small", "generate", "transcription"),
     ],
 )
 def test_auto_task(model_id, expected_runner_type, expected_task):
@@ -69,7 +69,11 @@ def test_auto_task(model_id, expected_runner_type, expected_task):
     )
 
     assert config.runner_type == expected_runner_type
-    assert config.task == expected_task
+
+    if config.runner_type == "pooling":
+        assert config.task == expected_task
+    else:
+        assert expected_task in config.supported_tasks
 
 
 @pytest.mark.parametrize(

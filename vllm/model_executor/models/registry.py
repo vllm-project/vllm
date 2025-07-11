@@ -23,8 +23,7 @@ from vllm.logger import init_logger
 from .interfaces import (has_inner_state, has_noops, is_attention_free,
                          is_hybrid, supports_cross_encoding,
                          supports_multimodal, supports_pp,
-                         supports_transcription, supports_transcription_only,
-                         supports_v0_only)
+                         supports_transcription, supports_v0_only)
 from .interfaces_base import is_text_generation_model
 
 logger = init_logger(__name__)
@@ -300,7 +299,8 @@ class _ModelInfo:
             is_attention_free=is_attention_free(model),
             is_hybrid=is_hybrid(model),
             supports_transcription=supports_transcription(model),
-            supports_transcription_only=supports_transcription_only(model),
+            supports_transcription_only=(supports_transcription(model) and
+                                         model.supports_transcription_only),
             supports_v0_only=supports_v0_only(model),
             has_noops=has_noops(model),
         )

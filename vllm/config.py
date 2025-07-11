@@ -93,23 +93,17 @@ ConfigT = TypeVar("ConfigT", bound=ConfigType)
 TaskOption = Literal["auto", "generate", "embedding", "embed", "classify",
                      "score", "reward", "transcription"]
 
-_ResolvedTask = Literal["generate", "embed", "classify", "reward", "draft",
-                        "transcription"]
+_ResolvedTask = Literal["generate", "transcription", "pooling", "embed",
+                        "classify", "reward"]
 
-RunnerType = Literal["generate", "pooling", "draft", "transcription_only"]
+RunnerOption = Literal["auto", "generate", "pooling", "draft"]
+
+RunnerType = Literal["generate", "pooling", "draft"]
 
 _RUNNER_TASKS: dict[RunnerType, list[_ResolvedTask]] = {
     "generate": ["generate", "transcription"],
-    "pooling": ["embed", "classify", "reward"],
-    "draft": ["draft"],
-    # Runner for all models that do not support the generate endpoints.
-    "transcription_only": [],
-}
-
-_TASK_RUNNER: dict[_ResolvedTask, RunnerType] = {
-    task: runner
-    for runner, tasks in _RUNNER_TASKS.items()
-    for task in tasks
+    "pooling": ["pooling", "embed", "classify", "reward"],
+    "draft": [],
 }
 
 
@@ -235,11 +229,14 @@ class ModelConfig:
     """Name or path of the Hugging Face model to use. It is also used as the
     content for `model_name` tag in metrics output when `served_model_name` is
     not specified."""
-    task: Literal[TaskOption, Literal["draft"]] = "auto"
-    """The task to use the model for. Each vLLM instance only supports one
-    task, even if the same model can be used for multiple tasks. When the model
-    only supports one task, "auto" can be used to select it; otherwise, you
-    must specify explicitly which task to use."""
+    runner: RunnerOption = "auto"
+    """The type of model runner to use. Each vLLM instance only supports one
+    model runner, even if the same model can be used for multiple types."""
+    task: TaskOption = "auto"
+    """The task to use the model for. If the model supports more than one
+    model runner, this is used to select which model runner to run.
+
+    Note that the model may support other tasks using the same model runner."""
     tokenizer: SkipValidation[str] = None  # type: ignore
     """Name or path of the Hugging Face tokenizer to use. If unspecified, model
     name or path will be used."""
@@ -554,10 +551,23 @@ class ModelConfig:
         self.hf_image_processor_config = get_hf_image_processor_config(
             self.model, hf_token=self.hf_token, revision=self.revision)
 
-        supported_tasks, task = self._resolve_task(self.task)
-        self.supported_tasks = supported_tasks
-        self.task = task
-        if self.task in ("draft", "generate"):
+        all_supported_tasks = self._get_supported_tasks(self.task)
+        supported_runner_types = self._get_supported_runner_types(
+            all_supported_tasks)
+        runner_type = self._resolve_runner(self.runner, self.task,
+                                           supported_runner_types,
+                                           all_supported_tasks)
+        self.supported_runner_types = supported_runner_types
+        self.runner_type = runner_type
+        self.supported_tasks = all_supported_tasks[runner_type]
+
+        # Currently, pooling models only supports "pooling"
+        # and the user-specified task
+        if runner_type == "pooling" and self.task == "auto":
+            self.task = next(t for t in self.supported_tasks if t != "pooling")
+
+        if self.runner_type in ("draft",
+                                "generate") and self.task != "transcription":
             self.truncation_side = "left"
         else:
             self.truncation_side = "right"
@@ -781,11 +791,11 @@ class ModelConfig:
                 f"one of {get_args(TokenizerMode)}.")
         self.tokenizer_mode = tokenizer_mode
 
-    def _get_preferred_task(
+    def _get_preferred_pooling_task(
         self,
         architectures: list[str],
-        supported_tasks: set[_ResolvedTask],
-    ) -> Optional[_ResolvedTask]:
+        supported_tasks: list[_ResolvedTask],
+    ) -> _ResolvedTask:
         model_id = self.model
         if get_pooling_config(model_id, self.revision):
             return "embed"
@@ -796,11 +806,7 @@ class ModelConfig:
 
         suffix_to_preferred_task: list[tuple[str, _ResolvedTask]] = [
             # Other models follow this pattern
-            ("ForCausalLM", "generate"),
-            ("ForConditionalGeneration", "generate"),
             ("ForSequenceClassification", "classify"),
-            ("ChatModel", "generate"),
-            ("LMHeadModel", "generate"),
             ("EmbeddingModel", "embed"),
             ("RewardModel", "reward"),
         ]
@@ -810,88 +816,141 @@ class ModelConfig:
             if arch.endswith(suffix) and pref_task in supported_tasks:
                 return pref_task
 
-        return None
+        return "embed"
 
-    def _resolve_task(
+    def _get_supported_generation_tasks(
         self,
-        task_option: Literal[TaskOption, Literal["draft"]],
-    ) -> tuple[set[_ResolvedTask], _ResolvedTask]:
-        if task_option == "draft":
-            return {"draft"}, "draft"
-
+        task_option: TaskOption,
+    ) -> list[_ResolvedTask]:
         registry = self.registry
         architectures = self.architectures
 
-        if (registry.is_transcription_only_model(architectures) and\
-             task_option in ("auto", "transcription")):
-            self.runner_type = "transcription_only"
-            return {"transcription"}, "transcription"
+        if registry.is_transcription_only_model(architectures):
+            return ["transcription"]
 
-        runner_support: dict[RunnerType, bool] = {
-            # NOTE: Listed from highest to lowest priority,
-            # in case the model supports multiple of them
-            "generate": registry.is_text_generation_model(architectures),
-            "pooling": registry.is_pooling_model(architectures),
+        supported_tasks = list[_ResolvedTask]()
+        if registry.is_text_generation_model(architectures):
+            supported_tasks.append("generate")
+
+            if registry.is_transcription_model(architectures):
+                supported_tasks.append("transcription")
+
+        return supported_tasks
+
+    def _get_supported_pooling_tasks(
+        self,
+        task_option: TaskOption,
+    ) -> list[_ResolvedTask]:
+        registry = self.registry
+        architectures = self.architectures
+
+        supported_tasks = list[_ResolvedTask]()
+        if registry.is_pooling_model(architectures):
+            supported_tasks.append("pooling")
+
+            # For now, users must specify the task (other than "pooling")
+            # to use for pooling models
+            if task_option == "auto":
+                preferred_task = self._get_preferred_pooling_task(
+                    architectures, _RUNNER_TASKS["pooling"])
+
+                supported_tasks.append(preferred_task)
+            elif task_option in _RUNNER_TASKS["pooling"]:
+                if task_option == "score":
+                    if self.registry.is_cross_encoder_model(architectures):
+                        task_option = "classify"
+                    else:
+                        task_option = "embed"
+                else:
+                    # Aliases
+                    if task_option == "embedding":
+                        msg = (
+                            "The 'embedding' task has been renamed to "
+                            "'embed', please use the new name. The old name "
+                            "will be removed in v1.0.")
+                        warnings.warn(msg, DeprecationWarning, stacklevel=2)
+
+                        task_option = "embed"
+
+                supported_tasks.append(task_option)
+
+        return supported_tasks
+
+    def _get_supported_tasks(
+        self,
+        task_option: TaskOption,
+    ) -> dict[RunnerType, list[_ResolvedTask]]:
+        return {
+            "generate": self._get_supported_generation_tasks(task_option),
+            "pooling": self._get_supported_pooling_tasks(task_option),
         }
 
-        def is_task_supported(task: _ResolvedTask) -> bool:
-            # Allows the model to opt out of tasks listed by the runner.
-            if task == "transcription":
-                return registry.is_transcription_model(architectures)
-            elif task == "score":
-                return runner_support["pooling"]
-            return True
+    def _get_supported_runner_types(
+        self,
+        supported_tasks: dict[RunnerType, list[_ResolvedTask]],
+    ) -> set[RunnerType]:
+        return {
+            runner
+            for runner, runner_tasks in supported_tasks.items()
+            if len(runner_tasks) > 0
+        }
 
-        self.supported_runner_types: list[RunnerType] = [
-            runner_type
-            for runner_type, is_supported in runner_support.items()
-            if is_supported
-        ]
+    def _resolve_runner(
+        self,
+        runner_option: RunnerOption,
+        task_option: TaskOption,
+        supported_runner_types: set[RunnerType],
+        supported_tasks: dict[RunnerType, list[_ResolvedTask]],
+    ) -> RunnerType:
+        if runner_option == "draft":
+            assert task_option == "auto"
+            return "draft"
 
-        supported_tasks_lst: list[_ResolvedTask] = [
-            task for runner_type in self.supported_runner_types
-            for task in _RUNNER_TASKS[runner_type] if is_task_supported(task)
-        ]
-        supported_tasks = set(supported_tasks_lst)
+        if not supported_runner_types:
+            raise ValueError("This model does not support any model runners!")
 
-        if task_option == "auto":
-            selected_task = next(iter(supported_tasks_lst))
+        if runner_option != "auto":
+            if runner_option not in supported_runner_types:
+                raise ValueError(
+                    f"This model does not support runner={runner_option}. "
+                    f"Available runners: {supported_runner_types}")
 
-            if len(supported_tasks_lst) > 1:
-                preferred_task = self._get_preferred_task(
-                    architectures, supported_tasks)
-                if preferred_task is not None:
-                    selected_task = preferred_task
+            return runner_option
 
-                logger.info(
-                    "This model supports multiple tasks: %s. "
-                    "Defaulting to '%s'.", supported_tasks, selected_task)
-        else:
-            if task_option == "score":
-                if self.registry.is_cross_encoder_model(architectures):
-                    task_option = "classify"
-                else:
-                    task_option = "embed"
+        if task_option != "auto":
+            for runner, runner_tasks in supported_tasks.items():
+                if task_option in runner_tasks:
+                    return runner
             else:
-                # Aliases
-                if task_option == "embedding":
-                    msg = ("The 'embedding' task has been renamed to "
-                           "'embed', please use the new name. The old name "
-                           "will be removed in v1.0.")
-                    warnings.warn(msg, DeprecationWarning, stacklevel=2)
+                runner = self._resolve_runner(runner_option, task_option,
+                                              supported_runner_types,
+                                              _RUNNER_TASKS)
+                raise ValueError(
+                    f"This model does not support task={task_option}. "
+                    f"Available tasks for runner={runner}: "
+                    f"{supported_tasks[runner]}")
 
-                    task_option = "embed"
+        suffix_to_preferred_runner: list[tuple[str, _ResolvedTask]] = [
+            ("ForCausalLM", "generate"),
+            ("ForConditionalGeneration", "generate"),
+            ("ChatModel", "generate"),
+            ("LMHeadModel", "generate"),
+            ("ForSequenceClassification", "pooling"),
+            ("EmbeddingModel", "pooling"),
+            ("RewardModel", "pooling"),
+        ]
+        _, arch = self.registry.inspect_model_cls(self.architectures)
 
-            if task_option not in supported_tasks:
-                msg = (
-                    f"This model does not support the '{task_option}' task. "
-                    f"Supported tasks: {supported_tasks}")
-                raise ValueError(msg)
+        for suffix, runner in suffix_to_preferred_runner:
+            if arch.endswith(suffix) and runner in supported_runner_types:
+                return runner
 
-            selected_task = task_option
+        if "generate" in supported_runner_types:
+            return "generate"
+        if "pooling" in supported_runner_types:
+            return "pooling"
 
-        self.runner_type = _TASK_RUNNER[cast(_ResolvedTask, selected_task)]
-        return supported_tasks, selected_task
+        raise AssertionError("This line should not be reached")
 
     def _parse_quant_hf_config(self):
         quant_cfg = getattr(self.hf_config, "quantization_config", None)
@@ -2697,7 +2756,7 @@ class SpeculativeConfig:
             if self.model is not None:
                 self.draft_model_config = ModelConfig(
                     model=self.model,
-                    task="draft",
+                    runner="draft",
                     tokenizer=self.target_model_config.tokenizer,
                     tokenizer_mode=self.target_model_config.tokenizer_mode,
                     trust_remote_code=self.target_model_config.
