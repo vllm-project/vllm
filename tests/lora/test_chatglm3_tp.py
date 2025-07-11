@@ -48,7 +48,7 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> list[str]:
 @create_new_process_for_each_test()
 def test_chatglm3_lora(chatglm3_lora_files):
     llm = vllm.LLM(MODEL_PATH,
-                   max_model_len=512,
+                   max_model_len=1024,
                    enable_lora=True,
                    max_loras=4,
                    max_lora_rank=64,
@@ -67,7 +67,7 @@ def test_chatglm3_lora(chatglm3_lora_files):
 @create_new_process_for_each_test()
 def test_chatglm3_lora_tp4(chatglm3_lora_files):
     llm = vllm.LLM(MODEL_PATH,
-                   max_model_len=512,
+                   max_model_len=1024,
                    enable_lora=True,
                    max_loras=4,
                    max_lora_rank=64,
@@ -88,14 +88,16 @@ def test_chatglm3_lora_tp4(chatglm3_lora_files):
 @create_new_process_for_each_test()
 def test_chatglm3_lora_tp4_fully_sharded_loras(chatglm3_lora_files):
     llm = vllm.LLM(MODEL_PATH,
-                   max_model_len=512,
+                   max_model_len=1024,
                    enable_lora=True,
                    max_loras=4,
                    max_lora_rank=64,
                    tensor_parallel_size=4,
                    trust_remote_code=True,
                    fully_sharded_loras=True,
-                   enable_chunked_prefill=True)
+                   enable_chunked_prefill=True,
+                   gpu_memory_utilization=0.85,
+                   cpu_offload_gb=10)
     output1 = do_sample(llm, chatglm3_lora_files, lora_id=1)
     for i in range(len(EXPECTED_LORA_OUTPUT)):
         assert output1[i] == EXPECTED_LORA_OUTPUT[i]

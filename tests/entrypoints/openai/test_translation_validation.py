@@ -169,4 +169,4 @@ async def test_long_audio_request(foscolo):
             temperature=0.0)
         out = json.loads(translation)['text'].strip().lower()
         # TODO investigate higher model uncertainty in for longer translations.
-        assert out.count("nor will i ever") == 2
+        assert out.count("nor do i ever") == 2
