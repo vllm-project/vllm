@@ -11,6 +11,8 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP)
+from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
+    TopKWeightAndReduceDelegate)
 from vllm.model_executor.layers.fused_moe.utils import (_fp8_perm,
                                                         _fp8_quantize,
                                                         _resize_cache)
@@ -255,6 +257,10 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
     def supports_expert_map(self) -> bool:
         return not self.use_batched_format
 
+    def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
+        # Let PrepareAndFinalize::finalize() decide the impl.
+        return TopKWeightAndReduceDelegate()
+
     def workspace_shapes(
         self,
         a: torch.Tensor,
@@ -303,11 +309,17 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
         a2_scale: Optional[torch.Tensor],
         workspace13: torch.Tensor,
         workspace2: torch.Tensor,
-        expert_num_tokens: Optional[torch.Tensor],
+        expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
     ):
         assert w1_zp is None, "w1_zp is not supported in CUTLASS MoE"
         assert w2_zp is None, "w2_zp is not supported in CUTLASS MoE"
+
+        expert_num_tokens = None
+        if expert_tokens_meta is not None:
+            expert_num_tokens = expert_tokens_meta.expert_num_tokens
+
         activation_callable = lambda o, i: self.activation(activation, o, i)
+
         in_dtype = hidden_states.dtype
         run_cutlass_moe_fp8(
             output, hidden_states, w1, w2, topk_ids, activation_callable,
@@ -541,8 +553,10 @@ def cutlass_moe_fp4(a: torch.Tensor,
     return out.to(dtype=out_dtype)
 
 
-def _valid_cutlass_block_scaled_grouped_gemm(w1: torch.Tensor,
-                                             w2: torch.Tensor) -> bool:
+def _valid_cutlass_block_scaled_grouped_gemm(
+        w1: torch.Tensor, w2: torch.Tensor, inplace: bool, activation: str,
+        apply_router_weight_on_input: bool,
+        expert_map: Optional[torch.Tensor]) -> bool:
 
     def _valid_cutlass_block_scaled_grouped_gemm_shape(N: int, K: int):
         return N % 128 == 0 and K % 128 == 0
@@ -556,6 +570,29 @@ def _valid_cutlass_block_scaled_grouped_gemm(w1: torch.Tensor,
     if (w1.dtype != torch.float8_e4m3fn or w2.dtype != torch.float8_e4m3fn):
         logger.debug(
             "CutlassBlockScaledGroupedGemm disabled: invalid weight dtype(s).")
+        return False
+
+    if expert_map is not None:
+        logger.debug(
+            "CutlassBlockScaledGroupedGemm disabled: expert_parallel is"
+            " not supported.")
+        return False
+
+    if activation != "silu":
+        logger.debug(
+            "CutlassBlockScaledGroupedGemm disabled: only activation silu is"
+            " supported.")
+        return False
+
+    if apply_router_weight_on_input:
+        logger.debug("CutlassBlockScaledGroupedGemm disabled:"
+                     " apply_router_weight_on_input is not supported.")
+        return False
+
+    if inplace:
+        logger.debug(
+            "CutlassBlockScaledGroupedGemm disabled: inplace is not supported."
+        )
         return False
 
     return True

@@ -18,7 +18,7 @@ from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
 from functools import partial
 from http import HTTPStatus
-from typing import Annotated, Any, Optional
+from typing import Annotated, Any, Callable, Optional
 
 import prometheus_client
 import pydantic
@@ -61,13 +61,9 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               CompletionResponse,
                                               DetokenizeRequest,
                                               DetokenizeResponse,
-                                              EmbeddingChatRequest,
-                                              EmbeddingCompletionRequest,
                                               EmbeddingRequest,
                                               EmbeddingResponse, ErrorResponse,
                                               LoadLoRAAdapterRequest,
-                                              PoolingChatRequest,
-                                              PoolingCompletionRequest,
                                               PoolingRequest, PoolingResponse,
                                               RerankRequest, RerankResponse,
                                               ResponsesRequest,
@@ -87,6 +83,7 @@ from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
 from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import (BaseModelPath,
+                                                    LoRAModulePath,
                                                     OpenAIServingModels)
 from vllm.entrypoints.openai.serving_pooling import OpenAIServingPooling
 from vllm.entrypoints.openai.serving_responses import OpenAIServingResponses
@@ -112,7 +109,7 @@ from vllm.version import __version__ as VLLM_VERSION
 prometheus_multiproc_dir: tempfile.TemporaryDirectory
 
 # Cannot use __name__ (https://github.com/vllm-project/vllm/pull/4765)
-logger = init_logger("vllm.entrypoints.openai.api_server")
+logger = init_logger('vllm.entrypoints.openai.api_server')
 
 _running_tasks: set[asyncio.Task] = set()
 
@@ -125,7 +122,7 @@ async def lifespan(app: FastAPI):
 
             async def _force_log():
                 while True:
-                    await asyncio.sleep(10.0)
+                    await asyncio.sleep(10.)
                     await engine_client.do_log_stats()
 
             task = asyncio.create_task(_force_log())
@@ -153,6 +150,7 @@ async def build_async_engine_client(
     args: Namespace,
     client_config: Optional[dict[str, Any]] = None,
 ) -> AsyncIterator[EngineClient]:
+
     # Context manager to handle engine_client lifecycle
     # Ensures everything is shutdown and cleaned up on error/exit
     engine_args = AsyncEngineArgs.from_cli_args(args)
@@ -189,7 +187,6 @@ async def build_async_engine_client_from_engine_args(
                 "To disable frontend multiprocessing, set VLLM_USE_V1=0.")
 
         from vllm.v1.engine.async_llm import AsyncLLM
-
         async_llm: Optional[AsyncLLM] = None
         client_index = client_config.pop(
             "client_index") if client_config else 0
@@ -200,8 +197,7 @@ async def build_async_engine_client_from_engine_args(
                 disable_log_requests=engine_args.disable_log_requests,
                 disable_log_stats=engine_args.disable_log_stats,
                 client_addresses=client_config,
-                client_index=client_index,
-            )
+                client_index=client_index)
 
             # Don't keep the dummy data in memory
             await async_llm.reset_mm_cache()
@@ -214,14 +210,14 @@ async def build_async_engine_client_from_engine_args(
     # V0 AsyncLLM.
     elif (MQLLMEngineClient.is_unsupported_config(vllm_config)
           or disable_frontend_multiprocessing):
+
         engine_client: Optional[EngineClient] = None
         try:
             engine_client = AsyncLLMEngine.from_vllm_config(
                 vllm_config=vllm_config,
                 usage_context=usage_context,
                 disable_log_requests=engine_args.disable_log_requests,
-                disable_log_stats=engine_args.disable_log_stats,
-            )
+                disable_log_stats=engine_args.disable_log_stats)
             yield engine_client
         finally:
             if engine_client and hasattr(engine_client, "shutdown"):
@@ -235,8 +231,8 @@ async def build_async_engine_client_from_engine_args(
             #   cleaned up upon exit.
             global prometheus_multiproc_dir
             prometheus_multiproc_dir = tempfile.TemporaryDirectory()
-            os.environ["PROMETHEUS_MULTIPROC_DIR"] = (
-                prometheus_multiproc_dir.name)
+            os.environ[
+                "PROMETHEUS_MULTIPROC_DIR"] = prometheus_multiproc_dir.name
         else:
             logger.warning(
                 "Found PROMETHEUS_MULTIPROC_DIR was set by user. "
@@ -260,18 +256,12 @@ async def build_async_engine_client_from_engine_args(
         # The Process can raise an exception during startup, which may
         # not actually result in an exitcode being reported. As a result
         # we use a shared variable to communicate the information.
-        engine_alive = multiprocessing.Value("b", True, lock=False)
+        engine_alive = multiprocessing.Value('b', True, lock=False)
         engine_process = context.Process(
             target=run_mp_engine,
-            args=(
-                vllm_config,
-                UsageContext.OPENAI_API_SERVER,
-                ipc_path,
-                engine_args.disable_log_stats,
-                engine_args.disable_log_requests,
-                engine_alive,
-            ),
-        )
+            args=(vllm_config, UsageContext.OPENAI_API_SERVER, ipc_path,
+                  engine_args.disable_log_stats,
+                  engine_args.disable_log_requests, engine_alive))
         engine_process.start()
         engine_pid = engine_process.pid
         assert engine_pid is not None, "Engine process failed to start."
@@ -296,7 +286,8 @@ async def build_async_engine_client_from_engine_args(
                     await mq_engine_client.setup()
                     break
                 except TimeoutError:
-                    if not engine_process.is_alive() or not engine_alive.value:
+                    if (not engine_process.is_alive()
+                            or not engine_alive.value):
                         raise RuntimeError(
                             "Engine process failed to start. See stack "
                             "trace for the root cause.") from None
@@ -320,7 +311,6 @@ async def build_async_engine_client_from_engine_args(
             # before prometheus_client is imported.
             # See https://prometheus.github.io/client_python/multiprocess/
             from prometheus_client import multiprocess
-
             multiprocess.mark_process_dead(engine_process.pid)
 
 
@@ -440,6 +430,7 @@ async def get_server_load_metrics(request: Request):
     # - /v1/chat/completions
     # - /v1/completions
     # - /v1/audio/transcriptions
+    # - /v1/audio/translations
     # - /v1/embeddings
     # - /pooling
     # - /classify
@@ -449,7 +440,7 @@ async def get_server_load_metrics(request: Request):
     # - /v1/rerank
     # - /v2/rerank
     return JSONResponse(
-        content={"server_load": request.app.state.server_load_metrics})
+        content={'server_load': request.app.state.server_load_metrics})
 
 
 @router.get("/ping", response_class=Response)
@@ -459,24 +450,22 @@ async def ping(raw_request: Request) -> Response:
     return await health(raw_request)
 
 
-@router.post(
-    "/tokenize",
-    dependencies=[Depends(validate_json_request)],
-    responses={
-        HTTPStatus.BAD_REQUEST.value: {
-            "model": ErrorResponse
-        },
-        HTTPStatus.NOT_FOUND.value: {
-            "model": ErrorResponse
-        },
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {
-            "model": ErrorResponse
-        },
-        HTTPStatus.NOT_IMPLEMENTED.value: {
-            "model": ErrorResponse
-        },
-    },
-)
+@router.post("/tokenize",
+             dependencies=[Depends(validate_json_request)],
+             responses={
+                 HTTPStatus.BAD_REQUEST.value: {
+                     "model": ErrorResponse
+                 },
+                 HTTPStatus.NOT_FOUND.value: {
+                     "model": ErrorResponse
+                 },
+                 HTTPStatus.INTERNAL_SERVER_ERROR.value: {
+                     "model": ErrorResponse
+                 },
+                 HTTPStatus.NOT_IMPLEMENTED.value: {
+                     "model": ErrorResponse
+                 },
+             })
 @with_cancellation
 async def tokenize(request: TokenizeRequest, raw_request: Request):
     handler = tokenization(raw_request)
@@ -499,21 +488,19 @@ async def tokenize(request: TokenizeRequest, raw_request: Request):
     assert_never(generator)
 
 
-@router.post(
-    "/detokenize",
-    dependencies=[Depends(validate_json_request)],
-    responses={
-        HTTPStatus.BAD_REQUEST.value: {
-            "model": ErrorResponse
-        },
-        HTTPStatus.NOT_FOUND.value: {
-            "model": ErrorResponse
-        },
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {
-            "model": ErrorResponse
-        },
-    },
-)
+@router.post("/detokenize",
+             dependencies=[Depends(validate_json_request)],
+             responses={
+                 HTTPStatus.BAD_REQUEST.value: {
+                     "model": ErrorResponse
+                 },
+                 HTTPStatus.NOT_FOUND.value: {
+                     "model": ErrorResponse
+                 },
+                 HTTPStatus.INTERNAL_SERVER_ERROR.value: {
+                     "model": ErrorResponse
+                 },
+             })
 @with_cancellation
 async def detokenize(request: DetokenizeRequest, raw_request: Request):
     handler = tokenization(raw_request)
@@ -549,26 +536,24 @@ async def show_version():
     return JSONResponse(content=ver)
 
 
-@router.post(
-    "/v1/responses",
-    dependencies=[Depends(validate_json_request)],
-    responses={
-        HTTPStatus.OK.value: {
-            "content": {
-                "text/event-stream": {}
-            }
-        },
-        HTTPStatus.BAD_REQUEST.value: {
-            "model": ErrorResponse
-        },
-        HTTPStatus.NOT_FOUND.value: {
-            "model": ErrorResponse
-        },
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {
-            "model": ErrorResponse
-        },
-    },
-)
+@router.post("/v1/responses",
+             dependencies=[Depends(validate_json_request)],
+             responses={
+                 HTTPStatus.OK.value: {
+                     "content": {
+                         "text/event-stream": {}
+                     }
+                 },
+                 HTTPStatus.BAD_REQUEST.value: {
+                     "model": ErrorResponse
+                 },
+                 HTTPStatus.NOT_FOUND.value: {
+                     "model": ErrorResponse
+                 },
+                 HTTPStatus.INTERNAL_SERVER_ERROR.value: {
+                     "model": ErrorResponse
+                 },
+             })
 @with_cancellation
 async def create_responses(request: ResponsesRequest, raw_request: Request):
     handler = responses(raw_request)
@@ -616,26 +601,24 @@ async def cancel_responses(response_id: str, raw_request: Request):
     return JSONResponse(content=response.model_dump())
 
 
-@router.post(
-    "/v1/chat/completions",
-    dependencies=[Depends(validate_json_request)],
-    responses={
-        HTTPStatus.OK.value: {
-            "content": {
-                "text/event-stream": {}
-            }
-        },
-        HTTPStatus.BAD_REQUEST.value: {
-            "model": ErrorResponse
-        },
-        HTTPStatus.NOT_FOUND.value: {
-            "model": ErrorResponse
-        },
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {
-            "model": ErrorResponse
-        },
-    },
-)
+@router.post("/v1/chat/completions",
+             dependencies=[Depends(validate_json_request)],
+             responses={
+                 HTTPStatus.OK.value: {
+                     "content": {
+                         "text/event-stream": {}
+                     }
+                 },
+                 HTTPStatus.BAD_REQUEST.value: {
+                     "model": ErrorResponse
+                 },
+                 HTTPStatus.NOT_FOUND.value: {
+                     "model": ErrorResponse
+                 },
+                 HTTPStatus.INTERNAL_SERVER_ERROR.value: {
+                     "model": ErrorResponse
+                 }
+             })
 @with_cancellation
 @load_aware_call
 async def create_chat_completion(request: ChatCompletionRequest,
@@ -657,26 +640,24 @@ async def create_chat_completion(request: ChatCompletionRequest,
     return StreamingResponse(content=generator, media_type="text/event-stream")
 
 
-@router.post(
-    "/v1/completions",
-    dependencies=[Depends(validate_json_request)],
-    responses={
-        HTTPStatus.OK.value: {
-            "content": {
-                "text/event-stream": {}
-            }
-        },
-        HTTPStatus.BAD_REQUEST.value: {
-            "model": ErrorResponse
-        },
-        HTTPStatus.NOT_FOUND.value: {
-            "model": ErrorResponse
-        },
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {
-            "model": ErrorResponse
-        },
-    },
-)
+@router.post("/v1/completions",
+             dependencies=[Depends(validate_json_request)],
+             responses={
+                 HTTPStatus.OK.value: {
+                     "content": {
+                         "text/event-stream": {}
+                     }
+                 },
+                 HTTPStatus.BAD_REQUEST.value: {
+                     "model": ErrorResponse
+                 },
+                 HTTPStatus.NOT_FOUND.value: {
+                     "model": ErrorResponse
+                 },
+                 HTTPStatus.INTERNAL_SERVER_ERROR.value: {
+                     "model": ErrorResponse
+                 },
+             })
 @with_cancellation
 @load_aware_call
 async def create_completion(request: CompletionRequest, raw_request: Request):
@@ -703,18 +684,16 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
     return StreamingResponse(content=generator, media_type="text/event-stream")
 
 
-@router.post(
-    "/v1/embeddings",
-    dependencies=[Depends(validate_json_request)],
-    responses={
-        HTTPStatus.BAD_REQUEST.value: {
-            "model": ErrorResponse
-        },
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {
-            "model": ErrorResponse
-        },
-    },
-)
+@router.post("/v1/embeddings",
+             dependencies=[Depends(validate_json_request)],
+             responses={
+                 HTTPStatus.BAD_REQUEST.value: {
+                     "model": ErrorResponse
+                 },
+                 HTTPStatus.INTERNAL_SERVER_ERROR.value: {
+                     "model": ErrorResponse
+                 },
+             })
 @with_cancellation
 @load_aware_call
 async def create_embedding(request: EmbeddingRequest, raw_request: Request):
@@ -734,18 +713,16 @@ async def create_embedding(request: EmbeddingRequest, raw_request: Request):
     assert_never(generator)
 
 
-@router.post(
-    "/pooling",
-    dependencies=[Depends(validate_json_request)],
-    responses={
-        HTTPStatus.BAD_REQUEST.value: {
-            "model": ErrorResponse
-        },
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {
-            "model": ErrorResponse
-        },
-    },
-)
+@router.post("/pooling",
+             dependencies=[Depends(validate_json_request)],
+             responses={
+                 HTTPStatus.BAD_REQUEST.value: {
+                     "model": ErrorResponse
+                 },
+                 HTTPStatus.INTERNAL_SERVER_ERROR.value: {
+                     "model": ErrorResponse
+                 },
+             })
 @with_cancellation
 @load_aware_call
 async def create_pooling(request: PoolingRequest, raw_request: Request):
@@ -785,18 +762,16 @@ async def create_classify(request: ClassificationRequest,
     assert_never(generator)
 
 
-@router.post(
-    "/score",
-    dependencies=[Depends(validate_json_request)],
-    responses={
-        HTTPStatus.BAD_REQUEST.value: {
-            "model": ErrorResponse
-        },
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {
-            "model": ErrorResponse
-        },
-    },
-)
+@router.post("/score",
+             dependencies=[Depends(validate_json_request)],
+             responses={
+                 HTTPStatus.BAD_REQUEST.value: {
+                     "model": ErrorResponse
+                 },
+                 HTTPStatus.INTERNAL_SERVER_ERROR.value: {
+                     "model": ErrorResponse
+                 },
+             })
 @with_cancellation
 @load_aware_call
 async def create_score(request: ScoreRequest, raw_request: Request):
@@ -815,18 +790,16 @@ async def create_score(request: ScoreRequest, raw_request: Request):
     assert_never(generator)
 
 
-@router.post(
-    "/v1/score",
-    dependencies=[Depends(validate_json_request)],
-    responses={
-        HTTPStatus.BAD_REQUEST.value: {
-            "model": ErrorResponse
-        },
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {
-            "model": ErrorResponse
-        },
-    },
-)
+@router.post("/v1/score",
+             dependencies=[Depends(validate_json_request)],
+             responses={
+                 HTTPStatus.BAD_REQUEST.value: {
+                     "model": ErrorResponse
+                 },
+                 HTTPStatus.INTERNAL_SERVER_ERROR.value: {
+                     "model": ErrorResponse
+                 },
+             })
 @with_cancellation
 @load_aware_call
 async def create_score_v1(request: ScoreRequest, raw_request: Request):
@@ -837,25 +810,23 @@ async def create_score_v1(request: ScoreRequest, raw_request: Request):
     return await create_score(request, raw_request)
 
 
-@router.post(
-    "/v1/audio/transcriptions",
-    responses={
-        HTTPStatus.OK.value: {
-            "content": {
-                "text/event-stream": {}
-            }
-        },
-        HTTPStatus.BAD_REQUEST.value: {
-            "model": ErrorResponse
-        },
-        HTTPStatus.UNPROCESSABLE_ENTITY.value: {
-            "model": ErrorResponse
-        },
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {
-            "model": ErrorResponse
-        },
-    },
-)
+@router.post("/v1/audio/transcriptions",
+             responses={
+                 HTTPStatus.OK.value: {
+                     "content": {
+                         "text/event-stream": {}
+                     }
+                 },
+                 HTTPStatus.BAD_REQUEST.value: {
+                     "model": ErrorResponse
+                 },
+                 HTTPStatus.UNPROCESSABLE_ENTITY.value: {
+                     "model": ErrorResponse
+                 },
+                 HTTPStatus.INTERNAL_SERVER_ERROR.value: {
+                     "model": ErrorResponse
+                 },
+             })
 @with_cancellation
 @load_aware_call
 async def create_transcriptions(raw_request: Request,
@@ -880,25 +851,23 @@ async def create_transcriptions(raw_request: Request,
     return StreamingResponse(content=generator, media_type="text/event-stream")
 
 
-@router.post(
-    "/v1/audio/translations",
-    responses={
-        HTTPStatus.OK.value: {
-            "content": {
-                "text/event-stream": {}
-            }
-        },
-        HTTPStatus.BAD_REQUEST.value: {
-            "model": ErrorResponse
-        },
-        HTTPStatus.UNPROCESSABLE_ENTITY.value: {
-            "model": ErrorResponse
-        },
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {
-            "model": ErrorResponse
-        },
-    },
-)
+@router.post("/v1/audio/translations",
+             responses={
+                 HTTPStatus.OK.value: {
+                     "content": {
+                         "text/event-stream": {}
+                     }
+                 },
+                 HTTPStatus.BAD_REQUEST.value: {
+                     "model": ErrorResponse
+                 },
+                 HTTPStatus.UNPROCESSABLE_ENTITY.value: {
+                     "model": ErrorResponse
+                 },
+                 HTTPStatus.INTERNAL_SERVER_ERROR.value: {
+                     "model": ErrorResponse
+                 },
+             })
 @with_cancellation
 @load_aware_call
 async def create_translations(request: Annotated[TranslationRequest,
@@ -923,18 +892,16 @@ async def create_translations(request: Annotated[TranslationRequest,
     return StreamingResponse(content=generator, media_type="text/event-stream")
 
 
-@router.post(
-    "/rerank",
-    dependencies=[Depends(validate_json_request)],
-    responses={
-        HTTPStatus.BAD_REQUEST.value: {
-            "model": ErrorResponse
-        },
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {
-            "model": ErrorResponse
-        },
-    },
-)
+@router.post("/rerank",
+             dependencies=[Depends(validate_json_request)],
+             responses={
+                 HTTPStatus.BAD_REQUEST.value: {
+                     "model": ErrorResponse
+                 },
+                 HTTPStatus.INTERNAL_SERVER_ERROR.value: {
+                     "model": ErrorResponse
+                 },
+             })
 @with_cancellation
 @load_aware_call
 async def do_rerank(request: RerankRequest, raw_request: Request):
@@ -952,18 +919,16 @@ async def do_rerank(request: RerankRequest, raw_request: Request):
     assert_never(generator)
 
 
-@router.post(
-    "/v1/rerank",
-    dependencies=[Depends(validate_json_request)],
-    responses={
-        HTTPStatus.BAD_REQUEST.value: {
-            "model": ErrorResponse
-        },
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {
-            "model": ErrorResponse
-        },
-    },
-)
+@router.post("/v1/rerank",
+             dependencies=[Depends(validate_json_request)],
+             responses={
+                 HTTPStatus.BAD_REQUEST.value: {
+                     "model": ErrorResponse
+                 },
+                 HTTPStatus.INTERNAL_SERVER_ERROR.value: {
+                     "model": ErrorResponse
+                 },
+             })
 @with_cancellation
 async def do_rerank_v1(request: RerankRequest, raw_request: Request):
     logger.warning_once(
@@ -974,47 +939,20 @@ async def do_rerank_v1(request: RerankRequest, raw_request: Request):
     return await do_rerank(request, raw_request)
 
 
-@router.post(
-    "/v2/rerank",
-    dependencies=[Depends(validate_json_request)],
-    responses={
-        HTTPStatus.BAD_REQUEST.value: {
-            "model": ErrorResponse
-        },
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {
-            "model": ErrorResponse
-        },
-    },
-)
+@router.post("/v2/rerank",
+             dependencies=[Depends(validate_json_request)],
+             responses={
+                 HTTPStatus.BAD_REQUEST.value: {
+                     "model": ErrorResponse
+                 },
+                 HTTPStatus.INTERNAL_SERVER_ERROR.value: {
+                     "model": ErrorResponse
+                 },
+             })
 @with_cancellation
 async def do_rerank_v2(request: RerankRequest, raw_request: Request):
     return await do_rerank(request, raw_request)
 
-
-TASK_HANDLERS: dict[str, dict[str, tuple]] = {
-    "generate": {
-        "messages": (ChatCompletionRequest, create_chat_completion),
-        "default": (CompletionRequest, create_completion),
-    },
-    "embed": {
-        "messages": (EmbeddingChatRequest, create_embedding),
-        "default": (EmbeddingCompletionRequest, create_embedding),
-    },
-    "score": {
-        "default": (RerankRequest, do_rerank)
-    },
-    "rerank": {
-        "default": (RerankRequest, do_rerank)
-    },
-    "reward": {
-        "messages": (PoolingChatRequest, create_pooling),
-        "default": (PoolingCompletionRequest, create_pooling),
-    },
-    "classify": {
-        "messages": (PoolingChatRequest, create_pooling),
-        "default": (PoolingCompletionRequest, create_pooling),
-    },
-}
 
 if envs.VLLM_SERVER_DEV_MODE:
     logger.warning("SECURITY WARNING: Development endpoints are enabled! "
@@ -1067,51 +1005,72 @@ if envs.VLLM_SERVER_DEV_MODE:
         return JSONResponse(content={"is_sleeping": is_sleeping})
 
 
-@router.post(
-    "/invocations",
-    dependencies=[Depends(validate_json_request)],
-    responses={
-        HTTPStatus.BAD_REQUEST.value: {
-            "model": ErrorResponse
-        },
-        HTTPStatus.UNSUPPORTED_MEDIA_TYPE.value: {
-            "model": ErrorResponse
-        },
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {
-            "model": ErrorResponse
-        },
-    },
-)
+# TODO: RequestType = TypeForm[BaseModel] when recognized by type checkers
+# (requires typing_extensions >= 4.13)
+RequestType = Any
+GetHandlerFn = Callable[[Request], Optional[OpenAIServing]]
+EndpointFn = Callable[[RequestType, Request], Awaitable[Any]]
+
+# NOTE: Items defined earlier take higher priority
+INVOCATION_TYPES: list[tuple[RequestType, tuple[GetHandlerFn, EndpointFn]]] = [
+    (ChatCompletionRequest, (chat, create_chat_completion)),
+    (CompletionRequest, (completion, create_completion)),
+    (EmbeddingRequest, (embedding, create_embedding)),
+    (ClassificationRequest, (classify, create_classify)),
+    (ScoreRequest, (score, create_score)),
+    (RerankRequest, (rerank, do_rerank)),
+    (PoolingRequest, (pooling, create_pooling)),
+]
+
+# NOTE: Construct the TypeAdapters only once
+INVOCATION_VALIDATORS = [
+    (pydantic.TypeAdapter(request_type), (get_handler, endpoint))
+    for request_type, (get_handler, endpoint) in INVOCATION_TYPES
+]
+
+
+@router.post("/invocations",
+             dependencies=[Depends(validate_json_request)],
+             responses={
+                 HTTPStatus.BAD_REQUEST.value: {
+                     "model": ErrorResponse
+                 },
+                 HTTPStatus.UNSUPPORTED_MEDIA_TYPE.value: {
+                     "model": ErrorResponse
+                 },
+                 HTTPStatus.INTERNAL_SERVER_ERROR.value: {
+                     "model": ErrorResponse
+                 },
+             })
 async def invocations(raw_request: Request):
-    """
-    For SageMaker, routes requests to other handlers based on model `task`.
-    """
+    """For SageMaker, routes requests based on the request type."""
     try:
         body = await raw_request.json()
     except json.JSONDecodeError as e:
-        raise HTTPException(
-            status_code=HTTPStatus.BAD_REQUEST.value,
-            detail=f"JSON decode error: {e}",
-        ) from e
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST.value,
+                            detail=f"JSON decode error: {e}") from e
 
-    task = raw_request.app.state.task
+    valid_endpoints = [(validator, endpoint)
+                       for validator, (get_handler,
+                                       endpoint) in INVOCATION_VALIDATORS
+                       if get_handler(raw_request) is not None]
 
-    if task not in TASK_HANDLERS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unsupported task: '{task}' for '/invocations'. "
-            f"Expected one of {set(TASK_HANDLERS.keys())}",
-        )
+    for request_validator, endpoint in valid_endpoints:
+        try:
+            request = request_validator.validate_python(body)
+        except pydantic.ValidationError:
+            continue
 
-    handler_config = TASK_HANDLERS[task]
-    if "messages" in body:
-        request_model, handler = handler_config["messages"]
-    else:
-        request_model, handler = handler_config["default"]
+        return await endpoint(request, raw_request)
 
-    # this is required since we lose the FastAPI automatic casting
-    request = request_model.model_validate(body)
-    return await handler(request, raw_request)
+    type_names = [
+        t.__name__ if isinstance(t := validator._type, type) else str(t)
+        for validator, _ in valid_endpoints
+    ]
+    msg = ("Cannot find suitable handler for request. "
+           f"Expected one of: {type_names}")
+    res = base(raw_request).create_error_response(message=msg)
+    return JSONResponse(content=res.model_dump(), status_code=res.code)
 
 
 if envs.VLLM_TORCH_PROFILER_DIR:
@@ -1171,11 +1130,8 @@ def load_log_config(log_config_file: Optional[str]) -> Optional[dict]:
         with open(log_config_file) as f:
             return json.load(f)
     except Exception as e:
-        logger.warning(
-            "Failed to load log config from file %s: error %s",
-            log_config_file,
-            e,
-        )
+        logger.warning("Failed to load log config from file %s: error %s",
+                       log_config_file, e)
         return None
 
 
@@ -1197,8 +1153,8 @@ class AuthenticationMiddleware:
 
     def __call__(self, scope: Scope, receive: Receive,
                  send: Send) -> Awaitable[None]:
-        if (scope["type"] not in ("http", "websocket")
-                or scope["method"] == "OPTIONS"):
+        if scope["type"] not in ("http",
+                                 "websocket") or scope["method"] == "OPTIONS":
             # scope["type"] can be "lifespan" or "startup" for example,
             # in which case we don't need to do anything
             return self.app(scope, receive, send)
@@ -1206,8 +1162,8 @@ class AuthenticationMiddleware:
         url_path = URL(scope=scope).path.removeprefix(root_path)
         headers = Headers(scope=scope)
         # Type narrow to satisfy mypy.
-        if (url_path.startswith("/v1") and headers.get("Authorization")
-                != f"Bearer {self.api_token}"):
+        if url_path.startswith("/v1") and headers.get(
+                "Authorization") != f"Bearer {self.api_token}":
             response = JSONResponse(content={"error": "Unauthorized"},
                                     status_code=401)
             return response(scope, receive, send)
@@ -1254,25 +1210,25 @@ def _extract_content_from_chunk(chunk_data: dict) -> str:
             ChatCompletionStreamResponse, CompletionStreamResponse)
 
         # Try using Completion types for type-safe parsing
-        if chunk_data.get("object") == "chat.completion.chunk":
+        if chunk_data.get('object') == 'chat.completion.chunk':
             chat_response = ChatCompletionStreamResponse.model_validate(
                 chunk_data)
             if chat_response.choices and chat_response.choices[0].delta.content:
                 return chat_response.choices[0].delta.content
-        elif chunk_data.get("object") == "text_completion":
+        elif chunk_data.get('object') == 'text_completion':
             completion_response = CompletionStreamResponse.model_validate(
                 chunk_data)
-            if (completion_response.choices
-                    and completion_response.choices[0].text):
+            if completion_response.choices and completion_response.choices[
+                    0].text:
                 return completion_response.choices[0].text
     except pydantic.ValidationError:
         # Fallback to manual parsing
-        if "choices" in chunk_data and chunk_data["choices"]:
-            choice = chunk_data["choices"][0]
-            if "delta" in choice and choice["delta"].get("content"):
-                return choice["delta"]["content"]
-            elif choice.get("text"):
-                return choice["text"]
+        if 'choices' in chunk_data and chunk_data['choices']:
+            choice = chunk_data['choices'][0]
+            if 'delta' in choice and choice['delta'].get('content'):
+                return choice['delta']['content']
+            elif choice.get('text'):
+                return choice['text']
     return ""
 
 
@@ -1288,7 +1244,7 @@ class SSEDecoder:
         import json
 
         try:
-            chunk_str = chunk.decode("utf-8")
+            chunk_str = chunk.decode('utf-8')
         except UnicodeDecodeError:
             # Skip malformed chunks
             return []
@@ -1297,18 +1253,18 @@ class SSEDecoder:
         events = []
 
         # Process complete lines
-        while "\n" in self.buffer:
-            line, self.buffer = self.buffer.split("\n", 1)
-            line = line.rstrip("\r")  # Handle CRLF
+        while '\n' in self.buffer:
+            line, self.buffer = self.buffer.split('\n', 1)
+            line = line.rstrip('\r')  # Handle CRLF
 
-            if line.startswith("data: "):
+            if line.startswith('data: '):
                 data_str = line[6:].strip()
-                if data_str == "[DONE]":
-                    events.append({"type": "done"})
+                if data_str == '[DONE]':
+                    events.append({'type': 'done'})
                 elif data_str:
                     try:
                         event_data = json.loads(data_str)
-                        events.append({"type": "data", "data": event_data})
+                        events.append({'type': 'data', 'data': event_data})
                     except json.JSONDecodeError:
                         # Skip malformed JSON
                         continue
@@ -1326,7 +1282,7 @@ class SSEDecoder:
 
     def get_complete_content(self) -> str:
         """Get the complete buffered content."""
-        return "".join(self.content_buffer)
+        return ''.join(self.content_buffer)
 
 
 def _log_streaming_response(response, response_body: list) -> None:
@@ -1347,10 +1303,10 @@ def _log_streaming_response(response, response_body: list) -> None:
             events = sse_decoder.decode_chunk(chunk)
 
             for event in events:
-                if event["type"] == "data":
-                    content = sse_decoder.extract_content(event["data"])
+                if event['type'] == 'data':
+                    content = sse_decoder.extract_content(event['data'])
                     sse_decoder.add_content(content)
-                elif event["type"] == "done":
+                elif event['type'] == 'done':
                     # Log complete content when done
                     full_content = sse_decoder.get_complete_content()
                     if full_content:
@@ -1359,17 +1315,14 @@ def _log_streaming_response(response, response_body: list) -> None:
                             full_content = full_content[:2048] + ""
                             "...[truncated]"
                         logger.info(
-                            "response_body={streaming_complete: "
+                            "response_body={streaming_complete: " \
                             "content='%s', chunks=%d}",
-                            full_content,
-                            chunk_count,
-                        )
+                            full_content, chunk_count)
                     else:
                         logger.info(
-                            "response_body={streaming_complete: "
+                            "response_body={streaming_complete: " \
                             "no_content, chunks=%d}",
-                            chunk_count,
-                        )
+                            chunk_count)
                     return
 
     response.body_iterator = iterate_in_threadpool(buffered_iterator())
@@ -1409,11 +1362,9 @@ def build_app(args: Namespace) -> FastAPI:
 
     @app.exception_handler(HTTPException)
     async def http_exception_handler(_: Request, exc: HTTPException):
-        err = ErrorResponse(
-            message=exc.detail,
-            type=HTTPStatus(exc.status_code).phrase,
-            code=exc.status_code,
-        )
+        err = ErrorResponse(message=exc.detail,
+                            type=HTTPStatus(exc.status_code).phrase,
+                            code=exc.status_code)
         return JSONResponse(err.model_dump(), status_code=exc.status_code)
 
     @app.exception_handler(RequestValidationError)
@@ -1427,11 +1378,9 @@ def build_app(args: Namespace) -> FastAPI:
         else:
             message = exc_str
 
-        err = ErrorResponse(
-            message=message,
-            type=HTTPStatus.BAD_REQUEST.phrase,
-            code=HTTPStatus.BAD_REQUEST,
-        )
+        err = ErrorResponse(message=message,
+                            type=HTTPStatus.BAD_REQUEST.phrase,
+                            code=HTTPStatus.BAD_REQUEST)
         return JSONResponse(err.model_dump(),
                             status_code=HTTPStatus.BAD_REQUEST)
 
@@ -1529,19 +1478,34 @@ async def init_app_state(
                     "Using supplied chat template: %s\n"
                     "It is different from official chat template '%s'. "
                     "This discrepancy may lead to performance degradation.",
-                    resolved_chat_template,
-                    args.model,
-                )
+                    resolved_chat_template, args.model)
+
+    # Merge default_mm_loras into the static lora_modules
+    default_mm_loras = (vllm_config.lora_config.default_mm_loras
+                        if vllm_config.lora_config is not None else {})
+
+    lora_modules = args.lora_modules
+    if default_mm_loras:
+        default_mm_lora_paths = [
+            LoRAModulePath(
+                name=modality,
+                path=lora_path,
+            ) for modality, lora_path in default_mm_loras.items()
+        ]
+        if args.lora_modules is None:
+            lora_modules = default_mm_lora_paths
+        else:
+            lora_modules += default_mm_lora_paths
 
     state.openai_serving_models = OpenAIServingModels(
         engine_client=engine_client,
         model_config=model_config,
         base_model_paths=base_model_paths,
-        lora_modules=args.lora_modules,
+        lora_modules=lora_modules,
         prompt_adapters=args.prompt_adapters,
     )
     await state.openai_serving_models.init_static_loras()
-    state.openai_serving_responses = (OpenAIServingResponses(
+    state.openai_serving_responses = OpenAIServingResponses(
         engine_client,
         model_config,
         state.openai_serving_models,
@@ -1556,9 +1520,8 @@ async def init_app_state(
         reasoning_parser=args.reasoning_parser,
         enable_prompt_tokens_details=args.enable_prompt_tokens_details,
         enable_force_include_usage=args.enable_force_include_usage,
-        enable_log_outputs=args.enable_log_outputs,
-    ) if model_config.runner_type == "generate" else None)
-    state.openai_serving_chat = (OpenAIServingChat(
+    ) if model_config.runner_type == "generate" else None
+    state.openai_serving_chat = OpenAIServingChat(
         engine_client,
         model_config,
         state.openai_serving_models,
@@ -1574,47 +1537,46 @@ async def init_app_state(
         reasoning_parser=args.reasoning_parser,
         enable_prompt_tokens_details=args.enable_prompt_tokens_details,
         enable_force_include_usage=args.enable_force_include_usage,
-        enable_log_outputs=args.enable_log_outputs,
-    ) if model_config.runner_type == "generate" else None)
-    state.openai_serving_completion = (OpenAIServingCompletion(
+    ) if model_config.runner_type == "generate" else None
+    state.openai_serving_completion = OpenAIServingCompletion(
         engine_client,
         model_config,
         state.openai_serving_models,
         request_logger=request_logger,
         return_tokens_as_token_ids=args.return_tokens_as_token_ids,
         enable_force_include_usage=args.enable_force_include_usage,
-    ) if model_config.runner_type == "generate" else None)
-    state.openai_serving_pooling = (OpenAIServingPooling(
+    ) if model_config.runner_type == "generate" else None
+    state.openai_serving_pooling = OpenAIServingPooling(
         engine_client,
         model_config,
         state.openai_serving_models,
         request_logger=request_logger,
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
-    ) if model_config.runner_type == "pooling" else None)
-    state.openai_serving_embedding = (OpenAIServingEmbedding(
+    ) if model_config.runner_type == "pooling" else None
+    state.openai_serving_embedding = OpenAIServingEmbedding(
         engine_client,
         model_config,
         state.openai_serving_models,
         request_logger=request_logger,
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
-    ) if model_config.task == "embed" else None)
-    state.openai_serving_classification = (ServingClassification(
+    ) if model_config.task == "embed" else None
+    state.openai_serving_classification = ServingClassification(
         engine_client,
         model_config,
         state.openai_serving_models,
         request_logger=request_logger,
-    ) if model_config.task == "classify" else None)
+    ) if model_config.task == "classify" else None
 
     enable_serving_reranking = (model_config.task == "classify" and getattr(
         model_config.hf_config, "num_labels", 0) == 1)
-    state.openai_serving_scores = (ServingScores(
+    state.openai_serving_scores = ServingScores(
         engine_client,
         model_config,
         state.openai_serving_models,
-        request_logger=request_logger,
-    ) if (model_config.task == "embed" or enable_serving_reranking) else None)
+        request_logger=request_logger) if (
+            model_config.task == "embed" or enable_serving_reranking) else None
 
     state.openai_serving_tokenization = OpenAIServingTokenization(
         engine_client,
@@ -1624,18 +1586,18 @@ async def init_app_state(
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
     )
-    state.openai_serving_transcription = (OpenAIServingTranscription(
+    state.openai_serving_transcription = OpenAIServingTranscription(
         engine_client,
         model_config,
         state.openai_serving_models,
         request_logger=request_logger,
-    ) if model_config.runner_type == "transcription" else None)
-    state.openai_serving_translation = (OpenAIServingTranslation(
+    ) if model_config.runner_type == "transcription" else None
+    state.openai_serving_translation = OpenAIServingTranslation(
         engine_client,
         model_config,
         state.openai_serving_models,
         request_logger=request_logger,
-    ) if model_config.runner_type == "transcription" else None)
+    ) if model_config.runner_type == "transcription" else None
     state.task = model_config.task
 
     state.enable_server_load_tracking = args.enable_server_load_tracking
@@ -1657,14 +1619,14 @@ def create_server_socket(addr: tuple[str, int]) -> socket.socket:
 
 def validate_api_server_args(args):
     valid_tool_parses = ToolParserManager.tool_parsers.keys()
-    if (args.enable_auto_tool_choice
-            and args.tool_call_parser not in valid_tool_parses):
+    if args.enable_auto_tool_choice \
+            and args.tool_call_parser not in valid_tool_parses:
         raise KeyError(f"invalid tool call parser: {args.tool_call_parser} "
                        f"(chose from {{ {','.join(valid_tool_parses)} }})")
 
     valid_reasoning_parses = ReasoningParserManager.reasoning_parsers.keys()
-    if (args.reasoning_parser
-            and args.reasoning_parser not in valid_reasoning_parses):
+    if args.reasoning_parser \
+        and args.reasoning_parser not in valid_reasoning_parses:
         raise KeyError(
             f"invalid reasoning parser: {args.reasoning_parser} "
             f"(chose from {{ {','.join(valid_reasoning_parses)} }})")
@@ -1700,8 +1662,8 @@ def setup_server(args):
 
     addr, port = sock_addr
     is_ssl = args.ssl_keyfile and args.ssl_certfile
-    host_part = (f"[{addr}]"
-                 if is_valid_ipv6_address(addr) else addr or "0.0.0.0")
+    host_part = f"[{addr}]" if is_valid_ipv6_address(
+        addr) else addr or "0.0.0.0"
     listen_address = f"http{'s' if is_ssl else ''}://{host_part}:{port}"
 
     return listen_address, sock
@@ -1728,7 +1690,7 @@ async def run_server_worker(listen_address,
     # Load logging config for uvicorn if specified
     log_config = load_log_config(args.log_config_file)
     if log_config is not None:
-        uvicorn_kwargs["log_config"] = log_config
+        uvicorn_kwargs['log_config'] = log_config
 
     async with build_async_engine_client(args, client_config) as engine_client:
         app = build_app(args)

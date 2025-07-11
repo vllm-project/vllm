@@ -117,6 +117,7 @@ if TYPE_CHECKING:
     VLLM_RANDOMIZE_DP_DUMMY_INPUTS: bool = False
     VLLM_MARLIN_USE_ATOMIC_ADD: bool = False
     VLLM_V0_USE_OUTLINES_CACHE: bool = False
+    VLLM_V1_USE_OUTLINES_CACHE: bool = False
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
     VLLM_TPU_MOST_MODEL_LEN: Optional[int] = None
     VLLM_USE_DEEP_GEMM: bool = False
@@ -847,6 +848,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_V0_USE_OUTLINES_CACHE":
     lambda: os.environ.get("VLLM_V0_USE_OUTLINES_CACHE", "0") == "1",
 
+    # Whether to turn on the outlines cache for V1
+    # This cache is unbounded and on disk, so it's not safe to use in
+    # an environment with potentially malicious users.
+    "VLLM_V1_USE_OUTLINES_CACHE":
+    lambda: os.environ.get("VLLM_V1_USE_OUTLINES_CACHE", "0") == "1",
+
     # Gap between padding buckets for the forward pass. So we have
     # 8, we will run forward pass with [16, 24, 32, ...].
     "VLLM_TPU_BUCKET_PADDING_GAP":
@@ -952,7 +959,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # consumer. This is only applicable when using NixlConnector in a
     # disaggregated decode-prefill setup.
     "VLLM_NIXL_ABORT_REQUEST_TIMEOUT":
-    lambda: int(os.getenv("VLLM_NIXL_ABORT_REQUEST_TIMEOUT", "120"))
+    lambda: int(os.getenv("VLLM_NIXL_ABORT_REQUEST_TIMEOUT", "120")),
+
+    # If set to 1, use the TRTLLM Decode Attention backend in flashinfer.
+    "VLLM_USE_TRTLLM_DECODE_ATTENTION":
+    lambda: os.getenv("VLLM_USE_TRTLLM_DECODE_ATTENTION", None),
 }
 
 # --8<-- [end:env-vars-definition]
