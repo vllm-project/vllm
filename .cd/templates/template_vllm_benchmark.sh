@@ -3,18 +3,19 @@
 #@VARS
 
 # Wait for vLLM server to be ready
-until curl -s http://localhost:8000/v1/completions > /dev/null; do
+until curl -s http://localhost:8000${ENDPOINT} > /dev/null; do
     echo "Waiting for vLLM server to be ready..."
     sleep 15
 done
 echo "vLLM server is ready. Starting benchmark..."
 
-# Prepare dataset specific arguments
+
 SONNET_ARGS=""
-HF_ARGS=""
 if [[ "$DATASET_NAME" == "sonnet" ]]; then
     SONNET_ARGS="--sonnet-prefix-len $PREFIX_LEN --sonnet-input-len $INPUT_TOK --sonnet-output-len $OUTPUT_TOK"
 fi
+
+HF_ARGS=""
 if [[ "$DATASET_NAME" == "hf" ]]; then
     HF_ARGS="--hf-split train"
 fi
@@ -23,6 +24,7 @@ fi
 python3 /workspace/vllm/benchmarks/benchmark_serving.py \
                 --model $MODEL \
                 --base-url http://localhost:8000 \
+                --endpoint $ENDPOINT \
                 --backend $BACKEND \
                 --dataset-name $DATASET_NAME \
                 --dataset-path $DATASET\
