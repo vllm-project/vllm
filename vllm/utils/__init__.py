@@ -2085,10 +2085,10 @@ def supports_dynamo() -> bool:
     return base_torch_version >= Version("2.4.0")
 
 
-# Supports xccl with PyTorch versions >= 2.8.0 for XPU platform
+# Supports xccl with PyTorch versions >= 2.8.0.dev for XPU platform
 def supports_xccl() -> bool:
     return is_torch_equal_or_newer(
-        "2.8.0") and torch.distributed.is_xccl_available()
+        "2.8.0.dev") and torch.distributed.is_xccl_available()
 
 
 # Some backends use pytorch version < 2.4.0 which doesn't
