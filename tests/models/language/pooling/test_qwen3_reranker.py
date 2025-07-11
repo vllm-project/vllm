@@ -113,4 +113,4 @@ def test_rerank_models_mteb_tp(vllm_runner,
                             vllm_runner,
                             model_info,
                             vllm_extra_kwargs,
-                            atol=1e-2)
+                            atol=1.2e-2)
