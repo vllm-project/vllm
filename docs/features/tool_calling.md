@@ -288,6 +288,16 @@ Supported models:
 
 Flags: `--tool-call-parser kimi_k2`
 
+### Hunyuan Models (`hunyuan_a13b`)
+
+Supported models:
+
+* `tencent/Hunyuan-A13B-Instruct` (chat template already included huggingface model file.)
+
+Flags:
+* For non-reasoning: `--tool-call-parser hunyuan_a13b`
+* For reasoning: `--tool-call-parser hunyuan_a13b --reasoning-parser hunyuan_a13b --enable_reasoning`
+
 ### Models with Pythonic Tool Calls (`pythonic`)
 
 A growing number of models output a python list to represent tool calls instead of using JSON. This has the advantage of inherently supporting parallel tool calls and removing ambiguity around the JSON schema required for tool calls. The `pythonic` tool parser can support such models.
