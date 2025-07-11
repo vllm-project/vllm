@@ -109,6 +109,15 @@ class JinaVLForEmbedding(Qwen2VLForConditionalGeneration,
         self.hidden_size = vllm_config.model_config.hf_config.hidden_size
         pooler_config = vllm_config.model_config.pooler_config
         self.observability_config = vllm_config.observability_config
+
+        # Configuration for vision pooling backend
+        self.pooling_backend = getattr(vllm_config.model_config,
+                                       "jina_pooling_backend", "triton")
+        if self.pooling_backend not in ("triton", "pytorch"):
+            logger.warning(
+                f"Invalid jina_pooling_backend '{self.pooling_backend}'. "
+                f"Must be 'triton' or 'pytorch'. Defaulting to 'triton'.")
+            self.pooling_backend = "triton"
         
         # Initialize base pooler for fallback
         self._base_pooler = Pooler.from_config_with_defaults(
@@ -320,20 +329,15 @@ class JinaVLForEmbedding(Qwen2VLForConditionalGeneration,
             logger.error(f"Mismatch: {len(token_ids_list)} sequences vs {len(prompt_lens)} lengths")
             return self._base_pooler(hidden_states, pooling_metadata)
         
-        # Apply optimized pooling
-        try:
+        # Apply pooling based on configured backend
+        if self.pooling_backend == "triton":
             pooled_data = self._apply_vision_pooling_optimized(
                 hidden_states, token_ids_list, prompt_lens
             )
-        except RuntimeError as e:
-            if "out of memory" in str(e).lower():
-                logger.warning("OOM during optimized pooling, falling back to batched PyTorch")
-                # Fallback to a more memory-efficient PyTorch implementation
-                pooled_data = self._apply_vision_pooling_pytorch(
-                    hidden_states, token_ids_list, prompt_lens
-                )
-            else:
-                raise
+        else: # self.pooling_backend == "pytorch"
+            pooled_data = self._apply_vision_pooling_pytorch(
+                hidden_states, token_ids_list, prompt_lens
+            )
         
         # Build output
         pooled_outputs = [
