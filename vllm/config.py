@@ -33,6 +33,7 @@ import vllm.envs as envs
 from vllm import version
 from vllm.compilation.inductor_pass import CallableInductorPass, InductorPass
 from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.platforms import current_platform
 from vllm.transformers_utils.config import (
     ConfigFormat, get_config, get_hf_image_processor_config,
@@ -1142,7 +1143,7 @@ class ModelConfig:
         if not hasattr(self.hf_text_config, "model_type"):
             return False
         elif self.hf_text_config.model_type in \
-            ('deepseek_v2', 'deepseek_v3', 'deepseek_mtp'):
+            ('deepseek_v2', 'deepseek_v3', 'deepseek_mtp', 'kimi_k2'):
             return self.hf_text_config.kv_lora_rank is not None
         elif self.hf_text_config.model_type == 'eagle':
             # if the model is an EAGLE module, check for the
@@ -2989,6 +2990,16 @@ class LoRAConfig:
     trained with those scaling factors to be used at the same time. If not
     specified, only adapters trained with the base model scaling factor are
     allowed."""
+    default_mm_loras: Optional[dict[str, str]] = None
+    """Dictionary mapping specific modalities to LoRA model paths; this field
+    is only applicable to multimodal models and should be leveraged when a
+    model always expects a LoRA to be active when a given modality is present.
+    Note that currently, if a request provides multiple additional
+    modalities, each of which have their own LoRA, we do NOT apply
+    default_mm_loras because we currently only support one lora adapter
+    per prompt. When run in offline mode, the lora IDs for n modalities
+    will be automatically assigned to 1-n with the names of the modalities
+    in alphabetic order."""
     bias_enabled: bool = False
     """Enable bias for LoRA adapters."""
 
@@ -3580,7 +3591,8 @@ def get_served_model_name(model: str,
 
 GuidedDecodingBackendV0 = Literal["auto", "outlines", "lm-format-enforcer",
                                   "xgrammar", "guidance"]
-GuidedDecodingBackendV1 = Literal["auto", "xgrammar", "guidance"]
+
+GuidedDecodingBackendV1 = Literal["auto", "xgrammar", "guidance", "outlines"]
 GuidedDecodingBackend = Literal[GuidedDecodingBackendV0,
                                 GuidedDecodingBackendV1]
 
@@ -4722,7 +4734,6 @@ class VllmConfig:
         # calculate the default `batch_size_capture_list`
         if not envs.VLLM_USE_V1:
             batch_size_capture_list = []
-            max_batchsize_to_capture = 0
             if self.scheduler_config is not None and \
                 self.model_config is not None and \
                     not self.model_config.enforce_eager:

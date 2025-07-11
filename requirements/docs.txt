@@ -7,3 +7,18 @@ mkdocs-awesome-nav
 python-markdown-math
 regex
 ruff
+
+# Required for argparse hook only
+-f https://download.pytorch.org/whl/cpu
+cachetools
+cloudpickle
+fastapi
+msgspec
+openai
+pillow
+psutil
+pybase64
+pydantic
+torch
+transformers
+zmq

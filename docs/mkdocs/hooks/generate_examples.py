@@ -161,8 +161,8 @@ def on_startup(command: Literal["build", "gh-deploy", "serve"], dirty: bool):
     for example in sorted(examples, key=lambda e: e.path.stem):
         example_name = f"{example.path.stem}.md"
         doc_path = EXAMPLE_DOC_DIR / example.category / example_name
-        logger.debug("Example generated: %s", doc_path.relative_to(ROOT_DIR))
         if not doc_path.parent.exists():
             doc_path.parent.mkdir(parents=True)
         with open(doc_path, "w+") as f:
             f.write(example.generate())
+        logger.debug("Example generated: %s", doc_path.relative_to(ROOT_DIR))
