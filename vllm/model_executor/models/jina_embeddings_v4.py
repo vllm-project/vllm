@@ -340,11 +340,6 @@ class JinaVLForEmbedding(Qwen2VLForConditionalGeneration,
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         """Load weights with validation and error handling."""
-        try:
-            loader = AutoWeightsLoader(self)
-            loaded_weights = loader.load_weights(weights, mapper=self.weight_mapper)
-            logger.info(f"Successfully loaded {len(loaded_weights)} weight tensors")
-            return loaded_weights
-        except Exception as e:
-            logger.error(f"Error loading weights: {e}")
-            raise
+        loader = AutoWeightsLoader(self)
+        loaded_weights = loader.load_weights(weights, mapper=self.weight_mapper)
+        return loaded_weights
