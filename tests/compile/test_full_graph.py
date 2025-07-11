@@ -114,9 +114,9 @@ def test_full_graph(
         for model in models_list(keywords=["FP8-dynamic", "quantized.w8a8"])
     ] + [
         # Test depyf integration works
-        (CompilationConfig(
-            level=CompilationLevel.PIECEWISE,
-            debug_dump_path=tempfile.gettempdir()), "facebook/opt-125m"),
+        (CompilationConfig(level=CompilationLevel.PIECEWISE,
+                           debug_dump_path=tempfile.gettempdir()),
+         ("facebook/opt-125m", {})),
     ])
 # only test some of the models
 @create_new_process_for_each_test()
