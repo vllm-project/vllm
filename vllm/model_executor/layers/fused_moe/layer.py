@@ -81,12 +81,11 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                        params_dtype: torch.dtype, **extra_weight_attrs):
         raise NotImplementedError
 
-    def init_prepare_finalize(self, moe: FusedMoEConfig,
-                              quant_config: Optional[QuantizationConfig]):
+    @staticmethod
+    def maybe_make_prepare_finalize(
+            moe: FusedMoEConfig) -> Optional[FusedMoEPrepareAndFinalize]:
         all2all_manager = get_ep_group().device_communicator.all2all_manager
         assert all2all_manager is not None
-
-        self.moe = moe
 
         prepare_finalize: Optional[FusedMoEPrepareAndFinalize] = None
 
@@ -160,8 +159,6 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                                 and moe.quant_config.block_shape
                                 == DEEPEP_QUANT_BLOCK_SHAPE)
 
-            # Note (varun): Whether to use FP8 dispatch or not needs some
-            # profiling. Turning it off for now.
             prepare_finalize = DeepEPLLPrepareAndFinalize(
                 handle,
                 max_tokens_per_rank=moe.max_num_tokens,
@@ -169,11 +166,18 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                 use_fp8_dispatch=use_fp8_dispatch,
             )
 
+        return prepare_finalize
+
+    def init_prepare_finalize(self, moe: FusedMoEConfig):
+        self.moe = moe
+        prepare_finalize = FusedMoEMethodBase.maybe_make_prepare_finalize(
+            self.moe)
+
         self.topk_indices_dtype = None
         if prepare_finalize is not None:
             logger.debug("%s", prepare_finalize.__class__.__name__)
             self.topk_indices_dtype = prepare_finalize.topk_indices_dtype()
-            experts = self.select_gemm_impl(prepare_finalize, moe)
+            experts = self.select_gemm_impl(prepare_finalize, self.moe)
             self.fused_experts = FusedMoEModularKernel(
                 prepare_finalize,
                 experts,
