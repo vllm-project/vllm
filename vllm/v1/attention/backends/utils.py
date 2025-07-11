@@ -77,6 +77,18 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
         return self.build(common_prefix_len=0,
                           common_attn_metadata=common_attn_metadata)
 
+    def build_for_drafting(
+        self,
+        common_attn_metadata: CommonAttentionMetadata,
+        current_step: int,
+        total_tokens_generated: int,
+    ) -> M:
+        """
+        Build attention metadata for draft model. Uses build by default.
+        """
+        return self.build(common_prefix_len=0,
+                          common_attn_metadata=common_attn_metadata)
+
     def use_cascade_attention(
         self,
         common_prefix_len: int,

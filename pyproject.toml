@@ -61,7 +61,7 @@ ignore_patterns = [
 
 [tool.ruff]
 # Allow lines to be as long as 80.
-line-length = 80
+line-length = 90
 
 [tool.ruff.lint.per-file-ignores]
 "vllm/third_party/**" = ["ALL"]

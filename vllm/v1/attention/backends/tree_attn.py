@@ -9,7 +9,9 @@ import torch
 from xformers.ops.fmha import triton_splitk
 from xformers.ops.fmha.attn_bias import (AttentionBias,
                                          PagedBlockDiagonalPaddedKeysMask)
-from xformers.ops.tree_attention import tree_attention
+from xformers.ops.tree_attention import (_get_depth_counts,
+                                         _prepare_tree_attn_bias,
+                                         tree_attention)
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
@@ -97,10 +99,18 @@ class TreeAttentionMetadataBuilder(
 
         spec_config = runner.vllm_config.speculative_config
         spec_token_tree = spec_config.speculative_token_tree
-        self.tree_choices: list[tuple[int, ...]] = (
-            ast.literal_eval(spec_token_tree)
-            if spec_token_tree is not None else [])
-        self.tree_size = len(self.tree_choices) + 1
+        tree_choices: list[tuple[int,
+                                 ...]] = (ast.literal_eval(spec_token_tree) if
+                                          spec_token_tree is not None else [])
+        # Construct the tree attention bias.
+        depth_counts = _get_depth_counts(tree_choices)
+        self.tree_attn_bias = _prepare_tree_attn_bias(
+            tree_choices,
+            depth_counts,
+            dtype=self.kv_cache_spec.dtype,
+            device=block_table.device,
+        ).T
+        self.suffix_attn_bias = self.tree_attn_bias
 
         self.prefill_attn_metadata_builder: FlashAttentionMetadataBuilder = (
             FlashAttentionMetadataBuilder(
@@ -119,8 +129,6 @@ class TreeAttentionMetadataBuilder(
         # better naming here)
         decodes = []
         prefills = []
-        num_decode_tokens = 0
-        num_prefill_tokens = 0
 
         for i, req_id in enumerate(input_batch.req_ids):
             num_tokens = scheduler_output.num_scheduled_tokens[req_id]
@@ -128,12 +136,10 @@ class TreeAttentionMetadataBuilder(
             # we should update this to something like < 8 in the future but
             # currently the decode run only supports num_tokens = 1
             # For now, treat any decode step with exactly
-            if num_tokens == self.tree_size:
+            if num_tokens == self.suffix_attn_bias.shape[0]:
                 decodes.append(i)
-                num_decode_tokens += num_tokens
             else:
                 prefills.append(i)
-                num_prefill_tokens += num_tokens
 
         # We hope that this is fairly minimal since decodes
         # should be around for a number of iterations so hopefully they are
@@ -163,9 +169,6 @@ class TreeAttentionMetadataBuilder(
         # TODO(lucas): this is a bit of a hack, we should probably have a
         # better way of doing this
         self._num_decodes = num_decodes
-        self._num_prefills = num_prefills
-        self._num_decode_tokens = num_decode_tokens
-        self._num_prefill_tokens = num_prefill_tokens
 
         return modified_batch
 
@@ -175,10 +178,10 @@ class TreeAttentionMetadataBuilder(
     ) -> TreeAttentionMetadata:
         num_reqs = common_attn_metadata.num_reqs
         num_decodes = self._num_decodes
-        num_prefills = self._num_prefills
+        num_prefills = num_reqs - num_decodes
         num_actual_tokens = common_attn_metadata.num_actual_tokens
-        num_decode_tokens = self._num_decode_tokens
-        num_prefill_tokens = self._num_prefill_tokens
+        num_decode_tokens = num_decodes * self.suffix_attn_bias.shape[0]
+        num_prefill_tokens = num_actual_tokens - num_decode_tokens
         q_start_loc = common_attn_metadata.query_start_loc
         q_seqlens = torch.diff(q_start_loc)
         max_query_len = common_attn_metadata.max_query_len
@@ -220,7 +223,6 @@ class TreeAttentionMetadataBuilder(
         slot_mapping[num_actual_tokens:].fill_(-1)
 
         prefix_attn_bias = None
-        spec_attn_bias = None
         if num_decodes > 0:
             # Construct the prefix bias.
             decode_q_seqlens = q_seqlens[:num_decodes]
@@ -233,12 +235,6 @@ class TreeAttentionMetadataBuilder(
                 block_tables=block_table_tensor[:num_decodes],
                 device=block_table.device,
             )
-            # Construct the tree attention (suffix) bias.
-            spec_attn_bias = _prepare_tree_attn_bias(
-                self.tree_choices,
-                self.kv_cache_spec.dtype,
-                device=block_table.device,
-            ).T
 
         return TreeAttentionMetadata(
             num_actual_tokens=num_actual_tokens,
@@ -249,88 +245,35 @@ class TreeAttentionMetadataBuilder(
             block_table=block_table_tensor,
             slot_mapping=slot_mapping,
             prefix_attn_bias=prefix_attn_bias,
-            spec_attn_bias=spec_attn_bias,
+            spec_attn_bias=self.suffix_attn_bias,
             prefill_attn_metadata=prefill_attn_metadata,
         )
 
+    def build_for_drafting(
+        self,
+        common_attn_metadata: CommonAttentionMetadata,
+        current_step: int,
+        total_tokens_generated: int,
+    ) -> TreeAttentionMetadata:
+        orig_num_decodes = self._num_decodes
+        if total_tokens_generated > current_step:
+            # There is branching in the draft tree. Use tree attention.
+            self._num_decodes = common_attn_metadata.num_reqs
+            query_len = common_attn_metadata.max_query_len
+            start, end = current_step, current_step + query_len
+            self.suffix_attn_bias = self.tree_attn_bias[start:end, start:end]
+        else:
+            # This is a chain of draft tokens. Use prefill attention, which
+            # is more performant.
+            self._num_decodes = 0
 
-def _get_depth_counts(sorted_tree_choices: list[tuple[int, ...]]) -> list[int]:
-    # Initialize depth_counts to keep track of how many choices have a
-    # particular depth.
-    depth_counts = []
-    prev_depth = 0
-    for path in sorted_tree_choices:
-        depth = len(path)
-        if depth != prev_depth:
-            depth_counts.append(0)
-        depth_counts[depth - 1] += 1
-        prev_depth = depth
-    return depth_counts
+        # Build attention bias.
+        attn_metadata = self.build(0, common_attn_metadata)
 
-
-def _prepare_tree_attn_bias(
-    sorted_tree_choices: list[tuple[int, ...]],
-    dtype: Optional[torch.dtype],
-    device: Optional[torch.device],
-) -> torch.Tensor:
-    """
-    Construct a Medusa-style tree attention bias as an explicit tensor.
-    It can be used as a spec_attn_bias ("right" or "suffix" attention part)
-    in tree_attention. See run_tree_attention_inner in test for a usage example.
-    Args:
-        sorted_tree_choices: tree description in the style of
-            https://github.com/FasterDecoding/Medusa/blob/5e9805386/medusa/model/medusa_choices.py
-            A typical tree description would look like:
-            [(node0, node1, ...),
-             (node0, node2),
-             (node0, node3),
-             (node1, node3), ...,
-             (node0, node2, ..., nodeN)]
-            Every tuple is corresponds to one node in the tree, encoded as a
-            path from one of the root nodes to the node in question. Passed
-            in sorted order.
-
-            For example, a node encoded as (1, 0, 3, ..., 2) is understood as:
-            list all the root nodes and take node number 1
-            list all children of that node and take node number 0
-            list all children of that node and take node number 3
-            ...
-            list all children of that node and take node number 2 - that's the
-            node encoded by this tuple
-        dtype: data type of the output tensor.
-        device: device of the output tensor.
-    Returns:
-        attention bias of shape (tree_size, tree_size),
-        where tree_size is the total number of nodes in the tree.
-    """
-    depth_counts = _get_depth_counts(sorted_tree_choices)
-
-    # +1 comes from the additional root node
-    tree_len = len(sorted_tree_choices) + 1
-    tree_attn_mask = torch.full((tree_len, tree_len),
-                                -torch.inf,
-                                device=device,
-                                dtype=dtype)
-
-    mask_val = 0
-    for i in range(tree_len):
-        tree_attn_mask[i, i] = mask_val
-
-    tree_attn_mask[:, 0] = mask_val
-    start = 0
-    for i in range(len(depth_counts)):
-        for j in range(depth_counts[i]):
-            cur_tree_choice = sorted_tree_choices[start + j]
-            # retrieve ancestor position
-            if len(cur_tree_choice) == 1:
-                continue
-            ancestor_idx = []
-            for c in range(len(cur_tree_choice) - 1):
-                ancestor_idx.append(
-                    sorted_tree_choices.index(cur_tree_choice[:c + 1]) + 1)
-            tree_attn_mask[j + start + 1, ancestor_idx] = mask_val
-        start += depth_counts[i]
-    return tree_attn_mask
+        # Reset properties to original values.
+        self._num_decodes = orig_num_decodes
+        self.suffix_attn_bias = self.tree_attn_bias
+        return attn_metadata
 
 
 class TreeAttentionImpl(AttentionImpl):

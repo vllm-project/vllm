@@ -31,7 +31,7 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
         disable_input_layernorm: bool,
         prefix: str = "",
     ) -> None:
-        super().__init__(config, prefix=prefix, is_draft=True)
+        super().__init__(config, prefix=prefix)
 
         # Skip the input_layernorm
         # https://github.com/SafeAILab/EAGLE/blob/35c78f6cdc19a73e05cf5c330b4c358dad970c6a/eagle/model/cnets.py#L427

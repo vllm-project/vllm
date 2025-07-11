@@ -2724,6 +2724,13 @@ class SpeculativeConfig:
                             f"num_speculative_tokens:{self.num_speculative_tokens}"
                             f" must be divisible by {n_predict=}")
 
+                if self.speculative_token_tree is None:
+                    # Generate chain of tokens.
+                    self.speculative_token_tree = str([
+                        tuple(range(i + 1))
+                        for i in range(self.num_speculative_tokens)
+                    ])
+
                 self.draft_tensor_parallel_size = \
                     SpeculativeConfig._verify_and_get_draft_tp(
                         self.target_parallel_config,
