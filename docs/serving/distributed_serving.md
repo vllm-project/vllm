@@ -65,7 +65,7 @@ bash run_cluster.sh \
                 <head_node_ip> \
                 --head \
                 /path/to/the/huggingface/home/in/this/node \
-                -e VLLM_HOST_IP=<this_node_ip>
+                -e VLLM_HOST_IP=<head_node_ip>
 ```
 
 On each worker node, run:
