@@ -3,7 +3,7 @@
 import importlib
 import itertools
 import logging
-from typing import Callable, Optional
+from typing import Callable, Optional, Union
 
 from vllm.v1.sample.logits_processor import LogitsProcessor
 from vllm.v1.sample.logits_processor.impls import (LogitBiasLogitsProcessor,
@@ -24,90 +24,113 @@ _builtin_logitsprocs_ctors: list[LogitprocCtor] = [
 ]
 
 
-def _load_logitsprocs_ctors_by_fqns(
-        fqns: Optional[list[str]]) -> list[LogitprocCtor]:
-    if not fqns:
+def _load_logitsprocs_by_fqns(
+    logits_processors: Optional[list[Union[str, type[LogitsProcessor]]]]
+) -> list[type[LogitsProcessor]]:
+    """Load logit processor types, identifying them by fully-qualified names
+    (FQNs).
+
+    Effectively, a mixed list of logitproc types and FQN strings is converted
+    into a list of entirely logitproc types, by loading the FQNs.
+
+    FQN syntax is <module>:<type> i.e. x.y.z:CustomLogitProc
+
+    Already-loaded logitproc types must be subclasses of LogitsProcessor
+
+    Args:
+      fqns: Potentially mixed list of logitsprocs types and FQN strings for
+            logitproc types
+
+    Returns:
+      List of logitproc types
+    
+    """
+    if not logits_processors:
         return []
 
     logger.info(
-        "Attempting to load the following logits processors via FQNs: %s",
-        fqns)
+        "%s additional custom logits processors specified, checking whether "
+        "they need to be loaded.", len(logits_processors))
 
-    constructors: list[LogitprocCtor] = []
-    for fqn in fqns:
-        logger.info("Loading logits processor %s", fqn)
+    constructors: list[type[LogitsProcessor]] = []
+    for ldx, logitproc in enumerate(logits_processors):
+        if isinstance(logitproc, type):
+            logger.info(" - Already loaded logit processor: %s",
+                        logitproc.__name__)
+            if not issubclass(logitproc, LogitsProcessor):
+                raise ValueError(
+                    f"{logitproc.__name__} is not a subclass of LogitsProcessor"
+                )
+            constructors.append(logitproc)
+            continue
+
+        logger.info("- Loading logits processor %s", logitproc)
         try:
-            module_path, qualname = fqn.split(":")
+            module_path, qualname = logitproc.split(":")
             # Load module
             module = importlib.import_module(module_path)
             # Walk down dotted name to get logitproc constructor
             obj = module
             for attr in qualname.split("."):
                 obj = getattr(obj, attr)
-            if not callable(obj):
-                raise ValueError(f"{fqn} is not a Callable.")
+            if not isinstance(obj, type):
+                raise ValueError("Loaded logit processor must be a type.")
+            if not issubclass(obj, LogitsProcessor):
+                raise ValueError(
+                    f"{obj.__name__} must be a subclass of LogitsProcessor")
             constructors.append(obj)
         except Exception as e:
-            logger.exception("Failed to load logits processor %s", fqn)
+            logger.exception("Failed to load %sth logits processor %s", ldx,
+                             logitproc)
             raise e
 
     return constructors
 
 
-def _load_logitsprocs_ctors_by_entrypoints(
-        entrypoints: Optional[list[str]]) -> list[LogitprocCtor]:
-    if not entrypoints:
-        return []
-
-    logger.info(
-        "Attempting to load the following logits processors via "
-        "entrypoints: %s", entrypoints)
-
+def _load_logitsprocs_plugins() -> list[type[LogitsProcessor]]:
+    """Load all installed logit processor plugins"""
     import sys
     if sys.version_info < (3, 10):
         from importlib_metadata import entry_points
     else:
         from importlib.metadata import entry_points
 
-    installed_logitsprocs_plugins = {
-        plugin.name: plugin
-        for plugin in entry_points(group=LOGITSPROCS_GROUP)
-    }
+    installed_logitsprocs_plugins = entry_points(group=LOGITSPROCS_GROUP)
     if len(installed_logitsprocs_plugins) == 0:
         logger.debug("No logitsprocs plugins installed (group %s).",
                      LOGITSPROCS_GROUP)
         return []
 
-    # Use INFO for non-default groups and DEBUG for the default group
-    log_level = logger.info
-    log_level("Available logitsprocs plugins (group %s):", LOGITSPROCS_GROUP)
-    for plugin in installed_logitsprocs_plugins.values():
-        log_level("- %s -> %s", plugin.name, plugin.value)
-
-    constructors: list[LogitprocCtor] = []
-    for entrypoint in entrypoints:
-        if entrypoint not in installed_logitsprocs_plugins:
-            raise ValueError(
-                f"Invalid logit processor entrypoint string {entrypoint}.")
-        log_level("Loading plugin %s", entrypoint)
-
+    # Load logitsprocs plugins
+    logger.info("Loading installed logitsprocs plugins (group %s):",
+                LOGITSPROCS_GROUP)
+    constructors: list[type[LogitsProcessor]] = []
+    for entrypoint in installed_logitsprocs_plugins:
         try:
-            func = installed_logitsprocs_plugins[entrypoint].load()
-            constructors.append(func)
+            logger.info("- Loading logitproc plugin entrypoint=%s target=%s",
+                        entrypoint.name, entrypoint.value)
+            constructors.append(entrypoint.load())
         except Exception as e:
             logger.exception("Failed to load plugin %s", entrypoint)
             raise e
-
     return constructors
 
 
-def _load_custom_logitsprocs_ctors(
-    logits_processors_fqns: Optional[list[str]],
-    logits_processors_entrypoints: Optional[list[str]],
-) -> list[LogitprocCtor]:
-    """WARNING: logitsprocs can be loaded for multiple times in different
-    processes. They should be designed in a way that they can be loaded
-    multiple times without causing issues.
+def load_custom_logitsprocs(
+    logits_processors: Optional[list[Union[str, type[LogitsProcessor]]]],
+) -> list[type[LogitsProcessor]]:
+    """Load all custom logits processors.
+    
+    * First load all installed logitproc plugins
+    * Second load custom logitsprocs pass by the user at initialization time
+
+    Args:
+      logits_processors: potentially mixed list of logitproc types and
+                         logitproc type fully-qualified names (FQNs)
+                         which need to be loaded
+
+    Returns:
+      A list of all loaded logitproc types
     """
     from vllm.platforms import current_platform
     if current_platform.is_tpu():
@@ -115,16 +138,11 @@ def _load_custom_logitsprocs_ctors(
         # TODO(andy) - vLLM V1 on TPU does not support custom logitsprocs
         return []
 
-    return (
-        _load_logitsprocs_ctors_by_entrypoints(logits_processors_entrypoints) +
-        _load_logitsprocs_ctors_by_fqns(logits_processors_fqns))
+    return (_load_logitsprocs_plugins() +
+            _load_logitsprocs_by_fqns(logits_processors))
 
 
 def build_logitsprocs(args: LogitProcessorCtorArgs) -> LogitsProcessors:
-    _custom_logitsprocs_ctors = _load_custom_logitsprocs_ctors(
-        args.vllm_config.logits_processors_fqns,
-        args.vllm_config.logits_processors_entrypoints,
-    )
     return LogitsProcessors(
-        ctor(args) for ctor in itertools.chain(_builtin_logitsprocs_ctors,
-                                               _custom_logitsprocs_ctors))
+        ctor(args) for ctor in itertools.chain(
+            _builtin_logitsprocs_ctors, args.vllm_config.logits_processors))

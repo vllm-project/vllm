@@ -42,6 +42,8 @@ from vllm.test_utils import MODEL_WEIGHTS_S3_BUCKET, MODELS_ON_S3
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.utils import (STR_DUAL_CHUNK_FLASH_ATTN_VAL, FlexibleArgumentParser,
                         GiB_bytes, get_ip, is_in_ray_actor)
+from vllm.v1.sample.logits_processor import (LogitsProcessor,
+                                             load_custom_logitsprocs)
 
 # yapf: enable
 
@@ -297,21 +299,6 @@ def get_kwargs(cls: ConfigType) -> dict[str, Any]:
     return copy.deepcopy(_compute_kwargs(cls))
 
 
-def comma_separated_list(value: str) -> list[str]:
-    """Argparse-compatible comma-separated list arg type.
-    
-    Expected format: "<val0>,<val1>,<val2>" or just "<val>".
-
-    Args:
-      value: string comma-separate list representation
-
-    Returns:
-      Parsed list of string values
-    """
-    items = value.split(',')
-    return items
-
-
 @dataclass
 class EngineArgs:
     """Arguments for vLLM engine."""
@@ -499,8 +486,8 @@ class EngineArgs:
     enable_multimodal_encoder_data_parallel: bool = \
         ParallelConfig.enable_multimodal_encoder_data_parallel
 
-    logits_processors_fqns: Optional[list[str]] = None
-    logits_processors_entrypoints: Optional[list[str]] = None
+    logits_processors: Optional[list[Union[str, type[LogitsProcessor]]]] = None
+    """Custom logitproc types"""
 
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
@@ -516,9 +503,17 @@ class EngineArgs:
                 DeprecationWarning,
                 stacklevel=2,
             )
-        # Setup plugins
+        # Setup general plugins
         from vllm.plugins import load_general_plugins
         load_general_plugins()
+        if envs.VLLM_USE_V1:
+            # Setup V1 custom logitsprocs. Load plugins & any logitsprocs
+            # specified by FQN
+            self.logits_processors = load_custom_logitsprocs(
+                self.logits_processors)
+        elif self.logits_processors is not None:
+            raise ValueError(
+                "vLLM V0 does not support logits_processors engine args")
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
@@ -610,6 +605,10 @@ class EngineArgs:
                                  **model_kwargs["model_impl"])
         model_group.add_argument("--override-attention-dtype",
                                  **model_kwargs["override_attention_dtype"])
+        model_group.add_argument(
+            "--logits-processors",
+            nargs='+',
+            help="List of logits processors' fully-qualified names (FQNs).")
 
         # Model loading arguments
         load_kwargs = get_kwargs(LoadConfig)
@@ -939,23 +938,6 @@ class EngineArgs:
         scheduler_group.add_argument(
             "--disable-hybrid-kv-cache-manager",
             **scheduler_kwargs["disable_hybrid_kv_cache_manager"])
-
-        logitsprocs_group = parser.add_argument_group(
-            title="Logits processors",
-            description="Logits processors settings.",
-        )
-        logitsprocs_group.add_argument(
-            "--logits-processors-entrypoints",
-            type=lambda x: comma_separated_list(x),
-            default=[],
-            help="Comma-separated list of allowed logits processor "
-            "entrypoints (acceptable entrypoint formats: "
-            "package.entrypoint | package.*).")
-        logitsprocs_group.add_argument(
-            "--logits-processors-fqns",
-            type=lambda x: comma_separated_list(x),
-            default=[],
-            help="Comma-separated list of logits processor qualified names.")
 
         # vLLM arguments
         vllm_kwargs = get_kwargs(VllmConfig)
@@ -1383,8 +1365,7 @@ class EngineArgs:
             kv_transfer_config=self.kv_transfer_config,
             kv_events_config=self.kv_events_config,
             additional_config=self.additional_config,
-            logits_processors_fqns=self.logits_processors_fqns,
-            logits_processors_entrypoints=self.logits_processors_entrypoints,
+            logits_processors=self.logits_processors,
         )
 
         return config
