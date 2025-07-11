@@ -103,8 +103,13 @@ class TorchCompileWrapperWithCustomDispatcher:
                     # as we guarantee a full-graph compilation in Dynamo.
                     # but there's no 100% guarantee, since decompliation is
                     # not a reversible process.
-                    import depyf
-                    src = depyf.decompile(new_code)
+                    if envs.VLLM_COMPILE_DEPYF:
+                        import depyf
+                        src = depyf.decompile(new_code)
+                    else:
+                        src = ("Please set VLLM_COMPILE_DEPYF=1 to populate "
+                               "this file")
+
                     with open(decompiled_file, "w") as f:
                         f.write(src)
 
