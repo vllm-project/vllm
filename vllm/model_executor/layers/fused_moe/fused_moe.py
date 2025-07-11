@@ -26,7 +26,7 @@ from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
-    TopKWeightAndReduceDelegate)
+    TopKWeightAndReduceContiguous, TopKWeightAndReduceNoOP)
 from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache, moe_kernel_quantize_input)
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
@@ -1606,8 +1606,7 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         return True
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
-        # Let PrepareAndFinalize::finalize() decide the impl.
-        return TopKWeightAndReduceDelegate()
+        return TopKWeightAndReduceNoOP()
 
     def workspace_shapes(
         self,
@@ -1620,9 +1619,9 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         global_num_experts: int,
         local_num_experts: int,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
-        workspace1 = (M, topk, max(N * 2, K))
-        workspace2 = (M, topk, N)
-        output = (M, topk, K)
+        workspace1 = (M, topk, max(N, K))
+        workspace2 = (M, topk, max(N * 2, K))
+        output = (M, K)
         return (workspace1, workspace2, output, a.dtype)
 
     def apply(
@@ -1631,6 +1630,7 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         hidden_states: torch.Tensor,
         w1: torch.Tensor,
         w2: torch.Tensor,
+        topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         activation: str,
         global_num_experts: int,
@@ -1644,6 +1644,7 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         workspace13: torch.Tensor,
         workspace2: torch.Tensor,
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
+        apply_router_weight_on_input: bool,
     ):
         # Check constraints.
         if self.use_int4_w4a16:
@@ -1696,12 +1697,13 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
             raise ValueError(
                 f"Unsupported compute_type: {hidden_states.dtype}")
 
-        # We can reuse the memory between these because by the time we need
-        # cache3, we're done with cache1
-        intermediate_cache1 = _resize_cache(workspace13,
+        # Note that the output tensor might be in workspace1
+        intermediate_cache1 = _resize_cache(workspace2,
                                             (num_tokens, top_k_num, N))
-        intermediate_cache2 = _resize_cache(workspace2,
+        intermediate_cache2 = _resize_cache(workspace13,
                                             (num_tokens * top_k_num, N // 2))
+        intermediate_cache3 = _resize_cache(workspace2,
+                                            (num_tokens, top_k_num, K))
 
         sorted_token_ids, expert_ids, num_tokens_post_padded = (
             moe_align_block_size(topk_ids, config['BLOCK_SIZE_M'],
@@ -1739,7 +1741,7 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
         invoke_fused_moe_kernel(qintermediate_cache2,
                                 w2,
-                                output,
+                                intermediate_cache3,
                                 a2q_scale,
                                 w2_scale,
                                 w2_zp,
@@ -1757,6 +1759,13 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
                                 use_int4_w4a16=self.use_int4_w4a16,
                                 per_channel_quant=self.per_act_token_quant,
                                 block_shape=self.block_shape)
+
+        TopKWeightAndReduceContiguous().apply(
+            output=output,
+            fused_expert_output=intermediate_cache3,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            apply_router_weight_on_input=apply_router_weight_on_input)
 
 
 def modular_triton_fused_moe(
