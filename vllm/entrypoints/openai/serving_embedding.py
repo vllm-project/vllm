@@ -14,12 +14,15 @@ from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.logger import RequestLogger
+# yapf conflicts with isort for this docstring
+# yapf: disable
 from vllm.entrypoints.openai.protocol import (EmbeddingChatRequest,
                                               EmbeddingCompletionRequest,
                                               EmbeddingRequest,
                                               EmbeddingResponse,
                                               EmbeddingResponseData,
                                               ErrorResponse, UsageInfo)
+# yapf: enable
 from vllm.entrypoints.openai.serving_engine import (EmbeddingServeContext,
                                                     OpenAIServing,
                                                     ServeContext,
