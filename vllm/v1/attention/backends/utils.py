@@ -24,6 +24,7 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
+_KV_CACHE_LAYOUT_OVERRIDE = None
 
 
 @dataclass
@@ -103,6 +104,7 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
 
 @functools.lru_cache
 def get_kv_cache_layout():
+    global _KV_CACHE_LAYOUT_OVERRIDE
     # Override with format specified by the user.
     cache_layout = envs.VLLM_KV_CACHE_LAYOUT
     if cache_layout is None:
@@ -110,8 +112,14 @@ def get_kv_cache_layout():
     else:
         logger.info_once("`VLLM_KV_CACHE_LAYOUT` environment variable " \
         "detected. Setting KV cache layout to %s.", cache_layout)
-
+    if _KV_CACHE_LAYOUT_OVERRIDE is not None:
+        cache_layout = _KV_CACHE_LAYOUT_OVERRIDE
     return cache_layout
+
+
+def set_kv_cache_layout(cache_layout: str):
+    global _KV_CACHE_LAYOUT_OVERRIDE
+    _KV_CACHE_LAYOUT_OVERRIDE = cache_layout
 
 
 @dataclass
