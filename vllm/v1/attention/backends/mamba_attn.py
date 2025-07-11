@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Optional, Union
 
 import torch
 
@@ -10,7 +10,7 @@ from vllm.attention.backends.abstract import AttentionBackend
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
                                               CommonAttentionMetadata)
-from vllm.v1.kv_cache_interface import MambaSpec
+from vllm.v1.kv_cache_interface import (MambaSpec, ShortConvSpec)
 from vllm.v1.worker.block_table import BlockTable
 
 if TYPE_CHECKING:
@@ -25,6 +25,15 @@ def get_mamba2_chunk_size(vllm_config: VllmConfig) -> int:
     chunk_sizes = set(layer.chunk_size for layer in layers.values())
     assert len(
         chunk_sizes) == 1, "All Mamba2 layers must have the same chunk size"
+    return chunk_sizes.pop()
+
+
+def get_short_conv_chunk_size(vllm_config: VllmConfig) -> int:
+    from vllm.model_executor.layers.conv import ShortConv
+    layers = get_layers_from_vllm_config(vllm_config, ShortConv)
+    chunk_sizes = set(layer.chunk_size for layer in layers.values())
+    assert len(
+        chunk_sizes) == 1, "All ShortConv layers must have the same chunk size"
     return chunk_sizes.pop()
 
 
@@ -97,12 +106,17 @@ class Mamba2AttentionMetadata:
 class Mamba2AttentionMetadataBuilder(
         AttentionMetadataBuilder[Mamba2AttentionMetadata]):
 
-    def __init__(self, runner: "GPUModelRunner", kv_cache_spec: MambaSpec,
+    def __init__(self, runner: "GPUModelRunner", kv_cache_spec: Union[MambaSpec, ShortConvSpec],
                  block_table: BlockTable):
         self.runner = runner
         self.kv_cache_spec = kv_cache_spec
         self.block_table = block_table
-        self.chunk_size = get_mamba2_chunk_size(runner.vllm_config)
+        if isinstance(kv_cache_spec, MambaSpec):
+            self.chunk_size = get_mamba2_chunk_size(runner.vllm_config)
+        elif isinstance(kv_cache_spec, ShortConvSpec):
+            self.chunk_size = get_short_conv_chunk_size(runner.vllm_config)
+        else:
+            raise ValueError(f"Unsupported KV cache spec: {kv_cache_spec}")
 
     def reorder_batch(self, input_batch: "InputBatch",
                       scheduler_output: "SchedulerOutput") -> bool:
