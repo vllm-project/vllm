@@ -24,7 +24,7 @@ def get_mamba_state_shape(
     state_size: int,
     conv_kernel: int,
     use_v1: bool = True,
-) -> tuple[tuple[int, int], tuple[int, int]]:
+) -> tuple[tuple[int, int], tuple[int, int, int]]:
     """ Get the shape of mamba state."""
 
     # if n_groups is not divisible by world_size, need to extend the shards

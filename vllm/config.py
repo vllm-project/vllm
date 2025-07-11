@@ -1565,7 +1565,7 @@ class CacheConfig:
     cpu_kvcache_space_bytes: Optional[int] = None
     """(CPU backend only) CPU key-value cache space."""
     mamba_page_size_padded: Optional[int] = None
-    """ Optional override for mamba page size; used by hybrid mamaba/attention
+    """ Optional override for mamba page size; used by hybrid mamba/attention
     models to ensure exact alignment with attention page size."""
 
     # Will be set after profiling.
