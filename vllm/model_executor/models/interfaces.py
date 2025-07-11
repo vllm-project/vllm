@@ -690,8 +690,12 @@ class SupportsTranscription(Protocol):
     """The interface required for all models that support transcription."""
 
     supports_transcription: ClassVar[Literal[True]] = True
-    # Allows transcription models to opt out of text generation when True.
+
     supports_transcription_only: ClassVar[bool] = False
+    """
+    Transcription models can opt out of text generation by setting this to
+    `True`.
+    """
 
     @classmethod
     def get_decoder_prompt(cls, language: str, task_type: str,
