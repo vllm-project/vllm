@@ -551,20 +551,37 @@ class ModelConfig:
         self.hf_image_processor_config = get_hf_image_processor_config(
             self.model, hf_token=self.hf_token, revision=self.revision)
 
+        # For pooling models, self.task is used to indicate the
+        # user-selected task
+        if self.task == "score":
+            if self.registry.is_cross_encoder_model(self.architectures):
+                self.task = "classify"
+            else:
+                self.task = "embed"
+        elif self.task == "embedding":
+            msg = ("The 'embedding' task has been renamed to 'embed', please "
+                   "use the new name. The old name will be removed in v1.0.")
+            warnings.warn(msg, DeprecationWarning, stacklevel=2)
+
+            self.task = "embed"
+
         all_supported_tasks = self._get_supported_tasks(self.task)
         supported_runner_types = self._get_supported_runner_types(
             all_supported_tasks)
         runner_type = self._resolve_runner(self.runner, self.task,
                                            supported_runner_types,
                                            all_supported_tasks)
+
+        # For pooling models, self.task is used to indicate the
+        # user-selected task
+        if runner_type == "pooling" and self.task == "auto":
+            selected_task = all_supported_tasks[runner_type][-1]
+            assert selected_task != "pooling"
+            self.task = selected_task
+
         self.supported_runner_types = supported_runner_types
         self.runner_type = runner_type
         self.supported_tasks = all_supported_tasks[runner_type]
-
-        # Currently, pooling models only supports "pooling"
-        # and the user-specified task
-        if runner_type == "pooling" and self.task == "auto":
-            self.task = next(t for t in self.supported_tasks if t != "pooling")
 
         if self.runner_type in ("draft",
                                 "generate") and self.task != "transcription":
@@ -794,7 +811,6 @@ class ModelConfig:
     def _get_preferred_pooling_task(
         self,
         architectures: list[str],
-        supported_tasks: list[_ResolvedTask],
     ) -> _ResolvedTask:
         model_id = self.model
         if get_pooling_config(model_id, self.revision):
@@ -813,7 +829,7 @@ class ModelConfig:
         _, arch = self.registry.inspect_model_cls(architectures)
 
         for suffix, pref_task in suffix_to_preferred_task:
-            if arch.endswith(suffix) and pref_task in supported_tasks:
+            if arch.endswith(suffix):
                 return pref_task
 
         return "embed"
@@ -852,26 +868,10 @@ class ModelConfig:
             # to use for pooling models
             if task_option == "auto":
                 preferred_task = self._get_preferred_pooling_task(
-                    architectures, _RUNNER_TASKS["pooling"])
+                    architectures)
 
                 supported_tasks.append(preferred_task)
             elif task_option in _RUNNER_TASKS["pooling"]:
-                if task_option == "score":
-                    if self.registry.is_cross_encoder_model(architectures):
-                        task_option = "classify"
-                    else:
-                        task_option = "embed"
-                else:
-                    # Aliases
-                    if task_option == "embedding":
-                        msg = (
-                            "The 'embedding' task has been renamed to "
-                            "'embed', please use the new name. The old name "
-                            "will be removed in v1.0.")
-                        warnings.warn(msg, DeprecationWarning, stacklevel=2)
-
-                        task_option = "embed"
-
                 supported_tasks.append(task_option)
 
         return supported_tasks
@@ -912,7 +912,7 @@ class ModelConfig:
         if runner_option != "auto":
             if runner_option not in supported_runner_types:
                 raise ValueError(
-                    f"This model does not support runner={runner_option}. "
+                    f"This model does not support runner={runner_option!r}. "
                     f"Available runners: {supported_runner_types}")
 
             return runner_option
@@ -922,15 +922,15 @@ class ModelConfig:
                 if task_option in runner_tasks:
                     return runner
             else:
-                runner = self._resolve_runner(runner_option, task_option,
-                                              supported_runner_types,
-                                              _RUNNER_TASKS)
+                runner: RunnerType = next(
+                    runner for runner, tasks in _RUNNER_TASKS.items()
+                    if task_option in tasks)
                 raise ValueError(
-                    f"This model does not support task={task_option}. "
-                    f"Available tasks for runner={runner}: "
+                    f"This model does not support task={task_option!r}. "
+                    f"Available tasks for runner={runner!r}: "
                     f"{supported_tasks[runner]}")
 
-        suffix_to_preferred_runner: list[tuple[str, _ResolvedTask]] = [
+        suffix_to_preferred_runner: list[tuple[str, RunnerType]] = [
             ("ForCausalLM", "generate"),
             ("ForConditionalGeneration", "generate"),
             ("ChatModel", "generate"),
