@@ -34,6 +34,7 @@ from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.openai.tool_parsers import ToolParser, ToolParserManager
 from vllm.entrypoints.openai.tool_parsers.mistral_tool_parser import (
     MistralToolCall)
+from vllm.entrypoints.utils import get_max_tokens
 from vllm.logger import init_logger
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
@@ -152,7 +153,8 @@ class OpenAIServingChat(OpenAIServing):
             (
                 lora_request,
                 prompt_adapter_request,
-            ) = self._maybe_get_adapters(request)
+            ) = self._maybe_get_adapters(request,
+                                         supports_default_mm_loras=True)
 
             model_name = self._get_model_name(request.model, lora_request)
 
@@ -233,15 +235,22 @@ class OpenAIServingChat(OpenAIServing):
         try:
             for i, engine_prompt in enumerate(engine_prompts):
                 sampling_params: Union[SamplingParams, BeamSearchParams]
-                default_max_tokens = self.max_model_len - len(
-                    engine_prompt["prompt_token_ids"])
+
+                if self.default_sampling_params is None:
+                    self.default_sampling_params = {}
+
+                max_tokens = get_max_tokens(
+                    max_model_len=self.max_model_len,
+                    request=request,
+                    input_length=len(engine_prompt["prompt_token_ids"]),
+                    default_sampling_params=self.default_sampling_params)
+
                 if request.use_beam_search:
                     sampling_params = request.to_beam_search_params(
-                        default_max_tokens, self.default_sampling_params)
+                        max_tokens, self.default_sampling_params)
                 else:
                     sampling_params = request.to_sampling_params(
-                        default_max_tokens,
-                        self.model_config.logits_processor_pattern,
+                        max_tokens, self.model_config.logits_processor_pattern,
                         self.default_sampling_params)
 
                 self._log_inputs(request_id,
@@ -1041,6 +1050,7 @@ class OpenAIServingChat(OpenAIServing):
                 message = ChatMessage(
                     role=role,
                     content="",
+                    reasoning_content=reasoning_content,
                     tool_calls=[
                         tool_call_class(function=FunctionCall(
                             name=tool_call.name,

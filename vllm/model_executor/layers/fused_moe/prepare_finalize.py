@@ -6,8 +6,8 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
-from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import (
-    _moe_unpermute_and_reduce)
+from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
+    TopKWeightAndReduceContiguous, TopKWeightAndReduceDelegate)
 from vllm.model_executor.layers.fused_moe.utils import (
     moe_kernel_quantize_input)
 
@@ -24,6 +24,9 @@ class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
     def topk_indices_dtype(self) -> Optional[torch.dtype]:
         return None
 
+    def num_dispatchers(self) -> int:
+        return 1
+
     def prepare(
         self,
         a1: torch.Tensor,
@@ -35,9 +38,9 @@ class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
         expert_map: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
-        skip_quant: Optional[bool]=False,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor],
-               Optional[torch.Tensor], Optional[torch.Tensor]]:
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor],
+               Optional[mk.ExpertTokensMetadata], Optional[torch.Tensor],
+               Optional[torch.Tensor]]:
 
         if apply_router_weight_on_input:
             topk = topk_ids.size(1)
@@ -55,7 +58,6 @@ class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
 
         return a1q, a1q_scale, None, None, None
 
-
     def finalize(
         self,
         output: torch.Tensor,
@@ -63,13 +65,18 @@ class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
+        weight_and_reduce_impl: mk.TopKWeightAndReduce,
         skip_permute_reduce: Optional[bool]=False,
     ) -> None:
         if skip_permute_reduce:
             assert output.shape == fused_expert_output.shape
             output.copy_(fused_expert_output)
         else:
-            _moe_unpermute_and_reduce(
-                output, fused_expert_output, None,
-                topk_weights, apply_router_weight_on_input
-            )
+            if isinstance(weight_and_reduce_impl, TopKWeightAndReduceDelegate):
+                weight_and_reduce_impl = TopKWeightAndReduceContiguous()
+            weight_and_reduce_impl.apply(
+                output=output,
+                fused_expert_output=fused_expert_output,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                apply_router_weight_on_input=apply_router_weight_on_input)

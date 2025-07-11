@@ -84,12 +84,15 @@ class KVCacheManager:
         self.log_stats = log_stats
         # FIXME: make prefix cache stats conditional on log_stats
         self.prefix_cache_stats = PrefixCacheStats() if log_stats else None
-        assert len(
-            set(g.kv_cache_spec.block_size
-                for g in kv_cache_config.kv_cache_groups)
-        ) == 1, "Only one block size is supported for now"
-        self.block_size = kv_cache_config.kv_cache_groups[
-            0].kv_cache_spec.block_size
+
+        self.block_size: Optional[int] = None
+        if self.enable_caching:
+            assert len(
+                set(g.kv_cache_spec.block_size
+                    for g in kv_cache_config.kv_cache_groups)
+            ) == 1, "Only one block size is supported for now"
+            self.block_size = kv_cache_config.kv_cache_groups[
+                0].kv_cache_spec.block_size
 
         self.coordinator = get_kv_cache_coordinator(
             kv_cache_config=kv_cache_config,
@@ -154,6 +157,7 @@ class KVCacheManager:
         # if the scheduler has tried to schedule the request before.
         block_hashes = self.req_to_block_hashes[request.request_id]
         if not block_hashes:
+            assert self.block_size is not None
             block_hashes = hash_request_tokens(self.caching_hash_fn,
                                                self.block_size, request)
             self.req_to_block_hashes[request.request_id] = block_hashes
@@ -186,7 +190,6 @@ class KVCacheManager:
         num_new_tokens: int,
         num_new_computed_tokens: int = 0,
         new_computed_blocks: Optional[KVCacheBlocks] = None,
-        num_draft_tokens: int = 0,
         num_lookahead_tokens: int = 0,
         delay_cache_blocks: bool = False,
     ) -> Optional[KVCacheBlocks]:
@@ -282,12 +285,17 @@ class KVCacheManager:
         if not self.enable_caching or delay_cache_blocks:
             return KVCacheBlocks(new_blocks)
 
-        # Speculated tokens might be rejected in the future, so we does
-        # not cache any speculated tokens. We only cache blocks with
-        # generated (accepted) tokens.
+        # NOTE(woosuk): We want to commit (cache) up to num_computed_tokens +
+        # num_new_tokens, but must exclude "non-committable" tokens (e.g.,
+        # draft tokens that could be rejected). Therefore, we cap the number
+        # at `request.num_tokens`, ensuring only "finalized" tokens are cached.
+        num_tokens_to_cache = min(num_computed_tokens + num_new_tokens,
+                                  request.num_tokens)
         self.coordinator.cache_blocks(
-            request, self.req_to_block_hashes[request.request_id],
-            num_computed_tokens + num_new_tokens - num_draft_tokens)
+            request,
+            self.req_to_block_hashes[request.request_id],
+            num_tokens_to_cache,
+        )
 
         return KVCacheBlocks(new_blocks)
 

@@ -782,40 +782,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         if enable_eplb:
             raise NotImplementedError(
                 "EPLB not supported for `ModelOptNvFp4FusedMoE` yet.")
-
-        if self.use_marlin:
-            topk_weights, topk_ids = FusedMoE.select_experts(
-                hidden_states=x,
-                router_logits=router_logits,
-                use_grouped_topk=use_grouped_topk,
-                top_k=top_k,
-                renormalize=renormalize,
-                topk_group=topk_group,
-                num_expert_group=num_expert_group,
-                custom_routing_function=custom_routing_function,
-                scoring_func=scoring_func,
-                e_score_correction_bias=e_score_correction_bias,
-            )
-
-            return torch.ops.vllm.fused_marlin_moe(
-                x,
-                layer.w13_weight,
-                layer.w2_weight,
-                layer.w13_weight_scale,
-                layer.w2_weight_scale,
-                router_logits,
-                topk_weights,
-                topk_ids,
-                global_scale1=layer.w13_weight_scale_2,
-                global_scale2=layer.w2_weight_scale_2,
-                quant_type_id=scalar_types.float4_e2m1f.id,
-                global_num_experts=global_num_experts,
-                expert_map=expert_map)
-
         assert activation == "silu", "Only SiLU activation is supported."
-        assert not apply_router_weight_on_input, (
-            "Router weight on input is not "
-            "supported for ModelOptNvFp4FusedMoE.")
 
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
@@ -828,7 +795,24 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias)
-   
+
+        if self.use_marlin:
+            return torch.ops.vllm.fused_marlin_moe(
+                x,
+                layer.w13_weight,
+                layer.w2_weight,
+                layer.w13_weight_scale,
+                layer.w2_weight_scale,
+                router_logits,
+                topk_weights,
+                topk_ids,
+                global_scale1=layer.w13_weight_scale_2,
+                global_scale2=layer.w2_weight_scale_2,
+                quant_type_id=scalar_types.float4_e2m1f.id,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+                global_num_experts=global_num_experts,
+                expert_map=expert_map)
+
         a1_gscale = torch.min(layer.w13_input_scale_quant)
         a2_gscale = torch.min(layer.w2_input_scale_quant)
         if self.allow_flashinfer_cutlass:
@@ -836,7 +820,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             assert _valid_flashinfer_fused_moe(
                 x, layer.w13_weight, layer.w2_weight), ("Flashinfer CUTLASS Fused MoE not applicable!") 
             extra_expert_args = {
-              'topk_weights': None, #placeholder topk_weights,
+              'topk_weights': None, # placeholder topk_weights,
               'g1_alphas': layer.g1_alphas,
               'g2_alphas': layer.g2_alphas,
               'out_dtype': x.dtype,

@@ -9,6 +9,7 @@ import torch
 from torch import Tensor
 from typing_extensions import Self, TypeIs
 
+from vllm.inputs import TokensPrompt
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
@@ -46,6 +47,13 @@ class SupportsMultiModal(Protocol):
         MRO of your model class.
     """
 
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+        """
+        Get the placeholder text for the `i`th `modality` item in the prompt.
+        """
+        ...
+
     def get_multimodal_embeddings(self,
                                   **kwargs: object) -> MultiModalEmbeddings:
         """
@@ -82,11 +90,22 @@ class SupportsMultiModal(Protocol):
     ) -> Tensor:
         ...
 
+    # TODO: Remove this overload once v0 is deprecated
     @overload
     def get_input_embeddings(
         self,
         input_ids: Tensor,
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
+    ) -> Tensor:
+        ...
+
+    def get_input_embeddings(
+        self,
+        input_ids: Tensor,
+        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
+        # Only necessary so that the v0 overload is valid
+        # TODO: Remove attn_metadata once v0 is deprecated
+        attn_metadata: Optional["AttentionMetadata"] = None,
     ) -> Tensor:
         """
         Returns the input embeddings merged from the text embeddings from 
@@ -121,6 +140,62 @@ def supports_multimodal(
         return isinstance(model, _SupportsMultiModalType)
 
     return isinstance(model, SupportsMultiModal)
+
+
+@runtime_checkable
+class SupportsScoreTemplate(Protocol):
+    """The interface required for all models that support score template."""
+
+    supports_score_template: ClassVar[Literal[True]] = True
+    """
+    A flag that indicates this model supports score template.
+
+    Note:
+        There is no need to redefine this flag if this class is in the
+        MRO of your model class.
+    """
+
+    @classmethod
+    def get_score_template(cls, query: str, document: str) -> Optional[str]:
+        """
+        Generate a full prompt by populating the score template with query and document content.
+        """ # noqa: E501
+        ...
+
+    @classmethod
+    def post_process_tokens(cls, prompt: TokensPrompt) -> None:
+        """
+        Perform architecture-specific manipulations on the input tokens.
+        """
+        ...
+
+
+# We can't use runtime_checkable with ClassVar for issubclass checks
+# so we need to treat the class as an instance and use isinstance instead
+@runtime_checkable
+class _SupportsScoreTemplateType(Protocol):
+    supports_score_template: Literal[True]
+
+
+@overload
+def supports_score_template(
+        model: type[object]) -> TypeIs[type[SupportsScoreTemplate]]:
+    ...
+
+
+@overload
+def supports_score_template(model: object) -> TypeIs[SupportsScoreTemplate]:
+    ...
+
+
+def supports_score_template(
+    model: Union[type[object], object],
+) -> Union[TypeIs[type[SupportsScoreTemplate]], TypeIs[SupportsScoreTemplate]]:
+
+    if isinstance(model, type):
+        return isinstance(model, _SupportsScoreTemplateType)
+
+    return isinstance(model, SupportsScoreTemplate)
 
 
 @runtime_checkable

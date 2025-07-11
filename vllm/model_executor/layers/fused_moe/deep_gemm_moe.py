@@ -12,9 +12,12 @@ from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import (
     _moe_permute)
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP)
-from vllm.model_executor.layers.fused_moe.utils import (
-    _resize_cache, per_token_group_quant_fp8)
+from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
+    TopKWeightAndReduceDelegate)
+from vllm.model_executor.layers.fused_moe.utils import _resize_cache
 from vllm.utils import has_deep_gemm, round_up
+from vllm.utils.deep_gemm import (m_grouped_fp8_gemm_nt_contiguous,
+                                  per_token_group_cast_to_fp8)
 
 logger = init_logger(__name__)
 
@@ -85,6 +88,10 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def supports_expert_map(self) -> bool:
         return True
 
+    def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
+        # Let PrepareAndFinalize::finalize() decide the impl.
+        return TopKWeightAndReduceDelegate()
+
     def workspace_shapes(
         self, a: torch.Tensor, aq: torch.Tensor, M: int, N: int, K: int,
         topk: int, global_num_experts: int, local_num_experts: int
@@ -98,7 +105,7 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         M_sum = round_up(M_sum, block_m)
         workspace1 = (M_sum, max(N * 2, K))
         workspace2 = (M_sum, max(N, K))
-        output = (M * topk, K)
+        output = (M, topk, K)
         return (workspace1, workspace2, output, a.dtype)
 
     def apply(
@@ -119,9 +126,8 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         a2_scale: Optional[torch.Tensor],
         workspace13: torch.Tensor,
         workspace2: torch.Tensor,
-        expert_num_tokens: Optional[torch.Tensor],
+        expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
     ):
-        import deep_gemm as dg
         assert self.block_shape is not None
 
         a1q = hidden_states
@@ -158,21 +164,21 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
                                   (M_sum, N // 2))
         mm2_out = _resize_cache(workspace2, (M_sum, K))
 
-        dg.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
-            (a1q, a1q_scale), (w1, w1_scale), mm1_out, expert_ids)
+        m_grouped_fp8_gemm_nt_contiguous((a1q, a1q_scale), (w1, w1_scale),
+                                         mm1_out, expert_ids)
 
         self.activation(activation, act_out, mm1_out.view(-1, N))
 
         a2q_scale: Optional[torch.Tensor] = None
-        a2q, a2q_scale = per_token_group_quant_fp8(act_out,
-                                                   self.block_shape[1],
-                                                   column_major_scales=True,
-                                                   out_q=quant_out)
+        a2q, a2q_scale = per_token_group_cast_to_fp8(act_out,
+                                                     self.block_shape[1],
+                                                     column_major_scales=True,
+                                                     out_q=quant_out)
 
-        dg.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
-            (a2q, a2q_scale), (w2, w2_scale), mm2_out, expert_ids)
+        m_grouped_fp8_gemm_nt_contiguous((a2q, a2q_scale), (w2, w2_scale),
+                                         mm2_out, expert_ids)
 
-        torch.index_select(mm2_out, 0, inv_perm, out=output)
+        torch.index_select(mm2_out, 0, inv_perm, out=output.view((-1, K)))
 
 
 def deep_gemm_moe_fp8(

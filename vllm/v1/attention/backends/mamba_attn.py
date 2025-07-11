@@ -1,14 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import math
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 import torch
 
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.config import VllmConfig, get_layers_from_vllm_config
-from vllm.model_executor.layers.mamba.mamba2_metadata import (
-    _query_start_loc_to_chunk_indices_offsets)
 from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
                                               CommonAttentionMetadata)
 from vllm.v1.kv_cache_interface import MambaSpec
@@ -27,6 +26,42 @@ def get_mamba2_chunk_size(vllm_config: VllmConfig) -> int:
     assert len(
         chunk_sizes) == 1, "All Mamba2 layers must have the same chunk size"
     return chunk_sizes.pop()
+
+
+def _query_start_loc_to_chunk_indices_offsets(query_start_loc: torch.Tensor,
+                                              chunk_size: int,
+                                              total_seqlens: int):
+
+    cu_seqlens = query_start_loc[1:]  # remove prepended 0
+
+    # outputs will have length expansion of chunks that do not divide
+    # chunk_size
+    N = math.ceil(total_seqlens / chunk_size) + (cu_seqlens[:-1] % chunk_size
+                                                 > 0).sum()
+    chunk_indices = torch.arange(N,
+                                 dtype=torch.int,
+                                 device=query_start_loc.device)
+    chunk_offsets = torch.zeros((N, ),
+                                dtype=torch.int,
+                                device=query_start_loc.device)
+
+    p = 0  # num of insertions
+    for s, e in zip(cu_seqlens[:-1], cu_seqlens[1:]):
+
+        # if does not divide chunk_size, then there is one chunk insertion
+        p += (s % chunk_size > 0)
+
+        # get the dimensions
+        # - the + 1 for _e is to shift the boundary by one chunk
+        # - this shifting is not needed if chunk_size divides e
+        _s, _e = s // chunk_size + p, e // chunk_size + p + (e % chunk_size
+                                                             > 0)
+
+        # adjust indices and offsets
+        chunk_indices[_s:_e] -= p
+        chunk_offsets[_s] = s % chunk_size
+
+    return chunk_indices, chunk_offsets
 
 
 class Mamba2AttentionBackend(AttentionBackend):
@@ -53,6 +88,10 @@ class Mamba2AttentionMetadata:
     chunk_offsets: torch.Tensor
 
     state_indices_tensor: torch.Tensor  # shape: [batch,]
+    nums_dict: Optional[dict] = None
+    cu_seqlen: Optional[int] = None
+    batch_ptr: Optional[torch.tensor] = None
+    token_chunk_offset_ptr: Optional[torch.tensor] = None
 
 
 class Mamba2AttentionMetadataBuilder(

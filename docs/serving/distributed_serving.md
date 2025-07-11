@@ -1,7 +1,4 @@
----
-title: Distributed Inference and Serving
----
-[](){ #distributed-serving }
+# Distributed Inference and Serving
 
 ## How to decide the distributed inference strategy?
 
