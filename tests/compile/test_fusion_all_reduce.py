@@ -38,7 +38,7 @@ class TestAllReduceRMSNormModel(torch.nn.Module):
         return [torch.ops.vllm.all_reduce.default]
 
     def ops_in_model_after(self):
-        return [torch.ops.vllm.flashinfer_trtllm_allreduce_fusion.default]
+        return [torch.ops.vllm.flashinfer_trtllm_fused_allreduce_norm.default]
 
 
 class TestAllReduceFusedAddRMSNormModel(torch.nn.Module):
@@ -59,7 +59,7 @@ class TestAllReduceFusedAddRMSNormModel(torch.nn.Module):
         return [torch.ops.vllm.all_reduce.default]
 
     def ops_in_model_after(self):
-        return [torch.ops.vllm.flashinfer_trtllm_allreduce_fusion.default]
+        return [torch.ops.vllm.flashinfer_trtllm_fused_allreduce_norm.default]
 
 
 @multi_gpu_test(num_gpus=2)
@@ -74,6 +74,8 @@ class TestAllReduceFusedAddRMSNormModel(torch.nn.Module):
                     reason="Only test on CUDA")
 @pytest.mark.skipif(not find_spec("flashinfer"),
                     reason="flashinfer is not installed")
+@pytest.mark.skipif(not current_platform.is_device_capability(100),
+                    reason="Only test on SM100")
 def test_all_reduce_fusion_pass_replace(test_model: torch.nn.Module,
                                         batch_size: int, seq_len: int,
                                         hidden_size: int, dtype: torch.dtype):
@@ -96,6 +98,7 @@ def all_reduce_fusion_pass_on_test_model(local_rank: int, world_size: int,
     current_platform.seed_everything(0)
 
     device = torch.device(f"cuda:{local_rank}")
+    torch.cuda.set_device(device)
     torch.set_default_device(device)
     torch.set_default_dtype(dtype)
 
@@ -146,3 +149,4 @@ def all_reduce_fusion_pass_on_test_model(local_rank: int, world_size: int,
 
     backend.check_before_ops(model.ops_in_model_before(), fully_replaced=False)
     backend.check_after_ops(model.ops_in_model_after())
+    del all_reduce_fusion_pass
