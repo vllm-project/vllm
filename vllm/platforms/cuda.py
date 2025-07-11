@@ -270,6 +270,8 @@ class CudaPlatformBase(Platform):
                 logger.info_once("Using Tree Attention backend on V1 engine.")
                 return TREE_ATTN_V1
 
+            from vllm.attention.selector import is_attn_backend_supported
+
             # Default backends for V1 engine
             # Prefer FlashInfer for Blackwell GPUs if installed
             if cls.is_device_capability(100):

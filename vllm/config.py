@@ -346,11 +346,11 @@ class ModelConfig:
     """Maximum number of data items per modality per prompt. Only applicable
     for multimodal models."""
     interleave_mm_strings: bool = False
-    """Enable fully interleaved support for multimodal prompts, while using 
+    """Enable fully interleaved support for multimodal prompts, while using
     --chat-template-content-format=string. Defaults to False."""
     media_io_kwargs: dict[str, dict[str, Any]] = field(default_factory=dict)
-    """Additional args passed to process media inputs, keyed by modalities. 
-    For example, to set num_frames for video, set 
+    """Additional args passed to process media inputs, keyed by modalities.
+    For example, to set num_frames for video, set
     `--media-io-kwargs '{"video": {"num_frames": 40} }'` """
     use_async_output_proc: bool = True
     """Whether to use async output processor."""
@@ -1611,8 +1611,8 @@ class CacheConfig:
     - "builtin" is Python's built-in hash.\n
     - "sha256" is collision resistant but with certain overheads.
     This option uses Pickle for object serialization before hashing.\n
-    - "sha256_cbor_64bit" provides a reproducible, cross-language compatible 
-    hash. It serializes objects using canonical CBOR and hashes them with 
+    - "sha256_cbor_64bit" provides a reproducible, cross-language compatible
+    hash. It serializes objects using canonical CBOR and hashes them with
     SHA-256. The resulting hash consists of the lower 64 bits of the SHA-256
     digest."""
     cpu_offload_gb: float = 0
@@ -2828,6 +2828,19 @@ class SpeculativeConfig:
                             f"num_speculative_tokens:{self.num_speculative_tokens}"
                             f" must be divisible by {n_predict=}")
 
+                if self.speculative_token_tree is None:
+                    # Generate chain of tokens.
+                    self.speculative_token_tree = str([
+                        (i + 1) * (0, )
+                        for i in range(self.num_speculative_tokens)
+                    ])
+                else:
+                    # Sort the token tree breadth-first.
+                    tree_choices = ast.literal_eval(
+                        self.speculative_token_tree)
+                    self.speculative_token_tree = str(
+                        sorted(tree_choices, key=lambda t: (len(t), t)))
+
                 self.draft_tensor_parallel_size = \
                     SpeculativeConfig._verify_and_get_draft_tp(
                         self.target_parallel_config,
@@ -3196,8 +3209,8 @@ class MultiModalConfig:
     """
 
     media_io_kwargs: dict[str, dict[str, Any]] = field(default_factory=dict)
-    """Additional args passed to process media inputs, keyed by modalities. 
-    For example, to set num_frames for video, set 
+    """Additional args passed to process media inputs, keyed by modalities.
+    For example, to set num_frames for video, set
     `--media-io-kwargs '{"video": {"num_frames": 40} }'` """
 
     mm_processor_kwargs: Optional[dict[str, object]] = None
@@ -4097,7 +4110,7 @@ class CompilationConfig:
     - True: inductor compilation is used (custom_ops disabled by default).
         One graph for symbolic shape and one graph per size in compile_sizes
         are compiled using configurations in inductor_compile_config.
-        
+
     This setting is ignored if level<PIECEWISE."""
     compile_sizes: Optional[list[Union[int, str]]] = None
     """Sizes to compile for inductor. In addition
@@ -4395,7 +4408,7 @@ class VllmConfig:
 
     As a shorthand, `-O<n>` can be used to directly specify the compilation
     level `n`: `-O3` is equivalent to `-O.level=3` (same as `-O='{"level":3}'`).
-    Currently, -O <n> and -O=<n> are supported as well but this will likely be 
+    Currently, -O <n> and -O=<n> are supported as well but this will likely be
     removed in favor of clearer -O<n> syntax in the future.
 
     NOTE: level 0 is the default level without any optimization. level 1 and 2

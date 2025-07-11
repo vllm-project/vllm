@@ -149,7 +149,7 @@ def _get_sliding_window_configs(
     sliding_window_configs: set[Optional[tuple[int, int]]] = set()
     layers = get_layers_from_vllm_config(vllm_config, Attention)
     for layer in layers.values():
-        assert hasattr(layer.impl, "sliding_window")
+        assert isinstance(layer.impl, FlashAttentionImpl)
         sliding_window_configs.add(layer.impl.sliding_window)
     return sliding_window_configs
 

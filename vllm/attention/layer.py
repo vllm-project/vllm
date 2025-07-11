@@ -52,7 +52,6 @@ class Attention(nn.Module):
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
         kv_sharing_target_layer_name: Optional[str] = None,
-        is_draft: bool = False,
         **extra_impl_args,
     ) -> None:
         """
@@ -136,8 +135,7 @@ class Attention(nn.Module):
                                         block_size,
                                         is_attention_free,
                                         blocksparse_params is not None,
-                                        use_mla=use_mla,
-                                        is_draft=is_draft)
+                                        use_mla=use_mla)
         impl_cls = attn_backend.get_impl_cls()
         self.impl = impl_cls(num_heads, head_size, scale, num_kv_heads,
                              alibi_slopes, sliding_window, kv_cache_dtype,

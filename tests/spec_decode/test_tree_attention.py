@@ -33,6 +33,7 @@ def forward_attention(
     sequence_position: int,
     q_len: int,
     backends: list[type[AttentionBackend]],
+    randomize_blocks: bool,
 ) -> list[torch.Tensor]:
     # Assert that the number of heads is divisible by the number of KV heads.
     assert num_heads % num_kv_heads == 0
@@ -94,21 +95,22 @@ def forward_attention(
         batch_size * num_allocated_blocks_per_batch,
         device=device,
         dtype=torch.int32,
-    ).view(-1, num_allocated_blocks_per_batch)
-    block_table[:, :num_allocated_blocks_per_batch] = block_ids
+    )
+    if randomize_blocks:
+        block_ids = block_ids[torch.randperm(block_ids.numel())]
+    block_table[:, :num_allocated_blocks_per_batch] = block_ids.view(
+        -1, num_allocated_blocks_per_batch)
 
     # Setup the slot mapping for the input KVs.
-    slots_per_batch = []
-    for i in range(batch_size):
-        start_offset = block_ids[i, 0] * block_size + sequence_position
-        slots_per_batch.append(
-            torch.arange(
-                start_offset,
-                start_offset + q_len,
-                device=device,
-                dtype=torch.int64,
-            ))
-    slot_mapping = torch.cat(slots_per_batch, dim=0)
+    positions = sequence_position + torch.arange(
+        0,
+        q_len,
+        device=device,
+        dtype=torch.int64,
+    ).repeat(batch_size, 1)
+    block_indices = positions // block_size
+    blocks = block_table.gather(dim=1, index=block_indices)
+    slot_mapping = (blocks * block_size + positions % block_size).view(-1)
 
     softmax_scale = q.shape[-1]**(-0.5)
     layer = NoOpLayerModule()
@@ -154,7 +156,10 @@ def forward_attention(
                 diagonal=1,
             )
             attn_metadata_dict["spec_attn_bias"] = chain_attn_bias
-            attn_metadata_dict["prefill_attn_metadata"] = None
+            attn_metadata_dict["num_prefill_tokens"] = 0
+            attn_metadata_dict["num_prefills"] = 0
+            attn_metadata_dict["num_decode_tokens"] = num_actual_tokens
+            attn_metadata_dict["num_decodes"] = batch_size
 
         # Initialize the backend implementation.
         instance = backend_cls.get_impl_cls()(
@@ -184,7 +189,8 @@ def forward_attention(
 
 
 def test_tree_attn_correctness() -> None:
-    torch.cuda.manual_seed_all(0)
+    torch.manual_seed(42)
+    torch.cuda.manual_seed_all(42)
 
     for batch_size in [1, 2, 16, 32, 64]:
         for num_heads in [2, 4]:
@@ -200,6 +206,7 @@ def test_tree_attn_correctness() -> None:
                         sequence_position=sequence_position,
                         q_len=q_len,
                         backends=[FlashAttentionBackend, TreeAttentionBackend],
+                        randomize_blocks=True,
                     )
                     assert torch.allclose(
                         flash_attn_output, tree_attn_output, atol=7.81e-3
