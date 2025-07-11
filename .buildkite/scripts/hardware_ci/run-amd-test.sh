@@ -170,13 +170,13 @@ if [[ $commands == *" entrypoints/llm "* ]]; then
   --ignore=entrypoints/llm/test_prompt_validation.py "}
 fi
 
-if [[ $commands == *"pytest -v -s lora"* ]]; then
-  commands=${commands//"pytest -v -s lora"/"VLLM_ROCM_CUSTOM_PAGED_ATTN=0 VLLM_ATTENTION_BACKEND=ROCM_FLASH pytest -v -s lora"}
-fi
+#if [[ $commands == *"pytest -v -s lora"* ]]; then
+#  commands=${commands//"pytest -v -s lora"/"VLLM_ROCM_CUSTOM_PAGED_ATTN=0 VLLM_ATTENTION_BACKEND=ROCM_FLASH pytest -v -s lora"}
+#fi
 
-if [[ $commands == *"pytest -v -s models/quantization" ]]; then 
-  commands=${commands//"pytest -v -s models/quantization"/"VLLM_ATTENTION_BACKEND=ROCM_FLASH pytest -v -s models/quantization"}
-fi
+#if [[ $commands == *"pytest -v -s models/quantization" ]]; then 
+#  commands=${commands//"pytest -v -s models/quantization"/"VLLM_ATTENTION_BACKEND=ROCM_FLASH pytest -v -s models/quantization"}
+#fi
 
 #Obsolete currently
 ##ignore certain Entrypoints/llm tests
