@@ -109,7 +109,6 @@ class FalconH1SSMDecoderLayer(nn.Module):
             quant_config=quant_config,
             use_rms_norm=config.mamba_rms_norm,
             prefix=f"{prefix}.mixer",
-            chunk_size=config.mamba_chunk_size,
         )
         # n_groups is overridden later by `MambaMixer2`
         self.groups_time_state_size = self.mamba.n_groups * config.mamba_d_state

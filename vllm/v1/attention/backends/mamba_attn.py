@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING, Optional
 import torch
 
 from vllm.attention.backends.abstract import AttentionBackend
-from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
                                               CommonAttentionMetadata)
 from vllm.v1.kv_cache_interface import MambaSpec
@@ -17,15 +16,6 @@ if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.worker.gpu_input_batch import InputBatch
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
-
-
-def get_mamba2_chunk_size(vllm_config: VllmConfig) -> int:
-    from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
-    layers = get_layers_from_vllm_config(vllm_config, MambaMixer2)
-    chunk_sizes = set(layer.chunk_size for layer in layers.values())
-    assert len(
-        chunk_sizes) == 1, "All Mamba2 layers must have the same chunk size"
-    return chunk_sizes.pop()
 
 
 def _query_start_loc_to_chunk_indices_offsets(query_start_loc: torch.Tensor,
@@ -102,7 +92,10 @@ class Mamba2AttentionMetadataBuilder(
         self.runner = runner
         self.kv_cache_spec = kv_cache_spec
         self.block_table = block_table
-        self.chunk_size = get_mamba2_chunk_size(runner.vllm_config)
+        self.chunk_size = runner.vllm_config.model_config.get_mamba_chunk_size(
+        )
+        assert self.chunk_size is not None, (
+            "chunk_size needs to be set in the model config for Mamba2 models")
 
     def reorder_batch(self, input_batch: "InputBatch",
                       scheduler_output: "SchedulerOutput") -> bool:

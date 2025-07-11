@@ -501,8 +501,7 @@ class Zamba2MambaDecoderLayer(nn.Module):
                                  rms_norm_eps=config.rms_norm_eps,
                                  activation="silu",
                                  quant_config=quant_config,
-                                 prefix=f"{prefix}.mixer",
-                                 chunk_size=config.chunk_size)
+                                 prefix=f"{prefix}.mixer")
 
         # Input normalization
         self.input_layernorm = RMSNorm(config.hidden_size,
