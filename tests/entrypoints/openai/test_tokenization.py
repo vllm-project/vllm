@@ -32,6 +32,7 @@ def server(zephyr_lora_added_tokens_files: str):  # noqa: F811
         f"zephyr-lora2={zephyr_lora_added_tokens_files}",
         "--max-lora-rank",
         "64",
+        "--enable-tokenizer-info-endpoint",
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
@@ -291,13 +292,13 @@ async def test_detokenize(
     [(MODEL_NAME, MODEL_NAME), ("zephyr-lora2", "zephyr-lora2")],
     indirect=["tokenizer_name"],
 )
-async def test_get_tokenizer_info_basic(
+async def test_tokenizer_info_basic(
     server: RemoteOpenAIServer,
     model_name: str,
     tokenizer_name: str,
 ):
     """Test basic tokenizer info endpoint functionality."""
-    response = requests.get(server.url_for("get_tokenizer_info"))
+    response = requests.get(server.url_for("tokenizer_info"))
     response.raise_for_status()
     result = response.json()
     assert "tokenizer_class" in result
@@ -306,9 +307,9 @@ async def test_get_tokenizer_info_basic(
 
 
 @pytest.mark.asyncio
-async def test_get_tokenizer_info_schema(server: RemoteOpenAIServer):
+async def test_tokenizer_info_schema(server: RemoteOpenAIServer):
     """Test that the response matches expected schema types."""
-    response = requests.get(server.url_for("get_tokenizer_info"))
+    response = requests.get(server.url_for("tokenizer_info"))
     response.raise_for_status()
     result = response.json()
     field_types = {
@@ -334,10 +335,10 @@ async def test_get_tokenizer_info_schema(server: RemoteOpenAIServer):
 
 
 @pytest.mark.asyncio
-async def test_get_tokenizer_info_added_tokens_structure(
+async def test_tokenizer_info_added_tokens_structure(
     server: RemoteOpenAIServer, ):
     """Test added_tokens_decoder structure if present."""
-    response = requests.get(server.url_for("get_tokenizer_info"))
+    response = requests.get(server.url_for("tokenizer_info"))
     response.raise_for_status()
     result = response.json()
     added_tokens = result.get("added_tokens_decoder")
@@ -353,10 +354,10 @@ async def test_get_tokenizer_info_added_tokens_structure(
 
 
 @pytest.mark.asyncio
-async def test_get_tokenizer_info_consistency_with_tokenize(
+async def test_tokenizer_info_consistency_with_tokenize(
     server: RemoteOpenAIServer, ):
     """Test that tokenizer info is consistent with tokenization endpoint."""
-    info_response = requests.get(server.url_for("get_tokenizer_info"))
+    info_response = requests.get(server.url_for("tokenizer_info"))
     info_response.raise_for_status()
     info = info_response.json()
     tokenize_response = requests.post(
@@ -376,9 +377,9 @@ async def test_get_tokenizer_info_consistency_with_tokenize(
 
 
 @pytest.mark.asyncio
-async def test_get_tokenizer_info_chat_template(server: RemoteOpenAIServer):
+async def test_tokenizer_info_chat_template(server: RemoteOpenAIServer):
     """Test chat template is properly included."""
-    response = requests.get(server.url_for("get_tokenizer_info"))
+    response = requests.get(server.url_for("tokenizer_info"))
     response.raise_for_status()
     result = response.json()
     chat_template = result.get("chat_template")
