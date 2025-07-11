@@ -1655,8 +1655,8 @@ class CacheConfig:
     - "builtin" is Python's built-in hash.\n
     - "sha256" is collision resistant but with certain overheads.
     This option uses Pickle for object serialization before hashing.\n
-    - "sha256_cbor_64bit" provides a reproducible, cross-language compatible 
-    hash. It serializes objects using canonical CBOR and hashes them with 
+    - "sha256_cbor_64bit" provides a reproducible, cross-language compatible
+    hash. It serializes objects using canonical CBOR and hashes them with
     SHA-256. The resulting hash consists of the lower 64 bits of the SHA-256
     digest."""
     cpu_offload_gb: float = 0
@@ -2874,6 +2874,19 @@ class SpeculativeConfig:
                         raise ValueError(
                             f"num_speculative_tokens:{self.num_speculative_tokens}"
                             f" must be divisible by {n_predict=}")
+
+                if self.speculative_token_tree is None:
+                    # Generate chain of tokens.
+                    self.speculative_token_tree = str([
+                        (i + 1) * (0, )
+                        for i in range(self.num_speculative_tokens)
+                    ])
+                else:
+                    # Sort the token tree breadth-first.
+                    tree_choices = ast.literal_eval(
+                        self.speculative_token_tree)
+                    self.speculative_token_tree = str(
+                        sorted(tree_choices, key=lambda t: (len(t), t)))
 
                 self.draft_tensor_parallel_size = \
                     SpeculativeConfig._verify_and_get_draft_tp(
