@@ -240,8 +240,7 @@ class DeviceCommunicatorBase:
             if module.__class__.__name__ == "FusedMoE"
         ]
         for module in moe_modules:
-            module.quant_method.init_prepare_finalize(module.moe_config,
-                                                      module.quant_config)
+            module.quant_method.init_prepare_finalize(module.moe_config)
 
     def dispatch(
             self, hidden_states: torch.Tensor,
