@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
 
 import torch
+
 from flashinfer import (BatchDecodeWithPagedKVCacheWrapper,
                         BatchPrefillWithPagedKVCacheWrapper,
                         MultiLevelCascadeAttentionWrapper)
@@ -19,14 +20,11 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.flash_attn import use_cascade_attention
-from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
-                                              CommonAttentionMetadata,
-                                              PerLayerParameters,
-                                              get_kv_cache_layout,
-                                              get_per_layer_parameters,
-                                              infer_global_hyperparameters, 
-                                              reoder_batch_to_split_decodes_and_prefills,
-                                              split_decodes_and_prefills)
+from vllm.v1.attention.backends.utils import (
+    AttentionMetadataBuilder, CommonAttentionMetadata, PerLayerParameters,
+    get_kv_cache_layout, get_per_layer_parameters,
+    infer_global_hyperparameters, reoder_batch_to_split_decodes_and_prefills,
+    split_decodes_and_prefills)
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 if TYPE_CHECKING:
@@ -450,7 +448,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             num_kv_heads=self.kv_cache_spec.num_kv_heads,
             head_dim=self.kv_cache_spec.head_size,
             page_size=page_size,
-            kv_data_type=self.kv_cache_spec.dtype,
+            kv_data_type=kv_cache_dtype,
             q_data_type=self.vllm_config.model_config.dtype,
             slot_mapping=common_attn_metadata.slot_mapping,
             num_decodes=num_decodes,
