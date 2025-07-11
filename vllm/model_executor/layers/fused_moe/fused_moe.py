@@ -979,7 +979,7 @@ def get_config_dtype_str(
         use_int4_w4a16: Optional[bool] = False,
         use_int8_w8a16: Optional[bool] = False,
         use_fp8_w8a8: Optional[bool] = False,
-        ocp_mx_scheme: Optional[OCP_MX_Scheme] = None,) -> Optional[str]:
+        ocp_mx_scheme: Optional[str] = None,) -> Optional[str]:
     if use_fp8_w8a8:
         return "fp8_w8a8"
     elif use_int8_w8a16:
@@ -991,7 +991,10 @@ def get_config_dtype_str(
         # use fp16/bfloat16 configs
         return "float32"
     elif ocp_mx_scheme is not None:
-        return ocp_mx_scheme.value
+        # The output of this function is passed to `try_get_optimal_moe_config`,
+        # and as we only simulate OCP MX execution in fused_moe for now,
+        # we will NOT look for `*,dtype=w_fp4_a_fp4.json` for now.
+        return None
     return None
 
 
@@ -1006,7 +1009,7 @@ def inplace_fused_experts(hidden_states: torch.Tensor,
                           use_int8_w8a8: bool = False,
                           use_int8_w8a16: bool = False,
                           use_int4_w4a16: bool = False,
-                          ocp_mx_scheme: Optional[OCP_MX_Scheme] = None,
+                          ocp_mx_scheme: Optional[str] = None,
                           per_channel_quant: bool = False,
                           global_num_experts: int = -1,
                           expert_map: Optional[torch.Tensor] = None,
@@ -1037,7 +1040,7 @@ def inplace_fused_experts_fake(
         use_int8_w8a8: bool = False,
         use_int8_w8a16: bool = False,
         use_int4_w4a16: bool = False,
-        ocp_mx_scheme: Optional[OCP_MX_Scheme] = None,
+        ocp_mx_scheme: Optional[str] = None,
         per_channel_quant: bool = False,
         global_num_experts: int = -1,
         expert_map: Optional[torch.Tensor] = None,
@@ -1072,7 +1075,7 @@ def outplace_fused_experts(
         use_int8_w8a8: bool = False,
         use_int8_w8a16: bool = False,
         use_int4_w4a16: bool = False,
-        ocp_mx_scheme: Optional[OCP_MX_Scheme] = None,
+        ocp_mx_scheme: Optional[str] = None,
         per_channel_quant: bool = False,
         global_num_experts: int = -1,
         expert_map: Optional[torch.Tensor] = None,
@@ -1103,7 +1106,7 @@ def outplace_fused_experts_fake(
         use_int8_w8a8: bool = False,
         use_int8_w8a16: bool = False,
         use_int4_w4a16: bool = False,
-        ocp_mx_scheme: Optional[OCP_MX_Scheme] = None,
+        ocp_mx_scheme: Optional[str] = None,
         per_channel_quant: bool = False,
         global_num_experts: int = -1,
         expert_map: Optional[torch.Tensor] = None,
@@ -1249,7 +1252,7 @@ def fused_experts_impl(
     use_int8_w8a8: bool = False,
     use_int8_w8a16: bool = False,
     use_int4_w4a16: bool = False,
-    ocp_mx_scheme: Optional[OCP_MX_Scheme] = None,
+    ocp_mx_scheme: Optional[str] = None,
     per_channel_quant: bool = False,
     global_num_experts: int = -1,
     expert_map: Optional[torch.Tensor] = None,
@@ -1265,14 +1268,13 @@ def fused_experts_impl(
     if use_int4_w4a16:
         assert hidden_states.size(1) // 2 == w1.size(2), (
             "Hidden size mismatch")
-    elif ocp_mx_scheme == OCP_MX_Scheme.w_fp4_a_fp4:
-        # 16bit activation and fp4x2 packed weight
-        assert hidden_states.size(1) // 2 == w1.size(2), "hidden size mismatch"
-    elif ocp_mx_scheme == OCP_MX_Scheme.w_fp4_a_fp6_e3m2:
-        assert (w1.size(2) * 3) % 4  # TODO: remove this line.
-        assert hidden_states.size(1) == (w1.size(2) * 3) // 4, "hidden size mismatch"
     elif ocp_mx_scheme is not None:
-        raise NotImplementedError("to implement")
+        if ocp_mx_scheme == "w_fp4_a_fp4":
+            # 16bit activation and fp4x2 packed weight
+            assert hidden_states.size(1) // 2 == w1.size(2), "hidden size mismatch"
+        elif ocp_mx_scheme in {"w_fp4_a_fp6_e3m2", "w_fp4_a_fp6_e2m3", "w_fp6_e3m2_a_fp6_e3m2", "w_fp6_e2m3_a_fp6_e2m3"}:
+            assert (w1.size(2) * 3) % 4  # TODO: remove this line.
+            assert hidden_states.size(1) == (w1.size(2) * 3) // 4, "hidden size mismatch"
     else:
         assert hidden_states.size(1) == w1.size(2), (
             f"Hidden size mismatch {hidden_states.size(1)} != {w1.size(2)}")
@@ -1346,7 +1348,7 @@ def fused_experts_impl(
         out_hidden_states = torch.empty_like(hidden_states)
 
     if ocp_mx_scheme is not None:
-        if ocp_mx_scheme in {OCP_MX_Scheme.w_fp4_a_fp4, OCP_MX_Scheme.w_fp4_a_fp6_e3m2}:
+        if ocp_mx_scheme in {OCP_MX_Scheme.w_fp4_a_fp4, OCP_MX_Scheme.w_fp4_a_fp6_e3m2, OCP_MX_Scheme.w_fp4_a_fp6_e2m3}:
             # Weight has to be dequantized for mxfp4 emulation.
             w1 = dequant_mxfp4(w1, w1_scale, hidden_states.dtype)
             w1_scale = None

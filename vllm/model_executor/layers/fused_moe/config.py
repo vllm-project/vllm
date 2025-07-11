@@ -52,17 +52,17 @@ def get_config_quant_dtype(
     use_int8_w8a8: bool,
     use_int8_w8a16: bool,
     use_int4_w4a16: bool,
-    ocp_mx_scheme: Optional[OCP_MX_Scheme],
+    ocp_mx_scheme: Optional[str],
 ) -> Union[None, torch.dtype, str]:
     if use_fp8_w8a8:
         return torch.float8_e4m3fn
     elif use_int8_w8a8:
         return torch.int8
-    elif ocp_mx_scheme == OCP_MX_Scheme.w_fp4_a_fp4:
+    elif ocp_mx_scheme == "w_fp4_a_fp4":
         return "fp4"
-    elif ocp_mx_scheme in [OCP_MX_Scheme.w_fp4_a_fp6_e3m2, OCP_MX_Scheme.w_fp6_e3m2_a_fp6_e3m2]:
+    elif ocp_mx_scheme in ["w_fp4_a_fp6_e3m2", "w_fp4_a_fp6_e2m3", "w_fp6_e3m2_a_fp6_e3m2"]:
         return "fp6_e3m2"
-    elif ocp_mx_scheme == OCP_MX_Scheme.w_fp6_e2m3_a_fp6_e2m3:
+    elif ocp_mx_scheme == "w_fp6_e2m3_a_fp6_e2m3":
         return "fp6_e2m3"
     return None
 
@@ -154,7 +154,7 @@ class FusedMoEQuantConfig:
             use_int8_w8a8=use_int8_w8a8,
             use_int8_w8a16=use_int8_w8a16,
             use_int4_w4a16=use_int4_w4a16,
-            ocp_mx_scheme=ocp_mx_scheme,
+            ocp_mx_scheme=ocp_mx_scheme.value,
         )
         return FusedMoEQuantConfig(
             quant_dtype,

@@ -8,7 +8,7 @@ import torch.nn.functional as F
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.quark.schemes import QuarkScheme
-from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import OCP_MX_BLOCK_SIZE, quant_dequant_mxfp6, quant_dequant_mxfp4, dequant_mxfp4, OCP_MX_Scheme
+from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import OCP_MX_BLOCK_SIZE, quant_dequant_mxfp6, quant_dequant_mxfp4, dequant_mxfp4, OCP_MX_Scheme, dequant_mxfp6
 from vllm.model_executor.parameter import (GroupQuantScaleParameter,
                                            PackedvLLMParameter)
 from vllm.platforms import current_platform
@@ -38,7 +38,7 @@ class QuarkOCP_MX(QuarkScheme):
             self.dequant_func = dequant_mxfp4
         else:
             self.packed_factor = 8/6
-            self.dequant_func = self.dequant_mxfp6
+            self.dequant_func = partial(dequant_mxfp6, quant_dtype=self.input_dtype)
 
         if self.input_dtype == "fp4":
             self.quant_dequant_func = quant_dequant_mxfp4
@@ -117,50 +117,11 @@ class QuarkOCP_MX(QuarkScheme):
         )
         layer.register_parameter("weight_scale", weight_scale)
 
-    def dequant_mxfp6(self, weight: torch.Tensor, scale: torch.Tensor,
-                      float_dtype: torch.dtype):
-        return self.weight_quantizer(weight).to(float_dtype)
-
-    def _process_weights_after_loading_fp6(self, layer: torch.nn.Module) -> None:
-        try:
-            from quark.torch.export.nn.modules import realquantizer
-            from quark.torch.quantization.config.config import (
-                QuantizationSpec)
-        except ImportError as err:
-            raise ImportError(
-                "The package `amd-quark` is required to use AMD Quark "
-                "MX-FP6 models. Please install it with `pip install "
-                "amd-quark`.") from err
-
-        weight_quant_spec = QuantizationSpec.from_dict(
-            self.weight_quant_spec)
-
-        weight_quantizer = realquantizer.get_real_quantizer(
-            qspec=weight_quant_spec,
-            quantizer=None,
-            real_quantized=True,
-            reorder=False,  # TODO: load from config
-            float_dtype=self.out_dtype,
-            scale_shape=layer.weight_scale.shape,
-            zero_point_shape=None,
-        )
-        weight_quantizer.scale.data = layer.weight_scale.data
-        self.weight_quantizer = weight_quantizer
-        layer.weight_scale = None
-
-        # This call is necessary to release the scales memory.
-        torch.cuda.empty_cache()
-
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         layer.weight = torch.nn.Parameter(layer.weight.data,
                                         requires_grad=False)
-
-        if self.weight_dtype in ["fp6_e3m2", "fp6_e2m3"]:
-            # Uses Quark quantizer for now.
-            self._process_weights_after_loading_fp6(layer)
-        else:
-            layer.weight_scale = torch.nn.Parameter(layer.weight_scale.data,
-                                                    requires_grad=False)
+        layer.weight_scale = torch.nn.Parameter(layer.weight_scale.data,
+                                                requires_grad=False)
 
     def apply_weights(self,
                       layer: torch.nn.Module,

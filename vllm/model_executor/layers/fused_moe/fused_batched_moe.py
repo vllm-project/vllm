@@ -935,7 +935,7 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         config_dtype = get_config_dtype_str(use_fp8_w8a8=self.use_fp8_w8a8,
                                             use_int8_w8a16=self.use_int8_w8a16,
                                             use_int4_w4a16=self.use_int4_w4a16,
-                                            ocp_mx_scheme=self.ocp_mx_scheme,
+                                            ocp_mx_scheme=self.ocp_mx_scheme.value,
                                             dtype=hidden_states.dtype)
 
         config = try_get_optimal_moe_config(
