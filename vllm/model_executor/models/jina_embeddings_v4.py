@@ -278,78 +278,65 @@ class JinaVLForEmbedding(Qwen2VLForConditionalGeneration,
         """Thread-safe pooler with production error handling."""
         start_time = time.time() if self.observability_config else None
         
-        try:
-            # Validate inputs
-            if hidden_states is None or hidden_states.numel() == 0:
-                logger.warning("Empty hidden states received")
-                return PoolerOutput(outputs=[])
-            
-            # Extract token IDs safely from metadata
-            token_ids_list, seq_ids = self._extract_token_ids_safe(pooling_metadata)
-            
-            if not token_ids_list:
-                logger.warning("No valid sequences found for pooling")
-                # Fallback to base pooler
-                return self._base_pooler(hidden_states, pooling_metadata)
-            
-            # Get prompt lengths
-            prompt_lens = PoolingTensors.from_pooling_metadata(
-                pooling_metadata, hidden_states.device
-            ).prompt_lens
-            
-            # Validate lengths match
-            if len(token_ids_list) != len(prompt_lens):
-                logger.error(f"Mismatch: {len(token_ids_list)} sequences vs {len(prompt_lens)} lengths")
-                return self._base_pooler(hidden_states, pooling_metadata)
-            
-            # Apply optimized pooling
-            try:
-                pooled_data = self._apply_vision_pooling_optimized(
-                    hidden_states, token_ids_list, prompt_lens
-                )
-            except RuntimeError as e:
-                if "out of memory" in str(e).lower():
-                    logger.warning("OOM during pooling, falling back to sequential processing")
-                    # Process sequences one by one to reduce memory
-                    pooled_data = []
-                    for i in range(len(token_ids_list)):
-                        single_pooled = self._apply_vision_pooling_pytorch(
-                            hidden_states,
-                            [token_ids_list[i]],
-                            prompt_lens[i:i+1]
-                        )
-                        pooled_data.extend(single_pooled)
-                else:
-                    raise
-            
-            # Build output
-            pooled_outputs = [
-                PoolingSequenceGroupOutput(data) for data in pooled_data
-            ]
-            
-            # Record metrics
-            if self.observability_config:
-                elapsed_ms = (time.time() - start_time) * 1000
-                self._pooling_time_ms += elapsed_ms
-                self._pooling_count += 1
-                
-                if self._pooling_count % 100 == 0:
-                    avg_time = self._pooling_time_ms / self._pooling_count
-                    logger.debug(f"Average pooling time: {avg_time:.2f}ms")
-            
-            return PoolerOutput(outputs=pooled_outputs)
-            
-        except Exception as e:
-            logger.error(f"Error in pooler: {type(e).__name__}: {e}")
-            # Graceful degradation to base pooler
-            logger.info("Falling back to base pooler due to error")
+        # Validate inputs
+        if hidden_states is None or hidden_states.numel() == 0:
+            logger.warning("Empty hidden states received")
+            return PoolerOutput(outputs=[])
+        
+        # Extract token IDs safely from metadata
+        token_ids_list, seq_ids = self._extract_token_ids_safe(pooling_metadata)
+        
+        if not token_ids_list:
+            logger.warning("No valid sequences found for pooling")
+            # Fallback to base pooler
             return self._base_pooler(hidden_states, pooling_metadata)
         
-        finally:
-            # Rely on Python's garbage collector for releasing tensors.
-            # torch.cuda.empty_cache() is a blocking and expensive operation
-            # that should be used sparingly.
-            pass
+        # Get prompt lengths
+        prompt_lens = PoolingTensors.from_pooling_metadata(
+            pooling_metadata, hidden_states.device
+        ).prompt_lens
+        
+        # Validate lengths match
+        if len(token_ids_list) != len(prompt_lens):
+            logger.error(f"Mismatch: {len(token_ids_list)} sequences vs {len(prompt_lens)} lengths")
+            return self._base_pooler(hidden_states, pooling_metadata)
+        
+        # Apply optimized pooling
+        try:
+            pooled_data = self._apply_vision_pooling_optimized(
+                hidden_states, token_ids_list, prompt_lens
+            )
+        except RuntimeError as e:
+            if "out of memory" in str(e).lower():
+                logger.warning("OOM during pooling, falling back to sequential processing")
+                # Process sequences one by one to reduce memory
+                pooled_data = []
+                for i in range(len(token_ids_list)):
+                    single_pooled = self._apply_vision_pooling_pytorch(
+                        hidden_states,
+                        [token_ids_list[i]],
+                        prompt_lens[i:i+1]
+                    )
+                    pooled_data.extend(single_pooled)
+            else:
+                raise
+        
+        # Build output
+        pooled_outputs = [
+            PoolingSequenceGroupOutput(data) for data in pooled_data
+        ]
+        
+        # Record metrics
+        if self.observability_config:
+            elapsed_ms = (time.time() - start_time) * 1000
+            self._pooling_time_ms += elapsed_ms
+            self._pooling_count += 1
+            
+            if self._pooling_count % 100 == 0:
+                avg_time = self._pooling_time_ms / self._pooling_count
+                logger.debug(f"Average pooling time: {avg_time:.2f}ms")
+        
+        return PoolerOutput(outputs=pooled_outputs)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         """Load weights with validation and error handling."""
