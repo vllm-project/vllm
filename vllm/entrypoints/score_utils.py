@@ -201,10 +201,9 @@ def get_score_prompt(
         prompt_inputs = tokenizer(text=prompt_1 + prompt_2,
                                   **tokenization_kwargs)
 
-    mm_data = mm_data or {}
     if (token_type_ids := prompt_inputs.get("token_type_ids")) is not None \
         and envs.VLLM_USE_V1:
-        mm_data["token_type_ids"] = token_type_ids
+        mm_data = {"token_type_ids": token_type_ids, **(mm_data or {})}
         token_type_ids = None
 
     engine_prompt = TokensPrompt(prompt_token_ids=prompt_inputs["input_ids"],
