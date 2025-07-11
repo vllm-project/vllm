@@ -6,6 +6,8 @@ import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
+from vllm.distributed.device_communicators.all_reduce_utils import (
+    SYMM_MEM_ALL_REDUCE_MAX_SIZES)
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
@@ -20,14 +22,6 @@ logger = init_logger(__name__)
 
 
 class SymmMemCommunicator:
-    MiB = 1024 * 1024
-    # Max sizes for each world size
-    _MAX_SIZES = {
-        2: 8 * MiB,
-        4: 32 * MiB,
-        6: 128 * MiB,
-        8: 128 * MiB,
-    }
 
     def __init__(self, group: ProcessGroup, device: Union[int, str,
                                                           torch.device]):
@@ -49,15 +43,27 @@ class SymmMemCommunicator:
         self.device = device
         self.group = group
         self.world_size = dist.get_world_size(self.group)
-        if self.world_size not in self._MAX_SIZES:
+        device_capability = current_platform.get_device_capability()
+
+        if device_capability not in SYMM_MEM_ALL_REDUCE_MAX_SIZES:
+            logger.warning(
+                "SymmMemCommunicator: Device capability %s not supported, "
+                "communicator is not available.",
+                device_capability,
+            )
+            return
+        if self.world_size not in SYMM_MEM_ALL_REDUCE_MAX_SIZES[
+                device_capability]:
             logger.warning(
                 "SymmMemCommunicator: World size %d not supported, "
                 "communicator is not available.",
                 self.world_size,
             )
             return
+        self.max_size = SYMM_MEM_ALL_REDUCE_MAX_SIZES[device_capability][
+            self.world_size]
         self.buffer = torch_symm_mem.empty(
-            self._MAX_SIZES[self.world_size] // self.dtype.itemsize,
+            self.max_size // self.dtype.itemsize,
             device=self.device,
             dtype=self.dtype,
         )
@@ -76,7 +82,7 @@ class SymmMemCommunicator:
         inp_size = inp.numel() * inp.element_size()
         if inp_size % 4 != 0:
             return False
-        return inp_size <= self._MAX_SIZES[self.world_size]
+        return inp_size <= self.max_size
 
     def all_reduce(
             self,

@@ -621,7 +621,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
      ("1", "true")),
 
     # By default, vLLM will check the peer-to-peer capability itself,
-    # in case of broken drivers. See https://github.com/vllm-project/vllm/blob/a9b15c606fea67a072416ea0ea115261a2756058/vllm/distributed/device_communicators/custom_all_reduce_utils.py#L101-L108 for details. # noqa
+    # in case of broken drivers. See https://github.com/vllm-project/vllm/blob/a9b15c606fea67a072416ea0ea115261a2756058/vllm/distributed/device_communicators/all_reduce_utils.py#L101-L108 for details. # noqa
     # If this env var is set to 1, vLLM will skip the peer-to-peer check,
     # and trust the driver's peer-to-peer capability report.
     "VLLM_SKIP_P2P_CHECK":

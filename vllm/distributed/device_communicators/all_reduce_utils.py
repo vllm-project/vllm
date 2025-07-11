@@ -18,10 +18,47 @@ import torch.multiprocessing as mp
 import vllm.envs as envs
 from vllm.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
 from vllm.logger import init_logger
+from vllm.platforms import DeviceCapability
 from vllm.utils import (cuda_device_count_stateless,
                         update_environment_variables)
 
 logger = init_logger(__name__)
+
+MiB = 1024 * 1024
+
+# Max size for each world size in case symmetric memory is available
+# For different SM architectures
+
+# TODO(ilia): update max sizes for 6, 8 for sm90
+CUSTOM_ALL_REDUCE_MAX_SIZES = {
+    DeviceCapability(9, 0): {
+        2: 64 * MiB,  # 64 MB
+        4: MiB,  # 1 MB
+        6: MiB,  # 1 MB
+        8: MiB // 2,  # 512 KB
+    },
+    DeviceCapability(10, 0): {
+        2: 2 * MiB,  # 2 MB
+        4: 2 * MiB,  # 2 MB
+        6: 8 * MiB,  # 8 MB
+        8: 8 * MiB,  # 8 MB
+    }
+}
+
+SYMM_MEM_ALL_REDUCE_MAX_SIZES = {
+    DeviceCapability(9, 0): {
+        2: 64 * MiB,  # 64 MB
+        4: 32 * MiB,  # 32 MB
+        6: 128 * MiB,  # 128 MB
+        8: 128 * MiB,  # 128 MB
+    },
+    DeviceCapability(10, 0): {
+        2: 8 * MiB,  # 8 MB
+        4: 32 * MiB,  # 32 MB
+        6: 128 * MiB,  # 128 MB
+        8: 128 * MiB,  # 128 MB
+    }
+}
 
 
 def producer(batch_src: Sequence[int],
