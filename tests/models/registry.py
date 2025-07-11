@@ -209,6 +209,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                         extras={"guard": "meta-llama/Llama-Guard-3-1B",  # noqa: E501
                                                 "hermes": "NousResearch/Hermes-3-Llama-3.1-8B", # noqa: E501
                                                 "fp8": "RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8"}),  # noqa: E501
+    "LlamaForSequenceClassification": _HfExamplesInfo("Skywork/Skywork-Reward-V2-Llama-3.2-1B"),
     "LLaMAForCausalLM": _HfExamplesInfo("decapoda-research/llama-7b-hf",
                                         is_available_online=False),
     "MambaForCausalLM": _HfExamplesInfo("state-spaces/mamba-130m-hf"),
