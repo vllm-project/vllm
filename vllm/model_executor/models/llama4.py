@@ -433,6 +433,7 @@ class Llama4Model(LlamaModel):
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name or "experts" in name:
                     continue
+                # This check is for ModelOpt ckpts with kv cache quant enabled
                 if not (name.endswith(
                     (".k_scale", ".v_scale")) and "self_attn" in name):
                     name = name.replace(weight_name, param_name)

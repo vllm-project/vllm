@@ -1006,7 +1006,6 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         for name, loaded_weight in other_weights:
             # Try stacked parameter mapping first
-            mapped = False
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name or self.use_data_parallel:
                     continue
@@ -1015,10 +1014,8 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
                 updated_params.add(name)
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
-                mapped = True
                 break
-
-            if not mapped:
+            else:
                 # Use regular weight loading
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
