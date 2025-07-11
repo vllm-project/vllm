@@ -188,8 +188,10 @@ class ExpertsInt8MoEMethod(FusedMoEMethodBase):
                 raise ValueError(
                     f"Shard id must be in [0,1,2] but got {shard_id}")
             weight_loader(param, loaded_weight, weight_name, shard_id,
-                          expert_id)
+                                                    expert_id)
 
+        # Mark as supporting MoE-specific loading to avoid expensive reflection
+        quantize_and_call_weight_loader.supports_moe_loading = True
         return quantize_and_call_weight_loader
 
 
