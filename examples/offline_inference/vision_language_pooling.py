@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 This example shows how to use vLLM for running offline inference with
-the correct prompt format on vision language models for multimodal embedding.
+the correct prompt format on vision language models for multimodal pooling.
 
 For most models, the prompt format should follow corresponding examples
 on HuggingFace model repository.
@@ -15,6 +15,7 @@ from typing import Literal, NamedTuple, Optional, TypedDict, Union, get_args
 from PIL.Image import Image
 
 from vllm import LLM, EngineArgs
+from vllm.entrypoints.score_utils import ScoreMultiModalParam
 from vllm.multimodal.utils import fetch_image
 from vllm.utils import FlexibleArgumentParser
 
@@ -35,14 +36,22 @@ class TextImageQuery(TypedDict):
     image: Image
 
 
-QueryModality = Literal["text", "image", "text+image"]
-Query = Union[TextQuery, ImageQuery, TextImageQuery]
+class TextImagesQuery(TypedDict):
+    modality: Literal["text+images"]
+    text: str
+    image: ScoreMultiModalParam
+
+
+QueryModality = Literal["text", "image", "text+image", "text+images"]
+Query = Union[TextQuery, ImageQuery, TextImageQuery, TextImagesQuery]
 
 
 class ModelRequestData(NamedTuple):
     engine_args: EngineArgs
-    prompt: str
-    image: Optional[Image]
+    prompt: Optional[str] = None
+    image: Optional[Image] = None
+    query: Optional[str] = None
+    documents: Optional[ScoreMultiModalParam] = None
 
 
 def run_e5_v(query: Query) -> ModelRequestData:
@@ -107,6 +116,29 @@ def run_vlm2vec(query: Query) -> ModelRequestData:
     )
 
 
+def run_jinavl_reranker(query: Query) -> ModelRequestData:
+    if query["modality"] != "text+images":
+        raise ValueError(f"Unsupported query modality: '{query['modality']}'")
+
+    engine_args = EngineArgs(
+        model="jinaai/jina-reranker-m0",
+        task="score",
+        max_model_len=32768,
+        trust_remote_code=True,
+        mm_processor_kwargs={
+            "min_pixels": 3136,
+            "max_pixels": 602112,
+        },
+        limit_mm_per_prompt={"image": 1},
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        query=query["text"],
+        documents=query["image"],
+    )
+
+
 def get_query(modality: QueryModality):
     if modality == "text":
         return TextQuery(modality="text", text="A dog sitting in the grass")
@@ -126,6 +158,28 @@ def get_query(modality: QueryModality):
             image=fetch_image(
                 "https://upload.wikimedia.org/wikipedia/commons/thumb/b/b6/Felis_catus-cat_on_snow.jpg/179px-Felis_catus-cat_on_snow.jpg"  # noqa: E501
             ),
+        )
+
+    if modality == "text+images":
+        return TextImagesQuery(
+            modality="text+images",
+            text="slm markdown",
+            image={
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/handelsblatt-preview.png"
+                        },
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/paper-11.png"
+                        },
+                    },
+                ]
+            },
         )
 
     msg = f"Modality {modality} is not supported."
@@ -162,16 +216,31 @@ def run_encode(model: str, modality: QueryModality, seed: Optional[int]):
         print("-" * 50)
 
 
+def run_score(model: str, modality: QueryModality, seed: Optional[int]):
+    query = get_query(modality)
+    req_data = model_example_map[model](query)
+
+    engine_args = asdict(req_data.engine_args) | {"seed": seed}
+    llm = LLM(**engine_args)
+
+    outputs = llm.score(req_data.query, req_data.documents)
+
+    print("-" * 30)
+    print([output.outputs.score for output in outputs])
+    print("-" * 30)
+
+
 model_example_map = {
     "e5_v": run_e5_v,
     "vlm2vec": run_vlm2vec,
+    "jinavl_reranker": run_jinavl_reranker,
 }
 
 
 def parse_args():
     parser = FlexibleArgumentParser(
         description="Demo on using vLLM for offline inference with "
-        "vision language models for multimodal embedding"
+        "vision language models for multimodal pooling tasks."
     )
     parser.add_argument(
         "--model-name",
@@ -180,6 +249,14 @@ def parse_args():
         default="vlm2vec",
         choices=model_example_map.keys(),
         help="The name of the embedding model.",
+    )
+    parser.add_argument(
+        "--task",
+        "-t",
+        type=str,
+        default="embedding",
+        choices=["embedding", "scoring"],
+        help="The task type.",
     )
     parser.add_argument(
         "--modality",
@@ -198,7 +275,12 @@ def parse_args():
 
 
 def main(args: Namespace):
-    run_encode(args.model_name, args.modality, args.seed)
+    if args.task == "embedding":
+        run_encode(args.model_name, args.modality, args.seed)
+    elif args.task == "scoring":
+        run_score(args.model_name, args.modality, args.seed)
+    else:
+        raise ValueError(f"Unsupported task: {args.task}")
 
 
 if __name__ == "__main__":
