@@ -756,10 +756,7 @@ def is_kv_cache_type_attention_free(
         kv_cache_spec: dict[str, KVCacheSpec]) -> bool:
 
     # kv_cache_spec is an empty dict for attention free models
-    if not kv_cache_spec:
-        return True
-
-    return False
+    return not kv_cache_spec
 
 def _get_kv_cache_config_uniform_page_size(
         vllm_config: VllmConfig, kv_cache_spec: dict[str, KVCacheSpec],
