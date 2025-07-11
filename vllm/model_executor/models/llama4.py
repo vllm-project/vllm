@@ -79,7 +79,8 @@ class Llama4MoE(nn.Module):
 
         # Calculate expert distribution
         self.n_logical_experts = config.num_local_experts
-        self.n_redundant_experts = parallel_config.num_redundant_experts
+        # Only use redundant experts if EPLB is enabled
+        self.n_redundant_experts = parallel_config.num_redundant_experts if self.enable_eplb else 0
         self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
 
@@ -276,7 +277,6 @@ class Llama4DecoderLayer(nn.Module):
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
-        enable_eplb: bool = False,
     ) -> None:
         super().__init__()
 
@@ -285,6 +285,11 @@ class Llama4DecoderLayer(nn.Module):
         rope_theta = config.rope_theta
         rope_scaling = config.rope_scaling
         max_position_embeddings = config.max_position_embeddings
+        
+        # Get enable_eplb from current vllm config
+        vllm_config = get_current_vllm_config()
+        enable_eplb = vllm_config.parallel_config.enable_eplb if hasattr(
+            vllm_config.parallel_config, 'enable_eplb') else False
 
         self.self_attn = Llama4Attention(
             config=config,
@@ -386,7 +391,7 @@ class Llama4Model(LlamaModel):
         layer_type: type[nn.Module],
         prefix: str,
     ) -> list[nn.Module]:
-        """Override to pass enable_eplb to decoder layers."""
+        """Create decoder layers."""
         layers = []
         for layer_idx in range(num_hidden_layers):
             if isinstance(self.start_layer,
@@ -400,7 +405,6 @@ class Llama4Model(LlamaModel):
                     cache_config=self.cache_config,
                     quant_config=self.quant_config,
                     prefix=f"{prefix}.{layer_idx}",
-                    enable_eplb=self.enable_eplb,
                 )
                 layers.append(layer)
         return layers
