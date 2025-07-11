@@ -288,8 +288,7 @@ def _per_token_group_quant_fp8(
     # Quant
     _absmax = tl.maximum(tl.max(tl.abs(y)), eps)
     scale_raw = _absmax / fp8_max
-    y_s = tl.where(use_ue8m0, tl.math.exp2(tl.ceil(tl.log2(scale_raw))),
-                   scale_raw)
+    y_s = tl.math.exp2(tl.ceil(tl.log2(scale_raw))) if use_ue8m0 else scale_raw
     y_q = tl.clamp(y / y_s, fp8_min, fp8_max).to(y_q_ptr.dtype.element_ty)
 
     tl.store(y_q_ptr + cols, y_q, mask=mask)
@@ -353,8 +352,7 @@ def _per_token_group_quant_fp8_colmajor(
     # Quant
     _absmax = tl.maximum(tl.max(tl.abs(y)), eps)
     scale_raw = _absmax / fp8_max
-    y_s = tl.where(use_ue8m0, tl.math.exp2(tl.ceil(tl.log2(scale_raw))),
-                   scale_raw)
+    y_s = tl.math.exp2(tl.ceil(tl.log2(scale_raw))) if use_ue8m0 else scale_raw
     y_q = tl.clamp(y / y_s, fp8_min, fp8_max).to(y_q_ptr.dtype.element_ty)
 
     tl.store(y_q_ptr + cols, y_q, mask=mask)
