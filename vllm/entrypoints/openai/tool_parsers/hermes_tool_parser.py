@@ -7,7 +7,6 @@ from typing import Union
 
 import partial_json_parser
 import regex as re
-from partial_json_parser.core.options import Allow
 from json_repair import repair_json
 
 from vllm.entrypoints.chat_utils import random_tool_call_id
@@ -171,6 +170,7 @@ class Hermes2ProToolParser(ToolParser):
             # something with tools with this diff.
             # flags for partial JSON parting. exported constants from
             # "Allow" are handled via BIT MASK
+            from partial_json_parser.core.options import Allow
             flags = Allow.ALL if self.current_tool_name_sent \
                 else Allow.ALL & ~Allow.STR
 
