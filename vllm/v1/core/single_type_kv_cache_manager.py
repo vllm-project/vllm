@@ -8,7 +8,7 @@ from vllm.utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheSpec,
-                                        MambaSpec, SlidingWindowSpec)
+                                        MambaSpec, SlidingWindowSpec, ShortConvSpec)
 from vllm.v1.request import Request
 
 
@@ -434,6 +434,7 @@ spec_manager_map: dict[type[KVCacheSpec], type[SingleTypeKVCacheManager]] = {
     FullAttentionSpec: FullAttentionManager,
     SlidingWindowSpec: SlidingWindowManager,
     MambaSpec: MambaManager,
+    ShortConvSpec: MambaManager,
 }
 
 
