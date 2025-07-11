@@ -94,7 +94,6 @@ if TYPE_CHECKING:
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
     VLLM_ROCM_CUSTOM_PAGED_ATTN: bool = True
-    VLLM_QUARK_EMU_MEM_OPT: bool = False
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
     VLLM_DISABLE_COMPILE_CACHE: bool = False
@@ -118,6 +117,7 @@ if TYPE_CHECKING:
     VLLM_RANDOMIZE_DP_DUMMY_INPUTS: bool = False
     VLLM_MARLIN_USE_ATOMIC_ADD: bool = False
     VLLM_V0_USE_OUTLINES_CACHE: bool = False
+    VLLM_V1_USE_OUTLINES_CACHE: bool = False
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
     VLLM_TPU_MOST_MODEL_LEN: Optional[int] = None
     VLLM_USE_DEEP_GEMM: bool = False
@@ -723,14 +723,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: maybe_convert_int(
         os.environ.get("VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB", None)),
 
-    # If set, when running in Quark emulation mode, do not dequantize the
-    # weights at load time. Instead, dequantize weights on-the-fly during
-    # kernel execution.
-    # This allows running larger models at the cost of slower inference.
-    # This flag has no effect when not running in Quark emulation mode.
-    "VLLM_QUARK_EMU_MEM_OPT":
-    lambda: bool(int(os.getenv("VLLM_QUARK_EMU_MEM_OPT", "0"))),
-
     # Divisor for dynamic query scale factor calculation for FP8 KV Cache
     "Q_SCALE_CONSTANT":
     lambda: int(os.getenv("Q_SCALE_CONSTANT", "200")),
@@ -856,6 +848,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_V0_USE_OUTLINES_CACHE":
     lambda: os.environ.get("VLLM_V0_USE_OUTLINES_CACHE", "0") == "1",
 
+    # Whether to turn on the outlines cache for V1
+    # This cache is unbounded and on disk, so it's not safe to use in
+    # an environment with potentially malicious users.
+    "VLLM_V1_USE_OUTLINES_CACHE":
+    lambda: os.environ.get("VLLM_V1_USE_OUTLINES_CACHE", "0") == "1",
+
     # Gap between padding buckets for the forward pass. So we have
     # 8, we will run forward pass with [16, 24, 32, ...].
     "VLLM_TPU_BUCKET_PADDING_GAP":
@@ -961,7 +959,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # consumer. This is only applicable when using NixlConnector in a
     # disaggregated decode-prefill setup.
     "VLLM_NIXL_ABORT_REQUEST_TIMEOUT":
-    lambda: int(os.getenv("VLLM_NIXL_ABORT_REQUEST_TIMEOUT", "120"))
+    lambda: int(os.getenv("VLLM_NIXL_ABORT_REQUEST_TIMEOUT", "120")),
+
+    # If set to 1, use the TRTLLM Decode Attention backend in flashinfer.
+    "VLLM_USE_TRTLLM_DECODE_ATTENTION":
+    lambda: os.getenv("VLLM_USE_TRTLLM_DECODE_ATTENTION", None),
 }
 
 # --8<-- [end:env-vars-definition]
