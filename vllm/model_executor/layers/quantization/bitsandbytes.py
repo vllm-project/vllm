@@ -5,7 +5,11 @@ from typing import Any, Callable, Optional, Union
 
 import torch
 
-from vllm.model_executor.layers.fused_moe import fused_experts
+from vllm.triton_utils import HAS_TRITON
+
+if HAS_TRITON:
+    from vllm.model_executor.layers.fused_moe import fused_experts
+
 from vllm.model_executor.layers.fused_moe.layer import (FusedMoE,
                                                         FusedMoEMethodBase)
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
