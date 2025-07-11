@@ -1385,11 +1385,16 @@ class CompletionResponseChoice(OpenAIBaseModel):
 
 class CompletionResponse(OpenAIBaseModel):
     id: str = Field(default_factory=lambda: f"cmpl-{random_uuid()}")
-    object: str = "text_completion"
+    object: Literal["text_completion"] = "text_completion"
     created: int = Field(default_factory=lambda: int(time.time()))
     model: str
     choices: list[CompletionResponseChoice]
+    service_tier: Optional[Literal["auto", "default", "flex", "scale",
+                                   "priority"]] = None
+    system_fingerprint: Optional[str] = None
     usage: UsageInfo
+
+    # vLLM-specific fields that are not in OpenAI spec
     kv_transfer_params: Optional[dict[str, Any]] = Field(
         default=None, description="KVTransfer parameters.")
 

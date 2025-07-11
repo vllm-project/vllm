@@ -1011,21 +1011,21 @@ GetHandlerFn = Callable[[Request], Optional[OpenAIServing]]
 EndpointFn = Callable[[RequestType, Request], Awaitable[Any]]
 
 # NOTE: Items defined earlier take higher priority
-INVOCATION_TYPES: dict[RequestType, tuple[GetHandlerFn, EndpointFn]] = {
-    ChatCompletionRequest: (chat, create_chat_completion),
-    CompletionRequest: (completion, create_completion),
-    EmbeddingRequest: (embedding, create_embedding),
-    ClassificationRequest: (classify, create_classify),
-    ScoreRequest: (score, create_score),
-    RerankRequest: (rerank, do_rerank),
-    PoolingRequest: (pooling, create_pooling),
-}
+INVOCATION_TYPES: list[tuple[RequestType, tuple[GetHandlerFn, EndpointFn]]] = [
+    (ChatCompletionRequest, (chat, create_chat_completion)),
+    (CompletionRequest, (completion, create_completion)),
+    (EmbeddingRequest, (embedding, create_embedding)),
+    (ClassificationRequest, (classify, create_classify)),
+    (ScoreRequest, (score, create_score)),
+    (RerankRequest, (rerank, do_rerank)),
+    (PoolingRequest, (pooling, create_pooling)),
+]
 
 # NOTE: Construct the TypeAdapters only once
-INVOCATION_VALIDATORS = {
-    pydantic.TypeAdapter(request_type): (get_handler, endpoint)
-    for request_type, (get_handler, endpoint) in INVOCATION_TYPES.items()
-}
+INVOCATION_VALIDATORS = [
+    (pydantic.TypeAdapter(request_type), (get_handler, endpoint))
+    for request_type, (get_handler, endpoint) in INVOCATION_TYPES
+]
 
 
 @router.post("/invocations",
@@ -1049,14 +1049,12 @@ async def invocations(raw_request: Request):
         raise HTTPException(status_code=HTTPStatus.BAD_REQUEST.value,
                             detail=f"JSON decode error: {e}") from e
 
-    valid_endpoints = {
-        validator: endpoint
-        for validator, (get_handler,
-                        endpoint) in INVOCATION_VALIDATORS.items()
-        if get_handler(raw_request) is not None
-    }
+    valid_endpoints = [(validator, endpoint)
+                       for validator, (get_handler,
+                                       endpoint) in INVOCATION_VALIDATORS
+                       if get_handler(raw_request) is not None]
 
-    for request_validator, endpoint in valid_endpoints.items():
+    for request_validator, endpoint in valid_endpoints:
         try:
             request = request_validator.validate_python(body)
         except pydantic.ValidationError:
@@ -1066,7 +1064,7 @@ async def invocations(raw_request: Request):
 
     type_names = [
         t.__name__ if isinstance(t := validator._type, type) else str(t)
-        for validator in valid_endpoints
+        for validator, _ in valid_endpoints
     ]
     msg = ("Cannot find suitable handler for request. "
            f"Expected one of: {type_names}")
