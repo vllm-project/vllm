@@ -57,7 +57,7 @@ class KVConnectorRole(enum.Enum):
     WORKER = 1
 
 
-class KVConnectorMetadata:
+class KVConnectorMetadata(ABC):  # noqa: B024
     """
     Abstract Metadata used to communicate between the
     Scheduler KVConnector and Worker KVConnector.
@@ -71,7 +71,7 @@ class KVConnectorBase_V1(ABC):
         logger.warning(
             "Initializing KVConnectorBase_V1. This API is experimental and "
             "subject to change in the future as we iterate the design.")
-        self._connector_metadata = KVConnectorMetadata()
+        self._connector_metadata: Optional[KVConnectorMetadata] = None
         self._vllm_config = vllm_config
         self._role = role
 
@@ -102,7 +102,7 @@ class KVConnectorBase_V1(ABC):
         This function should be called by the model runner every time 
         after the model execution.
         """
-        self._connector_metadata = KVConnectorMetadata()
+        self._connector_metadata = None
 
     def _get_connector_metadata(self) -> KVConnectorMetadata:
         """Get the connector metadata.
@@ -112,6 +112,9 @@ class KVConnectorBase_V1(ABC):
         Returns:
             ConnectorMetadata: the connector metadata.
         """
+
+        # Should only be called while set to valid metadata.
+        assert self._connector_metadata is not None
         return self._connector_metadata
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
