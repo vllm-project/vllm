@@ -124,7 +124,15 @@ class NixlConnector(KVConnectorBase_V1):
                                 "Fallback to default kv cache layout.")
             return None
         use_mla = vllm_config.model_config.use_mla
-        return None if use_mla else "HND"
+        if use_mla:
+            # return None when we have mla
+            # as the layout should not matter in that case,
+            # which fallback to the default behavior.
+            return None
+        else:
+            logger.info_once("NixlConnector detected. Setting KV cache " \
+                             "layout to HND for better xfer performance.")
+            return "HND"
 
     ############################################################
     # Scheduler Side Methods
