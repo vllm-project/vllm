@@ -81,12 +81,11 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                        params_dtype: torch.dtype, **extra_weight_attrs):
         raise NotImplementedError
 
-    def init_prepare_finalize(self, moe: FusedMoEConfig,
-                              quant_config: Optional[QuantizationConfig]):
+    @staticmethod
+    def maybe_make_prepare_finalize(
+            moe: FusedMoEConfig) -> Optional[FusedMoEPrepareAndFinalize]:
         all2all_manager = get_ep_group().device_communicator.all2all_manager
         assert all2all_manager is not None
-
-        self.moe = moe
 
         prepare_finalize: Optional[FusedMoEPrepareAndFinalize] = None
 
@@ -160,8 +159,6 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                                 and moe.quant_config.block_shape
                                 == DEEPEP_QUANT_BLOCK_SHAPE)
 
-            # Note (varun): Whether to use FP8 dispatch or not needs some
-            # profiling. Turning it off for now.
             prepare_finalize = DeepEPLLPrepareAndFinalize(
                 handle,
                 max_tokens_per_rank=moe.max_num_tokens,
@@ -169,11 +166,18 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                 use_fp8_dispatch=use_fp8_dispatch,
             )
 
+        return prepare_finalize
+
+    def init_prepare_finalize(self, moe: FusedMoEConfig):
+        self.moe = moe
+        prepare_finalize = FusedMoEMethodBase.maybe_make_prepare_finalize(
+            self.moe)
+
         self.topk_indices_dtype = None
         if prepare_finalize is not None:
             logger.debug("%s", prepare_finalize.__class__.__name__)
             self.topk_indices_dtype = prepare_finalize.topk_indices_dtype()
-            experts = self.select_gemm_impl(prepare_finalize, moe)
+            experts = self.select_gemm_impl(prepare_finalize, self.moe)
             self.fused_experts = FusedMoEModularKernel(
                 prepare_finalize,
                 experts,
@@ -883,14 +887,21 @@ class FusedMoE(torch.nn.Module):
                            expert_data=expert_data,
                            tp_rank=tp_rank)
 
-    def _load_w13(self, expert_data: torch.Tensor, shard_dim: int,
-                  shard_id: str, loaded_weight: torch.Tensor, tp_rank: int):
+    def _load_w13(self,
+                  expert_data: torch.Tensor,
+                  shard_dim: int,
+                  shard_id: str,
+                  loaded_weight: torch.Tensor,
+                  tp_rank: int,
+                  load_full: bool = False):
 
         # Index the loaded weight for tp sharding.
         # gate_up_proj: "MergedColumnParallel", so tp sharding on output_dim
         shard_size = expert_data.shape[shard_dim] // 2
-        loaded_weight = loaded_weight.narrow(shard_dim, shard_size * tp_rank,
-                                             shard_size)
+        if not load_full:
+            loaded_weight = loaded_weight.narrow(shard_dim,
+                                                 shard_size * tp_rank,
+                                                 shard_size)
         # Narrow parameter and load.
         # w1, gate_proj: Load into first logical weight of w13.
         if shard_id == "w1":
@@ -996,6 +1007,27 @@ class FusedMoE(torch.nn.Module):
         if is_gguf_weight_type:
             param.weight_type = loaded_weight.item()
             param.data.copy_(loaded_weight)
+            return True if return_success else None
+
+        # Case for BitsAndBytes
+        use_bitsandbytes_4bit = getattr(param, "use_bitsandbytes_4bit", False)
+        if use_bitsandbytes_4bit:
+            shard_dim = 0
+
+            expert_data = param.data[expert_id]
+            if shard_id == "w2":
+                expert_data.copy_(loaded_weight)
+            elif shard_id in ("w1", "w3"):
+                # BNB inflight quantization has already sharded the weights
+                full_load = True
+                self._load_w13(
+                    shard_id=shard_id,
+                    shard_dim=shard_dim,
+                    loaded_weight=loaded_weight,
+                    expert_data=expert_data,
+                    tp_rank=self.tp_rank,
+                    load_full=full_load,
+                )
             return True if return_success else None
 
         # is_transposed: if the dim to shard the weight
