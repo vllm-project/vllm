@@ -282,6 +282,14 @@ Supported models:
 
 Flags: `--tool-call-parser deepseek_v3 --chat-template {see_above}`
 
+### Kimi-K2 Models (`kimi_k2`)
+
+Supported models:
+
+* `moonshotai/Kimi-K2-Instruct`
+
+Flags: `--tool-call-parser kimi_k2`
+
 ### Models with Pythonic Tool Calls (`pythonic`)
 
 A growing number of models output a python list to represent tool calls instead of using JSON. This has the advantage of inherently supporting parallel tool calls and removing ambiguity around the JSON schema required for tool calls. The `pythonic` tool parser can support such models.
