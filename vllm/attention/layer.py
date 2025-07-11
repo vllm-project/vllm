@@ -10,6 +10,7 @@ import torch.nn.functional as F
 import vllm.envs as envs
 from vllm.attention import AttentionType
 from vllm.attention.selector import backend_name_to_enum, get_attn_backend
+from vllm.attention.utils.kv_sharing_utils import validate_kv_sharing_target
 from vllm.config import CacheConfig, get_current_vllm_config
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group,
@@ -21,7 +22,6 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.platforms import _Backend, current_platform
 from vllm.utils import direct_register_custom_op
-from vllm.v1.attention.backends.utils import validate_kv_sharing_target
 
 
 class Attention(nn.Module):
@@ -310,7 +310,8 @@ class MultiHeadAttention(nn.Module):
             # currently, only torch_sdpa is supported on rocm
             self.attn_backend = _Backend.TORCH_SDPA
         else:
-            if backend in {_Backend.FLASH_ATTN, _Backend.FLASH_ATTN_VLLM_V1}:
+            if backend in (_Backend.FLASH_ATTN, _Backend.FLASH_ATTN_VLLM_V1,
+                           _Backend.FLEX_ATTENTION):
                 backend = _Backend.XFORMERS
 
             self.attn_backend = backend if backend in {

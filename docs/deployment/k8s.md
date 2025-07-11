@@ -1,7 +1,4 @@
----
-title: Using Kubernetes
----
-[](){ #deployment-k8s }
+# Using Kubernetes
 
 Deploying vLLM on Kubernetes is a scalable and efficient way to serve machine learning models. This guide walks you through deploying vLLM using native Kubernetes.
 
@@ -29,7 +26,7 @@ Alternatively, you can deploy vLLM to Kubernetes using any of the following:
 
 First, create a Kubernetes PVC and Secret for downloading and storing Hugging Face model:
 
-??? Config
+??? console "Config"
 
     ```bash
     cat <<EOF |kubectl apply -f -
@@ -57,7 +54,7 @@ First, create a Kubernetes PVC and Secret for downloading and storing Hugging Fa
 
 Next, start the vLLM server as a Kubernetes Deployment and Service:
 
-??? Config
+??? console "Config"
 
     ```bash
     cat <<EOF |kubectl apply -f -
