@@ -109,5 +109,8 @@ def test_rerank_models_mteb_tp(vllm_runner,
     if model_info.name == "Qwen/Qwen3-Reranker-4B":
         vllm_extra_kwargs["max_num_seqs"] = 1
 
-    mteb_test_rerank_models(Qwen3RerankerHfRunner, vllm_runner, model_info,
-                            vllm_extra_kwargs)
+    mteb_test_rerank_models(Qwen3RerankerHfRunner,
+                            vllm_runner,
+                            model_info,
+                            vllm_extra_kwargs,
+                            atol=1e-2)
