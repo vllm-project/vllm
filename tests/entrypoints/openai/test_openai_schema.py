@@ -95,6 +95,10 @@ def test_openapi_stateless(case: schemathesis.Case):
         case.operation.method.upper(),
         case.operation.path,
     )
+    if case.operation.path.startswith("/v1/responses"):
+        # Skip responses API as it is meant to be stateful.
+        return
+
     timeout = {
         # requires a longer timeout
         ("POST", "/v1/chat/completions"):

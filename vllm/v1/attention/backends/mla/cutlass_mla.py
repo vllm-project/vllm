@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from typing import Any, Optional
 
@@ -90,6 +91,7 @@ class CutlassMLAImpl(MLACommonImpl[MLACommonMetadata]):
         # Clone q_nope and q_pe to make sure strides computation is correct.
         q_nope = q_nope.clone()
         q_pe = q_pe.clone()
+
         ops.cutlass_mla_decode(o, q_nope, q_pe, kv_c_and_k_pe_cache,
                                attn_metadata.decode.seq_lens,
                                attn_metadata.decode.block_table, self.scale)
