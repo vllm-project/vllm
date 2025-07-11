@@ -27,6 +27,7 @@ Prerequisites:
 
 import time
 
+import numpy as np
 from openai import OpenAI
 
 # Configuration
@@ -292,7 +293,6 @@ def test_embedding_consistency():
         # Check consistency (embeddings should be identical)
         if len(embeddings) >= 2:
             # Calculate similarity between first two embeddings
-            import numpy as np
 
             emb1 = np.array(embeddings[0])
             emb2 = np.array(embeddings[1])
