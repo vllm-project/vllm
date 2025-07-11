@@ -461,7 +461,8 @@ class FusedMoEModularKernel(torch.nn.Module):
             w1_zp: Optional[torch.Tensor], w2_zp: Optional[torch.Tensor],
             a1q_scale: Optional[torch.Tensor],
             a2_scale: Optional[torch.Tensor],
-            expert_tokens_meta: Optional[ExpertTokensMetadata]
+            expert_tokens_meta: Optional[ExpertTokensMetadata],
+            extra_expert_kwargs: Optional[dict] = None
     ) -> torch.Tensor:
 
         _, M, N, K, top_k = _moe_problem_size(a1q, w1, w2, topk_ids)
@@ -501,7 +502,8 @@ class FusedMoEModularKernel(torch.nn.Module):
                                  a2_scale=a2_scale,
                                  workspace13=workspace13,
                                  workspace2=workspace2,
-                                 expert_tokens_meta=expert_tokens_meta)
+                                 expert_tokens_meta=expert_tokens_meta,
+                                 **extra_expert_kwargs)
 
         return fused_out
 
@@ -523,10 +525,6 @@ class FusedMoEModularKernel(torch.nn.Module):
         CHUNK_SIZE = envs.VLLM_FUSED_MOE_CHUNK_SIZE
         num_chunks = cdiv(M, CHUNK_SIZE)
 
-        if 'topk_weights' in extra_expert_kwargs and extra_expert_kwargs['topk_weights'] is None:
-            extra_expert_kwargs['topk_weights'] = topk_weights
-            assert extra_expert_kwargs['topk_weights'] is not None
-
         if not self.fused_experts.supports_chunking() or num_chunks == 1:
             return self._do_fused_experts(
                 fused_out=None,
@@ -546,7 +544,7 @@ class FusedMoEModularKernel(torch.nn.Module):
                 a1q_scale=a1q_scale,
                 a2_scale=a2_scale,
                 expert_tokens_meta=expert_tokens_meta,
-                **extra_expert_kwargs)
+                extra_expert_kwargs=extra_expert_kwargs)
 
         # Chunking required case
         assert num_chunks > 1
@@ -599,6 +597,10 @@ class FusedMoEModularKernel(torch.nn.Module):
                 expert_num_tokens=c_expert_num_tokens,
                 expert_num_tokens_cpu=c_expert_num_tokens_cpu)
 
+        topk_weights = extra_expert_kwargs.get('topk_weights')
+        m = extra_expert_kwargs.get('m')
+
+        chunked_extra_expert_kwargs = extra_expert_kwargs
         for chunk_idx in range(num_chunks):
             c_a1q, c_a1q_scale, c_a2_scale, c_topk_ids = (
                 slice_input_tensors(chunk_idx))
@@ -609,10 +611,13 @@ class FusedMoEModularKernel(torch.nn.Module):
                     expert_tokens_meta, c_topk_ids, local_num_experts,
                     expert_map)
             
-            if 'm' in extra_expert_kwargs and extra_expert_kwargs['m'] is not None:
-                s = chunk_idx * CHUNK_SIZE
-                e = min(s + CHUNK_SIZE, M)
-                extra_expert_kwargs['m'] = e - s
+            s = chunk_idx * CHUNK_SIZE
+            e = min(s + CHUNK_SIZE, M)
+
+            if m is not None:
+                chunked_extra_expert_kwargs['m'] = e - s
+            if topk_weights is not None:
+                chunked_extra_expert_kwargs['topk_weights'] = topk_weights[s:e]
 
             self._do_fused_experts(fused_out=slice_output_tensor(chunk_idx),
                                    a1=a1,
@@ -631,7 +636,7 @@ class FusedMoEModularKernel(torch.nn.Module):
                                    a1q_scale=c_a1q_scale,
                                    a2_scale=c_a2_scale,
                                    expert_tokens_meta=c_expert_tokens_meta,
-                                   **extra_expert_kwargs)
+                                   extra_expert_kwargs=chunked_extra_expert_kwargs)
 
         return fused_out
 
@@ -726,6 +731,11 @@ class FusedMoEModularKernel(torch.nn.Module):
 
         fused_out = None
         extra_expert_kwargs = extra_expert_args or {}
+    
+        if 'topk_weights' in extra_expert_kwargs and extra_expert_kwargs['topk_weights'] is None:
+            extra_expert_kwargs['topk_weights'] = topk_weights
+            assert extra_expert_kwargs['topk_weights'] is not None
+
         if a1q.numel() == 0:
             # This happens when none of the tokens from the all2all reach this
             # EP rank. Also, note that this is only relevant for CUDAGraph

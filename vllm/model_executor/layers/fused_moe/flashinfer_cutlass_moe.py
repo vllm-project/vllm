@@ -9,6 +9,8 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (
     FlashInferCutlassMoEPrepareAndFinalize)
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
+    TopKWeightAndReduceDelegate)
 
 from vllm.utils import round_up
 
@@ -58,6 +60,8 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         ep_size: int=1,
         tp_rank: int=0,
         tp_size: int=1,
+        num_dispatchers: Optional[int] = None,
+        use_batched_format: bool = False,
     ):
         super().__init__(
             FusedMoEQuantConfig(
@@ -72,6 +76,9 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         self.tp_rank=tp_rank
         self.tp_size=tp_size
         self.use_dp=use_dp
+        assert not use_batched_format or num_dispatchers is not None
+        self.num_dispatchers = num_dispatchers
+
 
     @property
     def activation_formats(
@@ -87,6 +94,10 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         # This refers to TP chunking; DP chunking is handled separately.
         return True
 
+    def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
+        # Let PrepareAndFinalize::finalize() decide the impl.
+        return TopKWeightAndReduceDelegate()
+    
     def workspace_shapes(
         self, a: torch.Tensor, aq: torch.Tensor, M: int, N: int, K: int,
         topk: int, global_num_experts: int, local_num_experts: int
@@ -139,7 +150,7 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         a2_scale: Optional[torch.Tensor],  # Not used
         workspace13:Optional[torch.Tensor],
         workspace2:Optional[torch.Tensor],
-        expert_num_tokens: Optional[torch.Tensor],
+        expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
         topk_weights: torch.Tensor,
         g1_alphas: torch.Tensor,
         g2_alphas: torch.Tensor,

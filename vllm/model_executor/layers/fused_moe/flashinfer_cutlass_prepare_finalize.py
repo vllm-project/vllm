@@ -35,11 +35,13 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         quant_dtype: Optional[torch.dtype] = None,
         per_channel_quant: bool = False,
         block_shape: Optional[list[int]] = None,
+        num_dispatchers: int = 1,
     ):
         super().__init__()      
         self.per_channel_quant = per_channel_quant
         self.block_shape = block_shape
         self.quant_dtype = quant_dtype
+        self.num_dispatchers_ = num_dispatchers
 
     @property
     def activation_format(self) -> mk.FusedMoEActivationFormat:
@@ -50,6 +52,9 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
     def topk_indices_dtype(self) -> Optional[torch.dtype]:
         return None
+    
+    def num_dispatchers(self) -> int:
+        return self.num_dispatchers_
 
     def prepare(
         self,
@@ -102,6 +107,7 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
+        weight_and_reduce_impl: mk.TopKWeightAndReduce,
         use_dp: bool = False,
         local_tokens: int = -1,
     ) -> None:
