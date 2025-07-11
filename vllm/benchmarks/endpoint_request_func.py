@@ -100,6 +100,7 @@ async def async_request_openai_completions(
                                     headers=headers) as response:
                 if response.status == 200:
                     first_chunk_received = False
+                    first_token_received = False
                     async for chunk_bytes in response.content:
                         chunk_bytes = chunk_bytes.strip()
                         if not chunk_bytes:
@@ -120,26 +121,32 @@ async def async_request_openai_completions(
                             # usage summary response without a token so we
                             # want to check a token was generated
                             if choices := data.get("choices"):
+                                first_chunk_received = True
                                 # Note that text could be empty here
                                 # e.g. for special tokens
                                 text = choices[0].get("text")
+                                chunk_has_valid_text = text and len(text) > 0
                                 timestamp = time.perf_counter()
                                 # First token
-                                if not first_chunk_received:
-                                    first_chunk_received = True
-                                    ttft = time.perf_counter() - st
-                                    output.ttft = ttft
+                                if chunk_has_valid_text:
+                                    if not first_token_received:
+                                        first_token_received = True
+                                        ttft = timestamp - st
+                                        output.ttft = ttft
 
-                                # Decoding phase
-                                else:
-                                    output.itl.append(timestamp -
-                                                      most_recent_timestamp)
+                                    # Decoding phase
+                                    else:
+                                        output.itl.append(
+                                            timestamp - most_recent_timestamp
+                                        )
 
-                                most_recent_timestamp = timestamp
-                                generated_text += text or ""
-                            elif usage := data.get("usage"):
+                                    generated_text += text
+                            if usage := data.get("usage"):
                                 output.output_tokens = usage.get(
-                                    "completion_tokens")
+                                    "completion_tokens"
+                                )
+
+                            most_recent_timestamp = timestamp
                     if first_chunk_received:
                         output.success = True
                     else:
@@ -232,22 +239,37 @@ async def async_request_openai_chat_completions(
                             timestamp = time.perf_counter()
                             data = json.loads(chunk)
 
+                            # NOTE: Some completion API might have a last
+                            # usage summary response without a token so we
+                            # want to check a token was generated
                             if choices := data.get("choices"):
                                 content = choices[0]["delta"].get("content")
-                                # First token
-                                if ttft == 0.0:
-                                    ttft = timestamp - st
-                                    output.ttft = ttft
 
-                                # Decoding phase
-                                else:
-                                    output.itl.append(timestamp -
-                                                      most_recent_timestamp)
+                                # NOTE: Some completion API might send first
+                                # chunk right after they recieved a request,
+                                # not just before a first generated token. It
+                                # significantly affects TTFT. First chunk in
+                                # v1/chat/completions don't have actual
+                                # content, so, we can rely on it
+                                chunk_has_valid_content = content and \
+                                    len(content) > 0
+                                if chunk_has_valid_content:
+                                    # First token
+                                    if ttft == 0.0:
+                                        ttft = timestamp - st
+                                        output.ttft = ttft
 
-                                generated_text += content or ""
-                            elif usage := data.get("usage"):
+                                    # Decoding phase
+                                    else:
+                                        output.itl.append(
+                                            timestamp - most_recent_timestamp
+                                        )
+
+                                    generated_text += content
+                            if usage := data.get("usage"):
                                 output.output_tokens = usage.get(
-                                    "completion_tokens")
+                                    "completion_tokens"
+                                )
 
                             most_recent_timestamp = timestamp
 
@@ -335,30 +357,49 @@ async def async_request_openai_audio(
                             chunk_bytes = chunk_bytes.strip()
                             if not chunk_bytes:
                                 continue
+                            chunk_bytes = chunk_bytes.decode("utf-8")
+                            # NOTE: SSE comments (often used as pings) start
+                            # with a colon. These are not JSON data payload
+                            # and should be skipped.
+                            if chunk_bytes.startswith(":"):
+                                continue
 
-                            chunk = chunk_bytes.decode("utf-8").removeprefix(
-                                "data: ")
+                            chunk = chunk_bytes.removeprefix("data: ")
+
                             if chunk != "[DONE]":
                                 timestamp = time.perf_counter()
                                 data = json.loads(chunk)
 
                                 if choices := data.get("choices"):
-                                    content = choices[0]["delta"].get(
-                                        "content")
-                                    # First token
-                                    if ttft == 0.0:
-                                        ttft = timestamp - st
-                                        output.ttft = ttft
+                                    content = choices[0]["delta"].get("content")
 
-                                    # Decoding phase
-                                    else:
-                                        output.itl.append(
-                                            timestamp - most_recent_timestamp)
+                                    # NOTE: Some completion API might send
+                                    # first chunk right after they recieved
+                                    # a request, not just before a first
+                                    # generated token. It significantly
+                                    # affects TTFT. First chunk in
+                                    # v1/chat/completions don't have actual
+                                    # content, so, we can rely on it
+                                    chunk_has_valid_content = content and \
+                                        len(content) > 0
+                                    if chunk_has_valid_content:
+                                        # First token
+                                        if ttft == 0.0:
+                                            ttft = timestamp - st
+                                            output.ttft = ttft
 
-                                    generated_text += content or ""
-                                elif usage := data.get("usage"):
+                                        # Decoding phase
+                                        else:
+                                            output.itl.append(
+                                                timestamp -
+                                                most_recent_timestamp
+                                            )
+
+                                        generated_text += content
+                                if usage := data.get("usage"):
                                     output.output_tokens = usage.get(
-                                        "completion_tokens")
+                                        "completion_tokens"
+                                    )
 
                                 most_recent_timestamp = timestamp
 
