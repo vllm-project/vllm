@@ -99,13 +99,13 @@ The test client demonstrates:
 
 2. **Memory errors**:
   
-```
+   ```
    RuntimeError: CUDA out of memory
    ```
   
-**Solution**: Reduce `MAX_MODEL_LEN` or use fewer GPUs
+   **Solution**: Reduce `MAX_MODEL_LEN` or use fewer GPUs
 
-1. **Slow processing**:
+3. **Slow processing**:
    **Expected**: Long text takes more time due to multiple inference calls
 
 ### Debug Information
