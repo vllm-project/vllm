@@ -465,7 +465,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             self._workspace_buffer = torch.empty(
                 FLASHINFER_WORKSPACE_BUFFER_SIZE,
                 dtype=torch.uint8,
-                device=runner.device)
+                device=device)
 
             self._fi_prefill_main: Optional[
                 BatchPrefillWithRaggedKVCacheWrapper] = None
@@ -473,7 +473,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 BatchPrefillWithRaggedKVCacheWrapper] = []
 
             self._global_hyperparameters = infer_global_hyperparameters(
-                get_per_layer_parameters(runner.vllm_config, MLACommonImpl))
+                get_per_layer_parameters(vllm_config, MLACommonImpl))
 
         if self._use_cudnn_prefill:
             self.cudnn_workspace = torch.empty(
@@ -505,7 +505,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             assert num_chunks <= len(self._fi_prefill_chunks)
 
         # In MLA, the non-latent num_qo_heads == num_kv_heads
-        num_qo_heads = self.runner.num_query_heads
+        num_qo_heads = self.num_heads
         num_kv_heads = num_qo_heads
 
         # Sanity: Verify that num_kv_heads == 1 since it is latent space
@@ -531,7 +531,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             sm_scale=self._global_hyperparameters.sm_scale,
             window_left=self._global_hyperparameters.window_left,
             logits_soft_cap=self._global_hyperparameters.logits_soft_cap,
-            q_data_type=self.runner.dtype,
+            q_data_type=self.model_config.dtype,
             kv_data_type=self.kv_cache_spec.dtype,
         )
 
@@ -552,7 +552,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                     window_left=self._global_hyperparameters.window_left,
                     logits_soft_cap=self._global_hyperparameters.
                     logits_soft_cap,
-                    q_data_type=self.runner.dtype,
+                    q_data_type=self.model_config.dtype,
                     kv_data_type=self.kv_cache_spec.dtype,
                 )
 
