@@ -38,7 +38,7 @@ class QuarkOCP_MX(QuarkScheme):
             self.dequant_func = dequant_mxfp4
         else:
             self.packed_factor = 8/6
-            self.dequant_func = partial(dequant_mxfp6, quant_dtype=self.input_dtype)
+            self.dequant_func = partial(dequant_mxfp6, quant_dtype=self.weight_dtype)
 
         if self.input_dtype == "fp4":
             self.quant_dequant_func = quant_dequant_mxfp4

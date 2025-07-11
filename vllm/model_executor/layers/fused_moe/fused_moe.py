@@ -1269,12 +1269,12 @@ def fused_experts_impl(
         assert hidden_states.size(1) // 2 == w1.size(2), (
             "Hidden size mismatch")
     elif ocp_mx_scheme is not None:
-        if ocp_mx_scheme == "w_fp4_a_fp4":
+        if ocp_mx_scheme in {"w_fp4_a_fp4", "w_fp4_a_fp6_e3m2", "w_fp4_a_fp6_e2m3"}:
             # 16bit activation and fp4x2 packed weight
-            assert hidden_states.size(1) // 2 == w1.size(2), "hidden size mismatch"
-        elif ocp_mx_scheme in {"w_fp4_a_fp6_e3m2", "w_fp4_a_fp6_e2m3", "w_fp6_e3m2_a_fp6_e3m2", "w_fp6_e2m3_a_fp6_e2m3"}:
-            assert (w1.size(2) * 3) % 4  # TODO: remove this line.
-            assert hidden_states.size(1) == (w1.size(2) * 3) // 4, "hidden size mismatch"
+            assert hidden_states.size(1) == w1.size(2) * 2, "hidden size mismatch"
+        elif ocp_mx_scheme in {"w_fp6_e3m2_a_fp6_e3m2", "w_fp6_e2m3_a_fp6_e2m3"}:
+            assert (w1.size(2) * 4) % 3 == 0  # TODO: remove this line.
+            assert hidden_states.size(1) == (w1.size(2) * 4) // 3, "hidden size mismatch"
     else:
         assert hidden_states.size(1) == w1.size(2), (
             f"Hidden size mismatch {hidden_states.size(1)} != {w1.size(2)}")
@@ -1360,9 +1360,9 @@ def fused_experts_impl(
             w2 = dequant_mxfp6(w2, w2_scale, quant_dtype="fp6_e3m2", float_dtype=hidden_states.dtype)
             w2_scale = None
         elif ocp_mx_scheme == OCP_MX_Scheme.w_fp6_e2m3_a_fp6_e2m3:
-            w1 = dequant_mxfp6(w1, w1_scale, quant_dtype="fp6_e3m2", float_dtype=hidden_states.dtype)
+            w1 = dequant_mxfp6(w1, w1_scale, quant_dtype="fp6_e2m3", float_dtype=hidden_states.dtype)
             w1_scale = None
-            w2 = dequant_mxfp6(w2, w2_scale, quant_dtype="fp6_e3m2", float_dtype=hidden_states.dtype)
+            w2 = dequant_mxfp6(w2, w2_scale, quant_dtype="fp6_e2m3", float_dtype=hidden_states.dtype)
             w2_scale = None
 
     for chunk in range((num_tokens // CHUNK_SIZE) + 1):
