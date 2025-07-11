@@ -941,8 +941,8 @@ class ModelConfig:
         ]
         _, arch = self.registry.inspect_model_cls(self.architectures)
 
-        for suffix, runner in suffix_to_preferred_runner:
-            if arch.endswith(suffix) and runner in supported_runner_types:
+        for suffix, pref_runner in suffix_to_preferred_runner:
+            if arch.endswith(suffix) and pref_runner in supported_runner_types:
                 return runner
 
         if "generate" in supported_runner_types:
