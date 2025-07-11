@@ -83,7 +83,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         return self.max_num_tokens
 
     def topk_indices_dtype(self) -> Optional[torch.dtype]:
-        return torch.uint32
+        return torch.int32
 
     def num_dispatchers(self) -> int:
         return self.num_dispatchers_
@@ -204,7 +204,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             out_expert_x_scale=expert_x_scale,
             dp_x=a1q,
             dp_x_scale=a1q_scale,
-            indices=topk_ids,
+            indices=topk_ids.view(dtype=torch.uint32),
             bound_m=bound_m,
         )
 
@@ -249,7 +249,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             topk_weights = torch.ones_like(topk_weights)
 
         self.a2a.combine(out_tokens=output,
-                         indices=topk_ids,
+                         indices=topk_ids.view(dtype=torch.uint32),
                          weights=topk_weights,
                          expert_y=fused_expert_output,
                          bound_m=bound_m)
