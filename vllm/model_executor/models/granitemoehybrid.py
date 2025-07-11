@@ -69,8 +69,7 @@ class GraniteMoeHybridMambaDecoderLayer(nn.Module):
                                 rms_norm_eps=config.rms_norm_eps,
                                 activation=config.hidden_act,
                                 quant_config=quant_config,
-                                prefix=f"{prefix}.mixer",
-                                chunk_size=config.mamba_chunk_size)
+                                prefix=f"{prefix}.mixer")
 
         self.block_sparse_moe = None
         if getattr(config, "num_local_experts", 0) > 0:
