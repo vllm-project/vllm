@@ -39,9 +39,6 @@ logger = init_logger(__name__)
 VISION_START_TOKEN_ID = 151652
 VISION_END_TOKEN_ID = 151653
 
-# Maximum sequence length for safety
-MAX_SEQUENCE_LENGTH = 512 * 1024  # 512K tokens
-
 
 PoolingMetadata = Union[V0PoolingMetadata, V1PoolingMetadata]
 
@@ -227,16 +224,10 @@ class JinaVLForEmbedding(Qwen2VLForConditionalGeneration,
                 # Regular mean pooling for text
                 seq_states = hidden_states[offset:offset + prompt_len]
                 output = seq_states.mean(dim=0)
-            
-            # Normalize (check for zero vector to avoid NaN)
-            if output.count_nonzero() > 0:
-                output = F.normalize(output, p=2, dim=-1)
-            else:
-                # If all zeros, fall back to PyTorch implementation
-                logger.warning("Triton kernel returned zero vector, falling back to PyTorch")
-                seq_states = hidden_states[offset:offset + prompt_len]
-                output = seq_states.mean(dim=0)
-                output = F.normalize(output, p=2, dim=-1)
+
+            # Normalize and handle potential NaNs by replacing with zeros
+            output = F.normalize(output, p=2, dim=-1)
+            output = torch.nan_to_num(output)
             pooled_outputs.append(output)
             
             offset += prompt_len
@@ -255,11 +246,6 @@ class JinaVLForEmbedding(Qwen2VLForConditionalGeneration,
         
         for token_ids, prompt_len in zip(token_ids_list, prompt_lens):
             prompt_len = int(prompt_len.item())
-            
-            # Safety check for sequence length
-            if prompt_len > MAX_SEQUENCE_LENGTH:
-                logger.warning(f"Sequence length {prompt_len} exceeds maximum {MAX_SEQUENCE_LENGTH}")
-                prompt_len = MAX_SEQUENCE_LENGTH
             
             # Extract sequence states and tokens
             seq_states = hidden_states[offset:offset + prompt_len]
@@ -325,10 +311,9 @@ class JinaVLForEmbedding(Qwen2VLForConditionalGeneration,
             ).prompt_lens
         
         # Validate lengths match
-        if len(token_ids_list) != len(prompt_lens):
-            raise AssertionError(
-                f"Mismatch: {len(token_ids_list)} sequences vs {len(prompt_lens)} lengths"
-            )
+        assert len(token_ids_list) == len(prompt_lens), (
+            f"Mismatch: {len(token_ids_list)} sequences vs {len(prompt_lens)} lengths"
+        )
         
         # Apply pooling based on configured backend
         if self.pooling_backend == "triton":
