@@ -19,6 +19,10 @@ from vllm.transformers_utils.config import (
     get_cross_encoder_activation_function)
 from vllm.v1.pool.metadata import PoolingMetadata as V1PoolingMetadata
 
+from vllm.triton_utils import tl, triton
+HAS_TRITON = triton is not None
+
+
 PoolingMetadata = Union[V0PoolingMetadata, V1PoolingMetadata]
 
 
@@ -471,3 +475,43 @@ class ClassifierPooler(nn.Module):
 
         pooled_outputs = [PoolingSequenceGroupOutput(data) for data in scores]
         return PoolerOutput(outputs=pooled_outputs)
+
+if HAS_TRITON:
+    @triton.jit
+    def extract_vision_tokens_kernel(
+        hidden_states_ptr,
+        token_ids_ptr,
+        output_ptr,
+        seq_start,
+        seq_len,
+        hidden_size,
+        vision_start_id: tl.constexpr,
+        vision_end_id: tl.constexpr,
+        BLOCK_SIZE: tl.constexpr,
+    ):
+        """Triton kernel to extract and pool vision tokens efficiently."""
+        pid = tl.program_id(0)
+
+        if pid >= hidden_size:
+            return
+            
+        # Find vision token range
+        vision_count = 0
+        accumulator = 0.0
+        
+        for i in range(seq_len):
+            token_id = tl.load(token_ids_ptr + seq_start + i)
+            if token_id >= vision_start_id and token_id <= vision_end_id:
+                hidden_val = tl.load(
+                    hidden_states_ptr + (seq_start + i) * hidden_size + pid
+                )
+                accumulator += hidden_val
+                vision_count += 1
+        
+        # Store mean pooled result
+        if vision_count > 0:
+            result = accumulator / vision_count
+        else:
+            result = 0.0
+            
+        tl.store(output_ptr + pid, result)
