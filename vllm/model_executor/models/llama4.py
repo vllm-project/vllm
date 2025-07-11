@@ -533,15 +533,27 @@ class Llama4ForCausalLM(LlamaForCausalLM, MixtureOfExperts):
         # For MixtureOfExperts protocol
         self._num_redundant_experts = 0
 
+        # Track FusedMoE layers for EPLB
+        self.moe_layers: list[FusedMoE] = []
+        config = vllm_config.model_config.hf_config
+        for i, layer in enumerate(self.model.layers):
+            if isinstance(layer, Llama4DecoderLayer):
+                is_moe_layer = (config.interleave_moe_layer_step > 0
+                                and (i + 1) % config.interleave_moe_layer_step
+                                == 0)
+                if is_moe_layer and hasattr(layer, 'feed_forward') and hasattr(
+                        layer.feed_forward, 'experts'):
+                    self.moe_layers.append(layer.feed_forward.experts)
+
     @property
     def expert_weights(self) -> list[torch.nn.Module]:
         """Get all MoE layers"""
-        return self.model.moe_layers
+        return self.moe_layers
 
     @property
     def num_moe_layers(self) -> int:
         """Get number of MoE layers"""
-        return len(self.model.moe_layers)
+        return len(self.moe_layers)
 
     @property
     def num_expert_groups(self) -> int:
@@ -561,11 +573,8 @@ class Llama4ForCausalLM(LlamaForCausalLM, MixtureOfExperts):
     @property
     def num_local_physical_experts(self) -> int:
         """Get number of local physical experts"""
-        if hasattr(self.model, 'moe_layers') and len(
-                self.model.moe_layers) > 0:
-            moe_layer = self.model.moe_layers[0]
-            if hasattr(moe_layer.feed_forward, 'experts'):
-                return moe_layer.feed_forward.experts.local_num_experts
+        if len(self.moe_layers) > 0:
+            return self.moe_layers[0].local_num_experts
         return self.config.num_local_experts
 
     @property
@@ -593,22 +602,18 @@ class Llama4ForCausalLM(LlamaForCausalLM, MixtureOfExperts):
     ) -> None:
         """Set EPLB state for MoE layers"""
         for i, moe_layer_idx in enumerate(moe_layer_indices):
-            moe_layer = self.model.moe_layers[i]
-            if hasattr(moe_layer.feed_forward, 'experts'):
-                moe_layer.feed_forward.experts.set_eplb_state(
-                    moe_layer_idx=i,
-                    expert_load_view=expert_load_view,
-                    logical_to_physical_map=logical_to_physical_map,
-                    logical_replica_count=logical_replica_count,
-                )
+            self.moe_layers[i].set_eplb_state(
+                moe_layer_idx=i,
+                expert_load_view=expert_load_view,
+                logical_to_physical_map=logical_to_physical_map,
+                logical_replica_count=logical_replica_count,
+            )
 
     def get_expert_weights(self) -> list[list[torch.Tensor]]:
         """Get expert weights from all MoE layers"""
         expert_weights = []
-        for moe_layer in self.model.moe_layers:
-            if hasattr(moe_layer.feed_forward, 'experts'):
-                expert_weights.append(
-                    list(moe_layer.feed_forward.experts.get_expert_weights()))
+        for moe_layer in self.moe_layers:
+            expert_weights.append(list(moe_layer.get_expert_weights()))
         return expert_weights
 
     def _init_model(self,
