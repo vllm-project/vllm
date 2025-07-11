@@ -11,7 +11,8 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate)
 from vllm.model_executor.layers.fused_moe.utils import _resize_cache
 from vllm.triton_utils import tl, triton
-from vllm.utils.deep_gemm import fp8_m_grouped_gemm_nt_masked
+from vllm.utils.deep_gemm import (fp8_m_grouped_gemm_nt_masked,
+                                  is_blackwell_deep_gemm_used)
 
 logger = init_logger(__name__)
 
@@ -101,11 +102,84 @@ def _silu_mul_fp8_quant_deep_gemm(
         t += 1
 
 
+@triton.jit
+def _silu_mul_fp8_quant_deep_gemm_ue8m0(
+    input_ptr,
+    y_q_ptr,
+    y_s_ptr,
+    counts_ptr,
+    H: tl.constexpr,
+    GROUP_SIZE: tl.constexpr,
+    stride_i_e,
+    stride_i_t,
+    stride_i_h,
+    stride_yq_e,
+    stride_yq_t,
+    stride_yq_h,
+    stride_ys_e,
+    stride_ys_t,
+    stride_ys_g,
+    stride_counts_e,
+    eps: tl.constexpr,
+    fp8_min: tl.constexpr,
+    fp8_max: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    G = H // GROUP_SIZE
+
+    pid = tl.program_id(0)
+    e = pid // G
+    g = pid % G
+
+    e = e.to(tl.int64)
+    g = g.to(tl.int64)
+
+    n_tokens = tl.load(counts_ptr + e * stride_counts_e).to(tl.int64)
+
+    cols = tl.arange(0, BLOCK).to(tl.int64)
+    mask_h = cols < BLOCK
+
+    t = tl.zeros([], tl.int64)
+    while t < n_tokens:
+        base_i_offset = (e * stride_i_e + t * stride_i_t +
+                         g * GROUP_SIZE * stride_i_h)
+        base_yq_offset = (e * stride_yq_e + t * stride_yq_t +
+                          g * GROUP_SIZE * stride_yq_h)
+        base_ys_offset = e * stride_ys_e + t * stride_ys_t + g * stride_ys_g
+
+        x = tl.load(input_ptr + base_i_offset + cols * stride_i_h,
+                    mask=mask_h,
+                    other=0.0).to(tl.float32)
+        y2 = tl.load(input_ptr + base_i_offset + H * stride_i_h +
+                     cols * stride_i_h,
+                     mask=mask_h,
+                     other=0.0).to(tl.float32)
+
+        x = x * (1.0 / (1.0 + tl.exp(-x)))
+        y = x * y2
+
+        _absmax = tl.maximum(tl.max(tl.abs(y)), eps)
+        # round scale up to nearest power-of-two (UE8M0)
+        # specifically for DeepGemm SM100 kernels
+        scale_raw = _absmax / fp8_max
+        y_s = tl.math.exp2(tl.ceil(tl.log2(scale_raw)))
+        y_q = tl.clamp(y / y_s, fp8_min, fp8_max).to(y_q_ptr.dtype.element_ty)
+
+        tl.store(y_q_ptr + base_yq_offset + cols * stride_yq_h,
+                 y_q,
+                 mask=mask_h)
+        tl.store(y_s_ptr + base_ys_offset, y_s)
+
+        t += 1
+
+
 def silu_mul_fp8_quant_deep_gemm(
     y: torch.Tensor,  # (E, T, 2*H) float32
     tokens_per_expert: torch.Tensor,  # (E,) number of valid tokens per expert
     group_size: int = 128,
     eps: float = 1e-10,
+    *,
+    use_ue8m0: bool = False,
 ):
     """Quantize silu(y[..., :H]) * y[..., H:] to FP8 with group per-token scales
 
@@ -154,7 +228,11 @@ def silu_mul_fp8_quant_deep_gemm(
     fp8_max = f_info.max
     fp8_min = f_info.min
 
-    _silu_mul_fp8_quant_deep_gemm[grid](
+    kernel = _silu_mul_fp8_quant_deep_gemm_ue8m0 \
+        if use_ue8m0 \
+        else _silu_mul_fp8_quant_deep_gemm
+
+    kernel[grid](
         y,
         y_q,
         y_s,
@@ -290,14 +368,16 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         # may lead to better performance.
         expected_m = max_num_tokens
         fp8_m_grouped_gemm_nt_masked((a1q, a1q_scale), (w1, w1_scale),
-                                     out=workspace1,
-                                     masked_m=expert_num_tokens,
-                                     expected_m=expected_m)
+                                     workspace1, expert_num_tokens, expected_m)
 
-        a2q, a2q_scale = silu_mul_fp8_quant_deep_gemm(workspace1,
-                                                      expert_num_tokens)
+        if is_blackwell_deep_gemm_used():
+            a2q, a2q_scale = silu_mul_fp8_quant_deep_gemm(workspace1,
+                                                          expert_num_tokens,
+                                                          use_ue8m0=True)
+        else:
+            a2q, a2q_scale = silu_mul_fp8_quant_deep_gemm(workspace1,
+                                                          expert_num_tokens,
+                                                          use_ue8m0=False)
 
-        fp8_m_grouped_gemm_nt_masked((a2q, a2q_scale), (w2, w2_scale),
-                                     out=output,
-                                     masked_m=expert_num_tokens,
-                                     expected_m=expected_m)
+        fp8_m_grouped_gemm_nt_masked((a2q, a2q_scale), (w2, w2_scale), output,
+                                     expert_num_tokens, expected_m)
