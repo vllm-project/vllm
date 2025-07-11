@@ -117,6 +117,7 @@ if TYPE_CHECKING:
     VLLM_RANDOMIZE_DP_DUMMY_INPUTS: bool = False
     VLLM_MARLIN_USE_ATOMIC_ADD: bool = False
     VLLM_V0_USE_OUTLINES_CACHE: bool = False
+    VLLM_V1_USE_OUTLINES_CACHE: bool = False
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
     VLLM_TPU_MOST_MODEL_LEN: Optional[int] = None
     VLLM_USE_DEEP_GEMM: bool = False
@@ -846,6 +847,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # an environment with potentially malicious users.
     "VLLM_V0_USE_OUTLINES_CACHE":
     lambda: os.environ.get("VLLM_V0_USE_OUTLINES_CACHE", "0") == "1",
+
+    # Whether to turn on the outlines cache for V1
+    # This cache is unbounded and on disk, so it's not safe to use in
+    # an environment with potentially malicious users.
+    "VLLM_V1_USE_OUTLINES_CACHE":
+    lambda: os.environ.get("VLLM_V1_USE_OUTLINES_CACHE", "0") == "1",
 
     # Gap between padding buckets for the forward pass. So we have
     # 8, we will run forward pass with [16, 24, 32, ...].

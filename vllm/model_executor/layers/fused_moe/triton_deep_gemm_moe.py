@@ -69,6 +69,25 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         return ((dge is None or dge.supports_expert_map())
                 and (te is None or te.supports_expert_map()))
 
+    def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
+        dge = self.deep_gemm_expert
+        te = self.triton_expert
+        dge_war = dge.finalize_weight_and_reduce_impl() if dge else None
+        te_war = te.finalize_weight_and_reduce_impl() if te else None
+        is_dge_war = dge_war is not None
+        is_te_war = te_war is not None
+
+        if is_dge_war and is_te_war:
+            assert dge_war == te_war, (
+                "Both implementations should agree on WeightAndReduce impls. "
+                f"Got dge_war: {dge_war}, and te_war: {te_war}")
+
+        if dge_war is not None:
+            return dge_war
+
+        assert te_war is not None
+        return te_war
+
     def workspace_shapes(
         self,
         a: torch.Tensor,
