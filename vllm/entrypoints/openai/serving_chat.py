@@ -669,14 +669,16 @@ class OpenAIServingChat(OpenAIServing):
                                 and not reasoning_parser.is_reasoning_end(
                                     previous_token_ids)):
                             assert reasoning_parser is not None
-                            delta_message = reasoning_parser.extract_reasoning_content_streaming(
-                                previous_text,
-                                current_text,
-                                delta_text,
-                                previous_token_ids,
-                                current_token_ids,
-                                output.token_ids,
-                            )
+                            delta_message = (
+                                reasoning_parser.
+                                extract_reasoning_content_streaming(
+                                    previous_text,
+                                    current_text,
+                                    delta_text,
+                                    previous_token_ids,
+                                    current_token_ids,
+                                    output.token_ids,
+                                ))
                             # When encountering think end id in delta_token_ids,
                             # process the `content`. Only keep 'content',
                             # remove 'reasoning_content'
@@ -747,14 +749,16 @@ class OpenAIServingChat(OpenAIServing):
                         assert added_content_delta_arr is not None
                         assert reasoning_end_arr is not None
                         if not reasoning_end_arr[i]:
-                            delta_message = reasoning_parser.extract_reasoning_content_streaming(
-                                previous_text,
-                                current_text,
-                                delta_text,
-                                previous_token_ids,
-                                current_token_ids,
-                                output.token_ids,
-                            )
+                            delta_message = (
+                                reasoning_parser.
+                                extract_reasoning_content_streaming(
+                                    previous_text,
+                                    current_text,
+                                    delta_text,
+                                    previous_token_ids,
+                                    current_token_ids,
+                                    output.token_ids,
+                                ))
                             # When encountering think end id in prompt_token_ids
                             # i.e {"enable_thinking": False},
                             # set reasoning status to end.
@@ -824,14 +828,15 @@ class OpenAIServingChat(OpenAIServing):
                             ))
                     # when only reasoning
                     elif self.reasoning_parser:
-                        delta_message = reasoning_parser.extract_reasoning_content_streaming(
-                            previous_text,
-                            current_text,
-                            delta_text,
-                            previous_token_ids,
-                            current_token_ids,
-                            output.token_ids,
-                        )
+                        delta_message = (reasoning_parser.
+                                         extract_reasoning_content_streaming(
+                                             previous_text,
+                                             current_text,
+                                             delta_text,
+                                             previous_token_ids,
+                                             current_token_ids,
+                                             output.token_ids,
+                                         ))
                     # handle streaming just a content delta
                     else:
                         delta_message = DeltaMessage(content=delta_text)
