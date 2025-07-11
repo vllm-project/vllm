@@ -408,7 +408,8 @@ RUN --mount=type=cache,target=/root/.cache/uv bash - <<'BASH'
 
           # Needed to build AOT kernels
           pushd flashinfer
-            python3 -m flashinfer.aot
+            TORCH_CUDA_ARCH_LIST="${FI_TORCH_CUDA_ARCH_LIST}" \
+              python3 -m flashinfer.aot
             TORCH_CUDA_ARCH_LIST="${FI_TORCH_CUDA_ARCH_LIST}" \
               uv pip install --system --no-build-isolation .
           popd
