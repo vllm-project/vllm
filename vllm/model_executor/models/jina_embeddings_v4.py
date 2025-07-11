@@ -3,7 +3,7 @@
 import time
 from array import array
 from collections.abc import Iterable
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple, List, Union
 
 import torch
 import torch.nn.functional as F
@@ -21,9 +21,11 @@ except ImportError:
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.pooler import Pooler, PoolingType
-from vllm.model_executor.pooling_metadata import PoolingMetadata, PoolingTensors
+from vllm.model_executor.pooling_metadata import (
+    PoolingMetadata as V0PoolingMetadata, PoolingTensors)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors, PoolerOutput, PoolingSequenceGroupOutput
+from vllm.v1.pool.metadata import PoolingMetadata as V1PoolingMetadata
 
 from .interfaces import SupportsMultiModal, SupportsCrossEncoding
 from .qwen2_vl import (Qwen2VLDummyInputsBuilder,
@@ -39,6 +41,9 @@ VISION_END_TOKEN_ID = 151653
 
 # Maximum sequence length for safety
 MAX_SEQUENCE_LENGTH = 512 * 1024  # 512K tokens
+
+
+PoolingMetadata = Union[V0PoolingMetadata, V1PoolingMetadata]
 
 
 # Triton kernel for optimized vision token extraction
@@ -120,14 +125,24 @@ class JinaVLForEmbedding(Qwen2VLForConditionalGeneration,
         logger.info("Initialized JinaVLForEmbedding with thread-safe pooling")
 
     def _extract_token_ids_safe(
-        self, 
+        self,
         pooling_metadata: PoolingMetadata
     ) -> Tuple[List[array], List[int]]:
         """Safely extract token IDs from pooling metadata."""
+        token_ids_list: List[array] = []
         try:
+            if isinstance(pooling_metadata, V1PoolingMetadata):
+                # For V1, we get token IDs and sequence indices directly
+                for i, num in enumerate(pooling_metadata.prompt_lens):
+                    token_ids = pooling_metadata.prompt_token_ids[i, :num].tolist()
+                    token_ids_list.append(array('l', token_ids))
+                
+                # V1 metadata does not have explicit seq_ids, so we use indices
+                seq_ids = list(range(len(token_ids_list)))
+                return token_ids_list, seq_ids
+
+            # For V0, we extract from seq_groups and seq_data
             seq_ids = []
-            token_ids_list = []
-            
             for seq_group, _ in pooling_metadata.seq_groups:
                 for seq_id in seq_group:
                     if seq_id not in pooling_metadata.seq_data:
@@ -151,7 +166,8 @@ class JinaVLForEmbedding(Qwen2VLForConditionalGeneration,
             return token_ids_list, seq_ids
             
         except Exception as e:
-            logger.error(f"Error extracting token IDs: {e}")
+            logger.error(f"Error extracting token IDs: {e}. "
+                         f"Extracted {len(token_ids_list)} sequences before failure")
             raise
 
     def _apply_vision_pooling_optimized(
@@ -291,10 +307,13 @@ class JinaVLForEmbedding(Qwen2VLForConditionalGeneration,
             # Fallback to base pooler
             return self._base_pooler(hidden_states, pooling_metadata)
         
-        # Get prompt lengths
-        prompt_lens = PoolingTensors.from_pooling_metadata(
-            pooling_metadata, hidden_states.device
-        ).prompt_lens
+        # Get prompt lengths based on metadata type
+        if isinstance(pooling_metadata, V1PoolingMetadata):
+            prompt_lens = pooling_metadata.prompt_lens
+        else:
+            prompt_lens = PoolingTensors.from_pooling_metadata(
+                pooling_metadata, hidden_states.device
+            ).prompt_lens
         
         # Validate lengths match
         if len(token_ids_list) != len(prompt_lens):
@@ -308,16 +327,11 @@ class JinaVLForEmbedding(Qwen2VLForConditionalGeneration,
             )
         except RuntimeError as e:
             if "out of memory" in str(e).lower():
-                logger.warning("OOM during pooling, falling back to sequential processing")
-                # Process sequences one by one to reduce memory
-                pooled_data = []
-                for i in range(len(token_ids_list)):
-                    single_pooled = self._apply_vision_pooling_pytorch(
-                        hidden_states,
-                        [token_ids_list[i]],
-                        prompt_lens[i:i+1]
-                    )
-                    pooled_data.extend(single_pooled)
+                logger.warning("OOM during optimized pooling, falling back to batched PyTorch")
+                # Fallback to a more memory-efficient PyTorch implementation
+                pooled_data = self._apply_vision_pooling_pytorch(
+                    hidden_states, token_ids_list, prompt_lens
+                )
             else:
                 raise
         
