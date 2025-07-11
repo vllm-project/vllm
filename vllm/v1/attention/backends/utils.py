@@ -48,7 +48,7 @@ class CommonAttentionMetadata:
     max_query_len: int
     """Longest query in batch"""
 
-    decode_indices: Optional[torch.Tensor] = None
+    generation_indices: Optional[torch.Tensor] = None
     """indices used for decoding"""
 
     query_start_loc_np: Optional[np.ndarray] = None

@@ -317,11 +317,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # from the KV cache of `shared_kv_cache_layers[layer_name]`.
         self.shared_kv_cache_layers: dict[str, str] = {}
 
-        self.decode_indices = None
+        self.generation_indices = None
         if self.cache_config.kv_sharing_skip_prefill:
-            self.decode_indices = torch.zeros(self.max_num_tokens,
-                                            dtype=torch.int32,
-                                            device=self.device)
+            self.generation_indices = torch.zeros(self.max_num_tokens,
+                                                  dtype=torch.int32,
+                                                  device=self.device)
 
     def _may_reorder_batch(self, scheduler_output: "SchedulerOutput") -> None:
         """
@@ -581,11 +581,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         return cu_num_tokens, arange
 
-    def _calc_decode_indices(self, logits_indices: torch.Tensor):
+    def _calc_generation_indices(self, logits_indices: torch.Tensor):
         """
         Pads logits_indices to align with CUDA graph capture sizes
         """
-        if self.decode_indices is None:
+        if self.generation_indices is None:
             return None
 
         num_decode_reqs = 0
@@ -604,16 +604,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # indices for partial requests though we do not sample any token
         # from these partial requests, for simplicity. In the future, we
         # can calculate the 'true' decode indices based on logits_indices
-        self.decode_indices[:num_decodes].copy_(logits_indices)
+        self.generation_indices[:num_decodes].copy_(logits_indices)
         # pad with last idx instead of zero
-        self.decode_indices[num_decodes:].fill_(logits_indices[-1].item())
+        self.generation_indices[num_decodes:].fill_(logits_indices[-1].item())
         if (self.use_cuda_graph
                 and num_decodes <= self.cudagraph_batch_sizes[-1]):
             num_decodes_padded = self.vllm_config.pad_for_cudagraph(
                 num_decodes)
         else:
             num_decodes_padded = num_decodes
-        return self.decode_indices[:num_decodes_padded]
+        return self.generation_indices[:num_decodes_padded]
 
     def _prepare_inputs(
         self,
@@ -765,7 +765,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_draft_tokens, cu_num_tokens)
             logits_indices = spec_decode_metadata.logits_indices
 
-        decode_indices = self._calc_decode_indices(logits_indices)
+        generation_indices = self._calc_generation_indices(logits_indices)
 
         common_attn_metadata = CommonAttentionMetadata(
             query_start_loc=query_start_loc,
@@ -774,7 +774,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_reqs=num_reqs,
             num_actual_tokens=total_num_scheduled_tokens,
             max_query_len=max_num_scheduled_tokens,
-            decode_indices=decode_indices,
+            generation_indices=generation_indices,
         )
 
         attn_metadata: dict[str, Any] = {}
@@ -812,7 +812,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.set_active_loras(self.input_batch, num_scheduled_tokens)
 
         return (attn_metadata, attention_cuda_graphs, logits_indices,
-                spec_decode_metadata, num_scheduled_tokens, decode_indices)
+                spec_decode_metadata, num_scheduled_tokens, generation_indices)
 
     def _compute_cascade_attn_prefix_len(
         self,
@@ -1334,7 +1334,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Prepare the decoder inputs.
         (attn_metadata, attention_cuda_graphs, logits_indices,
          spec_decode_metadata, num_scheduled_tokens_np,
-         decode_indices) = (self._prepare_inputs(scheduler_output))
+         generation_indices) = (self._prepare_inputs(scheduler_output))
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         if (self.use_cuda_graph
                 and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]):
@@ -1410,7 +1410,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                  num_tokens=num_input_tokens,
                                  num_tokens_across_dp=num_tokens_across_dp,
                                  skip_cuda_graphs=skip_cuda_graphs,
-                                 decode_indices=decode_indices):
+                                 generation_indices=generation_indices):
             self.maybe_setup_kv_connector(scheduler_output)
 
             model_output = self.model(
@@ -2003,9 +2003,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                         dtype=np.int32)
 
         attn_metadata: Optional[dict[str, Any]] = None
-        decode_indices = torch.arange(num_tokens,
-                                      device=self.device,
-                                      dtype=torch.int)
+        generation_indices = torch.arange(num_tokens,
+                                          device=self.device,
+                                          dtype=torch.int)
 
         if capture_attn_cudagraph:
             attn_metadata = {}
@@ -2026,7 +2026,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_reqs=num_reqs,
                 num_actual_tokens=num_tokens,
                 max_query_len=num_tokens,
-                decode_indices=decode_indices,
+                generation_indices=generation_indices,
             )
 
             for kv_cache_group_id, kv_cache_group_spec in enumerate(
@@ -2070,7 +2070,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     self.vllm_config,
                     num_tokens=num_tokens,
                     num_tokens_across_dp=num_tokens_across_dp,
-                    decode_indices=decode_indices):
+                    generation_indices=generation_indices):
                 outputs = model(
                     input_ids=input_ids,
                     positions=positions,

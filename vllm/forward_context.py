@@ -96,8 +96,13 @@ class ForwardContext:
     dp_metadata: Optional[DPMetadata] = None
     skip_cuda_graphs: bool = False
 
-    decode_indices: Optional[torch.Tensor] = None
-    """indices used for decoding"""
+    generation_indices: Optional[torch.Tensor] = None
+    """
+    Indices of tokens used for sampling output tokens.
+    Includes the last prefill token and all decode tokens.
+    Given N prompt tokens, the first N-1 tokens are not included as
+    they are not used to sample tokens for generation.
+    """
 
 
 _forward_context: Optional[ForwardContext] = None
@@ -119,7 +124,7 @@ def set_forward_context(
     num_tokens: Optional[int] = None,
     num_tokens_across_dp: Optional[torch.Tensor] = None,
     skip_cuda_graphs: bool = False,
-    decode_indices: Optional[torch.Tensor] = None,
+    generation_indices: Optional[torch.Tensor] = None,
 ):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
@@ -145,7 +150,7 @@ def set_forward_context(
         attn_metadata=attn_metadata,
         dp_metadata=dp_metadata,
         skip_cuda_graphs=skip_cuda_graphs,
-        decode_indices=decode_indices,
+        generation_indices=generation_indices,
     )
 
     try:

@@ -200,10 +200,9 @@ class Qwen2ModelWithKVSharing(Qwen2Model):
         self.residual = torch.zeros((max_num_tokens, hidden_size),
                                     dtype=dtype,
                                     device=device)
-        self.hidden_states = torch.zeros(
-            (max_num_tokens, hidden_size),
-            dtype=dtype,
-            device=device)
+        self.hidden_states = torch.zeros((max_num_tokens, hidden_size),
+                                         dtype=dtype,
+                                         device=device)
 
     def forward(
         self,
@@ -225,21 +224,21 @@ class Qwen2ModelWithKVSharing(Qwen2Model):
             self.hidden_states[:num_input_tokens],
         )
 
-        decode_indices = get_forward_context().decode_indices
-        if decode_indices is None:
-            decode_indices = torch.arange(positions.size(0),
-                                          device=positions.device)
+        generation_indices = get_forward_context().generation_indices
+        if generation_indices is None:
+            generation_indices = torch.arange(positions.size(0),
+                                              device=positions.device)
 
-        num_decodes = decode_indices.shape[0]
+        num_decodes = generation_indices.shape[0]
         assert num_decodes >= 1
         assert first_residual is not None
 
         # CUDA graph expects static tensor addresses
         # Copy output of first layer group to second layer group
-        self.residual[:num_decodes].copy_(first_residual[decode_indices])
+        self.residual[:num_decodes].copy_(first_residual[generation_indices])
         self.hidden_states[:num_decodes].copy_(
-            first_hidden_states[decode_indices])
-        positions[:num_decodes].copy_(positions[decode_indices])
+            first_hidden_states[generation_indices])
+        positions[:num_decodes].copy_(positions[generation_indices])
 
         second_hidden_states, second_residual = self.second_layer_group(
             positions[:num_decodes],
@@ -247,18 +246,18 @@ class Qwen2ModelWithKVSharing(Qwen2Model):
             self.residual[:num_decodes],
         )
 
-        # NOTE(sarckk): Due to cudagraph padding, decode_indices may have
+        # NOTE(sarckk): Due to cudagraph padding, generation_indices may have
         # trailing repeated indices. Attention output is only valid at the
         # last index in this case.
-        last_index_mask = decode_indices == decode_indices[-1]
+        last_index_mask = generation_indices == generation_indices[-1]
         second_hidden_states[last_index_mask] = second_hidden_states[-1].clone(
         )
         second_residual[last_index_mask] = second_residual[-1].clone()
 
         # Merge results back
-        first_hidden_states[decode_indices] = second_hidden_states
+        first_hidden_states[generation_indices] = second_hidden_states
         if first_residual is not None:
-            first_residual[decode_indices] = second_residual
+            first_residual[generation_indices] = second_residual
 
         hidden_states, _ = self.norm(first_hidden_states, first_residual)
         return hidden_states
@@ -353,8 +352,8 @@ def test_kv_sharing_skip_prefill(
     ModelRegistry.register_model("Qwen2ForCausalLM", TestQwen2ForCausalLM)
     sampling_params = SamplingParams(temperature=0.0, max_tokens=100)
     compilation_config = CompilationConfig(
-        level=CompilationLevel.PIECEWISE
-        if not enforce_eager else CompilationLevel.NO_COMPILATION)
+        level=CompilationLevel.
+        PIECEWISE if not enforce_eager else CompilationLevel.NO_COMPILATION)
 
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")

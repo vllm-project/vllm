@@ -217,16 +217,16 @@ class FlashAttentionMetadataBuilder(
         num_reqs = common_attn_metadata.num_reqs
         query_start_loc = common_attn_metadata.query_start_loc
         seq_lens = common_attn_metadata.seq_lens
-        decode_indices = common_attn_metadata.decode_indices
+        generation_indices = common_attn_metadata.generation_indices
         # Example inputs
         # num_reqs: 3
-        # decode_indices:  [14, 18, 19, 27]
+        # generation_indices:  [14, 18, 19, 27]
         # query_start_loc: [0, 15, 20, 28]
         # seq_lens:        [41, 31, 40]
 
         # Find how many decode indices belong to each request
         # request_ids: [0, 1, 1, 2]
-        request_ids = torch.bucketize(decode_indices,
+        request_ids = torch.bucketize(generation_indices,
                                       query_start_loc[1:],
                                       right=True)
 
@@ -234,7 +234,7 @@ class FlashAttentionMetadataBuilder(
         # num_decode_tokens: [1, 2, 1]
         num_decode_tokens = torch.bincount(request_ids, minlength=num_reqs)
 
-        # Calculate new query_start_loc with tokens in decode_indices
+        # Calculate new query_start_loc with tokens in generation_indices
         # decode_query_start_loc: [0, 1, 3, 4]
         decode_query_start_loc = torch.empty(num_reqs + 1,
                                              device=query_start_loc.device,
@@ -254,7 +254,7 @@ class FlashAttentionMetadataBuilder(
             num_actual_tokens=total_num_decode_tokens,
             max_query_len=decode_max_query_len,
             # Set to None so we don't recurse again
-            decode_indices=None,
+            generation_indices=None,
         )
         metadata = self.build(
             common_prefix_len=common_prefix_len,
@@ -268,7 +268,7 @@ class FlashAttentionMetadataBuilder(
         common_attn_metadata: CommonAttentionMetadata,
     ) -> FlashAttentionMetadata:
         prefill_skipped_attn_metadata = None
-        if common_attn_metadata.decode_indices is not None:
+        if common_attn_metadata.generation_indices is not None:
             # NOTE(sarckk): attention metadata for partial prefill skip case
             # needs to be built first, otherwise the line below
             # block_table.slot_mapping[num_actual_tokens:].fill_(-1)
