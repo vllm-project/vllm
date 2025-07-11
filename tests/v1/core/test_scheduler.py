@@ -451,6 +451,7 @@ def test_stop_via_update_from_output():
         req.num_computed_tokens = req.num_tokens
         scheduler.requests[req.request_id] = req
         scheduler.running.append(req)
+        req.status = RequestStatus.RUNNING
 
     scheduler_output = SchedulerOutput(
         scheduled_new_reqs=[],
@@ -504,6 +505,7 @@ def test_stop_via_update_from_output():
         req.num_computed_tokens = req.num_tokens
         scheduler.requests[req.request_id] = req
         scheduler.running.append(req)
+        req.status = RequestStatus.RUNNING
 
     scheduler_output = SchedulerOutput(
         scheduled_new_reqs=[],
@@ -556,6 +558,7 @@ def test_stop_via_update_from_output():
         req.num_computed_tokens = req.num_tokens
         scheduler.requests[req.request_id] = req
         scheduler.running.append(req)
+        req.status = RequestStatus.RUNNING
 
     scheduler_output = SchedulerOutput(
         scheduled_new_reqs=[],
