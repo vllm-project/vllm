@@ -158,7 +158,8 @@ def test_models(
     num_logprobs: int,
     tp_size: int,
 ) -> None:
-    if current_platform.is_rocm() and model.original_model == 'stabilityai/stablelm-3b-4e1t':
+    if current_platform.is_rocm(
+    ) and model.original_model == 'stabilityai/stablelm-3b-4e1t':
         pytest.skip("Head size 80 is not supported by FlashAttention on ROCm")
     check_model_outputs(vllm_runner, example_prompts, model, dtype, max_tokens,
                         num_logprobs, tp_size)
