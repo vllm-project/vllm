@@ -228,12 +228,10 @@ jobs:
             LOG_REDIRECTION="\&>"
             LOG_REGEX=""
             if [ -n "${IS_VERSION_BRANCH}" ]; then
-              pt_version=${{ vars.PT_VERSION_VERSION_BRANCH }}
               synapse_version=${TARGET_BRANCH#v}
               synapse_version=${synapse_version%_*}
               synapse_build_endpoint="https://dms.habana-labs.com/api/v1.1/guide/info/${synapse_version}/latest?type=docker-pt"
             else
-              pt_version=${{ vars.PT_VERSION }}
               synapse_version=${RELEASED_SYNAPSE_VERSION#v}
               LOG_REDIRECTION="'"
               LOG_REGEX=".*$"
@@ -241,6 +239,8 @@ jobs:
             fi
             echo "Using SynapseAI version ${synapse_version}"
             synapse_build=$(curl "${synapse_build_endpoint}" | jq -r ".release_id")
+            pt_version=$(curl -sH "Authorization: token ${{ secrets.GH_PAT }}" https://raw.githubusercontent.com/${{ secrets.PYTORCH_INTEGRATION_ORG_REPO }}/refs/heads/v${synapse_version}/${{ secrets.PYTORCH_INTEGRATION_PROFILES_JSON_PATH }} | jq -r '.pt_versions.current.version')
+            echo "using torch version ${pt_version}"
             BUILD_TAG="Github-vLLM-Fork-${{ github.event.number }}-${{github.run_number}}"
             safe_cmd=${TEST_COMMAND//&/\\&}
             echo "Writing Pod Template To File"
