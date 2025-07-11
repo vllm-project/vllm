@@ -142,8 +142,7 @@ def rms_norm_gated(x,
                    z=None,
                    eps=1e-6,
                    group_size=None,
-                   norm_before_gate=True,
-                   upcast=True):
+                   norm_before_gate=True):
     x_shape_og = x.shape
     # reshape input data into 2D tensor
     x = x.reshape(-1, x.shape[-1])
