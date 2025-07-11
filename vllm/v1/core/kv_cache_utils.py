@@ -66,8 +66,7 @@ def init_none_hash(hash_fn: Callable):
             "PYTHONHASHSEED is not set. This will lead to non-reproducible "
             "block-hashes when using sha256_cbor_64bit as the hash function."
             "Consider setting PYTHONHASHSEED to a fixed value for "
-            "reproducibility."
-        )
+            "reproducibility.")
 
     NONE_HASH = (int.from_bytes(os.urandom(32), byteorder="big")
                  if hash_seed is None else hash_fn(hash_seed))
