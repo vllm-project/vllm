@@ -185,6 +185,7 @@ def get_score_prompt(
         model_config,
         tokenizer,
     )
+    from vllm.model_executor.model_loader import get_model_cls
 
     model = get_model_cls(model_config)
     if supports_score_template(model):
