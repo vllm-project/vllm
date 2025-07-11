@@ -147,7 +147,6 @@ class SambaYAttention(nn.Module):
 
         params = {
             'differential_flash_attention_config': {
-                'used_shared_kv_cache': self.yoco_cross,
                 'lambda_init': self.lambda_init,
                 'lambda_q1': self.lambda_q1,
                 'lambda_k1': self.lambda_k1,
@@ -661,6 +660,8 @@ class Phi4FlashForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsV0Only):
         mamba_cache_params = self.mamba_cache.current_run_tensors(**kwargs)
 
         attn_metadata = get_forward_context().attn_metadata
+        # input_ids and hidden_states isn't a one-to-one mapping in prefill
+        # stage due to YOCO optimization.
         hidden_states = self.model(input_ids, positions, attn_metadata,
                                    mamba_cache_params, intermediate_tensors,
                                    inputs_embeds)

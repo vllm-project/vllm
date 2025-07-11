@@ -673,9 +673,7 @@ class DifferentialFlashAttentionImpl(AttentionImpl):
             differential_flash_attention_config = {}
         self.differential_flash_attention_config = \
             differential_flash_attention_config
-        self.used_shared_kv_cache = \
-            self.differential_flash_attention_config.get(
-                "used_shared_kv_cache", False)
+        self.used_shared_kv_cache = kv_sharing_target_layer_name is not None
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
         if blocksparse_params is not None:
             raise ValueError(
