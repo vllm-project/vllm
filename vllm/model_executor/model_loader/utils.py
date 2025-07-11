@@ -21,8 +21,7 @@ from vllm.model_executor.layers.linear import QKVCrossParallelLinear
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.models import ModelRegistry
-from vllm.model_executor.models.adapters import (as_classification_model,
-                                                 as_embedding_model,
+from vllm.model_executor.models.adapters import (as_embedding_model,
                                                  as_reward_model)
 from vllm.model_executor.models.interfaces import SupportsQuant
 from vllm.utils import is_pin_memory_available
@@ -246,11 +245,17 @@ def get_model_architecture(
     if model_config.task == "embed":
         model_cls = as_embedding_model(model_cls)
     elif model_config.task == "classify":
-        model_cls = as_classification_model(model_cls)
+        # Cannot automatically run as_seq_cls_model,
+        # otherwise it will cause a circular reference on is_cross_encoder_model
+        pass
     elif model_config.task == "reward":
         model_cls = as_reward_model(model_cls)
 
     return model_cls, arch
+
+
+def get_model_cls(model_config: ModelConfig) -> type[nn.Module]:
+    return get_model_architecture(model_config)[0]
 
 
 def get_architecture_class_name(model_config: ModelConfig) -> str:

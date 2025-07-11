@@ -241,15 +241,10 @@ class Scheduler(SchedulerInterface):
                 req_index += 1
                 continue
 
-            num_draft_tokens = max(
-                num_new_tokens + request.num_computed_tokens -
-                request.num_tokens, 0)
-
             while True:
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
                     num_new_tokens,
-                    num_draft_tokens=num_draft_tokens,
                     num_lookahead_tokens=self.num_lookahead_tokens)
                 if new_blocks is None:
                     # The request cannot be scheduled.
@@ -621,6 +616,7 @@ class Scheduler(SchedulerInterface):
         new_block_ids: list[tuple[list[int], ...]] = []
         num_computed_tokens: list[int] = []
 
+        use_connector = self.connector is not None
         for req in itertools.chain(running_reqs, resumed_reqs):
             req_id = req.request_id
             req_ids.append(req_id)
@@ -635,6 +631,11 @@ class Scheduler(SchedulerInterface):
                 token_ids = req.all_token_ids[req.num_computed_tokens:req.
                                               num_computed_tokens + num_tokens]
                 new_token_ids.append(token_ids)
+            elif use_connector:
+                # When using a KVConnector, we add a placeholder to avoid index
+                # out of bounds errors. TODO: Remove this once the KVConnector
+                # is updated to handle token IDs properly.
+                new_token_ids.append([])
             new_block_ids.append(req_to_new_block_ids[req_id])
             num_computed_tokens.append(req.num_computed_tokens)
         # Because resumed_reqs is usually empty, it is more efficient to do

@@ -33,6 +33,7 @@ import vllm.envs as envs
 from vllm import version
 from vllm.compilation.inductor_pass import CallableInductorPass, InductorPass
 from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.platforms import current_platform
 from vllm.transformers_utils.config import (
     ConfigFormat, get_config, get_hf_image_processor_config,
@@ -94,14 +95,14 @@ ConfigT = TypeVar("ConfigT", bound=ConfigType)
 TaskOption = Literal["auto", "generate", "embedding", "embed", "classify",
                      "score", "reward", "transcription"]
 
-_ResolvedTask = Literal["generate", "embed", "classify", "score", "reward",
-                        "draft", "transcription"]
+_ResolvedTask = Literal["generate", "embed", "classify", "reward", "draft",
+                        "transcription"]
 
 RunnerType = Literal["generate", "pooling", "draft", "transcription"]
 
 _RUNNER_TASKS: dict[RunnerType, list[_ResolvedTask]] = {
     "generate": ["generate"],
-    "pooling": ["embed", "classify", "score", "reward"],
+    "pooling": ["embed", "classify", "reward"],
     "draft": ["draft"],
     "transcription": ["transcription"],
 }
@@ -347,6 +348,13 @@ class ModelConfig:
     limit_mm_per_prompt: dict[str, int] = field(default_factory=dict)
     """Maximum number of data items per modality per prompt. Only applicable
     for multimodal models."""
+    interleave_mm_strings: bool = False
+    """Enable fully interleaved support for multimodal prompts, while using 
+    --chat-template-content-format=string. Defaults to False."""
+    media_io_kwargs: dict[str, dict[str, Any]] = field(default_factory=dict)
+    """Additional args passed to process media inputs, keyed by modalities. 
+    For example, to set num_frames for video, set 
+    `--media-io-kwargs '{"video": {"num_frames": 40} }'` """
     use_async_output_proc: bool = True
     """Whether to use async output processor."""
     config_format: Union[str, ConfigFormat] = ConfigFormat.AUTO.value
@@ -463,6 +471,9 @@ class ModelConfig:
                     "affect the random state of the Python process that "
                     "launched vLLM.", self.seed)
 
+        # Keep set served_model_name before maybe_model_redirect(self.model)
+        self.served_model_name = get_served_model_name(self.model,
+                                                       self.served_model_name)
         self.model = maybe_model_redirect(self.model)
         # The tokenizer is consistent with the model by default.
         if self.tokenizer is None:
@@ -606,8 +617,6 @@ class ModelConfig:
 
         self.original_max_model_len = self.max_model_len
         self.max_model_len = self.get_and_verify_max_len(self.max_model_len)
-        self.served_model_name = get_served_model_name(self.model,
-                                                       self.served_model_name)
         self.multimodal_config = self._init_multimodal_config()
         if not self.skip_tokenizer_init:
             self._verify_tokenizer_mode()
@@ -656,7 +665,7 @@ class ModelConfig:
         return self._architecture
 
     @property
-    def model_info(self) -> dict[str, Any]:
+    def model_info(self):
         return self._model_info
 
     def maybe_pull_model_tokenizer_for_s3(self, model: str,
@@ -679,8 +688,11 @@ class ModelConfig:
 
             # If tokenizer is same as model, download to same directory
             if model == tokenizer:
-                s3_model.pull_files(
-                    model, ignore_pattern=["*.pt", "*.safetensors", "*.bin"])
+                s3_model.pull_files(model,
+                                    ignore_pattern=[
+                                        "*.pt", "*.safetensors", "*.bin",
+                                        "*.tensors"
+                                    ])
                 self.tokenizer = s3_model.dir
                 return
 
@@ -688,16 +700,19 @@ class ModelConfig:
         if is_s3(tokenizer):
             s3_tokenizer = S3Model()
             s3_tokenizer.pull_files(
-                model, ignore_pattern=["*.pt", "*.safetensors", "*.bin"])
+                model,
+                ignore_pattern=["*.pt", "*.safetensors", "*.bin", "*.tensors"])
             self.tokenizer = s3_tokenizer.dir
 
     def _init_multimodal_config(self) -> Optional["MultiModalConfig"]:
         if self.registry.is_multimodal_model(self.architectures):
             return MultiModalConfig(
                 limit_per_prompt=self.limit_mm_per_prompt,
+                media_io_kwargs=self.media_io_kwargs,
                 mm_processor_kwargs=self.mm_processor_kwargs,
                 disable_mm_preprocessor_cache=self.
-                disable_mm_preprocessor_cache)
+                disable_mm_preprocessor_cache,
+                interleave_mm_strings=self.interleave_mm_strings)
 
         if self.limit_mm_per_prompt:
             raise ValueError("`limit_mm_per_prompt` is only supported for "
@@ -707,6 +722,9 @@ class ModelConfig:
                              "multimodal models.")
         if self.disable_mm_preprocessor_cache:
             raise ValueError("`disable_mm_preprocessor_cache` is only "
+                             "supported for multimodal models.")
+        if self.interleave_mm_strings:
+            raise ValueError("`interleave_mm_strings` is only "
                              "supported for multimodal models.")
 
         return None
@@ -773,7 +791,7 @@ class ModelConfig:
         if get_pooling_config(model_id, self.revision):
             return "embed"
         if self.registry.is_cross_encoder_model(architectures):
-            return "score"
+            return "classify"
         if self.registry.is_transcription_model(architectures):
             return "transcription"
 
@@ -837,14 +855,24 @@ class ModelConfig:
                     "This model supports multiple tasks: %s. "
                     "Defaulting to '%s'.", supported_tasks, selected_task)
         else:
-            # Aliases
-            if task_option == "embedding":
-                msg = ("The 'embedding' task has been renamed to "
-                       "'embed', please use the new name. The old name "
-                       "will be removed in v1.0.")
-                warnings.warn(msg, DeprecationWarning, stacklevel=2)
+            if task_option == "score":
+                if not runner_support["pooling"]:
+                    msg = (f"This model does not support the '{task_option}' "
+                           f"task. Supported tasks: {supported_tasks}")
+                    raise ValueError(msg)
+                if self.registry.is_cross_encoder_model(architectures):
+                    task_option = "classify"
+                else:
+                    task_option = "embed"
+            else:
+                # Aliases
+                if task_option == "embedding":
+                    msg = ("The 'embedding' task has been renamed to "
+                           "'embed', please use the new name. The old name "
+                           "will be removed in v1.0.")
+                    warnings.warn(msg, DeprecationWarning, stacklevel=2)
 
-                task_option = "embed"
+                    task_option = "embed"
 
             if task_option not in supported_tasks:
                 msg = (
@@ -965,7 +993,7 @@ class ModelConfig:
 
     def _verify_bnb_config(self) -> None:
         """
-        The current version of bitsandbytes (0.45.3) with 8-bit models does not
+        The current version of bitsandbytes (0.46.1) with 8-bit models does not
         yet support CUDA graph.
         # TODO Remove this when bitsandbytes supports.
         """
@@ -1116,7 +1144,7 @@ class ModelConfig:
         if not hasattr(self.hf_text_config, "model_type"):
             return False
         elif self.hf_text_config.model_type in \
-            ('deepseek_v2', 'deepseek_v3', 'deepseek_mtp'):
+            ('deepseek_v2', 'deepseek_v3', 'deepseek_mtp', 'kimi_k2'):
             return self.hf_text_config.kv_lora_rank is not None
         elif self.hf_text_config.model_type == 'eagle':
             # if the model is an EAGLE module, check for the
@@ -1406,7 +1434,7 @@ class ModelConfig:
 
     @property
     def is_cross_encoder(self) -> bool:
-        return self.registry.is_cross_encoder_model(self.architectures)
+        return self.task == "classify"
 
     @property
     def use_mla(self) -> bool:
@@ -1434,11 +1462,24 @@ class ModelConfig:
     def matryoshka_dimensions(self):
         return getattr(self.hf_config, "matryoshka_dimensions", None)
 
+    @property
+    def use_pad_token(self) -> bool:
+        # cross_encoder models defaults to using pad_token.
+        # `llm as reranker` models defaults to not using pad_token.
+        return getattr(self.hf_config, "use_pad_token", True)
+
     def get_and_verify_max_len(self, max_model_len: int):
-        tokenizer_config = try_get_tokenizer_config(
-            self.tokenizer,
-            trust_remote_code=self.trust_remote_code,
-            revision=self.tokenizer_revision)
+        # For pooling models, the tokenizer's `model_max_length` is often a
+        # reliable source for the maximum sequence length. However, for
+        # generative models, this can be incorrect and unduly limit the
+        # context window (e.g., DeepSeek-R1). Therefore, we only consider
+        # tokenizer_config for pooling models.
+        tokenizer_config = None
+        if self.runner_type == "pooling":
+            tokenizer_config = try_get_tokenizer_config(
+                self.tokenizer,
+                trust_remote_code=self.trust_remote_code,
+                revision=self.tokenizer_revision)
         max_model_len = _get_and_verify_max_len(
             hf_config=self.hf_text_config,
             tokenizer_config=tokenizer_config,
@@ -1770,6 +1811,10 @@ class ParallelConfig:
     """Port of the data parallel master."""
     data_parallel_backend: str = "mp"
     """Backend to use for data parallel, either "mp" or "ray"."""
+    data_parallel_external_lb: bool = False
+    """Whether to use "external" DP LB mode. Applies only to online serving
+    and when data_parallel_size > 0. Set implicitly when
+    data_parallel_rank is provided explicitly to vllm serve."""
     enable_expert_parallel: bool = False
     """Use expert parallelism instead of tensor parallelism for MoE layers."""
     enable_eplb: bool = False
@@ -1939,6 +1984,11 @@ class ParallelConfig:
         if self.data_parallel_size > 1 or self.data_parallel_size_local == 0:
             # Data parallel was specified in the engine args.
             self.data_parallel_master_port = get_open_port()
+
+            if not (0 <= self.data_parallel_rank < self.data_parallel_size):
+                raise ValueError(
+                    f"data_parallel_rank ({self.data_parallel_rank})"
+                    f" must be in the range [0, {self.data_parallel_size})")
         else:
             # Otherwise fall back to env vars (e.g. for offline SPMD case).
             self.data_parallel_size = envs.VLLM_DP_SIZE
@@ -1946,6 +1996,10 @@ class ParallelConfig:
             self.data_parallel_rank_local = envs.VLLM_DP_RANK_LOCAL
             self.data_parallel_master_ip = envs.VLLM_DP_MASTER_IP
             self.data_parallel_master_port = envs.VLLM_DP_MASTER_PORT
+
+            if self.data_parallel_external_lb:
+                raise ValueError("data_parallel_external_lb can only "
+                                 "be set when data_parallel_size > 1")
 
         if self.distributed_executor_backend == "external_launcher":
             import os
@@ -2095,11 +2149,12 @@ class SchedulerConfig:
     NOTE: This will be replaced by speculative config in the future; it is
     present to enable correctness tests until then."""
 
-    cuda_graph_sizes: list[int] = field(default_factory=lambda: [512])
-    """Cuda graph capture sizes, default is 512.
-    1. if one value is provided, then the capture list would follow the
+    cuda_graph_sizes: list[int] = field(default_factory=list)
+    """Cuda graph capture sizes
+    1. if none provided, then default set to [min(max_num_seqs * 2, 512)]
+    2. if one value is provided, then the capture list would follow the
     pattern: [1, 2, 4] + [i for i in range(8, cuda_graph_sizes + 1, 8)]
-    2. more than one value (e.g. 1 2 128) is provided, then the capture list
+    3. more than one value (e.g. 1 2 128) is provided, then the capture list
     will follow the provided list."""
 
     delay_factor: float = 0.0
@@ -2264,6 +2319,13 @@ class SchedulerConfig:
                 self.max_num_partial_prefills, self.max_long_partial_prefills,
                 self.long_prefill_token_threshold)
 
+        # NOTE: Default set cuda_graph_sizes to [min(max_num_seqs * 2, 512)].
+        # This avoids OOM in tight memory scenarios with small max_num_seqs,
+        # and prevents capture of many large graphs (>512) that would greatly
+        # increase startup time with limited performance benefit.
+        if not self.cuda_graph_sizes:
+            self.cuda_graph_sizes = [min(self.max_num_seqs * 2, 512)]
+
     @model_validator(mode='after')
     def _verify_args(self) -> Self:
         if (self.max_num_batched_tokens < self.max_model_len
@@ -2284,7 +2346,7 @@ class SchedulerConfig:
 
         if self.max_num_batched_tokens > self.max_num_seqs * self.max_model_len:
             logger.warning(
-                "max_num_batched_tokens (%d) exceeds max_num_seqs"
+                "max_num_batched_tokens (%d) exceeds max_num_seqs "
                 "* max_model_len (%d). This may lead to unexpected behavior.",
                 self.max_num_batched_tokens,
                 self.max_num_seqs * self.max_model_len)
@@ -2929,6 +2991,16 @@ class LoRAConfig:
     trained with those scaling factors to be used at the same time. If not
     specified, only adapters trained with the base model scaling factor are
     allowed."""
+    default_mm_loras: Optional[dict[str, str]] = None
+    """Dictionary mapping specific modalities to LoRA model paths; this field
+    is only applicable to multimodal models and should be leveraged when a
+    model always expects a LoRA to be active when a given modality is present.
+    Note that currently, if a request provides multiple additional
+    modalities, each of which have their own LoRA, we do NOT apply
+    default_mm_loras because we currently only support one lora adapter
+    per prompt. When run in offline mode, the lora IDs for n modalities
+    will be automatically assigned to 1-n with the names of the modalities
+    in alphabetic order."""
     bias_enabled: bool = False
     """Enable bias for LoRA adapters."""
 
@@ -3064,6 +3136,11 @@ class MultiModalConfig:
     `{"images": 16, "videos": 2}`
     """
 
+    media_io_kwargs: dict[str, dict[str, Any]] = field(default_factory=dict)
+    """Additional args passed to process media inputs, keyed by modalities. 
+    For example, to set num_frames for video, set 
+    `--media-io-kwargs '{"video": {"num_frames": 40} }'` """
+
     mm_processor_kwargs: Optional[dict[str, object]] = None
     """
     Overrides for the multi-modal processor obtained from
@@ -3078,6 +3155,11 @@ class MultiModalConfig:
     disable_mm_preprocessor_cache: bool = False
     """
     If `True`, disable caching of the processed multi-modal inputs.
+    """
+
+    interleave_mm_strings: bool = False
+    """
+    Enable fully interleaved support for multimodal prompts.
     """
 
     def compute_hash(self) -> str:
@@ -3510,7 +3592,8 @@ def get_served_model_name(model: str,
 
 GuidedDecodingBackendV0 = Literal["auto", "outlines", "lm-format-enforcer",
                                   "xgrammar", "guidance"]
-GuidedDecodingBackendV1 = Literal["auto", "xgrammar", "guidance"]
+
+GuidedDecodingBackendV1 = Literal["auto", "xgrammar", "guidance", "outlines"]
 GuidedDecodingBackend = Literal[GuidedDecodingBackendV0,
                                 GuidedDecodingBackendV1]
 
@@ -4652,7 +4735,6 @@ class VllmConfig:
         # calculate the default `batch_size_capture_list`
         if not envs.VLLM_USE_V1:
             batch_size_capture_list = []
-            max_batchsize_to_capture = 0
             if self.scheduler_config is not None and \
                 self.model_config is not None and \
                     not self.model_config.enforce_eager:
@@ -4722,6 +4804,12 @@ class VllmConfig:
         cls = MODELS_CONFIG_MAP.get(architecture, None)
         if cls is not None:
             cls.verify_and_update_config(self)
+
+        if self.model_config.task == "classify":
+            # Maybe convert ForCausalLM into ForSequenceClassification model.
+            from vllm.model_executor.models.adapters import (
+                SequenceClassificationConfig)
+            SequenceClassificationConfig.verify_and_update_config(self)
 
     def __str__(self):
         return (

@@ -714,8 +714,10 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                 self.device)
         block_tables = block_tables.to(self.device)
 
+        # Calculate the slot mapping
         slot_mapping_metadata = self._get_slot_mapping_metadata(
             num_reqs, num_scheduled_tokens_per_req)
+        num_kv_update_slices = slot_mapping_metadata.shape[0]
         padded_num_slices = _get_padded_num_kv_cache_update_slices(
             padded_total_num_scheduled_tokens, self.max_num_reqs,
             self.block_size)
@@ -746,6 +748,9 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             num_seqs=torch.tensor([num_reqs],
                                   dtype=torch.int32,
                                   device=self.device),
+            num_kv_update_slices=torch.tensor([num_kv_update_slices],
+                                              dtype=torch.int32,
+                                              device=self.device),
             num_slices_per_kv_cache_update_block=
             NUM_SLICES_PER_KV_CACHE_UPDATE_BLOCK,
         )
@@ -1133,26 +1138,33 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                 "vllm.model_executor.layers.vocab_parallel_embedding."
                 "get_tensor_model_parallel_rank",
                 return_value=xm_tp_rank):
-            if self.use_spmd:
-                tpu_loader = TPUModelLoader(
-                    load_config=self.vllm_config.load_config)
-                model = tpu_loader.load_model(
-                    vllm_config=self.vllm_config,
-                    model_config=self.vllm_config.model_config,
-                    mesh=self.mesh)
-            else:
-                # model = get_model(vllm_config=self.vllm_config)
-                model_loader = get_model_loader(self.load_config)
-                if not hasattr(self, "model"):
-                    logger.info("Loading model from scratch...")
-                    model = model_loader.load_model(
+            try:
+                if self.use_spmd:
+                    tpu_loader = TPUModelLoader(
+                        load_config=self.vllm_config.load_config)
+                    model = tpu_loader.load_model(
                         vllm_config=self.vllm_config,
-                        model_config=self.model_config)
+                        model_config=self.vllm_config.model_config,
+                        mesh=self.mesh)
                 else:
-                    logger.info("Model was already initialized. \
-                            Loading weights inplace...")
-                    model_loader.load_weights(self.model,
-                                              model_config=self.model_config)
+                    model_loader = get_model_loader(self.load_config)
+                    if not hasattr(self, "model"):
+                        logger.info("Loading model from scratch...")
+                        model = model_loader.load_model(
+                            vllm_config=self.vllm_config,
+                            model_config=self.model_config)
+                    else:
+                        logger.info("Model was already initialized. \
+                                Loading weights inplace...")
+                        model_loader.load_weights(
+                            self.model, model_config=self.model_config)
+            except RuntimeError as e:
+                raise RuntimeError(
+                    f"Unable to load model, a likely reason is the model is "
+                    "too large for the current device's HBM memory. "
+                    "Consider switching to a smaller model "
+                    "or sharding the weights on more chips. "
+                    f"See the detailed error: {e}") from e
         if self.lora_config is not None:
             model = self.load_lora_model(model, self.model_config,
                                          self.scheduler_config,
@@ -1184,6 +1196,8 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                                    dtype=torch.int32).to(self.device)
         padded_num_slices = _get_padded_num_kv_cache_update_slices(
             num_tokens, self.max_num_reqs, self.block_size)
+        num_kv_update_slices = torch.tensor([padded_num_slices],
+                                            dtype=torch.int32).to(self.device)
         slot_mapping = torch.zeros((3, padded_num_slices),
                                    dtype=torch.int32).to(self.device)
         block_tables = torch.zeros((num_reqs, num_blocks),
@@ -1203,6 +1217,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             context_lens=context_lens,
             query_start_loc=query_start_loc,
             num_seqs=num_seqs,
+            num_kv_update_slices=num_kv_update_slices,
             num_slices_per_kv_cache_update_block=
             NUM_SLICES_PER_KV_CACHE_UPDATE_BLOCK,
         )

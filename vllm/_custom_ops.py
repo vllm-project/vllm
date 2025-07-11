@@ -13,7 +13,8 @@ from vllm.scalar_type import ScalarType
 
 logger = init_logger(__name__)
 
-if not current_platform.is_tpu() and not current_platform.is_hpu():
+if not current_platform.is_tpu() and not current_platform.is_hpu()\
+        and not current_platform.is_xpu():
     try:
         import vllm._C
     except ImportError as e:
@@ -646,6 +647,20 @@ def cutlass_scaled_mm_supports_fp4(cuda_device_capability: int) -> bool:
     return torch.ops._C.cutlass_scaled_mm_supports_fp4(cuda_device_capability)
 
 
+def cutlass_blockwise_scaled_grouped_mm(
+    output: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    scales_a: torch.Tensor,
+    scales_b: torch.Tensor,
+    problem_sizes: torch.Tensor,
+    expert_offsets: torch.Tensor,
+):
+    torch.ops._C.cutlass_blockwise_scaled_grouped_mm(output, a, b, scales_a,
+                                                     scales_b, problem_sizes,
+                                                     expert_offsets)
+
+
 def cutlass_scaled_fp4_mm(a: torch.Tensor, b: torch.Tensor,
                           block_scale_a: torch.Tensor,
                           block_scale_b: torch.Tensor, alpha: torch.Tensor,
@@ -948,17 +963,17 @@ def cutlass_fp4_moe_mm(a_tensors: torch.Tensor, b_tensors: torch.Tensor,
                        expert_offsets: torch.Tensor, sf_offsets: torch.Tensor,
                        out_dtype: torch.dtype, device: torch.device):
     """
-    An FP4 Blockscaled Group Gemm that takes in  a_tensors, b_tensors and runs 
+    An FP4 Blockscaled Group Gemm that takes in  a_tensors, b_tensors and runs
     the gemms for each combination based on the specified problem sizes.
 
     This is used as the MoE gemm during NVFP4 Quantized FusedMoE forward.
     - a/b_tensors: the NVFP4 a_ptrs and b_ptrs tensors which are quantized
                      input and expert weights.
     - a_/b_scales: The blockscales in FP8-E4M3 precision
-    - expert_offsets/sf_offsets: Indices that mark at which token index 
-                    each expert begins its computation. The number of tokens 
-                    computed with expert E is expert_offsets[E + 1] - 
-                    expert_offsets[E] And the sf_size per expert is 
+    - expert_offsets/sf_offsets: Indices that mark at which token index
+                    each expert begins its computation. The number of tokens
+                    computed with expert E is expert_offsets[E + 1] -
+                    expert_offsets[E] And the sf_size per expert is
                     sf_offset[E+1] - sf_offset[E]
     - problem_sizes: MxNxK sizes of each expert's multiplication in two grouped
                      MMs used in the fused MoE operation.
@@ -1274,7 +1289,7 @@ def scaled_fp8_quant(
             scale = torch.zeros(1, device=input.device, dtype=torch.float32)
             torch.ops._C.dynamic_scaled_fp8_quant(output, input, scale)
     else:
-        assert scale.numel() == 1
+        assert scale.numel() == 1, f"{scale.shape}"
         torch.ops._C.static_scaled_fp8_quant(output, input, scale)
 
     return output, scale
@@ -1449,30 +1464,6 @@ def ggml_moe_get_block_size(quant_type: int) -> int:
 
 
 # mamba
-def causal_conv1d_fwd(x: torch.Tensor, weight: torch.Tensor,
-                      bias_: Optional[torch.Tensor],
-                      conv_states: Optional[torch.Tensor],
-                      query_start_loc: Optional[torch.Tensor],
-                      cache_indices: Optional[torch.Tensor],
-                      has_initial_state: Optional[torch.Tensor],
-                      silu_activation: bool, pad_slot_id: int):
-    torch.ops._C.causal_conv1d_fwd(x, weight, bias_, conv_states,
-                                   query_start_loc, cache_indices,
-                                   has_initial_state, silu_activation,
-                                   pad_slot_id)
-
-
-def causal_conv1d_update(x: torch.Tensor, conv_state: torch.Tensor,
-                         weight: torch.Tensor, bias_: Optional[torch.Tensor],
-                         silu_activation: bool,
-                         cache_seqlens: Optional[torch.Tensor],
-                         conv_state_indices: Optional[torch.Tensor],
-                         pad_slot_id: int):
-    torch.ops._C.causal_conv1d_update(x, conv_state, weight, bias_,
-                                      silu_activation, cache_seqlens,
-                                      conv_state_indices, pad_slot_id)
-
-
 def selective_scan_fwd(u: torch.Tensor, delta: torch.Tensor, A: torch.Tensor,
                        B: torch.Tensor, C: torch.Tensor,
                        D_: Optional[torch.Tensor], z_: Optional[torch.Tensor],

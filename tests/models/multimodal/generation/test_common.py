@@ -33,9 +33,6 @@ if current_platform.is_rocm():
     os.environ["VLLM_USE_TRITON_FLASH_ATTN"] = "0"
 
 REQUIRES_V0_MODELS = [
-    # V1 Test: no way to fall back for head_dim = 80
-    # https://github.com/vllm-project/vllm/issues/14524
-    "qwen_vl",
     # V1 Test: not enough KV cache space in C1.
     "fuyu",
 ]
@@ -155,6 +152,7 @@ VLM_TEST_SETTINGS = {
         video_idx_to_prompt=lambda idx: "<|vision_bos|><|VIDEO|><|vision_eos|>", # noqa: E501
         max_model_len=4096,
         max_num_seqs=2,
+        num_logprobs= 6 if current_platform.is_cpu() else 5,
         auto_cls=AutoModelForTextToWaveform,
         vllm_output_post_proc=model_utils.qwen2_vllm_to_hf_output,
         patch_hf_runner=model_utils.qwen2_5_omni_patch_hf_runner,
@@ -221,8 +219,7 @@ VLM_TEST_SETTINGS = {
         marks=[large_gpu_mark(min_gb=32)],
     ),
     "blip2": VLMTestInfo(
-        # TODO: Change back to 2.7b once head_dim = 80 is supported
-        models=["Salesforce/blip2-opt-6.7b"],
+        models=["Salesforce/blip2-opt-2.7b"],
         test_type=VLMTestType.IMAGE,
         prompt_formatter=lambda img_prompt: f"Question: {img_prompt} Answer:",
         img_idx_to_prompt=lambda idx: "",
@@ -340,8 +337,7 @@ VLM_TEST_SETTINGS = {
     "h2ovl": VLMTestInfo(
         models = [
             "h2oai/h2ovl-mississippi-800m",
-            # TODO: Re-enable once head_dim = 80 is supported
-            # "h2oai/h2ovl-mississippi-2b",
+            "h2oai/h2ovl-mississippi-2b",
         ],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
         prompt_formatter=lambda img_prompt: f"<|prompt|>{img_prompt}<|end|><|answer|>", # noqa: E501
