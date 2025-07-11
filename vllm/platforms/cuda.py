@@ -166,6 +166,13 @@ class CudaPlatformBase(Platform):
                 logger.info(
                     "Forcing kv cache block size to 64 for FlashMLA backend.")
 
+            use_cutlass_mla = (envs.VLLM_ATTENTION_BACKEND is not None \
+                and envs.VLLM_ATTENTION_BACKEND == "CUTLASS_MLA_VLLM_V1")
+            if use_cutlass_mla and cache_config.block_size != 128:
+                cache_config.block_size = 128
+                logger.info("Forcing kv cache block size to 128 for "
+                            "CUTLASS_MLA_VLLM_V1 backend.")
+
         compilation_config = vllm_config.compilation_config
         if (envs.VLLM_ALL2ALL_BACKEND == "deepep_high_throughput"
                 and parallel_config.data_parallel_size > 1
