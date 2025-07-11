@@ -281,11 +281,13 @@ def test_request_logger_log_outputs():
         )
 
         mock_logger.info.assert_called_once()
-        call_args = mock_logger.info.call_args[0]
-        assert "Generated response test-123" in call_args[0]
-        assert "Hello, world!" in call_args[1]
-        assert call_args[2] == [1, 2, 3, 4]
-        assert call_args[3] == "stop"
+        call_args = mock_logger.info.call_args.args
+        # logger.info(format_string, request_id, stream_info, outputs, output_token_ids, finish_reason)
+        assert "Generated response %s%s" in call_args[0]
+        assert call_args[1] == "test-123"
+        assert call_args[3] == "Hello, world!"
+        assert call_args[4] == [1, 2, 3, 4]
+        assert call_args[5] == "stop"
 
 
 def test_request_logger_log_outputs_streaming_delta():
@@ -306,11 +308,14 @@ def test_request_logger_log_outputs_streaming_delta():
         )
 
         mock_logger.info.assert_called_once()
-        call_args = mock_logger.info.call_args[0]
-        assert "Generated response test-456 (streaming delta)" in call_args[0]
-        assert call_args[1] == "Hello"
-        assert call_args[2] == [1]
-        assert call_args[3] is None
+        call_args = mock_logger.info.call_args.args
+        # logger.info(format_string, request_id, stream_info, outputs, output_token_ids, finish_reason)
+        assert "Generated response %s%s" in call_args[0]
+        assert call_args[1] == "test-456"
+        assert call_args[2] == " (streaming delta)"
+        assert call_args[3] == "Hello"
+        assert call_args[4] == [1]
+        assert call_args[5] is None
 
 
 def test_request_logger_log_outputs_streaming_complete():
@@ -331,12 +336,14 @@ def test_request_logger_log_outputs_streaming_complete():
         )
 
         mock_logger.info.assert_called_once()
-        call_args = mock_logger.info.call_args[0]
-        assert ("Generated response test-789 (streaming complete)"
-                in call_args[0])
-        assert call_args[1] == "Complete response"
-        assert call_args[2] == [1, 2, 3]
-        assert call_args[3] == "length"
+        call_args = mock_logger.info.call_args.args
+        # logger.info(format_string, request_id, stream_info, outputs, output_token_ids, finish_reason)
+        assert "Generated response %s%s" in call_args[0]
+        assert call_args[1] == "test-789"
+        assert call_args[2] == " (streaming complete)"
+        assert call_args[3] == "Complete response"
+        assert call_args[4] == [1, 2, 3]
+        assert call_args[5] == "length"
 
 
 def test_request_logger_log_outputs_with_truncation():
@@ -364,12 +371,12 @@ def test_request_logger_log_outputs_with_truncation():
         call_args = mock_logger.info.call_args
 
         # Check that output was truncated to first 10 characters
-        logged_output = call_args[0][1]
+        logged_output = call_args[0][3]
         assert logged_output == "This is a "
         assert len(logged_output) == 10
 
         # Check that token IDs were truncated to first 10 tokens
-        logged_token_ids = call_args[0][2]
+        logged_token_ids = call_args[0][4]
         assert logged_token_ids == list(range(10))
         assert len(logged_token_ids) == 10
 
@@ -392,11 +399,13 @@ def test_request_logger_log_outputs_none_values():
         )
 
         mock_logger.info.assert_called_once()
-        call_args = mock_logger.info.call_args[0]
-        assert "Generated response test-none" in call_args[0]
-        assert call_args[1] == "Test output"
-        assert call_args[2] is None
-        assert call_args[3] == "stop"
+        call_args = mock_logger.info.call_args.args
+        # logger.info(format_string, request_id, stream_info, outputs, output_token_ids, finish_reason)
+        assert "Generated response %s%s" in call_args[0]
+        assert call_args[1] == "test-none"
+        assert call_args[3] == "Test output"
+        assert call_args[4] is None
+        assert call_args[5] == "stop"
 
 
 def test_request_logger_log_outputs_empty_output():
@@ -417,11 +426,13 @@ def test_request_logger_log_outputs_empty_output():
         )
 
         mock_logger.info.assert_called_once()
-        call_args = mock_logger.info.call_args[0]
-        assert "Generated response test-empty" in call_args[0]
-        assert call_args[1] == ""
-        assert call_args[2] == []
-        assert call_args[3] == "stop"
+        call_args = mock_logger.info.call_args.args
+        # logger.info(format_string, request_id, stream_info, outputs, output_token_ids, finish_reason)
+        assert "Generated response %s%s" in call_args[0]
+        assert call_args[1] == "test-empty"
+        assert call_args[3] == ""
+        assert call_args[4] == []
+        assert call_args[5] == "stop"
 
 
 def test_request_logger_log_outputs_integration():
@@ -458,5 +469,10 @@ def test_request_logger_log_outputs_integration():
         input_call = mock_logger.info.call_args_list[0][0]
         output_call = mock_logger.info.call_args_list[1][0]
 
-        assert "Received request test-integration" in input_call[0]
-        assert "Generated response test-integration" in output_call[0]
+        # Check input call: logger.info(format_string, request_id, prompt, params, ...)
+        assert "Received request %s" in input_call[0]
+        assert input_call[1] == "test-integration"
+        
+        # Check output call: logger.info(format_string, request_id, stream_info, outputs, ...)
+        assert "Generated response %s%s" in output_call[0]
+        assert output_call[1] == "test-integration"
