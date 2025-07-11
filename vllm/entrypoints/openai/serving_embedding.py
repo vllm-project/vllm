@@ -482,84 +482,79 @@ class EmbeddingMixin(OpenAIServing):
             # Check if we used chunked processing
             use_chunked = self._should_use_chunked_processing(ctx.request)
 
-            # Collect all results first
-            all_results = []
-            async for i, res in ctx.result_generator:
-                all_results.append((i, res))
-
-            # Group results by original prompt
             if use_chunked:
-                # For chunked processing, we need to group chunk results by
-                # original prompt
-                chunked_final_res_batch: list[PoolingRequestOutput] = []
+                # Efficient single-pass processing for chunked requests
+                from collections import defaultdict
 
-                max_pos_embeddings = self._get_max_position_embeddings()
+                # Group results by original prompt index
+                grouped_results = defaultdict(list)
+                short_prompts_results = {}
+
+                async for result_idx, result in ctx.result_generator:
+                    if "-chunk-" in result.request_id:
+                        # Extract prompt_idx from chunked request_id
+                        # e.g., from "req-id-prompt-2-chunk-0" -> 2
+                        parts = result.request_id.split("-")
+                        try:
+                            prompt_idx = int(parts[parts.index("prompt") + 1])
+                            grouped_results[prompt_idx].append(
+                                cast(PoolingRequestOutput, result))
+                        except (ValueError, IndexError):
+                            return self.create_error_response(
+                                f"Invalid chunk request ID format: "
+                                f"{result.request_id}")
+                    else:
+                        # Extract prompt_idx from non-chunked request_id
+                        # e.g., from "req-id-2" -> 2
+                        try:
+                            prompt_idx = int(result.request_id.split("-")[-1])
+                            short_prompts_results[prompt_idx] = cast(
+                                PoolingRequestOutput, result)
+                        except ValueError:
+                            return self.create_error_response(
+                                f"Invalid request ID format: "
+                                f"{result.request_id}")
+
+                # Build final result batch in prompt order
+                final_res_batch = []
+
                 for prompt_idx, request_prompt in enumerate(
                         ctx.request_prompts):
-                    if self._is_text_tokens_prompt(request_prompt):
-                        # Cast to TextTokensPrompt
-                        # since we've verified prompt_token_ids
-                        text_tokens_prompt = cast(TextTokensPrompt,
-                                                  request_prompt)
-                        if len(text_tokens_prompt["prompt_token_ids"]
-                               ) > max_pos_embeddings:
-                            # This prompt was chunked, collect all
-                            # its chunk results
-                            chunk_results: list[PoolingRequestOutput] = []
-                            chunk_prefix = (
-                                f"{ctx.request_id}-prompt-{prompt_idx}-"
-                                f"chunk-")
-
-                            for result_idx, result in all_results:
-                                if result.request_id.startswith(chunk_prefix):
-                                    # Cast to PoolingRequestOutput since
-                                    # we know chunked results are always pooling
-                                    chunk_results.append(
-                                        cast(PoolingRequestOutput, result))
-
-                            if chunk_results:
-                                # Aggregate chunk results
-                                original_token_count = len(
+                    if prompt_idx in grouped_results:
+                        # This was a chunked prompt - aggregate results
+                        chunk_results = grouped_results[prompt_idx]
+                        if self._is_text_tokens_prompt(request_prompt):
+                            text_tokens_prompt = cast(TextTokensPrompt,
+                                                      request_prompt)
+                            original_token_count = len(
+                                text_tokens_prompt["prompt_token_ids"])
+                            aggregated_result = await \
+                                self._aggregate_chunked_results(
+                                    ctx, chunk_results, original_token_count,
                                     text_tokens_prompt["prompt_token_ids"])
-                                aggregated_result = await \
-                                    self._aggregate_chunked_results(
-                                        ctx, chunk_results,
-                                        original_token_count,
-                                        text_tokens_prompt["prompt_token_ids"])
-                                chunked_final_res_batch.append(
-                                    aggregated_result)
-                            else:
-                                return self.create_error_response(
-                                    f"No chunk results found for prompt "
-                                    f"{prompt_idx}")
-                            continue
-
-                    # Normal prompt (short or embeds), find its result
-                    expected_id = f"{ctx.request_id}-{prompt_idx}"
-                    found = False
-                    for result_idx, result in all_results:
-                        if result.request_id == expected_id:
-                            # Cast to PoolingRequestOutput for embedding results
-                            chunked_final_res_batch.append(
-                                cast(PoolingRequestOutput, result))
-                            found = True
-                            break
-
-                    if not found:
+                            final_res_batch.append(aggregated_result)
+                        else:
+                            return self.create_error_response(
+                                f"Chunked prompt {prompt_idx} is not a "
+                                f"text tokens prompt")
+                    elif prompt_idx in short_prompts_results:
+                        # This was a short prompt
+                        final_res_batch.append(
+                            short_prompts_results[prompt_idx])
+                    else:
                         return self.create_error_response(
                             f"Result not found for prompt {prompt_idx}")
 
-                # Update the final result batch with proper type
                 ctx.final_res_batch = cast(
                     list[Union[RequestOutput, PoolingRequestOutput]],
-                    chunked_final_res_batch)
+                    final_res_batch)
             else:
-                # Normal processing - original logic
+                # Normal processing for non-chunked requests
                 num_prompts = len(ctx.engine_prompts)
                 normal_final_res_batch: list[
                     Optional[PoolingRequestOutput]] = [None] * num_prompts
 
-                for result_idx, result in all_results:
+                async for result_idx, result in ctx.result_generator:
                     if result_idx < num_prompts:
                         # Cast to PoolingRequestOutput for embedding results
                         normal_final_res_batch[result_idx] = cast(
