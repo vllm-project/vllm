@@ -738,7 +738,7 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
                 "channelwise, dynamic per token quantization.")
 
         self.topk_indices_dtype = None
-        self.fused_experts = None
+        self.fused_experts = None  # type: ignore
         self.disable_expert_map = False
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
@@ -986,7 +986,6 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
                 layer.w2_weight,
                 topk_weights,
                 topk_ids,
-                per_act_token=per_act_token,
                 activation=activation,
                 global_num_experts=global_num_experts,
                 expert_map=None if self.disable_expert_map else expert_map,
