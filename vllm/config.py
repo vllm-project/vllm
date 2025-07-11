@@ -943,7 +943,7 @@ class ModelConfig:
 
         for suffix, pref_runner in suffix_to_preferred_runner:
             if arch.endswith(suffix) and pref_runner in supported_runner_types:
-                return runner
+                return pref_runner
 
         if "generate" in supported_runner_types:
             return "generate"
