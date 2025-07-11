@@ -493,7 +493,7 @@ class OpenAIServingChat(OpenAIServing):
 
         # Always track previous_texts for comprehensive output logging
         previous_texts = [""] * num_choices
-        
+
         # Only one of these will be used, thus previous_texts and
         # all_previous_token_ids will not be used twice in the same iteration.
         if tool_choice_auto or self.reasoning_parser:
@@ -868,12 +868,11 @@ class OpenAIServingChat(OpenAIServing):
                         delta_content = ""
                         if delta_message.content:
                             delta_content = delta_message.content
-                        elif (delta_message.tool_calls
-                              and delta_message.tool_calls[0].function and
-                              delta_message.tool_calls[0].function.arguments):
-                            func_args = delta_message.tool_calls[
-                                0].function.arguments
-                            delta_content = func_args
+                        elif delta_message.tool_calls:
+                            delta_content = "".join(
+                                tc.function.arguments
+                                for tc in delta_message.tool_calls
+                                if tc.function and tc.function.arguments)
 
                         if delta_content:
                             self.request_logger.log_outputs(
@@ -1021,14 +1020,16 @@ class OpenAIServingChat(OpenAIServing):
             if self.enable_log_outputs and self.request_logger:
                 # Log the complete response for each choice
                 for i in range(num_choices):
-                    full_text = (previous_texts[i] if previous_texts
-                                 and i < len(previous_texts) else
-                                 f"<streaming_complete: {previous_num_tokens[i]} tokens>"
-                                 )
+                    full_text = (
+                        previous_texts[i]
+                        if previous_texts and i < len(previous_texts) else
+                        f"<streaming_complete: {previous_num_tokens[i]} tokens>"
+                    )
                     self.request_logger.log_outputs(
                         request_id=request_id,
                         outputs=full_text,
-                        output_token_ids=None,  # Consider also logging all token IDs
+                        output_token_ids=
+                        None,  # Consider also logging all token IDs
                         finish_reason="streaming_complete",
                         is_streaming=True,
                         delta=False,
