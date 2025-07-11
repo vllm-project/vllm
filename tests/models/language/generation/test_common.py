@@ -90,7 +90,7 @@ AITER_MODEL_LIST = [
             marks=[pytest.mark.core_model],
         ),
         pytest.param(
-            "Qwen/Qwen1.5-MoE-A2.7B-Chat",
+            "allenai/OLMoE-1B-7B-0924-Instruct",
             marks=[pytest.mark.cpu_model],
         )
     ])
