@@ -8,10 +8,9 @@ from typing import Optional, Union
 
 import numpy as np
 import torch
-import triton
-import triton.language as tl
 
 from vllm.attention.backends.utils import PAD_SLOT_ID
+from vllm.triton_utils import tl, triton
 
 
 @triton.jit()
