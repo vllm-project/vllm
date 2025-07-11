@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import bisect
-import dataclasses
 import gc
 import time
 from typing import TYPE_CHECKING, Any, Optional, cast
@@ -19,7 +18,8 @@ import vllm.envs as envs
 from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
 from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
-from vllm.config import ParallelConfig, VllmConfig, get_layers_from_vllm_config
+from vllm.config import (ParallelConfig, VllmConfig,
+                         get_layers_from_vllm_config, update_config)
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.lora.layers import BaseLayerWithLoRA
@@ -1113,12 +1113,13 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         return model_runner_output
 
     def update_config(self, overrides: dict[str, Any]) -> None:
+        allowed_config_names = {"load_config", "model_config"}
         for config_name, config_overrides in overrides.items():
-            try:
-                config = getattr(self, config_name)
-            except AttributeError as exc:
-                raise ValueError(f"Unknown config {config_name}") from exc
-            new_config = dataclasses.replace(config, **config_overrides)
+            assert config_name in allowed_config_names, \
+                f"Config `{config_name}` not supported. " \
+                f"Allowed configs: {allowed_config_names}"
+            config = getattr(self, config_name)
+            new_config = update_config(config, config_overrides)
             setattr(self, config_name, new_config)
 
     def load_model(self) -> None:
