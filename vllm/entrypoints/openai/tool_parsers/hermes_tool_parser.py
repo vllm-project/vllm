@@ -8,6 +8,7 @@ from typing import Union
 import partial_json_parser
 import regex as re
 from partial_json_parser.core.options import Allow
+from json_repair import repair_json
 
 from vllm.entrypoints.chat_utils import random_tool_call_id
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
@@ -237,6 +238,9 @@ class Hermes2ProToolParser(ToolParser):
                 return delta
 
             try:
+                if tool_call_portion is not None:
+                    # repair the JSON if needed
+                    tool_call_portion = repair_json(tool_call_portion)
 
                 current_tool_call = partial_json_parser.loads(
                     tool_call_portion or "{}",
