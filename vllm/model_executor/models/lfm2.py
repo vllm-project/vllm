@@ -4,7 +4,7 @@ from typing import Any, Optional
 
 import torch
 import torch.nn as nn
-from transformers import LFM2Config
+from transformers import Lfm2Config
 
 from vllm import envs
 from vllm.attention import Attention
@@ -44,7 +44,7 @@ from .utils import (AutoWeightsLoader, PPMissingLayer, is_pp_missing_parameter,
 from vllm.v1.attention.backends.mamba_attn import Mamba2AttentionMetadata
 
 
-class LFM2MLP(nn.Module):
+class Lfm2MLP(nn.Module):
 
     def __init__(
         self,
@@ -87,11 +87,11 @@ class LFM2MLP(nn.Module):
         return x
 
 
-class LFM2Attention(nn.Module):
+class Lfm2Attention(nn.Module):
 
     def __init__(
         self,
-        config: LFM2Config,
+        config: Lfm2Config,
         layer_idx: int,
         hidden_size: int,
         num_heads: int,
@@ -184,11 +184,11 @@ class LFM2Attention(nn.Module):
         return output
 
 
-class LFM2AttentionDecoderLayer(nn.Module):
+class Lfm2AttentionDecoderLayer(nn.Module):
 
     def __init__(
         self,
-        config: LFM2Config,
+        config: Lfm2Config,
         layer_idx: int,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
@@ -208,7 +208,7 @@ class LFM2AttentionDecoderLayer(nn.Module):
         max_position_embeddings = getattr(config, "max_position_embeddings",
                                           8192)
 
-        self.self_attn = LFM2Attention(
+        self.self_attn = Lfm2Attention(
             config=config,
             layer_idx=layer_idx,
             hidden_size=config.hidden_size,
@@ -222,7 +222,7 @@ class LFM2AttentionDecoderLayer(nn.Module):
             prefix=f"{prefix}.self_attn",
         )
 
-        self.feed_forward = LFM2MLP(
+        self.feed_forward = Lfm2MLP(
             dim=config.block_dim,
             ff_dim=config.block_ff_dim,
             multiple_of=config.block_multiple_of,
@@ -253,11 +253,11 @@ class LFM2AttentionDecoderLayer(nn.Module):
         return self.feed_forward(hidden_states), residual
 
 
-class LFM2ShortConvDecoderLayer(nn.Module):
+class Lfm2ShortConvDecoderLayer(nn.Module):
 
     def __init__(
         self,
-        config: LFM2Config,
+        config: Lfm2Config,
         layer_idx: int,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
@@ -272,7 +272,7 @@ class LFM2ShortConvDecoderLayer(nn.Module):
             prefix=f"{prefix}.conv",
         )
 
-        self.feed_forward = LFM2MLP(
+        self.feed_forward = Lfm2MLP(
             dim=config.block_dim,
             ff_dim=config.block_ff_dim,
             multiple_of=config.block_multiple_of,
@@ -308,7 +308,7 @@ class LFM2ShortConvDecoderLayer(nn.Module):
         return hidden_states, residual
 
 
-class LFM2Model(nn.Module):
+class Lfm2Model(nn.Module):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -332,8 +332,8 @@ class LFM2Model(nn.Module):
         def get_layer(prefix: str):
             layer_idx = int(prefix.rsplit(".", 1)[1])
             is_attn = self.config.layer_types[layer_idx] == "full_attention"
-            layer_class = (LFM2AttentionDecoderLayer
-                           if is_attn else LFM2ShortConvDecoderLayer)
+            layer_class = (Lfm2AttentionDecoderLayer
+                           if is_attn else Lfm2ShortConvDecoderLayer)
             return layer_class(
                 config,
                 layer_idx,
@@ -391,9 +391,9 @@ class LFM2Model(nn.Module):
         state_cache_index = 0
         for layer in self.layers[self.start_layer:self.end_layer]:
             layer_conv_cache_params = None
-            if isinstance(layer, LFM2AttentionDecoderLayer):
+            if isinstance(layer, Lfm2AttentionDecoderLayer):
                 kv_cache_index += 1
-            if isinstance(layer, LFM2ShortConvDecoderLayer):
+            if isinstance(layer, Lfm2ShortConvDecoderLayer):
                 current_state_layer = state_cache_index
                 layer_conv_cache_params = conv_cache_params.at_layer_idx(
                     current_state_layer) if conv_cache_params else None
@@ -449,7 +449,7 @@ class LFM2Model(nn.Module):
         return loaded_params
 
 
-class LFM2ForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
+class Lfm2ForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
                       IsHybrid, SupportsQuant):
     packed_modules_mapping = {
         "qkv_proj": [
@@ -477,7 +477,7 @@ class LFM2ForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
         lora_config = vllm_config.lora_config
         scheduler_config = vllm_config.scheduler_config
         assert (not cache_config.enable_prefix_caching
-                ), "LFM2 currently does not support prefix caching"
+                ), "Lfm2 currently does not support prefix caching"
 
         super().__init__()
         self.config = config
@@ -485,7 +485,7 @@ class LFM2ForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
         self.scheduler_config = scheduler_config
         self.model_config = vllm_config.model_config
 
-        self.model = LFM2Model(vllm_config=vllm_config,
+        self.model = Lfm2Model(vllm_config=vllm_config,
                                prefix=maybe_prefix(prefix, "model"))
 
         if get_pp_group().is_last_rank:

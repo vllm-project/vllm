@@ -65,7 +65,7 @@ class ConvCacheManager(ConstantSizeCache):
     def get_seqlen_agnostic_capture_inputs(self, batch_size: int):
         """
         Provide the CUDA graph capture runs with a buffer in adjusted size.
-        The buffer is used to maintain the LFM2 Cache during the CUDA graph
+        The buffer is used to maintain the Lfm2 Cache during the CUDA graph
         replay runs.
         """
         return self._lfm2_cache, torch.as_tensor([PAD_SLOT_ID] * batch_size,
