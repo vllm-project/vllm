@@ -30,8 +30,7 @@ from vllm.distributed.parallel_state import (
 from vllm.forward_context import (DPMetadata, get_forward_context,
                                   set_forward_context)
 from vllm.logger import init_logger
-from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
-from vllm.model_executor.layers.conv import ShortConv
+from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaBase
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.model_loader import TensorizerLoader, get_model_loader
 from vllm.model_executor.models.interfaces import (has_step_pooler,
@@ -2625,14 +2624,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 raise ValueError(
                     f"Unknown attention type: {attn_module.attn_type}")
 
-        mamba_layers = get_layers_from_vllm_config(self.vllm_config,
-                                                   MambaMixer2)
-        short_conv_layers = get_layers_from_vllm_config(self.vllm_config,
-                                                        ShortConv)
-
-        has_mamba      = len(mamba_layers) > 0
-        has_conv_layer = len(short_conv_layers) > 0
-        if has_mamba:
+        mamba_layers = get_layers_from_vllm_config(self.vllm_config, MambaBase)
+        if len(mamba_layers) > 0:
             if self.vllm_config.speculative_config is not None:
                 raise NotImplementedError(
                     "Mamba with speculative decoding is not supported yet.")
@@ -2687,7 +2680,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def _maybe_pad_fixed_state_page_size(
         self,
         attn_layers: dict[str, Attention],
-        state_layers: dict[str, Union[MambaMixer2, ShortConv]],
+        mamba_layers: dict[str, MambaBase],
         kv_cache_spec: dict[str, KVCacheSpec],
         state_spec: type[MambaSpec | ShortConvSpec],
         max_model_len: int,
