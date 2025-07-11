@@ -10,8 +10,6 @@ from vllm.entrypoints.openai.protocol import FunctionCall, ToolCall
 from vllm.entrypoints.openai.tool_parsers import KimiK2ToolParser
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
-pytest.skip("skip kimi_k2 parser test", allow_module_level=True)
-
 # Use a common model that is likely to be available
 MODEL = "moonshotai/Kimi-K2-Instruct"
 
