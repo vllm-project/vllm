@@ -158,6 +158,42 @@ def extra_groups_for_head_shards(ngroups: int, tp_size: int):
     return tp_size - ngroups
 
 
+def get_mamba_state_shape(
+    intermediate_size: int,
+    tp_world_size: int,
+    n_groups: int,
+    n_heads: int,
+    d_head: int,
+    d_state: int,
+    d_conv: int,
+) -> tuple[tuple[int, int], tuple[int, int]]:
+    """ Get the shape of mamba state."""
+
+    # if n_groups is not divisible by world_size, need to extend the shards
+    # to ensure all groups needed by a head is sharded along with it
+    n_groups = (n_groups +
+                extra_groups_for_head_shards(n_groups, tp_world_size))
+
+    # - heads and n_groups are TP-ed
+    conv_dim = (intermediate_size + 2 * n_groups * d_state)
+    # contiguous along 'dim' axis
+    conv_state_shape = (
+        d_conv - 1,
+        divide(conv_dim, tp_world_size),
+    )
+
+    # These are not TP-ed as they depend on A, dt_bias, D
+    # - they are typically small
+    #   e.g., (h_heads, d_head, d_state) = (128, 64, 128)
+    temporal_state_shape = (
+        divide(n_heads, tp_world_size),
+        d_head,
+        d_state,
+    )
+
+    return conv_state_shape, temporal_state_shape
+
+
 def mamba_v2_sharded_weight_loader(
     shard_spec: list[tuple[int, int, float]],
     tp_size: int,
@@ -707,30 +743,12 @@ class MambaMixer2(MambaBase, CustomOp):
         return out
 
     def get_state_shape(self) -> tuple[tuple[int, ...], tuple[int, ...]]:
-        world_size = get_tensor_model_parallel_world_size()
-
-        conv_state_shape, temporal_state_shape = None, None
-
-        # if n_groups is not divisible by world_size, need to extend the shards
-        # to ensure all groups needed by a head is sharded along with it
-        n_groups = (self.n_groups +
-                    extra_groups_for_head_shards(self.n_groups, world_size))
-
-        # - heads and n_groups are TP-ed
-        conv_dim = (self.intermediate_size +
-                    2 * n_groups * self.ssm_state_size)
-        # contiguous along 'dim' axis
-        conv_state_shape = (
-            self.conv_kernel_size - 1,
-            divide(conv_dim, world_size),
+        return get_mamba_state_shape(
+            intermediate_size=self.intermediate_size,
+            tp_world_size=get_tensor_model_parallel_world_size(),
+            n_groups=self.n_groups,
+            n_heads=self.num_heads,
+            d_head=self.head_dim,
+            d_state=self.ssm_state_size,
+            d_conv=self.conv_kernel_size,
         )
-
-        # These are not TP-ed as they depend on A, dt_bias, D
-        # - they are typically small
-        #   e.g., (h_heads, d_head, d_state) = (128, 64, 128)
-        temporal_state_shape = (
-            divide(self.num_heads, world_size),
-            self.head_dim,
-            self.ssm_state_size,
-        )
-        return conv_state_shape, temporal_state_shape

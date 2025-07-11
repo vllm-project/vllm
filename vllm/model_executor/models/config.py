@@ -1,17 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from copy import deepcopy
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import vllm.envs as envs
-from vllm.distributed import divide
 from vllm.logger import init_logger
+from vllm.model_executor.models import ModelRegistry
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, cdiv
 from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
 
 if TYPE_CHECKING:
-    from transformers.configuration_utils import PretrainedConfig
 
     from vllm.config import VllmConfig
 
@@ -210,74 +208,6 @@ class SnowflakeGteNewModelConfig(VerifyAndUpdateConfig):
 class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
 
     @classmethod
-    def extra_groups_for_head_shards(cls, ngroups: int, tp_size: int) -> int:
-        """Compute the increase in group numbers to account for
-        replication in order to accompany the head shards."""
-
-        # in the case ngoups % tp_size == 0, this will be zero
-        if ngroups % tp_size == 0:
-            return 0
-
-        # for n_groups == 1, this is exactly tp_size - n_groups
-        return tp_size - ngroups
-
-    @dataclass
-    class MambaConfig:
-        expand: int
-        n_groups: int
-        n_heads: int
-        d_head: int
-        d_state: int
-        d_conv: int
-
-    @classmethod
-    def parse_mamba_config(cls, config: "PretrainedConfig") -> MambaConfig:
-        return cls.MambaConfig(
-            expand=config.mamba_expand,
-            n_groups=config.mamba_n_groups,
-            n_heads=config.mamba_n_heads,
-            d_head=config.mamba_d_head,
-            d_state=config.mamba_d_state,
-            d_conv=config.mamba_d_conv,
-        )
-
-    @classmethod
-    def get_mamba_cache_shape(
-            cls, vllm_config: "VllmConfig"
-    ) -> tuple[tuple[int, int], tuple[int, int]]:
-
-        parallel_config = vllm_config.parallel_config
-        hf_config = vllm_config.model_config.hf_config
-        mamba_config = cls.parse_mamba_config(hf_config)
-
-        world_size = parallel_config.tensor_parallel_size
-        hidden_size = hf_config.hidden_size
-        intermediate_size = mamba_config.expand * hidden_size
-
-        # if n_groups is not divisible by world_size, need to extend the shards
-        # to ensure all groups needed by a head is sharded along with it
-        n_groups = (mamba_config.n_groups + cls.extra_groups_for_head_shards(
-            mamba_config.n_groups, world_size))
-
-        # - heads and n_groups are TP-ed
-        conv_dim = (intermediate_size + 2 * n_groups * mamba_config.d_state)
-        conv_state_shape = (
-            divide(conv_dim, world_size),
-            mamba_config.d_conv - 1,
-        )
-
-        # These are not TP-ed as they depend on A, dt_bias, D
-        # - they are typically small
-        #   e.g., (h_heads, d_head, d_state) = (128, 64, 128)
-        temporal_state_shape = (
-            divide(mamba_config.n_heads, world_size),
-            mamba_config.d_head,
-            mamba_config.d_state,
-        )
-
-        return conv_state_shape, temporal_state_shape
-
-    @classmethod
     def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
         """
         Ensure that page size of attention layers is greater than or
@@ -310,9 +240,12 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
             dtype=kv_cache_dtype,
             use_mla=model_config.use_mla).page_size_bytes
 
+        model_cls = ModelRegistry.resolve_model_cls(
+            model_config._model_info.architecture)[0]
+
         # get mamba page size
         mamba_page_size = MambaSpec(
-            shapes=cls.get_mamba_cache_shape(vllm_config),
+            shapes=model_cls.get_mamba_state_shape_from_config(vllm_config),
             dtype=kv_cache_dtype,
             block_size=model_config.max_model_len,
         ).page_size_bytes
@@ -357,38 +290,6 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
                 "exactly equal.", mamba_padding_pct)
 
 
-class NemotronHModelConfig(HybridAttentionMambaModelConfig):
-
-    @classmethod
-    def parse_mamba_config(
-        cls, config: "PretrainedConfig"
-    ) -> HybridAttentionMambaModelConfig.MambaConfig:
-        return HybridAttentionMambaModelConfig.MambaConfig(
-            expand=config.expand,
-            n_groups=config.n_groups,
-            n_heads=config.mamba_num_heads,
-            d_head=config.mamba_head_dim,
-            d_state=config.ssm_state_size,
-            d_conv=config.conv_kernel,
-        )
-
-
-class Zamba2ModelConfig(HybridAttentionMambaModelConfig):
-
-    @classmethod
-    def parse_mamba_config(
-        cls, config: "PretrainedConfig"
-    ) -> HybridAttentionMambaModelConfig.MambaConfig:
-        return HybridAttentionMambaModelConfig.MambaConfig(
-            expand=config.mamba_expand,
-            n_groups=config.mamba_ngroups,
-            n_heads=config.n_mamba_heads,
-            d_head=config.mamba_headdim,
-            d_state=config.mamba_d_state,
-            d_conv=config.mamba_d_conv,
-        )
-
-
 MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "GteModel": SnowflakeGteNewModelConfig,
     "GteNewModel": GteNewModelConfig,
@@ -398,7 +299,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "FalconH1ForCausalLM": HybridAttentionMambaModelConfig,
     "BambaForCausalLM": HybridAttentionMambaModelConfig,
     "GraniteMoeHybridForCausalLM": HybridAttentionMambaModelConfig,
-    "NemotronHForCausalLM": NemotronHModelConfig,
-    "Zamba2ForCausalLM": Zamba2ModelConfig,
+    "NemotronHForCausalLM": HybridAttentionMambaModelConfig,
+    "Zamba2ForCausalLM": HybridAttentionMambaModelConfig,
     "JinaVLForRanking": JinaVLForSequenceClassificationConfig,
 }
