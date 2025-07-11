@@ -20,6 +20,8 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.mamba2_metadata import (Mamba2Metadata,
                                                               update_metadata)
+from vllm.model_executor.layers.mamba.mamba_utils import (
+    extra_groups_for_head_shards, get_mamba_state_shape)
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn, causal_conv1d_update)
 from vllm.model_executor.layers.mamba.ops.mamba_ssm import (
@@ -144,54 +146,6 @@ class Mixer2RMSNormGated(CustomOp):
             self.variance_epsilon,
         )
         return out
-
-
-def extra_groups_for_head_shards(ngroups: int, tp_size: int):
-    """Compute the increase in group numbers to account for
-    replication in order to accompany the head shards."""
-
-    # in the case ngoups % tp_size == 0, this will be zero
-    if ngroups % tp_size == 0:
-        return 0
-
-    # for n_groups == 1, this is exactly tp_size - n_groups
-    return tp_size - ngroups
-
-
-def get_mamba_state_shape(
-    intermediate_size: int,
-    tp_world_size: int,
-    n_groups: int,
-    n_heads: int,
-    d_head: int,
-    d_state: int,
-    d_conv: int,
-) -> tuple[tuple[int, int], tuple[int, int]]:
-    """ Get the shape of mamba state."""
-
-    # if n_groups is not divisible by world_size, need to extend the shards
-    # to ensure all groups needed by a head is sharded along with it
-    n_groups = (n_groups +
-                extra_groups_for_head_shards(n_groups, tp_world_size))
-
-    # - heads and n_groups are TP-ed
-    conv_dim = (intermediate_size + 2 * n_groups * d_state)
-    # contiguous along 'dim' axis
-    conv_state_shape = (
-        d_conv - 1,
-        divide(conv_dim, tp_world_size),
-    )
-
-    # These are not TP-ed as they depend on A, dt_bias, D
-    # - they are typically small
-    #   e.g., (h_heads, d_head, d_state) = (128, 64, 128)
-    temporal_state_shape = (
-        divide(n_heads, tp_world_size),
-        d_head,
-        d_state,
-    )
-
-    return conv_state_shape, temporal_state_shape
 
 
 def mamba_v2_sharded_weight_loader(
@@ -747,8 +701,8 @@ class MambaMixer2(MambaBase, CustomOp):
             intermediate_size=self.intermediate_size,
             tp_world_size=get_tensor_model_parallel_world_size(),
             n_groups=self.n_groups,
-            n_heads=self.num_heads,
-            d_head=self.head_dim,
-            d_state=self.ssm_state_size,
-            d_conv=self.conv_kernel_size,
+            num_heads=self.num_heads,
+            head_dim=self.head_dim,
+            state_size=self.ssm_state_size,
+            conv_kernel=self.conv_kernel_size,
         )
