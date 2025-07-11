@@ -12,6 +12,8 @@ from vllm.distributed import divide, get_pp_group, get_tensor_model_parallel_wor
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
                                                RowParallelLinear)
+from vllm.model_executor.layers.mamba.mamba2_metadata import (Mamba2Metadata,
+                                                              update_metadata)
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn, causal_conv1d_update)
 from vllm.attention.backends.abstract import AttentionMetadata
@@ -91,9 +93,10 @@ class ShortConv(CustomOp):
             if attn_metadata is not None:
                 assert isinstance(attn_metadata, dict)
                 attn_metadata = attn_metadata[self.prefix]
+                conv_metadata = attn_metadata
                 assert isinstance(attn_metadata, Mamba2AttentionMetadata)
                 self_kv_cache = self.kv_cache[forward_context.virtual_engine]
-                conv_state = self_kv_cache[0]
+                conv_state = self_kv_cache[0].transpose(-1, -2)
                 state_indices_tensor = attn_metadata.state_indices_tensor
                 has_initial_states_p = attn_metadata.has_initial_states
                 # prep_initial_states = attn_metadata.prep_initial_states
@@ -188,9 +191,12 @@ class ShortConv(CustomOp):
         conv_output_list = []
 
         if has_prefill:
-            Bx_p = (B_p * x_p).contiguous()
+            Bx_p = (B_p * x_p).transpose(0, 1)
+            if conv_metadata.cu_seqlen is None:
+                conv_metadata = update_metadata(
+                    Bx_p, attn_metadata.query_start_loc, conv_metadata)
             Bx = causal_conv1d_fn(
-                Bx_p.transpose(0, 1),
+                Bx_p,
                 conv_weights,
                 self.conv.bias,
                 activation=None,
@@ -228,8 +234,9 @@ class ShortConv(CustomOp):
 
     def get_state_shape(self) -> tuple[tuple[int, ...], tuple[int, ...]]:
         world_size = get_tensor_model_parallel_world_size()
+        # contiguous along 'dim' axis
         conv_state_shape = (
-            divide(self.conv_dim, world_size),
             self.L_cache - 1,
+            divide(self.conv_dim, world_size),
         )
         return (conv_state_shape,)
