@@ -97,7 +97,6 @@ class XLAScaledMMLinearKernel(ScaledMMLinearKernel):
             w_q,
             w_s,
             quantize_activation=True,
-            vmem_limit_bytes=96 * 1024 * 1024,
         )
 
         # Explicitly capture control flow to make dynamo happy.
