@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import dataclasses
+import os
 from collections import defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -13,6 +14,7 @@ try:
     from flashinfer import BatchDecodeWithPagedKVCacheWrapper
     from flashinfer.decode import CUDAGraphBatchDecodeWithPagedKVCacheWrapper
     from flashinfer.prefill import BatchPrefillWithPagedKVCacheWrapper
+    from flashinfer.decode import trtllm_batch_decode_with_kv_cache
 
     from vllm.vllm_flash_attn import flash_attn_varlen_func
     FLASHINFER_WORKSPACE_BUFFER_SIZE = 256 * 1024 * 1024
@@ -22,6 +24,7 @@ except ImportError:
         BatchDecodeWithPagedKVCacheWrapper = None
         CUDAGraphBatchDecodeWithPagedKVCacheWrapper = None
         BatchPrefillWithPagedKVCacheWrapper = None
+        trtllm_batch_decode_with_kv_cache = None
     FLASHINFER_WORKSPACE_BUFFER_SIZE = 0
 
 import torch
@@ -323,6 +326,8 @@ class FlashInferState(AttentionState):
             num_prefill_tokens=0,
             num_decode_tokens=batch_size,
             max_prefill_seq_len=0,
+            max_decode_seq_len=0,
+            seq_lens_tensor=self._graph_seq_lens,
             block_tables=self._graph_block_tables,
             paged_kv_indptr=paged_kv_indptr_tensor_host,
             paged_kv_indices=paged_kv_indices_tensor_host,
@@ -348,14 +353,23 @@ class FlashInferState(AttentionState):
                                 attn_metadata,
                                 is_encoder_decoder_model: bool = False):
         return {
-            "slot_mapping": attn_metadata.slot_mapping,
+            "block_tables": attn_metadata.block_tables,
+            "seq_lens_tensor": attn_metadata.seq_lens_tensor,
+            "slot_mapping": attn_metadata.slot_mapping,            
         }
 
     def prepare_graph_input_buffers(self,
                                     input_buffers,
                                     attn_metadata,
                                     is_encoder_decoder_model: bool = False):
-        return
+        super().prepare_graph_input_buffers(input_buffers, attn_metadata,
+                                            is_encoder_decoder_model)
+        num_total_blocks = attn_metadata.decode_metadata.seq_lens_tensor.shape[
+            0]
+        input_buffers["seq_lens_tensor"][:num_total_blocks].copy_(
+            attn_metadata.seq_lens_tensor, non_blocking=True)
+        input_buffers["block_tables"][:num_total_blocks].copy_(
+            attn_metadata.block_tables, non_blocking=True) 
 
     def begin_forward(self, model_input):
         assert not self._is_graph_capturing
@@ -388,6 +402,8 @@ class FlashInferMetadata(AttentionMetadata):
     # Maximum sequence length among prefill batch. 0 if there are decoding
     # requests only.
     max_prefill_seq_len: int
+    max_decode_seq_len: int
+
     # Number of query tokens for each request in the batch.
     # Currently, we require that all requests have the same number of query
     # tokens during the decoding phase. When speculavie decoding is enabled,
@@ -622,6 +638,7 @@ class FlashInferMetadata(AttentionMetadata):
             paged_kv_indptr=self.paged_kv_indptr,
             paged_kv_last_page_len=self.paged_kv_last_page_len,
             block_table_bound=self.block_table_bound)
+        self.max_decode_seq_len += 1
 
 
 class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
@@ -790,6 +807,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         use_captured_graph = cuda_graph_pad_size != -1
 
         max_prefill_seq_len = max(self.prefill_seq_lens, default=0)
+        max_decode_seq_len = max(self.curr_seq_lens, default=0)
         num_decode_tokens = self.num_decode_tokens
         decode_query_len = max(query_lens[self.num_prefills:], default=1)
 
@@ -895,6 +913,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             num_prefill_tokens=self.num_prefill_tokens,
             num_decode_tokens=num_decode_tokens,
             max_prefill_seq_len=max_prefill_seq_len,
+            max_decode_seq_len=max_decode_seq_len,
             block_tables=block_tables,
             paged_kv_indptr=paged_kv_indptr_tensor,
             paged_kv_indices=paged_kv_indices_tensor,
@@ -1082,12 +1101,31 @@ class FlashInferImpl(AttentionImpl):
                 logits_soft_cap or 0.0)
             assert decode_meta.decode_wrapper._sm_scale == softmax_scale
 
-            decode_output = decode_meta.decode_wrapper.run(
-                decode_query,
-                kv_cache.permute(*stride_order),
-                k_scale=layer._k_scale_float,
-                v_scale=layer._v_scale_float,
-            )
+            solver = os.environ.get('KERNEL', 'FI')
+            if solver == 'FI':
+                decode_output = decode_meta.decode_wrapper.run(
+                    decode_query,
+                    kv_cache.permute(*stride_order),
+                    k_scale=layer._k_scale_float,
+                    v_scale=layer._v_scale_float,
+                )
+            elif solver == 'GEN':
+                workspace_buffer = decode_meta.decode_wrapper._int_workspace_buffer
+                decode_output = trtllm_batch_decode_with_kv_cache(
+                    decode_query,
+                    kv_cache,
+                    workspace_buffer,
+                    num_heads,
+                    num_kv_heads,
+                    softmax_scale,
+                    attn_metadata.block_tables,
+                    decode_meta.seq_lens_tensor,
+                    attn_metadata.page_size,
+                    attn_metadata.max_decode_seq_len,
+                    kv_cache_dtype, layer._k_scale_float,
+                    layer._v_scale_float)
+            else:
+                raise ValueError(f"Unrecognized decode solver: {solver}")
 
         if prefill_output is None and decode_output is not None:
             # Decode only batch.
@@ -1105,3 +1143,4 @@ class FlashInferImpl(AttentionImpl):
             decode_output = decode_output.squeeze(1)
             output = torch.cat([prefill_output, decode_output], dim=0)
         return output.view(num_tokens, hidden_size)
+
