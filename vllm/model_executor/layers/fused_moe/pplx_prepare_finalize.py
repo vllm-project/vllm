@@ -6,10 +6,13 @@ import pplx_kernels as pplx
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.utils import (
     _validate_scale_shape, moe_kernel_quantize_input)
 from vllm.utils import cdiv, round_up
+
+logger = init_logger(__name__)
 
 
 def pplx_hidden_dim_scale_bytes(
@@ -101,9 +104,15 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         hidden_dim = a1.size(-1)  # K
 
         assert topk_ids.size(0) == num_tokens
-        assert expert_map is None, """with expert map, -1 id is used for
-            non-local token; this causes error when casting ids to the
-            topk_indices_dtype() uint32"""
+        # expert_map should be None because with expert map, -1 id is used for
+        # non-local token; this causes error when casting ids to the
+        # topk_indices_dtype() int32
+        #
+        if expert_map is not None:
+            logger.warn_once(
+                "The PPLX backend does not support expert mapping. "
+                "The provided `expert_map` will be ignored.")
+        expert_map = None  #noqa: F841
 
         # Is this always going to be a1.device?
         device = a1.device
