@@ -229,3 +229,28 @@ python3 quantize_quark.py --model_dir meta-llama/Llama-2-70b-chat-hf \
                           --model_export hf_format \
                           --tasks gsm8k
 ```
+
+## Using MXFP4 models
+
+vLLM supports loading MXFP4 models quantized offline through AMD Quark, compliant with [Open Compute Project (OCP) specification](https://www.opencompute.org/documents/ocp-microscaling-formats-mx-v1-0-spec-final-pdf).
+
+The scheme currently only supports dynamic quantization for activations.
+
+Example usage, after installing the latest AMD Quark release:
+
+```bash
+vllm serve fxmarty/qwen_1.5-moe-a2.7b-mxfp4 --tensor-parallel-size 1
+```
+
+A simulation of the matrix multiplication execution in MXFP4 can be run on devices that do not support MXFP4 operations natively (e.g. AMD Instinct MI325, MI300 and MI250), dequantizing weights from MXFP4 to half precision on the fly, using a fused kernel. This is useful e.g. to evaluate MXFP4 models using vLLM, or alternatively to benefit from the ~4x memory savings (compared to float16 and bfloat16).
+
+To generate offline models quantized using MXFP4 data type, the easiest approach is to use AMD Quark's [quantization script](https://quark.docs.amd.com/latest/pytorch/example_quark_torch_llm_ptq.html), as an example:
+
+```bash
+python quantize_quark.py --model_dir Qwen/Qwen1.5-MoE-A2.7B-Chat \
+    --quant_scheme w_mxfp4_a_mxfp4_sym \
+    --output_dir qwen_1.5-moe-a2.7b-mxfp4 \
+    --skip_evaluation \
+    --model_export hf_format \
+    --group_size 32
+```
