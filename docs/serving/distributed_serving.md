@@ -24,7 +24,7 @@ vLLM supports distributed tensor-parallel and pipeline-parallel inference and se
 
 vLLM's default distributed runtimes are [Ray](https://github.com/ray-project/ray) for multi-node inference and Python's native `multiprocessing` for single-node inference. You can override the defaults by setting `distributed_executor_backend` in the `LLM` class or `--distributed-executor-backend` in the API server. Use `mp` for `multiprocessing` or `ray` for Ray.
 
-Set `tensor_parallel_size` in the `LLM` class to the desired GPU count for multi-GPU inference:
+Set `tensor_parallel_size` in the `LLM` class to the desired GPU count for multi-GPU inference. For example, to run inference on 4 GPUs:
 
 ```python
 from vllm import LLM
@@ -32,14 +32,14 @@ llm = LLM("facebook/opt-13b", tensor_parallel_size=4)
 output = llm.generate("San Francisco is a")
 ```
 
-For multi-GPU serving, include `--tensor-parallel-size` when starting the server:
+For multi-GPU serving, include `--tensor-parallel-size` when starting the server. For example, to run API server on 4 GPUs:
 
 ```bash
 vllm serve facebook/opt-13b \
      --tensor-parallel-size 4
 ```
 
-Enable pipeline parallelism by adding `--pipeline-parallel-size`:
+Enable pipeline parallelism by adding `--pipeline-parallel-size`. For example, to run API server on 8 GPUs with pipeline parallelism and tensor parallelism:
 
 ```bash
 # Eight GPUs total
@@ -98,7 +98,9 @@ From any node, enter a container and run `ray status` and `ray list nodes` to ve
 !!! warning
      If Ray is running inside containers, run the commands in the remainder of this guide *inside the containers*. To open a shell inside a container, connect to a node and use `docker exec -it <container_name> /bin/bash`.
 
-Once a Ray cluster is running, use vLLM as you would in a single-node setting. All resources across the Ray cluster are visible to vLLM, so a single invocation on a single node is sufficient:
+Once a Ray cluster is running, use vLLM as you would in a single-node setting. All resources across the Ray cluster are visible to vLLM, so a single `vllm` command on a single node is sufficient.
+
+The common practice is to set the tensor parallel size to the number of GPUs in each node, and the pipeline parallel size to the number of nodes. For example, if you have 16 GPUs across 2 nodes (8 GPUs per node), set the tensor parallel size to 8 and the pipeline parallel size to 2:
 
 ```bash
 vllm serve /path/to/the/model/in/the/container \
@@ -106,7 +108,7 @@ vllm serve /path/to/the/model/in/the/container \
      --pipeline-parallel-size 2
 ```
 
-The example above assumes 16 GPUs across two nodes (8 GPUs per node). You can omit pipeline parallelism; set `tensor_parallel_size` to the total GPU count in the cluster and vLLM spawns the models across the cluster:
+Alternatively, you can siply set `tensor_parallel_size` to the total number of GPUs in the cluster:
 
 ```bash
 vllm serve /path/to/the/model/in/the/container \
