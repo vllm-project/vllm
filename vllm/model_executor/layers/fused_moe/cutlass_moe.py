@@ -320,6 +320,7 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
 
         activation_callable = lambda o, i: self.activation(activation, o, i)
 
+        topk_ids = topk_ids.view(dtype=torch.int32)
         in_dtype = hidden_states.dtype
         run_cutlass_moe_fp8(
             output, hidden_states, w1, w2, topk_ids, activation_callable,
