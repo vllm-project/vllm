@@ -17,8 +17,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only LLaMA model compatible with HuggingFace weights."""
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import Any, Optional, Union
+import typing
 
 import torch
 from torch import nn
@@ -26,8 +27,8 @@ from transformers import Llama4TextConfig
 
 from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
+from vllm.distributed import get_ep_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (QKVParallelLinear,
@@ -66,15 +67,35 @@ class Llama4MoE(nn.Module):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.top_k = config.num_experts_per_tok
 
+        # EP group support
+        self.ep_group = get_ep_group().device_group
+        self.ep_rank = self.ep_group.rank()
+        self.ep_size = self.ep_group.size()
+
+        # Get EPLB settings from current vllm config
+        vllm_config = get_current_vllm_config()
+        parallel_config = vllm_config.parallel_config
+        self.enable_eplb = enable_eplb
+
+        # Calculate expert distribution
+        self.n_logical_experts = config.num_local_experts
+        self.n_redundant_experts = parallel_config.num_redundant_experts
+        self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
+        self.n_local_physical_experts = self.n_physical_experts // self.ep_size
+
+        # Calculate which experts belong to this rank
+        self.physical_expert_start = self.ep_rank * self.n_local_physical_experts
+        self.physical_expert_end = self.physical_expert_start + self.n_local_physical_experts
+
         intermediate_size_moe = config.intermediate_size
         self.router = ReplicatedLinear(config.hidden_size,
-                                       config.num_local_experts,
+                                       self.n_logical_experts,
                                        bias=False,
                                        quant_config=None,
                                        prefix=f"{prefix}.router")
 
         self.experts = FusedMoE(
-            num_experts=config.num_local_experts,
+            num_experts=self.n_logical_experts,
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
             custom_routing_function=Llama4MoE.custom_routing_function,
@@ -84,7 +105,8 @@ class Llama4MoE(nn.Module):
             renormalize=False,
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
-            enable_eplb=enable_eplb)
+            enable_eplb=self.enable_eplb,
+            num_redundant_experts=self.n_redundant_experts)
 
         self.shared_expert = LlamaMLP(
             hidden_size=config.hidden_size,
@@ -280,6 +302,7 @@ class Llama4DecoderLayer(nn.Module):
         )
         is_moe_layer = config.interleave_moe_layer_step > 0 and (
             self.layer_idx + 1) % config.interleave_moe_layer_step == 0
+        self.feed_forward: Union[Llama4MoE, LlamaMLP]
         if is_moe_layer:
             self.feed_forward = Llama4MoE(
                 config=config,
@@ -467,7 +490,7 @@ class Llama4Model(LlamaModel):
             (".gate_up_proj", ".gate_proj", 0),
             (".gate_up_proj", ".up_proj", 1),
         ]
-        fused_experts_params = False
+        
         # Pass num_redundant_experts for EPLB support
         expert_params_mapping = FusedMoE.make_expert_params_mapping(
             ckpt_gate_proj_name="gate_proj",
@@ -475,18 +498,11 @@ class Llama4Model(LlamaModel):
             ckpt_up_proj_name="up_proj",
             num_experts=self.num_experts,
             num_redundant_experts=self._num_redundant_experts)
-        expert_params_mapping_fused = FusedMoE.make_expert_params_mapping(
-            ckpt_gate_proj_name="gate_up_proj",
-            ckpt_down_proj_name="down_proj",
-            ckpt_up_proj_name="gate_up_proj",
-            num_experts=1,
-            num_redundant_experts=0)
+        
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
+        
         for name, loaded_weight in weights:
-            if "experts.gate_up_proj" in name or "experts.down_proj" in name:
-                fused_experts_params = True
-                expert_params_mapping = expert_params_mapping_fused
             if (self.quant_config is not None and
                 (scale_name := self.quant_config.get_cache_scale(name))):
                 # Loading kv cache quantization scales
@@ -498,6 +514,7 @@ class Llama4Model(LlamaModel):
                 weight_loader(param, loaded_weight)
                 loaded_params.add(scale_name)
                 continue
+                
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name or "experts" in name:
                     continue
@@ -505,20 +522,77 @@ class Llama4Model(LlamaModel):
                 if is_pp_missing_parameter(name, self):
                     continue
                 param = params_dict[name]
-                weight_loader = param.weight_loader
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
                 weight_loader(param, loaded_weight, shard_id)
                 loaded_params.add(name)
                 break
             else:
-                moe_loaded = self.load_moe_expert_weights(
-                    name,
-                    loaded_weight,
-                    params_dict,
-                    loaded_params,
-                    expert_params_mapping,
-                    fused=fused_experts_params)
-
-                if not moe_loaded:
+                # Check if this is an expert weight
+                is_expert_weight = False
+                for mapping in expert_params_mapping:
+                    param_name, weight_name, expert_id, shard_id = mapping
+                    if weight_name not in name:
+                        continue
+                    
+                    # This is an expert weight
+                    is_expert_weight = True
+                    
+                    # Create mapped name without modifying original
+                    name_mapped = name.replace(weight_name, param_name)
+                    
+                    if is_pp_missing_parameter(name_mapped, self):
+                        continue
+                    
+                    # Skip bias if not in params
+                    if ((name_mapped.endswith(".bias") or name_mapped.endswith("_bias"))
+                            and name_mapped not in params_dict):
+                        continue
+                    
+                    # Handle fused weights transformation
+                    if "experts.gate_up_proj" in name:
+                        loaded_weight_list = list(loaded_weight.chunk(2, dim=-1))
+                        if "w13" in name_mapped and "w1" in shard_id:
+                            loaded_weight_to_use = loaded_weight_list[0].transpose(-1, -2)
+                        elif "w13" in name_mapped and "w3" in shard_id:
+                            loaded_weight_to_use = loaded_weight_list[1].transpose(-1, -2)
+                        else:
+                            loaded_weight_to_use = loaded_weight.transpose(-1, -2)
+                    else:
+                        loaded_weight_to_use = loaded_weight.transpose(-1, -2) if "experts" in name else loaded_weight
+                    
+                    param = params_dict[name_mapped]
+                    weight_loader = typing.cast(Callable[..., bool], 
+                                              getattr(param, "weight_loader", default_weight_loader))
+                    
+                    # Try to load with return_success
+                    try:
+                        success = weight_loader(
+                            param,
+                            loaded_weight_to_use,
+                            name_mapped,
+                            shard_id=shard_id,
+                            expert_id=expert_id,
+                            return_success=True
+                        )
+                        if success:
+                            loaded_params.add(name_mapped)
+                            break
+                    except TypeError:
+                        # Fallback for weight loaders without return_success
+                        weight_loader(
+                            param,
+                            loaded_weight_to_use,
+                            name_mapped
+                        )
+                        loaded_params.add(name_mapped)
+                        break
+                else:
+                    if is_expert_weight:
+                        # Expert weight identified but not local to this rank
+                        continue
+                    
+                    # Handle non-expert weights
                     if is_pp_missing_parameter(name, self):
                         continue
                     param = params_dict[name]
@@ -526,6 +600,7 @@ class Llama4Model(LlamaModel):
                                             default_weight_loader)
                     weight_loader(param, loaded_weight)
                     loaded_params.add(name)
+                    
         return loaded_params
 
 
@@ -568,48 +643,32 @@ class Llama4ForCausalLM(LlamaForCausalLM, MixtureOfExperts):
                         layer.feed_forward, 'experts'):
                     self.moe_layers.append(layer.feed_forward.experts)
 
-    @property
-    def num_moe_layers(self) -> int:
-        """Get number of MoE layers"""
-        return len(self.moe_layers)
+        # Get expert counts from an actual MoE layer
+        example_moe = None
+        for layer_idx in range(config.num_hidden_layers):
+            layer = self.model.layers[layer_idx]
+            if isinstance(layer, Llama4DecoderLayer) and hasattr(layer, 'feed_forward') and isinstance(layer.feed_forward, Llama4MoE):
+                example_moe = layer.feed_forward
+                break
 
-    @property
-    def num_expert_groups(self) -> int:
-        """Get number of expert groups (1 for Llama4)"""
-        return 1
+        if example_moe is not None:
+            self.num_logical_experts = example_moe.n_logical_experts
+            self.num_physical_experts = example_moe.n_physical_experts
+            self.num_local_physical_experts = example_moe.n_local_physical_experts
+            self.num_routed_experts = example_moe.n_logical_experts
+            self.num_redundant_experts = example_moe.n_redundant_experts
+        else:
+            # Fallback values if no MoE layers
+            self.num_logical_experts = 0
+            self.num_physical_experts = 0
+            self.num_local_physical_experts = 0
+            self.num_routed_experts = 0
+            self.num_redundant_experts = 0
 
-    @property
-    def num_logical_experts(self) -> int:
-        """Get number of logical experts"""
-        return self.config.num_local_experts
-
-    @property
-    def num_physical_experts(self) -> int:
-        """Get number of physical experts (includes redundant)"""
-        return self.config.num_local_experts + self._num_redundant_experts
-
-    @property
-    def num_local_physical_experts(self) -> int:
-        """Get number of local physical experts"""
-        if len(self.moe_layers) > 0:
-            return self.moe_layers[0].local_num_experts
-        return self.config.num_local_experts
-
-    @property
-    def num_routed_experts(self) -> int:
-        """Get number of routed experts (excludes shared experts)"""
-        return self.config.num_local_experts
-
-    @property
-    def num_shared_experts(self) -> int:
-        """Get number of shared experts"""
-        # Llama4 has 1 shared expert per MoE layer
-        return 1 if self.num_moe_layers > 0 else 0
-
-    @property
-    def num_redundant_experts(self) -> int:
-        """Get number of redundant experts"""
-        return self._num_redundant_experts
+        # Set MixtureOfExperts attributes
+        self.num_moe_layers = len(self.moe_layers)
+        self.num_expert_groups = 1  # Llama4 has 1 expert group
+        self.num_shared_experts = 1 if self.num_moe_layers > 0 else 0  # 1 shared expert per MoE layer
 
     def set_eplb_state(
         self,
