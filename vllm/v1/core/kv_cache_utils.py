@@ -10,7 +10,7 @@ from typing import Any, Callable, NamedTuple, Optional
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.utils import GiB_bytes, cdiv
+from vllm.utils import GiB_bytes, cdiv, sha256_cbor_64bit
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec, KVCacheSpec,
                                         KVCacheTensor, SlidingWindowSpec)
@@ -60,9 +60,17 @@ NONE_HASH: int
 def init_none_hash(hash_fn: Callable):
     global NONE_HASH
 
+    hash_seed = os.getenv("PYTHONHASHSEED")
+    if hash_seed is None and hash_fn is sha256_cbor_64bit:
+        logger.warning(
+            "PYTHONHASHSEED is not set. This will lead to non-reproducible "
+            "block-hashes when using sha256_cbor_64bit as the hash function."
+            "Consider setting PYTHONHASHSEED to a fixed value for "
+            "reproducibility."
+        )
+
     NONE_HASH = (int.from_bytes(os.urandom(32), byteorder="big")
-                 if os.getenv("PYTHONHASHSEED") is None else hash_fn(
-                     os.getenv("PYTHONHASHSEED")))
+                 if hash_seed is None else hash_fn(hash_seed))
 
 
 class PrefixCachingMetrics:
