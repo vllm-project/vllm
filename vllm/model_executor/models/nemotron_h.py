@@ -154,7 +154,6 @@ class NemotronHMambaDecoderLayer(nn.Module):
             activation=config.mamba_hidden_act,
             quant_config=quant_config,
             prefix=f"{prefix}.mixer",
-            chunk_size=config.chunk_size,
         )
 
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)

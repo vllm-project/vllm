@@ -166,17 +166,19 @@ class CudaPlatformBase(Platform):
                 logger.info(
                     "Forcing kv cache block size to 64 for FlashMLA backend.")
 
+        compilation_config = vllm_config.compilation_config
         if (envs.VLLM_ALL2ALL_BACKEND == "deepep_high_throughput"
                 and parallel_config.data_parallel_size > 1
-                and vllm_config.compilation_config.use_cudagraph):
+                and compilation_config.use_cudagraph):
             logger.info(
                 "Data Parallel: Forcing enforce eager to be True since DP "
                 "with DeepEP high-throughput kernels are not CUDA Graph "
                 "compatible. The DeepEP low-latency kernels are CUDA Graph "
                 "compatible. Set the all_to_all backend to deepep_low_latency "
                 "to use those kernels instead.")
-            vllm_config.compilation_config.use_cudagraph = False
-            vllm_config.model_config.enforce_eager = True
+            compilation_config.use_cudagraph = False
+            if model_config is not None:
+                model_config.enforce_eager = True
             # TODO (varun): Turning this ON gives incorrect results for the
             # Deepseek-V2-lite model.
             vllm_config.compilation_config.use_inductor = False
@@ -242,6 +244,10 @@ class CudaPlatformBase(Platform):
 
             if selected_backend == _Backend.FLASHINFER:
                 logger.info_once("Using FlashInfer backend on V1 engine.")
+                if cls.has_device_capability(100):
+                    from vllm.v1.attention.backends.utils import (
+                        set_kv_cache_layout)
+                    set_kv_cache_layout("HND")
                 return FLASHINFER_V1
             elif selected_backend == _Backend.FLEX_ATTENTION:
                 logger.info_once("Using FlexAttention backend on V1 engine.")
@@ -269,9 +275,13 @@ class CudaPlatformBase(Platform):
                 supports_head_size(FLASHINFER_V1, head_size):
                 try:
                     import flashinfer  # noqa: F401
+
+                    from vllm.v1.attention.backends.utils import (
+                        set_kv_cache_layout)
                     logger.info_once(
-                        "Using FlashInfer backend on V1 engine by default for "
-                        "Blackwell (SM 10.0) GPUs.")
+                        "Using FlashInfer backend with HND KV cache layout on "
+                        "V1 engine by default for Blackwell (SM 10.0) GPUs.")
+                    set_kv_cache_layout("HND")
                     return FLASHINFER_V1
                 except ImportError:
                     logger.info_once(
@@ -291,6 +301,13 @@ class CudaPlatformBase(Platform):
         # Backends for V0 engine
         if selected_backend == _Backend.FLASHINFER:
             logger.info("Using FlashInfer backend.")
+            if cls.has_device_capability(100):
+                from vllm.v1.attention.backends.utils import (
+                    set_kv_cache_layout)
+                logger.info_once(
+                    "Using HND KV cache layout on V1 engine by default for "
+                    "Blackwell (SM 10.0) GPUs.")
+                set_kv_cache_layout("HND")
             return "vllm.attention.backends.flashinfer.FlashInferBackend"
         elif selected_backend == _Backend.XFORMERS:
             logger.info("Using XFormers backend.")
