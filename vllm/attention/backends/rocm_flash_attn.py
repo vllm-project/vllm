@@ -19,6 +19,8 @@ from vllm.attention.ops.paged_attn import (PagedAttention,
                                            PagedAttentionMetadata)
 from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape)
 from vllm.platforms import current_platform
 from vllm.platforms.rocm import use_rocm_custom_paged_attention
 
@@ -598,10 +600,10 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                                                     head_dim))
 
     def fused_output_quant_supported(self, dtype: torch.dtype, static: bool,
-                                     group_shape: tuple[int, int]):
+                                     group_shape: GroupShape):
         if self.use_triton_flash_attn:
             return dtype == current_platform.fp8_dtype(
-            ) and static and group_shape == (-1, -1)  # per-tensor
+            ) and static and group_shape == GroupShape.PER_TENSOR
 
         # Only supported in the Triton backend
         return False
