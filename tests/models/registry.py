@@ -249,7 +249,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                             trust_remote_code=True,
                                             v0_only=True),
     "Phi4FlashForCausalLM": _HfExamplesInfo("microsoft/Phi-4-mini-flash-reasoning", # noqa: E501
-                                        trust_remote_code=True),
+                                        trust_remote_code=True,
+                                        v0_only=True),
     "PhiMoEForCausalLM": _HfExamplesInfo("microsoft/Phi-3.5-MoE-instruct",
                                          trust_remote_code=True),
     "Plamo2ForCausalLM": _HfExamplesInfo("pfnet/plamo-2-1b",

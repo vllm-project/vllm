@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 from transformers.activations import ACT2FN
 
+import vllm.envs as envs
 from vllm.attention import Attention, AttentionMetadata, AttentionType
 from vllm.attention.selector import _Backend
 from vllm.config import CacheConfig, VllmConfig
@@ -563,7 +564,7 @@ class SambaYModel(nn.Module):
                 # the kv cache since we reuse the kv cache from last layer.
                 # If in prefill phase, we can <s>prune></s> truncate
                 # the hidden state to save computation cost.
-                if attn_metadata.prefill_metadata:
+                if attn_metadata.prefill_metadata and not envs.VLLM_USE_V1:
                     selected_token_indices = torch.cumsum(
                         attn_metadata.seq_lens_tensor, dim=0) - 1
                     hidden_states = hidden_states.index_select(
