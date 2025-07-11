@@ -11,6 +11,8 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     get_config_dtype_str, try_get_optimal_moe_config)
+from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
+    TopKWeightAndReduceDelegate, TopKWeightAndReduceNaiveBatched)
 from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache, moe_kernel_quantize_input, normalize_batched_scales_shape,
     normalize_scales_shape)
@@ -600,25 +602,17 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
+        weight_and_reduce_impl: mk.TopKWeightAndReduce,
     ) -> None:
-        num_tokens = topk_ids.size(0)
-        num_local_experts = fused_expert_output.size(0)
-        K = fused_expert_output.size(-1)
-        assert output.size(0) == num_tokens and output.size(1) == K
-
-        output.fill_(0)
-
-        first_expert = num_local_experts * self.rank
-        last_expert = first_expert + num_local_experts
-
-        for expert_id in range(first_expert, last_expert):
-            matching_tokens = topk_ids == expert_id
-            topks = torch.any(matching_tokens, dim=1).flatten()
-            rows = torch.count_nonzero(topks)
-            rhs = fused_expert_output[expert_id - first_expert, :rows, :]
-            if not apply_router_weight_on_input:
-                rhs.mul_(topk_weights[matching_tokens].view(rhs.size(0), 1))
-            output[topks] = output[topks] + rhs
+        if isinstance(weight_and_reduce_impl, TopKWeightAndReduceDelegate):
+            weight_and_reduce_impl = TopKWeightAndReduceNaiveBatched(self.rank)
+        weight_and_reduce_impl.apply(
+            output=output,
+            fused_expert_output=fused_expert_output,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            apply_router_weight_on_input=apply_router_weight_on_input,
+        )
 
 
 class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
@@ -669,6 +663,10 @@ class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def supports_expert_map(self) -> bool:
         return False
+
+    def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
+        # Let PrepareAndFinalize::finalize() decide the impl.
+        return TopKWeightAndReduceDelegate()
 
     def workspace_shapes(
         self,
@@ -876,6 +874,10 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def supports_expert_map(self) -> bool:
         return False
+
+    def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
+        # Let PrepareAndFinalize::finalize() decide the impl.
+        return TopKWeightAndReduceDelegate()
 
     def workspace_shapes(
         self,
