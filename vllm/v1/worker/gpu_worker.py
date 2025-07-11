@@ -135,7 +135,14 @@ class Worker(WorkerBase):
 
             # This env var set by Ray causes exceptions with graph building.
             os.environ.pop("NCCL_ASYNC_ERROR_HANDLING", None)
-            self.device = torch.device(f"cuda:{self.local_rank}")
+
+            device_id = self.local_rank
+            if envs.VLLM_VISIBLE_DEVICES is not None:
+                devices = [
+                    int(dev) for dev in (x.strip() for x in envs.VLLM_VISIBLE_DEVICES.split(','))
+                ]
+                device_id = devices[self.local_rank]
+            self.device = torch.device(f"cuda:{device_id}")
             current_platform.set_device(self.device)
 
             _check_if_gpu_supports_dtype(self.model_config.dtype)

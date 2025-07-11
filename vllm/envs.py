@@ -338,6 +338,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "CUDA_VISIBLE_DEVICES":
     lambda: os.environ.get("CUDA_VISIBLE_DEVICES", None),
 
+    # used to control the visible devices in the distributed setting
+    "VLLM_VISIBLE_DEVICES":
+    lambda: os.environ.get("VLLM_VISIBLE_DEVICES", None),
+
     # timeout for each iteration in the engine
     "VLLM_ENGINE_ITERATION_TIMEOUT_S":
     lambda: int(os.environ.get("VLLM_ENGINE_ITERATION_TIMEOUT_S", "60")),
