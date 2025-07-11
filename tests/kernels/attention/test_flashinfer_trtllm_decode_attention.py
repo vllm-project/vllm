@@ -8,6 +8,10 @@ import torch
 
 from vllm.platforms import current_platform
 
+if not current_platform.is_device_capability(100):
+    pytest.skip("This TRTLLM kernel requires NVIDIA Blackwell.",
+                allow_module_level=True)
+
 FLOAT32_BYTES = torch.finfo(torch.float).bits // 8
 
 # KV Cache Layout for TRT-LLM
