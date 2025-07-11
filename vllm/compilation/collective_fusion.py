@@ -35,6 +35,7 @@ logger = init_logger(__name__)
 ALLREDUCE_OP = torch.ops.vllm.all_reduce.default
 RMS_OP = torch.ops._C.rms_norm.default
 RMS_ADD_OP = torch.ops._C.fused_add_rms_norm.default
+STATIC_FP8_QUANT_OP = torch.ops._C.static_scaled_fp8_quant.default
 
 
 class BasePattern:
@@ -174,7 +175,10 @@ if flashinfer_comm is not None:
         trigger_completion_at_end: bool,
         fp32_acc: bool,
         max_token_num: int,
+        pattern_code: int,
         norm_out: Optional[torch.Tensor] = None,
+        quant_out: Optional[torch.Tensor] = None,
+        scale_factor: Optional[float] = None,
     ) -> None:
 
         num_tokens, hidden_size = allreduce_in.shape
@@ -215,23 +219,28 @@ if flashinfer_comm is not None:
                 use_oneshot=True,
                 trigger_completion_at_end=trigger_completion_at_end,
                 fp32_acc=fp32_acc,
-                pattern_code=flashinfer_comm.AllReduceFusionPattern.
-                kARResidualRMSNorm,
+                pattern_code=flashinfer_comm.AllReduceFusionPattern(
+                    pattern_code),
                 allreduce_out=None,
-                quant_out=None,
+                quant_out=quant_out,
                 scale_out=None,
                 layout_code=None,
-                scale_factor=None,
+                scale_factor=scale_factor,
             )
         else:
             allreduce_out = tensor_model_parallel_all_reduce(allreduce_in)
             if norm_out is None:
                 torch.ops._C.fused_add_rms_norm(allreduce_out, residual,
                                                 rms_gamma, rms_eps)
+                norm_out = allreduce_out
             else:
                 torch.ops._C.rms_norm(norm_out, allreduce_out, rms_gamma,
                                       rms_eps)
-            allreduce_in.copy_(allreduce_out)
+            if scale_factor is not None:
+                torch.ops._C.static_scaled_fp8_quant(quant_out, norm_out,
+                                                     scale_factor)
+            else:
+                allreduce_in.copy_(allreduce_out)
 
     def call_trtllm_fused_allreduce_norm_fake(
         allreduce_in: torch.Tensor,
@@ -244,7 +253,10 @@ if flashinfer_comm is not None:
         trigger_completion_at_end: bool,
         fp32_acc: bool,
         max_token_num: int,
+        pattern_code: int,
         norm_out: Optional[torch.Tensor] = None,
+        quant_out: Optional[torch.Tensor] = None,
+        scale_factor: Optional[float] = None,
     ) -> None:
         pass
 
@@ -255,6 +267,7 @@ if flashinfer_comm is not None:
             "allreduce_in",
             "residual",
             "norm_out",
+            "quant_out",
         ],
         fake_impl=call_trtllm_fused_allreduce_norm_fake,
         dispatch_key=current_platform.dispatch_key,
@@ -319,15 +332,16 @@ class AllReduceRMSNORMPattern(BasePattern):
 
         def pattern(input: torch.Tensor, rms_result: torch.Tensor,
                     weight: torch.Tensor):
-            all_reduce_output = tensor_model_parallel_all_reduce(input)
+            allreduce_output = tensor_model_parallel_all_reduce(input)
             rms = auto_functionalized(
                 RMS_OP,
                 result=rms_result,
-                input=all_reduce_output,
+                input=allreduce_output,
                 weight=weight,
                 epsilon=self.epsilon,
             )
-            return rms[1], all_reduce_output
+            # rms_result, allreduce_output
+            return rms[1], allreduce_output
 
         def replacement(input: torch.Tensor, rms_result: torch.Tensor,
                         weight: torch.Tensor):
@@ -337,11 +351,14 @@ class AllReduceRMSNORMPattern(BasePattern):
                 allreduce_in=input,
                 residual=residual,
                 norm_out=rms_result,
+                quant_out=None,
                 rms_gamma=weight,
                 rms_eps=self.epsilon,
+                pattern_code=flashinfer_comm.AllReduceFusionPattern.
+                kARResidualRMSNorm,
                 **self.allreduce_params.get_trtllm_fused_allreduce_kwargs(),
             )
-
+            # rms_result, allreduce_in
             return allreduce[3], allreduce[1]
 
         pm.register_replacement(pattern, replacement, self.get_inputs(),
@@ -375,14 +392,15 @@ class AllReduceFusedAddRMSNormPattern(BasePattern):
 
         def pattern(residual: torch.Tensor, input: torch.Tensor,
                     weight: torch.Tensor):
-            all_reduce_output = tensor_model_parallel_all_reduce(input)
+            allreduce_output = tensor_model_parallel_all_reduce(input)
             rms = auto_functionalized(
                 RMS_ADD_OP,
-                input=all_reduce_output,
+                input=allreduce_output,
                 residual=residual,
                 weight=weight,
                 epsilon=self.epsilon,
             )
+            # input, residual
             return rms[1], rms[2]
 
         def replacement(residual: torch.Tensor, input: torch.Tensor,
@@ -391,14 +409,145 @@ class AllReduceFusedAddRMSNormPattern(BasePattern):
                 torch.ops.vllm.flashinfer_trtllm_fused_allreduce_norm.default,
                 allreduce_in=input,
                 residual=residual,
+                norm_out=None,
+                quant_out=None,
                 rms_gamma=weight,
                 rms_eps=self.epsilon,
-                norm_out=None,
+                pattern_code=flashinfer_comm.AllReduceFusionPattern.
+                kARResidualRMSNorm,
                 **self.allreduce_params.get_trtllm_fused_allreduce_kwargs(),
             )
+            # allreduce_in, residual
             return allreduce[1], allreduce[2]
 
         pm.register_replacement(pattern, replacement, self.get_inputs(),
+                                pm.fwd_only, pm_pass)
+
+
+class AllReduceFusedRMSNormStaticQuantPattern(BasePattern):
+
+    def __init__(self, epsilon: float, dtype: torch.dtype, device: str,
+                 allreduce_params: FlashInferFusedAllReduceParams):
+        super().__init__(dtype, device)
+        self.epsilon = epsilon
+        self.allreduce_params = allreduce_params
+        self.quant_dtype = torch.float8_e4m3fn
+
+    def register(self, pm_pass: PatternMatcherPass):
+
+        def get_inputs():
+            input = torch.empty([1, 8, 4],
+                                device=self.device,
+                                dtype=self.dtype)
+            rms_result = torch.empty([1, 8, 4],
+                                     device=self.device,
+                                     dtype=self.dtype)
+            weight = torch.empty([4], device=self.device, dtype=self.dtype)
+            result = torch.empty([1, 8, 4],
+                                 device="cuda",
+                                 dtype=self.quant_dtype)
+            scale = torch.empty(1, 1, device="cuda", dtype=torch.float32)
+            return [result, rms_result, input, weight, scale]
+
+        def pattern(result: torch.Tensor, result_rms: torch.Tensor,
+                    input: torch.Tensor, weight: torch.Tensor,
+                    scale: torch.Tensor):
+            allreduce_output = tensor_model_parallel_all_reduce(input)
+
+            at1 = auto_functionalized(RMS_OP,
+                                      result=result_rms,
+                                      input=allreduce_output,
+                                      weight=weight,
+                                      epsilon=self.epsilon)
+            at2 = auto_functionalized(STATIC_FP8_QUANT_OP,
+                                      result=result,
+                                      input=at1[1],
+                                      scale=scale)
+
+            # result
+            return at2[1]
+
+        def replacement(result: torch.Tensor, result_rms: torch.Tensor,
+                        input: torch.Tensor, weight: torch.Tensor,
+                        scale: torch.Tensor):
+            allreduce = auto_functionalized(
+                flashinfer_trtllm_fused_allreduce_norm,
+                allreduce_in=input,
+                norm_out=result_rms,
+                quant_out=result,
+                rms_gamma=weight,
+                rms_eps=self.epsilon,
+                pattern_code=flashinfer_comm.AllReduceFusionPattern.
+                kARResidualRMSNormFP8Quant,
+                scale_factor=scale,
+                **self.allreduce_params.get_trtllm_fused_allreduce_kwargs(),
+            )
+
+            # quant_out
+            return allreduce[4]
+
+        pm.register_replacement(pattern, replacement, get_inputs(),
+                                pm.fwd_only, pm_pass)
+
+
+class AllReduceFusedAddRMSNormStaticQuantPattern(BasePattern):
+
+    def __init__(self, epsilon: float, dtype: torch.dtype, device: str,
+                 allreduce_params: FlashInferFusedAllReduceParams):
+        super().__init__(dtype, device)
+        self.epsilon = epsilon
+        self.allreduce_params = allreduce_params
+        self.quant_dtype = torch.float8_e4m3fn
+
+    def register(self, pm_pass: PatternMatcherPass):
+
+        def get_inputs():
+            result = torch.empty([4, 4], device="cuda", dtype=self.quant_dtype)
+            input = torch.empty([4, 4], device=self.device, dtype=self.dtype)
+            residual = torch.empty([4, 4],
+                                   device=self.device,
+                                   dtype=self.dtype)
+            weight = torch.empty([4, 4], device=self.device, dtype=self.dtype)
+            scale = torch.empty(1, 1, device="cuda", dtype=torch.float32)
+            return [result, input, residual, weight, scale]
+
+        def pattern(result: torch.Tensor, input: torch.Tensor,
+                    residual: torch.Tensor, weight: torch.Tensor,
+                    scale: torch.Tensor):
+            allreduce_output = tensor_model_parallel_all_reduce(input)
+            at = auto_functionalized(
+                RMS_ADD_OP,
+                input=allreduce_output,
+                residual=residual,
+                weight=weight,
+                epsilon=self.epsilon,
+            )
+            at1 = auto_functionalized(STATIC_FP8_QUANT_OP,
+                                      result=result,
+                                      input=at[1],
+                                      scale=scale)
+            return at1[1], at[2]
+
+        def replacement(result: torch.Tensor, input: torch.Tensor,
+                        residual: torch.Tensor, weight: torch.Tensor,
+                        scale: torch.Tensor):
+            allreduce = auto_functionalized(
+                torch.ops.vllm.flashinfer_trtllm_fused_allreduce_norm.default,
+                allreduce_in=input,
+                residual=residual,
+                norm_out=None,
+                quant_out=result,
+                scale_factor=scale,
+                rms_gamma=weight,
+                rms_eps=self.epsilon,
+                pattern_code=flashinfer_comm.AllReduceFusionPattern.
+                kARResidualRMSNormFP8Quant,
+                **self.allreduce_params.get_trtllm_fused_allreduce_kwargs(),
+            )
+            # quant_out, residual
+            return allreduce[4], allreduce[2]
+
+        pm.register_replacement(pattern, replacement, get_inputs(),
                                 pm.fwd_only, pm_pass)
 
 
