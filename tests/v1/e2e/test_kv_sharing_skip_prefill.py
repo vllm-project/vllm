@@ -224,40 +224,41 @@ class Qwen2ModelWithKVSharing(Qwen2Model):
             self.hidden_states[:num_input_tokens],
         )
 
-        generation_indices = get_forward_context().generation_indices
-        if generation_indices is None:
-            generation_indices = torch.arange(positions.size(0),
-                                              device=positions.device)
-
-        num_decodes = generation_indices.shape[0]
-        assert num_decodes >= 1
+        generation_metadata = get_forward_context().generation_metadata
+        gen_indices_padded = (
+            generation_metadata.generation_indices_padded 
+            if generation_metadata is not None 
+            else torch.arange(num_input_tokens, device=positions.device)
+        )
+        num_gen_tokens_padded = gen_indices_padded.shape[0]
         assert first_residual is not None
 
         # CUDA graph expects static tensor addresses
         # Copy output of first layer group to second layer group
-        self.residual[:num_decodes].copy_(first_residual[generation_indices])
-        self.hidden_states[:num_decodes].copy_(
-            first_hidden_states[generation_indices])
-        positions[:num_decodes].copy_(positions[generation_indices])
+        self.residual[:num_gen_tokens_padded].copy_(
+            first_residual[gen_indices_padded])
+        self.hidden_states[:num_gen_tokens_padded].copy_(
+            first_hidden_states[gen_indices_padded])
+        positions[:num_gen_tokens_padded].copy_(positions[gen_indices_padded])
 
         second_hidden_states, second_residual = self.second_layer_group(
-            positions[:num_decodes],
-            self.hidden_states[:num_decodes],
-            self.residual[:num_decodes],
+            positions[:num_gen_tokens_padded],
+            self.hidden_states[:num_gen_tokens_padded],
+            self.residual[:num_gen_tokens_padded],
         )
 
-        # NOTE(sarckk): Due to cudagraph padding, generation_indices may have
-        # trailing repeated indices. Attention output is only valid at the
-        # last index in this case.
-        last_index_mask = generation_indices == generation_indices[-1]
-        second_hidden_states[last_index_mask] = second_hidden_states[-1].clone(
+        # NOTE: we need to pad generation indices for CUDA graph but only the
+        # first num_gen_tokens positions are actually valid.
+        num_gen_tokens = (
+            generation_metadata.num_generation_tokens
+            if generation_metadata is not None
+            else num_gen_tokens_padded
         )
-        second_residual[last_index_mask] = second_residual[-1].clone()
-
-        # Merge results back
-        first_hidden_states[generation_indices] = second_hidden_states
+        gen_indices = gen_indices_padded[:num_gen_tokens]
+        first_hidden_states[
+            gen_indices] = second_hidden_states[:num_gen_tokens]
         if first_residual is not None:
-            first_residual[generation_indices] = second_residual
+            first_residual[gen_indices] = second_residual[:num_gen_tokens]
 
         hidden_states, _ = self.norm(first_hidden_states, first_residual)
         return hidden_states

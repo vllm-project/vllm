@@ -242,8 +242,8 @@ class FlashAttentionMetadataBuilder(
 
         decode_query_start_loc[0] = 0
         decode_query_start_loc[1:] = torch.cumsum(num_decode_tokens, dim=0)
-        decode_max_query_len = num_decode_tokens.max().item()
-        total_num_decode_tokens = num_decode_tokens.sum().item()
+        decode_max_query_len = int(num_decode_tokens.max().item())
+        total_num_decode_tokens = int(num_decode_tokens.sum().item())
 
         common_attn_metadata = CommonAttentionMetadata(
             query_start_loc=decode_query_start_loc,

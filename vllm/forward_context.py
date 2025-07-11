@@ -27,6 +27,25 @@ batchsize_forward_time: defaultdict = defaultdict(list)
 
 
 @dataclass
+class GenerationMetadata:
+    # Set dynamically for each forward pass
+    num_generation_tokens: int
+    """
+    No. of generation indices without padding 
+    """
+    generation_indices_padded: torch.Tensor
+    """
+    Indices of tokens used for sampling output tokens.
+    Includes the last prefill token and all decode tokens.
+    Given N prompt tokens, the first N-1 tokens are not included as
+    they are not used to sample tokens for generation.
+    """
+
+    def generation_indices_unpadded(self) -> torch.Tensor:
+        return self.generation_indices_padded[:self.num_generation_tokens]
+
+
+@dataclass
 class DPMetadata:
     max_tokens_across_dp_cpu: torch.Tensor
     cu_tokens_across_dp_cpu: torch.Tensor
@@ -95,14 +114,7 @@ class ForwardContext:
     # set dynamically for each forward pass
     dp_metadata: Optional[DPMetadata] = None
     skip_cuda_graphs: bool = False
-
-    generation_indices: Optional[torch.Tensor] = None
-    """
-    Indices of tokens used for sampling output tokens.
-    Includes the last prefill token and all decode tokens.
-    Given N prompt tokens, the first N-1 tokens are not included as
-    they are not used to sample tokens for generation.
-    """
+    generation_metadata: Optional[GenerationMetadata] = None
 
 
 _forward_context: Optional[ForwardContext] = None
@@ -124,7 +136,7 @@ def set_forward_context(
     num_tokens: Optional[int] = None,
     num_tokens_across_dp: Optional[torch.Tensor] = None,
     skip_cuda_graphs: bool = False,
-    generation_indices: Optional[torch.Tensor] = None,
+    generation_metadata: Optional[GenerationMetadata] = None,
 ):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
@@ -150,7 +162,7 @@ def set_forward_context(
         attn_metadata=attn_metadata,
         dp_metadata=dp_metadata,
         skip_cuda_graphs=skip_cuda_graphs,
-        generation_indices=generation_indices,
+        generation_metadata=generation_metadata,
     )
 
     try:

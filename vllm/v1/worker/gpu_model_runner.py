@@ -27,8 +27,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
 from vllm.distributed.parallel_state import (
     get_pp_group, get_tp_group, graph_capture, is_global_first_rank,
     prepare_communication_buffer_for_model)
-from vllm.forward_context import (DPMetadata, get_forward_context,
-                                  set_forward_context)
+from vllm.forward_context import (DPMetadata, GenerationMetadata,
+                                  get_forward_context, set_forward_context)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaBase
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
@@ -581,11 +581,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         return cu_num_tokens, arange
 
-    def _calc_generation_indices(self, logits_indices: torch.Tensor):
+    def _calc_generation_metadata(
+            self,
+            logits_indices: torch.Tensor) -> Optional[GenerationMetadata]:
         """
         Pads logits_indices to align with CUDA graph capture sizes
         """
         if self.generation_indices is None:
+            assert not self.cache_config.kv_sharing_skip_prefill
             return None
 
         num_decode_reqs = 0
@@ -599,28 +602,32 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # All requests are on decode, skip calculate decode only indices
             return None
 
-        num_decodes = logits_indices.shape[0]
+        num_gen_tokens = logits_indices.shape[0]
         # TODO(sarckk): With chunked prefills, logits_indices contains
         # indices for partial requests though we do not sample any token
         # from these partial requests, for simplicity. In the future, we
         # can calculate the 'true' decode indices based on logits_indices
-        self.generation_indices[:num_decodes].copy_(logits_indices)
+        self.generation_indices[:num_gen_tokens].copy_(logits_indices)
         # pad with last idx instead of zero
-        self.generation_indices[num_decodes:].fill_(logits_indices[-1].item())
+        self.generation_indices[num_gen_tokens:].fill_(
+            logits_indices[-1].item())
         if (self.use_cuda_graph
-                and num_decodes <= self.cudagraph_batch_sizes[-1]):
-            num_decodes_padded = self.vllm_config.pad_for_cudagraph(
-                num_decodes)
+                and num_gen_tokens <= self.cudagraph_batch_sizes[-1]):
+            num_gen_tokens_padded = self.vllm_config.pad_for_cudagraph(
+                num_gen_tokens)
         else:
-            num_decodes_padded = num_decodes
-        return self.generation_indices[:num_decodes_padded]
+            num_gen_tokens_padded = num_gen_tokens
+
+        return GenerationMetadata(
+            num_generation_tokens=num_gen_tokens,
+            generation_indices_padded=self.generation_indices[:num_gen_tokens_padded])
 
     def _prepare_inputs(
         self,
         scheduler_output: "SchedulerOutput",
     ) -> tuple[dict[str,
                     Any], bool, torch.Tensor, Optional[SpecDecodeMetadata],
-               np.ndarray, Optional[torch.Tensor]]:
+               np.ndarray, Optional[GenerationMetadata]]:
         """
         :return: tuple[
             attn_metadata: layer-to-attention_metadata mapping,
@@ -765,7 +772,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_draft_tokens, cu_num_tokens)
             logits_indices = spec_decode_metadata.logits_indices
 
-        generation_indices = self._calc_generation_indices(logits_indices)
+        generation_metadata = self._calc_generation_metadata(logits_indices)
 
         common_attn_metadata = CommonAttentionMetadata(
             query_start_loc=query_start_loc,
@@ -774,7 +781,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_reqs=num_reqs,
             num_actual_tokens=total_num_scheduled_tokens,
             max_query_len=max_num_scheduled_tokens,
-            generation_indices=generation_indices,
+            generation_indices=(
+                generation_metadata.generation_indices_unpadded()
+                if generation_metadata is not None else None),
         )
 
         attn_metadata: dict[str, Any] = {}
@@ -812,7 +821,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.set_active_loras(self.input_batch, num_scheduled_tokens)
 
         return (attn_metadata, attention_cuda_graphs, logits_indices,
-                spec_decode_metadata, num_scheduled_tokens, generation_indices)
+                spec_decode_metadata, num_scheduled_tokens,
+                generation_metadata)
 
     def _compute_cascade_attn_prefix_len(
         self,
@@ -1334,7 +1344,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Prepare the decoder inputs.
         (attn_metadata, attention_cuda_graphs, logits_indices,
          spec_decode_metadata, num_scheduled_tokens_np,
-         generation_indices) = (self._prepare_inputs(scheduler_output))
+         generation_metadata) = (self._prepare_inputs(scheduler_output))
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         if (self.use_cuda_graph
                 and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]):
@@ -1410,7 +1420,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                  num_tokens=num_input_tokens,
                                  num_tokens_across_dp=num_tokens_across_dp,
                                  skip_cuda_graphs=skip_cuda_graphs,
-                                 generation_indices=generation_indices):
+                                 generation_metadata=generation_metadata):
             self.maybe_setup_kv_connector(scheduler_output)
 
             model_output = self.model(
@@ -2065,12 +2075,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 intermediate_tensors = self.sync_and_slice_intermediate_tensors(
                     num_tokens, None, False)
 
+            dummy_generation_metadata = GenerationMetadata(
+                num_generation_tokens=num_tokens,
+                generation_indices_padded=generation_indices,
+            )
+
             with self.maybe_randomize_inputs(input_ids), set_forward_context(
                     attn_metadata,
                     self.vllm_config,
                     num_tokens=num_tokens,
                     num_tokens_across_dp=num_tokens_across_dp,
-                    generation_indices=generation_indices):
+                    generation_metadata=dummy_generation_metadata):
                 outputs = model(
                     input_ids=input_ids,
                     positions=positions,
