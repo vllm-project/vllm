@@ -1,28 +1,28 @@
 ---
-title: Distributed Inference and Serving
+title: Distributed inference and serving
 ---
 [](){ #distributed-serving }
 
-## Select a distributed inference strategy for a single model replica
+# Distributed inference strategies for a single model replica
 
-Before exploring distributed inference and serving for a single model, first determine whether distributed inference is required, and if so, which strategy to adopt. The common practice is:
+To choose a distributed inference strategy for a single model replica, use the following guidelines:
 
-- **Single GPU (no distributed inference)**: When the model fits on a single GPU, distributed inference is probably unnecessary. Run inference on that GPU.
-- **Single-Node Multi-GPU (tensor parallel inference)**: When the model is too large for a single GPU but fits on a single node with multiple GPUs, use tensor parallelism. Set `tensor_parallel_size` to the number of GPUs (for example, 4 for a 4-GPU node).
-- **Multi-Node Multi-GPU (tensor parallel plus pipeline parallel inference)**: When the model is too large for a single node, combine tensor parallelism with pipeline parallelism. Set `tensor_parallel_size` to the number of GPUs per node and `pipeline_parallel_size` to the number of nodes (for example, 8 GPUs per node and 2 nodes: `tensor_parallel_size=8`, `pipeline_parallel_size=2`).
+- **Single GPU (no distributed inference):** If the model fits on a single GPU, distributed inference is probably unnecessary. Run inference on that GPU.
+- **Single-node multi-GPU (tensor parallel inference):** If the model is too large for a single GPU but fits on a single node with multiple GPUs, use tensor parallelism. Set `tensor_parallel_size` to the number of GPUs (for example, 4 for a 4-GPU node).
+- **Multi-node multi-GPU (tensor parallel plus pipeline parallel inference):** If the model is too large for a single node, combine tensor parallelism with pipeline parallelism. Set `tensor_parallel_size` to the number of GPUs per node and `pipeline_parallel_size` to the number of nodes (for example, 8 GPUs per node and 2 nodes: `tensor_parallel_size=8`, `pipeline_parallel_size=2`).
 
-Increase the number of GPUs and nodes until the configuration provides enough GPU memory for the model. Set `tensor_parallel_size` to the GPU count per node and `pipeline_parallel_size` to the node count.
+Increase the number of GPUs and nodes until there is enough GPU memory for the model. Set `tensor_parallel_size` to the number of GPUs per node and `pipeline_parallel_size` to the number of nodes.
 
-After provisioning sufficient resources, run vLLM. Find a log message that looks like `# GPU blocks: 790`. Multiply that number by `16` (the block size) to estimate the maximum number of tokens the configuration can serve. If this estimate is inadequate, increase the number of GPUs or nodes until the block count satisfies the throughput target.
+After you provision sufficient resources, run vLLM. Look for a log message similar to `# GPU blocks: 790`. Multiply that number by `16` (the block size) to estimate the maximum number of tokens the configuration can serve. If this estimate is inadequate, increase the number of GPUs or nodes until the block count satisfies your throughput target.
 
 !!! note
-    Edge case: When the model fits within a single node but the GPU count does not evenly divide the model size, enable pipeline parallelism, which splits the model along layers and supports uneven splits. In this scenario set `tensor_parallel_size=1` and `pipeline_parallel_size` to the number of GPUs.
+    Edge case: If the model fits within a single node but the GPU count does not evenly divide the model size, enable pipeline parallelism, which splits the model along layers and supports uneven splits. In this scenario, set `tensor_parallel_size=1` and `pipeline_parallel_size` to the number of GPUs.
 
-## Run vLLM on a single node
+## Single node deployment
 
 vLLM supports distributed tensor-parallel and pipeline-parallel inference and serving. The current implementation includes [Megatron-LM's tensor parallel algorithm](https://arxiv.org/pdf/1909.08053.pdf).
 
-vLLM's default distributed runtimes are [Ray](https://github.com/ray-project/ray) for multi-node inference and Python's native `multiprocessing` for single-node inference. Override the default by setting `distributed_executor_backend` in the `LLM` class or `--distributed-executor-backend` in the API server using `mp` for multiprocessing or `ray` for Ray.
+vLLM's default distributed runtimes are [Ray](https://github.com/ray-project/ray) for multi-node inference and Python's native `multiprocessing` for single-node inference. You can override the defaults by setting `distributed_executor_backend` in the `LLM` class or `--distributed-executor-backend` in the API server. Use `mp` for `multiprocessing` or `ray` for Ray.
 
 Set `tensor_parallel_size` in the `LLM` class to the desired GPU count for multi-GPU inference:
 
@@ -48,13 +48,13 @@ vllm serve gpt2 \
      --pipeline-parallel-size 2
 ```
 
-## Run vLLM on multiple nodes
+## Multi-node deployment
 
-When a single node lacks sufficient GPUs to hold the model, deploy vLLM across multiple nodes. This requires Ray as the runtime engine. Ensure that every node provides an identical execution environment, including the model path and Python packages. Container images are the recommended pattern here, as they provide a convenient way to keep environments consistent and to hide host heterogeneity.
+If a single node lacks sufficient GPUs to hold the model, deploy vLLM across multiple nodes. Multi-node deployments require Ray as the runtime engine. Ensure that every node provides an identical execution environment, including the model path and Python packages. Using container images is recommended because they provide a convenient way to keep environments consistent and to hide host heterogeneity.
 
-### Starting a Ray cluster using containers
+### Ray cluster setup with containers
 
-First, start containers across a Ray cluster. The helper script `<gh-file:examples/online_serving/run_cluster.sh>` initializes Ray across the nodes using containers. By default the script runs Docker without administrative privileges, which prevents access to GPU performance counters when profiling or tracing. Add the `--cap-add=CAP_SYS_ADMIN` flag to the Docker command to enable those capabilities.
+The helper script `<gh-file:examples/online_serving/run_cluster.sh>` starts containers across nodes and initializes Ray. By default, the script runs Docker without administrative privileges, which prevents access to GPU performance counters when profiling or tracing. Add the `--cap-add=CAP_SYS_ADMIN` flag to the Docker command to enable those capabilities.
 
 Choose one node as the head node and run:
 
@@ -86,19 +86,19 @@ Keep the shells running these commands open; closing a shell terminates the clus
 !!! warning
     Download the model on every node (to the same path) or store the model on a distributed file system accessible by all nodes.
 
-    When a Hugging Face repository ID is used, supply a Hugging Face token by appending `-e HF_TOKEN=<token>` to `run_cluster.sh`. Downloading the model before starting vLLM is recommended; pass the path to the model instead of the repository ID.
+    If you use Hugging Face models, downloading the model before starting vLLM is recommended. Then pass the path to the model in place of the repository ID. Otherwise, supply a Hugging Face token by appending `-e HF_TOKEN=<token>` to `run_cluster.sh`.
 
 From any node, enter a container and run `ray status` and `ray list nodes` to verify that the Ray cluster sees the expected number of nodes and GPUs.
 
 !!! warning
     Alternatively, set up the Ray cluster using KubeRay. See the [KubeRay vLLM documentation](https://docs.ray.io/en/latest/cluster/kubernetes/examples/vllm-rayservice.html) for details.
 
-### Executing vLLM commands on a running cluster
+### Running vLLM on a Ray cluster
 
 !!! warning
-     If Ray is running inside containers, run the commands in the remainder of this guide *inside the containers*. To open a shell inside a container, connect to a node and use `docker exec -it node /bin/bash`.
+     If Ray is running inside containers, run the commands in the remainder of this guide *inside the containers*. To open a shell inside a container, connect to a node and use `docker exec -it <container_name> /bin/bash`.
 
-Once a Ray cluster is running, you can use vLLM as you would in single-node setting. All the resources across the Ray cluster are visible to vLLM, so a single invocation on a single node is sufficient:
+Once a Ray cluster is running, use vLLM as you would in a single-node setting. All resources across the Ray cluster are visible to vLLM, so a single invocation on a single node is sufficient:
 
 ```bash
 vllm serve /path/to/the/model/in/the/container \
@@ -106,25 +106,25 @@ vllm serve /path/to/the/model/in/the/container \
      --pipeline-parallel-size 2
 ```
 
-The example above assumes 16 GPUs across two nodes (8 GPUs per node). Omitting pipeline parallelism is valid; set `tensor_parallel_size` to the total GPU count in the cluster and vLLM spawns the models across the cluster:
+The example above assumes 16 GPUs across two nodes (8 GPUs per node). You can omit pipeline parallelism; set `tensor_parallel_size` to the total GPU count in the cluster and vLLM spawns the models across the cluster:
 
 ```bash
 vllm serve /path/to/the/model/in/the/container \
      --tensor-parallel-size 16
 ```
 
-### Troubleshooting
+## Troubleshooting distributed deployments
 
-To make tensor parallel performant, you should make sure the communication between nodes is efficient, e.g. using high-speed network cards like InfiniBand. To correctly set up the cluster to use InfiniBand, append additional arguments like `--privileged -e NCCL_IB_HCA=mlx5` to the `run_cluster.sh` script. Please contact your system administrator for more information on how to set up the flags. One way to confirm if the InfiniBand is working is to run vLLM with `NCCL_DEBUG=TRACE` environment variable set, e.g. `NCCL_DEBUG=TRACE vllm serve ...` and check the logs for the NCCL version and the network used. If you find `[send] via NET/Socket` in the logs, it means NCCL uses raw TCP Socket, which is not efficient for cross-node tensor parallel. If you find `[send] via NET/IB/GDRDMA` in the logs, it means NCCL uses InfiniBand with GPUDirect RDMA, which is efficient.
+To make tensor parallelism performant, ensure that communication between nodes is efficient, for example by using high-speed network cards such as InfiniBand. To set up the cluster to use InfiniBand, append additional arguments like `--privileged -e NCCL_IB_HCA=mlx5` to the `run_cluster.sh` script. Contact your system administrator for more information about the required flags. One way to confirm if the InfiniBand is working is to run vLLM with the `NCCL_DEBUG=TRACE` environment variable set, for example `NCCL_DEBUG=TRACE vllm serve ...`, and check the logs for the NCCL version and the network used. If you find `[send] via NET/Socket` in the logs, NCCL uses raw TCP Socket, which is not efficient for cross-node tensor parallelism. If you find `[send] via NET/IB/GDRDMA` in the logs, NCCL uses InfiniBand with GPUDirect RDMA, which is efficient.
 
-### GPUDirect RDMA
+## Enabling GPUDirect RDMA
 
-To enable GPUDirect RDMA with vLLM, specific configuration tweaks are needed. This setup ensures:
+To enable GPUDirect RDMA with vLLM, configure the following settings:
 
-- `IPC_LOCK` Security Context: Add the `IPC_LOCK` capability to the container’s security context to lock memory pages and prevent swapping to disk.
-- Shared Memory with `/dev/shm`: Mount `/dev/shm` in the pod spec to provide shared memory for IPC.
+- `IPC_LOCK` security context: Add the `IPC_LOCK` capability to the container’s security context to lock memory pages and prevent swapping to disk.
+- Shared memory with `/dev/shm`: Mount `/dev/shm` in the pod spec to provide shared memory for IPC.
 
-When using Docker, you can set up the container as follows:
+If you use Docker, set up the container as follows:
 
 ```bash
 docker run --gpus all \
@@ -134,7 +134,7 @@ docker run --gpus all \
     vllm/vllm-openai
 ```
 
-When using Kubernetes, you can set up the pod spec as follows:
+If you use Kubernetes, set up the pod spec as follows:
 
 ```yaml
 ...
@@ -160,7 +160,7 @@ spec:
 ...
 ```
 
-Efficient tensor parallelism requires fast inter-node communication, preferably through high-speed network adapters such as InfiniBand. To enable InfiniBand, append flags such as `--privileged -e NCCL_IB_HCA=mlx5` to `run_cluster.sh`. Consult the system administrator for cluster-specific settings.
+Efficient tensor parallelism requires fast inter-node communication, preferably through high-speed network adapters such as InfiniBand. To enable InfiniBand, append flags such as `--privileged -e NCCL_IB_HCA=mlx5` to `run_cluster.sh`. Consult your system administrator for cluster-specific settings.
 
 Confirm InfiniBand operation by enabling detailed NCCL logs:
 
@@ -171,7 +171,7 @@ NCCL_DEBUG=TRACE vllm serve ...
 Search the logs for the transport method. Entries containing `[send] via NET/Socket` indicate raw TCP sockets, which perform poorly for cross-node tensor parallelism. Entries containing `[send] via NET/IB/GDRDMA` indicate InfiniBand with GPU-Direct RDMA, which provides high performance.
 
 !!! warning
-    After starting the Ray cluster, verify GPU-to-GPU communication across nodes. Configuring it up properly can be non-trivial. Refer to the [sanity check script][troubleshooting-incorrect-hardware-driver] for details. If additional environment variables are required for communication configuration, append them to `run_cluster.sh`, for example `-e NCCL_SOCKET_IFNAME=eth0`. Setting environment variables during cluster creation is recommended because the variables propogate to all nodes. In contrast, setting environment variables in the shell affects only the local node. See <gh-issue:6803> for more information.
+    After you start the Ray cluster, verify GPU-to-GPU communication across nodes. Proper configuration can be non-trivial. Refer to the [sanity check script][troubleshooting-incorrect-hardware-driver] for details. If you need additional environment variables for communication configuration, append them to `run_cluster.sh`, for example `-e NCCL_SOCKET_IFNAME=eth0`. Setting environment variables during cluster creation is recommended because the variables propagate to all nodes. In contrast, setting environment variables in the shell affects only the local node. See <gh-issue:6803> for more information.
 
 !!! warning
     The error message `Error: No available node types can fulfill resource request` can appear even when the cluster has enough GPUs. The issue often occurs when nodes have multiple IP addresses and vLLM cannot select the correct one. Ensure that vLLM and Ray use the same IP address by setting `VLLM_HOST_IP` in `run_cluster.sh` (with a different value on each node). Use `ray status` and `ray list nodes` to verify the chosen IP address. See <gh-issue:7815> for more information.
