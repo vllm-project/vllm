@@ -200,6 +200,7 @@ class EmbeddingMixin(OpenAIServing):
         original_prompt: TextTokensPrompt,
         pooling_params,
         trace_headers,
+        prompt_idx: int,
     ) -> list[AsyncGenerator[PoolingRequestOutput, None]]:
         """Process a single prompt using chunked processing."""
         generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
@@ -215,7 +216,8 @@ class EmbeddingMixin(OpenAIServing):
 
         for chunk_idx, chunk_tokens in enumerate(chunks):
             # Create a request ID for this chunk
-            chunk_request_id = f"{ctx.request_id}-chunk-{chunk_idx}"
+            chunk_request_id = (f"{ctx.request_id}-prompt-{prompt_idx}-"
+                                f"chunk-{chunk_idx}")
 
             # Create engine prompt for this chunk
             chunk_engine_prompt = EngineTokensPrompt(
@@ -418,7 +420,7 @@ class EmbeddingMixin(OpenAIServing):
                         # Use chunked processing for this prompt
                         chunk_generators = await self._process_chunked_request(
                             ctx, text_tokens_prompt, pooling_params,
-                            trace_headers)
+                            trace_headers, i)
                         generators.extend(chunk_generators)
                         continue
 
@@ -504,7 +506,9 @@ class EmbeddingMixin(OpenAIServing):
                             # This prompt was chunked, collect all
                             # its chunk results
                             chunk_results: list[PoolingRequestOutput] = []
-                            chunk_prefix = f"{ctx.request_id}-chunk-"
+                            chunk_prefix = (
+                                f"{ctx.request_id}-prompt-{prompt_idx}-"
+                                f"chunk-")
 
                             for result_idx, result in all_results:
                                 if result.request_id.startswith(chunk_prefix):
