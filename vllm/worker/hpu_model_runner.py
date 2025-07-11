@@ -15,7 +15,13 @@ import math
 import os
 import time
 from array import array
+from contextlib import suppress
 from enum import Enum, IntEnum
+
+if os.getenv("QUANT_CONFIG", None) is not None:
+    from neural_compressor.torch.quantization import finalize_calibration
+else:
+    finalize_calibration = None
 from typing import (TYPE_CHECKING, Any, Callable, Dict, List, NamedTuple,
                     Optional, Set, Tuple, Type, TypeVar, Union)
 
@@ -3280,21 +3286,20 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         from neural_compressor.torch.quantization import finalize_calibration
         finalize_calibration(self.model.model)
 
-    def shutdown_inc(self):
+    def shutdown_inc(self,
+                     suppress=suppress,
+                     finalize_calibration=finalize_calibration):
         global shutdown_inc_called
         if shutdown_inc_called:
             return
         shutdown_inc_called = True
         can_finalize_inc = False
-        from contextlib import suppress
         with suppress(AttributeError):
             can_finalize_inc = (self._is_quant_with_inc()
                                 and (self.model.model is not None)
                                 and self.inc_initialized_successfully and
                                 not getattr(self, "_is_inc_finalized", False))
         if can_finalize_inc:
-            from neural_compressor.torch.quantization import (
-                finalize_calibration)
             finalize_calibration(self.model.model)
             self._is_inc_finalized = True
 
@@ -4175,24 +4180,6 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
             sampler_outputs.append(
                 CompletionSequenceGroupOutput(seq_outputs, None))
         return SamplerOutput(sampler_outputs)
-
-    def shutdown_inc(self):
-        global shutdown_inc_called
-        if shutdown_inc_called:
-            return
-        shutdown_inc_called = True
-        can_finalize_inc = False
-        from contextlib import suppress
-        with suppress(AttributeError):
-            can_finalize_inc = (self._is_quant_with_inc()
-                                and (self.model.model is not None)
-                                and self.inc_initialized_successfully and
-                                not getattr(self, "_is_inc_finalized", False))
-        if can_finalize_inc:
-            from neural_compressor.torch.quantization import (
-                finalize_calibration)
-            finalize_calibration(self.model.model)
-            self._is_inc_finalized = True
 
     def __del__(self):
         self.shutdown_inc()
