@@ -1,7 +1,4 @@
----
-title: Quickstart
----
-[](){ #quickstart }
+# Quickstart
 
 This guide will help you quickly get started with vLLM to perform:
 
@@ -43,7 +40,7 @@ uv pip install vllm --torch-backend=auto
 ```
 
 !!! note
-    For more detail and non-CUDA platforms, please refer [here][installation-index] for specific instructions on how to install vLLM.
+    For more detail and non-CUDA platforms, please refer [here](installation/README.md) for specific instructions on how to install vLLM.
 
 [](){ #quickstart-offline }
 
@@ -77,7 +74,7 @@ prompts = [
 sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 ```
 
-The [LLM][vllm.LLM] class initializes vLLM's engine and the [OPT-125M model](https://arxiv.org/abs/2205.01068) for offline inference. The list of supported models can be found [here][supported-models].
+The [LLM][vllm.LLM] class initializes vLLM's engine and the [OPT-125M model](https://arxiv.org/abs/2205.01068) for offline inference. The list of supported models can be found [here](../models/supported_models.md).
 
 ```python
 llm = LLM(model="facebook/opt-125m")
@@ -147,7 +144,7 @@ curl http://localhost:8000/v1/completions \
 
 Since this server is compatible with OpenAI API, you can use it as a drop-in replacement for any applications using OpenAI API. For example, another way to query the server is via the `openai` Python package:
 
-??? Code
+??? code
 
     ```python
     from openai import OpenAI
@@ -186,7 +183,7 @@ curl http://localhost:8000/v1/chat/completions \
 
 Alternatively, you can use the `openai` Python package:
 
-??? Code
+??? code
 
     ```python
     from openai import OpenAI

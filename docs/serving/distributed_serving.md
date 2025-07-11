@@ -1,7 +1,4 @@
----
-title: Distributed inference and serving
----
-[](){ #distributed-serving }
+# Distributed inference and serving
 
 # Distributed inference strategies for a single model replica
 
