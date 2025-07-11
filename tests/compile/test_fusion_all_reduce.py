@@ -98,6 +98,7 @@ def all_reduce_fusion_pass_on_test_model(local_rank: int, world_size: int,
     current_platform.seed_everything(0)
 
     device = torch.device(f"cuda:{local_rank}")
+    torch.cuda.set_device(device)
     torch.set_default_device(device)
     torch.set_default_dtype(dtype)
 
