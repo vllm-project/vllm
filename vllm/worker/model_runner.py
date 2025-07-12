@@ -1220,10 +1220,11 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             CompilationLevel.DYNAMO_AS_IS and supports_dynamo():
             backend = self.vllm_config.compilation_config.init_backend(
                 self.vllm_config)
-            self.model = torch.compile(
-                self.model,
-                fullgraph=envs.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
-                backend=backend)
+            with torch.fx.experimental._config.patch(backed_size_oblivious=True):
+                self.model = torch.compile(
+                    self.model,
+                    fullgraph=envs.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
+                    backend=backend)
 
     def get_model(self) -> nn.Module:
         return self.model
