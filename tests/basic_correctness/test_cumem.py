@@ -177,3 +177,96 @@ def test_end_to_end(monkeypatch: pytest.MonkeyPatch, model: str, use_v1: bool):
 
         # cmp output
         assert output[0].outputs[0].text == output3[0].outputs[0].text
+
+
+@create_new_process_for_each_test()
+def test_backup_memory_except():
+    allocator = CuMemAllocator.get_instance()
+    named_tensors = []
+    tag = "discard"
+    with allocator.use_memory_pool(tag=tag):
+        x = torch.nn.Parameter(torch.randn(100, 100, device='cuda'))
+        y = torch.nn.Parameter(torch.randn(200, 100, device='cuda'))
+        z = torch.nn.Parameter(torch.randn(300, 100, device='cuda'))
+        named_tensors.append(("x", x))
+        named_tensors.append(("y", y))
+    backup_named_tensors = [t.clone() for _, t in named_tensors]
+    backup_z = z.clone()
+
+    allocator.backup_memory_except(named_tensors, tags=tag)
+    assert len(allocator.pointer_to_data) == 1
+    ptr, data = next(iter(allocator.pointer_to_data.items()))
+    assert ptr == x.data_ptr()
+    size = data.handle[1]
+    # torch's smallest segment size is 2MiB
+    assert size == 2 * 1024 * 1024
+    start = z.data_ptr() - x.data_ptr()
+    for _, t in named_tensors:
+        size -= t.nbytes
+        start -= t.nbytes
+    assert data.cpu_backup_tensor.nbytes == size
+    end = start + z.nbytes
+    assert (data.cpu_backup_tensor[start:end] == z.view(-1).view(
+        torch.uint8).cpu()).all()
+
+    allocator.sleep(offload_tags=tuple())
+    allocator.wake_up()
+
+    for t, (_, new_t) in zip(backup_named_tensors, named_tensors):
+        assert (t != new_t).any()
+
+    assert (backup_z == z).all()
+
+
+@create_new_process_for_each_test()
+def test_backup_memory_except_with_model():
+    allocator = CuMemAllocator.get_instance()
+    tag = "discard"
+
+    class ToyModel(torch.nn.Module):
+
+        def __init__(self):
+            super().__init__()
+            self.linear = torch.nn.Linear(12345, 100)
+            self.register_buffer("x", torch.randn(22345, 100))
+            self.y = torch.randn(12345, 5432)
+            self.register_buffer("z", torch.randn(23333, 100))
+            self.p = torch.nn.Parameter(torch.randn(31460, 100))
+
+        def forward(self, x):
+            return x
+
+    with allocator.use_memory_pool(tag=tag):
+        model = ToyModel()
+        model.to('cuda')
+        x = torch.randn(100, 100, device='cuda')
+
+    backup_model = ToyModel().to('cuda')
+    backup_model.load_state_dict(model.state_dict())
+    backup_model.y = model.y.clone()
+    backup_x = x.clone()
+
+    def assert_equal_without_parameters():
+        for b1, b2 in zip(backup_model.named_buffers(), model.named_buffers()):
+            assert (b1[0] == b2[0])
+            assert (b1[1] == b2[1]).all()
+
+        assert (backup_model.y == model.y).all()
+
+        assert (backup_x == x).all()
+
+    # assert parameters are equal
+    for b1, b2 in zip(backup_model.named_parameters(),
+                      model.named_parameters()):
+        assert (b1[0] == b2[0])
+        assert (b1[1] == b2[1]).all()
+    assert_equal_without_parameters()
+
+    allocator.backup_memory_except(list(model.named_parameters()), tags=tag)
+
+    allocator.sleep()
+    allocator.wake_up()
+
+    assert_equal_without_parameters()
+    for p in model.parameters():
+        assert (p == 0).all()
