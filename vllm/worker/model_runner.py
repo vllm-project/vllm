@@ -1587,6 +1587,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 if get_tensor_model_parallel_rank() == 0:
                     compilation_cases = tqdm(
                         list(compilation_cases),
+                        disable=not self.load_config.use_tqdm_on_load,
                         desc="Capturing CUDA graph shapes")
                 for batch_size, use_inputs_embeds in compilation_cases:
                     attn_metadata = (
