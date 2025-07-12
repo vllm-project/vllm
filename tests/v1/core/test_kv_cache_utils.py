@@ -5,6 +5,7 @@ import importlib
 import pytest
 import torch
 
+from vllm.attention import AttentionType
 from vllm.config import ModelConfig, SchedulerConfig, VllmConfig
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.sampling_params import SamplingParams
@@ -39,6 +40,7 @@ def make_request(request_id,
     return Request(
         request_id=request_id,
         prompt_token_ids=prompt_token_ids,
+        token_type_ids=None,
         multi_modal_inputs=multi_modal_inputs,
         multi_modal_hashes=mm_hashes,
         multi_modal_placeholders=mm_positions,
@@ -61,6 +63,7 @@ def new_kv_cache_spec(block_size=16,
                              head_size=head_size,
                              dtype=dtype,
                              use_mla=use_mla,
+                             attn_type=AttentionType.DECODER,
                              sliding_window=sliding_window)
 
 
@@ -75,6 +78,7 @@ def new_sliding_window_spec(block_size=16,
                              head_size=head_size,
                              dtype=dtype,
                              use_mla=use_mla,
+                             attn_type=AttentionType.DECODER,
                              sliding_window=sliding_window)
 
 
@@ -534,6 +538,7 @@ def test_merge_kv_cache_spec():
             head_size=full_spec.head_size,
             dtype=full_spec.dtype,
             use_mla=full_spec.use_mla,
+            attn_type=AttentionType.DECODER,
             sliding_window=1,
         ),
     ]
@@ -603,6 +608,7 @@ def test_estimate_max_model_len(model_id, max_model_len,
             head_size=128,
             dtype=torch.float16,
             use_mla=False,
+            attn_type=AttentionType.DECODER,
         )
     # Estimate the maximum model length, 16384 model_len need 8GB
     estimated_max_len = estimate_max_model_len(vllm_config, kv_cache_spec,
@@ -638,6 +644,7 @@ def test_get_max_concurrency_for_kv_cache_config():
         head_size=128,
         dtype=torch.float16,
         use_mla=False,
+        attn_type=AttentionType.DECODER,
     )
 
     sliding_window_spec = SlidingWindowSpec(
@@ -646,6 +653,7 @@ def test_get_max_concurrency_for_kv_cache_config():
         head_size=128,
         dtype=torch.float16,
         use_mla=False,
+        attn_type=AttentionType.DECODER,
         sliding_window=1024,
     )
 

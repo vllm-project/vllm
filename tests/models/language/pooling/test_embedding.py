@@ -39,17 +39,9 @@ def v1(run_with_both_engines):
         pytest.param("ssmits/Qwen2-7B-Instruct-embed-base",
                      marks=[pytest.mark.skip_v0, pytest.mark.cpu_model]),
         # [Encoder-only]
-        pytest.param(
-            "BAAI/bge-base-en-v1.5",
-            marks=[
-                # CPU only supports V1
-                pytest.mark.core_model,
-                pytest.mark.skip_v1
-            ]),
-        pytest.param("sentence-transformers/all-MiniLM-L12-v2",
-                     marks=[pytest.mark.skip_v1]),
-        pytest.param("intfloat/multilingual-e5-small",
-                     marks=[pytest.mark.skip_v1]),
+        pytest.param("BAAI/bge-base-en-v1.5", marks=[pytest.mark.core_model]),
+        pytest.param("sentence-transformers/all-MiniLM-L12-v2"),
+        pytest.param("intfloat/multilingual-e5-small"),
         pytest.param("Alibaba-NLP/gte-Qwen2-1.5B-instruct",
                      marks=[pytest.mark.skip_v1]),
         # [Cross-Encoder]

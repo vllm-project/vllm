@@ -194,6 +194,9 @@ def _construct_cached_request_state(req_id_suffix: int):
         np.random.randint(0, VOCAB_SIZE)
         for _ in range(np.random.randint(0, MAX_PROMPT_SIZE))
     ]
+    token_type_ids = [
+        np.random.randint(0, 2) for _ in range(len(prompt_token_ids))
+    ]
     output_token_ids = [
         np.random.randint(0, VOCAB_SIZE)
         for _ in range(np.random.randint(0, NUM_OUTPUT_TOKENS))
@@ -201,6 +204,7 @@ def _construct_cached_request_state(req_id_suffix: int):
     return CachedRequestState(
         req_id=f"req_id_{req_id_suffix}",
         prompt_token_ids=prompt_token_ids,
+        token_type_ids=token_type_ids,
         sampling_params=_create_sampling_params(),
         pooling_params=None,
         mm_inputs=[],
