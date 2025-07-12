@@ -43,7 +43,7 @@ def _valid_deep_gemm(hidden_states: torch.Tensor, w1: torch.Tensor,
     aligned by `dg.get_m_alignment_for_contiguous_layout()`.
     """
     if not has_deep_gemm():
-        logger.debug("DeepGemm disabled: deep_gemm not available.")
+        logger.debug_once("DeepGemm disabled: deep_gemm not available.")
         return False
 
     M = hidden_states.size(0)
