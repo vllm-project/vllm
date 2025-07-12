@@ -458,6 +458,31 @@ def test_bind_kv_cache():
     assert ctx['layers.2.self_attn'].kv_cache[0] is kv_cache[2]
     assert ctx['layers.3.self_attn'].kv_cache[0] is kv_cache[3]
 
+def test_bind_kv_cache_kv_sharing():
+    from vllm.attention import Attention
+
+    ctx = {
+        'layers.0.self_attn': Attention(32, 128, 0.1),
+        'layers.1.self_attn': Attention(32, 128, 0.1),
+        'layers.2.self_attn': Attention(32, 128, 0.1),
+        'layers.3.self_attn': Attention(32, 128, 0.1),
+    }
+    kv_cache = [
+        torch.zeros((1, )),
+        torch.zeros((1, )),
+        torch.zeros((1, )),
+        torch.zeros((1, )),
+    ]
+    shared_kv_cache_layers = {
+        'layers.2.self_attn': 'layers.1.self_attn',
+        'layers.3.self_attn': 'layers.0.self_attn'
+    }
+    bind_kv_cache(ctx, [kv_cache], shared_kv_cache_layers)
+    assert ctx['layers.0.self_attn'].kv_cache[0] is kv_cache[0]
+    assert ctx['layers.1.self_attn'].kv_cache[0] is kv_cache[1]
+    assert ctx['layers.2.self_attn'].kv_cache[0] is kv_cache[1]
+    assert ctx['layers.3.self_attn'].kv_cache[0] is kv_cache[0]
+
 def test_bind_kv_cache_non_attention():
     from vllm.attention import Attention
 

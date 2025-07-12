@@ -1112,6 +1112,10 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             (self.max_batchsize_to_capture, self.get_max_block_per_batch()),
             dtype=np.int32)
 
+        self.cross_layer_shared_graph_block_tables = np.zeros(
+            (self.max_batchsize_to_capture, self.get_max_block_per_batch()),
+            dtype=np.int32)
+
         # Attention-free but stateful models like Mamba need a placeholder attn
         # backend, as the attention metadata is needed to manage internal state.
         # However we must bypass attention selection altogether for some models
