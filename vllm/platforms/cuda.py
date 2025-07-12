@@ -166,6 +166,13 @@ class CudaPlatformBase(Platform):
                 logger.info(
                     "Forcing kv cache block size to 64 for FlashMLA backend.")
 
+            use_sm100_cutlass = (envs.VLLM_ATTENTION_BACKEND is not None \
+                and envs.VLLM_ATTENTION_BACKEND == "SM100_CUTLASS_MLA_VLLM_V1")
+            if use_sm100_cutlass and cache_config.block_size != 128:
+                cache_config.block_size = 128
+                logger.info("Forcing kv cache block size to 128 for "
+                            "SM100_CUTLASS_MLA_VLLM_V1 backend.")
+
         compilation_config = vllm_config.compilation_config
         if (envs.VLLM_ALL2ALL_BACKEND == "deepep_high_throughput"
                 and parallel_config.data_parallel_size > 1
@@ -196,6 +203,17 @@ class CudaPlatformBase(Platform):
                              kv_cache_dtype, block_size, use_v1,
                              use_mla) -> str:
         if use_mla:
+            if selected_backend == _Backend.SM100_CUTLASS_MLA_VLLM_V1:
+                if use_v1:
+                    logger.info_once(
+                        "Using Sm100Cutlass MLA backend on V1 engine.")
+                    return ("vllm.v1.attention.backends.mla."
+                            "sm100_cutlass_mla.Sm100CutlassMLABackend")
+                else:
+                    logger.warning(
+                        "Sm100 Cutlass MLA backend is only supported on "
+                        "V1 engine")
+
             # TODO(lucas): refactor to  be more concise
             #  we should probably consider factoring out V1 here
             if selected_backend == _Backend.CUTLASS_MLA_VLLM_V1:

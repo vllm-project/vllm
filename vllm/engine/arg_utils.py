@@ -1502,6 +1502,7 @@ class EngineArgs:
             "TRITON_ATTN_VLLM_V1",
             "TRITON_MLA",
             "CUTLASS_MLA_VLLM_V1",
+            "SM100_CUTLASS_MLA_VLLM_V1",
             "FLASHMLA",
             "FLASHINFER",
             "FLASHINFER_VLLM_V1",
