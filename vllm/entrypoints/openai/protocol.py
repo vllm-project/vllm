@@ -488,6 +488,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     prompt_logprobs: Optional[int] = None
     allowed_token_ids: Optional[list[int]] = None
     bad_words: list[str] = Field(default_factory=list)
+    max_think_tokens: Optional[int] = None
     # --8<-- [end:chat-completion-sampling-params]
 
     # --8<-- [start:chat-completion-extra-params]
@@ -794,7 +795,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 else RequestOutputKind.FINAL_ONLY,
             structured_outputs=self.structured_outputs,
             logit_bias=self.logit_bias,
-            bad_words=self.bad_words,
+            bad_words= self.bad_words,
+            max_think_tokens=self.max_think_tokens,
             allowed_token_ids=self.allowed_token_ids,
             extra_args=extra_args or None,
         )

@@ -97,6 +97,7 @@ class EngineCore:
         self.collective_rpc("initialize_cache",
                             args=(num_gpu_blocks, num_cpu_blocks))
 
+        # EngineCore holds StructuredOutputManager to handle and it has vllm config as an arg.
         self.structured_output_manager = StructuredOutputManager(vllm_config)
 
         # Setup scheduler.

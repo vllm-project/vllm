@@ -114,6 +114,10 @@ from .utils import (AttentionGroup, MultiModalBudget,
                     gather_mm_placeholders, sanity_check_mm_encoder_outputs,
                     scatter_mm_placeholders)
 
+from vllm.config import ReasoningConfig
+from vllm.reasoning import ReasoningParserManager
+from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
+
 if TYPE_CHECKING:
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -190,6 +194,20 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.scheduler_config = vllm_config.scheduler_config
         self.speculative_config = vllm_config.speculative_config
         self.observability_config = vllm_config.observability_config
+
+        if self.vllm_config.decoding_config.reasoning_backend in ('deepseek_r1', 'qwen'):
+            tokenizer = init_tokenizer_from_configs(
+                model_config=self.vllm_config.model_config,
+                scheduler_config=self.vllm_config.scheduler_config,
+                lora_config=self.vllm_config.lora_config,
+            ).get_lora_tokenizer(None)
+            reasoning_backend = \
+                    self.vllm_config.decoding_config.reasoning_backend
+            reasoner_cls = ReasoningParserManager.get_reasoning_parser(
+                reasoning_backend)
+            reasoning_parser = reasoner_cls(tokenizer=tokenizer)
+            self.vllm_config.reasoning_config = ReasoningConfig(think_start_token_id=reasoning_parser.think_start_token_id,
+                                                                think_end_token_id=reasoning_parser.think_end_token_id)
 
         from vllm.model_executor.models.utils import set_cpu_offload_max_bytes
         set_cpu_offload_max_bytes(
@@ -326,6 +344,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 self.is_pooling_model,
                 self.vllm_config.model_config.logits_processors),
             is_pooling_model=self.is_pooling_model,
+            reasoning_config=self.vllm_config.reasoning_config,
         )
 
         self.use_async_scheduling = self.scheduler_config.async_scheduling
@@ -3864,6 +3883,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 num_speculative_tokens=(
                     self.vllm_config.speculative_config.num_speculative_tokens
                     if self.vllm_config.speculative_config else 0),
+                reasoning_config=self.vllm_config.reasoning_config,
             )
 
     def _allocate_kv_cache_tensors(
