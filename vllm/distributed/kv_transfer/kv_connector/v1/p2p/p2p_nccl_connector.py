@@ -90,7 +90,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
 
         self.p2p_nccl_engine = P2pNcclEngine(
             local_rank=self._local_rank,
-            config=self.config,
+            vllm_config=vllm_config,
             hostname="",
             port_offset=self._rank,
         ) if role == KVConnectorRole.WORKER else None
@@ -203,7 +203,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
                 if kv_cache is None:
                     logger.warning("🚧src_kv_cache is None, %s",
                                    request.request_id)
-                    continue
+                    break
 
                 inject_kv_into_layer(kv_cache_layer, kv_cache,
                                      request.slot_mapping, request.request_id)
@@ -266,9 +266,8 @@ class P2pNcclConnector(KVConnectorBase_V1):
                                              kv_cache, remote_address)
 
     def wait_for_save(self):
-        if self.is_producer:
-            assert self.p2p_nccl_engine is not None
-            self.p2p_nccl_engine.wait_for_sent()
+        """P2pNcclConnector does not save explicitly."""
+        return
 
     def get_finished(
             self, finished_req_ids: set[str],
@@ -318,10 +317,10 @@ class P2pNcclConnector(KVConnectorBase_V1):
         num_external_tokens = (len(request.prompt_token_ids) - 1 -
                                num_computed_tokens)
 
-        if num_external_tokens < 0:
-            num_external_tokens = 0
+        if num_external_tokens <= 0:
+            return 0, False
 
-        return num_external_tokens, False
+        return num_external_tokens, True
 
     def update_state_after_alloc(self, request: "Request",
                                  blocks: "KVCacheBlocks",
@@ -329,7 +328,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
         """
         Update KVConnector state after block allocation.
         """
-        if not self.is_producer and num_external_tokens > 0:
+        if not self.is_producer and num_external_tokens == 0:
             self._requests_need_load[request.request_id] = (
                 request, blocks.get_block_ids()[0])
 
@@ -356,6 +355,10 @@ class P2pNcclConnector(KVConnectorBase_V1):
                 # the request's prompt is chunked prefill
                 if num_tokens < len(new_req.prompt_token_ids):
                     # 'CachedRequestData' has no attribute 'prompt_token_ids'
+                    logger.info(
+                        "🚧%s is chunked prefill, num_tokens:%d, num_prompt:%d",
+                        new_req.req_id, num_tokens,
+                        len(new_req.prompt_token_ids))
                     self.chunked_prefill[new_req.req_id] = (
                         new_req.block_ids[0], new_req.prompt_token_ids)
                     continue
@@ -389,6 +392,10 @@ class P2pNcclConnector(KVConnectorBase_V1):
                 prompt_token_ids = self.chunked_prefill[req_id][1]
                 # the request's prompt is chunked prefill again
                 if num_tokens < len(prompt_token_ids):
+                    logger.info(
+                        "🚧%s is chunked prefill again, num_tokens:%d, "
+                        "num_prompt:%d", req_id, num_tokens,
+                        len(prompt_token_ids))
                     self.chunked_prefill[req_id] = (block_ids,
                                                     prompt_token_ids)
                     continue
@@ -409,6 +416,8 @@ class P2pNcclConnector(KVConnectorBase_V1):
                 total_tokens = num_computed_tokens + 1
                 token_ids = request.all_token_ids[:total_tokens]
 
+                logger.info("🚧%s is resumed from preemption, total_tokens:%d",
+                            req_id, total_tokens)
                 # NOTE(rob): For resumed req, new_block_ids is all
                 # of the block_ids for the request.
                 block_ids = new_block_ids[0]
@@ -417,14 +426,6 @@ class P2pNcclConnector(KVConnectorBase_V1):
                                  token_ids=token_ids,
                                  block_ids=block_ids,
                                  block_size=self._block_size)
-
-        # Requests loaded asynchronously are not in the scheduler_output.
-        # for request_id in self._requests_need_load:
-        #     request, block_ids = self._requests_need_load[request_id]
-        #     meta.add_request(request_id=request.request_id,
-        #                      token_ids=request.prompt_token_ids,
-        #                      block_ids=block_ids,
-        #                      block_size=self._block_size)
 
         self._requests_need_load.clear()
         return meta
@@ -447,7 +448,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
 
         self.chunked_prefill.pop(request.request_id, None)
 
-        return False, None
+        return self.is_producer, None
 
     # ==============================
     # Static methods

@@ -1487,6 +1487,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Get the valid generated tokens.
         sampled_token_ids = sampler_output.sampled_token_ids
         max_gen_len = sampled_token_ids.shape[-1]
+
+        # Eliminate global synchronization in `cudaMemcpyAsync`.
+        gpu_event = torch.cuda.Event()
+        gpu_event.record()
+        while not gpu_event.query():
+            # It can achieve a precision of around 50 microseconds.
+            # sched_yield can achieve a precision of around 1.25 microseconds.
+            # However, this can lead to very high CPU utilization.
+            time.sleep(0)
+
         if max_gen_len == 1:
             # No spec decode tokens.
             valid_sampled_token_ids = sampled_token_ids.tolist()
