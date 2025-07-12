@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
-from typing import Optional, Union
+from typing import TYPE_CHECKING, Optional, Union
 
 import torch
 from compressed_tensors.quantization import (QuantizationArgs,
@@ -15,8 +15,6 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.utils import cdiv
-
-from typing import TYPE_CHECKING
 
 try:
     from flashinfer import fp4_quantize as fp4_quantize
@@ -188,6 +186,7 @@ class FusedMoEParallelConfig:
     def use_pplx_kernels(self):
         return (self.use_all2all_kernels
                 and envs.VLLM_ALL2ALL_BACKEND == "pplx")
+
     @property
     def use_deepep_ht_kernels(self):
         return (self.use_all2all_kernels
@@ -446,9 +445,11 @@ class FusedMoEConfig:
             from vllm.model_executor.layers.quantization.fp8 import Fp8Config
             if quant_dtype is None and isinstance(quant_config, Fp8Config):
                 quant_dtype = torch.float8_e4m3fn
-            
-            from vllm.model_executor.layers.quantization.modelopt import ModelOptNvFp4Config
-            if quant_dtype is None and isinstance(quant_config, ModelOptNvFp4Config):
+
+            from vllm.model_executor.layers.quantization.modelopt import (
+                ModelOptNvFp4Config)
+            if quant_dtype is None and isinstance(quant_config,
+                                                  ModelOptNvFp4Config):
                 quant_dtype = torch.uint8
 
             if weight_quant is not None:

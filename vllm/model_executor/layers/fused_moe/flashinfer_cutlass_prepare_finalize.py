@@ -1,18 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Optional
-import vllm.envs as envs
 
 import torch
-from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 
+import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.distributed import get_dp_group
 from vllm.forward_context import get_forward_context
+from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.utils import (
     moe_kernel_quantize_input)
-from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-    MoEPrepareAndFinalizeNoEP)
+
 
 def get_local_sizes(local_tokens):
     cu_sizes = get_forward_context().dp_metadata.cu_tokens_across_dp_cpu
@@ -22,14 +21,16 @@ def get_local_sizes(local_tokens):
     max_num_tokens = envs.VLLM_MOE_DP_CHUNK_SIZE
     sizes_chunked = [max_num_tokens] * len(sizes)
     if local_tokens < max_num_tokens:
-        # When the number of local tokens is less than max_num_tokens, all other 
-        # ranks will also have fewer than max_num_tokens. The remaining tokens 
+        # When the number of local tokens is less than max_num_tokens, all other
+        # ranks will also have fewer than max_num_tokens. The remaining tokens
         # are accounted for as residual.
         sizes_chunked = [x % max_num_tokens for x in sizes]
 
     return sizes_chunked
 
+
 class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
+
     def __init__(
         self,
         quant_dtype: Optional[torch.dtype] = None,
@@ -37,7 +38,7 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         block_shape: Optional[list[int]] = None,
         num_dispatchers: int = 1,
     ):
-        super().__init__()      
+        super().__init__()
         self.per_channel_quant = per_channel_quant
         self.block_shape = block_shape
         self.quant_dtype = quant_dtype
@@ -52,7 +53,7 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
     def topk_indices_dtype(self) -> Optional[torch.dtype]:
         return None
-    
+
     def num_dispatchers(self) -> int:
         return self.num_dispatchers_
 
@@ -67,7 +68,7 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         expert_map: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
-        a1_gscale: torch.Tensor, 
+        a1_gscale: torch.Tensor,
         use_dp: Optional[bool] = True,
         local_tokens: int = -1,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor],

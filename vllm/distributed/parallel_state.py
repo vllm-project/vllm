@@ -370,7 +370,7 @@ class GroupCoordinator:
             return input_
         assert -input_.dim() <= dim < input_.dim(), (
             f"Invalid dim ({dim}) for input tensor with shape {input_.size()}")
-        
+
         # TODO(shuw): enable it
         if self.use_custom_op_call and False:
             return torch.ops.vllm.all_gather(input_,

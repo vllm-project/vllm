@@ -487,7 +487,7 @@ def run_cutlass_moe_fp4(
     assert (k_a == half_k_w1 * 2
             and k == k_w2), ("Hidden size mismatch between a, w1 and w2")
     assert (nx2_w1 == n * 2 and half_n_w2 * 2 == n), ("mismatch in "
-                                                       "expected `n`")
+                                                      "expected `n`")
     assert (m == m_a), "input shape mismatch"
     assert 2 * half_k_w1 == k_w2, "Hidden size mismatch w2 and w1"
     assert a.dtype in [torch.half, torch.bfloat16], "Invalid input dtype"
@@ -531,28 +531,30 @@ def run_cutlass_moe_fp4(
     c2 = _resize_cache(workspace2, (m * topk, n))
     c3 = _resize_cache(workspace13, (m * topk, k))
     ops.cutlass_fp4_moe_mm(c1, rep_a_fp4, w1_fp4, rep_a_blockscale,
-                                w1_blockscale, w1_alphas, problem_sizes1,
-                                expert_offsets[:-1], blockscale_offsets[:-1],
-                                out_dtype, device)
+                           w1_blockscale, w1_alphas, problem_sizes1,
+                           expert_offsets[:-1], blockscale_offsets[:-1],
+                           out_dtype, device)
     del rep_a_fp4, rep_a_blockscale
     torch.ops._C.silu_and_mul(c2, c1)
     int_fp4, int_blockscale = ops.scaled_fp4_experts_quant(
         c2, a2_gscale, expert_offsets, blockscale_offsets, num_topk)
 
     ops.cutlass_fp4_moe_mm(c3, int_fp4, w2_fp4, int_blockscale, w2_blockscale,
-                                w2_alphas, problem_sizes2, expert_offsets[:-1],
-                                blockscale_offsets[:-1], out_dtype, device)
+                           w2_alphas, problem_sizes2, expert_offsets[:-1],
+                           blockscale_offsets[:-1], out_dtype, device)
     del int_fp4, int_blockscale
 
     c3 = ops.shuffle_rows(c3, c_map)
 
     assert output.dtype == out_dtype
     output.copy_((c3.view(m, num_topk, k) *
-           topk_weights.view(m, num_topk, 1).half()).sum(dim=1), non_blocking=True)
+                  topk_weights.view(m, num_topk, 1).half()).sum(dim=1),
+                 non_blocking=True)
     return
 
 
 class CutlassExpertsFp4(mk.FusedMoEPermuteExpertsUnpermute):
+
     def __init__(
         self,
         max_experts_per_worker: int,
@@ -568,8 +570,7 @@ class CutlassExpertsFp4(mk.FusedMoEPermuteExpertsUnpermute):
                 per_act_token_quant=per_act_token_quant,
                 per_out_ch_quant=per_out_ch_quant,
                 block_shape=block_shape,
-            )
-        )
+            ))
         self.max_experts_per_worker = max_experts_per_worker
         self.out_dtype = out_dtype
         self.use_batched_format = use_batched_format
@@ -594,7 +595,7 @@ class CutlassExpertsFp4(mk.FusedMoEPermuteExpertsUnpermute):
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         # Let PrepareAndFinalize::finalize() decide the impl.
         return TopKWeightAndReduceDelegate()
-    
+
     def workspace_shapes(
         self,
         a: torch.Tensor,
@@ -708,7 +709,7 @@ def cutlass_moe_fp4(
             out_dtype=a.dtype,
             per_act_token_quant=False,
             per_out_ch_quant=False,
-            use_batched_format=False,            
+            use_batched_format=False,
         ),
     )
     extra_expert_args = {
@@ -725,7 +726,7 @@ def cutlass_moe_fp4(
     }
 
     # NVFP4 requires two levels of quantization, which involves computing some scaling
-    # factors dynamically. This makes it incompatible with the typical 
+    # factors dynamically. This makes it incompatible with the typical
     # prepare -> MoE -> finalize pipeline. Move the quantization logic into the MoE body.
     extra_prepare_args = {
         'skip_quant': True,

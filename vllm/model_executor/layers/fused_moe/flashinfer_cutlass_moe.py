@@ -1,18 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional, Dict
+from typing import Optional
 
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (
-    FlashInferCutlassMoEPrepareAndFinalize)
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate)
-
-from vllm.utils import round_up
 
 logger = init_logger(__name__)
 
@@ -20,7 +16,8 @@ from typing import TYPE_CHECKING
 
 try:
     from flashinfer import fp4_quantize as fp4_quantize
-    from flashinfer.fused_moe import cutlass_fused_moe as flashinfer_cutlass_fused_moe
+    from flashinfer.fused_moe import (
+        cutlass_fused_moe as flashinfer_cutlass_fused_moe)
 except ImportError:
     if not TYPE_CHECKING:
         cutlass_fused_moe = None
@@ -50,16 +47,18 @@ def _valid_flashinfer_fused_moe(hidden_states: torch.Tensor, w1: torch.Tensor,
         return False
     return True
 
+
 class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
-    def __init__(self,
+    def __init__(
+        self,
         use_nvfp4_w4a4: bool = False,
         use_fp8_w8a8: bool = False,
-        use_dp: bool=False,
-        ep_rank: int=0,
-        ep_size: int=1,
-        tp_rank: int=0,
-        tp_size: int=1,
+        use_dp: bool = False,
+        ep_rank: int = 0,
+        ep_size: int = 1,
+        tp_rank: int = 0,
+        tp_size: int = 1,
         num_dispatchers: Optional[int] = None,
         use_batched_format: bool = False,
     ):
@@ -71,14 +70,13 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
             ))
         self.use_nvfp4_w4a4 = use_nvfp4_w4a4
         self.use_fp8_w8a8 = use_fp8_w8a8
-        self.ep_rank=ep_rank
-        self.ep_size=ep_size
-        self.tp_rank=tp_rank
-        self.tp_size=tp_size
-        self.use_dp=use_dp
+        self.ep_rank = ep_rank
+        self.ep_size = ep_size
+        self.tp_rank = tp_rank
+        self.tp_size = tp_size
+        self.use_dp = use_dp
         assert not use_batched_format or num_dispatchers is not None
         self.num_dispatchers = num_dispatchers
-
 
     @property
     def activation_formats(
@@ -89,7 +87,7 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def supports_expert_map(self) -> bool:
         return False
-        
+
     def supports_chunking(self) -> bool:
         # This refers to TP chunking; DP chunking is handled separately.
         return True
@@ -97,7 +95,7 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         # Let PrepareAndFinalize::finalize() decide the impl.
         return TopKWeightAndReduceDelegate()
-    
+
     def workspace_shapes(
         self, a: torch.Tensor, aq: torch.Tensor, M: int, N: int, K: int,
         topk: int, global_num_experts: int, local_num_experts: int
@@ -121,16 +119,15 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
           of each tuple must be the number of tokens.
         """
         assert self.use_nvfp4_w4a4 is True, ("Only nvfp4 quantization is "
-                                             "currently supported.")    
+                                             "currently supported.")
         aq_m, aq_n = aq.shape
         workspace2 = ()
         output_shape = (aq_m, aq_n * 2)
         workspace_dtype = a.dtype
         workspace1 = output_shape
-        # The workspace is determined by `aq`, since it comes after any 
+        # The workspace is determined by `aq`, since it comes after any
         # potential communication op and is involved in the expert computation.
         return (workspace1, workspace2, output_shape, workspace_dtype)
-
 
     def apply(
         self,
@@ -148,8 +145,8 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         w2_zp: Optional[torch.Tensor],
         a1q_scale: Optional[torch.Tensor],
         a2_scale: Optional[torch.Tensor],  # Not used
-        workspace13:Optional[torch.Tensor],
-        workspace2:Optional[torch.Tensor],
+        workspace13: Optional[torch.Tensor],
+        workspace2: Optional[torch.Tensor],
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
         topk_weights: torch.Tensor,
         g1_alphas: torch.Tensor,

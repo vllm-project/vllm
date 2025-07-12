@@ -4,7 +4,7 @@
 from abc import abstractmethod
 from collections.abc import Iterable
 from enum import Enum
-from typing import Callable, Literal, Optional, overload
+from typing import TYPE_CHECKING, Callable, Literal, Optional, overload
 
 import torch
 import torch.nn.functional as F
@@ -35,8 +35,6 @@ from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
 from vllm.utils import direct_register_custom_op, has_deep_ep, has_pplx
 
-from typing import TYPE_CHECKING
-
 try:
     from flashinfer import fp4_quantize as fp4_quantize
     from flashinfer.fused_moe import (
@@ -57,7 +55,8 @@ if current_platform.is_cuda_alike():
         from .deepep_ll_prepare_finalize import (DEEPEP_QUANT_BLOCK_SHAPE,
                                                  DeepEPLLPrepareAndFinalize)
     if has_flashinfer:
-        from .flashinfer_cutlass_prepare_finalize import FlashInferCutlassMoEPrepareAndFinalize
+        from .flashinfer_cutlass_prepare_finalize import (
+            FlashInferCutlassMoEPrepareAndFinalize)
 else:
     fused_experts = None  # type: ignore
     FusedMoEPermuteExpertsUnpermute = None  # type: ignore
@@ -107,8 +106,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 
         if moe.use_flashinfer_cutlass_kernels:
             prepare_finalize = FlashInferCutlassMoEPrepareAndFinalize(
-                quant_dtype=moe.quant_dtype,
-            )
+                quant_dtype=moe.quant_dtype, )
         if moe.use_pplx_kernels:
             hidden_dim_bytes, hidden_scale_bytes = pplx_hidden_dim_scale_bytes(
                 moe.max_num_tokens,
@@ -755,9 +753,9 @@ class FusedMoE(torch.nn.Module):
         quant_method: Optional[QuantizeMethodBase] = None
         quant_method = (UnquantizedFusedMoEMethod(moe) if quant_config is None
                         else quant_config.get_quant_method(self, prefix))
-        
+
         quant_method.select_experts_impl(self.moe_parallel_config)
-    
+
         assert quant_method is not None
         assert isinstance(quant_method, FusedMoEMethodBase)
         self.quant_method = quant_method
@@ -932,7 +930,7 @@ class FusedMoE(torch.nn.Module):
         # Narrow parameter and load.
         # w1, gate_proj: Load into first logical weight of w13.
         # w3, up_proj: Load into second logical weight of w13.
-        # The FlashInfer Cutlass fused MoE kernel expects the combined weights 
+        # The FlashInfer Cutlass fused MoE kernel expects the combined weights
         # to be ordered as [w3, w1], unlike the standard [w1, w3] layout.
         assert shard_id in ("w1", "w3")
         switch_w13 = getattr(self.quant_method, 'load_up_proj_weight_first',
@@ -1472,12 +1470,12 @@ class FusedMoE(torch.nn.Module):
     def forward_impl(self, hidden_states: torch.Tensor,
                      router_logits: torch.Tensor):
         assert self.quant_method is not None
-        # Route to the chunked forward path using the FlashInfer Cutlass kernel 
+        # Route to the chunked forward path using the FlashInfer Cutlass kernel
         # only when data parallelism (DP) is enabled.
         use_flashinfer_cutlass_kernels = self.dp_size > 1 and self.moe_parallel_config.use_flashinfer_cutlass_kernels
         if (self.moe_parallel_config.use_pplx_kernels
-                or self.moe_parallel_config.use_deepep_ll_kernels or
-                use_flashinfer_cutlass_kernels):
+                or self.moe_parallel_config.use_deepep_ll_kernels
+                or use_flashinfer_cutlass_kernels):
             return self.forward_impl_chunked(hidden_states, router_logits)
 
         do_naive_dispatch_combine: bool = (

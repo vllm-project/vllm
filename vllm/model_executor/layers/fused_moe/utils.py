@@ -195,7 +195,9 @@ def moe_kernel_quantize_input(
     elif quant_dtype == torch.int8:
         return _int8_quantize(A, A_scale, per_act_token_quant, block_shape)
     elif quant_dtype == torch.uint8:  # nvfp4
-        return _fp4_quantize(A, A_scale, is_sf_swizzled_layout=is_fp4_scalar_swizzled)        
+        return _fp4_quantize(A,
+                             A_scale,
+                             is_sf_swizzled_layout=is_fp4_scalar_swizzled)
     elif quant_dtype == "mxfp4":
         return _mxfp4_quantize(A, A_scale, per_act_token_quant, block_shape)
     else:

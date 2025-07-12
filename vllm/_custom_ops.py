@@ -958,9 +958,9 @@ def cutlass_moe_mm(out_tensors: torch.Tensor, a_tensors: torch.Tensor,
 
 
 def cutlass_fp4_moe_mm(out_tensors: torch.Tensor, a_tensors: torch.Tensor,
-                       b_tensors: torch.Tensor,
-                       a_scales: torch.Tensor, b_scales: torch.Tensor,
-                       alphas: torch.Tensor, problem_sizes: torch.Tensor,
+                       b_tensors: torch.Tensor, a_scales: torch.Tensor,
+                       b_scales: torch.Tensor, alphas: torch.Tensor,
+                       problem_sizes: torch.Tensor,
                        expert_offsets: torch.Tensor, sf_offsets: torch.Tensor,
                        out_dtype: torch.dtype, device: torch.device):
     """
@@ -979,9 +979,10 @@ def cutlass_fp4_moe_mm(out_tensors: torch.Tensor, a_tensors: torch.Tensor,
     - problem_sizes: MxNxK sizes of each expert's multiplication in two grouped
                      MMs used in the fused MoE operation.
     """
-    return torch.ops._C.cutlass_fp4_group_mm(out_tensors, a_tensors, b_tensors, a_scales,
-                                      b_scales, alphas, problem_sizes,
-                                      expert_offsets, sf_offsets)
+    return torch.ops._C.cutlass_fp4_group_mm(out_tensors, a_tensors, b_tensors,
+                                             a_scales, b_scales, alphas,
+                                             problem_sizes, expert_offsets,
+                                             sf_offsets)
 
 
 # aqlm
