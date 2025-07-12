@@ -103,8 +103,8 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         block_m = self.block_shape[0]
         M_sum = (M * topk) + num_experts * (block_m - 1)
         M_sum = round_up(M_sum, block_m)
-        workspace1 = (M_sum, max(N, K))
-        workspace2 = (M_sum, max(N * 2, K))
+        workspace1 = (M_sum, max(N // 2, K))
+        workspace2 = (M_sum, max(N, K))
         output = (M, K)
         return (workspace1, workspace2, output, a.dtype)
 
