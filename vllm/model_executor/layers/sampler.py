@@ -296,6 +296,7 @@ class Sampler(nn.Module):
 
         # Sample the next tokens.
         maybe_deferred_sample_results, maybe_sampled_tokens_tensor = _sample(
+            logits,
             probs,
             logprobs,
             sampling_metadata,
@@ -611,7 +612,8 @@ def get_pythonized_sample_results(
     ]
 
 
-def _sample_with_torch(
+def _sample(
+    logits: torch.Tensor,
     probs: torch.Tensor,
     logprobs: torch.Tensor,
     sampling_metadata: SamplingMetadata,
@@ -629,6 +631,11 @@ def _sample_with_torch(
     * Perform GPU-side sampling computation
     * Defer Pythonization & preserve GPU-side
       tensors required for Pythonization
+
+    Returns:
+    (next_token_ids, parent_seq_ids) for each seq group in a batch.
+        If sampling is skipped, it returns ([], [])
+    sampled_token_ids_tensor: A tensor of sampled token ids.
     '''
 
     categorized_seq_group_ids: dict[SamplingType, list[int]] = {
@@ -668,8 +675,7 @@ def _sample_with_torch(
         sample_metadata[sampling_type] = (seq_group_id, seq_groups)
         long_sample_indices = sample_indices.long()
         if sampling_type == SamplingType.GREEDY:
-            greedy_samples = torch.argmax(logprobs[long_sample_indices],
-                                          dim=-1)
+            greedy_samples = torch.argmax(logits[long_sample_indices], dim=-1)
 
             if sampled_token_ids_tensor is not None:
                 # Store sampled tokens in output tensor.
@@ -733,36 +739,6 @@ def _sample_with_torch(
             maybe_deferred_args,
             sampled_token_ids_tensor,
         )
-
-
-def _sample(
-    probs: torch.Tensor,
-    logprobs: torch.Tensor,
-    sampling_metadata: SamplingMetadata,
-    sampling_tensors: SamplingTensors,
-    include_gpu_probs_tensor: bool,
-    modify_greedy_probs: bool,
-) -> SampleReturnType:
-    """
-    Args:
-        probs: (num_query_tokens_in_batch, num_vocab)
-        logprobs: (num_query_tokens_in_batch, num_vocab)
-        sampling_metadata: The metadata for a batch for sampling.
-        sampling_tensors: Tensors that include sampling related metadata.
-
-    Returns:
-        (next_token_ids, parent_seq_ids) for each seq group in a batch.
-            If sampling is skipped, it returns ([], [])
-        sampled_token_ids_tensor: A tensor of sampled token ids.
-    """
-    return _sample_with_torch(
-        probs,
-        logprobs,
-        sampling_metadata,
-        sampling_tensors,
-        include_gpu_probs_tensor=include_gpu_probs_tensor,
-        modify_greedy_probs=modify_greedy_probs,
-    )
 
 
 def _get_ranks(x: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
