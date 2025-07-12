@@ -578,7 +578,6 @@ class ModelConfig:
             selected_task = all_supported_tasks[runner_type][-1]
             assert selected_task != "pooling"
             self.task = selected_task
-
         self.supported_runner_types = supported_runner_types
         self.runner_type = runner_type
         self.supported_tasks = all_supported_tasks[runner_type]
@@ -942,6 +941,10 @@ class ModelConfig:
             if arch.endswith(suffix) and pref_runner in supported_runner_types:
                 return pref_runner
 
+        if len(supported_tasks.get("pooling", [])) > 1:
+            # When multiple pooling tasks are present, default to
+            # pooling (eg cross-encoder) for non-standard architectures.
+            return "pooling"
         if "generate" in supported_runner_types:
             return "generate"
         if "pooling" in supported_runner_types:
