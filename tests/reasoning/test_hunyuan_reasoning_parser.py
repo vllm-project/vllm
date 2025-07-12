@@ -30,6 +30,12 @@ COMPLETE_REASONING = {
     "reasoning_content": "This is a reasoning section",
     "content": None,
 }
+
+COMPLETE_REASONING_WITH_SYMBOL = {
+    "output": f"{START_REASONING}This is a reasoning section!{START_RESPONSE}",
+    "reasoning_content": "This is a reasoning section!",
+    "content": None,
+}
 NO_REASONING = {
     "output": "This is content",
     "reasoning_content": None,
@@ -69,6 +75,11 @@ TEST_CASES = [
         False,
         COMPLETE_REASONING,
         id="complete_reasoning",
+    ),
+    pytest.param(
+        False,
+        COMPLETE_REASONING_WITH_SYMBOL,
+        id="complete_reasoning_with_symbol",
     ),
     pytest.param(
         False,
