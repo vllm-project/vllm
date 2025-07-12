@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """A TPU worker class."""
+import copy
 import os
 from typing import Optional
 
@@ -12,9 +13,12 @@ import torch_xla.debug.profiler as xp
 import torch_xla.runtime as xr
 
 import vllm.envs as envs
-from vllm.config import ParallelConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
+from vllm.distributed.kv_transfer import (ensure_kv_transfer_initialized,
+                                          get_kv_transfer_group,
+                                          has_kv_transfer_group)
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
@@ -24,7 +28,7 @@ from vllm.v1.attention.backends.pallas import TPU_HEAD_SIZE_ALIGNMENT
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (AttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
-from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
 from vllm.v1.utils import bind_kv_cache, report_usage_stats
 from vllm.v1.worker.tpu_model_runner import TPUModelRunner
 
@@ -117,7 +121,7 @@ class TPUWorker:
 
         # Initialize the distributed environment.
         self._init_tpu_worker_distributed_environment(
-            self.parallel_config, self.rank, self.distributed_init_method,
+            self.vllm_config, self.rank, self.distributed_init_method,
             self.local_rank)
 
         # Device initialization should happen after initializing
@@ -241,6 +245,24 @@ class TPUWorker:
         scheduler_output: "SchedulerOutput",
     ) -> Optional[ModelRunnerOutput]:
         output = self.model_runner.execute_model(scheduler_output)
+        assert isinstance(output, ModelRunnerOutput)
+        if has_kv_transfer_group():
+            finished_sending, finished_recving = (
+                get_kv_transfer_group().get_finished(
+                    scheduler_output.finished_req_ids))
+            if finished_sending or finished_recving:
+                if output is EMPTY_MODEL_RUNNER_OUTPUT:
+                    output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
+                output.finished_sending = finished_sending
+                output.finished_recving = finished_recving
+
+            # Clear KVConnector state for this step.
+            get_kv_transfer_group().clear_connector_metadata()
+
+            # with a connector, the scheduler expects output from all workers
+            return output
+
+        # return output only from the driver worker
         return output if self.is_driver_worker else None
 
     def profile(self, is_start: bool = True):
@@ -284,7 +306,7 @@ class TPUWorker:
 
     def _init_tpu_worker_distributed_environment(
         self,
-        parallel_config: ParallelConfig,
+        vllm_config: VllmConfig,
         rank: int,
         distributed_init_method: Optional[str] = None,
         local_rank: int = -1,
@@ -296,6 +318,7 @@ class TPUWorker:
         # the input objects on CPU. The all-reduce and all-gather ops on TPU
         # are invoked by `xm.all_reduce` and `xm.all_gather` which use their
         # own context.
+        parallel_config = vllm_config.parallel_config
         init_distributed_environment(
             world_size=parallel_config.world_size,
             rank=rank,
@@ -306,6 +329,8 @@ class TPUWorker:
         ensure_model_parallel_initialized(
             parallel_config.tensor_parallel_size,
             parallel_config.pipeline_parallel_size)
+
+        ensure_kv_transfer_initialized(vllm_config)
 
 
 try:
