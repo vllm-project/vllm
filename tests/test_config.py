@@ -102,6 +102,23 @@ def test_score_task(model_id, expected_runner_type, expected_task):
     assert config.task == expected_task
 
 
+@pytest.mark.parametrize(("model_id", "expected_runner_type", "expected_task"),
+                         [
+                             ("Qwen/Qwen2.5-1.5B-Instruct", "draft", "auto"),
+                         ])
+def test_draft_task(model_id, expected_runner_type, expected_task):
+    config = ModelConfig(
+        model_id,
+        runner="draft",
+        tokenizer=model_id,
+        seed=0,
+        dtype="float16",
+    )
+
+    assert config.runner_type == expected_runner_type
+    assert config.task == expected_task
+
+
 @pytest.mark.parametrize(
     ("model_id", "expected_runner_type", "expected_task"),
     [

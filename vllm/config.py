@@ -94,7 +94,7 @@ TaskOption = Literal["auto", "generate", "embedding", "embed", "classify",
                      "score", "reward", "transcription"]
 
 _ResolvedTask = Literal["generate", "transcription", "pooling", "embed",
-                        "classify", "reward"]
+                        "classify", "reward", "draft"]
 
 RunnerOption = Literal["auto", "generate", "pooling", "draft"]
 
@@ -883,6 +883,7 @@ class ModelConfig:
         return {
             "generate": self._get_supported_generation_tasks(task_option),
             "pooling": self._get_supported_pooling_tasks(task_option),
+            "draft": ["draft"]
         }
 
     def _get_supported_runner_types(
@@ -902,10 +903,6 @@ class ModelConfig:
         supported_runner_types: set[RunnerType],
         supported_tasks: dict[RunnerType, list[_ResolvedTask]],
     ) -> RunnerType:
-        if runner_option == "draft":
-            assert task_option == "auto"
-            return "draft"
-
         if not supported_runner_types:
             raise ValueError("This model does not support any model runners!")
 
