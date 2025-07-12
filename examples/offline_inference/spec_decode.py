@@ -84,6 +84,7 @@ def main():
         gpu_memory_utilization=0.8,
         speculative_config=speculative_config,
         disable_log_stats=False,
+        max_model_len=16384,
     )
 
     sampling_params = SamplingParams(temperature=args.temp, max_tokens=args.output_len)
