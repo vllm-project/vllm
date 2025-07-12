@@ -30,8 +30,10 @@ import torch
 from torch import nn
 from transformers import BatchFeature, PretrainedConfig
 from transformers.modeling_outputs import BaseModelOutputWithPast
-from transformers.models.whisper.modeling_whisper import (
-    ACT2FN, WHISPER_ATTENTION_CLASSES, WhisperConfig, WhisperEncoder)
+from transformers.models.whisper.modeling_whisper import (ACT2FN,
+                                                          WhisperAttention,
+                                                          WhisperConfig,
+                                                          WhisperEncoder)
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -378,14 +380,13 @@ class MiniCPMWhisperEncoderLayer(nn.Module):
     def __init__(self, config: WhisperConfig, layer_idx: int):
         super().__init__()
         self.embed_dim = config.d_model
-        self.self_attn = WHISPER_ATTENTION_CLASSES[
-            config._attn_implementation](
-                embed_dim=self.embed_dim,
-                num_heads=config.encoder_attention_heads,
-                dropout=config.attention_dropout,
-                config=config,
-                layer_idx=layer_idx,
-            )
+        self.self_attn = WhisperAttention(
+            embed_dim=self.embed_dim,
+            num_heads=config.encoder_attention_heads,
+            dropout=config.attention_dropout,
+            config=config,
+            layer_idx=layer_idx,
+        )
         self.self_attn_layer_norm = nn.LayerNorm(self.embed_dim)
         self.dropout = config.dropout
         self.activation_fn = ACT2FN[config.activation_function]
