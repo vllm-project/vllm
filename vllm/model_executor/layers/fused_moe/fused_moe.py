@@ -1619,8 +1619,8 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         global_num_experts: int,
         local_num_experts: int,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
-        workspace1 = (M, topk, max(N, K))
-        workspace2 = (M, topk, max(N * 2, K))
+        workspace1 = (M, topk, max(N // 2, K))
+        workspace2 = (M, topk, max(N, K))
         output = (M, K)
         return (workspace1, workspace2, output, a.dtype)
 
