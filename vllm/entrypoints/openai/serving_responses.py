@@ -55,6 +55,7 @@ class OpenAIServingResponses(OpenAIServing):
         tool_parser: Optional[str] = None,
         enable_prompt_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
+        enable_log_outputs: bool = False,
     ) -> None:
         super().__init__(
             engine_client=engine_client,
@@ -67,6 +68,7 @@ class OpenAIServingResponses(OpenAIServing):
 
         self.chat_template = chat_template
         self.chat_template_content_format: Final = chat_template_content_format
+        self.enable_log_outputs = enable_log_outputs
 
         self.reasoning_parser: Optional[Callable[[AnyTokenizer],
                                                  ReasoningParser]] = None
@@ -87,8 +89,11 @@ class OpenAIServingResponses(OpenAIServing):
         if self.default_sampling_params:
             source = self.model_config.generation_config
             source = "model" if source == "auto" else source
-            logger.info("Using default chat sampling params from %s: %s",
-                        source, self.default_sampling_params)
+            logger.info(
+                "Using default chat sampling params from %s: %s",
+                source,
+                self.default_sampling_params,
+            )
 
         # HACK(woosuk): This is a hack. We should use a better store.
         # FIXME: This causes a memory leak since we never remove responses
@@ -167,11 +172,13 @@ class OpenAIServingResponses(OpenAIServing):
                 sampling_params = request.to_sampling_params(
                     default_max_tokens, self.default_sampling_params)
 
-                self._log_inputs(request.request_id,
-                                 request_prompts[i],
-                                 params=sampling_params,
-                                 lora_request=lora_request,
-                                 prompt_adapter_request=prompt_adapter_request)
+                self._log_inputs(
+                    request.request_id,
+                    request_prompts[i],
+                    params=sampling_params,
+                    lora_request=lora_request,
+                    prompt_adapter_request=prompt_adapter_request,
+                )
 
                 trace_headers = (None if raw_request is None else await
                                  self._get_trace_headers(raw_request.headers))
@@ -191,7 +198,7 @@ class OpenAIServingResponses(OpenAIServing):
             return self.create_error_response(str(e))
 
         assert len(generators) == 1
-        result_generator, = generators
+        (result_generator, ) = generators
 
         # Store the input messages.
         if request.store:
@@ -335,6 +342,24 @@ class OpenAIServingResponses(OpenAIServing):
             usage=usage,
         )
 
+        # Log complete response if output logging is enabled
+        if self.enable_log_outputs and self.request_logger:
+            output_text = ""
+            if content:
+                output_text = content
+            elif reasoning_content:
+                output_text = f"[reasoning: {reasoning_content}]"
+
+            if output_text:
+                self.request_logger.log_outputs(
+                    request_id=request.request_id,
+                    outputs=output_text,
+                    output_token_ids=final_output.token_ids,
+                    finish_reason=final_output.finish_reason,
+                    is_streaming=False,
+                    delta=False,
+                )
+
         if request.store:
             async with self.response_store_lock:
                 stored_response = self.response_store.get(response.id)
@@ -440,7 +465,7 @@ class OpenAIServingResponses(OpenAIServing):
             response.status = "cancelled"
 
         # Abort the request.
-        if (task := self.background_tasks.get(response_id)):
+        if task := self.background_tasks.get(response_id):
             task.cancel()
             try:
                 await task
