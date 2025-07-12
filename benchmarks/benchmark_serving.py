@@ -72,7 +72,11 @@ from benchmark_dataset import (
     SonnetDataset,
     VisionArenaDataset,
 )
-from benchmark_utils import convert_to_pytorch_benchmark_format, write_to_json
+from benchmark_utils import (
+    convert_to_pytorch_benchmark_format,
+    get_memory_usage,
+    write_to_json,
+)
 
 MILLISECONDS_TO_SECONDS_CONVERSION = 1000
 
@@ -105,6 +109,9 @@ class BenchmarkMetrics:
     median_e2el_ms: float
     std_e2el_ms: float
     percentiles_e2el_ms: list[tuple[float, float]]
+    # Memory usage metrics
+    peak_memory_gb: float
+    memory_per_request_mb: float
 
 
 def _get_current_request_rate(
@@ -210,6 +217,7 @@ def calculate_metrics(
     selected_percentile_metrics: list[str],
     selected_percentiles: list[float],
     goodput_config_dict: dict[str, float],
+    peak_memory_gb: float = 0.0,
 ) -> tuple[BenchmarkMetrics, list[int]]:
     actual_output_lens: list[int] = []
     total_input = 0
@@ -315,6 +323,8 @@ def calculate_metrics(
         percentiles_e2el_ms=[
             (p, np.percentile(e2els or 0, p) * 1000) for p in selected_percentiles
         ],
+        peak_memory_gb=peak_memory_gb,
+        memory_per_request_mb=(peak_memory_gb * 1024) / max(completed, 1),
     )
 
     return metrics, actual_output_lens
@@ -508,6 +518,9 @@ async def benchmark(
 
     benchmark_duration = time.perf_counter() - benchmark_start_time
 
+    # Track peak memory after benchmark ends
+    peak_memory = get_memory_usage()
+
     metrics, actual_output_lens = calculate_metrics(
         input_requests=input_requests,
         outputs=outputs,
@@ -516,6 +529,7 @@ async def benchmark(
         selected_percentile_metrics=selected_percentile_metrics,
         selected_percentiles=selected_percentiles,
         goodput_config_dict=goodput_config_dict,
+        peak_memory_gb=peak_memory,
     )
 
     print("{s:{c}^{n}}".format(s=" Serving Benchmark Result ", n=50, c="="))
@@ -544,6 +558,12 @@ async def benchmark(
             "Total Token throughput (tok/s):", metrics.total_token_throughput
         )
     )
+    print("{:<40} {:<10.2f}".format("Peak memory usage (GiB):", metrics.peak_memory_gb))
+    print(
+        "{:<40} {:<10.2f}".format(
+            "Memory per request (MiB):", metrics.memory_per_request_mb
+        )
+    )
 
     result = {
         "duration": benchmark_duration,
@@ -560,6 +580,8 @@ async def benchmark(
         "itls": [output.itl for output in outputs],
         "generated_texts": [output.generated_text for output in outputs],
         "errors": [output.error for output in outputs],
+        "peak_memory_gb": metrics.peak_memory_gb,
+        "memory_per_request_mb": metrics.memory_per_request_mb,
     }
 
     if rps_change_events:

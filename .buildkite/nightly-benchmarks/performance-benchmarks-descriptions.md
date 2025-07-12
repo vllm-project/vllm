@@ -30,7 +30,7 @@
 - GPU Models: llama-3.1 8B, llama-3 70B, mixtral 8x7B.
 - We also added a speculative decoding test for llama-3 70B on GPU, under QPS 2
 - CPU Models: llama-3.1 8B.
-- Evaluation metrics: throughput, TTFT (time to the first token, with mean, median and p99), ITL (inter-token latency, with mean, median and p99).
+- Evaluation metrics: throughput, TTFT (time to the first token, with mean, median and p99), ITL (inter-token latency, with mean, median and p99), peak memory usage (GiB), memory per request (MiB).
 - For CPU, we added random dataset tests to benchmark fixed input/output length with 100 prompts.
 
 {serving_tests_markdown_table}
