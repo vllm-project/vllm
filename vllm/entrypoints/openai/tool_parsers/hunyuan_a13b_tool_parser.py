@@ -108,10 +108,11 @@ class HunyuanA13BToolParser(ToolParser):
             if not potential_tool_calls:
                 # some text should be filtered out for no function call
                 # this text is in a13b's chat template.
-                cleaned_output = content.replace("助手：", "", 1)
+                if content:
+                    content = content.replace("助手：", "", 1)
                 return ExtractedToolCallInformation(tools_called=False,
                                                     tool_calls=[],
-                                                    content=cleaned_output)
+                                                    content=content)
 
             # Parse the potential tool calls as JSON
             tool_calls_data = json.loads(potential_tool_calls)
@@ -145,10 +146,15 @@ class HunyuanA13BToolParser(ToolParser):
                 tool_calls.append(tool_call)
 
             logger.debug("exit in last position.")
+
+            if content and len(content.strip()) == 0:
+                # clear the whitespace content.
+                content = None
+
             return ExtractedToolCallInformation(
                 tools_called=len(tool_calls) > 0,
                 tool_calls=tool_calls,
-                content=content if len(content.strip()) > 0 else None,
+                content=content,
             )
 
         except Exception as e:
