@@ -916,6 +916,7 @@ def graph_capture(device: torch.device):
 logger = init_logger(__name__)
 
 _ENABLE_CUSTOM_ALL_REDUCE = True
+_ENABLE_NVSHMEM_ALL_REDUCE = True
 
 
 def set_custom_all_reduce(enable: bool):

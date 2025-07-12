@@ -26,10 +26,17 @@ class CudaCommunicator(DeviceCommunicatorBase):
         if "tp" not in unique_name:
             # only tp uses custom allreduce
             use_custom_allreduce = False
+
+            # only tp uses nvshmem allreduce
+            use_nvshmem_allreduce = False
         else:
             from vllm.distributed.parallel_state import (
                 _ENABLE_CUSTOM_ALL_REDUCE)
             use_custom_allreduce = _ENABLE_CUSTOM_ALL_REDUCE
+
+            from vllm.distributed.parallel_state import (
+                _ENABLE_NVSHMEM_ALL_REDUCE)
+            use_nvshmem_allreduce = _ENABLE_NVSHMEM_ALL_REDUCE
 
         # ep does not use pynccl
         use_pynccl = "ep" not in unique_name
@@ -40,6 +47,8 @@ class CudaCommunicator(DeviceCommunicatorBase):
         # lazy import to avoid documentation build error
         from vllm.distributed.device_communicators.custom_all_reduce import (
             CustomAllreduce)
+        from vllm.distributed.device_communicators.nvshmem_all_reduce import (
+            NVSHMEMAllreduce)
         from vllm.distributed.device_communicators.pynccl import (
             PyNcclCommunicator)
         from vllm.distributed.device_communicators.quick_all_reduce import (
@@ -69,6 +78,13 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 # currently be an MI300 series.
                 self.qr_comm = QuickAllReduce(group=self.cpu_group,
                                               device=self.device)
+        self.nvshmem_ar_comm: Optional[NVSHMEMAllreduce] = None
+        if use_nvshmem_allreduce and self.world_size > 1:
+            self.nvshmem_ar_comm = NVSHMEMAllreduce(
+                group=self.cpu_group,
+                device=self.device,
+            )
+
         if self.use_all2all:
             all2all_backend = envs.VLLM_ALL2ALL_BACKEND
             if all2all_backend == "naive":
@@ -103,6 +119,12 @@ class CudaCommunicator(DeviceCommunicatorBase):
         if ca_comm is not None and not ca_comm.disabled and \
             ca_comm.should_custom_ar(input_):
             out = ca_comm.custom_all_reduce(input_)
+            assert out is not None
+            return out
+        nvshmem_ar_comm = self.nvshmem_ar_comm
+        if nvshmem_ar_comm is not None and not nvshmem_ar_comm.disabled and \
+            nvshmem_ar_comm.should_nvshmem_ar(input_):
+            out = nvshmem_ar_comm.nvshmem_all_reduce(input_)
             assert out is not None
             return out
         pynccl_comm = self.pynccl_comm
@@ -212,6 +234,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
             self.pynccl_comm = None
         if self.ca_comm is not None:
             self.ca_comm = None
+        if self.nvshmem_ar_comm is not None:
+            self.nvshmem_ar_comm.close()
+            self.nvshmem_ar_comm = None
         if self.all2all_manager is not None:
             self.all2all_manager.destroy()
             self.all2all_manager = None
