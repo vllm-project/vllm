@@ -191,6 +191,9 @@ class PythonicToolParser(ToolParser):
 def _get_parameter_value(val: ast.expr) -> Any:
     if isinstance(val, ast.Constant):
         return val.value
+    elif isinstance(val, ast.UnaryOp) and isinstance(val.op, ast.USub):
+        # Negative numbers are represented as UnaryOp(USub, Constant)
+        return -_get_parameter_value(val.operand)
     elif isinstance(val, ast.Dict):
         if not all(isinstance(k, ast.Constant) for k in val.keys):
             raise _UnexpectedAstError(
