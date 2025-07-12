@@ -59,8 +59,8 @@ def per_block_cast_to_fp8(
 @pytest.mark.skipif(
     (lambda x: x is None or x.to_int() != 100)(
         current_platform.get_device_capability()),
-    reason="Block Scaled Grouped GEMM is only supported on SM100.")
-def test_cutlass_grouped_gemm(
+    reason="Block Scaled Grouped GEMM SM100 is only supported on SM100.")
+def test_cutlass_grouped_gemm_sm100(
     num_groups: int,
     expected_m_per_group: int,
     k: int,
@@ -103,7 +103,7 @@ def test_cutlass_grouped_gemm(
         baseline = baseline_scaled_mm(a, b, a_scale, b_scale, out_dtype)
         ref_out[ep_offset[i]:ep_offset[i + 1]] = baseline
 
-    ops.cutlass_blockwise_scaled_grouped_mm(
+    ops.cutlass_blockwise_scaled_grouped_mm_sm100(
         out,
         x_fp8[0],
         y_fp8[0],
