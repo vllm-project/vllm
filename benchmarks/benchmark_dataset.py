@@ -1171,3 +1171,67 @@ class ASRDataset(HuggingFaceDataset):
             )
         self.maybe_oversample_requests(sampled_requests, num_requests)
         return sampled_requests
+
+
+# -----------------------------------------------------------------------------
+# Prefix Repetition Dataset Implementation
+# -----------------------------------------------------------------------------
+
+
+class PrefixRepetitionRandomDataset(BenchmarkDataset):
+    # Default values copied from benchmark_serving.py for the repeated prefix dataset.
+    DEFAULT_PREFIX_LEN = 256
+    DEFAULT_SUFFIX_LEN = 256
+    DEFAULT_NUM_PREFIXES = 10
+    DEFAULT_OUTPUT_LEN = 128
+
+    def __init__(
+        self,
+        **kwargs,
+    ) -> None:
+        super().__init__(**kwargs)
+
+    def sample(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        num_requests: int,
+        prefix_len: int = DEFAULT_PREFIX_LEN,
+        suffix_len: int = DEFAULT_SUFFIX_LEN,
+        num_prefixes: int = DEFAULT_NUM_PREFIXES,
+        output_len: int = DEFAULT_OUTPUT_LEN,
+        **kwargs,
+    ) -> list[SampleRequest]:
+        vocab_size = tokenizer.vocab_size
+        prompts_per_prefix = num_requests // num_prefixes
+
+        def _generate_random_text_part(length: int) -> tuple[str, list[int]]:
+            token_ids = np.random.randint(0, vocab_size, size=length).tolist()
+            decoded_text = tokenizer.decode(token_ids)
+            # Re-encoding and decoding is necessary to ensure the final
+            # token count is correct.
+            re_encoded_ids = tokenizer.encode(decoded_text, add_special_tokens=False)[
+                :length
+            ]
+            final_text = tokenizer.decode(re_encoded_ids)
+            return final_text, re_encoded_ids
+
+        requests = []
+        for _ in range(num_prefixes):
+            decoded_prefix, re_encoded_prefix = _generate_random_text_part(prefix_len)
+
+            for _ in range(prompts_per_prefix):
+                decoded_suffix, re_encoded_suffix = _generate_random_text_part(
+                    suffix_len
+                )
+
+                prompt = decoded_prefix + decoded_suffix
+                prompt_len = len(re_encoded_prefix) + len(re_encoded_suffix)
+                requests.append(
+                    SampleRequest(
+                        prompt=prompt,
+                        prompt_len=prompt_len,
+                        expected_output_len=output_len,
+                    )
+                )
+
+        return requests
