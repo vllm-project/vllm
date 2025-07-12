@@ -4289,6 +4289,17 @@ class CompilationConfig:
                 "vllm.unified_attention_with_output",
             ]
 
+class ReasoningConfig:
+    """Configuration for reasoning models."""
+
+    think_start_token_id: Optional[int] = None
+    """Token ID that indicates the start of reasoning."""
+    think_end_token_id: Optional[int] = None
+    """Token ID that indicates the end of reasoning."""
+
+    def __init__(self, think_start_token_id: Optional[int] = None, think_end_token_id: Optional[int] = None):
+        self.think_start_token_id = think_start_token_id
+        self.think_end_token_id = think_end_token_id
 
 @config
 @dataclass(config=ConfigDict(arbitrary_types_allowed=True))
@@ -4346,6 +4357,8 @@ class VllmConfig:
     # some opaque config, only used to provide additional information
     # for the hash computation, mainly used for testing, debugging or out of
     # tree config registration.
+    reasoning_config: Optional[ReasoningConfig] = None
+    """The configurations for reasoning model."""
     additional_config: Union[dict, SupportsHash] = field(default_factory=dict)
     """Additional config for specified platform. Different platforms may
     support different configs. Make sure the configs are valid for the platform
