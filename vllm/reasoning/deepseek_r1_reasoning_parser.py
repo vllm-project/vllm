@@ -23,8 +23,8 @@ class DeepSeekR1ReasoningParser(ReasoningParser):
     text. This parser extracts the reasoning content from the model output.
     """
 
-    start_token_id: int
-    end_token_id: int
+    think_start_token_id: int
+    think_end_token_id: int
 
     start_token: str = "<think>"
     end_token: str = "</think>"
@@ -37,24 +37,24 @@ class DeepSeekR1ReasoningParser(ReasoningParser):
                 "The model tokenizer must be passed to the ReasoningParser "
                 "constructor during construction.")
 
-        self.start_token_id = self.vocab.get(self.start_token)
-        self.end_token_id = self.vocab.get(self.end_token)
-        if self.start_token_id is None or self.end_token_id is None:
+        self.think_start_token_id = self.vocab.get(self.start_token)
+        self.think_end_token_id = self.vocab.get(self.end_token)
+        if self.think_start_token_id is None or self.think_end_token_id is None:
             raise RuntimeError(
                 "DeepSeek R1 reasoning parser could not locate think start/end "
                 "tokens in the tokenizer!")
 
     def is_reasoning_end(self, input_ids: list[int]) -> bool:
-        return self.end_token_id in input_ids
+        return self.think_end_token_id in input_ids
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         """
         Extract the content after the end tokens
         """
-        if self.end_token_id not in input_ids[:-1]:
+        if self.think_end_token_id not in input_ids[:-1]:
             return []
         else:
-            return input_ids[input_ids.index(self.end_token_id) + 1:]
+            return input_ids[input_ids.index(self.think_end_token_id) + 1:]
 
     def extract_reasoning_content_streaming(
         self,
@@ -75,14 +75,14 @@ class DeepSeekR1ReasoningParser(ReasoningParser):
         """
         # Skip single special tokens
         if len(delta_token_ids) == 1 and (delta_token_ids[0] in [
-                self.start_token_id, self.end_token_id
+                self.think_start_token_id, self.think_end_token_id
         ]):
             return None
 
         # Check if <think> is present in previous or delta.
         # Keep compatibility with models that don't generate <think> tokens.
-        if self.start_token_id in previous_token_ids:
-            if self.end_token_id in delta_token_ids:
+        if self.think_start_token_id in previous_token_ids:
+            if self.think_end_token_id in delta_token_ids:
                 # <think> in previous, </think> in delta,
                 # extract reasoning content
                 end_index = delta_text.find(self.end_token)
@@ -92,7 +92,7 @@ class DeepSeekR1ReasoningParser(ReasoningParser):
                     reasoning_content=reasoning_content,
                     content=content if content else None,
                 )
-            elif self.end_token_id in previous_token_ids:
+            elif self.think_end_token_id in previous_token_ids:
                 # <think> in previous, </think> in previous,
                 # reasoning content continues
                 return DeltaMessage(content=delta_text)
@@ -100,8 +100,8 @@ class DeepSeekR1ReasoningParser(ReasoningParser):
                 # <think> in previous, no </think> in previous or delta,
                 # reasoning content continues
                 return DeltaMessage(reasoning_content=delta_text)
-        elif self.start_token_id in delta_token_ids:
-            if self.end_token_id in delta_token_ids:
+        elif self.think_start_token_id in delta_token_ids:
+            if self.think_end_token_id in delta_token_ids:
                 # <think> in delta, </think> in delta, extract reasoning content
                 start_index = delta_text.find(self.start_token)
                 end_index = delta_text.find(self.end_token)
@@ -120,7 +120,7 @@ class DeepSeekR1ReasoningParser(ReasoningParser):
             # No <think> in previous or delta, also need to check for </think>.
             # Because the model may have generated </think> without <think>
             # Ref https://huggingface.co/deepseek-ai/DeepSeek-R1/commit/8a58a132790c9935686eb97f042afa8013451c9f
-            if self.end_token_id in delta_token_ids:
+            if self.think_end_token_id in delta_token_ids:
                 # </think> in delta with more tokens,
                 # extract reasoning content and content
                 end_index = delta_text.find(self.end_token)
@@ -130,7 +130,7 @@ class DeepSeekR1ReasoningParser(ReasoningParser):
                     reasoning_content=reasoning_content,
                     content=content if content else None,
                 )
-            elif self.end_token_id in previous_token_ids:
+            elif self.think_end_token_id in previous_token_ids:
                 # </think> in previous, thinking content ends
                 return DeltaMessage(content=delta_text)
             else:
