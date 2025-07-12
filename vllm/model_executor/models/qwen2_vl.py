@@ -193,6 +193,8 @@ class Qwen2VisionMLP(nn.Module):
         x_parallel, _ = self.fc1(x)
         x_parallel = self.act(x_parallel)
         x, _ = self.fc2(x_parallel)
+        if x.ndim == 2:
+            x = x.unsqueeze(1)
         return x
 
 
@@ -283,6 +285,8 @@ class Qwen2VisionAttention(nn.Module):
 
     def split_qkv(self, qkv: torch.Tensor) -> tuple[torch.Tensor, ...]:
         # [s, b, 3 * head * head_dim]
+        if qkv.ndim == 2:
+            qkv = qkv.unsqueeze(1)
         seq_len, bs, _ = qkv.shape
         if self.tp_size > 1:
             qkv = tensor_model_parallel_all_gather(qkv)
@@ -378,6 +382,8 @@ class Qwen2VisionAttention(nn.Module):
                                   "b s h d -> s b (h d)").contiguous()
 
         output, _ = self.proj(context_layer)
+        if output.ndim == 2:
+            output = output.unsqueeze(1)
         return output
 
 
@@ -1428,6 +1434,13 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             connector="visual.merger.",
             tower_model="visual.",
         )
+    
+    def get_vision_token_reduction_factor(self) -> int:
+        merge_size = self.visual.spatial_merge_size
+        return merge_size * merge_size if merge_size > 1 else 1
+    
+    def get_vision_token_reducer_layer(self) -> Optional[str]:
+        return "visual.merger.mlp.0"
 
 
 class Tarsier2MultiModalProcessor(Qwen2VLMultiModalProcessor):

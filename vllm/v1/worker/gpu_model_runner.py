@@ -65,7 +65,7 @@ from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.block_table import BlockTable
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
-from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
+from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin, LoRAMapping, LoRARequest
 
 from ..sample.logits_processor import LogitsProcessorManager
 from .utils import (gather_mm_placeholders, initialize_kv_cache_for_kv_sharing,
@@ -990,6 +990,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 mm_inputs.append(req_state.mm_inputs[mm_input_id])
                 req_ids_pos.append(
                     (req_id, mm_input_id, req_state.mm_positions[mm_input_id]))
+                
+        all_lora_requests = [
+            self.requests[req_id].lora_request
+            for req_id, _, _ in req_ids_pos
+        ]
 
         # Batch mm inputs as much as we can: if a request in the batch has
         # multiple modalities or a different modality than the previous one,
@@ -999,33 +1004,77 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # multimodal inputs. The proper solution should be reordering the
         # encoder outputs.
         grouped_mm_inputs_list = group_mm_inputs_by_modality(mm_inputs)
-
+        
+        lora_request_offset = 0
         encoder_outputs = []
-        for grouped_mm_inputs in grouped_mm_inputs_list:
-            batched_mm_inputs = MultiModalKwargs.batch(
-                grouped_mm_inputs, pin_memory=self.pin_memory)
-            batched_mm_inputs = MultiModalKwargs.as_kwargs(
-                batched_mm_inputs,
-                device=self.device,
-            )
+        max_items_per_chunk = 10
 
-            # Run the encoder.
-            # `curr_group_outputs` is either of the following:
-            # 1. A tensor of shape (num_items, feature_size, hidden_size)
-            # in case feature_size is fixed across all multimodal items.
-            # 2. A list or tuple (length: num_items) of tensors, each of shape
-            # (feature_size, hidden_size) in case the feature size is dynamic
-            # depending on the input multimodal items.
-            curr_group_outputs = self.model.get_multimodal_embeddings(
-                **batched_mm_inputs)
+        original_lora_mapping = None
+        if self.lora_config:
+            original_lora_mapping = self.lora_manager._adapter_manager._last_mapping
 
+
+        for full_modality_group in grouped_mm_inputs_list:
+            curr_group_outputs = []
+            for i in range(0, len(full_modality_group), max_items_per_chunk):
+
+                current_chunk = full_modality_group[i : i + max_items_per_chunk]
+                num_items_in_chunk = len(current_chunk)
+
+                group_lora_requests = all_lora_requests[
+                    lora_request_offset : lora_request_offset + num_items_in_chunk
+                ]
+                lora_request_offset += num_items_in_chunk
+                
+                batched_mm_inputs = MultiModalKwargs.batch(
+                    current_chunk, pin_memory=self.pin_memory)
+                batched_mm_inputs = MultiModalKwargs.as_kwargs(
+                    batched_mm_inputs,
+                    device=self.device,
+                )
+                
+                if self.lora_config and any(group_lora_requests):
+                    lora_indices = np.empty(len(group_lora_requests), dtype=np.int32)
+                    for i_req, lora_req in enumerate(group_lora_requests):
+                        if lora_req:
+                            self.lora_manager._adapter_manager.activate_adapter(lora_req.lora_int_id)
+                            lora_indices[i_req] = lora_req.lora_int_id
+                        else:
+                            lora_indices[i_req] = 0
+
+                    modality_key = "image" if "image_grid_thw" in batched_mm_inputs else "video"
+                    grid_thw = batched_mm_inputs[f"{modality_key}_grid_thw"]
+                    tokens_per_item = (grid_thw.prod(dim=-1)).squeeze(1).tolist()
+
+                    index_mapping = lora_indices.repeat(tokens_per_item)
+
+                    mapping = LoRAMapping(
+                        index_mapping=tuple(index_mapping.tolist()),
+                        prompt_mapping=tuple(lora_indices.tolist()),
+                        is_prefill=True,
+                    )
+
+                    self.lora_manager._adapter_manager.set_adapter_mapping(mapping)
+                    self.lora_manager._adapter_manager.prepare_for_vision_token_reduction(mapping, tokens_per_item)
+
+                curr_chunk_outputs = self.model.get_multimodal_embeddings(
+                    **batched_mm_inputs)
+
+                for output in curr_chunk_outputs:
+                    curr_group_outputs.append(output)
+                    encoder_outputs.append(output)
+        
             sanity_check_mm_encoder_outputs(
-                curr_group_outputs,
-                expected_num_items=len(grouped_mm_inputs),
-            )
-
-            for output in curr_group_outputs:
-                encoder_outputs.append(output)
+                    curr_group_outputs,
+                    expected_num_items=len(full_modality_group),
+                )
+        
+        if self.lora_config:
+            self.lora_manager._adapter_manager.set_adapter_mapping(original_lora_mapping)
+            req_ids = self.input_batch.req_ids
+            tokens = [scheduler_output.num_scheduled_tokens[i] for i in req_ids]
+            num_scheduled_tokens = np.array(tokens, dtype=np.int32)
+            self.set_active_loras(self.input_batch, num_scheduled_tokens)
 
         # Cache the encoder outputs.
         for (req_id, input_id, pos_info), output in zip(
@@ -1283,6 +1332,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
             # Return empty ModelRunnerOutput if there's no work to do.
             return EMPTY_MODEL_RUNNER_OUTPUT
+        
+        if self.lora_config:
+            self.lora_manager._adapter_manager._post_reduction_lora_mapping = None
 
         # Prepare the decoder inputs.
         (attn_metadata, attention_cuda_graphs, logits_indices,
@@ -2175,6 +2227,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 .get_max_tokens_per_item_by_nonzero_modality(self.model_config)
             dummy_data_modality, max_tokens_per_mm_item = max(
                 max_tokens_by_modality_dict.items(), key=lambda item: item[1])
+            # dummy_data_modality = "image"
+            max_tokens_per_mm_item = max_tokens_by_modality_dict[dummy_data_modality]
 
             # Check how many items of this modality can be supported by
             # the encoder budget.
@@ -2214,6 +2268,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 },
             ).multi_modal_data
 
+            if self.lora_config and hasattr(self.model, "get_vision_token_reduction_factor"):
+                max_num_mm_items = max_num_mm_items // self.model.get_vision_token_reduction_factor()  # to fit the vision tokens in the punica wrapper metadata
+
             batched_dummy_mm_inputs = MultiModalKwargs.batch(
                 [dummy_mm_kwargs] * max_num_mm_items,
                 pin_memory=self.pin_memory)
@@ -2222,9 +2279,34 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 device=self.device,
             )
 
-            # Run multimodal encoder.
-            dummy_encoder_outputs = self.model.get_multimodal_embeddings(
-                **batched_dummy_mm_inputs)
+            with self.maybe_setup_dummy_loras(self.lora_config):
+
+                if self.lora_config:
+                    num_reqs = max_num_mm_items
+                    num_loras = self.lora_config.max_loras
+
+                    modality_key = "image" if "image_grid_thw" in batched_dummy_mm_inputs else "video"
+                    grid_thw_final = batched_dummy_mm_inputs[f"{modality_key}_grid_thw"]
+                    
+                    prompt_lora_mapping = (np.arange(num_reqs, dtype=np.int32) % num_loras) + 1
+
+                    lora_requests = {
+                        LoRARequest(f"warmup_{lora_id}", lora_id, "/not/a/real/path")
+                        for lora_id in range(1, num_loras + 1)
+                    }
+
+                    tokens_per_item = (grid_thw_final.prod(dim=-1)).squeeze(1).tolist()
+
+                    index_mapping_list = prompt_lora_mapping.repeat(tokens_per_item)
+
+                    self._set_active_loras(tuple(prompt_lora_mapping.tolist()),
+                                           tuple(index_mapping_list),
+                                           lora_requests)
+                    mapping = self.lora_manager._adapter_manager._last_mapping
+                    self.lora_manager._adapter_manager.prepare_for_vision_token_reduction(mapping, tokens_per_item)
+
+                dummy_encoder_outputs = self.model.get_multimodal_embeddings(
+                    **batched_dummy_mm_inputs)
 
             sanity_check_mm_encoder_outputs(
                 dummy_encoder_outputs,
