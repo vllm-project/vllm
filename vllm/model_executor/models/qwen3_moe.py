@@ -122,7 +122,7 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
         self.gate = ReplicatedLinear(config.hidden_size,
                                      config.num_experts,
                                      bias=False,
-                                     quant_config=None,
+                                     quant_config=quant_config,
                                      prefix=f"{prefix}.gate")
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
