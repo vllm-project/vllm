@@ -850,7 +850,7 @@ class OpenAIServingChat(OpenAIServing):
                         previous_texts[i] = current_text
                         all_previous_token_ids[i] = current_token_ids
                     else:
-                        # Update previous_texts for comprehensive logging even in simple content case
+                        # Update for comprehensive logging even in simple case
                         assert previous_texts is not None
                         previous_texts[i] += delta_text
 
