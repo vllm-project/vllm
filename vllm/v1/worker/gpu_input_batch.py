@@ -8,6 +8,7 @@ from typing import Optional, cast
 import numpy as np
 import torch
 
+from vllm.config import ReasoningConfig
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.pooling_params import PoolingParams
@@ -70,6 +71,8 @@ class InputBatch:
         vocab_size: int,
         block_sizes: list[int],  # The block_size of each kv cache group
         is_spec_decode: bool = False,
+        logits_processing_needs_token_ids: bool = False,
+        reasoning_config: ReasoningConfig = None,
     ):
         self.is_spec_decode = is_spec_decode
         self.max_num_reqs = max_num_reqs
@@ -218,7 +221,8 @@ class InputBatch:
         self.logitsprocs = init_builtin_logitsprocs(
             pin_memory_available=pin_memory,
             max_num_reqs=max_num_reqs + 1,
-            device=device)
+            device=device,
+            reasoning_config=reasoning_config)
 
         # TODO convert this to LogitsProcessor
         self.has_allowed_token_ids: set[str] = set()
@@ -260,7 +264,7 @@ class InputBatch:
         params = (request.sampling_params
                   if request.sampling_params else request.pooling_params)
         self.batch_update_builder.added.append(
-            (req_index, params, request.output_token_ids))
+            (req_index, params, request.prompt_token_ids, request.output_token_ids))
         return req_index
 
     def add_request(
