@@ -566,12 +566,14 @@ class ModelConfig:
             self.task = "embed"
 
         all_supported_tasks = self._get_supported_tasks(self.task)
+        logger.debug("Tasks supported by runner type: %s", all_supported_tasks)
         supported_runner_types = self._get_supported_runner_types(
             all_supported_tasks)
         runner_type = self._resolve_runner(self.runner, self.task,
                                            supported_runner_types,
                                            all_supported_tasks)
 
+        logger.debug("Selected runner type: %s", runner_type)
         # For pooling models, self.task is used to indicate the
         # user-selected task
         if runner_type == "pooling" and self.task == "auto":
@@ -941,7 +943,7 @@ class ModelConfig:
             if arch.endswith(suffix) and pref_runner in supported_runner_types:
                 return pref_runner
 
-        if len(supported_tasks.get("pooling", [])) > 1:
+        if "classify" in supported_tasks.get("pooling", []):
             # When multiple pooling tasks are present, default to
             # pooling (eg cross-encoder) for non-standard architectures.
             return "pooling"
