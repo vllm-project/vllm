@@ -166,7 +166,7 @@ repos:
     language: python
     types: [python]
     pass_filenames: true
-    files: vllm/config.py|tests/test_config.py
+    files: vllm/config.py|tests/test_config.py|vllm/entrypoints/openai/cli_args.py
   # Keep `suggestion` last
   - id: suggestion
     name: Suggestion
