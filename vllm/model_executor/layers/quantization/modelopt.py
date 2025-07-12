@@ -80,17 +80,21 @@ class ModelOptFp8Config(QuantizationConfig):
         if not quant_library:
             quant_library = hf_quant_cfg.get("quant_method", "").lower()
 
-        if quant_library == "modelopt":
-            # Look for ModelOpt-specific config structure
-            if "quantization" in hf_quant_cfg:
-                quant_config = hf_quant_cfg["quantization"]
+        # Only proceed if the library is explicitly "modelopt"
+        if quant_library != "modelopt":
+            return None
+
+        # Look for ModelOpt-specific config structure
+        if "quantization" in hf_quant_cfg:
+            quant_config = hf_quant_cfg["quantization"]
+            if isinstance(quant_config, dict):
                 quant_algo = quant_config.get("quant_algo", "")
                 if "FP8" in quant_algo:
                     return "modelopt"
-            # Also check for compressed-tensors style config with modelopt
-            elif any("FP8" in str(v).upper()
-                     for v in hf_quant_cfg.values()
-                     if isinstance(v, (str, dict))):
+        else:
+            # Check for compressed-tensors style config with specific quant_algo field
+            quant_algo = hf_quant_cfg.get("quant_algo", "")
+            if isinstance(quant_algo, str) and "FP8" in quant_algo:
                 return "modelopt"
 
         return None
@@ -101,7 +105,11 @@ class ModelOptFp8Config(QuantizationConfig):
         if "quantization" in config:
             # Traditional ModelOpt format: {"quantization": {"quant_algo": "..."}}
             quant_config = cls.get_from_keys(config, ["quantization"])
-            quant_method = quant_config["quant_algo"]
+            if not isinstance(quant_config, dict):
+                raise ValueError("Expected 'quantization' to be a dictionary in config")
+            quant_method = quant_config.get("quant_algo", "")
+            if not quant_method:
+                raise ValueError("Missing 'quant_algo' in quantization config")
             kv_cache_quant_method = quant_config.get("kv_cache_quant_algo")
             exclude_modules = quant_config.get("exclude_modules")
         else:
@@ -503,17 +511,21 @@ class ModelOptNvFp4Config(QuantizationConfig):
         if not quant_library:
             quant_library = hf_quant_cfg.get("quant_method", "").lower()
 
-        if quant_library == "modelopt":
-            # Look for ModelOpt-specific config structure
-            if "quantization" in hf_quant_cfg:
-                quant_config = hf_quant_cfg["quantization"]
+        # Only proceed if the library is explicitly "modelopt"
+        if quant_library != "modelopt":
+            return None
+
+        # Look for ModelOpt-specific config structure
+        if "quantization" in hf_quant_cfg:
+            quant_config = hf_quant_cfg["quantization"]
+            if isinstance(quant_config, dict):
                 quant_algo = quant_config.get("quant_algo", "")
                 if "NVFP4" in quant_algo:
                     return "modelopt_fp4"
-            # Also check for compressed-tensors style config with modelopt FP4
-            elif any("FP4" in str(v).upper()
-                     for v in hf_quant_cfg.values()
-                     if isinstance(v, (str, dict))):
+        else:
+            # Check for compressed-tensors style config with specific quant_algo field
+            quant_algo = hf_quant_cfg.get("quant_algo", "")
+            if isinstance(quant_algo, str) and "FP4" in quant_algo.upper():
                 return "modelopt_fp4"
 
         return None
@@ -524,10 +536,16 @@ class ModelOptNvFp4Config(QuantizationConfig):
         if "quantization" in config:
             # Traditional ModelOpt format: {"quantization": {"quant_algo": "..."}}
             quant_config = cls.get_from_keys(config, ["quantization"])
-            quant_method = quant_config["quant_algo"]
-            kv_cache_quant_algo = quant_config["kv_cache_quant_algo"]
-            group_size = quant_config["group_size"]
-            exclude_modules = quant_config["exclude_modules"]
+            if not isinstance(quant_config, dict):
+                raise ValueError("Expected 'quantization' to be a dictionary in config")
+
+            quant_method = quant_config.get("quant_algo", "")
+            if not quant_method:
+                raise ValueError("Missing 'quant_algo' in quantization config")
+
+            kv_cache_quant_algo = quant_config.get("kv_cache_quant_algo")
+            group_size = quant_config.get("group_size")
+            exclude_modules = quant_config.get("exclude_modules", [])
         else:
             # Compressed-tensors style format: {"quant_algo": "...", "quant_library": "modelopt"}
             quant_method = config.get("quant_algo", "")
@@ -544,13 +562,16 @@ class ModelOptNvFp4Config(QuantizationConfig):
         is_checkpoint_nvfp4_serialized = ("NVFP4" in quant_method)
 
         # For FP4, these fields are required
-        if (is_checkpoint_nvfp4_serialized and "quantization" in config
-            and ("group_size" and "kv_cache_quant_algo"
-                 and "exclude_modules") not in config["quantization"]):
-            raise ValueError(
-                "NVFP4 quantization requires group size and "
-                "kv_cache_quant_algo specified in "
-                "hf_quant_config.json")
+        if is_checkpoint_nvfp4_serialized and "quantization" in config:
+            # Check if required fields are present in the quantization config
+            quant_config = config["quantization"]
+            required_fields = ["group_size", "kv_cache_quant_algo", "exclude_modules"]
+            missing_fields = [field for field in required_fields
+                             if field not in quant_config]
+            if missing_fields:
+                raise ValueError(
+                    f"NVFP4 quantization requires the following fields in "
+                    f"hf_quant_config.json: {missing_fields}")
 
         return cls(is_checkpoint_nvfp4_serialized, kv_cache_quant_algo,
                    exclude_modules, group_size)
