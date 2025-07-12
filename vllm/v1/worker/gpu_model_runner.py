@@ -55,6 +55,9 @@ from vllm.v1.kv_cache_interface import (AttentionSpec, FullAttentionSpec,
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
                              ModelRunnerOutput)
 from vllm.v1.pool.metadata import PoolingMetadata
+from vllm.v1.sample.logits_processor import (LogitProcessorCtorArgs,
+                                             LogitsProcessors,
+                                             build_logitsprocs)
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.sample.sampler import Sampler
@@ -67,7 +70,6 @@ from vllm.v1.worker.block_table import BlockTable
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
-from ..sample.logits_processor import LogitsProcessorManager
 from .utils import (gather_mm_placeholders, initialize_kv_cache_for_kv_sharing,
                     sanity_check_mm_encoder_outputs, scatter_mm_placeholders)
 
@@ -194,6 +196,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Request states.
         self.requests: dict[str, CachedRequestState] = {}
 
+        # Build logits processors. If specified by user, load custom
+        # logitsprocs constructors.
+        self.logitsprocs: LogitsProcessors = build_logitsprocs(
+            LogitProcessorCtorArgs(
+                vllm_config=vllm_config,
+                device=self.device,
+                is_pin_memory=self.pin_memory,
+            ))
+
         # Input Batch
         # NOTE(Chen): Ideally, we should initialize the input batch inside
         # `initialize_kv_cache` based on the kv cache config. However, as in
@@ -212,6 +223,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             vocab_size=self.model_config.get_vocab_size(),
             block_sizes=[self.cache_config.block_size],
             is_spec_decode=bool(self.vllm_config.speculative_config),
+            logitsprocs=self.logitsprocs,
         )
 
         self.use_cuda_graph = (
@@ -2077,7 +2089,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             output_token_ids=[[] for _ in range(num_reqs)],
             allowed_token_ids_mask=None,
             bad_words_token_ids={},
-            logitsprocs=LogitsProcessorManager(),
+            logitsprocs=LogitsProcessors(),
         )
         try:
             sampler_output = self.sampler(logits=logits,
@@ -2374,6 +2386,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 vocab_size=self.model_config.get_vocab_size(),
                 block_sizes=block_sizes,
                 is_spec_decode=bool(self.vllm_config.speculative_config),
+                logitsprocs=self.logitsprocs,
             )
 
     def _allocate_kv_cache_tensors(
