@@ -2331,6 +2331,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 if is_global_first_rank():
                     compilation_cases = tqdm(
                         list(compilation_cases),
+                        disable=not self.load_config.use_tqdm_on_load,
                         desc="Capturing CUDA graphs (mix prefill-decode)")
                 for num_tokens in compilation_cases:
                     for _ in range(
@@ -2363,6 +2364,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 if is_global_first_rank():
                     compilation_cases_decode = tqdm(
                         list(compilation_cases_decode),
+                        disable=not self.load_config.use_tqdm_on_load,
                         desc="Capturing CUDA graphs (pure decode)")
 
                 for num_tokens in compilation_cases_decode:
