@@ -1,3 +1,13 @@
+all:
+    just llama-scout-bf16 && \
+    just llama-scout-fp8 && \
+    just llama-maverick && \
+    just qwen-30b && \
+    just qwen-30b-fp8 && \
+    just qwen-235b && \
+    just deepseek-r1 
+
+
 llama-scout-bf16:
   python3 benchmark_moe.py \
     --model meta-llama/Llama-4-Scout-17B-16E-Instruct \
