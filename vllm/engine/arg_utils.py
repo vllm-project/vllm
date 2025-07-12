@@ -484,6 +484,10 @@ class EngineArgs:
     enable_multimodal_encoder_data_parallel: bool = \
         ParallelConfig.enable_multimodal_encoder_data_parallel
 
+    num_iterp: int = SchedulerConfig.num_iterp
+    kv_thresh: float = SchedulerConfig.kv_thresh
+    minp: int = SchedulerConfig.minp
+
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
         # without having to manually construct a
@@ -921,6 +925,14 @@ class EngineArgs:
         scheduler_group.add_argument(
             "--disable-hybrid-kv-cache-manager",
             **scheduler_kwargs["disable_hybrid_kv_cache_manager"])
+
+        scheduler_group.add_argument("--num-iterp",
+                                     **scheduler_kwargs["num_iterp"])
+
+        scheduler_group.add_argument("--kv-thresh",
+                                     **scheduler_kwargs["kv_thresh"])
+
+        scheduler_group.add_argument("--minp", **scheduler_kwargs["minp"])
 
         # vLLM arguments
         vllm_kwargs = get_kwargs(VllmConfig)
