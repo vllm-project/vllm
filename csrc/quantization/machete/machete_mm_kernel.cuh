@@ -40,8 +40,7 @@ using namespace cute;
 //   we compute the transpose to move it to the left-hand side.
 template <typename ElementA_, typename ElementB_, typename ElementD_,
           typename AccumulatorT, typename GroupScaleT, typename GroupZeroT,
-          typename ChannelScaleT, typename TokenScaleT, class KernelSchedule,
-          typename ScheduleConfig>
+          typename ChannelScaleT, typename TokenScaleT, typename ScheduleConfig>
 struct MacheteKernelTemplate {
   static constexpr bool with_C = false;  // not ever used
   static constexpr bool with_group_scales = !std::is_same_v<GroupScaleT, void>;
@@ -101,6 +100,7 @@ struct MacheteKernelTemplate {
   using ArchTag = cutlass::arch::Sm90;
   using OperatorClass = cutlass::arch::OpClassTensorOp;
 
+  using KernelSchedule = typename ScheduleConfig::KernelSchedule;
   using PrepackedLayoutB =
       PrepackedLayoutBTemplate<ElementA_, ElementB_, ElementConvertGroup,
                                AccumulatorT, LayoutA_Transpose, KernelSchedule>;

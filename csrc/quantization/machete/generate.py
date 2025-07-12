@@ -169,8 +169,7 @@ struct sch_{{sch_sig}} {
       to_cute_constant(sch.tile_shape_mn)|join(', ')}}>;
   using ClusterShape = Shape<{{
       to_cute_constant(sch.cluster_shape_mnk)|join(', ')}}>;
-  // TODO: Reimplement
-  // using KernelSchedule   = {{KernelScheduleTag[sch.kernel_schedule]}};
+  using KernelSchedule   = {{KernelScheduleTag[sch.kernel_schedule]}};
   using EpilogueSchedule = {{EpilogueScheduleTag[sch.epilogue_schedule]}};
   using TileScheduler    = {{TileSchedulerTag[sch.tile_scheduler]}};
   using EpilogueTileType = cutlass::epilogue::collective::EpilogueTileAuto;
@@ -192,7 +191,6 @@ using Kernel_{{type_sig}} = MacheteKernelTemplate<
   {{DataTypeTag[t.b_group_zeropoint]}}, // GroupZeroT
   {{DataTypeTag[t.b_channel_scale]}}, // ChannelScaleT
   {{DataTypeTag[t.a_token_scale]}}, // TokenScaleT
-  cutlass::gemm::KernelTmaWarpSpecializedCooperative,
   Sch>;
 
 {% for sch in schs %}
@@ -504,16 +502,29 @@ def generate():
         "M > 16 && K <= 12288 && N <= 8192": ((128, 32), (2, 1, 1)),
         "M > 16": ((256, 32), (2, 1, 1)),
         #### M = 1-16
-        "N >= 26624": ((256, 16), (1, 1, 1)),
         None: ((128, 16), (1, 1, 1)),
+    }
+
+    sch_config_overrides = {
+        #### M = 1-16
+        None:
+        dict(
+            kernel_schedule=MixedInputKernelScheduleType.TmaWarpSpecialized,
+            epilogue_schedule=TmaCoop,
+            tile_scheduler=TileSchedulerType.Default,
+        )
     }
 
     # For now we use the same heuristic for all types
     # Heuristic is currently tuned for H100s
     default_heuristic = [
-        (cond, ScheduleConfig(*tile_config,
-                              **sch_common_params))  # type: ignore
-        for cond, tile_config in default_tile_heuristic_config.items()
+        (
+            cond,
+            ScheduleConfig(
+                *tile_config,
+                **sch_config_overrides.get(cond,
+                                           sch_common_params)  # type: ignore
+            )) for cond, tile_config in default_tile_heuristic_config.items()
     ]
 
     def get_unique_schedules(heuristic: dict[str, ScheduleConfig]):
