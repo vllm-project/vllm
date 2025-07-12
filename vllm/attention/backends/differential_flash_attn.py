@@ -432,6 +432,11 @@ class DifferentialFlashAttentionMetadataBuilder(
         2. block table.
         3. slot mapping.
         """
+        # TODO: add support for chunked prefill and prefix caching.
+        assert not chunked_prefill_enabled, \
+            "chunked prefill is not supported for now"
+        assert not prefix_cache_hit, "prefix caching is not supported for now"
+
         is_prompt = inter_data.is_prompt
         block_tables = inter_data.block_tables
 
