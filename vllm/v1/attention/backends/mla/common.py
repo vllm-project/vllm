@@ -237,7 +237,6 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-CUDNN_SUPPORTED_HEAD_DIMS = [192, 128]
 CUDNN_WORKSPACE_SIZE = 12800
 
 
@@ -301,7 +300,7 @@ class MLACommonPrefillMetadata:
     query_start_loc: torch.Tensor
     query_seq_lens: torch.Tensor
     max_query_len: int
-    workspace: torch.Tensor
+    cudnn_workspace: Optional[torch.Tensor] = None
     chunked_context: Optional[ChunkedContextMetadata] = None
 
 
@@ -368,6 +367,11 @@ def use_flashinfer_prefill() -> bool:
         return current_platform.has_device_capability(100)
     return False
 
+def use_cudnn_prefill() -> bool:
+    if envs.VLLM_USE_CUDNN_PREFILL:
+        return current_platform.has_device_capability(100)
+    return False
+
 
 # Currently 394MB, this can be tuned based on GEMM sizes used.
 # Choosen to be the same as sglang:
@@ -427,11 +431,12 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 dtype=model_config.dtype,
                 device=runner.device,
             )
-            self.workspace = torch.empty(
-                CUDNN_WORKSPACE_SIZE * scheduler_config.max_num_seqs,
-                dtype=torch.int8,
-                device=runner.device,
-            )
+            if use_cudnn_prefill():
+                self.cudnn_workspace = torch.empty(
+                    CUDNN_WORKSPACE_SIZE * scheduler_config.max_num_seqs,
+                    dtype=torch.int8,
+                    device=runner.device,
+                )
 
         self.block_table = block_table
 
@@ -715,7 +720,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 block_table=block_table_tensor[reqs_start:, ...],
                 query_start_loc=prefill_query_start_loc,
                 max_query_len=max_query_len,
-                workspace=self.workspace,
+                cudnn_workspace=self.cudnn_workspace,
                 query_seq_lens=prefill_query_start_loc[1:] -
                 prefill_query_start_loc[:-1],
                 chunked_context=chunked_context_metadata,
@@ -802,10 +807,11 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             self._run_prefill_context_chunk = self._run_prefill_context_chunk_fi
             self._run_prefill_new_tokens = self._run_prefill_new_tokens_fi
             self._pad_v = False
-        elif envs.VLLM_USE_CUDNN_PREFILL:
+        elif use_cudnn_prefill():
             logger.debug_once("Using CUDNN prefill for MLA")
             self._run_prefill_context_chunk = self._run_prefill_context_chunk_cudnn
             self._run_prefill_new_tokens = self._run_prefill_new_tokens_cudnn
+            self._pad_v = False
         else:  # Use FlashAttention
             logger.debug_once("Using FlashAttention prefill for MLA")
             self._run_prefill_context_chunk = self._run_prefill_context_chunk_fa
@@ -826,9 +832,9 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             # v with 0s to match the qk head dim for attention backends that do
             # not support different headdims
             # We don't need to pad V if we are on a hopper system with FA3
-            self._pad_v = not self.VLLM_USE_CUDNN_PREFILL and (self.vllm_flash_attn_version is None or not (
+            self._pad_v = self.vllm_flash_attn_version is None or not (
                 self.vllm_flash_attn_version == 3
-                and current_platform.get_device_capability()[0] == 9))
+                and current_platform.get_device_capability()[0] == 9)
 
     def _flash_attn_varlen_diff_headdims(self,
                                          q,
@@ -902,8 +908,8 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             q=q,
             k_cache=k,
             v_cache=v,
-            scale=scale,
-            workspace_buffer=prefill.workspace,
+            scale=self.scale,
+            workspace_buffer=prefill.cudnn_workspace,
             max_token_per_sequence=prefill.max_query_len,
             max_sequence_kv=prefill.max_query_len,
             actual_seq_lens_q=prefill.query_seq_lens.view(-1, 1, 1, 1),
@@ -951,8 +957,8 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             q=q,
             k_cache=k,
             v_cache=v,
-            scale=scale,
-            workspace_buffer=prefill.workspace,
+            scale=self.scale,
+            workspace_buffer=prefill.cudnn_workspace,
             max_token_per_sequence=prefill.max_query_len,
             max_sequence_kv=prefill.chunked_context.max_seq_lens[chunk_idx],
             actual_seq_lens_q=prefill.query_seq_lens.view(-1, 1, 1, 1),
@@ -1060,36 +1066,13 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             k = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))),
                           dim=-1)
 
-            if envs.VLLM_USE_CUDNN_PREFILL and all(
-                    t.shape[-1] in CUDNN_SUPPORTED_HEAD_DIMS
-                    for t in (q, k, v)):
-                attn_output, attn_softmax_lse = (
-                    self._cudnn_varlen_func_diff_headdims(
-                        q,
-                        k,
-                        v,
-                        scale=self.scale,
-                        workspace=prefill_metadata.workspace,
-                        max_q_seq_lens=prefill_metadata.max_query_len,
-                        max_kv_seq_lens=prefill_metadata.chunked_context.
-                        max_seq_lens[i],
-                        seq_lens_q=prefill_metadata.query_seq_lens.view(
-                            -1, 1, 1, 1),
-                        seq_lens_kv=prefill_metadata.chunked_context.
-                        seq_lens[i].view(-1, 1, 1, 1),
-                        causal=False,
-                        is_cuda_graph_compatible=
-                        True,  #Indicates actual_seq_lens are on GPU or CPU.
-                    ))
-            else:
-                attn_output, attn_softmax_lse = self._run_prefill_context_chunk(
-                    prefill=prefill_metadata,
-                    chunk_idx=i,
-                    q=q,
-                    k=k,
-                    v=v,
-                )
-           
+            attn_output, attn_softmax_lse = self._run_prefill_context_chunk(
+                prefill=prefill_metadata,
+                chunk_idx=i,
+                q=q,
+                k=k,
+                v=v,
+            )
 
             if output is None:
                 output = attn_output
@@ -1128,34 +1111,13 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
 
         k = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))), dim=-1)
 
-        if envs.VLLM_USE_CUDNN_PREFILL and all(
-                t.shape[-1] in CUDNN_SUPPORTED_HEAD_DIMS for t in (q, k, v)):
-            output = self._cudnn_varlen_func_diff_headdims(
-                q,
-                k,
-                v,
-                scale=self.scale,
-                workspace=attn_metadata.prefill.workspace,
-                max_q_seq_lens=attn_metadata.prefill.max_query_len,
-                max_kv_seq_lens=attn_metadata.prefill.max_query_len,
-                seq_lens_q=attn_metadata.prefill.query_seq_lens.view(
-                    -1, 1, 1, 1),
-                seq_lens_kv=attn_metadata.prefill.query_seq_lens.view(
-                    -1, 1, 1, 1),
-                causal=True,
-                is_cuda_graph_compatible=
-                True,  #Indicates actual_seq_lens are on GPU or CPU.
-            )
-            if not has_context:
-                output = output[0]
-        else:
-            output = self._run_prefill_new_tokens(
-                prefill=attn_metadata.prefill,
-                q=q,
-                k=k,
-                v=v,
-                return_softmax_lse=has_context,
-            )
+        output = self._run_prefill_new_tokens(
+            prefill=attn_metadata.prefill,
+            q=q,
+            k=k,
+            v=v,
+            return_softmax_lse=has_context,
+        )
 
         if has_context:
             suffix_output, suffix_lse = output
