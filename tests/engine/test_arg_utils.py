@@ -9,7 +9,7 @@ from typing import Annotated, Literal, Optional
 
 import pytest
 
-from vllm.config import CompilationConfig, config
+from vllm.config import CompilationConfig, EPConfig, config
 from vllm.engine.arg_utils import (EngineArgs, contains_type, get_kwargs,
                                    get_type, get_type_hints, is_not_builtin,
                                    is_type, literal_to_kwargs, nullable_kvs,
@@ -305,6 +305,32 @@ def test_compilation_config():
     assert (args.compilation_config.level == 3 and
             args.compilation_config.cudagraph_capture_sizes == [1, 2, 4, 8]
             and args.compilation_config.use_inductor)
+
+
+def test_ep_config():
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+
+    # default value
+    args = parser.parse_args([])
+    assert args.ep_config == EPConfig()
+    assert not args.ep_config.enable_eplb
+    assert args.ep_config.lb_window_size == 1000
+    assert args.ep_config.lb_step_interval == 3000
+    assert not args.ep_config.lb_log_balancedness
+    assert args.ep_config.num_redundant_experts == 0
+
+    # test JSON config
+    args = parser.parse_args([
+        "--ep-config",
+        '{"enable_eplb": true, "lb_window_size": 1500, '
+        '"lb_step_interval": 4000, "lb_log_balancedness": true,'
+        '"num_redundant_experts":10}',
+    ])
+    assert args.ep_config.enable_eplb
+    assert args.ep_config.lb_window_size == 1500
+    assert args.ep_config.lb_step_interval == 4000
+    assert args.ep_config.lb_log_balancedness
+    assert args.ep_config.num_redundant_experts == 10
 
 
 def test_prefix_cache_default():
