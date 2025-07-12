@@ -1564,6 +1564,10 @@ class CacheConfig:
     checkpoint if available. Otherwise, the scales will default to 1.0."""
     cpu_kvcache_space_bytes: Optional[int] = None
     """(CPU backend only) CPU key-value cache space."""
+    kv_sharing_skip_prefill: bool = False
+    """Skip prefill for tokens where applicable in KV cache sharing
+    scenarios where required key/value tensors have been populated
+    in earlier KV sharing target layers."""
 
     # Will be set after profiling.
     num_gpu_blocks: Optional[int] = field(default=None, init=False)

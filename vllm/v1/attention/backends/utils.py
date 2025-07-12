@@ -36,6 +36,7 @@ class CommonAttentionMetadata:
 
     query_start_loc: torch.Tensor
     """(batch_size + 1,), the start location of each request in query Tensor"""
+
     seq_lens: torch.Tensor
     """(batch_size,), the length of each request including both computed tokens
     and newly scheduled tokens"""
@@ -46,6 +47,12 @@ class CommonAttentionMetadata:
     """Total number of tokens in batch"""
     max_query_len: int
     """Longest query in batch"""
+
+    generation_indices: Optional[torch.Tensor] = None
+    """indices used for decoding"""
+
+    query_start_loc_np: Optional[np.ndarray] = None
+    """(batch_size + 1,), numpy equivalent of query_start_loc on the CPU"""
 
 
 M = TypeVar("M")

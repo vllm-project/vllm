@@ -472,6 +472,7 @@ class EngineArgs:
     override_attention_dtype: str = ModelConfig.override_attention_dtype
 
     calculate_kv_scales: bool = CacheConfig.calculate_kv_scales
+    kv_sharing_skip_prefill: bool = CacheConfig.kv_sharing_skip_prefill
 
     additional_config: dict[str, Any] = \
         get_field(VllmConfig, "additional_config")
@@ -748,6 +749,8 @@ class EngineArgs:
                                  **cache_kwargs["cpu_offload_gb"])
         cache_group.add_argument("--calculate-kv-scales",
                                  **cache_kwargs["calculate_kv_scales"])
+        cache_group.add_argument("--kv-sharing-skip-prefill",
+                                 **cache_kwargs["kv_sharing_skip_prefill"])
 
         # Tokenizer arguments
         tokenizer_kwargs = get_kwargs(TokenizerPoolConfig)
@@ -1158,6 +1161,7 @@ class EngineArgs:
             prefix_caching_hash_algo=self.prefix_caching_hash_algo,
             cpu_offload_gb=self.cpu_offload_gb,
             calculate_kv_scales=self.calculate_kv_scales,
+            kv_sharing_skip_prefill=self.kv_sharing_skip_prefill,
         )
 
         # Get the current placement group if Ray is initialized and
