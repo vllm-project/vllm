@@ -39,7 +39,7 @@ from vllm.transformers_utils.config import (
     get_hf_text_config, get_pooling_config,
     get_sentence_transformer_tokenizer_config, is_encoder_decoder,
     try_get_generation_config, try_get_safetensors_metadata,
-    try_get_tokenizer_config, uses_mrope)
+    try_get_tokenizer_config, uses_mrope, patch_rope_scaling)
 from vllm.transformers_utils.s3_utils import S3Model
 from vllm.transformers_utils.utils import is_s3, maybe_model_redirect
 # yapf conflicts with isort for this block
@@ -543,7 +543,7 @@ class ModelConfig:
         if hf_overrides_fn:
             logger.debug("Overriding HF config with %s", hf_overrides_fn)
             hf_config = hf_overrides_fn(hf_config)
-
+        patch_rope_scaling(hf_config)
         self.hf_config = hf_config
 
         self.hf_text_config = get_hf_text_config(self.hf_config)
