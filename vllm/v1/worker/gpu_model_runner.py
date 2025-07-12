@@ -247,7 +247,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.slot_mapping = torch.zeros(self.max_num_tokens,
                                         dtype=torch.int64,
                                         device=self.device)
-
         # None in the first PP rank. The rest are set after load_model.
         self.intermediate_tensors: Optional[IntermediateTensors] = None
 
@@ -2599,7 +2598,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 continue
 
             # TODO: Support other attention modules, e.g., cross-attention
-            if attn_module.attn_type == AttentionType.DECODER:
+            if attn_module.attn_type in (AttentionType.DECODER,
+                                         AttentionType.ENCODER_ONLY):
                 if attn_module.sliding_window is not None:
                     kv_cache_spec[layer_name] = SlidingWindowSpec(
                         block_size=block_size,
@@ -2607,17 +2607,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         head_size=attn_module.head_size,
                         dtype=self.kv_cache_dtype,
                         sliding_window=attn_module.sliding_window,
-                        use_mla=use_mla)
+                        use_mla=use_mla,
+                        attn_type=str(attn_module.attn_type))
                 else:
                     kv_cache_spec[layer_name] = FullAttentionSpec(
                         block_size=block_size,
                         num_kv_heads=attn_module.num_kv_heads,
                         head_size=attn_module.head_size,
                         dtype=self.kv_cache_dtype,
-                        use_mla=use_mla)
-            elif attn_module.attn_type in (AttentionType.ENCODER,
-                                           AttentionType.ENCODER_ONLY):
-                # encoder-only attention does not need KV cache.
+                        use_mla=use_mla,
+                        attn_type=str(attn_module.attn_type))
+            elif attn_module.attn_type == AttentionType.ENCODER:
+                # encoder attention does not need KV cache.
                 continue
             elif attn_module.attn_type == AttentionType.ENCODER_DECODER:
                 raise NotImplementedError

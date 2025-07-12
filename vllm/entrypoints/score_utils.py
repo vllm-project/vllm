@@ -5,6 +5,7 @@ from typing import Any, Optional, Union, cast
 from torch.nn import CosineSimilarity
 from typing_extensions import Required, TypeAlias, TypedDict
 
+import vllm.envs as envs
 from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import (
     BaseMultiModalItemTracker, ChatCompletionContentPartImageEmbedsParam,
@@ -184,12 +185,29 @@ def get_score_prompt(
         model_config,
         tokenizer,
     )
+    from vllm.model_executor.model_loader import get_model_cls
 
-    full_prompt = apply_score_template(model_config, prompt_1, prompt_2)
-
-    prompt_inputs = tokenizer(full_prompt, **tokenization_kwargs)
+    model = get_model_cls(model_config)
+    if supports_score_template(model):
+        full_prompt = apply_score_template(model_config, prompt_1, prompt_2)
+        prompt_inputs = tokenizer(full_prompt, **tokenization_kwargs)
+    elif model_config.use_pad_token:
+        # cross_encoder models defaults to using pad_token.
+        prompt_inputs = tokenizer(text=prompt_1,
+                                  text_pair=prompt_2,
+                                  **tokenization_kwargs)
+    else:
+        # `llm as reranker` models defaults to not using pad_token.
+        prompt_inputs = tokenizer(text=prompt_1 + prompt_2,
+                                  **tokenization_kwargs)
 
     engine_prompt = TokensPrompt(prompt_token_ids=prompt_inputs["input_ids"])
+
+    if (token_type_ids := prompt_inputs.get("token_type_ids")) is not None:
+        if envs.VLLM_USE_V1:
+            mm_data = {"token_type_ids": token_type_ids, **(mm_data or {})}
+        else:
+            engine_prompt["token_type_ids"] = token_type_ids
 
     post_process_tokens(model_config, engine_prompt)
 
