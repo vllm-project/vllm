@@ -198,6 +198,7 @@ class Glm4MoeAttention(nn.Module):
 
     def __init__(
         self,
+        config: PretrainedConfig,
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
@@ -250,12 +251,14 @@ class Glm4MoeAttention(nn.Module):
                                         quant_config=quant_config,
                                         prefix=f"{prefix}.o_proj")
 
+        partial_rotary_factor = getattr(config, "partial_rotary_factor", 0.5)
         self.rotary_emb = get_rope(
             self.head_dim,
             rotary_dim=self.head_dim,
             max_position=max_position_embeddings,
             base=rope_theta,
             rope_scaling=rope_scaling,
+            partial_rotary_factor=partial_rotary_factor,
         )
         self.attn = Attention(
             self.num_heads,
@@ -312,6 +315,7 @@ class Glm4MoeDecoderLayer(nn.Module):
         self.layer_idx = layer_idx
 
         self.self_attn = Glm4MoeAttention(
+            config=config,
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
             num_kv_heads=config.num_key_value_heads,
@@ -320,6 +324,7 @@ class Glm4MoeDecoderLayer(nn.Module):
             max_position_embeddings=max_position_embeddings,
             head_dim=config.head_dim,
             rms_norm_eps=config.rms_norm_eps,
+            qkv_bias=config.attention_bias,
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
