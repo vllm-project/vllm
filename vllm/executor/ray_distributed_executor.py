@@ -673,6 +673,10 @@ class RayDistributedExecutor(DistributedExecutorBase):
         return await asyncio.gather(*coros)
 
     def check_health(self) -> None:
-        # Assume that the Ray workers are healthy.
-        # TODO: check the health of the Ray workers
+        from ray.util.state import get_actor
+
+        for worker in self.workers:
+            actor_state = get_actor(worker._actor_id)
+            if actor_state and actor_state.state == "DEAD":
+                raise RuntimeError(f"Ray Worker {worker} is dead.")
         return
