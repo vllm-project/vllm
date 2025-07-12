@@ -26,7 +26,7 @@ from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
-    TopKWeightAndReduceContiguous, TopKWeightAndReduceNoOP)
+    TopKWeightAndReduceNoOP)
 from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache, moe_kernel_quantize_input)
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
@@ -1709,26 +1709,27 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
             moe_align_block_size(topk_ids, config['BLOCK_SIZE_M'],
                                  global_num_experts, expert_map))
 
-        invoke_fused_moe_kernel(hidden_states,
-                                w1,
-                                intermediate_cache1,
-                                a1q_scale,
-                                w1_scale,
-                                w1_zp,
-                                None,
-                                sorted_token_ids,
-                                expert_ids,
-                                num_tokens_post_padded,
-                                False,
-                                top_k_num,
-                                config,
-                                compute_type=compute_type,
-                                use_fp8_w8a8=self.use_fp8_w8a8,
-                                use_int8_w8a8=self.use_int8_w8a8,
-                                use_int8_w8a16=self.use_int8_w8a16,
-                                use_int4_w4a16=self.use_int4_w4a16,
-                                per_channel_quant=self.per_act_token_quant,
-                                block_shape=self.block_shape)
+        invoke_fused_moe_kernel(
+            hidden_states,
+            w1,
+            intermediate_cache1,
+            a1q_scale,
+            w1_scale,
+            w1_zp,
+            None,  # topk_weights
+            sorted_token_ids,
+            expert_ids,
+            num_tokens_post_padded,
+            False,  # mul_routed_weights
+            top_k_num,
+            config,
+            compute_type=compute_type,
+            use_fp8_w8a8=self.use_fp8_w8a8,
+            use_int8_w8a8=self.use_int8_w8a8,
+            use_int8_w8a16=self.use_int8_w8a16,
+            use_int4_w4a16=self.use_int4_w4a16,
+            per_channel_quant=self.per_act_token_quant,
+            block_shape=self.block_shape)
 
         self.activation(activation, intermediate_cache2,
                         intermediate_cache1.view(-1, N))
@@ -1745,11 +1746,11 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
                                 a2q_scale,
                                 w2_scale,
                                 w2_zp,
-                                None,
+                                topk_weights,
                                 sorted_token_ids,
                                 expert_ids,
                                 num_tokens_post_padded,
-                                False,
+                                not apply_router_weight_on_input,
                                 1,
                                 config,
                                 compute_type=compute_type,
@@ -1760,12 +1761,7 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
                                 per_channel_quant=self.per_act_token_quant,
                                 block_shape=self.block_shape)
 
-        TopKWeightAndReduceContiguous().apply(
-            output=output,
-            fused_expert_output=intermediate_cache3,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            apply_router_weight_on_input=apply_router_weight_on_input)
+        ops.moe_sum(intermediate_cache3, output)
 
 
 def modular_triton_fused_moe(
