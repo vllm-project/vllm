@@ -169,6 +169,9 @@ class CustomChatCompletionMessageParam(TypedDict, total=False):
     content: Union[str, list[ChatCompletionContentPartParam]]
     """The contents of the message."""
 
+    reasoning_content: Optional[str]
+    """The reasoning contents of the message."""
+
     name: str
     """An optional name for the participant.
 
@@ -194,6 +197,9 @@ class ConversationMessage(TypedDict, total=False):
 
     content: Union[Optional[str], list[dict[str, str]]]
     """The contents of the message"""
+
+    reasoning_content: Optional[str]
+    """The reasoning content of the message"""
 
     tool_call_id: Optional[str]
     """Tool call that this message is responding to."""
@@ -1182,6 +1188,10 @@ def _parse_chat_message_content(
 
         if "name" in message and isinstance(message["name"], str):
             result_msg["name"] = message["name"]
+
+        if ("reasoning_content" in message
+            and isinstance(message["reasoning_content"], str)):
+            result_msg["reasoning_content"] = message["reasoning_content"]
 
     return result
 
