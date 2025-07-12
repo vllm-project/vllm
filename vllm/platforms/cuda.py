@@ -166,19 +166,24 @@ class CudaPlatformBase(Platform):
                 logger.info(
                     "Forcing kv cache block size to 64 for FlashMLA backend.")
 
-        compilation_config = vllm_config.compilation_config
+        # lazy import to avoid circular import
+        from vllm.config import CUDAGraphMode
+
         if (envs.VLLM_ALL2ALL_BACKEND == "deepep_high_throughput"
                 and parallel_config.data_parallel_size > 1
-                and compilation_config.use_cudagraph):
+                and vllm_config.compilation_config.cudagraph_mode
+                != CUDAGraphMode.NONE):
             logger.info(
                 "Data Parallel: Forcing enforce eager to be True since DP "
                 "with DeepEP high-throughput kernels are not CUDA Graph "
                 "compatible. The DeepEP low-latency kernels are CUDA Graph "
                 "compatible. Set the all_to_all backend to deepep_low_latency "
                 "to use those kernels instead.")
-            compilation_config.use_cudagraph = False
-            if model_config is not None:
-                model_config.enforce_eager = True
+
+            vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+            if vllm_config.model_config is not None:
+                vllm_config.model_config.enforce_eager = True
+
             # TODO (varun): Turning this ON gives incorrect results for the
             # Deepseek-V2-lite model.
             vllm_config.compilation_config.use_inductor = False
@@ -406,8 +411,8 @@ class CudaPlatformBase(Platform):
         return True
 
     @classmethod
-    def get_piecewise_backend_cls(cls) -> str:
-        return "vllm.compilation.cuda_piecewise_backend.CUDAPiecewiseBackend"  # noqa
+    def get_static_graph_wrapper_cls(cls) -> str:
+        return "vllm.compilation.cuda_graph.CUDAGraphWrapper"
 
     @classmethod
     def stateless_init_device_torch_dist_pg(
