@@ -189,10 +189,13 @@ class CohereAttention(nn.Module):
 
         layer_idx = extract_layer_index(prefix)
         layer_has_sliding_window = (
-            getattr(config, "sliding_window_pattern", False)
-            and (layer_idx + 1) % self.config.sliding_window_pattern != 0)
+            getattr(config, "sliding_window_pattern", False) and
+            (layer_idx + 1) % self.config.sliding_window_pattern
+            != 0) or (getattr(config, "layer_types", False)
+                      and config.layer_types[layer_idx] == "sliding_attention")
 
         self.sliding_window = (interleaved_sliding_window
+                               or config.sliding_window
                                if layer_has_sliding_window else None)
 
         self.attn = Attention(self.num_heads,
