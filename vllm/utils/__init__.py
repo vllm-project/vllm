@@ -2911,28 +2911,26 @@ def bind_kv_cache(
     layer_need_kv_cache = [
         layer_name for layer_name in ctx
         if (hasattr(ctx[layer_name], 'attn_type') and ctx[layer_name].attn_type
-            in (AttentionType.DECODER, AttentionType.ENCODER_DECODER))
+            in (AttentionType.DECODER, AttentionType.ENCODER_DECODER)) \
+                and ctx[layer_name].kv_sharing_target_layer_name is None
     ]
     layer_index_sorted = sorted(
         set(
             extract_layer_index(layer_name)
             for layer_name in layer_need_kv_cache))
-
-    # Map from layer_name to the kv cache layer idx.
-    layer_name_2_kv_cache_index = dict()
     for layer_name in layer_need_kv_cache:
-        target_layer_name = shared_kv_cache_layers.get(layer_name, layer_name)
         kv_cache_idx = layer_index_sorted.index(
-            extract_layer_index(target_layer_name))
-        layer_name_2_kv_cache_index[layer_name] = kv_cache_idx
-
-    for layer_name, kv_cache_idx in layer_name_2_kv_cache_index.items():
+            extract_layer_index(layer_name))
         forward_ctx = ctx[layer_name]
         assert len(forward_ctx.kv_cache) == len(kv_cache)
         for ve, ve_kv_cache in enumerate(kv_cache):
-            assert kv_cache_idx < len(ve_kv_cache), \
-                "v0 doesn't support interleaving kv sharing"
             forward_ctx.kv_cache[ve] = ve_kv_cache[kv_cache_idx]
+    if shared_kv_cache_layers is not None:
+        for layer_name, target_layer_name in shared_kv_cache_layers.items():
+            assert extract_layer_index(target_layer_name) < \
+               extract_layer_index(layer_name), \
+                   "v0 doesn't support interleaving kv sharing"
+            ctx[layer_name].kv_cache = ctx[target_layer_name].kv_cache
 
 
 def run_method(obj: Any, method: Union[str, bytes, Callable], args: tuple[Any],
