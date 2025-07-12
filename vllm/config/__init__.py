@@ -2476,6 +2476,8 @@ class VllmConfig:
     # some opaque config, only used to provide additional information
     # for the hash computation, mainly used for testing, debugging or out of
     # tree config registration.
+    reasoning_config: Optional[ReasoningConfig] = None
+    """The configurations for reasoning model."""
     additional_config: Union[dict, SupportsHash] = field(default_factory=dict)
     """Additional config for specified platform. Different platforms may
     support different configs. Make sure the configs are valid for the platform
