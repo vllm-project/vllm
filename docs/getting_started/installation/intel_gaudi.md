@@ -133,7 +133,7 @@ docker run \
 The following configurations have been validated to function with
 Gaudi2 devices. Configurations that are not listed may or may not work.
 
-| Model | HPU(s) | dtype | Sampling |
+| Model | TP Size| dtype | Sampling |
 |-------|--------|--------|----------|
 | [meta-llama/Llama-2-7b](https://huggingface.co/meta-llama/Llama-2-7b) | 1, 2, 8 | BF16 | Random / Greedy |
 | [meta-llama/Llama-2-7b-chat-hf](https://huggingface.co/meta-llama/Llama-2-7b-chat-hf) | 1, 2, 8 | BF16 | Random / Greedy |
