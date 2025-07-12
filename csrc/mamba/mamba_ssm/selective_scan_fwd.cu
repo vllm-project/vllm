@@ -312,19 +312,20 @@ void selective_scan_fwd_launch(SSMParamsBase &params, cudaStream_t stream) {
     // kIsVariableB, kIsVariableC and kHasZ are all set to True to reduce binary size
     constexpr bool kIsVariableB = true;
     constexpr bool kIsVariableC = true;
-    constexpr bool kHasZ = true;
     BOOL_SWITCH(params.seqlen % (kNThreads * kNItems) == 0, kIsEvenLen, [&] {
-        BOOL_SWITCH(params.query_start_loc_ptr != nullptr , kVarlen, [&] {
-            using Ktraits = Selective_Scan_fwd_kernel_traits<kNThreads, kNItems, kNRows, kIsEvenLen, kIsVariableB, kIsVariableC, kHasZ,  kVarlen, input_t, weight_t>;
-            constexpr int kSmemSize = Ktraits::kSmemSize + kNRows * MAX_DSTATE * sizeof(typename Ktraits::scan_t);
-            dim3 grid(params.batch, params.dim / kNRows);
-            auto kernel = &selective_scan_fwd_kernel<Ktraits>;
-            if (kSmemSize >= 48 * 1024) {
-                C10_CUDA_CHECK(cudaFuncSetAttribute(
-                    (void *) kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemSize));
-            }
-            kernel<<<grid, Ktraits::kNThreads, kSmemSize, stream>>>(params);
-            C10_CUDA_KERNEL_LAUNCH_CHECK();
+        BOOL_SWITCH(params.z_ptr != nullptr , kHasZ, [&] {
+            BOOL_SWITCH(params.query_start_loc_ptr != nullptr , kVarlen, [&] {
+                using Ktraits = Selective_Scan_fwd_kernel_traits<kNThreads, kNItems, kNRows, kIsEvenLen, kIsVariableB, kIsVariableC, kHasZ,  kVarlen, input_t, weight_t>;
+                constexpr int kSmemSize = Ktraits::kSmemSize + kNRows * MAX_DSTATE * sizeof(typename Ktraits::scan_t);
+                dim3 grid(params.batch, params.dim / kNRows);
+                auto kernel = &selective_scan_fwd_kernel<Ktraits>;
+                if (kSmemSize >= 48 * 1024) {
+                    C10_CUDA_CHECK(cudaFuncSetAttribute(
+                        kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemSize));
+                }
+                kernel<<<grid, Ktraits::kNThreads, kSmemSize, stream>>>(params);
+                C10_CUDA_KERNEL_LAUNCH_CHECK();
+            });
         });
     });
 }
@@ -612,18 +613,19 @@ void selective_scan_fwd(const torch::Tensor &u, const torch::Tensor &delta,
 
     at::Tensor z, out_z;
     const bool has_z = z_.has_value();
-    TORCH_CHECK(has_z, "has_z = False is disabled in favor of reduced binary size")
-    z = z_.value();
-    TORCH_CHECK(z.scalar_type() == input_type);
-    TORCH_CHECK(z.is_cuda());
-    TORCH_CHECK(z.stride(-1) == 1 || z.size(-1) == 1);
-    if (varlen){
-        CHECK_SHAPE(z, dim, seqlen);
-    } else {
-        CHECK_SHAPE(z, batch_size, dim, seqlen);
+    if (has_z) {
+        z = z_.value();
+        TORCH_CHECK(z.scalar_type() == input_type);
+        TORCH_CHECK(z.is_cuda());
+        TORCH_CHECK(z.stride(-1) == 1 || z.size(-1) == 1);
+        if (varlen){
+            CHECK_SHAPE(z, dim, seqlen);
+        } else {
+            CHECK_SHAPE(z, batch_size, dim, seqlen);
+        }
+        
+        out_z = z;
     }
-
-    out_z = z;
 
     // Right now u has BHL layout and delta has HBL layout, and we want out to have HBL layout
     at::Tensor out = delta;
@@ -653,4 +655,3 @@ void selective_scan_fwd(const torch::Tensor &u, const torch::Tensor &delta,
         selective_scan_fwd_cuda<input_t, weight_t>(params, stream);
     });
 }
-

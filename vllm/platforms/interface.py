@@ -60,6 +60,7 @@ class _Backend(enum.Enum):
     IPEX = enum.auto()
     BLOCK_SPARSE_FLASH_ATTN = enum.auto()
     DUAL_CHUNK_FLASH_ATTN = enum.auto()
+    DIFFERENTIAL_FLASH_ATTN = enum.auto()
     NO_ATTENTION = enum.auto()
     FLEX_ATTENTION = enum.auto()
 

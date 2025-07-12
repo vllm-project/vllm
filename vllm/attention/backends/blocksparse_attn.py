@@ -308,7 +308,8 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
         kv_sharing_target_layer_name: Optional[str] = None,
     ) -> None:
         if kv_sharing_target_layer_name is not None:
-            raise NotImplementedError("KV sharing is not supported in V0.")
+            raise NotImplementedError("KV sharing is not supported in V0 "
+                                      "BLOCK_SPARSE_FLASH_ATTN Backend.")
         assert blocksparse_params is not None
         assert alibi_slopes is None, ValueError(
             "Alibi not support for blocksparse flash attention.")
