@@ -38,8 +38,8 @@ from vllm.transformers_utils.config import (
     ConfigFormat, get_config, get_hf_image_processor_config,
     get_hf_text_config, get_pooling_config,
     get_sentence_transformer_tokenizer_config, is_encoder_decoder,
-    try_get_generation_config, try_get_safetensors_metadata,
-    try_get_tokenizer_config, uses_mrope, patch_rope_scaling)
+    patch_rope_scaling, try_get_generation_config,
+    try_get_safetensors_metadata, try_get_tokenizer_config, uses_mrope)
 from vllm.transformers_utils.s3_utils import S3Model
 from vllm.transformers_utils.utils import is_s3, maybe_model_redirect
 # yapf conflicts with isort for this block
