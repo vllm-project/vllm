@@ -94,12 +94,18 @@ class ModelOptFp8Config(QuantizationConfig):
 
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> "ModelOptFp8Config":
-        quant_config = cls.get_from_keys(config, ["quantization"])
-        quant_method = quant_config["quant_algo"]
-        kv_cache_quant_method = cls.get_from_keys(
-            config, ["quantization"]).get("kv_cache_quant_algo")
-        exclude_modules = cls.get_from_keys(
-            config, ["quantization"]).get("exclude_modules")
+        # Handle both traditional ModelOpt format and compressed-tensors style format
+        if "quantization" in config:
+            # Traditional ModelOpt format: {"quantization": {"quant_algo": "..."}}
+            quant_config = cls.get_from_keys(config, ["quantization"])
+            quant_method = quant_config["quant_algo"]
+            kv_cache_quant_method = quant_config.get("kv_cache_quant_algo")
+            exclude_modules = quant_config.get("exclude_modules")
+        else:
+            # Compressed-tensors style format: {"quant_algo": "...", "quant_library": "modelopt"}
+            quant_method = config.get("quant_algo", "")
+            kv_cache_quant_method = config.get("kv_cache_quant_algo")
+            exclude_modules = config.get("exclude_modules")
 
         if quant_method not in QUANT_ALGOS:
             raise ValueError(f"ModelOpt currently only supports: {QUANT_ALGOS}"
@@ -507,22 +513,36 @@ class ModelOptNvFp4Config(QuantizationConfig):
 
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> "ModelOptNvFp4Config":
-        quant_config = cls.get_from_keys(config, ["quantization"])
-        quant_method = quant_config["quant_algo"]
+        # Handle both traditional ModelOpt format and compressed-tensors style format
+        if "quantization" in config:
+            # Traditional ModelOpt format: {"quantization": {"quant_algo": "..."}}
+            quant_config = cls.get_from_keys(config, ["quantization"])
+            quant_method = quant_config["quant_algo"]
+            kv_cache_quant_algo = quant_config["kv_cache_quant_algo"]
+            group_size = quant_config["group_size"]
+            exclude_modules = quant_config["exclude_modules"]
+        else:
+            # Compressed-tensors style format: {"quant_algo": "...", "quant_library": "modelopt"}
+            quant_method = config.get("quant_algo", "")
+            kv_cache_quant_algo = config.get("kv_cache_quant_algo")
+            group_size = config.get("group_size")
+            exclude_modules = config.get("exclude_modules", [])
+
         if quant_method not in QUANT_ALGOS:
             raise ValueError(f"ModelOpt currently only supports: {QUANT_ALGOS}"
                              " quantizations in vLLM. Please check the "
                              "`hf_quant_config.json` file for your model's "
                              "quant configuration.")
         is_checkpoint_nvfp4_serialized = ("NVFP4" in quant_method)
-        if ("group_size" and "kv_cache_quant_algo"
-                and "exclude_modules") not in quant_config:
-            raise ValueError("NVFP4 quantization requires group size and "
-                             "kv_cache_quant_algo specified in "
-                             "hf_quant_config.json")
-        kv_cache_quant_algo = quant_config["kv_cache_quant_algo"]
-        group_size = quant_config["group_size"]
-        exclude_modules = quant_config["exclude_modules"]
+
+        # For FP4, these fields are required
+        if is_checkpoint_nvfp4_serialized and "quantization" in config:
+            if ("group_size" and "kv_cache_quant_algo"
+                    and "exclude_modules") not in config["quantization"]:
+                raise ValueError("NVFP4 quantization requires group size and "
+                                 "kv_cache_quant_algo specified in "
+                                 "hf_quant_config.json")
+
         return cls(is_checkpoint_nvfp4_serialized, kv_cache_quant_algo,
                    exclude_modules, group_size)
 

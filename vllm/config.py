@@ -928,6 +928,8 @@ class ModelConfig:
                 "awq_marlin",
                 "ipex",
                 "moe_wna16",
+                "modelopt",
+                "modelopt_fp4",
             ]
             quantization_methods = [
                 q for q in supported_quantization if q not in overrides
