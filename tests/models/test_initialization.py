@@ -31,7 +31,8 @@ def test_can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch):
     model_info.check_transformers_version(on_fail="skip")
 
     # FIXME: Possible memory leak in the previous tests?
-    if model_arch in ("GraniteSpeechForConditionalGeneration",
+    if model_arch in ("Glm4vForConditionalGeneration",
+                      "GraniteSpeechForConditionalGeneration",
                       "KimiVLForConditionalGeneration"):
         pytest.skip("Avoid OOM")
 
@@ -46,9 +47,14 @@ def test_can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch):
         n_group = getattr(text_config, 'n_group', None)
         num_experts = n_group * 2 if n_group is not None else 2
 
+        # we use three layers for Gemma-3n to check
+        # both normal layer and kv_shared_layer
+        num_hidden_layers = (3 if model_arch
+                             == "Gemma3nForConditionalGeneration" else 1)
+
         text_config.update({
             "num_layers": 1,
-            "num_hidden_layers": 1,
+            "num_hidden_layers": num_hidden_layers,
             "num_experts": num_experts,
             "num_experts_per_tok": 2,
             "num_local_experts": num_experts,
@@ -56,6 +62,8 @@ def test_can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch):
             "first_k_dense_replace": 0,
             # To avoid OOM on DeepSeek-V3
             "n_routed_experts": num_experts,
+            # For Gemma-3n
+            "num_kv_shared_layers": 1,
         })
 
         if hasattr(hf_config, "vision_config"):
