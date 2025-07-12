@@ -125,7 +125,7 @@ class PaliGemmaMultiModalProcessor(
     ) -> BatchFeature:
         tokenizer = self.info.get_tokenizer()
         if not mm_data:
-            prompt_ids = tokenizer.encode(prompt)
+            prompt_ids = tokenizer.encode(prompt, add_special_tokens=False)
             return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
 
         return super()._call_hf_processor(
