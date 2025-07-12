@@ -208,6 +208,11 @@ class CudaCommunicator(DeviceCommunicatorBase):
         pynccl_comm = self.pynccl_comm
         assert pynccl_comm is not None and not pynccl_comm.disabled
 
+        # 'sizes' is not needed if all inputs in the same group have the same
+        # shape
+        if sizes is not None and all(s == sizes[0] for s in sizes):
+            sizes = None
+
         def _all_gather_single(input_: torch.Tensor,
                                sizes: Optional[list[int]] = None):
             input_size = input_.size()
@@ -215,10 +220,6 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 assert len(sizes) == world_size
                 assert input_.shape[dim] == sizes[self.rank_in_group]
                 output_size = (sum(sizes), ) + input_size[1:]
-                # 'sizes' is not needed if all inputs in the same group have the
-                # same shape
-                if all(s == sizes[0] for s in sizes):
-                    sizes = None
             else:
                 output_size = (input_size[0] * world_size, ) + input_size[1:]
             # Allocate output tensor.

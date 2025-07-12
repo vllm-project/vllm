@@ -385,9 +385,9 @@ class GroupCoordinator:
         return self.device_communicator.all_gather(input_, dim)
 
     def all_gatherv(self,
-                    input_: Union[torch.Tensor, List[torch.Tensor]],
+                    input_: Union[torch.Tensor, list[torch.Tensor]],
                     dim: int = 0,
-                    sizes: Optional[List[int]] = None):
+                    sizes: Optional[list[int]] = None):
         return self.device_communicator.all_gatherv(input_, dim, sizes)
 
     def reduce_scatter(self,
@@ -416,12 +416,9 @@ class GroupCoordinator:
                         sizes: Optional[list[int]] = None) -> torch.Tensor:
         return self.device_communicator.reduce_scatterv(input_, dim, sizes)
 
-    def _reduce_scatter_out_place(
-            self,
-            input_: torch.Tensor,
-            dim: int,
-            sizes: Optional[List[int]] = None) -> torch.Tensor:
-        return self.device_communicator.reduce_scatter(input_, dim, sizes)
+    def _reduce_scatter_out_place(self, input_: torch.Tensor,
+                                  dim: int) -> torch.Tensor:
+        return self.device_communicator.reduce_scatter(input_, dim)
 
     def gather(self,
                input_: torch.Tensor,
