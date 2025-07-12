@@ -45,9 +45,10 @@ steps:
   # if this test fails, it means the nightly torch version is not compatible with some
   # of the dependencies. Please check the error message and add the package to whitelist
   # in /vllm/tools/generate_nightly_torch_test.py
-  soft_fail: true
+  
   source_file_dependencies:
   - requirements/nightly_torch_test.txt
+  - requirements/nightly_torch_test_manual.txt
   commands:
   - bash standalone_tests/pytorch_nightly_dependency.sh
 
