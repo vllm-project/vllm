@@ -8,5 +8,5 @@ RUN git clone https://github.com/vllm-project/vllm.git && \
     VLLM_USE_PRECOMPILED=1 uv pip install -e .
 
 WORKDIR /workspace/vllm
-ENV VLLM_SHA=270d05d9fdf9fc68767056204a1fee078358b122
-RUN git fetch && git checkout VLLM_SHA
+ENV VLLM_SHA=8ce3cad72fbd0dc6524e495ecddbbc58fd8fd09e
+RUN git fetch && git checkout ${VLLM_SHA}
