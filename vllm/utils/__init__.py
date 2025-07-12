@@ -2888,8 +2888,9 @@ def get_mp_context():
 
 
 def bind_kv_cache(
-        ctx: dict[str, Any],
-        kv_cache: list[list[torch.Tensor]],  # [virtual_engine][layer_index]
+    ctx: dict[str, Any],
+    kv_cache: list[list[torch.Tensor]],  # [virtual_engine][layer_index]
+    shared_kv_cache_layers: Optional[dict[str, str]] = None
 ) -> None:
     # Bind the kv_cache tensor to Attention modules, similar to
     # ctx[layer_name].kv_cache[ve]=kv_cache[ve][extract_layer_index(layer_name)]
@@ -2901,12 +2902,17 @@ def bind_kv_cache(
     #    attention of the same layer (e.g., bart's decoder.layers.1.self_attn
     #    and decoder.layers.1.encoder_attn) is mapped to the same kv cache
     #    tensor
+    # 5. Some models have attention layers that share kv cache with previous
+    #    layers, this is specified through shared_kv_cache_layers
+    if shared_kv_cache_layers is None:
+        shared_kv_cache_layers = {}
     from vllm.attention import AttentionType
     from vllm.model_executor.models.utils import extract_layer_index
     layer_need_kv_cache = [
         layer_name for layer_name in ctx
         if (hasattr(ctx[layer_name], 'attn_type') and ctx[layer_name].attn_type
-            in (AttentionType.DECODER, AttentionType.ENCODER_DECODER))
+            in (AttentionType.DECODER, AttentionType.ENCODER_DECODER)) \
+                and ctx[layer_name].kv_sharing_target_layer_name is None
     ]
     layer_index_sorted = sorted(
         set(
@@ -2919,6 +2925,12 @@ def bind_kv_cache(
         assert len(forward_ctx.kv_cache) == len(kv_cache)
         for ve, ve_kv_cache in enumerate(kv_cache):
             forward_ctx.kv_cache[ve] = ve_kv_cache[kv_cache_idx]
+    if shared_kv_cache_layers is not None:
+        for layer_name, target_layer_name in shared_kv_cache_layers.items():
+            assert extract_layer_index(target_layer_name) < \
+               extract_layer_index(layer_name), \
+                   "v0 doesn't support interleaving kv sharing"
+            ctx[layer_name].kv_cache = ctx[target_layer_name].kv_cache
 
 
 def run_method(obj: Any, method: Union[str, bytes, Callable], args: tuple[Any],
