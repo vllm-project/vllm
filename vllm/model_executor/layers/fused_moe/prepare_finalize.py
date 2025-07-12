@@ -38,6 +38,7 @@ class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
         expert_map: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
+        skip_quant: Optional[bool] = False,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor],
                Optional[mk.ExpertTokensMetadata], Optional[torch.Tensor],
                Optional[torch.Tensor]]:
@@ -48,6 +49,10 @@ class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
             assert topk == 1, \
                 "apply_router_weight_on_input is only implemented for topk=1"
             a1.mul_(topk_weights.to(a1.dtype))
+
+        if skip_quant:
+            return a1, None, None, None, None
+
         a1q, a1q_scale = moe_kernel_quantize_input(
             a1, a1_scale, quant_config.quant_dtype,
             quant_config.per_act_token_quant, quant_config.block_shape)
@@ -62,12 +67,17 @@ class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
         weight_and_reduce_impl: mk.TopKWeightAndReduce,
+        skip_weight_reduce: Optional[bool] = False,
     ) -> None:
-        if isinstance(weight_and_reduce_impl, TopKWeightAndReduceDelegate):
-            weight_and_reduce_impl = TopKWeightAndReduceContiguous()
-        weight_and_reduce_impl.apply(
-            output=output,
-            fused_expert_output=fused_expert_output,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            apply_router_weight_on_input=apply_router_weight_on_input)
+        if skip_weight_reduce:
+            assert output.shape == fused_expert_output.shape
+            output.copy_(fused_expert_output)
+        else:
+            if isinstance(weight_and_reduce_impl, TopKWeightAndReduceDelegate):
+                weight_and_reduce_impl = TopKWeightAndReduceContiguous()
+            weight_and_reduce_impl.apply(
+                output=output,
+                fused_expert_output=fused_expert_output,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                apply_router_weight_on_input=apply_router_weight_on_input)

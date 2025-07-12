@@ -4,6 +4,7 @@ from math import prod
 from typing import Optional, Union
 
 import torch
+from flashinfer import fp4_quantize as fp4_quantize
 
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
@@ -100,6 +101,16 @@ def _resize_cache(x: torch.Tensor, v: tuple[int, ...]) -> torch.Tensor:
     return x.flatten()[:prod(v)].view(*v)
 
 
+def _fp4_quantize(
+    A: torch.Tensor,
+    A_scale: Optional[torch.Tensor],
+    is_sf_swizzled_layout: bool,
+) -> tuple[torch.Tensor]:
+    return fp4_quantize(A,
+                        A_scale,
+                        is_sf_swizzled_layout=is_sf_swizzled_layout)
+
+
 def _fp8_quantize(
     A: torch.Tensor,
     A_scale: Optional[torch.Tensor],
@@ -177,11 +188,16 @@ def moe_kernel_quantize_input(
     quant_dtype: Union[None, torch.dtype, str],
     per_act_token_quant: bool,
     block_shape: Optional[list[int]] = None,
+    is_fp4_scalar_swizzled: bool = True,
 ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
     if quant_dtype == torch.float8_e4m3fn:
         return _fp8_quantize(A, A_scale, per_act_token_quant, block_shape)
     elif quant_dtype == torch.int8:
         return _int8_quantize(A, A_scale, per_act_token_quant, block_shape)
+    elif quant_dtype == torch.uint8:  # nvfp4
+        return _fp4_quantize(A,
+                             A_scale,
+                             is_sf_swizzled_layout=is_fp4_scalar_swizzled)
     elif quant_dtype == "mxfp4":
         return _mxfp4_quantize(A, A_scale, per_act_token_quant, block_shape)
     else:

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
-from typing import Optional, Union
+from typing import TYPE_CHECKING, Optional, Union
 
 import torch
 from compressed_tensors.quantization import (QuantizationArgs,
@@ -15,6 +15,15 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.utils import cdiv
+
+try:
+    from flashinfer import fp4_quantize as fp4_quantize
+    from flashinfer.fused_moe import (
+        cutlass_fused_moe as flashinfer_cutlass_fused_moe)
+except ImportError:
+    if not TYPE_CHECKING:
+        flashinfer_cutlass_fused_moe = None
+has_flashinfer = flashinfer_cutlass_fused_moe is not None
 
 logger = init_logger(__name__)
 
@@ -187,6 +196,10 @@ class FusedMoEParallelConfig:
     def use_deepep_ll_kernels(self):
         return (self.use_all2all_kernels
                 and envs.VLLM_ALL2ALL_BACKEND == "deepep_low_latency")
+
+    @property
+    def use_flashinfer_cutlass_kernels(self):
+        return envs.VLLM_USE_FLASHINFER_MOE and has_flashinfer
 
     @staticmethod
     def make(tp_size_: int, dp_size_: int,
@@ -386,6 +399,10 @@ class FusedMoEConfig:
     def use_deepep_ll_kernels(self):
         return self.moe_parallel_config.use_deepep_ll_kernels
 
+    @property
+    def use_flashinfer_cutlass_kernels(self):
+        return self.moe_parallel_config.use_flashinfer_cutlass_kernels
+
     @staticmethod
     def make(
         num_experts: int,
@@ -428,6 +445,12 @@ class FusedMoEConfig:
             from vllm.model_executor.layers.quantization.fp8 import Fp8Config
             if quant_dtype is None and isinstance(quant_config, Fp8Config):
                 quant_dtype = torch.float8_e4m3fn
+
+            from vllm.model_executor.layers.quantization.modelopt import (
+                ModelOptNvFp4Config)
+            if quant_dtype is None and isinstance(quant_config,
+                                                  ModelOptNvFp4Config):
+                quant_dtype = torch.uint8
 
             if weight_quant is not None:
                 per_out_ch_quant = (

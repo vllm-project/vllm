@@ -4,7 +4,7 @@
 from abc import abstractmethod
 from collections.abc import Iterable
 from enum import Enum
-from typing import Callable, Literal, Optional, overload
+from typing import TYPE_CHECKING, Callable, Literal, Optional, overload
 
 import torch
 import torch.nn.functional as F
@@ -35,6 +35,15 @@ from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
 from vllm.utils import direct_register_custom_op, has_deep_ep, has_pplx
 
+try:
+    from flashinfer import fp4_quantize as fp4_quantize
+    from flashinfer.fused_moe import (
+        cutlass_fused_moe as flashinfer_cutlass_fused_moe)
+except ImportError:
+    if not TYPE_CHECKING:
+        flashinfer_cutlass_fused_moe = None
+has_flashinfer = flashinfer_cutlass_fused_moe is not None
+
 if current_platform.is_cuda_alike():
     from .fused_batched_moe import BatchedTritonExperts
     from .fused_moe import TritonExperts, fused_experts
@@ -45,6 +54,9 @@ if current_platform.is_cuda_alike():
         from .deepep_ht_prepare_finalize import DeepEPHTPrepareAndFinalize
         from .deepep_ll_prepare_finalize import (DEEPEP_QUANT_BLOCK_SHAPE,
                                                  DeepEPLLPrepareAndFinalize)
+    if has_flashinfer:
+        from .flashinfer_cutlass_prepare_finalize import (
+            FlashInferCutlassMoEPrepareAndFinalize)
 else:
     fused_experts = None  # type: ignore
     FusedMoEPermuteExpertsUnpermute = None  # type: ignore
@@ -75,6 +87,9 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 
     moe: FusedMoEConfig
 
+    def select_experts_impl(self, moe_parallel_config):
+        pass
+
     @abstractmethod
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
                        hidden_size: int, intermediate_size_per_partition: int,
@@ -99,6 +114,9 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 
         prepare_finalize: Optional[FusedMoEPrepareAndFinalize] = None
 
+        if moe.use_flashinfer_cutlass_kernels:
+            prepare_finalize = FlashInferCutlassMoEPrepareAndFinalize(
+                quant_dtype=moe.quant_dtype, )
         if moe.use_pplx_kernels:
             hidden_dim_bytes, hidden_scale_bytes = pplx_hidden_dim_scale_bytes(
                 moe.max_num_tokens,
@@ -746,6 +764,8 @@ class FusedMoE(torch.nn.Module):
         quant_method = (UnquantizedFusedMoEMethod(moe) if quant_config is None
                         else quant_config.get_quant_method(self, prefix))
 
+        quant_method.select_experts_impl(self.moe_parallel_config)
+
         assert quant_method is not None
         assert isinstance(quant_method, FusedMoEMethodBase)
         self.quant_method = quant_method
@@ -785,7 +805,8 @@ class FusedMoE(torch.nn.Module):
         self.batched_hidden_states: Optional[torch.Tensor] = None
         self.batched_router_logits: Optional[torch.Tensor] = None
         if (self.moe_parallel_config.use_pplx_kernels
-                or self.moe_parallel_config.use_deepep_ll_kernels):
+                or self.moe_parallel_config.use_deepep_ll_kernels
+                or self.moe_parallel_config.use_flashinfer_cutlass_kernels):
             self.batched_hidden_states = torch.zeros(
                 (moe.max_num_tokens, self.hidden_size),
                 dtype=moe.in_dtype,
@@ -836,6 +857,10 @@ class FusedMoE(torch.nn.Module):
     @property
     def use_deepep_ll_kernels(self):
         return self.moe_parallel_config.use_deepep_ll_kernels
+
+    @property
+    def use_flashinfer_cutlass_kernels(self):
+        return self.moe_parallel_config.use_flashinfer_cutlass_kernels
 
     def _load_per_tensor_weight_scale(self, shard_id: str,
                                       param: torch.nn.Parameter,
@@ -914,12 +939,18 @@ class FusedMoE(torch.nn.Module):
                                                  shard_size)
         # Narrow parameter and load.
         # w1, gate_proj: Load into first logical weight of w13.
-        if shard_id == "w1":
-            expert_data = expert_data.narrow(shard_dim, 0, shard_size)
         # w3, up_proj: Load into second logical weight of w13.
+        # The FlashInfer Cutlass fused MoE kernel expects the combined weights
+        # to be ordered as [w3, w1], unlike the standard [w1, w3] layout.
+        assert shard_id in ("w1", "w3")
+        switch_w13 = getattr(self.quant_method, 'load_up_proj_weight_first',
+                             False)
+        if (switch_w13 and shard_id == "w1") or (not switch_w13
+                                                 and shard_id == "w3"):
+            start = shard_size
         else:
-            assert shard_id == "w3"
-            expert_data = expert_data.narrow(shard_dim, shard_size, shard_size)
+            start = 0
+        expert_data = expert_data.narrow(shard_dim, start, shard_size)
         expert_data.copy_(loaded_weight)
 
     def _load_w2(self,
@@ -1438,9 +1469,9 @@ class FusedMoE(torch.nn.Module):
                     final_hidden_states, non_blocking=True)
 
         ctx = get_forward_context()
+        # flashinfer_cutlass_kernels can handle: optional DP + TP/EP
         max_tokens_across_dp = ctx.dp_metadata.max_tokens_across_dp_cpu
         moe_dp_chunk_size_per_rank = self.moe_config.max_num_tokens
-
         num_tokens = full_hidden_states.size(0)
         for chunk_start_ in range(0, max_tokens_across_dp,
                                   moe_dp_chunk_size_per_rank):
@@ -1460,13 +1491,18 @@ class FusedMoE(torch.nn.Module):
     def forward_impl(self, hidden_states: torch.Tensor,
                      router_logits: torch.Tensor):
         assert self.quant_method is not None
+        # Route to the chunked forward path using the FlashInfer Cutlass kernel
+        # only when data parallelism (DP) is enabled.
+        use_flashinfer_cutlass_kernels = self.dp_size > 1 and self.moe_parallel_config.use_flashinfer_cutlass_kernels
         if (self.moe_parallel_config.use_pplx_kernels
-                or self.moe_parallel_config.use_deepep_ll_kernels):
+                or self.moe_parallel_config.use_deepep_ll_kernels
+                or use_flashinfer_cutlass_kernels):
             return self.forward_impl_chunked(hidden_states, router_logits)
 
         do_naive_dispatch_combine: bool = (
             self.dp_size > 1
-            and not self.moe_parallel_config.use_deepep_ht_kernels)
+            and not self.moe_parallel_config.use_deepep_ht_kernels
+            and not self.moe_parallel_config.use_flashinfer_cutlass_kernels)
         if do_naive_dispatch_combine:
             hidden_states, router_logits = get_ep_group().dispatch(
                 hidden_states, router_logits)
@@ -1496,7 +1532,6 @@ class FusedMoE(torch.nn.Module):
 
         if do_naive_dispatch_combine:
             final_hidden_states = get_ep_group().combine(final_hidden_states)
-
         if self.reduce_results and (self.tp_size > 1 or self.ep_size > 1):
             # Default set to False. (May have to add shared expert outputs.
             final_hidden_states = self.maybe_all_reduce_tensor_model_parallel(
