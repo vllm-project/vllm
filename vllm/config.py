@@ -3970,6 +3970,10 @@ class PassConfig:
     """Whether to enable sequence parallelism."""
     enable_async_tp: bool = False
     """Whether to enable async TP."""
+    enable_fi_allreduce_fusion: bool = False
+    """Whether to enable flashinfer allreduce fusion."""
+    fi_allreduce_fusion_max_token_num: int = 1024
+    """Max number of tokens to used in flashinfer allreduce fusion."""
 
     # TODO(luka) better pass enabling system.
 
