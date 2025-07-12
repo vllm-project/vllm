@@ -32,6 +32,90 @@ we attempt to override the default pooler based on its Sentence Transformers con
     You can customize the model's pooling method via the `--override-pooler-config` option,
     which takes priority over both the model's and Sentence Transformers's defaults.
 
+## Chunked Processing for Long Text
+
+vLLM supports **chunked processing** for embedding models to handle text inputs that exceed the model's maximum token length. This feature automatically splits long text into manageable chunks, processes them separately, and aggregates the results.
+
+### Supported Models
+
+- `intfloat/multilingual-e5-large`
+- Other embedding models can be extended to support this feature
+
+### How Chunked Processing Works
+
+1. **Automatic Detection**: When input text exceeds `max_model_len`, chunked processing is triggered
+2. **Smart Chunking**: Text is split at token boundaries to maintain semantic integrity  
+3. **Parallel Processing**: Each chunk is processed independently through the model
+4. **Intelligent Aggregation**: Results are combined using weighted averaging based on chunk token counts
+5. **Consistent Output**: Final embeddings maintain the same dimensionality as standard processing
+
+### Configuration
+
+Enable chunked processing by setting `enable_chunked_processing: true` in the pooler configuration:
+
+```bash
+vllm serve intfloat/multilingual-e5-large \
+  --task embed \
+  --override-pooler-config '{"pooling_type": "CLS", "normalize": true, "enable_chunked_processing": true}' \
+  --max-model-len 10240 \
+  --trust-remote-code
+```
+
+### Aggregation Algorithm
+
+The chunked processing uses a FastChat-inspired weighted averaging algorithm:
+
+```python
+# Weighted average: sum(embedding_i * token_count_i) / total_tokens
+weighted_sum = sum(embeddings[i] * weights[i] for i in range(num_chunks))
+final_embedding = weighted_sum / sum(weights)
+```
+
+This ensures that longer chunks contribute proportionally more to the final representation.
+
+### Performance Characteristics
+
+| Aspect | Short Text (≤ max_len) | Long Text (> max_len) |
+|--------|------------------------|----------------------|
+| **Processing Time** | Standard | Increased (multiple inference calls) |
+| **Memory Usage** | Standard | Reduced (chunks processed separately) |
+| **Quality** | Standard | Maintains semantic representation |
+| **Compatibility** | Full | Full (backward compatible) |
+
+### Example Usage
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    api_key="your-api-key",
+    base_url="http://localhost:31090/v1"
+)
+
+# This will automatically use chunked processing if text is too long
+response = client.embeddings.create(
+    input="Very long text that exceeds the model's maximum context length..." * 1000,
+    model="multilingual-e5-large"
+)
+
+print(f"Embedding dimension: {len(response.data[0].embedding)}")
+```
+
+### Logging and Monitoring
+
+When chunked processing is active, you'll see informative log messages:
+
+```
+INFO: Input length 15000 exceeds max_model_len 10240, will use chunked processing
+INFO: Split input of 15000 tokens into 2 chunks
+```
+
+### Limitations
+
+- **Increased Latency**: Processing multiple chunks takes longer than single-chunk processing
+- **Model Support**: Currently limited to specific embedding models
+- **Context Boundaries**: Chunking may split related content, though weighted averaging helps preserve overall semantics
+
 ## Offline Inference
 
 The [LLM][vllm.LLM] class provides various methods for offline inference.
@@ -170,7 +254,7 @@ vllm serve jinaai/jina-embeddings-v3 --trust-remote-code
 You can change the output dimensions of embedding models that support Matryoshka Embeddings by using the dimensions parameter.
 
 ```text
-curl http://127.0.0.1:8000/v1/embeddings \
+curl http://127.0.0.1:31090/v1/embeddings \
   -H 'accept: application/json' \
   -H 'Content-Type: application/json' \
   -d '{
