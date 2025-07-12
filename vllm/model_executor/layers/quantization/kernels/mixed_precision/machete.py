@@ -32,6 +32,9 @@ class MacheteLinearKernel(MPLinearKernel):
         if not current_platform.is_cuda():
             return False, "Machete only supported on CUDA"
 
+        if not current_platform.is_device_capability(90):
+            return False, "Machete requires compute capability of 90 (Hopper)"
+
         if c.has_g_idx and\
             c.partition_weight_shape[0] != c.full_weight_shape[0]:
             return False, "Act reordering currently not supported by Machete, "\
