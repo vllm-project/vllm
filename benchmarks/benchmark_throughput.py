@@ -28,7 +28,6 @@ from benchmark_dataset import (
     VisionArenaDataset,
 )
 from benchmark_utils import convert_to_pytorch_benchmark_format, write_to_json
-from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
 from vllm.entrypoints.openai.api_server import (
     build_async_engine_client_from_engine_args,
@@ -111,8 +110,6 @@ def run_vllm(
             ),
         )
         end = time.perf_counter()
-
-    cleanup_dist_env_and_memory()
     return end - start, outputs
 
 

@@ -65,6 +65,7 @@ class NaiveAll2AllManager(All2AllManagerBase):
         start = 0 if self.dp_rank == 0 else cu_tokens_across_dp_cpu[
             self.dp_rank - 1]
         end = cu_tokens_across_dp_cpu[self.dp_rank]
+
         all_hidden_states = self.dp_group.all_reduce(hidden_states)
         hidden_states = all_hidden_states[start:end, :]
         return hidden_states

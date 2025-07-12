@@ -30,7 +30,7 @@ from collections import namedtuple
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from multiprocessing import shared_memory
-from typing import Any, Callable, List, Optional, Union
+from typing import Any, Callable, Optional, Union
 from unittest.mock import patch
 
 import torch
@@ -371,8 +371,7 @@ class GroupCoordinator:
         assert -input_.dim() <= dim < input_.dim(), (
             f"Invalid dim ({dim}) for input tensor with shape {input_.size()}")
 
-        # TODO(shuw): enable it
-        if self.use_custom_op_call and False:
+        if self.use_custom_op_call:
             return torch.ops.vllm.all_gather(input_,
                                              dim,
                                              world_size,
@@ -392,8 +391,7 @@ class GroupCoordinator:
 
     def reduce_scatter(self,
                        input_: torch.Tensor,
-                       dim: int = -1,
-                       sizes: Optional[List[int]] = None) -> torch.Tensor:
+                       dim: int = -1) -> torch.Tensor:
         world_size = self.world_size
         # Bypass the function if we are using only 1 GPU.
         if world_size == 1:
@@ -401,14 +399,13 @@ class GroupCoordinator:
         assert -input_.dim() <= dim < input_.dim(), (
             f"Invalid dim ({dim}) for input tensor with shape {input_.size()}")
 
-        if self.use_custom_op_call and False:
-            assert sizes is None, "Varying size reduce scatter not supported with vllm custom op"
+        if self.use_custom_op_call:
             return torch.ops.vllm.reduce_scatter(input_,
                                                  dim,
                                                  world_size,
                                                  group_name=self.unique_name)
         else:
-            return self._reduce_scatter_out_place(input_, dim, sizes)
+            return self._reduce_scatter_out_place(input_, dim)
 
     def reduce_scatterv(self,
                         input_: torch.Tensor,
