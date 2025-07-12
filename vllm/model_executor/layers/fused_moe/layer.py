@@ -81,6 +81,16 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                        params_dtype: torch.dtype, **extra_weight_attrs):
         raise NotImplementedError
 
+    def uses_weight_scale_2_pattern(self) -> bool:
+        """
+        Returns True if this quantization method uses 'weight_scale_2' pattern
+        for per-tensor weight scales (e.g., FP4 variants), False otherwise.
+
+        This method should be overridden by subclasses that use the
+        'weight_scale_2' pattern instead of the standard 'weight_scale' pattern.
+        """
+        return False
+
     @staticmethod
     def maybe_make_prepare_finalize(
             moe: FusedMoEConfig) -> Optional[FusedMoEPrepareAndFinalize]:
@@ -1081,12 +1091,23 @@ class FusedMoE(torch.nn.Module):
 
         # TODO @dsikka: ModelOpt should follow the proper MoE loading pattern
         if "ModelOpt" in quant_method_name:
-            if ('weight_scale_2' in weight_name
-                    or 'input_scale' in weight_name):
-                self._load_per_tensor_weight_scale(shard_id=shard_id,
-                                                   param=param,
-                                                   loaded_weight=loaded_weight,
-                                                   expert_id=expert_id)
+            # Determine per-tensor weight scale patterns based on variant
+            # Use the dedicated method instead of brittle string matching
+            uses_weight_scale_2 = self.quant_method.uses_weight_scale_2_pattern(
+            )
+
+            # For per-tensor, FP4 uses "weight_scale_2", FP8 uses "weight_scale"
+            per_tensor_conditions = (
+                "weight_scale_2" in weight_name if uses_weight_scale_2 else
+                "weight_scale" in weight_name) or "input_scale" in weight_name
+
+            if per_tensor_conditions:
+                self._load_per_tensor_weight_scale(
+                    shard_id=shard_id,
+                    param=param,
+                    loaded_weight=loaded_weight,
+                    expert_id=expert_id,
+                )
             elif "weight" in weight_name:
                 self._load_model_weight_or_group_weight_scale(
                     shard_id=shard_id,
@@ -1558,3 +1579,7 @@ direct_register_custom_op(
     dispatch_key=current_platform.dispatch_key,
     tags=(torch.Tag.needs_fixed_stride_order, ),
 )
+
+# Mark the FusedMoE weight_loader as supporting MoE-specific parameters
+# to avoid expensive runtime reflection in model loading code
+FusedMoE.weight_loader.supports_moe_loading = True  # type: ignore[attr-defined]
