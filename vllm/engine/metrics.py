@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import time
+from copy import copy
 from typing import TYPE_CHECKING
 from typing import Counter as CollectionsCounter
 from typing import Dict, List, Optional, Type, Union, cast
@@ -586,6 +587,18 @@ class PrometheusStatLogger(StatLoggerBase):
         if local_interval_elapsed(stats.now, self.last_local_log,
                                   self.local_interval):
             if self.spec_decode_metrics is not None:
+                # The counters in self.spec_decode_metrics are aggregates.
+                # The Prometheus Counters must be incremented with deltas.
+                # Keep track of the previous value so we can compute deltas.
+                if self.last_spec_decode_metrics is None:
+                    self.last_spec_decode_metrics = copy(
+                        self.spec_decode_metrics)
+                    self.last_spec_decode_metrics.accepted_tokens = 0
+                    self.last_spec_decode_metrics.draft_tokens = 0
+                    self.last_spec_decode_metrics.emitted_tokens = 0
+
+                snapshot = copy(self.spec_decode_metrics)
+
                 self._log_gauge(
                     self.metrics.gauge_spec_decode_draft_acceptance_rate,
                     self.spec_decode_metrics.draft_acceptance_rate)
@@ -593,13 +606,18 @@ class PrometheusStatLogger(StatLoggerBase):
                                 self.spec_decode_metrics.system_efficiency)
                 self._log_counter(
                     self.metrics.counter_spec_decode_num_accepted_tokens,
-                    self.spec_decode_metrics.accepted_tokens)
+                    snapshot.accepted_tokens -
+                    self.last_spec_decode_metrics.accepted_tokens)
                 self._log_counter(
                     self.metrics.counter_spec_decode_num_draft_tokens,
-                    self.spec_decode_metrics.draft_tokens)
+                    snapshot.draft_tokens -
+                    self.last_spec_decode_metrics.draft_tokens)
                 self._log_counter(
                     self.metrics.counter_spec_decode_num_emitted_tokens,
-                    self.spec_decode_metrics.emitted_tokens)
+                    snapshot.emitted_tokens -
+                    self.last_spec_decode_metrics.emitted_tokens)
+
+                self.last_spec_decode_metrics = snapshot
 
             # Reset tracked stats for next interval.
             self.num_prompt_tokens = []
