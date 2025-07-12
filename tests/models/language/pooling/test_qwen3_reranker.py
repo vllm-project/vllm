@@ -6,6 +6,7 @@ import pytest
 import torch
 
 from tests.conftest import HfRunner
+from tests.utils import multi_gpu_test
 
 from .mteb_utils import RerankModelInfo, mteb_test_rerank_models
 
@@ -87,3 +88,29 @@ def test_rerank_models_mteb(vllm_runner, model_info: RerankModelInfo) -> None:
 
     mteb_test_rerank_models(Qwen3RerankerHfRunner, vllm_runner, model_info,
                             vllm_extra_kwargs)
+
+
+@pytest.mark.parametrize("model_info", RERANK_MODELS)
+@multi_gpu_test(num_gpus=2)
+def test_rerank_models_mteb_tp(vllm_runner,
+                               model_info: RerankModelInfo) -> None:
+
+    assert model_info.architecture == "Qwen3ForSequenceClassification"
+
+    vllm_extra_kwargs: dict[str, Any] = {
+        "hf_overrides": {
+            "architectures": ["Qwen3ForSequenceClassification"],
+            "classifier_from_token": ["no", "yes"],
+            "is_original_qwen3_reranker": True,
+        },
+        "tensor_parallel_size": 2,
+    }
+
+    if model_info.name == "Qwen/Qwen3-Reranker-4B":
+        vllm_extra_kwargs["max_num_seqs"] = 1
+
+    mteb_test_rerank_models(Qwen3RerankerHfRunner,
+                            vllm_runner,
+                            model_info,
+                            vllm_extra_kwargs,
+                            atol=1.2e-2)
