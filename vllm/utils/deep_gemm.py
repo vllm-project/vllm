@@ -49,7 +49,6 @@ if not has_deep_gemm():
     _fp8_gemm_nt_impl: Callable[..., Any] | None = None
     _grouped_impl: Callable[..., Any] | None = None
     _grouped_masked_impl: Callable[..., Any] | None = None
-    _per_token_cast_impl: Callable[..., Any] | None = None
     _per_block_cast_impl: Callable[..., Any] | None = None
 else:
     _dg = importlib.import_module("deep_gemm")  # type: ignore
@@ -74,12 +73,9 @@ else:
     try:
         _math_mod = importlib.import_module(
             "deep_gemm.utils.math")  # type: ignore
-        _per_token_cast_impl = getattr(_math_mod, "per_token_cast_to_fp8",
-                                       None)
         _per_block_cast_impl = getattr(_math_mod, "per_block_cast_to_fp8",
                                        None)
     except ModuleNotFoundError:
-        _per_token_cast_impl = None
         _per_block_cast_impl = None
 
 
@@ -99,22 +95,6 @@ def fp8_m_grouped_gemm_nt_masked(*args, **kwargs):
     if _grouped_masked_impl is None:
         return _missing(*args, **kwargs)
     return _grouped_masked_impl(*args, **kwargs)
-
-
-def per_token_group_cast_to_fp8(x, group_size, *args, **kwargs):
-    """Wrapper for token-wise FP8 quantisation.
-
-    • If DeepGEMM provides ``per_token_cast_to_fp8`` (new API), use it.
-    • Otherwise, fall back to vLLM's ``per_token_group_quant_fp8``
-    """
-
-    if _per_token_cast_impl is not None and is_blackwell_deep_gemm_used():
-        assert group_size == 128, "group_size must be 128 for deepgemm"
-        return _per_token_cast_impl(x)
-
-    from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-        per_token_group_quant_fp8 as _ptg)
-    return _ptg(x, group_size, *args, **kwargs)
 
 
 def per_block_cast_to_fp8(x, *args, **kwargs):
@@ -146,7 +126,6 @@ __all__ = [
     "fp8_gemm_nt",
     "m_grouped_fp8_gemm_nt_contiguous",
     "fp8_m_grouped_gemm_nt_masked",
-    "per_token_group_cast_to_fp8",
     "per_block_cast_to_fp8",
     "is_blackwell_deep_gemm_used",
 ]
