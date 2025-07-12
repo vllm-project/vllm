@@ -419,15 +419,6 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                         f"MoE Model {type(model).__name__} does not support "
                         "BitsAndBytes quantization yet. Ensure this model has "
                         "'get_expert_mapping' method.")
-                # TODO: support FusedMoE with prequant and 8bit.
-                if self.pre_quant:
-                    raise ValueError(
-                        "Prequant BitsAndBytes models with FusedMoE is not "
-                        "supported yet.")
-                if self.load_8bit:
-                    raise ValueError(
-                        "BitsAndBytes 8bit quantization with FusedMoE is not "
-                        "supported yet.")
                 # Get the corresponding weight name using module name and
                 # get_expert_mapping.
                 expert_mapping = model.get_expert_mapping()
