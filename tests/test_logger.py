@@ -282,7 +282,6 @@ def test_request_logger_log_outputs():
 
         mock_logger.info.assert_called_once()
         call_args = mock_logger.info.call_args.args
-        # logger.info(format_string, request_id, stream_info, outputs, output_token_ids, finish_reason)
         assert "Generated response %s%s" in call_args[0]
         assert call_args[1] == "test-123"
         assert call_args[3] == "Hello, world!"
@@ -309,7 +308,6 @@ def test_request_logger_log_outputs_streaming_delta():
 
         mock_logger.info.assert_called_once()
         call_args = mock_logger.info.call_args.args
-        # logger.info(format_string, request_id, stream_info, outputs, output_token_ids, finish_reason)
         assert "Generated response %s%s" in call_args[0]
         assert call_args[1] == "test-456"
         assert call_args[2] == " (streaming delta)"
@@ -337,7 +335,6 @@ def test_request_logger_log_outputs_streaming_complete():
 
         mock_logger.info.assert_called_once()
         call_args = mock_logger.info.call_args.args
-        # logger.info(format_string, request_id, stream_info, outputs, output_token_ids, finish_reason)
         assert "Generated response %s%s" in call_args[0]
         assert call_args[1] == "test-789"
         assert call_args[2] == " (streaming complete)"
@@ -400,7 +397,6 @@ def test_request_logger_log_outputs_none_values():
 
         mock_logger.info.assert_called_once()
         call_args = mock_logger.info.call_args.args
-        # logger.info(format_string, request_id, stream_info, outputs, output_token_ids, finish_reason)
         assert "Generated response %s%s" in call_args[0]
         assert call_args[1] == "test-none"
         assert call_args[3] == "Test output"
@@ -427,7 +423,6 @@ def test_request_logger_log_outputs_empty_output():
 
         mock_logger.info.assert_called_once()
         call_args = mock_logger.info.call_args.args
-        # logger.info(format_string, request_id, stream_info, outputs, output_token_ids, finish_reason)
         assert "Generated response %s%s" in call_args[0]
         assert call_args[1] == "test-empty"
         assert call_args[3] == ""
@@ -469,17 +464,16 @@ def test_request_logger_log_outputs_integration():
         input_call = mock_logger.info.call_args_list[0][0]
         output_call = mock_logger.info.call_args_list[1][0]
 
-        # Check input call: logger.info(format_string, request_id, prompt, params, ...)
         assert "Received request %s" in input_call[0]
         assert input_call[1] == "test-integration"
 
-        # Check output call: logger.info(format_string, request_id, stream_info, outputs, ...)
         assert "Generated response %s%s" in output_call[0]
         assert output_call[1] == "test-integration"
 
 
 def test_streaming_complete_logs_full_text_content():
-    """Test that streaming complete logging includes full accumulated text, not just token count."""
+    """Test that streaming complete logging includes
+      full accumulated text, not just token count."""
     mock_logger = MagicMock()
 
     with patch("vllm.entrypoints.logger.logger", mock_logger):
@@ -502,8 +496,8 @@ def test_streaming_complete_logs_full_text_content():
         # Verify the logged output is the full text, not a token count format
         logged_output = call_args[3]
         assert logged_output == full_response
-        assert "tokens>" not in logged_output  # Ensure it's not the old token count format
-        assert "streaming_complete" not in logged_output  # Ensure it's not the fallback format
+        assert "tokens>" not in logged_output
+        assert "streaming_complete" not in logged_output
 
         # Verify other parameters
         assert call_args[1] == "test-streaming-full-text"
