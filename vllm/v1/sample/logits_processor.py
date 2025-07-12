@@ -12,6 +12,7 @@ import torch
 from torch._prims_common import DeviceLikeType
 
 from vllm import PoolingParams, SamplingParams
+from vllm.config import ReasoningConfig
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -24,9 +25,9 @@ class MoveDirectionality(Enum):
     SWAP = 1
 
 
-# (index, params, output_tok_ids) tuples for new
+# (index, params, prompt_tok_ids, output_tok_ids) tuples for new
 # requests added to the batch.
-AddedRequest = tuple[int, Union[SamplingParams, PoolingParams], list[int]]
+AddedRequest = tuple[int, Union[SamplingParams, PoolingParams], list[int], list[int]]
 # (index 1, index 2, directionality) tuples representing
 # one-way moves or two-way swaps of requests in batch
 MovedRequest = tuple[int, int, MoveDirectionality]
@@ -43,9 +44,9 @@ class BatchUpdate:
     # within the persistent batch.
     #
     # Note: each added request is represented as
-    # (index, params, output_tok_ids)
-    # Key assumption: output_tok_ids is a reference to the
-    # request's running output tokens list; in this way
+    # (index, params, prompt_tok_ids, output_tok_ids)
+    # Key assumption: prompt_tok_ids, output_tok_ids is a reference to the
+    # request's prompt and running output tokens list; in this way
     # the logits processors always see the latest list of
     # generated tokens
     removed: Sequence[RemovedRequest]
@@ -260,7 +261,7 @@ class MinPLogitsProcessor(LogitsProcessor):
 
         needs_update = False
         # Process added requests.
-        for index, params, _ in batch_update.added:
+        for index, params, _, _ in batch_update.added:
             min_p = params.min_p if isinstance(params, SamplingParams) else 0.0
             if self.min_p_cpu[index] != min_p:
                 needs_update = True
@@ -337,7 +338,7 @@ class LogitBiasLogitsProcessor(LogitsProcessor):
 
         # Process added requests.
         needs_update = bool(batch_update.added)
-        for index, params, _ in batch_update.added:
+        for index, params, _, _ in batch_update.added:
             if isinstance(params, SamplingParams) and (lb :=
                                                        params.logit_bias):
                 self.biases[index] = lb
@@ -420,7 +421,7 @@ class MinTokensLogitsProcessor(LogitsProcessor):
         if batch_update:
             # Process added requests.
             needs_update |= bool(batch_update.added)
-            for index, params, output_tok_ids in batch_update.added:
+            for index, params, _, output_tok_ids in batch_update.added:
                 if (isinstance(params, SamplingParams)
                         and (min_tokens := params.min_tokens)
                         and len(output_tok_ids) < min_tokens):
@@ -493,8 +494,113 @@ class MinTokensLogitsProcessor(LogitsProcessor):
         return logits
 
 
+class MaxThinkTokensLogitsProcessor(LogitsProcessor):
+    """A logits processor that limits the maximum number of thinking tokens."""
+
+    def __init__(self, reasoning_config: ReasoningConfig, pin_memory: bool, device: torch.device):
+        """
+        Args:
+            think_start_token_id (int): Token ID for the start of thinking section.
+            think_end_token_id (int): Token ID for the end of thinking section.
+            pin_memory (bool): Whether to use pinned memory for tensors.
+            device (torch.device): Device to use for tensor operations.
+        """
+        super().__init__()
+        self.think_start_token_id = reasoning_config.think_start_token_id
+        self.think_end_token_id = reasoning_config.think_end_token_id
+        self.pin_memory = pin_memory
+        self.device = device
+        self._state = {}
+
+    def _find_last_token_index(self, tokens, token_id):
+        try:
+            return len(tokens) - tokens[::-1].index(token_id) - 1
+        except ValueError:
+            return -1
+
+    def is_argmax_invariant(self) -> bool:
+        """This logits processor can change the outcome of greedy sampling
+        by forcing that the thinking section ends after a certain number of tokens."""
+        return False
+
+    def update_state(self, batch_update: Optional[BatchUpdate]):
+        if batch_update is None:
+            return
+
+        for index, params, prompt_tok_ids, output_tok_ids in batch_update.added:
+            max_think_tokens = params.max_think_tokens if isinstance(params, SamplingParams) else None
+
+            if max_think_tokens is None:
+                continue
+
+            last_think_start_idx = self._find_last_token_index(prompt_tok_ids, self.think_start_token_id)
+            last_think_end_idx = self._find_last_token_index(prompt_tok_ids, self.think_end_token_id)
+
+            in_think = False
+            count = 0
+
+            if last_think_start_idx > last_think_end_idx:
+                in_think = True
+                count = len(prompt_tok_ids) - (last_think_start_idx + 1)
+
+            self._state[index] = {
+                "in_think": in_think,
+                "count": count,
+                "prompt_tok_ids": prompt_tok_ids,
+                "output_tok_ids": output_tok_ids,
+                "max_think_tokens": max_think_tokens,
+            }
+
+        for index in batch_update.removed:
+            self._state.pop(index, None)
+
+        for i1, i2, direction in batch_update.moved:
+            if direction == MoveDirectionality.SWAP:
+                self._state[i1], self._state[i2] = self._state[i2], self._state[i1]
+            else:
+                self._state[i2] = self._state.pop(i1, None)
+
+    def apply(self, logits: torch.Tensor) -> torch.Tensor:
+        batch_size = logits.size(0)
+        if batch_size == 0:
+            return logits
+
+        mask = torch.zeros(batch_size, dtype=torch.bool, device=logits.device)
+        end_token_id = self.think_end_token_id
+
+        for index in range(batch_size):
+            state = self._state.get(index, None)
+            if not state or not state.get("output_tok_ids"):
+                continue
+
+            last_tok = state["output_tok_ids"][-1]
+            in_think = state["in_think"]
+            count = state["count"]
+
+            if last_tok == self.think_start_token_id:
+                in_think = True
+                count = 0
+            elif last_tok == self.think_end_token_id:
+                in_think = False
+                count = 0
+            elif in_think:
+                count += 1
+
+            state["in_think"] = in_think
+            state["count"] = count
+
+            if state["in_think"] and state["count"] >= state["max_think_tokens"]:
+                mask[index] = True
+
+        if mask.any():
+            logits[mask] = -float("inf")
+            logits[mask, end_token_id] = 0.0
+
+        return logits
+
+
 def init_builtin_logitsprocs(pin_memory_available: bool, max_num_reqs: int,
-                             device: torch.device) -> LogitsProcessorManager:
+                             device: torch.device, reasoning_config: ReasoningConfig) -> LogitsProcessorManager:
     """Construct 'builtin' vLLM logitsprocs which the engine
     loads by default.
 
@@ -516,10 +622,16 @@ def init_builtin_logitsprocs(pin_memory_available: bool, max_num_reqs: int,
         device=device,
         # +1 for temporary swap space
         max_num_reqs=max_num_reqs + 1)
+    max_think_tokens_logitproc = MaxThinkTokensLogitsProcessor(
+        reasoning_config=reasoning_config,
+        pin_memory=pin_memory_available,
+        device=device,
+    )
     return LogitsProcessorManager(
         non_argmax_invariant=[
             min_tokens_logitproc,
             logit_bias_logitproc,
+            max_think_tokens_logitproc
         ],
         argmax_invariant=[min_p_logitproc],
     )
