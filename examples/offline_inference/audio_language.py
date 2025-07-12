@@ -40,6 +40,25 @@ class ModelRequestData(NamedTuple):
 # Unless specified, these settings have been tested to work on a single L4.
 
 
+# Gemma3N
+def run_gemma3n(question: str, audio_count: int) -> ModelRequestData:
+    model_name = "google/gemma-3n-E2B-it"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=2048,
+        max_num_seqs=2,
+        limit_mm_per_prompt={"audio": audio_count},
+        enforce_eager=True,
+    )
+
+    prompt = f"<audio_soft_token>{question}"
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+    )
+
+
 # Granite Speech
 def run_granite_speech(question: str, audio_count: int) -> ModelRequestData:
     # NOTE - the setting in this example are somehat different than what is
@@ -243,6 +262,7 @@ def run_whisper(question: str, audio_count: int) -> ModelRequestData:
 
 
 model_example_map = {
+    "gemma3n": run_gemma3n,
     "granite_speech": run_granite_speech,
     "minicpmo": run_minicpmo,
     "phi4_mm": run_phi4mm,
