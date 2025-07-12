@@ -497,7 +497,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
         self.flashinfer_moe_enabled = False
         if (envs.VLLM_USE_FLASHINFER_MOE_FP8
-            and find_spec("flashinfer.fused_moe") is not None):
+                and find_spec("flashinfer.fused_moe") is not None):
             logger.info_once(
                 "Using FlashInfer MoE FP8 kernels for Fp8MoEMethod.")
             self.flashinfer_moe_enabled = True
