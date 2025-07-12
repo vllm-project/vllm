@@ -91,7 +91,7 @@ logger = init_logger(__name__)
 ConfigT = TypeVar("ConfigT", bound=ConfigType)
 
 TaskOption = Literal["auto", "generate", "embedding", "embed", "classify",
-                     "score", "reward", "transcription"]
+                     "score", "reward", "transcription", "draft"]
 
 _ResolvedTask = Literal["generate", "transcription", "pooling", "embed",
                         "classify", "reward", "draft"]
