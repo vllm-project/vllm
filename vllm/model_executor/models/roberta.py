@@ -13,9 +13,9 @@ from vllm.config import VllmConfig
 from vllm.model_executor.layers.pooler import ClassifierPooler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.bert import BertEmbeddingModel, BertModel
-from vllm.model_executor.models.utils import WeightsMapper, maybe_prefix
+from vllm.model_executor.models.utils import (AutoWeightsLoader, WeightsMapper,
+                                              maybe_prefix)
 from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.sequence import IntermediateTensors, PoolerOutput
 
@@ -136,16 +136,20 @@ class RobertaEmbeddingModel(BertEmbeddingModel):
                              embedding_class=RobertaEmbedding)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-        weights = self.hf_to_vllm_mapper.apply(weights)
-        # Separate weights in "roberta"-prefixed and all else (not in memory).
-        # For use with models like FacebookAI/roberta-base.
-        bert_weights, task_weights = roberta_task_weights_filter(weights)
-        loaded = self.model.load_weights(bert_weights)
-        if not len(loaded):
-            # Fix for models like `sentence-transformers/stsb-roberta-base-v2`
-            # which use the same architecture, but have no "roberta" prefix.
-            loaded = self.model.load_weights(task_weights)
-        assert len(loaded), "Unable to load RobertaEmbeddingModel"
+        weights_list = list(weights)
+        has_roberta_prefix = any(
+            name.startswith("roberta.") for name, _ in weights_list)
+        if has_roberta_prefix:
+            # For models with the `roberta.` prefix e.g.
+            # `FacebookAI/roberta-base`
+            mapper = WeightsMapper(orig_to_new_prefix={"roberta.": "model."})
+        else:
+            # For models without the `roberta.` prefix e.g.
+            # `sentence-transformers/stsb-roberta-base-v2`
+            mapper = WeightsMapper(orig_to_new_prefix={"": "model."})
+
+        loader = AutoWeightsLoader(self, skip_prefixes=["lm_head."])
+        return loader.load_weights(weights_list, mapper=mapper)
 
 
 class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding,
@@ -187,19 +191,8 @@ class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding,
                                         self.classifier)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-        bert_weights, task_weights = roberta_task_weights_filter(weights)
-        bert_weights = self.jina_to_vllm_mapper.apply(bert_weights)
-
-        self.roberta.load_weights(bert_weights)
-
-        params_dict = dict(self.named_parameters())
-
-        for name, loaded_weight in task_weights:
-            if name.startswith("classifier"):
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
-                weight_loader(param, loaded_weight)
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.jina_to_vllm_mapper)
 
     def pooler(
         self,
