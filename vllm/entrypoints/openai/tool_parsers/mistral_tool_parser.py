@@ -88,7 +88,8 @@ class MistralToolParser(ToolParser):
 
         # Core streaming state
         self.raw_tool_calls: str = ""
-        self.streaming_state: StreamingState = StreamingState.WAITING_FOR_TOOL_START
+        self.streaming_state: StreamingState = \
+        	StreamingState.WAITING_FOR_TOOL_START
 
         # Tool tracking
         self.current_tool_id: int = -1
