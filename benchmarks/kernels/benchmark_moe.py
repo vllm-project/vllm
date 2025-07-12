@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import os
 import time
 from contextlib import nullcontext
 from datetime import datetime
@@ -44,9 +45,16 @@ def benchmark_config(
     num_iters: int = 100,
     block_quant_shape: list[int] = None,
     use_deep_gemm: bool = False,
+    enable_expert_parallel: bool = False,
+    ep_size: int = 1,
 ) -> float:
     init_dtype = torch.float16 if use_fp8_w8a8 else dtype
     x = torch.randn(num_tokens, hidden_size, dtype=dtype)
+    
+    # For expert parallel, only create weights for local experts
+    if enable_expert_parallel:
+        num_experts = num_experts // ep_size
+    
     if use_int8_w8a16:
         w1 = torch.randint(
             -127,
@@ -383,10 +391,22 @@ def merge_unique_dicts(list1, list2):
 
 @ray.remote(num_gpus=1)
 class BenchmarkWorker:
-    def __init__(self, seed: int) -> None:
+    def __init__(
+        self,
+        seed: int,
+        enable_expert_parallel: bool = False,
+        worker_id: int = 0,
+        total_workers: int = 1,
+    ) -> None:
         torch.set_default_device("cuda")
         current_platform.seed_everything(seed)
         self.seed = seed
+        self.enable_expert_parallel = enable_expert_parallel
+        self.worker_id = worker_id
+        self.total_workers = total_workers
+        # For EP, use worker_id as ep_rank and total_workers as ep_size
+        self.ep_rank = worker_id if enable_expert_parallel else 0
+        self.ep_size = total_workers if enable_expert_parallel else 1
         # Get the device ID to allocate tensors and kernels
         # on the respective GPU. This is required for Ray to work
         # correctly with multi-GPU tuning on the ROCm platform.
@@ -439,6 +459,8 @@ class BenchmarkWorker:
             num_iters=100,
             block_quant_shape=block_quant_shape,
             use_deep_gemm=use_deep_gemm,
+            enable_expert_parallel=self.enable_expert_parallel,
+            ep_size=self.ep_size,
         )
         return config, kernel_time
 
@@ -491,6 +513,8 @@ class BenchmarkWorker:
                         num_iters=20,
                         block_quant_shape=block_quant_shape,
                         use_deep_gemm=use_deep_gemm,
+                        enable_expert_parallel=self.enable_expert_parallel,
+                        ep_size=self.ep_size,
                     )
                 except triton.runtime.autotuner.OutOfResources:
                     # Some configurations may be invalid and fail to compile.
@@ -535,6 +559,8 @@ def save_configs(
     use_fp8_w8a8: bool,
     use_int8_w8a16: bool,
     block_quant_shape: list[int],
+    enable_expert_parallel: bool = False,
+    ep_size: int = 1,
 ) -> None:
     dtype_str = get_config_dtype_str(
         dtype, use_int8_w8a16=use_int8_w8a16, use_fp8_w8a8=use_fp8_w8a8
@@ -542,9 +568,17 @@ def save_configs(
 
     # NOTE(woosuk): The current naming convention uses w2.shape[2], which
     # is the intermediate size after silu_and_mul.
-    filename = get_config_file_name(
-        num_experts, shard_intermediate_size // 2, dtype_str, block_quant_shape
-    )
+    
+    if enable_expert_parallel:
+        # Expert parallel uses local expert count per device
+        local_num_experts = num_experts // ep_size
+        filename = get_config_file_name(
+            local_num_experts, shard_intermediate_size//2, dtype_str, block_quant_shape
+        )
+    else:
+        filename = get_config_file_name(
+            num_experts, shard_intermediate_size//2, dtype_str, block_quant_shape
+        )
 
     print(f"Writing best config to {filename}...")
     with open(filename, "w") as f:
@@ -570,22 +604,34 @@ def main(args: argparse.Namespace):
         E = config.ffn_config.moe_num_experts
         topk = config.ffn_config.moe_top_k
         intermediate_size = config.ffn_config.ffn_hidden_size
-        shard_intermediate_size = 2 * intermediate_size // args.tp_size
+        if args.enable_expert_parallel:
+            shard_intermediate_size = 2 * intermediate_size
+        else:
+            shard_intermediate_size = 2 * intermediate_size // args.tp_size
     elif config.architectures[0] == "JambaForCausalLM":
         E = config.num_experts
         topk = config.num_experts_per_tok
         intermediate_size = config.intermediate_size
-        shard_intermediate_size = 2 * intermediate_size // args.tp_size
+        if args.enable_expert_parallel:
+            shard_intermediate_size = 2 * intermediate_size
+        else:
+            shard_intermediate_size = 2 * intermediate_size // args.tp_size
     elif config.architectures[0] in ("DeepseekV3ForCausalLM", "DeepseekV2ForCausalLM"):
         E = config.n_routed_experts
         topk = config.num_experts_per_tok
         intermediate_size = config.moe_intermediate_size
-        shard_intermediate_size = 2 * intermediate_size // args.tp_size
+        if args.enable_expert_parallel:
+            shard_intermediate_size = 2 * intermediate_size
+        else:
+            shard_intermediate_size = 2 * intermediate_size // args.tp_size
     elif config.architectures[0] in ("Qwen2MoeForCausalLM", "Qwen3MoeForCausalLM"):
         E = config.num_experts
         topk = config.num_experts_per_tok
         intermediate_size = config.moe_intermediate_size
-        shard_intermediate_size = 2 * intermediate_size // args.tp_size
+        if args.enable_expert_parallel:
+            shard_intermediate_size = 2 * intermediate_size
+        else:
+            shard_intermediate_size = 2 * intermediate_size // args.tp_size
     else:
         # Support for llama4
         config = config.get_text_config()
@@ -593,7 +639,10 @@ def main(args: argparse.Namespace):
         E = config.num_local_experts
         topk = config.num_experts_per_tok
         intermediate_size = config.intermediate_size
-        shard_intermediate_size = 2 * intermediate_size // args.tp_size
+        if args.enable_expert_parallel:
+            shard_intermediate_size = 2 * intermediate_size
+        else:
+            shard_intermediate_size = 2 * intermediate_size // args.tp_size
 
     hidden_size = config.hidden_size
     dtype = torch.float16 if current_platform.is_rocm() else config.torch_dtype
@@ -639,7 +688,25 @@ def main(args: argparse.Namespace):
 
     ray.init()
     num_gpus = int(ray.available_resources()["GPU"])
-    workers = [BenchmarkWorker.remote(args.seed) for _ in range(num_gpus)]
+
+    if args.enable_expert_parallel:
+        if args.tp_size != num_gpus:
+            raise ValueError(
+                "When running with --enable-expert-parallel, the specified "
+                "--tp-size must be equal to the number of available GPUs. "
+                f"Got --tp-size={args.tp_size} and {num_gpus} GPUs.\n"
+                "To tune for a specific number of GPUs for expert parallel, "
+                "please restrict the visible devices using the CUDA_VISIBLE_DEVICES"
+            )
+        if args.tp_size < 2:
+            raise ValueError("Expert parallel requires tensor parallel size >= 2")
+
+    workers = [BenchmarkWorker.remote(
+        args.seed, 
+        args.enable_expert_parallel,
+        worker_id=i,
+        total_workers=num_gpus
+    ) for i in range(num_gpus)]
 
     def _distribute(method: str, inputs: list[Any]) -> list[Any]:
         outputs = []
@@ -690,6 +757,8 @@ def main(args: argparse.Namespace):
             use_fp8_w8a8,
             use_int8_w8a16,
             block_quant_shape,
+            args.enable_expert_parallel,
+            args.tp_size,
         )
         end = time.time()
         print(f"Tuning took {end - start:.2f} seconds")
@@ -735,6 +804,7 @@ if __name__ == "__main__":
     parser.add_argument("--tune", action="store_true")
     parser.add_argument("--trust-remote-code", action="store_true")
     parser.add_argument("--model-prefix", type=str, required=False)
+    parser.add_argument("--enable-expert-parallel", action="store_true")
     args = parser.parse_args()
 
     main(args)
