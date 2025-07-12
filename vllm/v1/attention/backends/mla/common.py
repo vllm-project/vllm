@@ -953,6 +953,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                                           chunk_idx: int, q, k, v):
         from flashinfer.prefill import cudnn_batch_prefill_with_kv_cache
         
+        assert prefill.chunked_context is not None
         return cudnn_batch_prefill_with_kv_cache(
             q=q,
             k_cache=k,
