@@ -5,11 +5,14 @@ from collections.abc import Iterable, MutableSequence
 from typing import (TYPE_CHECKING, ClassVar, Literal, Optional, Protocol,
                     Union, overload, runtime_checkable)
 
+import numpy as np
 import torch
 from torch import Tensor
 from typing_extensions import Self, TypeIs
 
+from vllm.config import ModelConfig, SpeechToTextConfig
 from vllm.inputs import TokensPrompt
+from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
@@ -692,15 +695,38 @@ class SupportsTranscription(Protocol):
     supports_transcription: ClassVar[Literal[True]] = True
 
     @classmethod
-    def get_decoder_prompt(cls, language: str, task_type: str,
-                           prompt: str) -> str:
-        """Get the decoder prompt for the ASR model."""
+    def get_generation_prompt(cls, audio: np.ndarray,
+                              stt_config: SpeechToTextConfig, language: str,
+                              task_type: str,
+                              request_prompt: str) -> PromptType:
+        """Get the prompt for the ASR model.
+        The model has control over the construction, as long as it
+        returns a valid PromptType."""
         ...
 
     @classmethod
     def validate_language(cls, language: str) -> bool:
         """Check if the model supports a specific ISO639_1 language."""
         ...
+
+    @classmethod
+    def get_speech_to_text_config(
+            cls, model_config: ModelConfig,
+            task_type: Literal["transcribe",
+                               "translate"]) -> SpeechToTextConfig:
+        """Get the speech to text config for the ASR model."""
+        ...
+
+    @classmethod
+    def get_num_audio_tokens(cls, audio_duration_s: float,
+                             stt_config: SpeechToTextConfig,
+                             model_config: ModelConfig) -> Optional[int]:
+        """
+        Map from audio duration to number of audio tokens produced by the ASR 
+        model, without running a forward pass.
+        This is used for estimating the amount of processing for this audio.
+        """
+        return None
 
 
 @overload
