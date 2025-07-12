@@ -117,6 +117,15 @@ For additional features and advanced configurations, refer to the official [MkDo
     pytest -s -v tests/test_logger.py
     ```
 
+!!! note
+    If you encounter errors installing torch (PyTorch) with the above command, you may need to specify an extra index URL for the torch wheels. For example:
+
+    ```bash
+    pip install --extra-index-url https://download.pytorch.org/whl/cu128 -r requirements/dev.txt
+    ```
+
+    Replace `cu128` with the appropriate CUDA version for your system. See [PyTorch Get Started](https://pytorch.org/get-started/locally/) for the correct URL and version.
+
 !!! tip
     Since the <gh-file:docker/Dockerfile> ships with Python 3.12, all tests in CI (except `mypy`) are run with Python 3.12.
 
