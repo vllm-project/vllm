@@ -111,7 +111,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         # topk_indices_dtype() int32
         #
         if expert_map is not None:
-            logger.warn_once(
+            logger.warning_once(
                 "The PPLX backend does not support expert mapping. "
                 "The provided `expert_map` will be ignored.")
         expert_map = None  #noqa: F841
