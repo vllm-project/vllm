@@ -2377,7 +2377,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     skip_eplb=True)
             self._dummy_run(num_tokens,
                             cudagraph_runtime_style=cudagraph_runtime_style,
-                            is_pure_decode=False,
+                            is_pure_decode=is_pure_decode,
                             skip_eplb=True)
 
     def initialize_attn_backend(self, kv_cache_config: KVCacheConfig) -> None:
