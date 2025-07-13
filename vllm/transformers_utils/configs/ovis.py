@@ -103,9 +103,11 @@ class BaseVisualTokenizerConfig(PretrainedConfig):
                 f"expect `backbone_config` to be instance of PretrainedConfig or dict, but got {type(backbone_config)} type"
             if not isinstance(backbone_config, PretrainedConfig):
                 model_type = backbone_config['model_type']
-                backbone_config.pop('model_type')
-                config_factory = AutoConfig if model_type != "aimv2" else AIMv2Config
-                backbone_config = config_factory.for_model(model_type, **backbone_config)
+                if model_type != "aimv2":
+                    backbone_config.pop('model_type')
+                    backbone_config = AutoConfig.for_model(model_type, **backbone_config)
+                else:
+                    backbone_config = AIMv2Config(**backbone_config)
         self.backbone_config = backbone_config
         self.hidden_stride = hidden_stride
 
