@@ -29,8 +29,7 @@ from vllm.v1.engine.coordinator import DPCoordinator
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
 from vllm.v1.engine.exceptions import EngineDeadError
 from vllm.v1.engine.utils import (CoreEngineActorManager,
-                                  CoreEngineProcManager, EngineZmqAddresses,
-                                  launch_core_engines)
+                                  CoreEngineProcManager, launch_core_engines)
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder, bytestr
 
@@ -94,8 +93,6 @@ class EngineCoreClient(ABC):
                 # External load balancer - client per DP rank.
                 return DPAsyncMPClient(*client_args)
             # Internal load balancer - client balances to all DP ranks.
-            if parallel_config.data_parallel_backend == "ray":
-                return RayDPClient(*client_args)
             return DPLBAsyncMPClient(*client_args)
         return AsyncMPClient(*client_args)
 
@@ -164,6 +161,12 @@ class EngineCoreClient(ABC):
     def dp_engines_running(self) -> bool:
         """Returns True id data parallel engines are collectively in a
         running state."""
+        raise NotImplementedError
+
+    async def scale_up(self, new_data_parallel_size: int) -> None:
+        raise NotImplementedError
+
+    async def scale_down(self, new_data_parallel_size: int) -> None:
         raise NotImplementedError
 
     async def get_output_async(self) -> EngineCoreOutputs:
@@ -1066,53 +1069,6 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                               engine: EngineIdentity) -> None:
         await self._send_input(EngineCoreRequestType.ABORT, request_ids,
                                engine)
-
-
-class RayDPClient(DPAsyncMPClient):
-    """
-    Ray-based client for multi-proc, multi-engine (data parallel)
-    EngineCore.
-    """
-
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        executor_class: type[Executor],
-        log_stats: bool,
-        client_addresses: Optional[dict[str, str]] = None,
-        client_index: int = 0,
-    ):
-        super().__init__(vllm_config, executor_class, log_stats,
-                         client_addresses, client_index)
-
-    def _init_engines_direct(self, vllm_config: VllmConfig, local_only: bool,
-                             local_start_index: int, input_address: str,
-                             output_address: str,
-                             executor_class: type[Executor], log_stats: bool):
-        """Self-contained client mode, launch engine and coordinator process
-        as needed."""
-
-        parallel_config = vllm_config.parallel_config
-        assert parallel_config.data_parallel_rank == 0
-        assert local_start_index == 0
-
-        addresses = EngineZmqAddresses(
-            inputs=[input_address],
-            outputs=[output_address],
-        )
-
-        if len(self.core_engines) > 1:
-            coordinator = DPCoordinator(parallel_config)
-            self.resources.coordinator = coordinator
-            addresses.coordinator_input, addresses.coordinator_output = (
-                coordinator.get_engine_socket_addresses())
-
-        # Start all engines.
-        self.resources.engine_manager = (CoreEngineActorManager(
-            vllm_config=vllm_config,
-            addresses=addresses,
-            executor_class=executor_class,
-            log_stats=log_stats))
 
     async def _send_reconfig_message(
             self, reconfig_request: ReconfigureDistributedRequest,

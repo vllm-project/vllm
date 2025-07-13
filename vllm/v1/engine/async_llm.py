@@ -636,12 +636,6 @@ class AsyncLLM(EngineClient):
             drain_timeout:
                 Maximum time to wait for requests to drain (seconds)
         """
-        from vllm.v1.engine.core_client import RayDPClient
-
-        if not isinstance(self.engine_core, RayDPClient):
-            raise NotImplementedError(
-                "Scale up/down only supported by RayDPClient")
-
         self.scaling = True
         old_data_parallel_size = \
             self.vllm_config.parallel_config.data_parallel_size
