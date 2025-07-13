@@ -41,7 +41,7 @@ class ToolParser:
 
     def adjust_request(
         self, request: Union[ChatCompletionRequest, ResponsesRequest]
-    ) -> ChatCompletionRequest:
+    ) -> Union[ChatCompletionRequest, ResponsesRequest]:
         """
         Static method that used to adjust the request parameters.
         """
@@ -69,7 +69,7 @@ class ToolParser:
         previous_token_ids: Sequence[int],
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
-        request: Union[ChatCompletionRequest, ResponsesRequest],
+        request: ChatCompletionRequest,
     ) -> Union[DeltaMessage, None]:
         """
         Instance method that should be implemented for extracting tool calls

@@ -303,7 +303,8 @@ class OpenAIServingResponses(OpenAIServing):
         assert final_res is not None
         assert len(final_res.outputs) == 1
         final_output = final_res.outputs[0]
-
+        print("-"*70)
+        print(f"Final output: {final_output}")
         if self.reasoning_parser:
             try:
                 reasoning_parser = self.reasoning_parser(tokenizer)
@@ -463,7 +464,28 @@ class OpenAIServingResponses(OpenAIServing):
         if isinstance(request.input, str):
             messages.append({"role": "user", "content": request.input})
         else:
-            messages.extend(request.input)  # type: ignore
+            for item in request.input:
+                if item.get("type") == "function_call":
+                    messages.append({
+                        "role":
+                        "assistant",
+                        "tool_calls": [{
+                            "id": item.get("call_id"),
+                            "function": {
+                                "name": item.get("name"),
+                                "arguments": item.get("arguments", "{}"),
+                            },
+                            "type": "function",
+                        }]
+                    })
+                elif item.get("type") == "function_call_output":
+                    messages.append({
+                        "role": "tool",
+                        "content": item.get("output", ""),
+                        "tool_call_id": item.get("call_id"),
+                    })
+                else:
+                    messages.append(item)  # type: ignore
         return messages
 
     async def _run_background_request(
