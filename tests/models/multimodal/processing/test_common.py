@@ -159,6 +159,7 @@ def _test_processing_correctness(
 _ADD_SPECIAL_TOKENS_OVERRIDES = {
     "mllama": False,
     "ovis": False,
+    "paligemma": False,
     "ultravox": False,
     "whisper": False,
 }

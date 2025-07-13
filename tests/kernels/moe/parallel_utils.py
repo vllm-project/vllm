@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 DeepEP test utilities
 """
 import dataclasses
-import importlib
 import os
 import traceback
 from typing import Callable, Optional
@@ -14,10 +14,9 @@ from torch.multiprocessing import (
     spawn)  # pyright: ignore[reportPrivateImportUsage]
 from typing_extensions import Concatenate, ParamSpec
 
-from vllm.utils import get_open_port
+from vllm.utils import get_open_port, has_deep_ep
 
-has_deep_ep = importlib.util.find_spec("deep_ep") is not None
-if has_deep_ep:
+if has_deep_ep():
     from vllm.model_executor.layers.fused_moe.deepep_ht_prepare_finalize import (  # noqa: E501
         DeepEPHTPrepareAndFinalize)
     from vllm.model_executor.layers.fused_moe.deepep_ll_prepare_finalize import (  # noqa: E501
@@ -137,8 +136,7 @@ def make_deepep_ht_a2a(pg: ProcessGroup,
                             low_latency_mode=low_latency_mode,
                             num_qps_per_rank=num_qps_per_rank)
     return DeepEPHTPrepareAndFinalize(buffer=buffer,
-                                      world_size=pgi.world_size,
-                                      rank=pgi.rank,
+                                      num_dispatchers=pgi.world_size,
                                       dp_size=dp_size,
                                       rank_expert_offset=pgi.rank *
                                       ht_args.num_local_experts)
@@ -146,7 +144,6 @@ def make_deepep_ht_a2a(pg: ProcessGroup,
 
 def make_deepep_ll_a2a(pg: ProcessGroup,
                        pgi: ProcessGroupInfo,
-                       dp_size: int,
                        deepep_ll_args: DeepEPLLArgs,
                        q_dtype: Optional[torch.dtype] = None,
                        block_shape: Optional[list[int]] = None):
@@ -166,8 +163,7 @@ def make_deepep_ll_a2a(pg: ProcessGroup,
 
     return DeepEPLLPrepareAndFinalize(
         buffer=buffer,
-        world_size=pgi.world_size,
-        dp_size=dp_size,
+        num_dispatchers=pgi.world_size,
         max_tokens_per_rank=deepep_ll_args.max_tokens_per_rank,
         use_fp8_dispatch=deepep_ll_args.use_fp8_dispatch,
     )
@@ -186,5 +182,4 @@ def make_deepep_a2a(pg: ProcessGroup,
                                   block_shape)
 
     assert deepep_ll_args is not None
-    return make_deepep_ll_a2a(pg, pgi, dp_size, deepep_ll_args, q_dtype,
-                              block_shape)
+    return make_deepep_ll_a2a(pg, pgi, deepep_ll_args, q_dtype, block_shape)

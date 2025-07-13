@@ -59,11 +59,12 @@ class LogitsProcessor(nn.Module):
         hidden_states: torch.Tensor,
         sampling_metadata: Optional[SamplingMetadata] = None,
         embedding_bias: Optional[torch.Tensor] = None,
+        prune_hidden_states: bool = True,
     ) -> Optional[torch.Tensor]:
         if self.logits_as_input:
             logits = hidden_states
         else:
-            if sampling_metadata is not None:
+            if sampling_metadata is not None and prune_hidden_states:
                 hidden_states = _prune_hidden_states(hidden_states,
                                                      sampling_metadata)
 
