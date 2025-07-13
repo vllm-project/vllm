@@ -194,6 +194,8 @@ class P2pNcclEngine:
         tensor_id: str,
         tensor: torch.Tensor,
         remote_address: typing.Optional[str] = None,
+        slot_mapping: torch.Tensor = None,
+        is_mla: Boolean = False,
     ) -> bool:
         if remote_address is None:
             with self.recv_store_cv:
@@ -202,10 +204,10 @@ class P2pNcclEngine:
             return True
         else:
             if self.send_type == "PUT":
-                return self._send_sync(tensor_id, tensor, remote_address)
+                return self._send_sync(tensor_id, tensor, remote_address, slot_mapping, is_mla)
             elif self.send_type == "PUT_ASYNC":
                 with self.send_queue_cv:
-                    self.send_queue.append([tensor_id, remote_address, tensor])
+                    self.send_queue.append([tensor_id, remote_address, tensor, slot_mapping, is_mla])
                     self.send_queue_cv.notify()
             else:  # GET
                 with self.send_store_cv:
@@ -393,10 +395,10 @@ class P2pNcclEngine:
             with self.send_queue_cv:
                 while not self.send_queue:
                     self.send_queue_cv.wait()
-                tensor_id, remote_address, tensor = self.send_queue.popleft()
+                tensor_id, remote_address, tensor, slot_mapping, is_mla = self.send_queue.popleft()
                 if not self.send_queue:
                     self.send_queue_cv.notify()
-            self._send_sync(tensor_id, tensor, remote_address)
+            self._send_sync(tensor_id, tensor, remote_address, slot_mapping, is_mla)
 
     def wait_for_sent(self):
         if self.send_type == "PUT_ASYNC":
@@ -414,11 +416,16 @@ class P2pNcclEngine:
         tensor_id: str,
         tensor: torch.Tensor,
         remote_address: typing.Optional[str] = None,
+        slot_mapping: torch.Tensor = None,
+        is_mla: Boolean = False,
     ) -> bool:
         if remote_address is None:
             return False
         if remote_address not in self.socks:
             self._create_connect(remote_address)
+
+        with self.send_stream:
+            tensor = self.extract_kv_from_layer(is_mla, tensor, slot_mapping)
 
         sock = self.socks[remote_address]
         comm, rank = self.comms[remote_address]
@@ -531,3 +538,21 @@ class P2pNcclEngine:
             self._send_thread.join()
         if self._ping_thread is not None:
             self._ping_thread.join()
+
+    @staticmethod
+    def extract_kv_from_layer(
+            self,
+            is_mla: Boolean,
+            layer: torch.Tensor,
+            slot_mapping: torch.Tensor,
+    ) -> torch.Tensor:
+        """Extract the KV cache from the layer.
+        Assume the shape of the layer is (2, num_pages, page_size, xxx)
+        if MLA is not used, and (num_pages, page_size, xxx) otherwise.
+        """
+        if is_mla:
+            num_pages, page_size = layer.shape[0], layer.shape[1]
+            return layer.reshape(num_pages * page_size, -1)[slot_mapping, ...]
+
+        num_pages, page_size = layer.shape[1], layer.shape[2]
+        return layer.reshape(2, num_pages * page_size, -1)[:, slot_mapping, ...]
