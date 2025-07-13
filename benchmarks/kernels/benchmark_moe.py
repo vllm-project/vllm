@@ -24,16 +24,16 @@ from vllm.utils import FlexibleArgumentParser, get_open_port
 FP8_DTYPE = current_platform.fp8_dtype()
 
 
-def build_expert_map(global_num_experts: int, 
-                    ep_size: int,
-                    ep_rank: int) -> tuple[int, torch.Tensor]:
+def build_expert_map(
+    global_num_experts: int, ep_size: int, ep_rank: int
+) -> tuple[int, torch.Tensor]:
     """Build expert map for expert parallel. Returns (local_num_experts, expert_map)."""
     # Calculate base number of experts per rank
     base_experts = global_num_experts // ep_size
-    
+
     # Create expert map
     expert_map = torch.full((global_num_experts,), -1, dtype=torch.int32)
-    
+
     if ep_rank < (ep_size - 1):
         # Non-last ranks get base number of experts
         local_num_experts = base_experts
@@ -45,7 +45,7 @@ def build_expert_map(global_num_experts: int,
         start = ep_rank * base_experts
         local_num_experts = global_num_experts - start
         expert_map[start:] = torch.arange(local_num_experts, dtype=torch.int32)
-    
+
     return local_num_experts, expert_map.cuda()
 
 
@@ -77,16 +77,17 @@ def benchmark_config(
 ) -> float:
     init_dtype = torch.float16 if use_fp8_w8a8 else dtype
     x = torch.randn(num_tokens, hidden_size, dtype=dtype)
-    
+
     # For expert parallel, calculate local and global expert counts
     global_num_experts = num_experts
     if enable_expert_parallel:
         local_num_experts, expert_map = build_expert_map(
-            global_num_experts, ep_size, ep_rank)
+            global_num_experts, ep_size, ep_rank
+        )
     else:
         local_num_experts = num_experts
         expert_map = None
-    
+
     if use_int8_w8a16:
         w1 = torch.randint(
             -127,
@@ -110,16 +111,18 @@ def benchmark_config(
         )
     else:
         w1 = torch.randn(
-            local_num_experts, shard_intermediate_size, hidden_size,
-            dtype=init_dtype
+            local_num_experts, shard_intermediate_size, hidden_size, dtype=init_dtype
         )
         w2 = torch.randn(
-            local_num_experts, hidden_size, shard_intermediate_size // 2,
-            dtype=init_dtype
+            local_num_experts,
+            hidden_size,
+            shard_intermediate_size // 2,
+            dtype=init_dtype,
         )
     # Gating output uses global number of experts
     gating_output = torch.randn(
-        num_iters, num_tokens, global_num_experts, dtype=torch.float32)
+        num_iters, num_tokens, global_num_experts, dtype=torch.float32
+    )
 
     w1_scale = None
     w2_scale = None
@@ -432,11 +435,11 @@ def merge_unique_dicts(list1, list2):
 @ray.remote(num_gpus=1)
 class BenchmarkWorker:
     def __init__(
-        self, 
-        seed: int, 
-        enable_expert_parallel: bool, 
-        worker_id: int, 
-        total_workers: int
+        self,
+        seed: int,
+        enable_expert_parallel: bool,
+        worker_id: int,
+        total_workers: int,
     ) -> None:
         torch.set_default_device("cuda")
         current_platform.seed_everything(seed)
@@ -460,21 +463,19 @@ class BenchmarkWorker:
         """Initialize torch.distributed for expert parallel."""
         if self.distributed_initialized:
             return
-        
-        os.environ['MASTER_ADDR'] = master_addr
-        os.environ['MASTER_PORT'] = str(master_port)
-        os.environ['RANK'] = str(self.worker_id)
-        os.environ['WORLD_SIZE'] = str(self.total_workers)
-        
+
+        os.environ["MASTER_ADDR"] = master_addr
+        os.environ["MASTER_PORT"] = str(master_port)
+        os.environ["RANK"] = str(self.worker_id)
+        os.environ["WORLD_SIZE"] = str(self.total_workers)
+
         if not dist.is_initialized():
             dist.init_process_group(
-                backend='nccl',
-                world_size=self.total_workers,
-                rank=self.worker_id
+                backend="nccl", world_size=self.total_workers, rank=self.worker_id
             )
-        
+
         self.distributed_initialized = True
-        
+
         # Set device using local device ID
         # Ray workers see their assigned GPU as device 0
         if torch.cuda.is_available() and torch.cuda.device_count() > 0:
@@ -482,8 +483,7 @@ class BenchmarkWorker:
 
     def get_node_ip(self) -> str:
         """Get the IP address of this worker node."""
-        import socket
-        return socket.gethostbyname(socket.gethostname())
+        return ray.util.get_node_ip_address()
 
     def benchmark(
         self,
@@ -634,6 +634,8 @@ def save_configs(
     use_fp8_w8a8: bool,
     use_int8_w8a16: bool,
     block_quant_shape: list[int],
+    enable_expert_parallel: bool = False,
+    ep_size: int = 1,
 ) -> None:
     dtype_str = get_config_dtype_str(
         dtype, use_int8_w8a16=use_int8_w8a16, use_fp8_w8a8=use_fp8_w8a8
@@ -641,12 +643,23 @@ def save_configs(
 
     # NOTE(woosuk): The current naming convention uses w2.shape[2], which
     # is the intermediate size after silu_and_mul.
-    filename = get_config_file_name(
-        num_experts, shard_intermediate_size // 2, dtype_str, block_quant_shape
-    )
+
+    # vLLM uses local expert count in filename when EP is enabled
+    if enable_expert_parallel:
+        local_num_experts = num_experts // ep_size
+        filename = get_config_file_name(
+            local_num_experts,
+            shard_intermediate_size // 2,
+            dtype_str,
+            block_quant_shape,
+        )
+    else:
+        filename = get_config_file_name(
+            num_experts, shard_intermediate_size // 2, dtype_str, block_quant_shape
+        )
 
     print(f"Writing best config to {filename}...")
-    
+
     with open(filename, "w") as f:
         json.dump(configs, f, indent=4)
         f.write("\n")
@@ -670,22 +683,18 @@ def main(args: argparse.Namespace):
         E = config.ffn_config.moe_num_experts
         topk = config.ffn_config.moe_top_k
         intermediate_size = config.ffn_config.ffn_hidden_size
-        shard_intermediate_size = 2 * intermediate_size // args.tp_size
     elif config.architectures[0] == "JambaForCausalLM":
         E = config.num_experts
         topk = config.num_experts_per_tok
         intermediate_size = config.intermediate_size
-        shard_intermediate_size = 2 * intermediate_size // args.tp_size
     elif config.architectures[0] in ("DeepseekV3ForCausalLM", "DeepseekV2ForCausalLM"):
         E = config.n_routed_experts
         topk = config.num_experts_per_tok
         intermediate_size = config.moe_intermediate_size
-        shard_intermediate_size = 2 * intermediate_size // args.tp_size
     elif config.architectures[0] in ("Qwen2MoeForCausalLM", "Qwen3MoeForCausalLM"):
         E = config.num_experts
         topk = config.num_experts_per_tok
         intermediate_size = config.moe_intermediate_size
-        shard_intermediate_size = 2 * intermediate_size // args.tp_size
     else:
         # Support for llama4
         config = config.get_text_config()
@@ -693,6 +702,11 @@ def main(args: argparse.Namespace):
         E = config.num_local_experts
         topk = config.num_experts_per_tok
         intermediate_size = config.intermediate_size
+
+    # Calculate shard_intermediate_size based on EP mode
+    if args.enable_expert_parallel:
+        shard_intermediate_size = 2 * intermediate_size
+    else:
         shard_intermediate_size = 2 * intermediate_size // args.tp_size
 
     hidden_size = config.hidden_size
@@ -750,32 +764,36 @@ def main(args: argparse.Namespace):
                 "please restrict the visible devices using the CUDA_VISIBLE_DEVICES"
             )
         if args.tp_size < 2:
-            raise ValueError("Expert parallel requires tensor parallel size >= 2")
+            raise ValueError(
+                f"Expert parallel benchmark requires at least 2 GPUs, "
+                f"but got --tp-size={args.tp_size}."
+            )
 
-    workers = [BenchmarkWorker.remote(
-        args.seed, 
-        args.enable_expert_parallel,
-        worker_id=i,
-        total_workers=num_gpus
-    ) for i in range(num_gpus)]
+    workers = [
+        BenchmarkWorker.remote(
+            args.seed, args.enable_expert_parallel, worker_id=i, total_workers=num_gpus
+        )
+        for i in range(num_gpus)
+    ]
 
     # Initialize distributed communication for expert parallel
     if args.enable_expert_parallel:
         # Get worker IPs to determine master
         worker_ips = ray.get([w.get_node_ip.remote() for w in workers])
-        
+
         # Use first worker's IP as master
         master_addr = worker_ips[0]
         master_port = get_open_port()
-        
+
         # Initialize distributed on all workers
         init_futures = [
-            w.init_distributed.remote(master_addr, master_port)
-            for w in workers
+            w.init_distributed.remote(master_addr, master_port) for w in workers
         ]
         ray.get(init_futures)
-        print(f"Initialized distributed environment with master at "
-              f"{master_addr}:{master_port}")
+        print(
+            f"Initialized distributed environment with master at "
+            f"{master_addr}:{master_port}"
+        )
 
     def _distribute(method: str, inputs: list[Any]) -> list[Any]:
         outputs = []
@@ -826,6 +844,8 @@ def main(args: argparse.Namespace):
             use_fp8_w8a8,
             use_int8_w8a16,
             block_quant_shape,
+            args.enable_expert_parallel,
+            args.tp_size,
         )
         end = time.time()
         print(f"Tuning took {end - start:.2f} seconds")
