@@ -284,6 +284,7 @@ class _ModelInfo:
     is_hybrid: bool
     has_noops: bool
     supports_transcription: bool
+    supports_transcription_only: bool
     supports_v0_only: bool
 
     @staticmethod
@@ -299,6 +300,8 @@ class _ModelInfo:
             is_attention_free=is_attention_free(model),
             is_hybrid=is_hybrid(model),
             supports_transcription=supports_transcription(model),
+            supports_transcription_only=(supports_transcription(model) and
+                                         model.supports_transcription_only),
             supports_v0_only=supports_v0_only(model),
             has_noops=has_noops(model),
         )
@@ -572,6 +575,13 @@ class _ModelRegistry:
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures)
         return model_cls.supports_transcription
+
+    def is_transcription_only_model(
+        self,
+        architectures: Union[str, list[str]],
+    ) -> bool:
+        model_cls, _ = self.inspect_model_cls(architectures)
+        return model_cls.supports_transcription_only
 
     def is_v1_compatible(
         self,
