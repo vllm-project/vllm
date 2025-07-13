@@ -526,10 +526,9 @@ class Platform:
         """
         Return the global graph pool for the this platform.
         """
-        global _global_graph_pool
-        if _global_graph_pool is None:
-            _global_graph_pool = self.graph_pool_handle()
-        return _global_graph_pool
+        if not hasattr(self, '_global_graph_pool'):
+            self._global_graph_pool = self.graph_pool_handle()
+        return self._global_graph_pool
 
     @classmethod
     def get_cu_count(cls, device_id: int = 0) -> int:

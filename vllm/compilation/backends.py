@@ -356,10 +356,10 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
                 # it from the FULL cudagraph runtime style, no matter it
                 # is wrapped on a full or piecewise fx graph.
                 self.module.__dict__[target] = static_graph_wrapper_class(
-                    piecewise_backend,
-                    self.vllm_config,
-                    CUDAGraphRuntimeStyle.PIECEWISE,
-                    self.graph_pool,
+                    runnable=piecewise_backend,
+                    vllm_config=self.vllm_config,
+                    runtime_style=CUDAGraphRuntimeStyle.PIECEWISE,
+                    graph_pool=self.graph_pool,
                     cudagraph_options=CUDAGraphOptions(
                         debug_log_enable=piecewise_backend.is_first_graph,
                         gc_disable=not piecewise_backend.is_first_graph,

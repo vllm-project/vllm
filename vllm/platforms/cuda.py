@@ -169,20 +169,19 @@ class CudaPlatformBase(Platform):
         # lazy import to avoid circular import
         from vllm.config import CUDAGraphMode
 
+        compilation_config = vllm_config.compilation_config
         if (envs.VLLM_ALL2ALL_BACKEND == "deepep_high_throughput"
                 and parallel_config.data_parallel_size > 1
-                and vllm_config.compilation_config.cudagraph_mode
-                != CUDAGraphMode.NONE):
+                and compilation_config.cudagraph_mode != CUDAGraphMode.NONE):
             logger.info(
                 "Data Parallel: Forcing enforce eager to be True since DP "
                 "with DeepEP high-throughput kernels are not CUDA Graph "
                 "compatible. The DeepEP low-latency kernels are CUDA Graph "
                 "compatible. Set the all_to_all backend to deepep_low_latency "
                 "to use those kernels instead.")
-
-            vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-            if vllm_config.model_config is not None:
-                vllm_config.model_config.enforce_eager = True
+            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+            if model_config is not None:
+                model_config.enforce_eager = True
 
             # TODO (varun): Turning this ON gives incorrect results for the
             # Deepseek-V2-lite model.

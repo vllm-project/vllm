@@ -472,8 +472,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         self._num_decodes, attn_metadata.max_seq_len,
                         attn_metadata.kv_data_type, attn_metadata.num_qo_heads,
                         attn_metadata.num_kv_heads, attn_metadata.head_dim):
-                # TODO: Override flashinfer's plan function to avoid some
-                # host-to-device copy overhead.
+                    # TODO: Override flashinfer's plan function to avoid some
+                    # host-to-device copy overhead.
                     attn_metadata.decode_wrapper.plan(
                         # NOTE: Use the persistent buffer with padding length,
                         # instead of the same address but chunked length buffers
@@ -629,7 +629,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             "FlashInfer only supports decode-only full CUDAGraph capture. " \
             "Make sure all cudagraph capture sizes <= max_num_seq."
 
-        m.max_query_len = 1  # decode-only
+        assert m.max_query_len == 1  # decode-only
 
         # Update state usually set in reorder_batch.
         self._num_decodes = m.num_reqs

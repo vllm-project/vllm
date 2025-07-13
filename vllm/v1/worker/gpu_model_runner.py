@@ -218,8 +218,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
 
         self.cudagraph_mode = self.compilation_config.cudagraph_mode
-        self.use_cuda_graph = (self.cudagraph_mode != CUDAGraphMode.NONE
-                               and not self.model_config.enforce_eager)
 
         # TODO(woosuk): Provide an option to tune the max cudagraph batch size.
         # The convention is different.
@@ -321,12 +319,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # We may disable capturing cudagraph for mixed batches when
         # no support (e.g., no piecewise compilation) or want only capturing
         # full cudagraph for pure decode batches.
-        self.capture_mixed_batches = True
+        self.capture_mixed_batches = self.cudagraph_mode != CUDAGraphMode.NONE
         self.no_compilation = self.compilation_config.level != \
             CompilationLevel.PIECEWISE or self.model_config.enforce_eager
 
         # Cudagraph dispatcher for runtime cudagraph dispatching.
-        self.cudagraph_dispatcher = CudagraphDispatcher(self, self.vllm_config)
+        self.cudagraph_dispatcher = CudagraphDispatcher(self.vllm_config)
 
     def _may_reorder_batch(self, scheduler_output: "SchedulerOutput") -> None:
         """
@@ -1301,9 +1299,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
          spec_decode_metadata,
          num_scheduled_tokens_np) = (self._prepare_inputs(scheduler_output))
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
-        if (self.use_cuda_graph
+        if (self.cudagraph_mode != CUDAGraphMode.NONE
                 and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]):
-            # Use piecewise CUDA graphs.
+            # Use CUDA graphs.
             # Add padding to the batch size.
             num_input_tokens = self.vllm_config.pad_for_cudagraph(
                 num_scheduled_tokens)
@@ -1792,7 +1790,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.parallel_config,
             )
         # immediately initialize the dispatcher for profile run
-        self.cudagraph_dispatcher.after_load_model()
+        self.cudagraph_dispatcher.after_load_model(self.model)
 
     def save_tensorized_model(
         self,
@@ -2286,11 +2284,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         gc.collect()
 
     def capture_model(self) -> None:
-        if not self.use_cuda_graph:
+        if self.cudagraph_mode == CUDAGraphMode.NONE:
             logger.warning(
                 "Skipping CUDA graph capture. To turn on CUDA graph capture, "
-                "ensure `cudagraph_mode` was not manually set to %s",
-                CUDAGraphMode.NONE)
+                "ensure `cudagraph_mode` was not manually set to `NONE`")
             return
 
         compilation_counter.num_gpu_runner_capture_triggers += 1
@@ -2322,34 +2319,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     and len(self.cudagraph_batch_sizes) > 0 \
                     and self.cudagraph_batch_sizes[0] == 1:
                     start_idx = 1
-
-                # We skip EPLB here since we don't want to record dummy metrics
-
-                # Only rank 0 should print progress bar during capture
-                compilation_cases = reversed(
-                    self.cudagraph_batch_sizes[start_idx:])
-                if is_global_first_rank():
-                    compilation_cases = tqdm(
-                        list(compilation_cases),
-                        disable=not self.load_config.use_tqdm_on_load,
-                        desc="Capturing CUDA graphs (mix prefill-decode)")
-                for num_tokens in compilation_cases:
-                    for _ in range(
-                            self.compilation_config.cudagraph_num_of_warmups):
-                        # Use CUDAGraphRuntimeStyle.NONE (default) for warmup.
-                        # But be careful, warm up with `NONE`is orthogonal to
-                        # if we want to warm up attention or not. This is
-                        # different from the case where `FULL` implies capture
-                        # attention while `PIECEWISE` implies no attention.
-                        self._dummy_run(num_tokens,
-                                        is_pure_decode=False,
-                                        force_attention=attn_cuda_graphs,
-                                        skip_eplb=True)
-                    self._dummy_run(
-                        num_tokens,
-                        cudagraph_runtime_style=cudagraph_runtime_style,
-                        is_pure_decode=False,
-                        skip_eplb=True)
+                compilation_cases = list(
+                    reversed(self.cudagraph_batch_sizes[start_idx:]))
+                self._capture_cudagraphs(
+                    compilation_cases,
+                    cudagraph_runtime_style=cudagraph_runtime_style,
+                    is_pure_decode=False)
 
             if self.compilation_config.separate_attention_routine:
                 # Capture full cudagraph for pure decode.
@@ -2359,27 +2334,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 decode_cudagraph_batch_sizes = [
                     x for x in self.cudagraph_batch_sizes if x <= max_num_reqs
                 ]
-                compilation_cases_decode = reversed(
-                    decode_cudagraph_batch_sizes)
-                if is_global_first_rank():
-                    compilation_cases_decode = tqdm(
-                        list(compilation_cases_decode),
-                        disable=not self.load_config.use_tqdm_on_load,
-                        desc="Capturing CUDA graphs (pure decode)")
-
-                for num_tokens in compilation_cases_decode:
-                    for _ in range(
-                            self.compilation_config.cudagraph_num_of_warmups):
-                        # Always force attention for warmup of pure decode.
-                        self._dummy_run(num_tokens,
-                                        is_pure_decode=True,
-                                        force_attention=True,
-                                        skip_eplb=True)
-                    self._dummy_run(
-                        num_tokens,
-                        cudagraph_runtime_style=cudagraph_runtime_style,
-                        is_pure_decode=True,
-                        skip_eplb=True)
+                compilation_cases_decode = list(
+                    reversed(decode_cudagraph_batch_sizes))
+                self._capture_cudagraphs(
+                    compilation_cases=compilation_cases_decode,
+                    cudagraph_runtime_style=cudagraph_runtime_style,
+                    is_pure_decode=True)
 
         end_time = time.perf_counter()
         end_free_gpu_memory = torch.cuda.mem_get_info()[0]
@@ -2389,6 +2349,35 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         logger.info("Graph capturing finished in %.0f secs, took %.2f GiB",
                     elapsed_time, cuda_graph_size / (1 << 30))
 
+    def _capture_cudagraphs(self, compilation_cases: list[int],
+                            cudagraph_runtime_style: CUDAGraphRuntimeStyle,
+                            is_pure_decode: bool):
+        # Only rank 0 should print progress bar during capture
+        if is_global_first_rank():
+            compilation_cases = tqdm(
+                compilation_cases,
+                disable=not self.load_config.use_tqdm_on_load,
+                desc="Capturing CUDA graphs ({})".format(
+                    "pure decode" if is_pure_decode else "mix prefill-decode"))
+        # We skip EPLB here since we don't want to record dummy metrics
+        for num_tokens in compilation_cases:
+            for _ in range(self.compilation_config.cudagraph_num_of_warmups):
+                # Use CUDAGraphRuntimeStyle.NONE (default) for warmup.
+                # But be careful, warm up with `NONE`is orthogonal to
+                # if we want to warm up attention or not. This is
+                # different from the case where `FULL` implies capture
+                # attention while `PIECEWISE` implies no attention.
+                force_attention = cudagraph_runtime_style == CUDAGraphMode.FULL
+                self._dummy_run(num_tokens,
+                                is_pure_decode=is_pure_decode,
+                                cudagraph_runtime_style=CUDAGraphMode.NONE,
+                                force_attention=force_attention,
+                                skip_eplb=True)
+            self._dummy_run(num_tokens,
+                            cudagraph_runtime_style=cudagraph_runtime_style,
+                            is_pure_decode=False,
+                            skip_eplb=True)
+
     def initialize_attn_backend(self, kv_cache_config: KVCacheConfig) -> None:
         """
         Initialize the attention backends and attention metadata builders.
@@ -2396,6 +2385,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         assert len(self.attn_backends) == 0 and len(
             self.attn_metadata_builders
         ) == 0, "Attention backends are already initialized"
+
+        # Record the attention cudagraph support of the first spec.
+        attn_cg: AttentionCGSupport = None  # type: ignore
         for i, kv_cache_group_spec in enumerate(
                 kv_cache_config.kv_cache_groups):
             kv_cache_spec = kv_cache_group_spec.kv_cache_spec
@@ -2432,9 +2424,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 block_table_i,
             )
 
-            if self.full_cuda_graph:
-                attn_cg: AttentionCGSupport = \
-                    attn_metadata_builder_i.attn_cudagraph_support
+            if self.cudagraph_mode == CUDAGraphMode.FULL:
+                if attn_cg is None:
+                    attn_cg = attn_metadata_builder_i.attn_cudagraph_support
+                else:
+                    if attn_cg != attn_metadata_builder_i.\
+                        attn_cudagraph_support:
+                        raise ValueError(
+                            "All attention backends must have the same "
+                            "AttentionCGSupport type when using full "
+                            "CUDAGraph. Set CompilationConfig.cudagraph_mode"
+                            " to `PIECEWISE` instead.")
+
                 if attn_cg == AttentionCGSupport.NEVER:
                     raise ValueError(
                         f"Full CUDAGraph not supported for "
@@ -2455,25 +2456,30 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
                 # check if the attention backends compatible with
                 # CompilationConfig.separate_attention_routine
-                is_updated = False
-                expected = False
                 if attn_cg == AttentionCGSupport.ALWAYS_UNIFIED and \
                     self.compilation_config.separate_attention_routine:
                     expected = False
-                    is_updated = True
+                    logger.warning_once(
+                        f"Full CUDAGraph for {attn_backend_i.__name__} "
+                        f"supports unified attention routine for mixed "
+                        f"batches or pure decode batches, which expect "
+                        f"CompilationConfig.separate_attention_rountine"
+                        f" as: {expected}. Now set it to: {expected}.")
+                    self.compilation_config.separate_attention_routine = \
+                                                                    expected
+
                 if attn_cg == AttentionCGSupport.PURE_DECODE_ONLY and \
                     not self.compilation_config.separate_attention_routine:
                     expected = True
-                    is_updated = True
-
-                if is_updated:
                     logger.warning_once(
-                        f"Full CUDAGraph for {attn_backend_i.__name__}"
-                        f"expect CompilationConfig.separate_attention"
-                        f"_rountine as: {expected}. Now set it to: "
-                        f"{expected}.")
+                        f"Full CUDAGraph for {attn_backend_i.__name__} "
+                        f"requires separate attention routines for mixed "
+                        f"batches or pure decode batches, which expect "
+                        f"CompilationConfig.separate_attention_rountine"
+                        f" as: {expected}. Now set it to: {expected}.")
                     self.compilation_config.separate_attention_routine = \
                                                                     expected
+
                 # when AttentionCGSupport.ALWAYS_SEPARATE, we don't change
                 # the separate_attention_routine flag, but should inform
                 # the user that this flag can be turned on to obtain
@@ -2491,6 +2497,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 # we skip capturing mix prefill-decode (general) batches.
                 if attn_cg == AttentionCGSupport.PURE_DECODE_ONLY and \
                                                     self.no_compilation:
+                    logger.warning_once(
+                        f"Skipping capturing mixed prefill-decode batches, "
+                        f"since full cudagraph for {attn_backend_i.__name__}"
+                        f"only supports pure decode batches while piecewise "
+                        f"cudagraph is disabled as no vllm compilation.")
                     self.capture_mixed_batches = False
 
             self.attn_backends.append(attn_backend_i)
@@ -2499,7 +2510,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Trigger cudagraph initialization here (after
         # initializing attn backends).
         # TODO: move this to better place.
-        self.cudagraph_dispatcher.maybe_initialize_cudagraph()
+
+        # if we need capture full cudagraph for mixed prefill-decode batches.
+        create_mixed_batch_full_cg = attn_cg in [
+                            AttentionCGSupport.ALWAYS_UNIFIED,
+                            AttentionCGSupport.ALWAYS_SEPARATE] and \
+                            self.capture_mixed_batches
+        self.cudagraph_dispatcher.maybe_initialize_cudagraph(
+            create_mixed_batch_full_cg)
 
     def may_reinitialize_input_batch(self,
                                      kv_cache_config: KVCacheConfig) -> None:

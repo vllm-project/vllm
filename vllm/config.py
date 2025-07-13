@@ -4671,6 +4671,7 @@ class VllmConfig:
 
         # disable cudagraph if enforce eager execution
         if self.model_config is not None and self.model_config.enforce_eager:
+            logger.info("Cudagraph is disabled under eager mode.")
             self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
         self._set_cudagraph_sizes()

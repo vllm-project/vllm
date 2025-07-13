@@ -85,17 +85,14 @@ class CUDAGraphWrapper:
 
         if cudagraph_runtime_style == CUDAGraphRuntimeStyle.NONE or\
                                                     runtime_shape is None:
-            # make sure it's on profile run, eager run, or warmup stage.
+            # This could mean the profile run, a warmup run, or running
+            # without cudagraphs.
             return self.runnable(*args, **kwargs)
         if cudagraph_runtime_style != self.runtime_style:
             # Only triggers capture/replay if the runtime style matches,
-            # otherwise, we fallback to the original runnable to handle
-            # no match case. This is a hack to avoid double capturing
-            # cudagraph and ensure extra safety in situations where we
-            # have nested CUDAdGraphWrapper structure, e.g., we have
-            # piecewise cudagraph for piecewise backend, which may be
-            # further wrapped to obtain a full cudagraph. See #20059 for
-            # more details.
+            # otherwise, we fallback to the original runnable.
+            # This enables properly dispatching to the correct CUDAGraphWrapper
+            # when nesting multiple instances with different runtime styles.
             return self.runnable(*args, **kwargs)
 
         if runtime_shape not in self.concrete_cudagraph_entries:
@@ -108,7 +105,8 @@ class CUDAGraphWrapper:
             if self.cudagraph_options.debug_log_enable:
                 # Since we capture cudagraph for many different shapes and
                 # capturing is fast, we don't need to log it for every
-                # shape. We only log it in the debug mode.
+                # shape. E.g. we only log it for the first subgraph in
+                # piecewise mode.
                 logger.debug("Capturing a cudagraph of %s usage for shape %s",
                              self.cudagraph_options.usage_str,
                              entry.runtime_shape)
@@ -139,8 +137,9 @@ class CUDAGraphWrapper:
                         # by converting it to weak ref,
                         # the original `output` will immediately be released
                         # to save memory. It is only safe to do this for
-                        # the last graph, because the output of the last
-                        # graph will not be used by any other cuda graph.
+                        # the last graph in piecewise cuadgraph mode, because
+                        # the output of the last graph will not be used by
+                        # any other cuda graph.
                         output = weak_ref_tensors(output)
 
             # here we always use weak ref for the output

@@ -53,19 +53,20 @@ M = TypeVar("M")
 
 
 class AttentionCGSupport(enum.Enum):
-    # Constants for the cudagraph support of the attention backend
-    # Here we do not consider the cascade attention, as currently
-    # it is never cudagraph supported.
+    """ Constants for the cudagraph support of the attention backend
+    Here we do not consider the cascade attention, as currently
+    it is never cudagraph supported."""
 
-    NEVER = 0  # No support
+    NEVER = 0
+    """NO cudagraph support"""
     PURE_DECODE_ONLY = 1
-    # Cudagraph supported for pure decode, need to use piecewise
-    # cudagraph or no cudagraph for mixed prefill-decode batches
+    """Cudagraph supported for pure decode, need to use piecewise
+    cudagraph or no cudagraph for mixed prefill-decode batches"""
     ALWAYS_UNIFIED = 2
-    # Cudagraph always supported with unified routine
+    """Cudagraph always supported with unified routine"""
     ALWAYS_SEPARATE = 3
-    # Cudagraph supported for both mixed prefill-decode
-    # or pure decode attention routines.
+    """ Cudagraph supported for both mixed prefill-decode
+    or pure decode attention routines."""
 
 
 class AttentionMetadataBuilder(abc.ABC, Generic[M]):

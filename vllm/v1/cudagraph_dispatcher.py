@@ -1,15 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import TYPE_CHECKING, Any
+from typing import Any, Callable
 
 from vllm.compilation.cuda_graph import CUDAGraphOptions, CUDAGraphWrapper
 from vllm.config import (CompilationLevel, CUDAGraphMode,
                          CUDAGraphRuntimeStyle, VllmConfig)
-from vllm.v1.attention.backends.utils import AttentionCGSupport
-
-if TYPE_CHECKING:
-    from vllm.v1.worker.gpu_model_runner import GPUModelRunner
-
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -20,59 +15,64 @@ DECODE_BOOLEN = True
 
 class CudagraphDispatcher:
     """
-    Runtime cudagraph dispatcher for gpu model runner.
+    Runtime cudagraph dispatcher to switch between multiple cudagraphs.
     """
 
-    def __init__(self, runner: "GPUModelRunner", vllm_config: VllmConfig):
-        self.runner = runner
+    def __init__(self, vllm_config: VllmConfig):
         self.vllm_config = vllm_config
         self.compilation_config = vllm_config.compilation_config
         self.cudagraph_mode = self.compilation_config.cudagraph_mode
-        self.no_compilation = self.runner.no_compilation
+        self.no_compilation = self.compilation_config.level != \
+            CompilationLevel.PIECEWISE or \
+            vllm_config.model_config.enforce_eager
+
+        self.model: Callable = None  # type: ignore
+        # we lazy initialize self.model after model loading of model
+        # runner have been done.
 
         # Dict to store cudagraph candidates for runtime dispatching.
         self.cudagraph_candidates: dict[tuple, Any] = {}
 
-    def after_load_model(self):
+    def after_load_model(self, model: Callable):
         # add original model to cudagraph_candidates for profile run.
-        assert self.runner.model is not None, "model is not loaded"
+        assert model is not None, "model should not be None"
+        self.model = model
         self.cudagraph_candidates.update({
             (CUDAGraphRuntimeStyle.NONE, ):
-            self.runner.model
+            self.model
         })
 
-    def maybe_initialize_cudagraph(self):
-        # This is called only after attention backend is initialized.
+    def maybe_initialize_cudagraph(self, create_mixed_batch_full_cg: bool):
+        assert self.model is not None, (
+            "No model have been assigned to cudagraph dispatcher")
+        # This should be called only after attention backend is initialized.
 
         if self.compilation_config.level == CompilationLevel.PIECEWISE\
                 and len(self.compilation_config.splitting_ops)>0:
             self.cudagraph_candidates.update({
                 (CUDAGraphRuntimeStyle.PIECEWISE, ):
-                self.runner.model
+                self.model
             })
             logger.debug("Piecewise cudagraph initialized")
 
-        if self.runner.full_cuda_graph:
-            attn_cg = self.runner.attn_metadata_builders[0].\
-                attn_cudagraph_support
+        if self.compilation_config.cudagraph_mode == CUDAGraphMode.FULL:
             # create full cudagraph for mix prefill-decode/general batches
-            if attn_cg in [AttentionCGSupport.ALWAYS_UNIFIED,
-                           AttentionCGSupport.ALWAYS_SEPARATE] and \
-                    self.runner.capture_mixed_batches:
+            if create_mixed_batch_full_cg:
                 self.cudagraph_candidates.update({
                     (CUDAGraphRuntimeStyle.FULL, not DECODE_BOOLEN):
-                    CUDAGraphWrapper(self.runner.model,
+                    CUDAGraphWrapper(self.model,
                                      self.vllm_config,
                                      runtime_style=CUDAGraphRuntimeStyle.FULL,
                                      cudagraph_options=CUDAGraphOptions(
                                          usage_str="full/mixed"))
                 })
                 logger.debug("Full cudagraph for mixed batches initialized")
-            # create full cudagraph for pure decode batches.
+            # always create full cudagraph for pure decode batches if speparate
+            # attention routine.
             if self.compilation_config.separate_attention_routine:
                 self.cudagraph_candidates.update({
                     (CUDAGraphRuntimeStyle.FULL, DECODE_BOOLEN):
-                    CUDAGraphWrapper(self.runner.model,
+                    CUDAGraphWrapper(self.model,
                                      self.vllm_config,
                                      runtime_style=CUDAGraphRuntimeStyle.FULL,
                                      cudagraph_options=CUDAGraphOptions(
@@ -111,12 +111,14 @@ class CudagraphDispatcher:
 
     def dispatch(self, cudagraph_runtime_style: CUDAGraphRuntimeStyle,
                  is_pure_decode: bool) -> Any:
-        # if no cudagraph candidates inside other platforms,
+        assert self.model is not None, ("No model have been assigned"
+                                        "to cudagraph dispatcher")
+        # if no cudagraph candidates,
         # just skip cudagraph dispatching.
         if not self.cudagraph_candidates:
             logger.warning_once("cudagraphs are not initialized."
                                 " No cudagraph will be used.")
-            return self.runner.model
+            return self.model
 
         # select between no cudagraph and piecewise cudagraph
         if cudagraph_runtime_style in [
