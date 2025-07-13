@@ -9,11 +9,9 @@ import partial_json_parser
 from partial_json_parser.core.options import Allow
 
 from vllm.entrypoints.chat_utils import random_tool_call_id
-from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
-                                              DeltaFunctionCall, DeltaMessage,
-                                              DeltaToolCall,
-                                              ExtractedToolCallInformation,
-                                              FunctionCall, ToolCall)
+from vllm.entrypoints.openai.protocol import (
+    ChatCompletionRequest, DeltaFunctionCall, DeltaMessage, DeltaToolCall,
+    ExtractedToolCallInformation, FunctionCall, ResponsesRequest, ToolCall)
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     ToolParser, ToolParserManager)
 from vllm.entrypoints.openai.tool_parsers.utils import (consume_space,
@@ -45,8 +43,9 @@ class GraniteToolParser(ToolParser):
         self.bot_string = "<tool_call>"
 
     def extract_tool_calls(
-            self, model_output: str,
-            request: ChatCompletionRequest) -> ExtractedToolCallInformation:
+        self, model_output: str, request: Union[ChatCompletionRequest,
+                                                ResponsesRequest]
+    ) -> ExtractedToolCallInformation:
         stripped = model_output.strip()\
                     .removeprefix(self.bot_token)\
                     .removeprefix(self.bot_string)\

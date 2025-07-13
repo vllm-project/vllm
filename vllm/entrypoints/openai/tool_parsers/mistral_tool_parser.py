@@ -12,11 +12,9 @@ import regex as re
 from partial_json_parser.core.options import Allow
 from pydantic import Field
 
-from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
-                                              DeltaFunctionCall, DeltaMessage,
-                                              DeltaToolCall,
-                                              ExtractedToolCallInformation,
-                                              FunctionCall, ToolCall)
+from vllm.entrypoints.openai.protocol import (
+    ChatCompletionRequest, DeltaFunctionCall, DeltaMessage, DeltaToolCall,
+    ExtractedToolCallInformation, FunctionCall, ResponsesRequest, ToolCall)
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     ToolParser, ToolParserManager)
 from vllm.entrypoints.openai.tool_parsers.utils import (
@@ -88,7 +86,8 @@ class MistralToolParser(ToolParser):
                 "the tokenizer!")
 
     def adjust_request(
-            self, request: ChatCompletionRequest) -> ChatCompletionRequest:
+        self, request: Union[ChatCompletionRequest, ResponsesRequest]
+    ) -> Union[ChatCompletionRequest, ResponsesRequest]:
         if not isinstance(
                 self.model_tokenizer, MistralTokenizer
         ) and request.tools and request.tool_choice != 'none':

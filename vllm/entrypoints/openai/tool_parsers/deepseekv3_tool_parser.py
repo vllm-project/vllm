@@ -7,11 +7,9 @@ from typing import Union
 import regex as re
 
 from vllm.entrypoints.chat_utils import random_tool_call_id
-from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
-                                              DeltaFunctionCall, DeltaMessage,
-                                              DeltaToolCall,
-                                              ExtractedToolCallInformation,
-                                              FunctionCall, ToolCall)
+from vllm.entrypoints.openai.protocol import (
+    ChatCompletionRequest, DeltaFunctionCall, DeltaMessage, DeltaToolCall,
+    ExtractedToolCallInformation, FunctionCall, ResponsesRequest, ToolCall)
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     ToolParser, ToolParserManager)
 from vllm.logger import init_logger
@@ -71,7 +69,7 @@ class DeepSeekV3ToolParser(ToolParser):
     def extract_tool_calls(
         self,
         model_output: str,
-        request: ChatCompletionRequest,
+        request: Union[ChatCompletionRequest, ResponsesRequest],
     ) -> ExtractedToolCallInformation:
 
         # sanity check; avoid unnecessary processing

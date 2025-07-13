@@ -11,11 +11,9 @@ from partial_json_parser.core.options import Allow
 from transformers import PreTrainedTokenizerBase
 
 from vllm.entrypoints.chat_utils import random_tool_call_id
-from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
-                                              DeltaFunctionCall, DeltaMessage,
-                                              DeltaToolCall,
-                                              ExtractedToolCallInformation,
-                                              FunctionCall, ToolCall)
+from vllm.entrypoints.openai.protocol import (
+    ChatCompletionRequest, DeltaFunctionCall, DeltaMessage, DeltaToolCall,
+    ExtractedToolCallInformation, FunctionCall, ResponsesRequest, ToolCall)
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     ToolParser, ToolParserManager)
 from vllm.entrypoints.openai.tool_parsers.utils import (find_common_prefix,
@@ -57,8 +55,9 @@ class Llama3JsonToolParser(ToolParser):
             re.DOTALL)
 
     def extract_tool_calls(
-            self, model_output: str,
-            request: ChatCompletionRequest) -> ExtractedToolCallInformation:
+        self, model_output: str, request: Union[ChatCompletionRequest,
+                                                ResponsesRequest]
+    ) -> ExtractedToolCallInformation:
         """
         Extract the tool calls from a complete model response.
         Only extracts JSON content and ignores any surrounding plain text.

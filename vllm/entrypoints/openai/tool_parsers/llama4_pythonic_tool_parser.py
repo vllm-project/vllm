@@ -9,11 +9,9 @@ import regex as re
 from transformers import PreTrainedTokenizerBase
 
 import vllm.envs as envs
-from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
-                                              DeltaFunctionCall, DeltaMessage,
-                                              DeltaToolCall,
-                                              ExtractedToolCallInformation,
-                                              FunctionCall, ToolCall)
+from vllm.entrypoints.openai.protocol import (
+    ChatCompletionRequest, DeltaFunctionCall, DeltaMessage, DeltaToolCall,
+    ExtractedToolCallInformation, FunctionCall, ResponsesRequest, ToolCall)
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     ToolParser, ToolParserManager)
 from vllm.logger import init_logger
@@ -55,8 +53,9 @@ class Llama4PythonicToolParser(ToolParser):
         self.current_tool_id = value
 
     def extract_tool_calls(
-            self, model_output: str,
-            request: ChatCompletionRequest) -> ExtractedToolCallInformation:
+        self, model_output: str, request: Union[ChatCompletionRequest,
+                                                ResponsesRequest]
+    ) -> ExtractedToolCallInformation:
         """
         Extract the tool calls from a complete model response.
         """
