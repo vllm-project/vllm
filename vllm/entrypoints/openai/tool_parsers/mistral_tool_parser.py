@@ -89,7 +89,7 @@ class MistralToolParser(ToolParser):
         # Core streaming state
         self.raw_tool_calls: str = ""
         self.streaming_state: StreamingState = \
-        	StreamingState.WAITING_FOR_TOOL_START
+            StreamingState.WAITING_FOR_TOOL_START
 
         # Tool tracking
         self.current_tool_id: int = -1
@@ -98,8 +98,8 @@ class MistralToolParser(ToolParser):
         self.previous_attribute_end_index: int = 0
 
         # Legacy state tracking (kept for compatibility)
-        self.current_element_streaming: Union[Literal["name",
-                                                      "arguments"], None] = None
+        self.current_element_streaming: Union[Literal["name", "arguments"],
+                                              None] = None
         self.current_tool_name_finished: bool = False
         self.current_tool_arguments_finished: bool = False
         self.tools_parsing_finished: bool = False
@@ -141,14 +141,16 @@ class MistralToolParser(ToolParser):
         logger.debug("v11 streaming: prev_args_sent='%s'", self.prev_args_sent)
 
         # Handle multiple tools separated by commas/whitespace
-        if self.current_tool_name_finished and self.current_tool_arguments_finished:
-            if self._should_advance_to_next_v11_tool():
-                # Remove the completed tool from raw_tool_calls before resetting state
-                completed_tool_end = self._find_completed_v11_tool_end()
-                if completed_tool_end > 0:
-                    self.raw_tool_calls = self.raw_tool_calls[completed_tool_end:]
-                self._reset_v11_tool_state()
-                logger.debug("v11 streaming: found next tool, resetting state")
+        if self.current_tool_name_finished  \
+            and self.current_tool_arguments_finished \
+            and self._should_advance_to_next_v11_tool():
+            # Remove the completed tool from raw_tool_calls
+            # before resetting state
+            completed_tool_end = self._find_completed_v11_tool_end()
+            if completed_tool_end > 0:
+                self.raw_tool_calls = self.raw_tool_calls[completed_tool_end:]
+            self._reset_v11_tool_state()
+            logger.debug("v11 streaming: found next tool, resetting state")
 
         # Phase 1: Extract and send function name
         if not self.current_tool_name_sent:
@@ -186,7 +188,8 @@ class MistralToolParser(ToolParser):
             )
 
         # Phase 2: Extract and send argument fragments
-        if self.current_tool_name_sent and not self.current_tool_arguments_finished:
+        if self.current_tool_name_sent and \
+            not self.current_tool_arguments_finished:
             # Find the arguments part (everything after the first {)
             brace_index = self.raw_tool_calls.find("{")
             if brace_index == -1:
@@ -245,26 +248,31 @@ class MistralToolParser(ToolParser):
         completed_tool_end = self._find_completed_v11_tool_end()
         if completed_tool_end <= 0:
             return False
-        
-        # Check if there's content after the completed tool that looks like another tool
+
+        # Check if there's content after the completed tool
+        # that looks like another tool
         remaining = self.raw_tool_calls[completed_tool_end:].strip()
         if remaining.startswith(','):
             remaining = remaining[1:].strip()
-        
+
         # Look for next tool pattern: function_name{
         return bool(re.match(r'[a-zA-Z0-9_-]+\s*\{', remaining))
 
     def _find_completed_v11_tool_end(self) -> int:
-        """Find the end position of the first completed tool in V11 format using JSON parsing."""
+        """
+        Find the end position of the first completed tool in V11 format using
+        JSON parsing.
+        """
         # Look for function name pattern: name followed by {
-        brace_match = re.search(r'([a-zA-Z0-9_-]+)\s*(\{)', self.raw_tool_calls)
+        brace_match = re.search(r'([a-zA-Z0-9_-]+)\s*(\{)',
+                                self.raw_tool_calls)
         if not brace_match:
             return -1
-        
+
         # Try to parse the JSON starting from the opening brace
         json_start = brace_match.start(2)
         json_part = self.raw_tool_calls[json_start:]
-        
+
         try:
             _, end_idx = self.json_decoder.raw_decode(json_part)
             return json_start + end_idx
@@ -278,7 +286,8 @@ class MistralToolParser(ToolParser):
         self.current_tool_name_sent = False
         self.prev_args_sent = ""
 
-    def _determine_next_parsing_element(self) -> Union[Literal["name", "arguments"], None]:
+    def _determine_next_parsing_element(self) \
+        -> Union[Literal["name", "arguments"], None]:
         """
         Determine the next element to parse based on current state.
         
@@ -290,8 +299,10 @@ class MistralToolParser(ToolParser):
             match_name = self.tool_call_first_attribute_name.match(
                 self.raw_tool_calls, self.current_tool_start_index)
             if match_name and match_name.end(
-            ) > self.current_tool_start_index + self.previous_attribute_end_index:
-                self.current_attribute_start_index = match_name.end() - self.current_tool_start_index
+            ) > self.current_tool_start_index \
+                    + self.previous_attribute_end_index:
+                self.current_attribute_start_index = match_name.end() \
+                    - self.current_tool_start_index
                 return "name"
 
         # Check for arguments attribute
@@ -299,9 +310,12 @@ class MistralToolParser(ToolParser):
             match_arguments = self.tool_call_first_attribute_arguments.match(
                 self.raw_tool_calls, self.current_tool_start_index)
             if match_arguments and match_arguments.end(
-            ) > self.current_tool_start_index + self.previous_attribute_end_index:
-                # The `{` is the last character in the match - we want it as start index
-                self.current_attribute_start_index = match_arguments.end() - 1 - self.current_tool_start_index
+            ) > self.current_tool_start_index \
+                    + self.previous_attribute_end_index:
+                # The `{` is the last character in the match.
+                # We want it as start index.
+                self.current_attribute_start_index = match_arguments.end() \
+                    - 1 - self.current_tool_start_index
                 return "arguments"
 
         return None
@@ -331,7 +345,8 @@ class MistralToolParser(ToolParser):
 
     def _process_delta_text(self, delta_text: str) -> str:
         """
-        Process delta text and update raw_tool_calls, returning any additional content.
+        Process delta text and update raw_tool_calls, returning any additional
+        content.
         
         Args:
             delta_text: The new text delta to process
@@ -358,7 +373,6 @@ class MistralToolParser(ToolParser):
                 self.raw_tool_calls = self.raw_tool_calls.lstrip()
 
         return additional_content
-
 
     def _should_detect_v11_format(self) -> bool:
         """Check if we should attempt V11 format detection."""
@@ -397,7 +411,8 @@ class MistralToolParser(ToolParser):
         return result
 
     def _extracted_complete_name(
-            self, current_attribute_start_index: int) -> tuple[str, Union[int, None]]:
+            self, current_attribute_start_index: int) \
+        -> tuple[str, Union[int, None]]:
         """
         Extract the complete function name from the current tool call.
 
@@ -411,8 +426,10 @@ class MistralToolParser(ToolParser):
             - The end index of the name relative to the current tool start,
             or None if extraction failed
         """
-        absolute_start = self.current_tool_start_index + current_attribute_start_index
-        if match := self.string_value_pattern.match(self.raw_tool_calls, absolute_start):
+        absolute_start = self.current_tool_start_index \
+            + current_attribute_start_index
+        if match := self.string_value_pattern.match(\
+            self.raw_tool_calls, absolute_start):
             return match.group(1), match.end() - self.current_tool_start_index
         return "", None
 
@@ -433,7 +450,8 @@ class MistralToolParser(ToolParser):
             - The end index of the arguments relative to the current tool start,
             or -1 if not yet complete
         """
-        absolute_start = self.current_tool_start_index + current_attribute_start_index
+        absolute_start = self.current_tool_start_index \
+            + current_attribute_start_index
         partial_arguments_value = self.raw_tool_calls[absolute_start:]
         try:
             _, end_index = self.json_decoder.raw_decode(
