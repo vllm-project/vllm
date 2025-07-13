@@ -8,10 +8,9 @@
 #  - Thomas Parnell <tpa@zurich.ibm.com>
 
 import torch
-import triton
-import triton.language as tl
 
 from vllm.logger import init_logger
+from vllm.triton_utils import tl, triton
 
 logger = init_logger(__name__)
 
