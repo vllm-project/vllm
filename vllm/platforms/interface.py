@@ -514,9 +514,6 @@ class Platform:
         """Raises if this request is unsupported on this platform"""
 
     def __getattr__(self, key: str):
-        if hasattr(self, key):
-            return getattr(self, key)
-
         device = getattr(torch, self.device_type, None)
         if device is not None and hasattr(device, key):
             return getattr(device, key)
@@ -529,9 +526,10 @@ class Platform:
         """
         Return the global graph pool for the this platform.
         """
-        if not hasattr(self, '_global_graph_pool'):
-            self._global_graph_pool = self.graph_pool_handle()
-        return self._global_graph_pool
+        cls = type(self)
+        if cls._global_graph_pool is None:
+            cls._global_graph_pool = self.graph_pool_handle()
+        return cls._global_graph_pool
 
     @classmethod
     def get_cu_count(cls, device_id: int = 0) -> int:
