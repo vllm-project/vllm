@@ -13,8 +13,8 @@ from transformers import BitsAndBytesConfig
 
 from tests.quantization.utils import is_quant_method_supported
 
-from ..models.utils import check_embeddings_close
-from ..utils import compare_two_settings, create_new_process_for_each_test
+from ...utils import compare_two_settings, multi_gpu_test
+from ..utils import check_embeddings_close, check_logprobs_close
 
 models_4bit_to_test = [
     ("facebook/opt-125m", "quantize opt model inflight"),
@@ -24,6 +24,10 @@ models_4bit_to_test = [
 
 models_4bit_to_embedding_test = [
     ("intfloat/e5-mistral-7b-instruct", "quantize embedding model inflight"),
+]
+
+models_4bit_to_moe_test = [
+    ("allenai/OLMoE-1B-7B-0125-Instruct", "quantize moe model inflight"),
 ]
 
 models_pre_qaunt_4bit_to_test = [
@@ -42,7 +46,6 @@ models_pre_quant_8bit_to_test = [
 @pytest.mark.skipif(not is_quant_method_supported("bitsandbytes"),
                     reason='bitsandbytes is not supported on this GPU type.')
 @pytest.mark.parametrize("model_name, description", models_4bit_to_test)
-@create_new_process_for_each_test()
 def test_load_4bit_bnb_model(hf_runner, vllm_runner, example_prompts,
                              model_name, description) -> None:
 
@@ -56,7 +59,6 @@ def test_load_4bit_bnb_model(hf_runner, vllm_runner, example_prompts,
                     reason='bitsandbytes is not supported on this GPU type.')
 @pytest.mark.parametrize("model_name, description",
                          models_pre_qaunt_4bit_to_test)
-@create_new_process_for_each_test()
 def test_load_pre_quant_4bit_bnb_model(hf_runner, vllm_runner, example_prompts,
                                        model_name, description) -> None:
 
@@ -68,7 +70,6 @@ def test_load_pre_quant_4bit_bnb_model(hf_runner, vllm_runner, example_prompts,
                     reason='bitsandbytes is not supported on this GPU type.')
 @pytest.mark.parametrize("model_name, description",
                          models_pre_quant_8bit_to_test)
-@create_new_process_for_each_test()
 def test_load_8bit_bnb_model(hf_runner, vllm_runner, example_prompts,
                              model_name, description) -> None:
 
@@ -76,12 +77,10 @@ def test_load_8bit_bnb_model(hf_runner, vllm_runner, example_prompts,
                              model_name, True)
 
 
-@pytest.mark.skipif(torch.cuda.device_count() < 2,
-                    reason='Test requires at least 2 GPUs.')
 @pytest.mark.skipif(not is_quant_method_supported("bitsandbytes"),
                     reason='bitsandbytes is not supported on this GPU type.')
 @pytest.mark.parametrize("model_name, description", models_4bit_to_test)
-@create_new_process_for_each_test()
+@multi_gpu_test(num_gpus=2)
 def test_load_tp_4bit_bnb_model(hf_runner, vllm_runner, example_prompts,
                                 model_name, description) -> None:
 
@@ -96,12 +95,10 @@ def test_load_tp_4bit_bnb_model(hf_runner, vllm_runner, example_prompts,
                              vllm_tp_size=2)
 
 
-@pytest.mark.skipif(torch.cuda.device_count() < 2,
-                    reason='Test requires at least 2 GPUs.')
 @pytest.mark.skipif(not is_quant_method_supported("bitsandbytes"),
                     reason='bitsandbytes is not supported on this GPU type.')
 @pytest.mark.parametrize("model_name, description", models_4bit_to_test)
-@create_new_process_for_each_test()
+@multi_gpu_test(num_gpus=2)
 def test_load_pp_4bit_bnb_model(model_name, description) -> None:
     common_args = [
         "--disable-log-stats",
@@ -124,10 +121,38 @@ def test_load_pp_4bit_bnb_model(model_name, description) -> None:
 
 @pytest.mark.skipif(not is_quant_method_supported("bitsandbytes"),
                     reason='bitsandbytes is not supported on this GPU type.')
+@pytest.mark.parametrize("model_name, description", models_4bit_to_moe_test)
+def test_4bit_bnb_moe_model(hf_runner, vllm_runner, example_prompts,
+                            model_name, description) -> None:
+
+    hf_model_kwargs = dict(quantization_config=BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_use_double_quant=True,
+    ))
+    with vllm_runner(model_name,
+                     quantization='bitsandbytes',
+                     enforce_eager=False) as llm:
+        vllm_outputs = llm.generate_greedy_logprobs(example_prompts,
+                                                    max_tokens=32,
+                                                    num_logprobs=5)
+
+    with hf_runner(model_name, model_kwargs=hf_model_kwargs) as llm:
+        transformers_outputs = llm.generate_greedy_logprobs_limit(
+            example_prompts, max_tokens=32, num_logprobs=5)
+    check_logprobs_close(
+        outputs_0_lst=transformers_outputs,
+        outputs_1_lst=vllm_outputs,
+        name_0="transformers",
+        name_1="vllm",
+    )
+
+
+@pytest.mark.skipif(not is_quant_method_supported("bitsandbytes"),
+                    reason='bitsandbytes is not supported on this GPU type.')
 @pytest.mark.parametrize("model_name, description",
                          models_4bit_to_embedding_test)
 @pytest.mark.parametrize("dtype", ["half"])
-@create_new_process_for_each_test()
 def test_4bit_bnb_embedding_model(
     model_name,
     description,
@@ -146,6 +171,13 @@ def test_4bit_bnb_embedding_model(
     example_prompts = [str(s).strip() for s in example_prompts]
 
     # Inflight 4bit quantization
+    with vllm_runner(model_name,
+                     task="embed",
+                     dtype=dtype,
+                     gpu_memory_utilization=0.5,
+                     quantization="bitsandbytes") as vllm_model:
+        vllm_outputs = vllm_model.embed(example_prompts)
+
     hf_model_kwargs = dict(quantization_config=BitsAndBytesConfig(
         load_in_4bit=True))
     with hf_runner(
@@ -156,12 +188,6 @@ def test_4bit_bnb_embedding_model(
     ) as hf_model:
         hf_outputs = hf_model.encode(example_prompts)
 
-    with vllm_runner(model_name,
-                     task="embed",
-                     dtype=dtype,
-                     gpu_memory_utilization=0.5,
-                     quantization="bitsandbytes") as vllm_model:
-        vllm_outputs = vllm_model.embed(example_prompts)
     check_embeddings_close(
         embeddings_0_lst=hf_outputs,
         embeddings_1_lst=vllm_outputs,
@@ -189,7 +215,8 @@ def validate_generated_texts(hf_runner,
                              model_name,
                              pre_quant=False,
                              hf_model_kwargs=None,
-                             vllm_tp_size=1):
+                             vllm_tp_size=1,
+                             max_tokens=8):
 
     # NOTE: run vLLM first, as it requires a clean process
     # when using distributed inference
@@ -197,7 +224,8 @@ def validate_generated_texts(hf_runner,
                      quantization=None if pre_quant else 'bitsandbytes',
                      tensor_parallel_size=vllm_tp_size,
                      enforce_eager=False) as llm:
-        vllm_outputs = llm.generate_greedy(prompts, 8)
+
+        vllm_outputs = llm.generate_greedy(prompts, max_tokens)
         vllm_logs = log_generated_texts(prompts, vllm_outputs, "VllmRunner")
 
     # Clean up the GPU memory for the next test
@@ -209,19 +237,17 @@ def validate_generated_texts(hf_runner,
 
     # Run with HF runner
     with hf_runner(model_name, model_kwargs=hf_model_kwargs) as llm:
-        hf_outputs = llm.generate_greedy(prompts, 8)
+        hf_outputs = llm.generate_greedy(prompts, max_tokens)
         hf_logs = log_generated_texts(prompts, hf_outputs, "HfRunner")
 
     # Clean up the GPU memory for the next test
     gc.collect()
     torch.cuda.empty_cache()
-
     # Compare the generated strings
     for hf_log, vllm_log in zip(hf_logs, vllm_logs):
         hf_str = hf_log["generated_text"]
         vllm_str = vllm_log["generated_text"]
         prompt = hf_log["prompt"]
-
         assert hf_str == vllm_str, (f"Model: {model_name}"
                                     f"Mismatch between HF and vLLM outputs:\n"
                                     f"Prompt: {prompt}\n"
