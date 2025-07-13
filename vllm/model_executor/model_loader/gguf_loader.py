@@ -37,10 +37,8 @@ class GGUFModelLoader(BaseModelLoader):
         if model_name_or_path.startswith(("http://", "https://")):
             return hf_hub_download(url=model_name_or_path)
         # repo id/filename.gguf
-        parts = model_name_or_path.split("/")
-        if len(parts) >= 2 and parts[-1].endswith(".gguf"):
-            repo_id = "/".join(parts[:-1])
-            filename = parts[-1]
+        if "/" in model_name_or_path and model_name_or_path.endswith(".gguf"):
+            repo_id, filename = model_name_or_path.rsplit("/", 1)
             return hf_hub_download(repo_id=repo_id, filename=filename)
         else:
             raise ValueError(f"Unrecognised GGUF reference: {model_name_or_path} "
