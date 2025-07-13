@@ -1,0 +1,21 @@
+# set this on your machine
+vllm-directory := "/home/rshaw/vllm/"
+
+launch_dp_ep MODEL SIZE:
+    vllm serve {{MODEL}} --data-parallel-size {{SIZE}} --enable-expert-parallel
+
+launch_tp MODEL SIZE:
+    vllm serve {{MODEL}} --tensor-parallel-size {{SIZE}}
+
+eval MODEL:
+  lm_eval --model local-completions --tasks gsm8k \
+    --model_args model={{MODEL}},base_url=http://127.0.0.1:800/v1/completions,num_concurrent=100,tokenized_requests=False
+
+benchmark MODEL NUM_PROMPTS:
+  python {{vllm-directory}}/benchmarks/benchmark_serving.py \
+    --model {{MODEL}} \
+    --dataset-name random \
+    --random-input-len 30000 \
+    --random-output-len 10 \
+    --num-prompts {{NUM_PROMPTS}} \
+    --seed $(date +%s) \
