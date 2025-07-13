@@ -772,6 +772,9 @@ class WhisperForConditionalGeneration(nn.Module, SupportsTranscription,
         ".fc2.": ".mlp.fc2."
     })
 
+    # Whisper only supports audio-conditioned generation.
+    supports_transcription_only = True
+
     @classmethod
     def validate_language(cls, language: str) -> bool:
         if language in ISO639_1_SUPPORTED_LANGS:
