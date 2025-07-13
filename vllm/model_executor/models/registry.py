@@ -249,6 +249,10 @@ _MULTIMODAL_MODELS = {
         "AyaVisionForConditionalGeneration",
     ),
     "Blip2ForConditionalGeneration": ("blip2", "Blip2ForConditionalGeneration"),
+    "CheXagentForConditionalGeneration": (
+        "chexagent",
+        "CheXagentForConditionalGeneration",
+    ),
     "ChameleonForConditionalGeneration": (
         "chameleon",
         "ChameleonForConditionalGeneration",
