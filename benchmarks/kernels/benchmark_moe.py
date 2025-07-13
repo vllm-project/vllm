@@ -81,7 +81,8 @@ def benchmark_config(
     # For expert parallel, calculate local and global expert counts
     global_num_experts = num_experts
     if enable_expert_parallel:
-        local_num_experts, expert_map = build_expert_map(global_num_experts, ep_size, ep_rank)
+        local_num_experts, expert_map = build_expert_map(
+            global_num_experts, ep_size, ep_rank)
     else:
         local_num_experts = num_experts
         expert_map = None
@@ -109,13 +110,16 @@ def benchmark_config(
         )
     else:
         w1 = torch.randn(
-            local_num_experts, shard_intermediate_size, hidden_size, dtype=init_dtype
+            local_num_experts, shard_intermediate_size, hidden_size,
+            dtype=init_dtype
         )
         w2 = torch.randn(
-            local_num_experts, hidden_size, shard_intermediate_size // 2, dtype=init_dtype
+            local_num_experts, hidden_size, shard_intermediate_size // 2,
+            dtype=init_dtype
         )
     # Gating output uses global number of experts
-    gating_output = torch.randn(num_iters, num_tokens, global_num_experts, dtype=torch.float32)
+    gating_output = torch.randn(
+        num_iters, num_tokens, global_num_experts, dtype=torch.float32)
 
     w1_scale = None
     w2_scale = None
@@ -770,7 +774,8 @@ def main(args: argparse.Namespace):
             for w in workers
         ]
         ray.get(init_futures)
-        print(f"Initialized distributed environment with master at {master_addr}:{master_port}")
+        print(f"Initialized distributed environment with master at "
+              f"{master_addr}:{master_port}")
 
     def _distribute(method: str, inputs: list[Any]) -> list[Any]:
         outputs = []
