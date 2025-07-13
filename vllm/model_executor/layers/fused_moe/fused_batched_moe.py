@@ -4,8 +4,6 @@
 from typing import Optional
 
 import torch
-import triton
-import triton.language as tl
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
@@ -18,6 +16,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
     normalize_scales_shape)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     group_broadcast)
+from vllm.triton_utils import tl, triton
 
 
 @triton.jit
