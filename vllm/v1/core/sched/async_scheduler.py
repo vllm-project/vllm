@@ -21,9 +21,6 @@ class AsyncScheduler(Scheduler):
         super()._update_after_schedule(scheduler_output)
         for req_id in scheduler_output.num_scheduled_tokens:
             request = self.requests[req_id]
-            if request.has_encoder_inputs:
-                self._free_encoder_inputs(request)
-
             if (request.num_computed_tokens == request.num_tokens +
                     request.num_output_placeholders):
                 # The request will generate a new token in this scheduling step.
