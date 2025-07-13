@@ -117,7 +117,7 @@ class MistralToolParser(ToolParser):
         self.tool_call_regex = re.compile(r"\[{.*}\]", re.DOTALL)
         if _is_fn_name_regex_support(self.model_tokenizer):
             self.fn_name_regex = re.compile(
-                r'([a-zA-Z0-9_-]+)(\{[\s\S]*?\})(?=\s*$|,|\s)', re.DOTALL)
+                r'([a-zA-Z0-9_-]+)\s*(\{[\s\S]*?\})', re.DOTALL)
         else:
             self.fn_name_regex = None
 
@@ -140,106 +140,120 @@ class MistralToolParser(ToolParser):
                      self.current_tool_name_sent)
         logger.debug("v11 streaming: prev_args_sent='%s'", self.prev_args_sent)
 
-        # Handle multiple tools separated by commas/whitespace
-        if self.current_tool_name_finished  \
-            and self.current_tool_arguments_finished \
-            and self._should_advance_to_next_v11_tool():
-            # Remove the completed tool from raw_tool_calls
-            # before resetting state
-            completed_tool_end = self._find_completed_v11_tool_end()
-            if completed_tool_end > 0:
-                self.raw_tool_calls = self.raw_tool_calls[completed_tool_end:]
-            self._reset_v11_tool_state()
-            logger.debug("v11 streaming: found next tool, resetting state")
+        result_tool_calls: list[DeltaToolCall] = []
 
-        # Phase 1: Extract and send function name
-        if not self.current_tool_name_sent:
-            # Look for function name pattern: name followed by {
-            brace_index = self.raw_tool_calls.find("{")
-            if brace_index == -1:
-                logger.debug("v11 streaming: no opening brace found yet")
-                return self._none_or_additional_content(additional_content)
+        while True:
+            advanced = False
+            if self.current_tool_name_finished and \
+                self.current_tool_arguments_finished and \
+                self._should_advance_to_next_v11_tool():
+                # Remove the completed tool from raw_tool_calls
+                # before resetting state
+                completed_tool_end = self._find_completed_v11_tool_end()
+                if completed_tool_end > 0:
+                    self.raw_tool_calls = self.raw_tool_calls[
+                        completed_tool_end:]
+                self._reset_v11_tool_state()
+                logger.debug("v11 streaming: found next tool, resetting state")
+                advanced = True
 
-            # Extract function name
-            func_name = self.raw_tool_calls[:brace_index].strip()
-            # Remove any leading separators from previous tools
-            func_name = re.sub(r'^[\s,]*', '', func_name)
+            sent_something = False
 
-            if not func_name:
-                logger.debug("v11 streaming: function name is empty")
-                return self._none_or_additional_content(additional_content)
+            # Phase 1: Extract and send function name
+            if not self.current_tool_name_sent:
+                # Look for function name pattern: name followed by {
+                brace_index = self.raw_tool_calls.find("{")
+                if brace_index == -1:
+                    logger.debug("v11 streaming: no opening brace found yet")
+                    break
 
-            logger.debug("v11 streaming: sending function name='%s'",
-                         func_name)
-            self.current_tool_name_sent = True
-            self.current_tool_id += 1
+                # Extract function name
+                func_name = self.raw_tool_calls[:brace_index].strip()
+                # Remove any leading separators from previous tools
+                func_name = re.sub(r'^[\s,]*', '', func_name)
 
-            return DeltaMessage(
-                content=additional_content,
-                tool_calls=[
+                if not func_name:
+                    logger.debug("v11 streaming: function name is empty")
+                    break
+
+                logger.debug("v11 streaming: sending function name='%s'",
+                             func_name)
+                self.current_tool_name_sent = True
+                self.current_tool_name_finished = True
+                self.current_tool_id += 1
+
+                result_tool_calls.append(
                     DeltaToolCall(
                         index=self.current_tool_id,
                         type="function",
                         id=MistralToolCall.generate_random_id(),
                         function=DeltaFunctionCall(name=func_name).model_dump(
                             exclude_none=True),
-                    )
-                ],
-            )
+                    ))
+                sent_something = True
 
-        # Phase 2: Extract and send argument fragments
-        if self.current_tool_name_sent and \
-            not self.current_tool_arguments_finished:
-            # Find the arguments part (everything after the first {)
-            brace_index = self.raw_tool_calls.find("{")
-            if brace_index == -1:
-                logger.debug("v11 streaming: no opening brace found for args")
-                return self._none_or_additional_content(additional_content)
+            # Phase 2: Extract and send argument fragments
+            if self.current_tool_name_sent and \
+                not self.current_tool_arguments_finished:
+                # Find the arguments part (everything after the first {)
+                brace_index = self.raw_tool_calls.find("{")
+                if brace_index == -1:
+                    logger.debug(
+                        "v11 streaming: no opening brace found for args")
+                    break
 
-            current_args = self.raw_tool_calls[brace_index:]
-            logger.debug("v11 streaming: current_args='%s'", current_args)
+                current_args = self.raw_tool_calls[brace_index:]
+                logger.debug("v11 streaming: current_args='%s'", current_args)
 
-            # Check if JSON is complete
-            try:
-                parsed_obj, end_idx = self.json_decoder.raw_decode(
-                    current_args)
-                # JSON is complete
-                self.current_tool_arguments_finished = True
-                logger.debug("v11 streaming: JSON complete, parsed_obj=%s",
-                             parsed_obj)
-            except json.decoder.JSONDecodeError:
-                # JSON still incomplete
-                logger.debug("v11 streaming: JSON still incomplete")
-                pass
+                actual_args = current_args
+                try:
+                    parsed_obj, end_idx = self.json_decoder.raw_decode(
+                        current_args)
+                    # JSON is complete
+                    self.current_tool_arguments_finished = True
+                    actual_args = current_args[:end_idx]
+                    logger.debug("v11 streaming: JSON complete, parsed_obj=%s",
+                                 parsed_obj)
+                except json.decoder.JSONDecodeError:
+                    # JSON still incomplete
+                    logger.debug("v11 streaming: JSON still incomplete")
+                    pass
 
-            # Calculate what's new since last time
-            if current_args != self.prev_args_sent:
-                if self.prev_args_sent and current_args.startswith(
-                        self.prev_args_sent):
-                    # Incremental update
-                    new_content = current_args[len(self.prev_args_sent):]
-                    logger.debug("v11 streaming: incremental args='%s'",
-                                 new_content)
-                else:
-                    # First time or reset
-                    new_content = current_args
-                    logger.debug("v11 streaming: first/reset args='%s'",
-                                 new_content)
+                # Calculate what's new since last time
+                new_content = ""
+                if actual_args != self.prev_args_sent:
+                    if self.prev_args_sent and actual_args.startswith(
+                            self.prev_args_sent):
+                        # Incremental update
+                        new_content = actual_args[len(self.prev_args_sent):]
+                        logger.debug("v11 streaming: incremental args='%s'",
+                                     new_content)
+                    else:
+                        # First time or reset
+                        new_content = actual_args
+                        logger.debug("v11 streaming: first/reset args='%s'",
+                                     new_content)
 
-                self.prev_args_sent = current_args
+                self.prev_args_sent = actual_args
 
                 if new_content:
-                    return DeltaMessage(
-                        content=additional_content,
-                        tool_calls=[
-                            DeltaToolCall(
-                                index=self.current_tool_id,
-                                function=DeltaFunctionCall(
-                                    arguments=new_content).model_dump(
-                                        exclude_none=True),
-                            )
-                        ],
-                    )
+                    result_tool_calls.append(
+                        DeltaToolCall(
+                            index=self.current_tool_id,
+                            function=DeltaFunctionCall(
+                                arguments=new_content).model_dump(
+                                    exclude_none=True),
+                        ))
+                    sent_something = True
+
+            if not sent_something and not advanced:
+                break
+
+        if result_tool_calls:
+            return DeltaMessage(
+                content=additional_content,
+                tool_calls=result_tool_calls,
+            )
 
         return self._none_or_additional_content(additional_content)
 
@@ -260,8 +274,8 @@ class MistralToolParser(ToolParser):
 
     def _find_completed_v11_tool_end(self) -> int:
         """
-        Find the end position of the first completed tool in V11 format using
-        JSON parsing.
+        Find the end position of the first completed tool in V11 format
+        using JSON parsing.
         """
         # Look for function name pattern: name followed by {
         brace_match = re.search(r'([a-zA-Z0-9_-]+)\s*(\{)',
@@ -550,19 +564,55 @@ class MistralToolParser(ToolParser):
             # jsons is difficult
             try:
                 if self.fn_name_regex:
-                    matches = self.fn_name_regex.findall(tool_content)
-
                     function_call_arr = []
-                    for match in matches:
-                        fn_name = match[0]
-                        args = match[1]
+                    pos = 0
+                    tool_str = tool_content
+                    while pos < len(tool_str):
+                        # skip ws
+                        while pos < len(tool_str) and tool_str[pos].isspace():
+                            pos += 1
+                        if pos >= len(tool_str):
+                            break
 
-                        # fn_name is encoded outside serialized json dump
-                        # only arguments are serialized
-                        function_call_arr.append({
-                            "name": fn_name,
-                            "arguments": json.loads(args)
-                        })
+                        # match name
+                        match_name = re.match(r'([a-zA-Z0-9_-]+)',
+                                              tool_str[pos:])
+                        if not match_name:
+                            break
+                        fn_name = match_name.group(0)
+                        pos += match_name.end()
+
+                        # skip ws
+                        while pos < len(tool_str) and tool_str[pos].isspace():
+                            pos += 1
+
+                        if pos >= len(tool_str) or tool_str[pos] != '{':
+                            break
+
+                        pos += 1  # skip {
+
+                        # parse args
+                        try:
+                            args_obj, end_idx = self.json_decoder.raw_decode(
+                                tool_str[pos:])
+                            function_call_arr.append({
+                                "name": fn_name,
+                                "arguments": args_obj
+                            })
+                            pos += end_idx
+                        except json.JSONDecodeError:
+                            break
+
+                        # skip ws
+                        while pos < len(tool_str) and tool_str[pos].isspace():
+                            pos += 1
+
+                        # optional comma
+                        if pos < len(tool_str) and tool_str[pos] == ',':
+                            pos += 1
+                            while pos < len(
+                                    tool_str) and tool_str[pos].isspace():
+                                pos += 1
                 else:
                     function_call_arr = json.loads(tool_content)
             except json.JSONDecodeError:
@@ -570,7 +620,8 @@ class MistralToolParser(ToolParser):
                 # NOTE: This use case should not happen if the model is trained
                 # correctly. It's a easy possible fix so it's included, but
                 # can be brittle for very complex / highly nested tool calls
-                raw_tool_call = self.tool_call_regex.findall(tool_content)[0]
+                raw_tool_call = self.tool_call_regex.search(
+                    tool_content).group(0)
                 function_call_arr = json.loads(raw_tool_call)
 
             # Tool Call
