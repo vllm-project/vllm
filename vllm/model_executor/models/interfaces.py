@@ -694,6 +694,12 @@ class SupportsTranscription(Protocol):
 
     supports_transcription: ClassVar[Literal[True]] = True
 
+    supports_transcription_only: ClassVar[bool] = False
+    """
+    Transcription models can opt out of text generation by setting this to
+    `True`.
+    """
+
     @classmethod
     def get_generation_prompt(cls, audio: np.ndarray,
                               stt_config: SpeechToTextConfig, language: str,
