@@ -2246,7 +2246,7 @@ class SchedulerConfig:
     """EXPERIMENTAL: If set to True, perform async scheduling. This may help
     reduce the CPU overheads, leading to better latency and throughput. However,
     async scheduling is currently not supported with some features such as
-    structured output, speculatice decoding, and pipeline parallelism.
+    structured outputs, speculative decoding, and pipeline parallelism.
     """
 
     def compute_hash(self) -> str:
