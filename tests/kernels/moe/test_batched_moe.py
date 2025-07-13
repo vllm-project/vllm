@@ -6,7 +6,6 @@ from typing import Optional
 
 import pytest
 import torch
-import triton.language as tl
 
 from tests.kernels.moe.utils import (batched_moe,
                                      make_quantized_test_activations,
@@ -18,6 +17,7 @@ from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
     invoke_moe_batched_triton_kernel)
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
 from vllm.platforms import current_platform
+from vllm.triton_utils import tl
 
 MNK_FACTORS = [
     (1, 128, 128),
