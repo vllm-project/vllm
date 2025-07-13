@@ -19,6 +19,8 @@ from vllm.config import CUDAGraphMode
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.flash_attn import use_cascade_attention
+# yapf conflicts with isort for this block
+# yapf: disable
 from vllm.v1.attention.backends.utils import (AttentionCGSupport,
                                               AttentionMetadataBuilder,
                                               CommonAttentionMetadata,
@@ -26,6 +28,7 @@ from vllm.v1.attention.backends.utils import (AttentionCGSupport,
                                               get_kv_cache_layout,
                                               get_per_layer_parameters,
                                               infer_global_hyperparameters)
+# yapf: enable
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.block_table import BlockTable
 
