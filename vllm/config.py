@@ -16,7 +16,6 @@ from dataclasses import (MISSING, Field, asdict, field, fields, is_dataclass,
                          replace)
 from functools import cached_property
 from importlib.util import find_spec
-from pathlib import Path
 from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Literal, Optional,
                     Protocol, TypeVar, Union, cast, get_args)
 
@@ -1331,6 +1330,17 @@ class ModelConfig:
                     f"{block_type.value} layers")
 
             return sum(t == 1 for t in attn_type_list[start:end])
+
+    def get_mamba_chunk_size(self) -> Optional[int]:
+        """
+        Returns the mamba chunk size if it exists
+        """
+        # used by e.g. Bamba, FalconH1, Granite, PLaMo2
+        chunk_size = getattr(self.hf_text_config, "mamba_chunk_size", None)
+        if chunk_size is None:
+            # used by e.g. Mamba2, NemotronH, Zamba
+            chunk_size = getattr(self.hf_text_config, "chunk_size", None)
+        return chunk_size
 
     def get_multimodal_config(self) -> "MultiModalConfig":
         """
@@ -3943,11 +3953,6 @@ class PassConfig:
     don't all have access to full configuration - that would create a cycle as
     the `PassManager` is set as a property of config."""
 
-    dump_graph_stages: list[str] = field(default_factory=list)
-    """List of stages for which we want to dump the graph. Each pass defines
-    its own stages (before, after, maybe in-between)."""
-    dump_graph_dir: Path = Path(".")
-    """Directory to dump the graphs."""
     enable_fusion: bool = field(default_factory=lambda: not envs.VLLM_USE_V1)
     """Whether to enable the custom fusion (RMSNorm/SiluMul+quant) pass."""
     enable_attn_fusion: bool = False
@@ -3958,6 +3963,10 @@ class PassConfig:
     """Whether to enable sequence parallelism."""
     enable_async_tp: bool = False
     """Whether to enable async TP."""
+    enable_fi_allreduce_fusion: bool = False
+    """Whether to enable flashinfer allreduce fusion."""
+    fi_allreduce_fusion_max_token_num: int = 1024
+    """Max number of tokens to used in flashinfer allreduce fusion."""
 
     # TODO(luka) better pass enabling system.
 
@@ -3965,12 +3974,9 @@ class PassConfig:
         """
         Produces a hash unique to the pass configuration.
         Any new fields that affect compilation should be added to the hash.
-        Do not include dump_graph_* in the hash - they don't affect
-        compilation.
+        Any future fields that don't affect compilation should be excluded.
         """
-        exclude = {"dump_graph_stages", "dump_graph_dir"}
-        dict_ = {k: v for k, v in asdict(self).items() if k not in exclude}
-        return InductorPass.hash_dict(dict_)
+        return InductorPass.hash_dict(asdict(self))
 
     def __post_init__(self) -> None:
         if not self.enable_noop:
@@ -4953,6 +4959,37 @@ def get_layers_from_vllm_config(vllm_config: VllmConfig,
         vllm_config.compilation_config.static_forward_context.items()
         if isinstance(layer, layer_type)
     }
+
+
+@config
+@dataclass
+class SpeechToTextConfig:
+    """Configuration for speech-to-text models."""
+
+    sample_rate: float = 16_000
+    """Sample rate (Hz) to resample input audio to. Most speech models expect
+    16kHz audio input. The input audio will be automatically resampled to this
+    rate before processing."""
+
+    max_audio_clip_s: int = 30
+    """Maximum duration in seconds for a single audio clip without chunking.
+    Audio longer than this will be split into smaller chunks if
+    `allow_audio_chunking` evaluates to True, otherwise it will be rejected."""
+
+    overlap_chunk_second: int = 1
+    """Overlap duration in seconds between consecutive audio chunks when
+    splitting long audio. This helps maintain context across chunk boundaries
+    and improves transcription quality at split points."""
+
+    min_energy_split_window_size: Optional[int] = 1600
+    """Window size in samples for finding low-energy (quiet) regions to split
+    audio chunks. The algorithm looks for the quietest moment within this
+    window to minimize cutting through speech. Default 1600 samples ≈ 100ms
+    at 16kHz. If None, no chunking will be done."""
+
+    @property
+    def allow_audio_chunking(self) -> bool:
+        return self.min_energy_split_window_size is not None
 
 
 def update_config(config: DataclassInstanceT,
