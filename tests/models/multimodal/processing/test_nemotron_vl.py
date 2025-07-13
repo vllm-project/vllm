@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for InternVL's multimodal preprocessing kwargs."""
+"""Tests for Nemotron-Nano-VL's multimodal preprocessing kwargs."""
 from collections.abc import Mapping
 from typing import Optional
 
@@ -35,7 +35,7 @@ def _get_expected_num_patches(
             min_num,
             max_num,
         ),
-        image_size=config.vision_config.image_size,
+        image_size=config.force_image_size,
         use_thumbnail=False,
     )
     expected_num_patches = blocks
@@ -55,26 +55,29 @@ def _run_check(
 ):
     tokenizer = processor.info.get_tokenizer()
     config = processor.info.get_hf_config()
+    image_processor = processor.info.get_image_processor()
 
+    config.use_thumbnail = image_processor.use_thumbnail
     prompt = "<image>" * len(images)
     mm_data = {"image": images}
 
     total_expected_num_patches = sum(
         _get_expected_num_patches(config, image, len(images), min_num, max_num)
         for image in images)
-
+    print(total_expected_num_patches)
     processed_inputs = processor.apply(prompt, mm_data, mm_processor_kwargs)
 
     # Ensure we have the right number of placeholders per num_crops size
-    image_token_id = tokenizer.convert_tokens_to_ids("<IMG_CONTEXT>")
+    image_token_id = tokenizer.convert_tokens_to_ids("<image>")
     img_tok_count = processed_inputs["prompt_token_ids"].count(image_token_id)
     pixel_shape = processed_inputs["mm_kwargs"]["pixel_values_flat"].shape
-
+    print("Image token count:", img_tok_count, "Pixel shape:", pixel_shape)
     assert img_tok_count == 256 * total_expected_num_patches
     assert pixel_shape[0] == total_expected_num_patches
 
 
-@pytest.mark.parametrize("model_id", ["OpenGVLab/InternVL2-2B"])
+@pytest.mark.parametrize("model_id",
+                         ["nvidia/Llama-3.1-Nemotron-Nano-VL-8B-V1"])
 @pytest.mark.parametrize(
     "size_factors",
     [
