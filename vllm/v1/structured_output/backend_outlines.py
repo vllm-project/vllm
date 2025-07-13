@@ -13,8 +13,6 @@ from typing import TYPE_CHECKING
 import torch
 from regex import escape as regex_escape
 
-from vllm.model_executor.guided_decoding.outlines_logits_processors import (
-    OutlinesVocabulary, get_cache, get_vocabulary)
 from vllm.sampling_params import SamplingParams
 from vllm.utils import LazyLoader
 from vllm.v1.structured_output.backend_types import (StructuredOutputBackend,
@@ -24,6 +22,8 @@ from vllm.v1.structured_output.backend_types import (StructuredOutputBackend,
 if TYPE_CHECKING:
     import outlines_core as oc
     import outlines_core.json_schema as json_schema
+    from vllm.model_executor.guided_decoding.outlines_logits_processors import (
+        OutlinesVocabulary, get_cache, get_vocabulary)
 else:
     oc = LazyLoader("oc", globals(), "outlines_core")
     json_schema = LazyLoader("json_schema", globals(),
