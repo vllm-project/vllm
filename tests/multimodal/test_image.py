@@ -38,10 +38,6 @@ def test_rgba_to_rgb():
 
 
 def test_load_avif():
-    load_success = True
-    try:
-        image = Image.open(ASSETS_DIR / "test.avif")
-        image.load()
-    except Exception:
-        load_success = False
-    assert load_success
+    image = Image.open(ASSETS_DIR / "test.avif")
+    image.load()
+    assert image.format == "AVIF"
