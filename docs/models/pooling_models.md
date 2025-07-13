@@ -43,23 +43,30 @@ vLLM supports **chunked processing** for embedding models to handle text inputs 
 
 ### How Chunked Processing Works
 
-1. **Automatic Detection**: When input text exceeds `max_model_len`, chunked processing is triggered
-2. **Smart Chunking**: Text is split at token boundaries to maintain semantic integrity  
+1. **Flexible Input Validation**: Configure `max_embed_len` to accept inputs longer than `max_model_len` without environment variables
+2. **Smart Chunking**: Text is split based on `max_position_embeddings` to maintain semantic integrity  
 3. **Parallel Processing**: Each chunk is processed independently through the model
 4. **Intelligent Aggregation**: Results are combined using weighted averaging based on chunk token counts
 5. **Consistent Output**: Final embeddings maintain the same dimensionality as standard processing
 
 ### Configuration
 
-Enable chunked processing by setting `enable_chunked_processing: true` in the pooler configuration:
+Enable chunked processing and configure maximum embedding input length:
 
 ```bash
 vllm serve intfloat/multilingual-e5-large \
   --task embed \
-  --override-pooler-config '{"pooling_type": "CLS", "normalize": true, "enable_chunked_processing": true}' \
-  --max-model-len 10240 \
+  --override-pooler-config '{"pooling_type": "CLS", "normalize": true, "enable_chunked_processing": true, "max_embed_len": 10240}' \
   --trust-remote-code
 ```
+
+#### Configuration Parameters
+
+- `enable_chunked_processing`: Enable chunked processing for long inputs (default: `false`)
+- `max_embed_len`: Maximum input length allowed for embedding generation (default: `null`)
+  - When set, allows inputs longer than `max_model_len` without requiring `VLLM_ALLOW_LONG_MAX_MODEL_LEN`
+  - Inputs exceeding `max_embed_len` are rejected with clear error messages
+  - Chunking is triggered when inputs exceed `max_position_embeddings`
 
 ### Aggregation Algorithm
 
@@ -75,12 +82,13 @@ This ensures that longer chunks contribute proportionally more to the final repr
 
 ### Performance Characteristics
 
-| Aspect | Short Text (≤ max_len) | Long Text (> max_len) |
-|--------|------------------------|----------------------|
+| Aspect | Short Text (≤ max_position_embeddings) | Long Text (> max_position_embeddings) |
+|--------|----------------------------------------|---------------------------------------|
 | **Processing Time** | Standard | Increased (multiple inference calls) |
 | **Memory Usage** | Standard | Reduced (chunks processed separately) |
 | **Quality** | Standard | Maintains semantic representation |
 | **Compatibility** | Full | Full (backward compatible) |
+| **Input Validation** | Standard max_model_len check | Extended max_embed_len check |
 
 ### Example Usage
 
@@ -92,9 +100,10 @@ client = OpenAI(
     base_url="http://localhost:31090/v1"
 )
 
-# This will automatically use chunked processing if text is too long
+# This will automatically use chunked processing for very long text
+# max_embed_len=10240 allows inputs up to 10k tokens
 response = client.embeddings.create(
-    input="Very long text that exceeds the model's maximum context length..." * 1000,
+    input="Very long text that exceeds the model's position embeddings..." * 500,
     model="multilingual-e5-large"
 )
 
@@ -106,8 +115,8 @@ print(f"Embedding dimension: {len(response.data[0].embedding)}")
 When chunked processing is active, you'll see informative log messages:
 
 ```
-INFO: Input length 15000 exceeds max_model_len 10240, will use chunked processing
-INFO: Split input of 15000 tokens into 2 chunks
+INFO: Input length 10000 exceeds max_position_embeddings 512, will use chunked processing
+INFO: Split input of 10000 tokens into 20 chunks (max_chunk_size: 512)
 ```
 
 ### Limitations

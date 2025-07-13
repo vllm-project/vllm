@@ -345,9 +345,37 @@ class EmbeddingMixin(OpenAIServing):
             enable_chunked = (pooler_config is not None and getattr(
                 pooler_config, 'enable_chunked_processing', False))
 
+            # Get max_embed_len from pooler config if set
+            max_embed_len = (pooler_config.max_embed_len if pooler_config
+                             and pooler_config.max_embed_len else None)
+
             # Use max_position_embeddings for chunked processing decisions
             max_pos_embeddings = self._get_max_position_embeddings()
 
+            # Determine the effective max length for validation
+            if max_embed_len is not None:
+                # Use max_embed_len for validation instead of max_model_len
+                effective_max_len = max_embed_len
+                validation_error_msg = (
+                    f"This model's maximum embedding input length is "
+                    f"{max_embed_len} tokens. However, you requested "
+                    f"{token_num} tokens in the input for embedding "
+                    f"generation. Please reduce the length of the input.")
+            else:
+                # Fall back to max_model_len validation (original behavior)
+                effective_max_len = self.max_model_len
+                validation_error_msg = (
+                    f"This model's maximum context length is "
+                    f"{self.max_model_len} tokens. However, you requested "
+                    f"{token_num} tokens in the input for embedding "
+                    f"generation. Please reduce the length of the input.")
+
+            # Check if input exceeds effective max length
+            if token_num > effective_max_len:
+                raise ValueError(validation_error_msg)
+
+            # Check for chunked processing
+            # when exceeding max_position_embeddings
             if token_num > max_pos_embeddings:
                 if enable_chunked:
                     # Allow long inputs when chunked processing is enabled

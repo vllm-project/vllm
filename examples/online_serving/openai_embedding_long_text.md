@@ -15,7 +15,7 @@ Use the provided script to start a vLLM server with chunked processing enabled:
 # Custom configuration
 MODEL_NAME="intfloat/multilingual-e5-large" \
 PORT=31090 \
-MAX_MODEL_LEN=10240 \
+MAX_EMBED_LEN=10240 \
 ./openai_embedding_long_text_service.sh
 ```
 
@@ -39,13 +39,14 @@ python openai_embedding_long_text_client.py
 
 ### Server Configuration
 
-The key parameter for chunked processing is in the `--override-pooler-config`:
+The key parameters for chunked processing are in the `--override-pooler-config`:
 
 ```json
 {
   "pooling_type": "CLS",
   "normalize": true,
-  "enable_chunked_processing": true
+  "enable_chunked_processing": true,
+  "max_embed_len": 10240
 }
 ```
 
@@ -56,23 +57,31 @@ The key parameter for chunked processing is in the `--override-pooler-config`:
 | `MODEL_NAME` | `intfloat/multilingual-e5-large` | Embedding model to use |
 | `PORT` | `31090` | Server port |
 | `GPU_COUNT` | `1` | Number of GPUs to use |
-| `MAX_MODEL_LEN` | `10240` | Maximum model context length |
+| `MAX_EMBED_LEN` | `10240` | Maximum embedding input length (allows longer inputs without VLLM_ALLOW_LONG_MAX_MODEL_LEN) |
 | `API_KEY` | `EMPTY` | API key for authentication |
 
 ## 🔧 How It Works
 
-1. **Automatic Detection**: When input text exceeds `max_model_len`, chunked processing is triggered
-2. **Smart Chunking**: Text is split at token boundaries to maintain semantic integrity
+1. **Enhanced Input Validation**: `max_embed_len` allows accepting inputs longer than `max_model_len` without environment variables
+2. **Smart Chunking**: Text is split based on `max_position_embeddings` to maintain semantic integrity
 3. **Independent Processing**: Each chunk is processed separately through the model
 4. **Weighted Aggregation**: Results are combined using token count-based weighted averaging
 5. **Consistent Output**: Final embeddings maintain the same dimensionality as standard processing
+
+### Input Length Handling
+
+- **Within max_embed_len**: Input is accepted and processed
+- **Exceeds max_position_embeddings**: Chunked processing is automatically triggered
+- **Exceeds max_embed_len**: Input is rejected with clear error message
+- **No environment variables required**: Works without `VLLM_ALLOW_LONG_MAX_MODEL_LEN`
 
 ## 📊 Performance Characteristics
 
 | Text Length | Processing Method | Memory Usage | Speed |
 |-------------|------------------|--------------|-------|
-| ≤ max_len | Standard | Normal | Fast |
-| > max_len | Chunked | Reduced per chunk | Slower (multiple inferences) |
+| ≤ max_position_embeddings | Standard | Normal | Fast |
+| > max_position_embeddings, ≤ max_embed_len | Chunked | Reduced per chunk | Slower (multiple inferences) |
+| > max_embed_len | Rejected | N/A | Error response |
 
 ## 🧪 Test Cases
 
@@ -92,20 +101,28 @@ The test client demonstrates:
 1. **Chunked processing not enabled**:
 
    ```
-   ValueError: This model's maximum context length is 512 tokens...
+   ValueError: This model's maximum position embeddings length is 4096 tokens...
    ```
 
    **Solution**: Ensure `enable_chunked_processing: true` in pooler config
 
-2. **Memory errors**:
+2. **Input exceeds max_embed_len**:
+
+   ```
+   ValueError: This model's maximum embedding input length is 10240 tokens...
+   ```
+
+   **Solution**: Increase `max_embed_len` in pooler config or reduce input length
+
+3. **Memory errors**:
   
    ```
    RuntimeError: CUDA out of memory
    ```
   
-   **Solution**: Reduce `MAX_MODEL_LEN` or use fewer GPUs
+   **Solution**: Reduce chunk size by adjusting model's `max_position_embeddings` or use fewer GPUs
 
-3. **Slow processing**:
+4. **Slow processing**:
    **Expected**: Long text takes more time due to multiple inference calls
 
 ### Debug Information
@@ -113,8 +130,8 @@ The test client demonstrates:
 Server logs show chunked processing activity:
 
 ```
-INFO: Input length 15000 exceeds max_model_len 10240, will use chunked processing
-INFO: Split input of 15000 tokens into 2 chunks
+INFO: Input length 15000 exceeds max_position_embeddings 4096, will use chunked processing
+INFO: Split input of 15000 tokens into 4 chunks (max_chunk_size: 4096)
 ```
 
 ## 📚 Additional Resources
@@ -131,6 +148,17 @@ To extend chunked processing support to other embedding models:
 2. Test with various text lengths
 3. Validate embedding quality compared to single-chunk processing
 4. Submit PR with test cases and documentation updates
+
+## 🆕 Enhanced Features
+
+### max_embed_len Parameter
+
+The new `max_embed_len` parameter provides:
+
+- **Simplified Configuration**: No need for `VLLM_ALLOW_LONG_MAX_MODEL_LEN` environment variable
+- **Flexible Input Validation**: Accept inputs longer than `max_model_len` up to `max_embed_len`
+- **Clear Error Messages**: Better feedback when inputs exceed limits
+- **Backward Compatibility**: Existing configurations continue to work
 
 ---
 

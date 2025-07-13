@@ -5,6 +5,7 @@
 
 # vLLM Embedding Server with Chunked Processing
 # This script starts a vLLM server with chunked processing enabled for long text embedding.
+# Uses max_embed_len to allow long inputs without VLLM_ALLOW_LONG_MAX_MODEL_LEN.
 
 set -euo pipefail
 
@@ -13,7 +14,7 @@ MODEL_NAME=${MODEL_NAME:-"intfloat/multilingual-e5-large"}
 MODEL_CODE=${MODEL_CODE:-"multilingual-e5-large"}
 PORT=${PORT:-31090}
 GPU_COUNT=${GPU_COUNT:-1}
-MAX_MODEL_LEN=${MAX_MODEL_LEN:-10240}
+MAX_EMBED_LEN=${MAX_EMBED_LEN:-10240}
 API_KEY=${API_KEY:-"your-api-key"}
 
 echo "🚀 Starting vLLM Embedding Server with Chunked Processing"
@@ -21,15 +22,14 @@ echo "================================================================"
 
 # Environment variables for optimization
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
-export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
 
 # Display configuration
 echo "📋 Configuration:"
 echo "   - Model: $MODEL_NAME"
 echo "   - Port: $PORT"
 echo "   - GPU Count: $GPU_COUNT"
-echo "   - Max Model Length: $MAX_MODEL_LEN tokens"
 echo "   - Chunked Processing: ENABLED"
+echo "   - Max Embed Length: ${MAX_EMBED_LEN} tokens"
 echo "   - Pooling Type: CLS + Normalization"
 echo ""
 
@@ -53,8 +53,7 @@ echo "🔧 Starting server with chunked processing configuration..."
 vllm serve "$MODEL_NAME" \
   --tensor-parallel-size "$GPU_COUNT" \
   --enforce-eager \
-  --max-model-len "$MAX_MODEL_LEN" \
-  --override-pooler-config '{"pooling_type": "CLS", "normalize": true, "enable_chunked_processing": true}' \
+  --override-pooler-config '{"pooling_type": "CLS", "normalize": true, "enable_chunked_processing": true, "max_embed_len": '${MAX_EMBED_LEN}'}' \
   --served-model-name ${MODEL_CODE} \
   --task embed \
   --use-v2-block-manager \
@@ -76,6 +75,7 @@ echo "   python examples/online_serving/openai_embedding_long_text_client.py"
 echo ""
 echo "📚 Features enabled:"
 echo "   ✅ Long text chunked processing"
+echo "   ✅ Enhanced max embedding length (${MAX_EMBED_LEN} tokens)"
 echo "   ✅ Automatic chunk aggregation"
 echo "   ✅ OpenAI-compatible API"
 echo "   ✅ GPU acceleration" 
