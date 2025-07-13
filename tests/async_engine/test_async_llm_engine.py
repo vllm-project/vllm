@@ -128,7 +128,6 @@ async def test_new_requests_event():
     engine = MockAsyncLLMEngine()
     assert engine.get_model_config() is not None
     assert engine.get_tokenizer() is not None
-    assert engine.get_decoding_config() is not None
 
 
 def start_engine():

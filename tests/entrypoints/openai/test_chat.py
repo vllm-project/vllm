@@ -487,8 +487,7 @@ async def test_chat_completion_stream_options(client: openai.AsyncOpenAI,
 
 
 @pytest.mark.asyncio
-async def test_guided_choice_chat(client: openai.AsyncOpenAI,
-                                  sample_guided_choice):
+async def test_guided_choice_chat(client: openai.AsyncOpenAI, sample_choice):
     messages = [{
         "role": "system",
         "content": "you are a helpful assistant"
@@ -503,9 +502,9 @@ async def test_guided_choice_chat(client: openai.AsyncOpenAI,
         messages=messages,
         max_completion_tokens=10,
         temperature=0.7,
-        extra_body=dict(guided_choice=sample_guided_choice))
+        extra_body=dict(guided_choice=sample_choice))
     choice1 = chat_completion.choices[0].message.content
-    assert choice1 in sample_guided_choice
+    assert choice1 in sample_choice
 
     messages.append({"role": "assistant", "content": choice1})
     messages.append({
@@ -517,9 +516,9 @@ async def test_guided_choice_chat(client: openai.AsyncOpenAI,
         messages=messages,
         max_completion_tokens=10,
         temperature=0.7,
-        extra_body=dict(guided_choice=sample_guided_choice))
+        extra_body=dict(guided_choice=sample_choice))
     choice2 = chat_completion.choices[0].message.content
-    assert choice2 in sample_guided_choice
+    assert choice2 in sample_choice
     assert choice1 != choice2
 
 
@@ -624,7 +623,7 @@ async def test_guided_decoding_type_error(client: openai.AsyncOpenAI):
 
 @pytest.mark.asyncio
 async def test_guided_choice_chat_logprobs(client: openai.AsyncOpenAI,
-                                           sample_guided_choice):
+                                           sample_choice):
 
     messages = [{
         "role": "system",
@@ -641,7 +640,7 @@ async def test_guided_choice_chat_logprobs(client: openai.AsyncOpenAI,
         max_completion_tokens=10,
         logprobs=True,
         top_logprobs=5,
-        extra_body=dict(guided_choice=sample_guided_choice))
+        extra_body=dict(guided_choice=sample_choice))
 
     assert chat_completion.choices[0].logprobs is not None
     assert chat_completion.choices[0].logprobs.content is not None

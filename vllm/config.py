@@ -26,7 +26,7 @@ from pydantic import (ConfigDict, SkipValidation, TypeAdapter, field_validator,
 from pydantic.dataclasses import dataclass
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 from torch.distributed import ProcessGroup, ReduceOp
-from typing_extensions import Self, deprecated, runtime_checkable
+from typing_extensions import Self, runtime_checkable
 
 import vllm.envs as envs
 from vllm import version
@@ -3606,7 +3606,12 @@ StructuredOutputsBackendV0 = Literal[
     "xgrammar",
     "guidance",
 ]
-StructuredOutputsBackendV1 = Literal["auto", "xgrammar", "guidance", "outlines"]
+StructuredOutputsBackendV1 = Literal[
+    "auto",
+    "xgrammar",
+    "guidance",
+    "outlines",
+]
 StructuredOutputsBackend = Literal[
     StructuredOutputsBackendV0,
     StructuredOutputsBackendV1,
@@ -3616,32 +3621,20 @@ StructuredOutputsBackend = Literal[
 @config
 @dataclass
 class StructuredOutputsConfig:
-    """Dataclass which contains the structured outputs config for the engine."""
-
-    @property
-    @deprecated(
-        "`guided_decoding_backend` is deprecated and has been renamed to "
-        "`backend`. This will be removed in v0.10.0. Please use the "
-        "`backend` argument instead.")
-    def guided_decoding_backend(self) -> StructuredOutputsBackend:
-        return self.backend
-
-    @guided_decoding_backend.setter
-    def guided_decoding_backend(self, value: StructuredOutputsBackend):
-        self.backend = value
+    """Configuration related to structured outputs for vLLM."""
 
     backend: StructuredOutputsBackend = "auto" if envs.VLLM_USE_V1 else "xgrammar"  # noqa: E501
-    """Which engine will be used for guided decoding (JSON schema / regex etc)
+    """Which engine will be used for structured outputs (JSON schema / regex etc)
     by default. With "auto", we will make opinionated choices based on request
     contents and what the backend libraries currently support, so the behavior
-    is subject to change in each release."""
+    is subject to change in each release."""  # noqa: E501
 
     disable_fallback: bool = False
     """If `True`, vLLM will not fallback to a different backend on error."""
 
     disable_any_whitespace: bool = False
-    """If `True`, the model will not generate any whitespace during guided
-    decoding. This is only supported for xgrammar and guidance backends."""
+    """If `True`, the model will not generate any whitespace during structured
+    outputs. This is only supported for xgrammar and guidance backends."""
 
     disable_additional_properties: bool = False
     """If `True`, the `guidance` backend will not use `additionalProperties`
@@ -3672,16 +3665,13 @@ class StructuredOutputsConfig:
         return hash_str
 
     def __post_init__(self):
-        if ":" in self.backend:
-            self._extract_backend_options()
-
         if envs.VLLM_USE_V1:
-            valid_guided_backends = get_args(StructuredOutputsBackendV1)
+            valid_structured_outputs = get_args(StructuredOutputsBackendV1)
         else:
-            valid_guided_backends = get_args(StructuredOutputsBackendV0)
-        if self.backend not in valid_guided_backends:
+            valid_structured_outputs = get_args(StructuredOutputsBackendV0)
+        if self.backend not in valid_structured_outputs:
             raise ValueError(f"Invalid backend '{self.backend}',"
-                             f" must be one of {valid_guided_backends}")
+                             f" must be one of {valid_structured_outputs}")
         if (self.disable_any_whitespace
                 and self.backend not in ("xgrammar", "guidance")):
             raise ValueError("disable_any_whitespace is only supported for "
@@ -3689,29 +3679,6 @@ class StructuredOutputsConfig:
         if (self.disable_additional_properties and self.backend != "guidance"):
             raise ValueError("disable_additional_properties is only supported "
                              "for the guidance backend.")
-
-    @deprecated(
-        "Passing structured output backend options inside backend in the format 'backend:...' is deprecated. This will be removed in v0.10.0. Please use the dedicated arguments '--structured-outputs-config.disable_fallback=True', '--structured-outputs-config.disable_any_whitespace=True' and '--structured-outputs-config.disable_additional_properties=True' instead.",  # noqa: E501
-    )
-    def _extract_backend_options(self):
-        """Extract backend options from the backend string."""
-        backend, options = self.backend.split(":")
-        self.backend = cast(StructuredOutputsBackend, backend)
-        options_set = set(options.strip().split(","))
-        if "no-fallback" in options_set:
-            self.disable_fallback = True
-        if "disable-any-whitespace" in options_set:
-            self.disable_any_whitespace = True
-        if "no-additional-properties" in options_set:
-            self.disable_additional_properties = True
-
-
-# For backward compatibility, should remove in v0.10.0
-@deprecated(
-    "DecodingConfig is deprecated and has been renamed to StructuredOutputsConfig. This will be removed in v0.10.0. Please use 'from vllm.config import StructuredOutputConfig' instead."  # noqa: E501
-)
-class DecodingConfig(StructuredOutputsConfig):
-    ...
 
 
 DetailedTraceModules = Literal["model", "worker", "all"]
@@ -4409,18 +4376,6 @@ class VllmConfig:
     you are using. Contents must be hashable."""
     instance_id: str = ""
     """The ID of the vLLM instance."""
-
-    @property
-    @deprecated(
-        "decoding_config is deprecated and has been renamed to 'structured_outputs_config'. This will be removed in v0.10.0. Uses 'structured_outputs_config' instead."  # noqa: E501
-    )
-    def decoding_config(self) -> StructuredOutputsConfig:
-        """Decoding configuration."""
-        return self.structured_outputs_config
-
-    @decoding_config.setter
-    def decoding_config(self, value: StructuredOutputsConfig):
-        self.structured_outputs_config = value
 
     def compute_hash(self) -> str:
         """

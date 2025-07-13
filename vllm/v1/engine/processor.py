@@ -151,39 +151,39 @@ class Processor:
                              "not enabled!")
 
     def _validate_structured_output(self, params: SamplingParams) -> None:
-        if not params.guided_decoding or not self.structured_outputs_config:
+        if not params.structured_outputs or not self.structured_outputs_config:
             return
 
-        if self.model_config.skip_tokenizer_init and params.guided_decoding:
+        if self.model_config.skip_tokenizer_init and params.structured_outputs:
             raise ValueError(
                 "Structured outputs requires a tokenizer so it can't be used with 'skip_tokenizer_init'"  # noqa: E501
             )
 
-        engine_level_backend = self.decoding_config.backend
-        if params.guided_decoding.backend:
+        engine_level_backend = self.structured_outputs_config.backend
+        if params.structured_outputs.backend:
             # Request-level backend selection is not supported in V1.
             # The values may differ if `params` is reused and was set
             # to a specific backend based on `auto` behavior in a previous
             # request. We remember that it was set as a result of `auto`
             # using the `_auto` option set on the backend in the params.
-            if (params.guided_decoding.backend != engine_level_backend
+            if (params.structured_outputs.backend != engine_level_backend
                     and not (engine_level_backend == "auto"
-                             and params.guided_decoding.backend_was_auto)):
+                             and params.structured_outputs.backend_was_auto)):
                 raise ValueError(
                     "Request-level structured output backend selection is no "
                     "longer supported. The request specified "
-                    f"'{params.guided_decoding.backend}', but vLLM was "
+                    f"'{params.structured_outputs.backend}', but vLLM was "
                     f"initialised with '{engine_level_backend}'. This error "
                     "can be resolved by removing backend selection from the "
                     "request.")
         else:
-            params.guided_decoding.backend = engine_level_backend
+            params.structured_outputs.backend = engine_level_backend
 
         # Request content validation
-        if (isinstance(params.guided_decoding.choice, list)
-                and not params.guided_decoding.choice):
+        if (isinstance(params.structured_outputs.choice, list)
+                and not params.structured_outputs.choice):
             # It is invalid for choice to be an empty list
-            raise ValueError(f"Choice '{params.guided_decoding.choice}' "
+            raise ValueError(f"Choice '{params.structured_outputs.choice}' "
                              "cannot be an empty list")
 
         if engine_level_backend.startswith("xgrammar"):
@@ -207,15 +207,15 @@ class Processor:
             # between releases as feature support changes.
             try:
                 validate_xgrammar_grammar(params)
-                params.guided_decoding.backend = "xgrammar"
+                params.structured_outputs.backend = "xgrammar"
             except ValueError:
                 # The request either failed validation
                 # or includes some jsonschema feature(s) that
                 # are not supported in xgrammar. Fall back to guidance.
                 validate_guidance_grammar(params, tokenizer=None)
-                params.guided_decoding.backend = "guidance"
+                params.structured_outputs.backend = "guidance"
             # Remember that this backend was set automatically
-            params.guided_decoding.backend_was_auto = True
+            params.structured_outputs.backend_was_auto = True
 
     def process_inputs(
         self,

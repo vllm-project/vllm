@@ -243,10 +243,10 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
 
     Raises ValueError if the request is not supported.
     """
-    if sampling_params.guided_decoding is None:
+    if sampling_params.structured_outputs is None:
         return
 
-    gd_params = sampling_params.guided_decoding
+    gd_params = sampling_params.structured_outputs
 
     if gd_params.regex:
         try:

@@ -8,13 +8,13 @@ from transformers import PreTrainedTokenizerBase
 
 from vllm.model_executor.guided_decoding.guidance_logits_processors import (
     GuidanceLogitsProcessor)
-from vllm.sampling_params import GuidedDecodingParams
+from vllm.sampling_params import StructuredOuputsParams
 from vllm.v1.structured_output.backend_guidance import (
     process_for_additional_properties)
 
 
 def get_local_guidance_guided_decoding_logits_processor(
-        guided_params: GuidedDecodingParams,
+        guided_params: StructuredOuputsParams,
         tokenizer: PreTrainedTokenizerBase) -> GuidanceLogitsProcessor:
     """
     Given an OpenAI-compatible request, check for guided decoding parameters

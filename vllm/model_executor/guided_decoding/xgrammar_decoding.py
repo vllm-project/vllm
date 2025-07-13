@@ -30,13 +30,13 @@ if TYPE_CHECKING:
 
     from vllm.config import ModelConfig
     from vllm.reasoning import ReasoningParser
-    from vllm.sampling_params import GuidedDecodingParams
+    from vllm.sampling_params import StructuredOuputsParams
 
 logger = init_logger(__name__)
 
 
 def get_local_xgrammar_guided_decoding_logits_processor(
-        guided_params: GuidedDecodingParams,
+        guided_params: StructuredOuputsParams,
         tokenizer: PreTrainedTokenizer,
         model_config: ModelConfig,
         reasoner: ReasoningParser | None,
@@ -158,7 +158,7 @@ class GrammarConfig:
 
     @classmethod
     def from_guided_params(cls,
-                           guided_params: GuidedDecodingParams,
+                           guided_params: StructuredOuputsParams,
                            model_config: ModelConfig,
                            tokenizer: PreTrainedTokenizer,
                            max_threads: int = 8) -> GrammarConfig:

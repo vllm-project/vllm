@@ -9,7 +9,7 @@ import pytest
 
 from vllm.entrypoints.openai.tool_parsers.mistral_tool_parser import (
     MistralToolCall, MistralToolParser)
-from vllm.sampling_params import GuidedDecodingParams, SamplingParams
+from vllm.sampling_params import SamplingParams, StructuredOuputsParams
 from vllm.transformers_utils.tokenizer import MistralTokenizer
 
 from ...utils import check_logprobs_close
@@ -293,10 +293,10 @@ def test_mistral_guided_decoding(
                 tokenizer_mode="mistral",
                 guided_decoding_backend=guided_backend,
         ) as vllm_model:
-            guided_decoding = GuidedDecodingParams(json=SAMPLE_JSON_SCHEMA)
+            guided_decoding = StructuredOuputsParams(json=SAMPLE_JSON_SCHEMA)
             params = SamplingParams(max_tokens=512,
                                     temperature=0.7,
-                                    guided_decoding=guided_decoding)
+                                    structured_outputs=guided_decoding)
 
             messages = [{
                 "role": "system",

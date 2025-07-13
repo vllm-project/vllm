@@ -17,7 +17,8 @@ from typing_extensions import TypeVar, deprecated
 from vllm.beam_search import (BeamSearchInstance, BeamSearchOutput,
                               BeamSearchSequence,
                               create_sort_beams_key_function)
-from vllm.config import (CompilationConfig, ModelDType, StructuredOutputsConfig, TokenizerMode, is_init_field)
+from vllm.config import (CompilationConfig, ModelDType,
+                         StructuredOutputsConfig, TokenizerMode, is_init_field)
 from vllm.engine.arg_utils import (EngineArgs, HfOverrides, PoolerConfig,
                                    TaskOption)
 from vllm.engine.llm_engine import LLMEngine
@@ -45,8 +46,8 @@ from vllm.outputs import (ClassificationRequestOutput, EmbeddingRequestOutput,
                           ScoringRequestOutput)
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
-from vllm.sampling_params import (BeamSearchParams, GuidedDecodingParams,
-                                  RequestOutputKind, SamplingParams)
+from vllm.sampling_params import (BeamSearchParams, RequestOutputKind,
+                                  SamplingParams, StructuredOuputsParams)
 from vllm.transformers_utils.tokenizer import (AnyTokenizer, MistralTokenizer,
                                                get_cached_tokenizer)
 from vllm.usage.usage_lib import UsageContext
@@ -1680,11 +1681,11 @@ class LLM:
         if guided_options is None:
             return params
 
-        if params.guided_decoding is not None:
+        if params.structured_outputs is not None:
             raise ValueError("Cannot set both guided_options_request and "
                              "params.guided_decoding.")
 
-        params.guided_decoding = GuidedDecodingParams(
+        params.structured_outputs = StructuredOuputsParams(
             json=guided_options.guided_json,
             regex=guided_options.guided_regex,
             choice=guided_options.guided_choice,

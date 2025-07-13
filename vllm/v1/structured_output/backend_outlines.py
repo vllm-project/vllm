@@ -157,10 +157,10 @@ class OutlinesGrammar(StructuredOutputGrammar):
 
 
 def validate_structured_output_request_outlines(params: SamplingParams):
-    if params.guided_decoding is None:
+    if params.structured_outputs is None:
         return
 
-    gd_params = params.guided_decoding
+    gd_params = params.structured_outputs
 
     if gd_params.regex:
         validate_regex_is_buildable(gd_params.regex)

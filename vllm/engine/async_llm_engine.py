@@ -12,7 +12,7 @@ from weakref import ReferenceType
 
 import vllm.envs as envs
 from vllm.config import (LoRAConfig, ModelConfig, ParallelConfig,
-                         SchedulerConfig, StructuredOutputsConfig, VllmConfig)
+                         SchedulerConfig, VllmConfig)
 from vllm.core.scheduler import SchedulerOutputs
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_timeout import asyncio_timeout
@@ -471,7 +471,7 @@ class _AsyncLLMEngine(LLMEngine):
         )
 
         if isinstance(params, SamplingParams) and \
-            params.guided_decoding is not None:
+            params.structured_outputs is not None:
             # Guided decoding has an async implementation for building logits
             # processors in a separate threadpool.
             # We want to invoke that here instead of using the blocking
@@ -515,13 +515,13 @@ async def build_guided_decoding_logits_processor_async(
     those fields and adds the constructed logits processors to the
     logits_processors field. Modifies sampling params in-place and returns
     the modified sampling params."""
-    if sampling_params.guided_decoding is None:
+    if sampling_params.structured_outputs is None:
         return sampling_params
 
     # Defensively copy sampling params since guided decoding logits
     # processors can have different state for each request
     sampling_params = copy.copy(sampling_params)
-    guided_decoding = sampling_params.guided_decoding
+    guided_decoding = sampling_params.structured_outputs
 
     logger.debug(
         "Building guided decoding logits processor. "
@@ -543,7 +543,7 @@ async def build_guided_decoding_logits_processor_async(
         sampling_params.logits_processors.append(processor)
 
     # Unset guided decoding params after constructing the lp from them
-    sampling_params.guided_decoding = None
+    sampling_params.structured_outputs = None
 
     return sampling_params
 
@@ -1119,10 +1119,6 @@ class AsyncLLMEngine(EngineClient):
     async def get_parallel_config(self) -> ParallelConfig:
         """Get the parallel configuration of the vLLM engine."""
         return self.engine.get_parallel_config()
-
-    async def get_decoding_config(self) -> StructuredOutputsConfig:
-        """Get the decoding configuration of the vLLM engine."""
-        return self.engine.get_decoding_config()
 
     async def get_scheduler_config(self) -> SchedulerConfig:
         """Get the scheduling configuration of the vLLM engine."""

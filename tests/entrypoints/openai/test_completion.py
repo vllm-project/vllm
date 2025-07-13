@@ -686,20 +686,20 @@ async def test_guided_regex_completion(client: openai.AsyncOpenAI,
 @pytest.mark.parametrize("guided_decoding_backend", GUIDED_DECODING_BACKENDS)
 async def test_guided_choice_completion(client: openai.AsyncOpenAI,
                                         guided_decoding_backend: str,
-                                        sample_guided_choice):
+                                        sample_choice):
     completion = await client.completions.create(
         model=MODEL_NAME,
         prompt="The best language for type-safe systems programming is ",
         n=2,
         temperature=1.0,
         max_tokens=10,
-        extra_body=dict(guided_choice=sample_guided_choice,
+        extra_body=dict(guided_choice=sample_choice,
                         guided_decoding_backend=guided_decoding_backend))
 
     assert completion.id is not None
     assert len(completion.choices) == 2
     for i in range(2):
-        assert completion.choices[i].text in sample_guided_choice
+        assert completion.choices[i].text in sample_choice
 
 
 @pytest.mark.asyncio

@@ -14,7 +14,7 @@ from vllm.model_executor.guided_decoding import (
     get_local_guided_decoding_logits_processor)
 from vllm.model_executor.guided_decoding.outlines_logits_processors import (
     JSONLogitsProcessor, RegexLogitsProcessor)
-from vllm.sampling_params import GuidedDecodingParams
+from vllm.sampling_params import StructuredOuputsParams
 
 MODEL_NAME = 'HuggingFaceH4/zephyr-7b-beta'
 GUIDED_DECODING_BACKENDS = [
@@ -76,7 +76,7 @@ async def test_guided_logits_processor_black_box(backend: str, is_local: bool,
         seed=0,
         dtype="bfloat16",
     )
-    regex_request = GuidedDecodingParams(regex=sample_regex, backend=backend)
+    regex_request = StructuredOuputsParams(regex=sample_regex, backend=backend)
 
     regex_lp = get_local_guided_decoding_logits_processor(
             regex_request, zephyr_7B_tokenzer, config) if is_local else \
@@ -90,8 +90,8 @@ async def test_guided_logits_processor_black_box(backend: str, is_local: bool,
     assert tensor.shape == original_tensor.shape
     assert not torch.allclose(tensor, original_tensor)
 
-    json_request = GuidedDecodingParams(json=sample_json_schema,
-                                        backend=backend)
+    json_request = StructuredOuputsParams(json=sample_json_schema,
+                                          backend=backend)
     json_lp = await get_guided_decoding_logits_processor(
         json_request, zephyr_7B_tokenzer, config)
     assert json_lp is not None
@@ -122,7 +122,7 @@ async def test_guided_logits_processor_with_reasoning(
     )
     token_ids = deepseek_r1_qwen_tokenizer.encode(
         "<think>here is the thinking process")
-    regex_request = GuidedDecodingParams(regex=sample_regex, backend=backend)
+    regex_request = StructuredOuputsParams(regex=sample_regex, backend=backend)
 
     regex_lp = get_local_guided_decoding_logits_processor(regex_request,
                     deepseek_r1_qwen_tokenizer, config,
@@ -139,8 +139,8 @@ async def test_guided_logits_processor_with_reasoning(
 
     token_ids = deepseek_r1_qwen_tokenizer.encode(
         "<think>here is the thinking process")
-    json_request = GuidedDecodingParams(json=sample_json_schema,
-                                        backend=backend)
+    json_request = StructuredOuputsParams(json=sample_json_schema,
+                                          backend=backend)
     json_lp = get_local_guided_decoding_logits_processor(
         json_request, deepseek_r1_qwen_tokenizer, config,
         reasoning_backend) if is_local else \
@@ -156,8 +156,8 @@ async def test_guided_logits_processor_with_reasoning(
     # Thinking is over, so the tensor should change.
     token_ids = deepseek_r1_qwen_tokenizer.encode(
         "<think>here is the thinking process</think>")
-    json_request = GuidedDecodingParams(json=sample_json_schema,
-                                        backend=backend)
+    json_request = StructuredOuputsParams(json=sample_json_schema,
+                                          backend=backend)
     json_lp = get_local_guided_decoding_logits_processor(
         json_request, deepseek_r1_qwen_tokenizer, config,
         reasoning_backend) if is_local else \
@@ -174,25 +174,25 @@ async def test_guided_logits_processor_with_reasoning(
 def test_multiple_guided_options_not_allowed(sample_json_schema, sample_regex):
     with pytest.raises(ValueError,
                        match="You can only use one kind of guided"):
-        GuidedDecodingParams(json=sample_json_schema, regex=sample_regex)
+        StructuredOuputsParams(json=sample_json_schema, regex=sample_regex)
 
     with pytest.raises(ValueError,
                        match="You can only use one kind of guided"):
-        GuidedDecodingParams(json=sample_json_schema, json_object=True)
+        StructuredOuputsParams(json=sample_json_schema, json_object=True)
 
     with pytest.raises(ValueError,
                        match="You can only use one kind of guided"):
-        GuidedDecodingParams(json=sample_json_schema, choice=["a", "b"])
+        StructuredOuputsParams(json=sample_json_schema, choice=["a", "b"])
 
     with pytest.raises(ValueError,
                        match="You can only use one kind of guided"):
-        GuidedDecodingParams(json=sample_json_schema, grammar="test grammar")
+        StructuredOuputsParams(json=sample_json_schema, grammar="test grammar")
 
 
 def test_guided_decoding_backend_options():
     """Test backend-specific options"""
     with pytest.warns(DeprecationWarning):
-        guided_decoding_params = GuidedDecodingParams(
+        guided_decoding_params = StructuredOuputsParams(
             backend=
             "xgrammar:no-fallback,disable-any-whitespace,no-additional-properties"
         )

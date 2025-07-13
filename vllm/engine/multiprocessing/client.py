@@ -381,9 +381,6 @@ class MQLLMEngineClient(EngineClient):
     async def get_vllm_config(self) -> VllmConfig:
         return self.vllm_config
 
-    async def get_decoding_config(self) -> StructuredOutputsConfig:
-        return self.structured_outputs_config
-
     async def get_model_config(self) -> ModelConfig:
         return self.model_config
 
@@ -539,7 +536,7 @@ class MQLLMEngineClient(EngineClient):
         # it here to avoid contending with cpu resources and the GIL on the
         # backend process.
         if isinstance(params, SamplingParams) and \
-            params.guided_decoding is not None:
+            params.structured_outputs is not None:
             params = await \
                 build_guided_decoding_logits_processor_async(
                     sampling_params=params,
