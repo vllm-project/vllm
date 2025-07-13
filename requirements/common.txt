@@ -17,6 +17,7 @@ openai >= 1.87.0, <= 1.90.0 # Ensure modern openai package (ensure ResponsePromp
 pydantic >= 2.10
 prometheus_client >= 0.18.0
 pillow  # Required for image processing
+pillow-avif-plugin  # Required for AVIF image
 prometheus-fastapi-instrumentator >= 7.0.0
 tiktoken >= 0.6.0  # Required for DBRX tokenizer
 lm-format-enforcer >= 0.10.11, < 0.11

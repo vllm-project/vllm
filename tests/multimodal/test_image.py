@@ -35,3 +35,13 @@ def test_rgba_to_rgb():
                 assert converted_image_numpy[i][j][0] == 255
                 assert converted_image_numpy[i][j][1] == 255
                 assert converted_image_numpy[i][j][2] == 255
+
+
+def test_load_avif():
+    load_success = True
+    try:
+        image = Image.open(ASSETS_DIR / "test.avif")
+        image.load()
+    except Exception:
+        load_success = False
+    assert load_success

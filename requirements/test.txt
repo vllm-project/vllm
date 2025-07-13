@@ -467,6 +467,8 @@ pillow==10.4.0
     #   mistral-common
     #   sentence-transformers
     #   torchvision
+pillow-avif-plugin==1.5.2
+    # via -r requirements/test.in
 platformdirs==4.3.6
     # via
     #   black

@@ -4,6 +4,7 @@
 from io import BytesIO
 from pathlib import Path
 
+import pillow_avif  # noqa: F401
 import pybase64
 import torch
 from PIL import Image
