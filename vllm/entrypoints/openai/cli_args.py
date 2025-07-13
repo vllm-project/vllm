@@ -92,60 +92,56 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         "--uvicorn-log-level",
         type=str,
         default="info",
-        choices=["debug", "info", "warning", "error", "critical", "trace"],
-        help="Log level for uvicorn.",
-    )
-    parser.add_argument(
-        "--disable-uvicorn-access-log",
-        action="store_true",
-        help="Disable uvicorn access log.",
-    )
+        choices=['debug', 'info', 'warning', 'error', 'critical', 'trace'],
+        help="Log level for uvicorn.")
+    parser.add_argument("--disable-uvicorn-access-log",
+                        action='store_true',
+                        help="Disable uvicorn access log.")
     parser.add_argument("--allow-credentials",
-                        action="store_true",
+                        action='store_true',
                         help="Allow credentials.")
     parser.add_argument(
         "--allowed-origins",
         type=json.loads,
         default=["*"],
-        help="Allowed origins.",
+        help="Allowed origins."
     )
     parser.add_argument(
         "--allowed-methods",
         type=json.loads,
         default=["*"],
-        help="Allowed methods.",
+        help="Allowed methods."
     )
     parser.add_argument(
         "--allowed-headers",
         type=json.loads,
         default=["*"],
-        help="Allowed headers.",
+        help="Allowed headers."
     )
     parser.add_argument(
         "--api-key",
         type=optional_type(str),
         default=None,
         help="If provided, the server will require this key "
-        "to be presented in the header.",
+        "to be presented in the header."
     )
     parser.add_argument(
         "--lora-modules",
         type=optional_type(str),
         default=None,
-        nargs="+",
+        nargs='+',
         action=LoRAParserAction,
         help="LoRA module configurations in either 'name=path' format"
         "or JSON format. "
         "Example (old format): ``'name=path'`` "
         "Example (new format): "
-        '``{"name": "name", "path": "lora_path", '
-        '"base_model_name": "id"}``',
-    )
+        "``{\"name\": \"name\", \"path\": \"lora_path\", "
+        "\"base_model_name\": \"id\"}``")
     parser.add_argument(
         "--prompt-adapters",
         type=optional_type(str),
         default=None,
-        nargs="+",
+        nargs='+',
         action=PromptAdapterParserAction,
         help="Prompt adapter configurations in the format name=path. "
         "Multiple adapters can be specified.",
@@ -163,57 +159,57 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         type=str,
         default="auto",
         choices=get_args(ChatTemplateContentFormatOption),
-        help="The format to render message content within a chat template."
-        "\n\n"
+        help='The format to render message content within a chat template.'
+        '\n\n'
         '* "string" will render the content as a string. '
         'Example: ``"Hello World"``\n'
         '* "openai" will render the content as a list of dictionaries, '
         "similar to OpenAI schema. "
-        'Example: ``[{"type": "text", "text": "Hello world!"}]``',
+        'Example: ``[{"type": "text", "text": "Hello world!"}]``'
     )
     parser.add_argument(
         "--response-role",
         type=optional_type(str),
         default="assistant",
         help="The role name to return if "
-        "``request.add_generation_prompt=true``.",
+        "``request.add_generation_prompt=true``."
     )
     parser.add_argument(
         "--ssl-keyfile",
         type=optional_type(str),
         default=None,
-        help="The file path to the SSL key file.",
+        help="The file path to the SSL key file."
     )
     parser.add_argument(
         "--ssl-certfile",
         type=optional_type(str),
         default=None,
-        help="The file path to the SSL cert file.",
+        help="The file path to the SSL cert file."
     )
     parser.add_argument(
         "--ssl-ca-certs",
         type=optional_type(str),
         default=None,
-        help="The CA certificates file.",
+        help="The CA certificates file."
     )
     parser.add_argument(
         "--enable-ssl-refresh",
-        action="store_true",
+        action='store_true',
         default=False,
-        help="Refresh SSL Context when SSL certificate files change",
+        help="Refresh SSL Context when SSL certificate files change"
     )
     parser.add_argument(
         "--ssl-cert-reqs",
         type=int,
         default=int(ssl.CERT_NONE),
         help=
-        "Whether client certificate is required (see stdlib ssl module's).",
+        "Whether client certificate is required (see stdlib ssl module's)."
     )
     parser.add_argument(
         "--root-path",
         type=optional_type(str),
         default=None,
-        help="FastAPI root_path when app is behind a path based routing proxy.",
+        help="FastAPI root_path when app is behind a path based routing proxy."
     )
     parser.add_argument(
         "--middleware",
@@ -226,37 +222,32 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         "If a function is provided, vLLM will add it to the server "
         "using ``@app.middleware('http')``. "
         "If a class is provided, vLLM will add it to the server "
-        "using ``app.add_middleware()``. ",
-    )
+        "using ``app.add_middleware()``. ")
     parser.add_argument(
         "--return-tokens-as-token-ids",
-        action="store_true",
+        action='store_true',
         help="When ``--max-logprobs`` is specified, represents single tokens "
         " as strings of the form 'token_id:{token_id}' so that tokens "
-        "that are not JSON-encodable can be identified.",
-    )
+        "that are not JSON-encodable can be identified.")
     parser.add_argument(
         "--disable-frontend-multiprocessing",
-        action="store_true",
+        action='store_true',
         help="If specified, will run the OpenAI frontend server in the same "
-        "process as the model serving engine.",
-    )
+        "process as the model serving engine.")
     parser.add_argument(
         "--enable-request-id-headers",
-        action="store_true",
+        action='store_true',
         help="If specified, API server will add X-Request-Id header to "
-        "responses.",
-    )
+        "responses.")
     parser.add_argument(
         "--enable-auto-tool-choice",
-        action="store_true",
+        action='store_true',
         default=False,
         help="Enable auto tool choice for supported models. Use "
-        "``--tool-call-parser`` to specify which parser to use.",
-    )
+        "``--tool-call-parser`` to specify which parser to use.")
     parser.add_argument(
         "--expand-tools-even-if-tool-choice-none",
-        action="store_true",
+        action='store_true',
         default=False,
         deprecated=True,
         help="Include tool definitions in prompts "
@@ -264,8 +255,7 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         "This is a transitional option that will be removed in v0.10.0. "
         "In v0.10.0, tool definitions will always be included regardless of "
         "tool_choice setting. Use this flag now to test the new behavior "
-        "before the breaking change.",
-    )
+        "before the breaking change.")
 
     valid_tool_parsers = ToolParserManager.tool_parsers.keys()
     parser.add_argument(
@@ -277,8 +267,7 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         help=
         "Select the tool call parser depending on the model that you're using."
         " This is used to parse the model-generated tool call into OpenAI API "
-        "format. Required for ``--enable-auto-tool-choice``.",
-    )
+        "format. Required for ``--enable-auto-tool-choice``.")
 
     parser.add_argument(
         "--tool-parser-plugin",
@@ -287,56 +276,49 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         help=
         "Special the tool parser plugin write to parse the model-generated tool"
         " into OpenAI API format, the name register in this plugin can be used "
-        "in ``--tool-call-parser``.",
-    )
+        "in ``--tool-call-parser``.")
 
     parser.add_argument(
         "--log-config-file",
         type=str,
         default=envs.VLLM_LOGGING_CONFIG_PATH,
-        help="Path to logging config JSON file for both vllm and uvicorn",
-    )
+        help="Path to logging config JSON file for both vllm and uvicorn")
 
     parser = AsyncEngineArgs.add_cli_args(parser)
 
-    parser.add_argument(
-        "--max-log-len",
-        type=int,
-        default=None,
-        help="Max number of prompt characters or prompt "
-        "ID numbers being printed in log."
-        " The default of None means unlimited.",
-    )
+    parser.add_argument('--max-log-len',
+                        type=int,
+                        default=None,
+                        help='Max number of prompt characters or prompt '
+                        'ID numbers being printed in log.'
+                        ' The default of None means unlimited.')
 
     parser.add_argument(
         "--disable-fastapi-docs",
-        action="store_true",
+        action='store_true',
         default=False,
-        help=
-        "Disable FastAPI's OpenAPI schema, Swagger UI, and ReDoc endpoint.",
+        help="Disable FastAPI's OpenAPI schema, Swagger UI, and ReDoc endpoint."
     )
     parser.add_argument(
         "--enable-prompt-tokens-details",
-        action="store_true",
+        action='store_true',
         default=False,
-        help="If set to True, enable prompt_tokens_details in usage.",
-    )
+        help="If set to True, enable prompt_tokens_details in usage.")
     parser.add_argument(
         "--enable-force-include-usage",
-        action="store_true",
+        action='store_true',
         default=False,
         help="If set to True, including usage on every request.",
     )
     parser.add_argument(
         "--enable-server-load-tracking",
-        action="store_true",
+        action='store_true',
         default=False,
         help=
-        "If set to True, enable tracking server_load_metrics in the app state.",
-    )
+        "If set to True, enable tracking server_load_metrics in the app state.")
     parser.add_argument(
         "--enable-log-outputs",
-        action="store_true",
+        action='store_true',
         default=False,
         help="If set to True, enable logging of model outputs (generations) "
         "in addition to the input logging that is enabled by default.",
@@ -355,8 +337,8 @@ def validate_parsed_serve_args(args: argparse.Namespace):
 
     # Enable auto tool needs a tool call parser to be valid
     if args.enable_auto_tool_choice and not args.tool_call_parser:
-        raise TypeError(
-            "Error: --enable-auto-tool-choice requires --tool-call-parser")
+        raise TypeError("Error: --enable-auto-tool-choice requires "
+                        "--tool-call-parser")
     if args.enable_prompt_embeds and args.enable_prompt_adapter:
         raise ValueError(
             "Cannot use prompt embeds and prompt adapter at the same time.")

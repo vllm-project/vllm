@@ -89,11 +89,8 @@ class OpenAIServingResponses(OpenAIServing):
         if self.default_sampling_params:
             source = self.model_config.generation_config
             source = "model" if source == "auto" else source
-            logger.info(
-                "Using default chat sampling params from %s: %s",
-                source,
-                self.default_sampling_params,
-            )
+            logger.info("Using default chat sampling params from %s: %s",
+                        source, self.default_sampling_params)
 
         # HACK(woosuk): This is a hack. We should use a better store.
         # FIXME: This causes a memory leak since we never remove responses
@@ -172,13 +169,11 @@ class OpenAIServingResponses(OpenAIServing):
                 sampling_params = request.to_sampling_params(
                     default_max_tokens, self.default_sampling_params)
 
-                self._log_inputs(
-                    request.request_id,
-                    request_prompts[i],
-                    params=sampling_params,
-                    lora_request=lora_request,
-                    prompt_adapter_request=prompt_adapter_request,
-                )
+                self._log_inputs(request.request_id,
+                                 request_prompts[i],
+                                 params=sampling_params,
+                                 lora_request=lora_request,
+                                 prompt_adapter_request=prompt_adapter_request)
 
                 trace_headers = (None if raw_request is None else await
                                  self._get_trace_headers(raw_request.headers))
@@ -198,7 +193,7 @@ class OpenAIServingResponses(OpenAIServing):
             return self.create_error_response(str(e))
 
         assert len(generators) == 1
-        (result_generator, ) = generators
+        result_generator, = generators
 
         # Store the input messages.
         if request.store:
@@ -465,7 +460,7 @@ class OpenAIServingResponses(OpenAIServing):
             response.status = "cancelled"
 
         # Abort the request.
-        if task := self.background_tasks.get(response_id):
+        if (task := self.background_tasks.get(response_id)):
             task.cancel()
             try:
                 await task
