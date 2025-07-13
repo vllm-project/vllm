@@ -1210,8 +1210,8 @@ class EngineArgs:
             self.data_parallel_rpc_port
             is not None) else ParallelConfig.data_parallel_rpc_port
 
-        # When async scheduling is used, we can't use the uni-process backend.
         if self.async_scheduling:
+            # Async scheduling does not work with the uniprocess backend.
             if self.distributed_executor_backend is None:
                 self.distributed_executor_backend = "mp"
                 logger.info("Using mp-based distributed executor backend "
@@ -1222,6 +1222,13 @@ class EngineArgs:
             if self.pipeline_parallel_size > 1:
                 raise ValueError("Async scheduling is not supported with "
                                  "pipeline-parallel-size > 1.")
+
+            # Currently, async scheduling does not support speculative decoding.
+            # TODO(woosuk): Support it.
+            if self.speculative_config is not None:
+                raise ValueError(
+                    "Currently, speculative decoding is not supported with "
+                    "async scheduling.")
 
         parallel_config = ParallelConfig(
             pipeline_parallel_size=self.pipeline_parallel_size,

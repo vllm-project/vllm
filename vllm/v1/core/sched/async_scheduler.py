@@ -26,7 +26,8 @@ class AsyncScheduler(Scheduler):
 
             if (request.num_computed_tokens == request.num_tokens +
                     request.num_output_placeholders):
-                # Pre-allocate the slot for output token ids.
+                # The request will generate a new token in this scheduling step.
+                # TODO(woosuk): Support speculative decoding.
                 request.num_output_placeholders += 1
 
     def _update_request(
@@ -38,19 +39,27 @@ class AsyncScheduler(Scheduler):
         if not new_token_ids:
             return new_token_ids, False
 
-        # Replace the pre-allocated placeholder token with the actual token.
-        request.num_output_placeholders -= len(new_token_ids)
-        assert request.num_output_placeholders >= 0
-        request.append_output_token_ids(new_token_ids)
+        status_before_update = request.status
+        stopped = False
+        for num_new, output_token_id in enumerate(new_token_ids, 1):
+            # Decrease the number of output placeholders and append the token.
+            request.num_output_placeholders -= 1
+            assert request.num_output_placeholders >= 0
+            request.append_output_token_ids(output_token_id)
+
+            # Check for stop and update request state.
+            # This must be called before we make the EngineCoreOutput.
+            stopped = check_stop(request, self.max_model_len)
+            if stopped:
+                break
+        if stopped:
+            new_token_ids = new_token_ids[:num_new]
 
         # Now that the request has actual output tokens, we can cache the
-        # blocks. NOTE(woosuk): We skip the preempted requests.
-        if request.status == RequestStatus.RUNNING:
+        # blocks. NOTE(woosuk): Preempted requests should be skipped.
+        if status_before_update == RequestStatus.RUNNING:
             self.kv_cache_manager.cache_blocks(
                 request,
                 request.num_computed_tokens - request.num_output_placeholders)
 
-        # NOTE: In async scheduling, the placeholder token should be ignored
-        # when checking the stop condition.
-        stopped = check_stop(request, self.max_model_len)
         return new_token_ids, stopped
