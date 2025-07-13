@@ -14,8 +14,8 @@ Prerequisites:
    vllm serve intfloat/multilingual-e5-large \
      --task embed \
      --override-pooler-config \
-      '{"pooling_type": "CLS", "normalize": true, \"enable_chunked_processing": true}' \
-     --max-model-len 10240 \
+      '{"pooling_type": "CLS", "normalize": true, ' \
+      '"enable_chunked_processing": true, "max_embed_len": 10240}' \
      --served-model-name multilingual-e5-large \
      --trust-remote-code \
      --port 31090 \
