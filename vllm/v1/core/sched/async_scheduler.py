@@ -26,13 +26,13 @@ class AsyncScheduler(Scheduler):
                 # TODO(woosuk): Support speculative decoding.
                 request.num_output_placeholders += 1
 
-    def _update_request_from_output(
+    def _update_request_with_output(
         self,
         request: Request,
         new_token_ids: list[int],
     ) -> tuple[list[int], bool]:
         status_before_update = request.status
-        new_token_ids, stopped = super()._update_request_from_output(
+        new_token_ids, stopped = super()._update_request_with_output(
             request, new_token_ids)
 
         # Update the number of output placeholders.
