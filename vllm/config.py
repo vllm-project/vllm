@@ -532,16 +532,12 @@ class ModelConfig:
             self.config_format = ConfigFormat(self.config_format)
 
         hf_config = get_config(self.hf_config_path or self.model,
-                               self.trust_remote_code, self.revision,
-                               self.code_revision, self.config_format)
-
-        if hf_overrides_kw:
-            logger.debug("Overriding HF config with %s", hf_overrides_kw)
-            hf_config.update(hf_overrides_kw)
-        if hf_overrides_fn:
-            logger.debug("Overriding HF config with %s", hf_overrides_fn)
-            hf_config = hf_overrides_fn(hf_config)
-
+                               self.trust_remote_code,
+                               self.revision,
+                               self.code_revision,
+                               self.config_format,
+                               hf_overrides_kw=hf_overrides_kw,
+                               hf_overrides_fn=hf_overrides_fn)
         self.hf_config = hf_config
 
         self.hf_text_config = get_hf_text_config(self.hf_config)
