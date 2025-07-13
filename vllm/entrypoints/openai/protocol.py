@@ -368,10 +368,8 @@ class ResponsesRequest(OpenAIBaseModel):
 
     def _get_guided_json_from_tool(
             self) -> Optional[Union[str, dict, BaseModel]]:
-        print(
-            f"Tool choice: {self.tool_choice}, type: {type(self.tool_choice)}")
         # user has chosen to use a named tool
-        if type(self.tool_choice) is ToolChoiceFunction:
+        if isinstance(self.tool_choice, ToolChoiceFunction):
             tool_name = self.tool_choice.name
             tools = {tool.name: tool for tool in \
                 self.tools if tool.type == "function"}
@@ -435,8 +433,6 @@ class ResponsesRequest(OpenAIBaseModel):
             json_schema_defs = get_tool_schema_defs(self.tools)
             if json_schema_defs:
                 json_schema["$defs"] = json_schema_defs
-            print("Using tool choice 'required' for guided json decoding.")
-            print(f"JSON schema: {json_schema}")
             return json_schema
 
         return None
