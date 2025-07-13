@@ -330,6 +330,7 @@ _CROSS_ENCODER_EXAMPLE_MODELS = {
                                                       hf_overrides={"architectures": ["GemmaForSequenceClassification"], # noqa: E501
                                                                     "classifier_from_token": ["Yes"], # noqa: E501
                                                                     "method": "no_post_processing"}), # noqa: E501
+    "LlamaForSequenceClassification": _HfExamplesInfo("Skywork/Skywork-Reward-V2-Llama-3.2-1B"), # noqa: E501
     "ModernBertForSequenceClassification": _HfExamplesInfo("Alibaba-NLP/gte-reranker-modernbert-base", v0_only=True), # noqa: E501
     "RobertaForSequenceClassification": _HfExamplesInfo("cross-encoder/quora-roberta-base", v0_only=True),  # noqa: E501
     "XLMRobertaForSequenceClassification": _HfExamplesInfo("BAAI/bge-reranker-v2-m3", v0_only=True),  # noqa: E501
