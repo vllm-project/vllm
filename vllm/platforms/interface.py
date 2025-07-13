@@ -30,8 +30,6 @@ else:
     SamplingParams = None
     FlexibleArgumentParser = None
 
-_global_graph_pool = None
-
 logger = init_logger(__name__)
 
 
@@ -137,6 +135,8 @@ class Platform:
     supported_quantization: list[str] = []
 
     additional_env_vars: list[str] = []
+
+    _global_graph_pool: Optional[Any] = None
 
     @property
     def supported_dtypes(self) -> list[torch.dtype]:
@@ -514,6 +514,9 @@ class Platform:
         """Raises if this request is unsupported on this platform"""
 
     def __getattr__(self, key: str):
+        if hasattr(self, key):
+            return getattr(self, key)
+
         device = getattr(torch, self.device_type, None)
         if device is not None and hasattr(device, key):
             return getattr(device, key)

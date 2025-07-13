@@ -2367,12 +2367,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 # if we want to warm up attention or not. This is
                 # different from the case where `FULL` implies capture
                 # attention while `PIECEWISE` implies no attention.
-                force_attention = cudagraph_runtime_style == CUDAGraphMode.FULL
-                self._dummy_run(num_tokens,
-                                is_pure_decode=is_pure_decode,
-                                cudagraph_runtime_style=CUDAGraphMode.NONE,
-                                force_attention=force_attention,
-                                skip_eplb=True)
+                force_attention = (
+                    cudagraph_runtime_style == CUDAGraphRuntimeStyle.FULL)
+                self._dummy_run(
+                    num_tokens,
+                    is_pure_decode=is_pure_decode,
+                    cudagraph_runtime_style=CUDAGraphRuntimeStyle.NONE,
+                    force_attention=force_attention,
+                    skip_eplb=True)
             self._dummy_run(num_tokens,
                             cudagraph_runtime_style=cudagraph_runtime_style,
                             is_pure_decode=False,
