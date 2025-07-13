@@ -5,7 +5,6 @@ from typing import Any, Callable, Optional, Union
 
 import torch
 
-from vllm.model_executor.layers.fused_moe import fused_experts
 from vllm.model_executor.layers.fused_moe.layer import (FusedMoE,
                                                         FusedMoEMethodBase)
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
@@ -467,6 +466,7 @@ class BitsAndBytesMoEMethod(FusedMoEMethodBase):
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        from vllm.model_executor.layers.fused_moe import fused_experts
 
         if enable_eplb:
             raise NotImplementedError(
