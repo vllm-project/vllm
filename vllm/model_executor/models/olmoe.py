@@ -74,25 +74,28 @@ class OlmoeMoE(nn.Module):
 
         self.hidden_size = hidden_size
 
-        self.enable_eplb = enable_eplb
-        vllm_config = get_current_vllm_config()
-        parallel_config = vllm_config.parallel_config
-
-        # Redundant experts requested by the user
-        self.n_redundant_experts: int = parallel_config.num_redundant_experts
-
-        # Expert-parallel (EP) group info
         self.ep_group = get_ep_group().device_group
         self.ep_rank = self.ep_group.rank()
         self.ep_size = self.ep_group.size()
+        self.n_routed_experts = getattr(config, "n_routed_experts",
+                                        num_experts)
+        self.n_shared_experts = getattr(config, "n_shared_experts", 0)
 
-        # Logical / physical expert counts (needed by MixtureOfExperts)
-        self.n_logical_experts = num_experts
+        # Load balancing settings.
+        vllm_config = get_current_vllm_config()
+        parallel_config = vllm_config.parallel_config
+        self.enable_eplb = enable_eplb
+
+        self.n_redundant_experts = parallel_config.num_redundant_experts
+        self.n_logical_experts = self.n_routed_experts
         self.n_physical_experts = (self.n_logical_experts +
                                    self.n_redundant_experts)
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
-        self.n_routed_experts = self.n_logical_experts
-        self.n_shared_experts = getattr(config, "n_shared_experts", 0)
+
+        self.physical_expert_start = (self.ep_rank *
+                                      self.n_local_physical_experts)
+        self.physical_expert_end = (self.physical_expert_start +
+                                    self.n_local_physical_experts)
 
         # Gate always runs at half / full precision for now.
         self.gate = ReplicatedLinear(hidden_size,
@@ -507,6 +510,22 @@ class OlmoeForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
         self.num_shared_experts = example_moe.n_shared_experts
         self.num_redundant_experts = example_moe.n_redundant_experts
 
+    def set_eplb_state(
+        self,
+        expert_load_view: torch.Tensor,
+        logical_to_physical_map: torch.Tensor,
+        logical_replica_count: torch.Tensor,
+    ) -> None:
+        for layer_idx, layer in enumerate(self.moe_layers):
+            # Register expert weights for this layer.
+            self.expert_weights.append(layer.get_expert_weights())
+            layer.set_eplb_state(
+                moe_layer_idx=layer_idx,
+                expert_load_view=expert_load_view,
+                logical_to_physical_map=logical_to_physical_map,
+                logical_replica_count=logical_replica_count,
+            )
+
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
 
@@ -534,20 +553,3 @@ class OlmoeForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.model.get_expert_mapping()
-
-    # MixtureOfExperts API
-    def set_eplb_state(
-        self,
-        expert_load_view: torch.Tensor,
-        logical_to_physical_map: torch.Tensor,
-        logical_replica_count: torch.Tensor,
-    ) -> None:
-        for layer_idx, layer in enumerate(self.moe_layers):
-            # Register expert weights for this layer.
-            self.expert_weights.append(layer.get_expert_weights())
-            layer.set_eplb_state(
-                moe_layer_idx=layer_idx,
-                expert_load_view=expert_load_view,
-                logical_to_physical_map=logical_to_physical_map,
-                logical_replica_count=logical_replica_count,
-            )
