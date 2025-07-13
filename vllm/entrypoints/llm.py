@@ -454,20 +454,19 @@ class LLM:
             considered legacy and may be deprecated in the future. You should
             instead pass them via the `inputs` parameter.
         """
-        runner_type = self.llm_engine.model_config.runner_type
-        if runner_type not in ["generate", "transcription"]:
+        model_config = self.llm_engine.model_config
+        runner_type = model_config.runner_type
+        if runner_type != "generate":
             messages = [
-                "LLM.generate() is only supported for (conditional) generation "
-                "models (XForCausalLM, XForConditionalGeneration).",
+                "LLM.generate() is only supported for generative models."
             ]
 
-            supported_runner_types = self.llm_engine.model_config \
-                .supported_runner_types
-            if "generate" in supported_runner_types:
+            if "generate" in model_config.supported_runner_types:
                 messages.append(
                     "Your model supports the 'generate' runner, but is "
                     f"currently initialized for the '{runner_type}' runner. "
-                    "Please initialize vLLM using `--task generate`.")
+                    "Please initialize vLLM using `--task generate` or "
+                    "`--task transcription`.")
 
             raise ValueError(" ".join(messages))
 
@@ -1091,13 +1090,12 @@ class LLM:
             considered legacy and may be deprecated in the future. You should
             instead pass them via the `inputs` parameter.
         """
-        runner_type = self.llm_engine.model_config.runner_type
+        model_config = self.llm_engine.model_config
+        runner_type = model_config.runner_type
         if runner_type != "pooling":
             messages = ["LLM.encode() is only supported for pooling models."]
 
-            supported_runner_types = self.llm_engine.model_config \
-                .supported_runner_types
-            if "pooling" in supported_runner_types:
+            if "pooling" in model_config.supported_runner_types:
                 messages.append(
                     "Your model supports the 'pooling' runner, but is "
                     f"currently initialized for the '{runner_type}' runner. "
@@ -1119,13 +1117,13 @@ class LLM:
             # Use default pooling params.
             pooling_params = PoolingParams()
         elif isinstance(pooling_params, PoolingParams):
-            pooling_params.verify(self.llm_engine.model_config)
+            pooling_params.verify(model_config)
         else:
             for pooling_param in pooling_params:
-                pooling_param.verify(self.llm_engine.model_config)
+                pooling_param.verify(model_config)
 
-        tokenization_kwargs: dict[str, Any] = {}
-        _validate_truncation_size(self.llm_engine.model_config.max_model_len,
+        tokenization_kwargs = dict[str, Any]()
+        _validate_truncation_size(model_config.max_model_len,
                                   truncate_prompt_tokens, tokenization_kwargs)
 
         self._validate_and_add_requests(
@@ -1178,9 +1176,10 @@ class LLM:
             A list of `EmbeddingRequestOutput` objects containing the
             embedding vectors in the same order as the input prompts.
         """
-        if self.llm_engine.model_config.task != "embed":
-            raise ValueError(
-                "Embedding API is only enabled for `--task embed`")
+        model_config = self.llm_engine.model_config
+        if "embed" not in model_config.supported_tasks:
+            raise ValueError("Embedding API is not supported by this model. "
+                             "Please set `--task embed`.")
 
         items = self.encode(prompts,
                             truncate_prompt_tokens=truncate_prompt_tokens,
@@ -1223,9 +1222,11 @@ class LLM:
             A list of `ClassificationRequestOutput` objects containing the
             embedding vectors in the same order as the input prompts.
         """
-        if self.llm_engine.model_config.task != "classify":
+        model_config = self.llm_engine.model_config
+        if "classify" not in model_config.supported_tasks:
             raise ValueError(
-                "Classification API is only enabled for `--task classify`")
+                "Classification API is not supported by this model. "
+                "Please set `--task classify`.")
 
         items = self.encode(prompts,
                             use_tqdm=use_tqdm,
@@ -1392,13 +1393,12 @@ class LLM:
             A list of `ScoringRequestOutput` objects containing the
             generated scores in the same order as the input prompts.
         """
-        runner_type = self.llm_engine.model_config.runner_type
+        model_config = self.llm_engine.model_config
+        runner_type = model_config.runner_type
         if runner_type != "pooling":
             messages = ["LLM.score() is only supported for pooling models."]
 
-            supported_runner_types = self.llm_engine.model_config \
-                .supported_runner_types
-            if "pooling" in supported_runner_types:
+            if "pooling" in model_config.supported_runner_types:
                 messages.append(
                     "Your model supports the 'pooling' runner, but is "
                     f"currently initialized for the '{runner_type}' runner. "
@@ -1407,12 +1407,13 @@ class LLM:
 
             raise ValueError(" ".join(messages))
 
-        if self.llm_engine.model_config.task not in ("embed", "classify"):
-            raise ValueError("Score API is only enabled for "
-                             "`--task embed or --task classify`.")
+        if all(t not in model_config.supported_tasks
+               for t in ("embed", "classify")):
+            raise ValueError("Score API is not supported by this model. "
+                             "Please set `--task embed` or `--task classify`.")
 
-        if (self.llm_engine.model_config.task == "classify"
-                and self.llm_engine.model_config.hf_config.num_labels != 1):
+        if (model_config.task == "classify"
+                and getattr(model_config.hf_config, "num_labels", 0) != 1):
             raise ValueError("Score API is only enabled for num_labels == 1.")
 
         # the tokenizer for models such as
