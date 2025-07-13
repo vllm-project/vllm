@@ -83,7 +83,7 @@ def get_outlines_cache():
     """Get the Cache instance to be used for index caching"""
 
     cache_dir = get_outlines_cache_path()
-    if envs.VLLM_V0_USE_OUTLINES_CACHE:
+    if envs.VLLM_V1_USE_OUTLINES_CACHE:
         logger.warning("Enabling outlines cache. This is an unbounded on-disk "
                        "cache. It may consume a lot of disk space and should "
                        "not be used with untrusted clients.")
