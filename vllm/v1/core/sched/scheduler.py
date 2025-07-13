@@ -803,8 +803,9 @@ class Scheduler(SchedulerInterface):
             status_before_stop = request.status
 
             # Check for stop and update request status.
-            new_token_ids, stopped = self._update_request(
-                request, new_token_ids)
+            if new_token_ids:
+                new_token_ids, stopped = self._update_request(
+                    request, new_token_ids)
 
             # Stop checking for pooler models.
             pooler_output = None
