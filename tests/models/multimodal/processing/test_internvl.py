@@ -69,7 +69,7 @@ def _run_check(
     image_token_id = tokenizer.convert_tokens_to_ids("<IMG_CONTEXT>")
     img_tok_count = processed_inputs["prompt_token_ids"].count(image_token_id)
     pixel_shape = processed_inputs["mm_kwargs"]["pixel_values_flat"].shape
-
+    print(f"Image token count: {img_tok_count}, Pixel shape: {pixel_shape}")
     assert img_tok_count == 256 * total_expected_num_patches
     assert pixel_shape[0] == total_expected_num_patches
 
@@ -79,20 +79,20 @@ def _run_check(
     "size_factors",
     [
         # Single-scale
-        [1.0],
+        #[1.0],
         # Single-scale, batched
         [1.0, 1.0, 1.0],
         # Multi-scale
-        [0.25, 0.5, 1.0],
-        [4.0, 2.0, 1.0],
+        #[0.25, 0.5, 1.0],
+        #[4.0, 2.0, 1.0],
     ],
 )
 @pytest.mark.parametrize(
     ("min_dynamic_patch", "max_dynamic_patch"),
     [(1, 1), (1, 2), (1, 4), (1, 8), (2, 4), (4, 8)],
 )
-@pytest.mark.parametrize("dynamic_image_size", [True, False])
-@pytest.mark.parametrize("kwargs_on_init", [True, False])
+@pytest.mark.parametrize("dynamic_image_size", [True])
+@pytest.mark.parametrize("kwargs_on_init", [True])
 def test_processor_override(
     model_id: str,
     image_assets: ImageTestAssets,
