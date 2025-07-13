@@ -44,13 +44,10 @@ class BertEmbedding(nn.Module):
         self.LayerNorm = nn.LayerNorm(config.hidden_size,
                                       eps=config.layer_norm_eps)
 
-        # Use nn.Parameter with requires_grad=False to maintain compatibility
-        # with existing HF checkpoints while ensuring position_ids are
-        # non-trainable.
-        self.position_ids = nn.Parameter(torch.empty(
-            (1, config.max_position_embeddings)),
-                                         requires_grad=False)
-
+        self.register_buffer(
+            "position_ids",
+            torch.arange(config.max_position_embeddings).unsqueeze(0),
+        )
         self.position_embedding_type = config.position_embedding_type
         if self.position_embedding_type != "absolute":
             raise ValueError("Only 'absolute' position_embedding_type" +
@@ -379,7 +376,8 @@ class BertModel(nn.Module, SupportsQuant):
                 loaded_stacked_params.append(name)
                 break
             else:
-                other_weights.append((name, loaded_weight))
+                if name in params_dict:
+                    other_weights.append((name, loaded_weight))
 
         loader = AutoWeightsLoader(
             self,

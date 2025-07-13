@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import itertools
 from collections.abc import Iterable
 from typing import Optional, Union
 
@@ -39,8 +38,10 @@ class RobertaEmbedding(nn.Module):
                                                   config.hidden_size)
         self.LayerNorm = nn.LayerNorm(config.hidden_size,
                                       eps=config.layer_norm_eps)
-        self.position_ids = nn.Parameter(
-            torch.empty((1, config.max_position_embeddings)), )
+        self.register_buffer(
+            "position_ids",
+            torch.arange(config.max_position_embeddings).unsqueeze(0),
+        )
 
         self.position_embedding_type = config.position_embedding_type
         if self.position_embedding_type != "absolute":
@@ -238,27 +239,3 @@ def create_position_ids_from_input_ids(input_ids,
                            past_key_values_length) * mask
 
     return incremental_indices.long() + padding_idx
-
-
-def roberta_task_weights_filter(
-    all_weights: Iterable[tuple[str, torch.Tensor]]
-) -> tuple[Iterable[tuple[str, torch.Tensor]], Iterable[tuple[str,
-                                                              torch.Tensor]]]:
-    """
-    Separate task-specific weights that are applied on top
-    of the encoder-decoder bert base.
-    To do so, return two generators over the original iterator.
-    Also, remove the "roberta." prefix to make it loadable
-    from vanilla BertModel.
-    """
-    # Copy of a lazy iterator without in-memory overhead so both
-    # iterators can be iterated upon independently.
-    all_weights1, all_weights2 = itertools.tee(all_weights)
-
-    def encoder_decoder_weights():
-        for name, weight in all_weights1:
-            if name.startswith("roberta."):
-                yield (name[len("roberta."):], weight)
-
-    return encoder_decoder_weights(), ((n, w) for n, w in all_weights2
-                                       if not n.startswith("roberta."))
