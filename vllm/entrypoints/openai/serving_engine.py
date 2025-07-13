@@ -907,8 +907,11 @@ class OpenAIServing:
             request, "tool_choice") and request.tool_choice != "none")
 
         if should_parse_tools:
-            if not isinstance(request, ChatCompletionRequest):
-                msg = "Tool usage is only supported for Chat Completions API"
+            if not isinstance(request,
+                              ChatCompletionRequest) and not isinstance(
+                                  request, ResponsesRequest):
+                msg = "Tool usage is only supported for Chat Completions API " \
+                      "and Responses API requests."
                 raise NotImplementedError(msg)
 
             request = tool_parser(tokenizer).adjust_request(  # type: ignore

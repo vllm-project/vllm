@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import json
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from http import HTTPStatus
@@ -9,7 +10,10 @@ from typing import Callable, Final, Optional, Union
 
 import jinja2
 from fastapi import Request
-from openai.types.responses import ResponseOutputMessage, ResponseOutputText
+from openai.types.responses import (ResponseFunctionToolCall,
+                                    ResponseOutputMessage, ResponseOutputText,
+                                    ToolChoiceFunction)
+from pydantic import TypeAdapter
 
 from vllm import envs
 from vllm.config import ModelConfig
@@ -20,7 +24,8 @@ from vllm.entrypoints.context import ConversationContext, SimpleContext
 from vllm.entrypoints.logger import RequestLogger
 # yapf conflicts with isort for this block
 # yapf: disable
-from vllm.entrypoints.openai.protocol import (ErrorResponse,
+from vllm.entrypoints.openai.protocol import (ErrorResponse, FunctionCall,
+                                              FunctionDefinition,
                                               PromptTokenUsageInfo,
                                               RequestResponseMetadata,
                                               ResponseReasoningItem,
@@ -29,12 +34,13 @@ from vllm.entrypoints.openai.protocol import (ErrorResponse,
 # yapf: enable
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
+from vllm.entrypoints.openai.tool_parsers import ToolParser, ToolParserManager
 from vllm.entrypoints.tool_server import ToolServer
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.utils import random_uuid
+from vllm.utils import random_fc_uuid, random_uuid
 
 logger = init_logger(__name__)
 
@@ -66,7 +72,18 @@ class OpenAIServingResponses(OpenAIServing):
             return_tokens_as_token_ids=return_tokens_as_token_ids,
             enable_force_include_usage=enable_force_include_usage,
         )
-
+        self.enable_auto_tools = enable_auto_tools
+        self.expand_tools_even_if_tool_choice_none = (
+            expand_tools_even_if_tool_choice_none)
+        self.tool_parser: Optional[Callable[[AnyTokenizer], ToolParser]] = None
+        if self.enable_auto_tools:
+            try:
+                self.tool_parser = ToolParserManager.get_tool_parser(
+                    tool_parser)
+            except Exception as e:
+                raise TypeError("Error: --enable-auto-tool-choice requires "
+                                f"tool_parser:'{tool_parser}' which has not "
+                                "been registered") from e
         self.chat_template = chat_template
         self.chat_template_content_format: Final = chat_template_content_format
 
@@ -172,11 +189,30 @@ class OpenAIServingResponses(OpenAIServing):
             lora_request = self._maybe_get_adapters(request)
             model_name = self._get_model_name(request.model, lora_request)
             tokenizer = await self.engine_client.get_tokenizer(lora_request)
-
+            if request.tools is None:
+                tool_dicts = None
+            elif (request.tool_choice == "none"
+                  and not self.expand_tools_even_if_tool_choice_none):
+                if len(request.tools) > 0:
+                    logger.warning_once(
+                        "Tools are specified but tool_choice is set to 'none' "
+                        "and --expand-tools-even-if-tool-choice-none is not "
+                        "enabled. Tool definitions will be excluded from the "
+                        "prompt. This behavior will change in vLLM v0.10 where "
+                        "tool definitions will be included by default even "
+                        "with tool_choice='none'. To adopt the new behavior "
+                        "now, use --expand-tools-even-if-tool-choice-none. "
+                        "To suppress this warning, either remove tools from "
+                        "the request or set tool_choice to a different value.")
+                tool_dicts = None
+            else:
+                tool_dicts = [tool.model_dump() for tool in request.tools]
             _, request_prompts, engine_prompts = await self._preprocess_chat(
                 request,
                 tokenizer,
                 messages,
+                tool_dicts=tool_dicts,
+                tool_parser=self.tool_parser,
                 chat_template=self.chat_template,
                 chat_template_content_format=self.chat_template_content_format,
             )
@@ -319,28 +355,82 @@ class OpenAIServingResponses(OpenAIServing):
             reasoning_content = None
             content = final_output.text
 
-        output = []
-        if reasoning_content:
-            reasoning_item = ResponseReasoningItem(
+        outputs = []
+        output = None
+        if self.tool_parser:
+            function_calls: list[FunctionCall] = []
+            if request.tool_choice and \
+                isinstance(request.tool_choice,
+                           ToolChoiceFunction):
+                # Forced Function Call
+                function_calls.append(
+                    FunctionCall(name=request.tool_choice.name,
+                                 arguments=content))
+            elif request.tool_choice is None or request.tool_choice == "none":
+                pass
+            elif request.tool_choice == "required":
+                tool_calls = TypeAdapter(
+                    list[FunctionDefinition]).validate_json(content)
+                function_calls.extend([
+                    FunctionCall(name=tool_call.name,
+                                 arguments=json.dumps(tool_call.parameters,
+                                                      ensure_ascii=False))
+                    for tool_call in tool_calls
+                ])
+            elif request.tool_choice == "auto":
+                try:
+                    tool_parser = self.tool_parser(tokenizer)
+                except RuntimeError as e:
+                    logger.exception("Error in tool parser creation.")
+                    return self.create_error_response(str(e))
+                tool_call_info = tool_parser.extract_tool_calls(
+                    content if content is not None else "", request=request)
+                if tool_call_info is not None and tool_call_info.tools_called:
+                    function_calls.extend(
+                        FunctionCall(
+                            name=tool_call.function.name,
+                            arguments=tool_call.function.arguments,
+                        ) for tool_call in tool_call_info.tool_calls)
+            else:
+                logger.warning(
+                    "Unknown tool choice: %s. "
+                    "Using 'none' as the default tool choice.",
+                    request.tool_choice)
+            output = [
+                ResponseFunctionToolCall(
+                    id=f"fc_{random_fc_uuid()}",
+                    call_id=f"call_{random_uuid()}",
+                    type="function_call",
+                    status="completed",
+                    name=tool_call.name,
+                    arguments=tool_call.arguments,
+                ) for tool_call in function_calls
+            ]
+        # If no tool call is generated, we still need to return an output.
+        if reasoning_content and output is None:
+            output = ResponseReasoningItem(
                 text=reasoning_content,
                 status=None,  # NOTE: Only the last output item has status.
             )
-            output.append(reasoning_item)
-        if content:
+        # If no tool call is generated, we still need to return an output.
+        if content and output is None:
             output_text = ResponseOutputText(
                 text=content,
                 annotations=[],  # TODO
                 type="output_text",
                 logprobs=None,  # TODO
             )
-            message = ResponseOutputMessage(
+            output = ResponseOutputMessage(
                 id=f"msg_{random_uuid()}",
                 content=[output_text],
                 role="assistant",
                 status="completed",
                 type="message",
             )
-            output.append(message)
+        if isinstance(output, list):
+            outputs.extend(output)
+        else:
+            outputs.append(output)
 
         # Calculate usage.
         assert final_res.prompt_token_ids is not None
@@ -361,7 +451,7 @@ class OpenAIServingResponses(OpenAIServing):
             sampling_params,
             model_name=model_name,
             created_time=created_time,
-            output=output,
+            output=outputs,
             status="completed",
             usage=usage,
         )
