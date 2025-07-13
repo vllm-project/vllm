@@ -73,57 +73,6 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
                 "FlashInferMLA V1 with FP8 KV cache not yet supported")
         
 
-
-    def _flash_attn_varlen_diff_headdims_rocm(self,
-                                              q,
-                                              k,
-                                              v,
-                                              softmax_scale=None,
-                                              **kwargs):
-        assert self.triton_fa_func is not None
-
-        # Triton Attention requires a padded V
-        padded_v = torch.nn.functional.pad(v, [0, q.shape[-1] - v.shape[-1]],
-                                           value=0)
-        # The output of triton_attention is a tuple of
-        # [output_tensor, encoded_softmax] where encoded_softmax is always None
-        output_tensor, _ = self.triton_fa_func(
-            q,
-            k,
-            padded_v,
-            None,  # output
-            kwargs["cu_seqlens_q"],
-            kwargs["cu_seqlens_k"],
-            kwargs["max_seqlen_q"],
-            kwargs["max_seqlen_k"],
-            kwargs["causal"],
-            softmax_scale,
-            None,  # bias
-        )
-
-        return output_tensor
-
-    def _flash_attn_varlen_diff_headdims(self,
-                                         q,
-                                         k,
-                                         v,
-                                         return_softmax_lse=False,
-                                         softmax_scale=None,
-                                         **kwargs):
-        if current_platform.is_rocm() \
-            and self.use_triton_flash_attn \
-            and not return_softmax_lse:
-            return self._flash_attn_varlen_diff_headdims_rocm(
-                q, k, v, softmax_scale=softmax_scale, **kwargs)
-        else:
-            return super()._flash_attn_varlen_diff_headdims(
-                q,
-                k,
-                v,
-                return_softmax_lse=return_softmax_lse,
-                softmax_scale=softmax_scale,
-                **kwargs)
-
     def _forward_decode(
         self,
         q_nope: torch.Tensor,
@@ -145,7 +94,7 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
                         device=q.device)
 
         page_size = kv_c_and_k_pe_cache.size(1)
-        max_seq_len = attn_metadata.decode.seq_lens.max()
+        max_seq_len = attn_metadata.decode.seq_lens.max().item()
 
         workspace_buffer = torch.empty(
             FLASHINFER_WORKSPACE_BUFFER_SIZE,
@@ -164,7 +113,7 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
             seq_lens=attn_metadata.decode.seq_lens,
             block_size=page_size,
             max_seq_len=max_seq_len,
-            scale=self.scale, #/ ((512 + 64) ** 0.5) * ((128 + 64) ** 0.5),
+            scale=self.scale,
             out=o,
         )
 
