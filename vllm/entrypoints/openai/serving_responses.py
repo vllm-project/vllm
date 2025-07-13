@@ -369,6 +369,7 @@ class OpenAIServingResponses(OpenAIServing):
             elif request.tool_choice is None or request.tool_choice == "none":
                 pass
             elif request.tool_choice == "required":
+                assert content is not None
                 tool_calls = TypeAdapter(
                     list[FunctionDefinition]).validate_json(content)
                 function_calls.extend([
@@ -396,16 +397,17 @@ class OpenAIServingResponses(OpenAIServing):
                     "Unknown tool choice: %s. "
                     "Using 'none' as the default tool choice.",
                     request.tool_choice)
-            output = [
-                ResponseFunctionToolCall(
-                    id=f"fc_{random_fc_uuid()}",
-                    call_id=f"call_{random_uuid()}",
-                    type="function_call",
-                    status="completed",
-                    name=tool_call.name,
-                    arguments=tool_call.arguments,
-                ) for tool_call in function_calls
-            ]
+            if function_calls:
+                output = [
+                    ResponseFunctionToolCall(
+                        id=f"fc_{random_fc_uuid()}",
+                        call_id=f"call_{random_uuid()}",
+                        type="function_call",
+                        status="completed",
+                        name=tool_call.name,
+                        arguments=tool_call.arguments,
+                    ) for tool_call in function_calls
+                ]
         # If no tool call is generated, we still need to return an output.
         if reasoning_content and output is None:
             output = ResponseReasoningItem(

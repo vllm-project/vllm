@@ -8,7 +8,8 @@ from typing import Callable, Optional, Union
 
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DeltaMessage,
-                                              ExtractedToolCallInformation)
+                                              ExtractedToolCallInformation,
+                                              ResponsesRequest)
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import import_from_path, is_list_of
@@ -39,15 +40,17 @@ class ToolParser:
         return self.model_tokenizer.get_vocab()
 
     def adjust_request(
-            self, request: ChatCompletionRequest) -> ChatCompletionRequest:
+        self, request: Union[ChatCompletionRequest, ResponsesRequest]
+    ) -> ChatCompletionRequest:
         """
         Static method that used to adjust the request parameters.
         """
         return request
 
     def extract_tool_calls(
-            self, model_output: str,
-            request: ChatCompletionRequest) -> ExtractedToolCallInformation:
+        self, model_output: str, request: Union[ChatCompletionRequest,
+                                                ResponsesRequest]
+    ) -> ExtractedToolCallInformation:
         """
         Static method that should be implemented for extracting tool calls from
         a complete model-generated string.
@@ -66,7 +69,7 @@ class ToolParser:
         previous_token_ids: Sequence[int],
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
-        request: ChatCompletionRequest,
+        request: Union[ChatCompletionRequest, ResponsesRequest],
     ) -> Union[DeltaMessage, None]:
         """
         Instance method that should be implemented for extracting tool calls
