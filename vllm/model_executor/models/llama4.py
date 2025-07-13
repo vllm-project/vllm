@@ -367,7 +367,12 @@ class Llama4Model(LlamaModel):
                 if "w13" in full_param_name:
                     shard_idx = 0 if shard_id == "w1" else 1
                     new_loaded_weight = new_loaded_weight[shard_idx]
-                new_loaded_weight = new_loaded_weight.transpose(-1, -2)
+
+                # Only transpose for non-FP4 weights
+                # FP4 weights are already in the correct format and shouldn't be transposed (double check)
+                if new_loaded_weight.dtype != torch.uint8:
+                    new_loaded_weight = new_loaded_weight.transpose(-1, -2)
+
                 layer_idx = extract_layer_index(name)
                 # EP mapping
                 expert_map = self.layers[
@@ -382,6 +387,8 @@ class Llama4Model(LlamaModel):
             else:
                 # TODO: add EP support for non fused weights
                 pass
+            if new_loaded_weight.dtype == torch.uint8:
+                new_loaded_weight = new_loaded_weight.transpose(-1, -2)
             weight_loader(param,
                           new_loaded_weight,
                           full_param_name,
@@ -486,8 +493,12 @@ class Llama4Model(LlamaModel):
                             # This is a MoE weight loader
                             if "w13_" in name:
                                 shard_id = "w1"
+                                if loaded_weight.dtype == torch.uint8 or loaded_weight.dtype == torch.float8_e4m3fn:
+                                    loaded_weight = loaded_weight.transpose(-1, -2)
                             elif "w2_" in name:
                                 shard_id = "w2"
+                                if loaded_weight.dtype == torch.uint8 or loaded_weight.dtype == torch.float8_e4m3fn:
+                                    loaded_weight = loaded_weight.transpose(-1, -2)
                             else:
                                 shard_id = "w1"
 
@@ -569,12 +580,12 @@ class Llama4ForCausalLM(LlamaForCausalLM):
 
         modules = name.split(".")
 
-        # rotary embeds should be sliced
-        if ("wk" in modules or "k_proj" in modules) \
+        is_fp4_weight = loaded_weight.dtype == torch.uint8
+        if ("wk" in modules or "k_proj" in modules) and not is_fp4_weight \
            and modules[-1] == "weight":
             loaded_weight = permute(loaded_weight,
                                     self.config.num_key_value_heads)
-        elif ("wq" in modules or "q_proj" in modules) \
+        elif ("wq" in modules or "q_proj" in modules) and not is_fp4_weight \
                 and modules[-1] == "weight":
             loaded_weight = permute(loaded_weight,
                                     self.config.num_attention_heads)
