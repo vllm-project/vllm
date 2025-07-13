@@ -292,6 +292,43 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
         selected_target_probs = target_probs[batch_indices, probs_indicies,
                                              draft_token_ids]
 
+        # DEBUG: Check which cause is creating the [1,0,0] distribution
+        if batch_size > 0 and k > 0:
+            # Quick probe to identify the issue
+            logger.info("\n--- Quick Probe for Target Prob Collapse ---")
+            # Check if it's fp16 underflow
+            logger.info(f"Target probs dtype: {target_probs.dtype}")
+            logger.info(f"Target probs shape: {target_probs.shape}")
+            logger.info(f"Draft probs shape: {draft_probs.shape}")
+            # Check if probabilities look like greedy modification
+            if target_probs.shape[0] > 0:
+                first_target_probs = target_probs[0, 0]
+                top_probs, _ = first_target_probs.topk(5)
+                logger.info(f"First target position top-5 probs: {top_probs.tolist()}")
+                if top_probs[0].item() == 1.0 and top_probs[1].item() == 0.0:
+                    logger.info(">>> Looks like GREEDY SAMPLING (cause A) - probs modified to [1,0,0,...]")
+            logger.info("--------------------")
+            
+            logger.info("\n[REJECTION_SAMPLER] Probability comparison:")
+            for b in range(min(1, batch_size)):  # Just first batch
+                logger.info(f"  Batch {b}:")
+                for i in range(min(4, k)):  # First 4 tokens
+                    draft_p = selected_draft_probs[b, i].item()
+                    target_p = selected_target_probs[b, i].item()
+                    token_id = draft_token_ids[b, i].item()
+                    ratio = target_p / draft_p if draft_p > 0 else 0
+                    logger.info(f"    Token {i} (ID={token_id}):")
+                    logger.info(f"      Draft prob:  {draft_p:.6f}")
+                    logger.info(f"      Target prob: {target_p:.6f}")
+                    logger.info(f"      Ratio (t/d): {ratio:.6f}")
+                    logger.info(f"      Accept prob: {min(1.0, ratio):.6f}")
+                    
+                    # Show top 3 choices from each model
+                    draft_top_probs, draft_top_ids = draft_probs[b, i].topk(3)
+                    target_top_probs, target_top_ids = target_probs[b, i].topk(3)
+                    logger.info(f"      Draft top 3: {[(id.item(), p.item()) for id, p in zip(draft_top_ids, draft_top_probs)]}")
+                    logger.info(f"      Target top 3: {[(id.item(), p.item()) for id, p in zip(target_top_ids, target_top_probs)]}")
+
         uniform_rand = self._create_uniform_samples(seeded_seqs, batch_size,
                                                     k - 1, target_probs.device)
 

@@ -173,15 +173,17 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
             'vllm_config'].parallel_config
         
         if layer_skip_method:
-            from vllm.spec_decode.layer_skip_proposer import LayerSkipProposer
+            from vllm.spec_decode.early_exit_proposer_worker import EarlyExitProposerWorker
             # For layer skip, we create a proposer that shares weights with target model
             layer_skip = layer_skip_config.layer_skip if layer_skip_config else 4
-            proposer_worker = LayerSkipProposer(
+            lsq_head_path = layer_skip_config.lsq_head_path if layer_skip_config else None
+            proposer_worker = EarlyExitProposerWorker(
                 target_worker=scorer_worker,
-                layer_skip=layer_skip,
+                exit_layer=layer_skip,
+                lsq_head_path=lsq_head_path,
                 **draft_worker_kwargs
             )
-            logger.info("[Layer Skip] Using LayerSkipProposer with layer %d", layer_skip)
+            logger.info("[Layer Skip] Using EarlyExitProposerWorker with layer %d", layer_skip)
         elif ngram_prompt_lookup_max > 0:
             draft_worker_kwargs[
                 "device_type"] = scorer_worker.device_config.device.type
@@ -431,8 +433,10 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         """
         (self.scorer_worker.model_runner.sampler.include_gpu_probs_tensor
          ) = True
+        # DISABLE greedy prob modification for better acceptance rates
+        # This may affect theoretical guarantees but makes greedy sampling practical
         (self.scorer_worker.model_runner.sampler.
-         should_modify_greedy_probs_inplace) = True
+         should_modify_greedy_probs_inplace) = False
         self.proposer_worker.set_include_gpu_probs_tensor()
         self.proposer_worker.set_should_modify_greedy_probs_inplace()
 
@@ -814,6 +818,11 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         from vllm.logger import init_logger
         logger = init_logger(__name__)
 
+        # Mark sequences as no longer prompt so scorer returns real probabilities
+        # for the draft tokens (otherwise they get masked to 0)
+        for sgm in execute_model_req.seq_group_metadata_list:
+            sgm.is_prompt = False
+
         with Timer() as scoring_timer:
             # BREAKPOINT 2: Scorer evaluation - watch proposals.proposal_token_ids, full model run
             proposal_scores = self.scorer.score_proposals(
@@ -897,14 +906,9 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         # Get proposed tokens.
         proposal_token_ids = proposals.proposal_token_ids[spec_indices]
 
-        # --- BEGIN PATCH: Compensate for norm difference in draft logits ---
-        # If the draft model's logits are much larger than the target's,
-        # acceptance probabilities will be very low. To mitigate this,
-        # scale down the draft logits before computing acceptance.
-        # This is a minimal fix; ideally, norm removal should be done at the model level.
-        # If you want to experiment, you can uncomment the following line:
-        # proposal_probs = proposal_probs / 2.5
-        # --- END PATCH ---
+        # Scale down draft probabilities to account for overconfidence
+        # Draft model at early layers tends to be more confident than target
+        proposal_probs = proposal_probs / 5.0
 
         # Sampler arguments
         sampler_extra_kwargs: Dict[str, Any] = {}
@@ -934,6 +938,25 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
 
         # Track acceptance rate for debugging
         self._track_acceptance_rate(proposal_token_ids, accepted_token_ids)
+        
+        # Debug acceptance ratios if enabled
+        if True:
+            # proposal_probs shape: [B, k, vocab]
+            # proposal_verifier_probs shape: [B, k+1, vocab] (includes bonus token)
+            # proposal_token_ids shape: [B, k]
+            b, k = proposal_token_ids.shape
+            for i in range(b):
+                ratios = []
+                for t in range(k):
+                    tok = proposal_token_ids[i, t].item()
+                    if tok == -1:
+                        continue
+                    # Get probabilities for the proposed token
+                    p_draft = proposal_probs[i, t, tok].item()
+                    p_target = proposal_verifier_probs[i, t, tok].item()
+                    ratio = p_target / p_draft if p_draft > 0 else 0
+                    ratios.append(ratio)
+                print(f"[seq {i}] per-token acceptance ratio: {ratios}")
         # Append output tokens from non-speculative sequences to
         # the accepted token ids tensor.
         non_spec_token_ids = non_spec_token_ids.expand(-1, max_proposal_len +

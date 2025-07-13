@@ -50,13 +50,11 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsPP
-from .layer_skip import LayerSkipModelMixin
 from .utils import (AutoWeightsLoader, PPMissingLayer, extract_layer_index,
                     is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
 
-logger = init_logger(__name__)
 
 
 class LlamaMLP(nn.Module):
@@ -466,7 +464,7 @@ class LlamaModel(nn.Module):
         return loaded_params
 
 
-class LlamaForCausalLM(LayerSkipModelMixin, nn.Module, SupportsLoRA, SupportsPP):
+class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"]
@@ -507,17 +505,12 @@ class LlamaForCausalLM(LayerSkipModelMixin, nn.Module, SupportsLoRA, SupportsPP)
                  vllm_config: VllmConfig,
                  prefix: str = "",
                  layer_type: type[nn.Module] = LlamaDecoderLayer):
-        LayerSkipModelMixin.__init__(self)  # Initialize mixin
         super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
         self.config = config
         self.lora_config = lora_config
-        
-        # Draft mode support
-        self.draft_mode = False
-        self.draft_layer = 4
 
         self.model = self._init_model(vllm_config=vllm_config,
                                       prefix=maybe_prefix(prefix, "model"),
@@ -579,46 +572,18 @@ class LlamaForCausalLM(LayerSkipModelMixin, nn.Module, SupportsLoRA, SupportsPP)
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        if self.draft_mode:
-            # H1 probe: Check if forward is called multiple times
-            logger.info(f"[H1] llama forward in draft_mode, positions shape={positions.shape}")
-            # Draft mode: early exit
-            return self.forward_with_early_exit(
-                input_ids=input_ids,
-                positions=positions,
-                stop_layer=self.draft_layer,
-                intermediate_tensors=intermediate_tensors
-            )
-        else:
-            # Normal mode: full forward pass
-            model_output = self.model(input_ids, positions, intermediate_tensors,
-                                      inputs_embeds)
-            return model_output
+        model_output = self.model(input_ids, positions, intermediate_tensors,
+                                  inputs_embeds)
+        return model_output
 
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        if self.draft_mode and hasattr(self, 'lsq_heads') and self.draft_layer in self.lsq_heads:
-            # Draft mode: use LSQ head (already TP-sharded ParallelLMHead)
-            lsq_head = self.lsq_heads[self.draft_layer]
-            # BREAKPOINT 2: Before logits computation
-            # Check: self.draft_layer, lsq_head.weight.shape, hidden_states.shape
-            logits = self.logits_processor(lsq_head, hidden_states, sampling_metadata)
-            # BREAKPOINT 3: After logits computation  
-            # Check: logits.shape, logits.argmax(dim=-1), tokenizer.decode([logits.argmax(dim=-1).item()])
-            # DEBUG: Check what token is being predicted
-            if logits is not None:
-                logger.info(f"[DRAFT] Layer {self.draft_layer} predicting: "
-                           f"argmax={logits.argmax(dim=-1).tolist()}, "
-                           f"max_logit={logits.max(dim=-1).values.tolist()}")
-            return logits
-        else:
-            # Normal mode: use LM head
-            logits = self.logits_processor(self.lm_head, hidden_states,
-                                           sampling_metadata)
-            return logits
+        logits = self.logits_processor(self.lm_head, hidden_states,
+                                       sampling_metadata)
+        return logits
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:

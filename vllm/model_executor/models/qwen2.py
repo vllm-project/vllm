@@ -53,7 +53,6 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, PoolerOutput
 
 from .interfaces import SupportsLoRA, SupportsPP
-from .layer_skip import LayerSkipModelMixin
 from .utils import (AutoWeightsLoader, PPMissingLayer, WeightsMapper,
                     extract_layer_index, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
@@ -426,7 +425,7 @@ class Qwen2Model(nn.Module):
         return loaded_params
 
 
-class Qwen2ForCausalLM(LayerSkipModelMixin, nn.Module, SupportsLoRA, SupportsPP):
+class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -441,7 +440,6 @@ class Qwen2ForCausalLM(LayerSkipModelMixin, nn.Module, SupportsLoRA, SupportsPP)
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        LayerSkipModelMixin.__init__(self)  # Initialize mixin
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
@@ -450,10 +448,6 @@ class Qwen2ForCausalLM(LayerSkipModelMixin, nn.Module, SupportsLoRA, SupportsPP)
         self.lora_config = lora_config
 
         self.quant_config = quant_config
-        
-        # Draft mode support
-        self.draft_mode = False
-        self.draft_layer = 4
         self.model = Qwen2Model(vllm_config=vllm_config,
                                 prefix=maybe_prefix(prefix, "model"))
 
@@ -484,30 +478,18 @@ class Qwen2ForCausalLM(LayerSkipModelMixin, nn.Module, SupportsLoRA, SupportsPP)
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        if self.draft_mode:
-            # Draft mode: early exit
-            return self.forward_with_early_exit(input_ids, positions, self.draft_layer, intermediate_tensors)
-        else:
-            # Normal mode: full forward pass
-            hidden_states = self.model(input_ids, positions, intermediate_tensors,
-                                       inputs_embeds)
-            return hidden_states
+        hidden_states = self.model(input_ids, positions, intermediate_tensors,
+                                   inputs_embeds)
+        return hidden_states
 
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        if self.draft_mode and hasattr(self, 'lsq_heads') and self.draft_layer in self.lsq_heads:
-            # Draft mode: use LSQ head (already TP-sharded ParallelLMHead)
-            lsq_head = self.lsq_heads[self.draft_layer]
-            logits = self.logits_processor(lsq_head, hidden_states, sampling_metadata)
-            return logits
-        else:
-            # Normal mode: use LM head
-            logits = self.logits_processor(self.lm_head, hidden_states,
-                                           sampling_metadata)
-            return logits
+        logits = self.logits_processor(self.lm_head, hidden_states,
+                                       sampling_metadata)
+        return logits
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
