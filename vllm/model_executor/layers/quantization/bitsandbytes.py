@@ -588,7 +588,70 @@ class BitsAndBytesMoEMethod(FusedMoEMethodBase):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
-        raise NotImplementedError
+        from bitsandbytes.nn import Int8Params
+
+        # Fused gate_up_proj (column parallel)
+        # For 8-bit, the data is not packed into uint8 from a lower bitwidth.
+        # It's directly int8, so pack_factor is 1 (or can be omitted if not used).
+        # The shape is the dequantized shape, but the dtype is int8.
+        w13_qweight = Int8Params(
+            data=torch.empty(
+                num_experts,
+                intermediate_size_per_partition * 2,
+                hidden_size,
+                dtype=torch.int8,
+            ),
+            has_fp16_weights=self.quant_config.llm_int8_has_fp16_weight,
+            requires_grad=False,
+        )
+        layer.register_parameter("w13_weight", w13_qweight)
+        set_weight_attrs(w13_qweight, extra_weight_attrs)
+        set_weight_attrs(
+            w13_qweight,
+            {
+                "num_experts": num_experts,
+                "input_dim": hidden_size,
+                "output_dim": 2 * intermediate_size_per_partition,
+                "experts_shape": (
+                    num_experts,
+                    intermediate_size_per_partition * 2,
+                    hidden_size,
+                ),
+                "pack_factor": 1,  # 8-bit means 1 byte per value, no packing ratio
+                "use_bitsandbytes_8bit": True,
+                "generation": 0, # Added for 8bit matmul states tracking
+            },
+        )
+
+        # down_proj (row parallel)
+        w2_qweight = Int8Params(
+            data=torch.empty(
+                num_experts,
+                hidden_size,
+                intermediate_size_per_partition,
+                dtype=torch.int8,
+            ),
+            has_fp16_weights=self.quant_config.llm_int8_has_fp16_weight,
+            requires_grad=False,
+        )
+        layer.register_parameter("w2_weight", w2_qweight)
+        set_weight_attrs(w2_qweight, extra_weight_attrs)
+        set_weight_attrs(
+            w2_qweight,
+            {
+                "num_experts": num_experts,
+                "input_dim": intermediate_size_per_partition,
+                "output_dim": hidden_size,
+                "experts_shape": (
+                    num_experts,
+                    hidden_size,
+                    intermediate_size_per_partition,
+                ),
+                "pack_factor": 1, # 8-bit means 1 byte per value, no packing ratio
+                "use_bitsandbytes_8bit": True,
+                "generation": 0, # Added for 8bit matmul states tracking
+            },
+        )
 
     def _apply_4bit_dequnt(
             self, layer: torch.nn.Module) -> tuple[torch.Tensor, torch.Tensor]:
@@ -607,4 +670,21 @@ class BitsAndBytesMoEMethod(FusedMoEMethodBase):
 
     def _apply_8bit_dequant(
             self, layer: torch.nn.Module) -> tuple[torch.Tensor, torch.Tensor]:
-        raise NotImplementedError
+        from bitsandbytes.functional import dequantize_8bit
+        
+        # Dequantize w13_weight
+        # Int8Params store the actual int8 data in .data and scales in .SCB or bnb_quant_state.
+        # The dequantize_8bit function typically requires the int8 data and its corresponding scale.
+        # Here, we assume bnb_quant_state holds the scale (SCB).
+        w13_qweight = layer.w13_weight
+        w13 = dequantize_8bit(w13_qweight.data, w13_qweight.bnb_quant_state.SCB)
+        
+        # Dequantize w2_weight
+        w2_qweight = layer.w2_weight
+        w2 = dequantize_8bit(w2_qweight.data, w2_qweight.bnb_quant_state.SCB)
+        
+        # Reshape to the expected expert shape
+        w13 = w13.reshape(w13_qweight.experts_shape)
+        w2 = w2.reshape(w2_qweight.experts_shape)
+        
+        return w13, w2

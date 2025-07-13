@@ -509,6 +509,22 @@ class Llama4Model(LlamaModel):
                     weight_loader(param, loaded_weight)
                     loaded_params.add(name)
         return loaded_params
+        
+    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
+        """
+        Returns a mapping for MoE expert weights to their corresponding
+        checkpoint names. This is used by BitsAndBytesModelLoader
+        to correctly identify and fuse pre-quantized expert weights.
+        """
+        # For Llama-4-Scout models, the expert weights are typically named
+        # w1, w2, w3 in the Hugging Face checkpoint.
+        # The 'gate_proj' corresponds to 'w1', 'down_proj' to 'w2',
+        # and 'up_proj' to 'w3' in the FusedMoE context.
+        return FusedMoE.make_expert_params_mapping(
+            ckpt_gate_proj_name="gate_proj",
+            ckpt_down_proj_name="down_proj",
+            ckpt_up_proj_name="up_proj",
+            num_experts=self.config.num_local_experts)
 
 
 class Llama4ForCausalLM(LlamaForCausalLM):
@@ -580,3 +596,9 @@ class Llama4ForCausalLM(LlamaForCausalLM):
                                     self.config.num_attention_heads)
 
         return name, loaded_weight
+    
+    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
+        """
+        Delegates the call to the underlying Llama4Model for expert mapping.
+        """
+        return self.model.get_expert_mapping()

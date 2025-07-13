@@ -1069,3 +1069,14 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
                                      stacked_params_mapping))
 
         return updated_params
+    
+    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
+        """
+        Delegates the call to the underlying language model for expert mapping.
+        """
+        if not hasattr(self.language_model, "get_expert_mapping"):
+            # This should ideally not happen if llama4.py is correctly updated
+            raise AttributeError(
+                "Llama4ForCausalLM does not have 'get_expert_mapping' method."
+                "Ensure vllm/model_executor/models/llama4.py is up-to-date.")
+        return self.language_model.get_expert_mapping()
