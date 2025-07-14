@@ -434,7 +434,7 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
         3. Attention chunk size of 8, block size of 4, max length of 16, 
         use_eagle is true,for next token at 16th (zero-indexed), 
         we only look for cache hit for 0th - 14th tokens, since last token
-        15th needs to be recomputed for eagle, so we return [null, null, block 3] 
+        15th needs to be recomputed for eagle, so return [null, null, block3] 
         if block3 is hit and [null, null] if block3 is not hit.
 
         Args:
