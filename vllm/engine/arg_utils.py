@@ -1420,12 +1420,14 @@ class EngineArgs:
             supported = False
             if current_platform.is_rocm():
                 supported = True
+            elif (current_platform.is_cuda()
+                  and current_platform.has_device_capability(100)):
+                supported = True
             elif fp8_attention and will_use_fa:
                 from vllm.attention.utils.fa_utils import (
                     flash_attn_supports_fp8)
                 supported = flash_attn_supports_fp8()
-            elif envs.VLLM_USE_TRTLLM_DECODE_ATTENTION:
-                supported = True
+            
             if not supported:
                 _raise_or_fallback(feature_name="--kv-cache-dtype",
                                    recommend_to_remove=False)
