@@ -403,14 +403,6 @@ class P2pNcclConnector(KVConnectorBase_V1):
                                  block_ids=block_ids,
                                  block_size=self._block_size)
 
-        # Requests loaded asynchronously are not in the scheduler_output.
-        # for request_id in self._requests_need_load:
-        #     request, block_ids = self._requests_need_load[request_id]
-        #     meta.add_request(request_id=request.request_id,
-        #                      token_ids=request.prompt_token_ids,
-        #                      block_ids=block_ids,
-        #                      block_size=self._block_size)
-
         self._requests_need_load.clear()
         return meta
 

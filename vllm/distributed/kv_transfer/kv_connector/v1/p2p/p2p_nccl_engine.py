@@ -112,10 +112,10 @@ class P2pNcclEngine:
         self.send_stream = torch.cuda.Stream()
         self.recv_stream = torch.cuda.Stream()
 
-        mem_pool_size_gb = self.config.get_from_extra_config(
-            "mem_pool_size_gb", DEFAULT_MEM_POOL_SIZE_GB)
-        self.pool = TensorMemoryPool(max_block_size=int(mem_pool_size_gb) *
-                                     1024**3)  # GB
+        mem_pool_size_gb = float(self.config.get_from_extra_config(
+            "mem_pool_size_gb", DEFAULT_MEM_POOL_SIZE_GB))
+        self.pool = TensorMemoryPool(max_block_size=int(mem_pool_size_gb *
+                                     1024**3))  # GB
 
         # The sending type includes tree mutually exclusive options:
         # PUT, GET, PUT_ASYNC.
@@ -129,8 +129,7 @@ class P2pNcclEngine:
             self.send_queue: deque[list[Any]] = deque()
             self.send_request_id_to_tensor_ids: dict[str, set[str]] = {}
             if self.send_type == "PUT_ASYNC":
-                self._send_thread = threading.Thread(target=self._send_async,
-                                                     daemon=True)
+                self._send_thread = threading.Thread(target=self.send_async, daemon=True)
                 self._send_thread.start()
 
         # tensor_id: torch.Tensor/(addr, dtype, shape)
@@ -146,13 +145,12 @@ class P2pNcclEngine:
             "nccl_num_channels", "8")
 
         self._listener_thread = threading.Thread(
-            target=self._listen_for_requests, daemon=True)
+            target=self.listen_for_requests, daemon=True)
         self._listener_thread.start()
 
         self._ping_thread = None
         if port_offset == 0 and self.proxy_address != "":
-            self._ping_thread = threading.Thread(target=self._ping,
-                                                 daemon=True)
+            self._ping_thread = threading.Thread(target=self.ping, daemon=True)
             self._ping_thread.start()
 
         logger.info(
@@ -162,7 +160,7 @@ class P2pNcclEngine:
             self.http_address, self.zmq_address, self.proxy_address,
             self.send_type, self.buffer_size_threshold, self.nccl_num_channels)
 
-    def _create_connect(self, remote_address: typing.Optional[str] = None):
+    def create_connect(self, remote_address: typing.Optional[str] = None):
         assert remote_address is not None
         if remote_address not in self.socks:
             sock = self.context.socket(zmq.DEALER)
@@ -184,7 +182,7 @@ class P2pNcclEngine:
                     comm: ncclComm_t = self.nccl.ncclCommInitRank(
                         2, unique_id, rank)
                 self.comms[remote_address] = (comm, rank)
-                logger.info("🤝ncclCommInitRank Success, %s👉%s, MyRank: %s",
+                logger.info("🤝ncclCommInitRank Success, %s👉%s, MyRank:%s",
                             self.zmq_address, remote_address, rank)
 
         return self.socks[remote_address], self.comms[remote_address]
@@ -202,38 +200,40 @@ class P2pNcclEngine:
                 self.recv_store[tensor_id] = tensor
                 self.recv_store_cv.notify()
             return True
-        else:
-            if self.send_type == "PUT":
-                return self._send_sync(tensor_id, tensor, remote_address, slot_mapping, is_mla)
-            elif self.send_type == "PUT_ASYNC":
-                with self.send_queue_cv:
-                    self.send_queue.append([tensor_id, remote_address, tensor, slot_mapping, is_mla])
-                    self.send_queue_cv.notify()
-            else:  # GET
-                with self.send_store_cv:
-                    tensor_size = tensor.element_size() * tensor.numel()
-                    while (self.buffer_size + tensor_size
-                           > self.buffer_size_threshold):
-                        oldest_tenser_id = next(iter(self.send_store))
-                        oldest_tenser = self.send_store.pop(oldest_tenser_id)
-                        oldest_tenser_size = oldest_tenser.element_size(
-                        ) * oldest_tenser.numel()
-                        self.buffer_size -= oldest_tenser_size
-                        logger.info(
-                            "⛔[GET]Send to %s, tensor_id:%s, tensor_size:%d,"
-                            " buffer_size:%d, oldest_tenser_size:%d, rank:%d",
-                            remote_address, tensor_id, tensor_size,
-                            self.buffer_size, oldest_tenser_size, self.rank)
 
-                    self.send_store[tensor_id] = tensor
-                    self.buffer_size += tensor_size
-                    logger.debug(
-                        "🔵[GET]Send to %s, tensor_id:%s, tensor_size:%d, "
-                        "shape:%s, rank:%d, buffer_size:%d(%.2f%%)",
-                        remote_address, tensor_id, tensor_size, tensor.shape,
-                        self.rank, self.buffer_size,
-                        self.buffer_size / self.buffer_size_threshold * 100)
+        if self.send_type == "PUT":
+            return self.send_sync(tensor_id, tensor, remote_address, slot_mapping, is_mla)
 
+        if self.send_type == "PUT_ASYNC":
+            with self.send_queue_cv:
+                self.send_queue.append([tensor_id, remote_address, tensor, slot_mapping, is_mla])
+                self.send_queue_cv.notify()
+            return True
+
+        # GET
+        with self.send_store_cv:
+            tensor_size = tensor.element_size() * tensor.numel()
+            while (self.buffer_size + tensor_size
+                   > self.buffer_size_threshold):
+                oldest_tenser_id = next(iter(self.send_store))
+                oldest_tenser = self.send_store.pop(oldest_tenser_id)
+                oldest_tenser_size = oldest_tenser.element_size(
+                ) * oldest_tenser.numel()
+                self.buffer_size -= oldest_tenser_size
+                logger.info(
+                    "⛔[GET]Send to %s, tensor_id:%s, tensor_size:%d,"
+                    " buffer_size:%d, oldest_tenser_size:%d, rank:%d",
+                    remote_address, tensor_id, tensor_size,
+                    self.buffer_size, oldest_tenser_size, self.rank)
+
+            self.send_store[tensor_id] = tensor
+            self.buffer_size += tensor_size
+            logger.debug(
+                "🔵[GET]Send to %s, tensor_id:%s, tensor_size:%d, "
+                "shape:%s, rank:%d, buffer_size:%d(%.2f%%)",
+                remote_address, tensor_id, tensor_size, tensor.shape,
+                self.rank, self.buffer_size,
+                self.buffer_size / self.buffer_size_threshold * 100)
         return True
 
     def recv_tensor(
@@ -269,7 +269,7 @@ class P2pNcclEngine:
             return None
 
         if remote_address not in self.socks:
-            self._create_connect(remote_address)
+            self.create_connect(remote_address)
 
         sock = self.socks[remote_address]
         comm, rank = self.comms[remote_address]
@@ -284,113 +284,116 @@ class P2pNcclEngine:
                            remote_address, tensor_id, data["ret"])
             return None
 
-        tensor = torch.empty(data["shape"],
-                             dtype=getattr(torch, data["dtype"]),
-                             device=self.device)
+        with torch.cuda.stream(self.recv_stream):
+            tensor = torch.empty(data["shape"],
+                                 dtype=getattr(torch, data["dtype"]),
+                                 device=self.device)
 
-        self._recv(comm, tensor, rank ^ 1, self.recv_stream)
+        self.recv(comm, tensor, rank ^ 1, self.recv_stream)
 
         return tensor
 
-    def _listen_for_requests(self):
+    def listen_for_requests(self):
         while True:
             socks = dict(self.poller.poll())
-            if self.router_socket in socks:
-                remote_address, message = self.router_socket.recv_multipart()
-                data = msgpack.loads(message)
-                if data["cmd"] == "NEW":
-                    unique_id = self.nccl.unique_id_from_bytes(
-                        bytes(data["unique_id"]))
-                    with torch.cuda.device(self.device):
-                        rank = 1
-                        with set_p2p_nccl_context(self.nccl_num_channels):
-                            comm: ncclComm_t = self.nccl.ncclCommInitRank(
-                                2, unique_id, rank)
-                        self.comms[remote_address.decode()] = (comm, rank)
-                        logger.info(
-                            "🤝ncclCommInitRank Success, %s👈%s, MyRank:%s",
-                            self.zmq_address, remote_address.decode(), rank)
-                elif data["cmd"] == "PUT":
-                    tensor_id = data["tensor_id"]
-                    try:
-                        with torch.cuda.stream(self.recv_stream):
-                            tensor = torch.empty(data["shape"],
-                                                 dtype=getattr(
-                                                     torch, data["dtype"]),
-                                                 device=self.device)
-                        self.router_socket.send_multipart(
-                            [remote_address, b"0"])
-                        comm, rank = self.comms[remote_address.decode()]
-                        self._recv(comm, tensor, rank ^ 1, self.recv_stream)
-                        tensor_size = tensor.element_size() * tensor.numel()
-                        if (self.buffer_size + tensor_size
-                                > self.buffer_size_threshold):
-                            # Store Tensor in memory pool
-                            addr = self.pool.store_tensor(tensor)
-                            tensor = (addr, tensor.dtype, tensor.shape)
-                            logger.warning(
-                                "🔴[PUT]Recv Tensor, Out Of Threshold, "
-                                "%s👈%s, data:%s, addr:%d", self.zmq_address,
-                                remote_address.decode(), data, addr)
-                        else:
-                            self.buffer_size += tensor_size
+            if self.router_socket not in socks:
+                continue
 
-                    except torch.cuda.OutOfMemoryError:
-                        self.router_socket.send_multipart(
-                            [remote_address, b"1"])
-                        tensor = None
-                        logger.warning(
-                            "🔴[PUT]Recv Tensor, Out Of Memory, %s👈%s, "
-                            "data:%s", self.zmq_address,
-                            remote_address.decode(), data)
-
-                    with self.recv_store_cv:
-                        self.recv_store[tensor_id] = tensor
-                        self._have_received_tensor_id(tensor_id)
-                        self.recv_store_cv.notify()
-
-                elif data["cmd"] == "GET":
-                    tensor_id = data["tensor_id"]
-                    with self.send_store_cv:
-                        tensor = self.send_store.pop(tensor_id, None)
-                        if tensor is not None:
-                            data = {
-                                "ret": 0,
-                                "shape": tensor.shape,
-                                "dtype":
-                                str(tensor.dtype).replace("torch.", "")
-                            }
-                            # LRU
-                            self.send_store[tensor_id] = tensor
-                            self._have_sent_tensor_id(tensor_id)
-                        else:
-                            data = {"ret": 1}
-
+            remote_address, message = self.router_socket.recv_multipart()
+            data = msgpack.loads(message)
+            if data["cmd"] == "NEW":
+                unique_id = self.nccl.unique_id_from_bytes(
+                    bytes(data["unique_id"]))
+                with torch.cuda.device(self.device):
+                    rank = 1
+                    with set_p2p_nccl_context(self.nccl_num_channels):
+                        comm: ncclComm_t = self.nccl.ncclCommInitRank(
+                            2, unique_id, rank)
+                    self.comms[remote_address.decode()] = (comm, rank)
+                    logger.info(
+                        "🤝ncclCommInitRank Success, %s👈%s, MyRank:%s",
+                        self.zmq_address, remote_address.decode(), rank)
+            elif data["cmd"] == "PUT":
+                tensor_id = data["tensor_id"]
+                try:
+                    with torch.cuda.stream(self.recv_stream):
+                        tensor = torch.empty(data["shape"],
+                                             dtype=getattr(
+                                                 torch, data["dtype"]),
+                                             device=self.device)
                     self.router_socket.send_multipart(
-                        [remote_address, msgpack.dumps(data)])
+                        [remote_address, b"0"])
+                    comm, rank = self.comms[remote_address.decode()]
+                    self.recv(comm, tensor, rank ^ 1, self.recv_stream)
+                    tensor_size = tensor.element_size() * tensor.numel()
+                    if (self.buffer_size + tensor_size
+                            > self.buffer_size_threshold):
+                        # Store Tensor in memory pool
+                        addr = self.pool.store_tensor(tensor)
+                        tensor = (addr, tensor.dtype, tensor.shape)
+                        logger.warning(
+                            "🔴[PUT]Recv Tensor, Out Of Threshold, "
+                            "%s👈%s, data:%s, addr:%d", self.zmq_address,
+                            remote_address.decode(), data, addr)
+                    else:
+                        self.buffer_size += tensor_size
 
-                    if data["ret"] == 0:
-                        comm, rank = self.comms[remote_address.decode()]
-                        self._send(comm, tensor.to(self.device), rank ^ 1,
-                                   self.send_stream)
-                else:
+                except torch.cuda.OutOfMemoryError:
+                    self.router_socket.send_multipart(
+                        [remote_address, b"1"])
+                    tensor = None
                     logger.warning(
-                        "🚧Unexpected, Received message from %s, data:%s",
-                        remote_address, data)
+                        "🔴[PUT]Recv Tensor, Out Of Memory, %s👈%s, "
+                        "data:%s", self.zmq_address,
+                        remote_address.decode(), data)
 
-    def _have_sent_tensor_id(self, tensor_id: str):
+                with self.recv_store_cv:
+                    self.recv_store[tensor_id] = tensor
+                    self.have_received_tensor_id(tensor_id)
+                    self.recv_store_cv.notify()
+
+            elif data["cmd"] == "GET":
+                tensor_id = data["tensor_id"]
+                with self.send_store_cv:
+                    tensor = self.send_store.pop(tensor_id, None)
+                    if tensor is not None:
+                        data = {
+                            "ret": 0,
+                            "shape": tensor.shape,
+                            "dtype":
+                            str(tensor.dtype).replace("torch.", "")
+                        }
+                        # LRU
+                        self.send_store[tensor_id] = tensor
+                        self._have_sent_tensor_id(tensor_id)
+                    else:
+                        data = {"ret": 1}
+
+                self.router_socket.send_multipart(
+                    [remote_address, msgpack.dumps(data)])
+
+                if data["ret"] == 0:
+                    comm, rank = self.comms[remote_address.decode()]
+                    self.send(comm, tensor.to(self.device), rank ^ 1,
+                               self.send_stream)
+            else:
+                logger.warning(
+                    "🚧Unexpected, Received message from %s, data:%s",
+                    remote_address, data)
+
+    def have_sent_tensor_id(self, tensor_id: str):
         request_id = tensor_id.split('#')[0]
         if request_id not in self.send_request_id_to_tensor_ids:
             self.send_request_id_to_tensor_ids[request_id] = set()
         self.send_request_id_to_tensor_ids[request_id].add(tensor_id)
 
-    def _have_received_tensor_id(self, tensor_id: str):
+    def have_received_tensor_id(self, tensor_id: str):
         request_id = tensor_id.split('#')[0]
         if request_id not in self.recv_request_id_to_tensor_ids:
             self.recv_request_id_to_tensor_ids[request_id] = set()
         self.recv_request_id_to_tensor_ids[request_id].add(tensor_id)
 
-    def _send_async(self):
+    def send_async(self):
         while True:
             with self.send_queue_cv:
                 while not self.send_queue:
@@ -398,7 +401,7 @@ class P2pNcclEngine:
                 tensor_id, remote_address, tensor, slot_mapping, is_mla = self.send_queue.popleft()
                 if not self.send_queue:
                     self.send_queue_cv.notify()
-            self._send_sync(tensor_id, tensor, remote_address, slot_mapping, is_mla)
+            self.send_sync(tensor_id, tensor, remote_address, slot_mapping, is_mla)
 
     def wait_for_sent(self):
         if self.send_type == "PUT_ASYNC":
@@ -411,7 +414,7 @@ class P2pNcclEngine:
                 "🚧[PUT_ASYNC]It took %.3fms to wait for the send_queue"
                 " to be empty, rank:%d", duration * 1000, self.rank)
 
-    def _send_sync(
+    def send_sync(
         self,
         tensor_id: str,
         tensor: torch.Tensor,
@@ -422,7 +425,7 @@ class P2pNcclEngine:
         if remote_address is None:
             return False
         if remote_address not in self.socks:
-            self._create_connect(remote_address)
+            self.create_connect(remote_address)
 
         with self.send_stream:
             tensor = self.extract_kv_from_layer(is_mla, tensor, slot_mapping)
@@ -447,10 +450,10 @@ class P2pNcclEngine:
                 response.decode())
             return False
 
-        self._send(comm, tensor.to(self.device), rank ^ 1, self.send_stream)
+        self.send(comm, tensor.to(self.device), rank ^ 1, self.send_stream)
 
         if self.send_type == "PUT_ASYNC":
-            self._have_sent_tensor_id(tensor_id)
+            self.have_sent_tensor_id(tensor_id)
 
         return True
 
@@ -479,7 +482,6 @@ class P2pNcclEngine:
                             request_id, None)
                         self.recv_request_id_to_tensor_ids.pop(
                             request_id, None)
-                    addr = 0
                     if isinstance(tensor, tuple):
                         addr, _, _ = tensor
                         self.pool.free(addr)
@@ -492,7 +494,7 @@ class P2pNcclEngine:
 
         return finished_sending or None, finished_recving or None
 
-    def _ping(self):
+    def ping(self):
         sock = self.context.socket(zmq.DEALER)
         sock.setsockopt_string(zmq.IDENTITY, self.zmq_address)
         logger.debug("ping start, zmq_address:%s", self.zmq_address)
@@ -506,7 +508,7 @@ class P2pNcclEngine:
             sock.send(msgpack.dumps(data))
             time.sleep(3)
 
-    def _send(self, comm, tensor: torch.Tensor, dst: int, stream=None):
+    def send(self, comm, tensor: torch.Tensor, dst: int, stream=None):
         assert tensor.device == self.device, (
             f"this nccl communicator is created to work on {self.device}, "
             f"but the input tensor is on {tensor.device}")
@@ -519,7 +521,7 @@ class P2pNcclEngine:
                                comm, cudaStream_t(stream.cuda_stream))
         stream.synchronize()
 
-    def _recv(self, comm, tensor: torch.Tensor, src: int, stream=None):
+    def recv(self, comm, tensor: torch.Tensor, src: int, stream=None):
         assert tensor.device == self.device, (
             f"this nccl communicator is created to work on {self.device}, "
             f"but the input tensor is on {tensor.device}")
