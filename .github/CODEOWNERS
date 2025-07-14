@@ -16,7 +16,7 @@
 /vllm/lora @jeejeelee
 /vllm/reasoning @aarnphm
 /vllm/entrypoints @aarnphm
-/vllm/compilation @zou3519
+/vllm/compilation @zou3519 @youkaichao
 CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 
 # Any change to the VllmConfig changes can have a large user-facing impact,
