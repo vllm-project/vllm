@@ -453,14 +453,20 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
         # e.g. for computed 1024 tokens, the 1024th token (0 indexed)
         # is in the second chunk, there are 1 prev chunk, the start idx
         # is 1024. for 1023, it will be 0.
-
+        num_cached_block = self.num_cached_block.get(request_id, 0)
         local_attention_start_idx = (
             num_computed_tokens
         ) // self.attention_chunk_size * self.attention_chunk_size
         first_useful_block_idx = local_attention_start_idx // self.block_size
-        #  if block size = 128, 0 -> block 0, 1024 -> block 8, 372 -> block 2
+        if num_cached_block > 0:
+            # Make sure we don't delete the last cached block
+            first_useful_block_idx = min(first_useful_block_idx,
+                                         num_cached_block - 1)
+        # if block size = 128, 0 -> block 0, 1024 (= 128 * 8) ->
+        # block 8, 372 (= 128 * 2 + 116) -> block 2
         blocks = self.req_to_blocks[request_id]
         removed_blocks: list[KVCacheBlock] = []
+        # we need to keep the last block to get the previous hash key
         for i in range(first_useful_block_idx - 1, -1, -1):
             if blocks[i] == self._null_block:
                 # If the block is already a null block, the blocks before it
@@ -469,7 +475,10 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
                 break
             removed_blocks.append(blocks[i])
             blocks[i] = self._null_block
+        if len(removed_blocks) > 0:
+            print("fanglu: removed blocks num: ", len(removed_blocks))
         self.block_pool.free_blocks(removed_blocks)
+        print(f"{blocks=}")
 
     def get_num_common_prefix_blocks(self, request_id: str,
                                      num_running_requests: int) -> int:

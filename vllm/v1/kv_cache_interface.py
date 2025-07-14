@@ -114,8 +114,8 @@ class FullAttentionSpec(AttentionSpec):
             return window_sizes.pop()
         else:
             raise ValueError(
-                "All sliding window/local attention layers in the same KV cache"
-                "group must have the same window size.")
+                "All attention layers in the same KV cache group must have the "
+                "same window size.")
 
     @classmethod
     def merge(cls, specs: list[Self]) -> Self:
