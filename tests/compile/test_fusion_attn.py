@@ -147,6 +147,11 @@ def test_attention_fusion_v0(example_prompts, monkeypatch, model: str,
 
     # Reset backend to make sure llm2 gets released
     backend = None
+    backend_unfused = None
+    import gc
+    gc.collect()
+    print(gc.get_referrers(backend))
+    print(gc.get_referrers(backend_unfused))
 
 
 @pytest.mark.parametrize(
@@ -194,9 +199,7 @@ def test_attention_fusion_v1(example_prompts, monkeypatch, model: str,
     }
     with set_current_vllm_config(vllm_config):
         backend = TestBackend()  # also force disable caches
-        llm = LLM(model,
-                  compilation_config=compile_config,
-                  max_model_len=2048)
+        llm = LLM(model, compilation_config=compile_config, max_model_len=2048)
         sampling_params = SamplingParams(temperature=0.0,
                                          max_tokens=10,
                                          top_p=0.95)
