@@ -586,6 +586,11 @@ def main(args: argparse.Namespace):
         topk = config.num_experts_per_tok
         intermediate_size = config.moe_intermediate_size
         shard_intermediate_size = 2 * intermediate_size // args.tp_size
+    elif config.architectures[0] in ("HunYuanMoEV1ForCausalLM"):
+        E = config.num_experts
+        topk = config.moe_topk[0]
+        intermediate_size = config.moe_intermediate_size[0]
+        shard_intermediate_size = 2 * intermediate_size // args.tp_size
     else:
         # Support for llama4
         config = config.get_text_config()
