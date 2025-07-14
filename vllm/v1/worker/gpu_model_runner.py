@@ -199,11 +199,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Build logits processors. If specified by user, load custom
         # logitsprocs constructors.
         self.logitsprocs: LogitsProcessors = build_logitsprocs(
-            LogitProcessorCtorArgs(
-                vllm_config=vllm_config,
-                device=self.device,
-                is_pin_memory=self.pin_memory,
-            ))
+            vllm_config,self.device,self.pin_memory)
 
         # Input Batch
         # NOTE(Chen): Ideally, we should initialize the input batch inside

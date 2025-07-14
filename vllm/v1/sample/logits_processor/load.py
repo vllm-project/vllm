@@ -5,12 +5,14 @@ import itertools
 import logging
 from typing import Optional, Union
 
+import torch
+
+from vllm.config import VllmConfig
 from vllm.v1.sample.logits_processor import LogitsProcessor
 from vllm.v1.sample.logits_processor.impls import (LogitBiasLogitsProcessor,
                                                    MinPLogitsProcessor,
                                                    MinTokensLogitsProcessor)
 from vllm.v1.sample.logits_processor.state import LogitsProcessors
-from vllm.v1.sample.logits_processor.utils import LogitProcessorCtorArgs
 
 logger = logging.getLogger(__name__)
 
@@ -141,7 +143,8 @@ def load_custom_logitsprocs(
             _load_logitsprocs_by_fqns(logits_processors))
 
 
-def build_logitsprocs(args: LogitProcessorCtorArgs) -> LogitsProcessors:
+def build_logitsprocs(vllm_config: VllmConfig, device: torch.device, is_pin_memory: bool) -> LogitsProcessors:
+    custom_logitsprocs_classes = vllm_config.logits_processors or []
     return LogitsProcessors(
-        ctor(args) for ctor in itertools.chain(
-            _builtin_logitsprocs_classes, args.vllm_config.logits_processors))
+        ctor(vllm_config, device, is_pin_memory) for ctor in itertools.chain(
+            _builtin_logitsprocs_classes, custom_logitsprocs_classes))
