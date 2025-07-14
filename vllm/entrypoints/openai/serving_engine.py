@@ -897,7 +897,6 @@ class OpenAIServing:
                 model_config=model_config,
                 **_chat_template_kwargs,
             )
-        print(f"Request prompt: {request_prompt}")
         mm_data = await mm_data_future
 
         # tool parsing is done only if a tool_parser has been set and if

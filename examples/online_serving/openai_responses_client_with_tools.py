@@ -26,7 +26,8 @@ def get_weather(latitude: float, longitude: float) -> str:
     return f"Current temperature at ({latitude}, {longitude}) is 20°C."
 
 
-tools = [{
+tools = [
+   {
     "type": "function",
     "name": "get_weather",
     "description":
@@ -45,25 +46,21 @@ tools = [{
         "additionalProperties": False
     },
     "strict": True
-}]
+   }
+]
 
-input_messages = [{
-    "role": "user",
-    "content": "What's the weather like in Paris today?"
-}]
+input_messages = [
+    {"role": "user", "content": "What's the weather like in Paris today?"}
+]
 
 
 def main():
     base_url = "http://0.0.0.0:8000/v1"
     model = "Qwen/Qwen3-1.7B"
-    client = OpenAI(base_url=base_url,
-                   api_key="empty")
+    client = OpenAI(base_url=base_url, api_key="empty")
     response = client.responses.create(
-    model=model,
-    input=input_messages,
-    tools=tools,
-    tool_choice="required"
-)
+       model=model, input=input_messages, tools=tools, tool_choice="required"
+    )
     tool_call = response.output[0]
     args = json.loads(tool_call.arguments)
     
@@ -71,16 +68,18 @@ def main():
     
     
     input_messages.append(tool_call)  # append model's function call message
-    input_messages.append({  # append result message
-       "type": "function_call_output",
-       "call_id": tool_call.call_id,
-       "output": str(result)
-    })
+    input_messages.append(
+        {  # append result message
+            "type": "function_call_output",
+            "call_id": tool_call.call_id,
+            "output": str(result),
+        }
+    )
     response_2 = client.responses.create(
-    model=model,
-    input=input_messages,
-    tools=tools,
-)
+       model=model,
+       input=input_messages,
+       tools=tools,
+    )
     print(response_2.output_text)
 
 
