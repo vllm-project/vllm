@@ -502,9 +502,57 @@ def get_max_shared_memory_bytes(gpu: int = 0) -> int:
     return int(max_shared_mem)
 
 
+def read_first_int(path):
+    try:
+        with open(path) as f:
+            val = f.read().strip()
+            if val == 'max' or val == '-1':
+                return None
+            return int(val)
+    except (OSError, ValueError):
+        return None
+
+
+@cache
 def get_cpu_memory() -> int:
-    """Returns the total CPU memory of the node in bytes."""
-    return psutil.virtual_memory().total
+    """Returns the total CPU memory of the container in bytes."""
+    # cgroup v1 path
+    # See https://www.kernel.org/doc/Documentation/cgroup-v1/memory.txt #noqa
+    cgroup_v1_path = "/sys/fs/cgroup/memory/memory.limit_in_bytes"
+    # cgroup v2 path
+    # See: https://www.kernel.org/doc/html/latest/admin-guide/cgroup-v2.html#memory-interface-files #noqa
+    cgroup_v2_path = "/sys/fs/cgroup/memory.max"
+
+    total_memory = psutil.virtual_memory().total
+
+    # checking v2 path
+    if os.path.exists(cgroup_v2_path):
+        return read_first_int(cgroup_v2_path) or total_memory
+
+    # fallback to check v1 path
+    if os.path.exists(cgroup_v1_path):
+        return read_first_int(cgroup_v1_path) or total_memory
+
+    return total_memory
+
+
+def get_cpu_available_memory():
+    """Returns the available memory in the container in bytes."""
+    mem_limit = get_cpu_memory()
+
+    # cgroup v2
+    mem_usage = read_first_int("/sys/fs/cgroup/memory.current")
+
+    if mem_usage is not None:
+        return max(mem_limit - mem_usage, 0)
+
+    # fallback to cgroup v1
+    mem_usage = read_first_int("/sys/fs/cgroup/memory/memory.usage_in_bytes")
+
+    if mem_usage is not None:
+        return max(mem_limit - mem_usage, 0)
+
+    return psutil.virtual_memory().available
 
 
 def random_uuid() -> str:
@@ -2799,12 +2847,11 @@ def make_zmq_socket(
 ) -> Union[zmq.Socket, zmq.asyncio.Socket]:  # type: ignore[name-defined]
     """Make a ZMQ socket with the proper bind/connect semantics."""
 
-    mem = psutil.virtual_memory()
     socket = ctx.socket(socket_type)
 
     # Calculate buffer size based on system memory
-    total_mem = mem.total / 1024**3
-    available_mem = mem.available / 1024**3
+    total_mem = get_cpu_memory() / 1024**3
+    available_mem = get_cpu_available_memory() / 1024**3
     # For systems with substantial memory (>32GB total, >16GB available):
     # - Set a large 0.5GB buffer to improve throughput
     # For systems with less memory:
