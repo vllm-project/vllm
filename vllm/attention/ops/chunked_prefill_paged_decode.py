@@ -351,7 +351,7 @@ def chunked_prefill_paged_decode(
             scale=sm_scale,
             k_scale=k_scale,
             v_scale=v_scale,
-            out_scale=1.0 / output_scale if output_scale is not None else 1.0,
+            out_scale_inv=1.0 / output_scale if output_scale is not None else 1.0,
             num_query_heads=num_query_heads,
             num_queries_per_kv=num_queries_per_kv,
             num_queries_per_kv_padded=num_queries_per_kv_padded,
