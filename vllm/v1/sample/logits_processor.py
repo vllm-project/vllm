@@ -623,15 +623,18 @@ def init_builtin_logitsprocs(
         device=device,
         # +1 for temporary swap space
         max_num_reqs=max_num_reqs + 1)
-    max_think_tokens_logitproc = MaxThinkTokensLogitsProcessor(
-        reasoning_config=reasoning_config,
-        pin_memory=pin_memory_available,
-        device=device,
-    )
+
+    non_argmax_invariant = [min_tokens_logitproc, logit_bias_logitproc]
+
+    if reasoning_config is not None:
+        max_think_tokens_logitproc = MaxThinkTokensLogitsProcessor(
+            reasoning_config=reasoning_config,
+            pin_memory=pin_memory_available,
+            device=device,
+        )
+        non_argmax_invariant.append(max_think_tokens_logitproc)
+
     return LogitsProcessorManager(
-        non_argmax_invariant=[
-            min_tokens_logitproc, logit_bias_logitproc,
-            max_think_tokens_logitproc
-        ],
+        non_argmax_invariant=non_argmax_invariant,
         argmax_invariant=[min_p_logitproc],
     )
