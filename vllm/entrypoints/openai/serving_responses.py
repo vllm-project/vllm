@@ -345,7 +345,9 @@ class OpenAIServingResponses(OpenAIServing):
                 outputs.append(reasoning_item)
             if message_item:
                 outputs.append(message_item)
-        elif request.tool_choice is None or request.tool_choice == "none":
+        elif (request.tool_choice == "none" and \
+            not self.expand_tools_even_if_tool_choice_none) or \
+                request.tool_choice is None:
             # No tool calls.
             if reasoning_item:
                 outputs.append(reasoning_item)
@@ -367,7 +369,7 @@ class OpenAIServingResponses(OpenAIServing):
                                                   ensure_ascii=False))
                 for tool_call in tool_calls
             ])
-        elif request.tool_choice == "auto":
+        elif request.tool_choice == "auto" or request.tool_choice == "none":
             try:
                 tool_parser = self.tool_parser(tokenizer)
             except RuntimeError as e:
@@ -376,6 +378,7 @@ class OpenAIServingResponses(OpenAIServing):
             tool_call_info = tool_parser.extract_tool_calls(
                 content if content is not None else "", request=request)
             if tool_call_info is not None and tool_call_info.tools_called:
+                # extract_tool_calls() returns a list of tool calls.
                 function_calls.extend(
                     FunctionCall(
                         name=tool_call.function.name,
@@ -471,6 +474,7 @@ class OpenAIServingResponses(OpenAIServing):
         else:
             for item in request.input:
                 if item.get("type") == "function_call":
+                    # Append the function call as a tool call.
                     messages.append({
                         "role":
                         "assistant",
@@ -484,6 +488,7 @@ class OpenAIServingResponses(OpenAIServing):
                         }]
                     })
                 elif item.get("type") == "function_call_output":
+                    # Append the function call output as a tool message.
                     messages.append({
                         "role": "tool",
                         "content": item.get("output", ""),
