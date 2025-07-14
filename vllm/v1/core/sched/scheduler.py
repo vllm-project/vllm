@@ -49,7 +49,6 @@ class Scheduler(SchedulerInterface):
         include_finished_set: bool = False,
         log_stats: bool = False,
         special_token_ids: Optional[dict] = None,  # NEW
-        thinking_budget: Optional[int] = None,      # NEW
     ) -> None:
         self.vllm_config = vllm_config
         self.scheduler_config = vllm_config.scheduler_config
@@ -60,7 +59,6 @@ class Scheduler(SchedulerInterface):
         self.log_stats = log_stats
         self.structured_output_manager = structured_output_manager
         self.special_token_ids = special_token_ids
-        self.thinking_budget = thinking_budget
         self.start_thinking_token_id = self.special_token_ids.get("start_token_id")
         self.end_thinking_token_id = self.special_token_ids.get("end_token_id")
         # include_finished_set controls whether a separate set of finished

@@ -1156,25 +1156,28 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def _force_thinking(self, scheduler_output: "SchedulerOutput",
                         valid_sampled_token_ids: torch.Tensor):
         '''
-        Force thinking for Cohere models.
+        Force thinking for reasoning models.
         This is used to ensure that the model generates a specific number of tokens
         The following function utilizes remaining thinking budget for each request
         in order to decide if we need to enforece thinking on valid token ids
         for the particular request. Eg: if remaining budget is 2, and
         valid tokens for the request are [1, 2, 3, 4, 5], we will
         remove the last 3 tokens and append end_thinking_token_id.
-        Resulting in [1,2,end_thinking_token_id]
-            '''
+        Resulting in [1,2,end_thinking_token_id] and the end token is appended
+        to the end of the valid tokens.
+        '''
         if scheduler_output.requests_with_remaining_budget:
             for req_id, remaining_budget in \
                 scheduler_output.requests_with_remaining_budget.items():
                 req_index = self.input_batch.req_id_to_index[req_id]
                 sampled_tokens = valid_sampled_token_ids[req_index]
-                if len(sampled_tokens) > remaining_budget:
+                if len(sampled_tokens) >= remaining_budget:
                     clear_indices = \
                         len(sampled_tokens) - remaining_budget
                     if clear_indices > 0:
                         del sampled_tokens[-clear_indices:]
+                    sampled_tokens.append(scheduler_output.end_thinking_token_id)
+                elif remaining_budget == 0:
                     sampled_tokens.append(scheduler_output.end_thinking_token_id)
 
     
