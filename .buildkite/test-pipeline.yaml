@@ -630,6 +630,18 @@ steps:
     # e.g. pytest -v -s models/encoder_decoder/vision_language/test_mllama.py
     # *To avoid merge conflicts, remember to REMOVE (not just comment out) them before merging the PR*
 
+- label: Transformers Nightly Models Test
+  working_dir: "/vllm-workspace/"
+  optional: true
+  commands:
+    - pip install --upgrade git+https://github.com/huggingface/transformers
+    - pytest -v -s models/test_initialization.py
+    - pytest -v -s tests/models/multimodal/processing/
+    - pytest -v -s tests/models/multimodal/test_mapping.py
+    - python3 examples/offline_inference/basic/chat.py
+    - python3 examples/offline_inference/audio_language.py --model-type whisper
+    - python3 examples/offline_inference/vision_language.py --model-type qwen2_5_vl
+
 #####  1 GPU test  #####
 #####  multi gpus test  #####
 
