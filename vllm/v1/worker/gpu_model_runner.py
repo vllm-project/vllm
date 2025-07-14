@@ -1171,13 +1171,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 scheduler_output.requests_with_remaining_budget.items():
                 req_index = self.input_batch.req_id_to_index[req_id]
                 sampled_tokens = valid_sampled_token_ids[req_index]
-                if len(sampled_tokens) >= remaining_budget:
+                if len(sampled_tokens) > remaining_budget:
                     clear_indices = \
                         len(sampled_tokens) - remaining_budget
                     if clear_indices > 0:
                         del sampled_tokens[-clear_indices:]
-                    sampled_tokens.append(scheduler_output.end_thinking_token_id)
-                elif remaining_budget == 0:
                     sampled_tokens.append(scheduler_output.end_thinking_token_id)
 
     
