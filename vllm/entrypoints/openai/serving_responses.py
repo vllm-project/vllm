@@ -340,8 +340,6 @@ class OpenAIServingResponses(OpenAIServing):
         assert final_res is not None
         assert len(final_res.outputs) == 1
         final_output = final_res.outputs[0]
-        print("-"*70)
-        print(f"Final output: {final_output}")
         if self.reasoning_parser:
             try:
                 reasoning_parser = self.reasoning_parser(tokenizer)
@@ -355,85 +353,92 @@ class OpenAIServingResponses(OpenAIServing):
         else:
             reasoning_content = None
             content = final_output.text
-
-        outputs = []
-        output = None
-        if self.tool_parser:
-            function_calls: list[FunctionCall] = []
-            if request.tool_choice and \
-                isinstance(request.tool_choice,
-                           ToolChoiceFunction):
-                # Forced Function Call
-                function_calls.append(
-                    FunctionCall(name=request.tool_choice.name,
-                                 arguments=content))
-            elif request.tool_choice is None or request.tool_choice == "none":
-                pass
-            elif request.tool_choice == "required":
-                assert content is not None
-                tool_calls = TypeAdapter(
-                    list[FunctionDefinition]).validate_json(content)
-                function_calls.extend([
-                    FunctionCall(name=tool_call.name,
-                                 arguments=json.dumps(tool_call.parameters,
-                                                      ensure_ascii=False))
-                    for tool_call in tool_calls
-                ])
-            elif request.tool_choice == "auto":
-                try:
-                    tool_parser = self.tool_parser(tokenizer)
-                except RuntimeError as e:
-                    logger.exception("Error in tool parser creation.")
-                    return self.create_error_response(str(e))
-                tool_call_info = tool_parser.extract_tool_calls(
-                    content if content is not None else "", request=request)
-                if tool_call_info is not None and tool_call_info.tools_called:
-                    function_calls.extend(
-                        FunctionCall(
-                            name=tool_call.function.name,
-                            arguments=tool_call.function.arguments,
-                        ) for tool_call in tool_call_info.tool_calls)
-            else:
-                logger.warning(
-                    "Unknown tool choice: %s. "
-                    "Using 'none' as the default tool choice.",
-                    request.tool_choice)
-            if function_calls:
-                output = [
-                    ResponseFunctionToolCall(
-                        id=f"fc_{random_fc_uuid()}",
-                        call_id=f"call_{random_uuid()}",
-                        type="function_call",
-                        status="completed",
-                        name=tool_call.name,
-                        arguments=tool_call.arguments,
-                    ) for tool_call in function_calls
-                ]
-        # If no tool call is generated, we still need to return an output.
-        if reasoning_content and output is None:
-            output = ResponseReasoningItem(
+        reasoning_item = None
+        message_item = None
+        if reasoning_content:
+            reasoning_item = ResponseReasoningItem(
                 text=reasoning_content,
                 status=None,  # NOTE: Only the last output item has status.
             )
-        # If no tool call is generated, we still need to return an output.
-        if content and output is None:
+        if content:
             output_text = ResponseOutputText(
                 text=content,
                 annotations=[],  # TODO
                 type="output_text",
                 logprobs=None,  # TODO
             )
-            output = ResponseOutputMessage(
+            message_item = ResponseOutputMessage(
                 id=f"msg_{random_uuid()}",
                 content=[output_text],
                 role="assistant",
                 status="completed",
                 type="message",
             )
-        if isinstance(output, list):
-            outputs.extend(output)
+        outputs = []
+        function_calls: list[FunctionCall] = []
+        if (not self.enable_auto_tools or not self.tool_parser):
+            # Tools are not enabled
+            if reasoning_item:
+                outputs.append(reasoning_item)
+            if message_item:
+                outputs.append(message_item)
+        elif request.tool_choice is None or request.tool_choice == "none":
+            # No tool calls.
+            if reasoning_item:
+                outputs.append(reasoning_item)
+            if message_item:
+                outputs.append(message_item)
+        elif request.tool_choice and \
+            isinstance(request.tool_choice,
+                        ToolChoiceFunction):
+            # Forced Function Call
+            function_calls.append(
+                FunctionCall(name=request.tool_choice.name, arguments=content))
+        elif request.tool_choice == "required":
+            assert content is not None
+            tool_calls = TypeAdapter(
+                list[FunctionDefinition]).validate_json(content)
+            function_calls.extend([
+                FunctionCall(name=tool_call.name,
+                             arguments=json.dumps(tool_call.parameters,
+                                                  ensure_ascii=False))
+                for tool_call in tool_calls
+            ])
+        elif request.tool_choice == "auto":
+            try:
+                tool_parser = self.tool_parser(tokenizer)
+            except RuntimeError as e:
+                logger.exception("Error in tool parser creation.")
+                return self.create_error_response(str(e))
+            tool_call_info = tool_parser.extract_tool_calls(
+                content if content is not None else "", request=request)
+            if tool_call_info is not None and tool_call_info.tools_called:
+                function_calls.extend(
+                    FunctionCall(
+                        name=tool_call.function.name,
+                        arguments=tool_call.function.arguments,
+                    ) for tool_call in tool_call_info.tool_calls)
+            else:
+                # No tool calls.
+                if reasoning_item:
+                    outputs.append(reasoning_item)
+                if message_item:
+                    outputs.append(message_item)
         else:
-            outputs.append(output)
+            return self.create_error_response(
+                f"Invalid tool_choice: {request.tool_choice}")
+
+        if function_calls:
+            outputs.extend([
+                ResponseFunctionToolCall(
+                    id=f"fc_{random_fc_uuid()}",
+                    call_id=f"call_{random_uuid()}",
+                    type="function_call",
+                    status="completed",
+                    name=tool_call.name,
+                    arguments=tool_call.arguments,
+                ) for tool_call in function_calls
+            ])
 
         # Calculate usage.
         assert final_res.prompt_token_ids is not None
