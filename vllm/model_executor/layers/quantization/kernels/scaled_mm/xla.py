@@ -5,8 +5,6 @@ import warnings
 from typing import Optional
 
 import torch
-# Required to register custom ops.
-import torch_xla.experimental.custom_kernel  # noqa: F401
 from functorch.experimental.control_flow import cond  # noqa: F401
 
 from vllm.model_executor.layers.quantization.utils import replace_parameter
@@ -92,6 +90,8 @@ class XLAScaledMMLinearKernel(ScaledMMLinearKernel):
                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         w_q, w_s, _, _, _ = self._get_weight_params(layer)
 
+        # Required to register custom ops.
+        import torch_xla.experimental.custom_kernel  # noqa: F401
         out = torch.ops.xla.quantized_matmul_int8(
             x,
             w_q,
