@@ -61,14 +61,15 @@ This DP mode can also be used with Ray by specifying `--data-parallel-backend=ra
 
 ```bash
 vllm serve $MODEL --data-parallel-size 4 --data-parallel-size-local 2 \
-                  --data-parallel-address 10.99.48.128 --data-parallel-backend=ray
+                  --data-parallel-backend=ray
 ```
 
 There are several notable differences when using Ray:
 
-- A single launch command (on Node 0) is needed to start all local and remote DP ranks, therefore it is more convenient compared to launching on all nodes
-- Remote DP ranks will be allocated based on node resources of the Ray cluster
+- A single launch command (on any node) is needed to start all local and remote DP ranks, therefore it is more convenient compared to launching on each node
+- There is no need to specify `--data-parallel-address`, and the node where the command is run is used as `--data-parallel-address`
 - There is no need to specify `--data-parallel-rpc-port`
+- Remote DP ranks will be allocated based on node resources of the Ray cluster
 
 Currently, the internal DP load balancing is done within the API server process(es) and is based on the running and waiting queues in each of the engines. This could be made more sophisticated in future by incorporating KV cache aware logic.
 
