@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import re
 from collections.abc import Sequence
 from typing import Optional, Union
 
+import regex as re
 from transformers import PreTrainedTokenizerBase
 
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
