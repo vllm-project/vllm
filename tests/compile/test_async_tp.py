@@ -161,7 +161,8 @@ class TestCutlassScaledMMRSModel(_BaseScaledMMModel):
 
     def forward(self, input: torch.Tensor):
         """
-        Forward pass implementing the cutlass_scaled_mm + reduce scatter in the FX graph
+        Forward pass implementing the cutlass_scaled_mm + reduce scatter
+        in the FX graph
     
         """
         fp8_input = input.to(FP8_DTYPE)
@@ -185,7 +186,8 @@ class TestAGCutlassScaledMMModel(_BaseScaledMMModel):
 
     def forward(self, input: torch.Tensor):
         """
-        Forward pass implementing the all gather + cutlass_scaled_mm in the FX graph
+        Forward pass implementing the all gather + cutlass_scaled_mm 
+        in the FX graph
         """
         # Reshape input
         fp8_input = input.to(FP8_DTYPE)
@@ -224,7 +226,8 @@ def test_async_tp_pass_replace(test_model: str, batch_size: int, seq_len: int,
                       TestCutlassScaledMMRSModel,
                       TestAGCutlassScaledMMModel) and dtype == torch.float16:
         pytest.skip(
-            "Only bf16 high precision output types are supported for row-wise scaling"
+            "Only bf16 high precision output types are supported for " \
+            "per-token (row-wise) scaling"
         )
 
     num_processes = 2

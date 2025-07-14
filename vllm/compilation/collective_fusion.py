@@ -357,15 +357,19 @@ class AsyncTPPass(VllmInductorPass):
         AllGatherGEMMPattern(self.model_dtype,
                              self.device).register(self.patterns)
 
-        ScaledMMReduceScatterPattern(self.model_dtype,
+        # These fusions are enabled only for bfloat16 models because
+        # `scaled_mm` or `cutlass_scaled_mm` with per-token (row-wise) scaling
+        # only supports bfloat16 as the output dtype.
+        if self.model_dtype == torch.bfloat16:
+            ScaledMMReduceScatterPattern(self.model_dtype,
+                                         self.device).register(self.patterns)
+            AllGatherScaledMMPattern(self.model_dtype,
                                      self.device).register(self.patterns)
-        AllGatherScaledMMPattern(self.model_dtype,
-                                 self.device).register(self.patterns)
 
-        CutlassScaledMMReduceScatterPattern(
-            self.model_dtype, self.device).register(self.patterns)
-        AllGatherCutlassScaledMMPattern(self.model_dtype,
-                                        self.device).register(self.patterns)
+            CutlassScaledMMReduceScatterPattern(
+                self.model_dtype, self.device).register(self.patterns)
+            AllGatherCutlassScaledMMPattern(
+                self.model_dtype, self.device).register(self.patterns)
 
     def is_applicable_for_shape(self, shape: Optional[int]) -> bool:
         # only do replace for specific shapes
