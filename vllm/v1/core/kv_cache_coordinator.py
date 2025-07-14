@@ -250,9 +250,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         super().__init__(kv_cache_config, max_model_len, use_eagle,
                          enable_caching, caching_hash_fn,
                          enable_kv_cache_events)
-        # attention free models are initialized with 0 kv_cache_groups
-        if len(self.kv_cache_config.kv_cache_groups) > 0:
-            self.verify_and_split_kv_cache_groups()
+        self.verify_and_split_kv_cache_groups()
 
     def verify_and_split_kv_cache_groups(self) -> None:
         """
@@ -390,7 +388,9 @@ def get_kv_cache_coordinator(
         kv_cache_config: KVCacheConfig, max_model_len: int, use_eagle: bool,
         enable_caching: bool, caching_hash_fn: Callable,
         enable_kv_cache_events: bool) -> KVCacheCoordinator:
-    if not enable_caching:
+    if not enable_caching or len(kv_cache_config.kv_cache_groups) == 0:
+        # We instantiate this coordinator also for attention free models that
+        # have 0 kv_cache_groups 
         return KVCacheCoordinatorNoPrefixCache(kv_cache_config, max_model_len,
                                                use_eagle, caching_hash_fn,
                                                enable_kv_cache_events)
