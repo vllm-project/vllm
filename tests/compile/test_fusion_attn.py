@@ -184,6 +184,7 @@ def test_attention_fusion_v1(example_prompts, monkeypatch, model: str,
             enable_attn_fusion=False,
         ),
         use_cudagraph=False,
+        custom_ops=["+quant_fp8"],
     )
     model_config = ModelConfig(dtype="bfloat16")
     vllm_config = VllmConfig(compilation_config=compile_config,
@@ -197,7 +198,7 @@ def test_attention_fusion_v1(example_prompts, monkeypatch, model: str,
         backend = TestBackend()  # also force disable caches
         llm = LLM(model,
                   compilation_config=compile_config,
-                  gpu_memory_utilization=0.5,
+                  gpu_memory_utilization=0.3,
                   max_model_len=2048)
         sampling_params = SamplingParams(temperature=0.0,
                                          max_tokens=10,
@@ -213,6 +214,7 @@ def test_attention_fusion_v1(example_prompts, monkeypatch, model: str,
             enable_attn_fusion=False,  # Added manually for checking
         ),
         use_cudagraph=False,
+        custom_ops=["+quant_fp8"],
     )
     vllm_config = VllmConfig(compilation_config=compile_config,
                              model_config=model_config)
@@ -232,7 +234,7 @@ def test_attention_fusion_v1(example_prompts, monkeypatch, model: str,
                 compile_config=get_current_vllm_config().compilation_config))
         llm2 = LLM(model,
                    compilation_config=compile_config,
-                   gpu_memory_utilization=0.5,
+                   gpu_memory_utilization=0.3,
                    max_model_len=2048)
 
         # check outputs
