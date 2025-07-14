@@ -512,10 +512,7 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
                 break
             removed_blocks.append(blocks[i])
             blocks[i] = self._null_block
-        if len(removed_blocks) > 0:
-            print("fanglu: removed blocks num: ", len(removed_blocks))
         self.block_pool.free_blocks(removed_blocks)
-        print(f"{blocks=}")
 
     def get_num_common_prefix_blocks(self, request_id: str,
                                      num_running_requests: int) -> int:
