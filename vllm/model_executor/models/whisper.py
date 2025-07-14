@@ -3,6 +3,7 @@
 
 import math
 from collections.abc import Iterable, Mapping, Sequence
+from contextlib import nullcontext
 from typing import Optional, TypedDict, Union, cast
 
 import numpy as np
@@ -474,7 +475,7 @@ class WhisperDecoderLayer(nn.Module):
 
 class WhisperEncoder(nn.Module):
 
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "", is_standalone_encoder: bool = False):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "", is_standalone_encoder: bool = False, init_in_fp32: bool = False):
         super().__init__()
         config = vllm_config.model_config.hf_config
         embed_dim = config.d_model
@@ -501,9 +502,11 @@ class WhisperEncoder(nn.Module):
         )
         self.layer_norm = nn.LayerNorm(config.d_model)
 
+        maybe_fp32_init_ctx = set_default_torch_dtype(torch.float32) if init_in_fp32 else nullcontext()
+
         with (
             torch.no_grad(),
-            set_default_torch_dtype(torch.float32),
+            maybe_fp32_init_ctx, 
         ):
             self.embed_positions = nn.Embedding(self.max_source_positions,
                                                 embed_dim)
