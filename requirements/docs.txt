@@ -16,6 +16,7 @@ fastapi
 msgspec
 openai
 pillow
+pillow-avif-plugin
 psutil
 pybase64
 pydantic
