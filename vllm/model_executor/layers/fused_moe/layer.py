@@ -4,7 +4,7 @@
 from abc import abstractmethod
 from collections.abc import Iterable
 from enum import Enum
-from typing import Callable, Literal, Optional, overload
+from typing import Callable, Optional
 
 import torch
 import torch.nn.functional as F
@@ -33,7 +33,8 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
-from vllm.utils import direct_register_custom_op, has_deep_ep, has_pplx, has_triton_kernels
+from vllm.utils import (direct_register_custom_op, has_deep_ep, has_pplx,
+                        has_triton_kernels)
 from vllm.utils.flashinfer import has_flashinfer
 
 if current_platform.is_cuda_alike():
@@ -631,30 +632,30 @@ class FusedMoE(torch.nn.Module):
     """
 
     def __init__(
-            self,
-            num_experts: int,  # Global number of experts
-            top_k: int,
-            hidden_size: int,
-            intermediate_size: int,
-            params_dtype: Optional[torch.dtype] = None,
-            reduce_results: bool = False,
-            renormalize: bool = True,
-            use_grouped_topk: bool = False,
-            num_expert_group: Optional[int] = None,
-            topk_group: Optional[int] = None,
-            quant_config: Optional[QuantizationConfig] = None,
-            tp_size: Optional[int] = None,
-            ep_size: Optional[int] = None,
-            dp_size: Optional[int] = None,
-            prefix: str = "",
-            custom_routing_function: Optional[Callable] = None,
-            scoring_func: str = "softmax",
-            e_score_correction_bias: Optional[torch.Tensor] = None,
-            apply_router_weight_on_input: bool = False,
-            activation: str = "silu",
-            enable_eplb: bool = False,
-            num_redundant_experts: int = 0,
-        ):
+        self,
+        num_experts: int,  # Global number of experts
+        top_k: int,
+        hidden_size: int,
+        intermediate_size: int,
+        params_dtype: Optional[torch.dtype] = None,
+        reduce_results: bool = False,
+        renormalize: bool = True,
+        use_grouped_topk: bool = False,
+        num_expert_group: Optional[int] = None,
+        topk_group: Optional[int] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+        tp_size: Optional[int] = None,
+        ep_size: Optional[int] = None,
+        dp_size: Optional[int] = None,
+        prefix: str = "",
+        custom_routing_function: Optional[Callable] = None,
+        scoring_func: str = "softmax",
+        e_score_correction_bias: Optional[torch.Tensor] = None,
+        apply_router_weight_on_input: bool = False,
+        activation: str = "silu",
+        enable_eplb: bool = False,
+        num_redundant_experts: int = 0,
+    ):
         super().__init__()
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
@@ -678,10 +679,11 @@ class FusedMoE(torch.nn.Module):
         if quant_config.get_name() == "mxfp4":
             if has_triton_kernels:
                 smallest_even_divide_number = lambda x, n: (
-                 x // n + 1) * n if x % n != 0 else x
-                
+                    x // n + 1) * n if x % n != 0 else x
+
                 self.use_triton_kernels = True
-                self.hidden_size_pad = smallest_even_divide_number(hidden_size, 256) - hidden_size
+                self.hidden_size_pad = smallest_even_divide_number(
+                    hidden_size, 256) - hidden_size
             else:
                 raise ValueError("triton_kernels must be installed first")
 
@@ -1002,7 +1004,7 @@ class FusedMoE(torch.nn.Module):
     def weight_loader(self, param: torch.nn.Parameter,
                       loaded_weight: torch.Tensor, weight_name: str,
                       shard_id: str, expert_id: int) -> None:
-        # if expert_id is None, then 
+        # if expert_id is None, then
         # all the experts are loaded at the same time
         if not expert_id and self.use_triton_kernels:
             if "bias" in weight_name:
@@ -1506,9 +1508,12 @@ class FusedMoE(torch.nn.Module):
         if do_naive_dispatch_combine:
             hidden_states, router_logits = get_ep_group().dispatch(
                 hidden_states, router_logits)
-            
+
         if self.hidden_size_pad is not None:
-            hidden_states = F.pad(hidden_states, (0, self.hidden_size_pad, 0, 0), mode="constant", value=0)
+            hidden_states = F.pad(hidden_states,
+                                  (0, self.hidden_size_pad, 0, 0),
+                                  mode="constant",
+                                  value=0)
 
         # Matrix multiply.
         final_hidden_states = self.quant_method.apply(
