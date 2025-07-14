@@ -189,6 +189,8 @@ def get_model_architecture(
         architectures,
         model_config=model_config,
     )
+    print(architectures)
+    print(model_config)
 
     if arch == model_config._get_transformers_backend_cls():
         assert model_config.model_impl != ModelImpl.VLLM
