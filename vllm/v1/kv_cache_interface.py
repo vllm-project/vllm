@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import copy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from math import prod
 from typing import Optional
 
@@ -202,6 +202,8 @@ class KVCacheGroupSpec:
     layer_names: list[str]
     # The KV cache spec of this manager layer
     kv_cache_spec: KVCacheSpec
+    # The names of model layers for which prefill can be truncated
+    truncated_prefill_eligible_layers: list[str] = field(default_factory=list)
 
 
 @dataclass

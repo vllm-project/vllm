@@ -1584,7 +1584,10 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         # Setup `kv_cache_config` and `kv_caches` for models
         # with cross-layer KV sharing
         if self.shared_kv_cache_layers:
+            attn_layers = get_layers_from_vllm_config(self.vllm_config,
+                                                      Attention)
             initialize_kv_cache_for_kv_sharing(
+                list(attn_layers.keys()),
                 self.shared_kv_cache_layers,
                 kv_cache_config.kv_cache_groups,
                 kv_caches,

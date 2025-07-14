@@ -79,6 +79,7 @@ def gather_mm_placeholders(
 
 
 def initialize_kv_cache_for_kv_sharing(
+    attn_layer_names: list[str],
     shared_kv_cache_layers: dict[str, str],
     kv_cache_groups: list[KVCacheGroupSpec],
     kv_caches: dict[str, torch.Tensor],
@@ -106,7 +107,17 @@ def initialize_kv_cache_for_kv_sharing(
         for layer_name in kv_cache_group.layer_names:
             layer_to_kv_cache_group_idx[layer_name] = i
 
+    truncated_prefill_eligible_layers = set()
+    for layer_name in reversed(attn_layer_names):
+        if layer_name in shared_kv_cache_layers:
+            truncated_prefill_eligible_layers.add(layer_name)
+        else:
+            break
+
     for layer_name, target_layer_name in shared_kv_cache_layers.items():
         kv_caches[layer_name] = kv_caches[target_layer_name]
         group_idx = layer_to_kv_cache_group_idx[target_layer_name]
         kv_cache_groups[group_idx].layer_names.append(layer_name)
+        if layer_name in truncated_prefill_eligible_layers:
+            kv_cache_groups[
+                group_idx].truncated_prefill_eligible_layers.append(layer_name)

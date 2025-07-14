@@ -53,8 +53,7 @@ class Qwen2DecoderLayerWithKVSharing(nn.Module):
         kv_sharing_target_layer_name = None
 
         if layer_idx >= START_KV_SHARING_LAYER:
-            # re-use KV cache from first 5 layers
-            target_layer_idx = layer_idx % 5
+            target_layer_idx = START_KV_SHARING_LAYER - 1
             kv_sharing_target_layer_name = f"{attn_prefix}.attn".replace(
                 str(layer_idx), str(target_layer_idx))
 
@@ -219,48 +218,49 @@ class Qwen2ModelWithKVSharing(Qwen2Model):
         num_input_tokens = input_ids.size(0)
         self.hidden_states[:num_input_tokens].copy_(hidden_states)
 
-        first_hidden_states, first_residual = self.first_layer_group(
+        hidden_states, residual = self.first_layer_group(
             positions,
             self.hidden_states[:num_input_tokens],
         )
 
-        generation_metadata = get_forward_context().generation_metadata
-        gen_indices_padded = (
-            generation_metadata.generation_indices_padded 
-            if generation_metadata is not None 
-            else torch.arange(num_input_tokens, device=positions.device)
-        )
-        num_gen_tokens_padded = gen_indices_padded.shape[0]
-        assert first_residual is not None
-
-        # CUDA graph expects static tensor addresses
-        # Copy output of first layer group to second layer group
-        self.residual[:num_gen_tokens_padded].copy_(
-            first_residual[gen_indices_padded])
-        self.hidden_states[:num_gen_tokens_padded].copy_(
-            first_hidden_states[gen_indices_padded])
-        positions[:num_gen_tokens_padded].copy_(positions[gen_indices_padded])
+        truncated_prefill_metadata = \
+            get_forward_context().truncated_prefill_metadata
+        if truncated_prefill_metadata is not None:
+            gen_indices_padded = \
+                truncated_prefill_metadata.generation_indices_padded
+            num_tokens = gen_indices_padded.shape[0]
+            # CUDA graph expects static tensor addresses
+            # Copy output of first layer group to second layer group
+            # TODO(sarckk): Move logic to @support_torch_compile
+            self.residual[:num_tokens].copy_(residual[gen_indices_padded])
+            self.hidden_states[:num_tokens].copy_(
+                hidden_states[gen_indices_padded])
+            positions[:num_tokens].copy_(positions[gen_indices_padded])
+        else:
+            num_tokens = num_input_tokens
+            self.residual[:num_tokens].copy_(residual)
+            self.hidden_states[:num_tokens].copy_(hidden_states)
 
         second_hidden_states, second_residual = self.second_layer_group(
-            positions[:num_gen_tokens_padded],
-            self.hidden_states[:num_gen_tokens_padded],
-            self.residual[:num_gen_tokens_padded],
+            positions[:num_tokens],
+            self.hidden_states[:num_tokens],
+            self.residual[:num_tokens],
         )
 
-        # NOTE: we need to pad generation indices for CUDA graph but only the
-        # first num_gen_tokens positions are actually valid.
-        num_gen_tokens = (
-            generation_metadata.num_generation_tokens
-            if generation_metadata is not None
-            else num_gen_tokens_padded
-        )
-        gen_indices = gen_indices_padded[:num_gen_tokens]
-        first_hidden_states[
-            gen_indices] = second_hidden_states[:num_gen_tokens]
-        if first_residual is not None:
-            first_residual[gen_indices] = second_residual[:num_gen_tokens]
+        if truncated_prefill_metadata is not None:
+            gen_indices_padded =\
+                truncated_prefill_metadata.generation_indices_padded
+            # NOTE: we need to pad generation indices for CUDA graph
+            # but only the first num_gen_indices positions are actually valid.
+            num_gen_indices = truncated_prefill_metadata.num_generation_indices
+            gen_indices = gen_indices_padded[:num_gen_indices]
+            hidden_states[gen_indices] = second_hidden_states[:num_gen_indices]
+            residual[gen_indices] = second_residual[:num_gen_indices]
+        else:
+            hidden_states = second_hidden_states
+            residual = second_residual
 
-        hidden_states, _ = self.norm(first_hidden_states, first_residual)
+        hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
 
@@ -345,7 +345,7 @@ def test_prompts():
 
 @fork_new_process_for_each_test
 @pytest.mark.parametrize("enforce_eager", [True, False])
-def test_kv_sharing_skip_prefill(
+def test_kv_sharing_truncated_prefill(
     monkeypatch: pytest.MonkeyPatch,
     enforce_eager: bool,
     test_prompts: list[str],
@@ -373,7 +373,7 @@ def test_kv_sharing_skip_prefill(
         llm = LLM(model="Qwen/Qwen2-1.5B-Instruct",
                   enforce_eager=enforce_eager,
                   compilation_config=compilation_config,
-                  kv_sharing_skip_prefill=True)
+                  enable_kv_sharing_truncated_prefill=True)
         optimized_responses = llm.generate(test_prompts, sampling_params)
 
         misses = 0
