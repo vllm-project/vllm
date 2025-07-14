@@ -17,7 +17,9 @@ from vllm.forward_context import get_forward_context
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
-from vllm.model_executor.layers.mamba.mamba2_metadata import Mamba2Metadata
+from vllm.model_executor.layers.mamba.abstract import MambaBase
+from vllm.model_executor.layers.mamba.mamba2_metadata import (Mamba2Metadata,
+                                                              update_metadata)
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn, causal_conv1d_update)
 from vllm.model_executor.layers.mamba.ops.mamba_ssm import (
@@ -161,9 +163,9 @@ def mamba_v2_sharded_weight_loader(
     tp_size: int,
     tp_rank: int,
 ) -> LoaderFunction:
-    """Create a weight loader for mamba v2. This ensures that the projections 
-    are correctly sharded so that they can be split into x, B, C. It also 
-    ensures that all the groups corresponding to a head shard is placed 
+    """Create a weight loader for mamba v2. This ensures that the projections
+    are correctly sharded so that they can be split into x, B, C. It also
+    ensures that all the groups corresponding to a head shard is placed
     together with it.
     """
 
@@ -218,7 +220,7 @@ def mamba_v2_sharded_weight_loader(
 
 # Adapted from transformers.models.mamba.modeling_mamba.MambaMixer
 @CustomOp.register("mamba_mixer2")
-class MambaMixer2(CustomOp):
+class MambaMixer2(MambaBase, CustomOp):
     """
     Compute ∆, A, B, C, and D the state space parameters and compute
     the `contextualized_states`. A, D are input independent
@@ -230,22 +232,21 @@ class MambaMixer2(CustomOp):
     """
 
     def __init__(
-            self,
-            hidden_size: int,
-            ssm_state_size: int,
-            conv_kernel_size: int,
-            intermediate_size: int,
-            use_conv_bias: bool,
-            use_bias: bool,
-            n_groups: int = 1,
-            num_heads: int = 128,
-            head_dim: int = 64,
-            rms_norm_eps: float = 1e-5,
-            activation: str = "silu",
-            use_rms_norm: bool = True,
-            quant_config: Optional[QuantizationConfig] = None,
-            prefix: str = "",
-            chunk_size: int = -1,  # the chunk size used by v1
+        self,
+        hidden_size: int,
+        ssm_state_size: int,
+        conv_kernel_size: int,
+        intermediate_size: int,
+        use_conv_bias: bool,
+        use_bias: bool,
+        n_groups: int = 1,
+        num_heads: int = 128,
+        head_dim: int = 64,
+        rms_norm_eps: float = 1e-5,
+        activation: str = "silu",
+        use_rms_norm: bool = True,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
 
@@ -427,10 +428,7 @@ class MambaMixer2(CustomOp):
             # of Attention + v0 PP.
             # The inner tuple is (conv_state, ssm_state)
             self.kv_cache = [(torch.tensor([]), torch.tensor([]))]
-            assert chunk_size != -1, "chunk_size must be set for v1"
 
-        # NOTE: chunk_size may be -1 for models without v1 support
-        self.chunk_size = chunk_size
         self.prefix = prefix
 
     def forward_native(
@@ -458,9 +456,11 @@ class MambaMixer2(CustomOp):
             if attn_metadata is not None:
                 assert isinstance(attn_metadata, dict)
                 attn_metadata = attn_metadata[self.prefix]
+                mamba2_metadata = attn_metadata
                 assert isinstance(attn_metadata, Mamba2AttentionMetadata)
                 self_kv_cache = self.kv_cache[forward_context.virtual_engine]
-                conv_state = self_kv_cache[0]
+                # conv_state = (..., dim, width-1) yet contiguous along 'dim'
+                conv_state = self_kv_cache[0].transpose(-1, -2)
                 ssm_state = self_kv_cache[1]
                 state_indices_tensor = attn_metadata.state_indices_tensor
                 has_initial_states_p = attn_metadata.has_initial_states
@@ -531,6 +531,7 @@ class MambaMixer2(CustomOp):
         # NOTE: V0 put prefill before decode, v1 puts decode before prefill
         # Separate prefill and decode by splitting varlen input
         # Split along token dimension
+        # NOTE: V0 put prefill before decode, v1 puts decode before prefill
         if envs.VLLM_USE_V1:
             hidden_states_B_C_d, hidden_states_B_C_p = torch.split(
                 hidden_states_B_C,
@@ -579,8 +580,13 @@ class MambaMixer2(CustomOp):
             # 2. Convolution sequence transformation
             # - "cache_indices" updates the conv_state cache in positions
             #   pointed to by "state_indices_tensor"
+            x = hidden_states_B_C_p.transpose(
+                0, 1)  # this is the form that causal-conv see
+            if mamba2_metadata.cu_seqlen is None:
+                mamba2_metadata = update_metadata(
+                    x, attn_metadata.query_start_loc, mamba2_metadata)
             hidden_states_B_C_p = causal_conv1d_fn(
-                hidden_states_B_C_p.transpose(0, 1),
+                x,
                 conv_weights,
                 self.conv1d.bias,
                 activation=self.activation,
@@ -590,8 +596,6 @@ class MambaMixer2(CustomOp):
                 query_start_loc=query_start_loc_p).transpose(
                     0, 1)[:num_prefill_tokens]
 
-            # TODO: Why is this needed?
-            hidden_states_B_C_p = hidden_states_B_C_p.contiguous()
             hidden_states_p, B_p, C_p = split_hidden_states_B_C_fn(
                 hidden_states_B_C_p)
 
@@ -715,9 +719,10 @@ class MambaMixer2(CustomOp):
         # - heads and n_groups are TP-ed
         conv_dim = (self.intermediate_size +
                     2 * n_groups * self.ssm_state_size)
+        # contiguous along 'dim' axis
         conv_state_shape = (
-            divide(conv_dim, world_size),
             self.conv_kernel_size - 1,
+            divide(conv_dim, world_size),
         )
 
         # These are not TP-ed as they depend on A, dt_bias, D

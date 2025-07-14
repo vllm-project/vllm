@@ -242,6 +242,13 @@ class RocmPlatform(Platform):
         return "vllm.attention.backends.rocm_flash_attn.ROCmFlashAttentionBackend"  # noqa: E501
 
     @classmethod
+    def set_device(cls, device: torch.device) -> None:
+        """
+        Set the device for the current platform.
+        """
+        torch.cuda.set_device(device)
+
+    @classmethod
     @lru_cache(maxsize=8)
     def get_device_capability(cls,
                               device_id: int = 0
