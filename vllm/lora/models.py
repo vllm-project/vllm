@@ -26,7 +26,7 @@ from vllm.lora.lora import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.punica_wrapper import get_punica_wrapper
 from vllm.lora.utils import (from_layer, from_layer_logits_processor,
-                             get_supported_lora_modules,
+                             get_supported_lora_modules, is_moe_model,
                              is_regex_target_modules,
                              parse_fine_tuned_lora_name, replace_submodule)
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
@@ -375,6 +375,7 @@ class LoRAModelManager(AdapterModelManager):
             # text modules (e.g. ChatGLM)
             and hasattr(self.model, "get_mm_mapping"))
         self.is_pooling_model = is_pooling_model(self.model)
+        self.is_moe_model = is_moe_model(self.model)
         self.packed_modules: dict[str, list[str]] = {}
         self.modules: dict[str, BaseLayerWithLoRA] = {}
         # Dict instead of a set for compatibility with LRUCache.
