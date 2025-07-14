@@ -3,7 +3,7 @@
 import bisect
 import gc
 import time
-from typing import TYPE_CHECKING, Optional, cast
+from typing import TYPE_CHECKING, Any, Optional, cast
 from unittest.mock import patch
 
 import numpy as np
@@ -18,7 +18,8 @@ import vllm.envs as envs
 from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
 from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
-from vllm.config import ParallelConfig, VllmConfig, get_layers_from_vllm_config
+from vllm.config import (ParallelConfig, VllmConfig,
+                         get_layers_from_vllm_config, update_config)
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.lora.layers import BaseLayerWithLoRA
@@ -1110,6 +1111,18 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         self._verify_num_xla_graphs("execute_model")
 
         return model_runner_output
+
+    def update_config(self, overrides: dict[str, Any]) -> None:
+        # TODO: TPU config may need extra validation
+        # https://github.com/vllm-project/vllm/pull/20095#discussion_r2201497754
+        allowed_config_names = {"load_config", "model_config"}
+        for config_name, config_overrides in overrides.items():
+            assert config_name in allowed_config_names, \
+                f"Config `{config_name}` not supported. " \
+                f"Allowed configs: {allowed_config_names}"
+            config = getattr(self, config_name)
+            new_config = update_config(config, config_overrides)
+            setattr(self, config_name, new_config)
 
     def load_model(self) -> None:
         self.device = self.device_config.device
