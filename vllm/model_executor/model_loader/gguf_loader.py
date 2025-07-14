@@ -34,7 +34,7 @@ class GGUFModelLoader(BaseModelLoader):
         if os.path.isfile(model_name_or_path):
             return model_name_or_path
         # for raw HTTPS link
-        if model_name_or_path.startswith(("http://", "https://")):
+        if model_name_or_path.startswith(("http://", "https://")) and model_name_or_path.endswith(".gguf"):
             return hf_hub_download(url=model_name_or_path)
         # repo id/filename.gguf
         if "/" in model_name_or_path and model_name_or_path.endswith(".gguf"):
