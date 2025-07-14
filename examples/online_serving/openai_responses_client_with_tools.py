@@ -27,26 +27,21 @@ def get_weather(latitude: float, longitude: float) -> str:
 
 
 tools = [
-   {
-    "type": "function",
-    "name": "get_weather",
-    "description":
-    "Get current temperature for provided coordinates in celsius.",
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "latitude": {
-                "type": "number"
+    {
+        "type": "function",
+        "name": "get_weather",
+        "description": "Get current temperature for provided coordinates in celsius.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "latitude": {"type": "number"},
+                "longitude": {"type": "number"},
             },
-            "longitude": {
-                "type": "number"
-            }
+            "required": ["latitude", "longitude"],
+            "additionalProperties": False,
         },
-        "required": ["latitude", "longitude"],
-        "additionalProperties": False
-    },
-    "strict": True
-   }
+        "strict": True,
+    }
 ]
 
 input_messages = [
@@ -59,14 +54,13 @@ def main():
     model = "Qwen/Qwen3-1.7B"
     client = OpenAI(base_url=base_url, api_key="empty")
     response = client.responses.create(
-       model=model, input=input_messages, tools=tools, tool_choice="required"
+        model=model, input=input_messages, tools=tools, tool_choice="required"
     )
     tool_call = response.output[0]
     args = json.loads(tool_call.arguments)
-    
+
     result = get_weather(args["latitude"], args["longitude"])
-    
-    
+
     input_messages.append(tool_call)  # append model's function call message
     input_messages.append(
         {  # append result message
@@ -76,9 +70,9 @@ def main():
         }
     )
     response_2 = client.responses.create(
-       model=model,
-       input=input_messages,
-       tools=tools,
+        model=model,
+        input=input_messages,
+        tools=tools,
     )
     print(response_2.output_text)
 
