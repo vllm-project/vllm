@@ -137,7 +137,7 @@ python3 -m vllm.entrypoints.openai.api_server \
 ### 6. Start the Proxy Server
 
 ```bash
-python3 examples/online_serving/disagg_examples/disagg_proxy_demo.py \
+python3 disagg_proxy_demo.py \
     --model deepseek-ai/DeepSeek-R1 \
     --prefill $prefill_node_ip:8100 \
     --decode $decode_node_ip:8200 \

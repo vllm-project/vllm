@@ -134,7 +134,7 @@ launch_pd() {
 
 launch_pd_proxy(){
   PROXY_BASE_CMD="
-  python3 ${GIT_ROOT}/examples/online_serving/disagg_examples/disagg_proxy_demo.py \
+  python3 ${GIT_ROOT}/pd_xpyd/disagg_proxy_demo.py \
     --model $MODEL_NAME \
     --prefill localhost:8100 \
     --decode localhost:8200 \
