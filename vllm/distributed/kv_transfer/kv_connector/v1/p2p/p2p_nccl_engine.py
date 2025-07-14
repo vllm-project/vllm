@@ -365,7 +365,7 @@ class P2pNcclEngine:
                         }
                         # LRU
                         self.send_store[tensor_id] = tensor
-                        self._have_sent_tensor_id(tensor_id)
+                        self.have_sent_tensor_id(tensor_id)
                     else:
                         data = {"ret": 1}
 
