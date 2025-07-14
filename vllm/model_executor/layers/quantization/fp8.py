@@ -1010,7 +1010,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     and custom_routing_function is None)
             assert activation == "silu"
 
-            return torch.ops.vllm.flashinfer_fused_moe_fp8(
+            return torch.ops.vllm.flashinfer_fused_moe_blockscale_fp8(
                 router_logits.to(torch.float32),
                 e_score_correction_bias,
                 x,

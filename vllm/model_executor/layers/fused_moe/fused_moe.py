@@ -1064,7 +1064,7 @@ direct_register_custom_op(
 )
 
 
-def flashinfer_fused_moe_fp8(router_logits: torch.Tensor,
+def flashinfer_fused_moe_blockscale_fp8(router_logits: torch.Tensor,
                              e_score_correction_bias: torch.Tensor,
                              x: torch.Tensor,
                              w13_weight: torch.Tensor,
@@ -1094,6 +1094,7 @@ def flashinfer_fused_moe_fp8(router_logits: torch.Tensor,
     a_q, a_sf = per_token_group_quant_fp8(x, block_shape[1])
     # NOTE: hidden states have to be transposed!
     a_sf_t = a_sf.t().contiguous()
+    assert fi_fused_moe is not None
     fi_fused_moe.trtllm_fp8_block_scale_moe(router_logits,
                                             e_score_correction_bias,
                                             a_q,
@@ -1111,12 +1112,12 @@ def flashinfer_fused_moe_fp8(router_logits: torch.Tensor,
                                             expert_offset,
                                             local_num_experts,
                                             routed_scaling=1.0,
-                                            tile_tokens_dim=8,
+                                            tile_tokens_dim=tile_tokens_dim,
                                             routing_method_type=2)
     return output
 
 
-def flashinfer_fused_moe_fp8_fake(
+def flashinfer_fused_moe_blockscale_fp8_fake(
         router_logits: torch.Tensor,
         e_score_correction_bias: torch.Tensor,
         x: torch.Tensor,
@@ -1139,10 +1140,10 @@ def flashinfer_fused_moe_fp8_fake(
 
 
 direct_register_custom_op(
-    op_name="flashinfer_fused_moe_fp8",
-    op_func=flashinfer_fused_moe_fp8,
+    op_name="flashinfer_fused_moe_blockscale_fp8",
+    op_func=flashinfer_fused_moe_blockscale_fp8,
     mutates_args=[],
-    fake_impl=flashinfer_fused_moe_fp8_fake,
+    fake_impl=flashinfer_fused_moe_blockscale_fp8_fake,
     tags=(torch.Tag.needs_fixed_stride_order, ),
 )
 
