@@ -8,6 +8,7 @@ import time
 import typing
 from collections import deque
 from contextlib import contextmanager
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
 
 import msgpack
@@ -57,6 +58,15 @@ def set_p2p_nccl_context(num_channels: str):
                 os.environ[var] = original_values[var]
             else:
                 os.environ.pop(var, None)
+
+
+@dataclass
+class SendQueueItem:
+    tensor_id: str
+    remote_address: str
+    tensor: torch.Tensor
+    slot_mapping: torch.Tensor
+    is_mla: bool
 
 
 class P2pNcclEngine:
@@ -126,7 +136,7 @@ class P2pNcclEngine:
         else:
             # PUT or PUT_ASYNC
             # tensor_id: torch.Tensor
-            self.send_queue: deque[list[Any]] = deque()
+            self.send_queue: deque[SendQueueItem] = deque()
             self.send_request_id_to_tensor_ids: dict[str, set[str]] = {}
             if self.send_type == "PUT_ASYNC":
                 self._send_thread = threading.Thread(target=self.send_async, daemon=True)
@@ -206,7 +216,14 @@ class P2pNcclEngine:
 
         if self.send_type == "PUT_ASYNC":
             with self.send_queue_cv:
-                self.send_queue.append([tensor_id, remote_address, tensor, slot_mapping, is_mla])
+                item = SendQueueItem(
+                    tensor_id=tensor_id,
+                    remote_address=remote_address,
+                    tensor=tensor,
+                    slot_mapping=slot_mapping,
+                    is_mla=is_mla
+                )
+                self.send_queue.append(item)
                 self.send_queue_cv.notify()
             return True
 
@@ -398,10 +415,10 @@ class P2pNcclEngine:
             with self.send_queue_cv:
                 while not self.send_queue:
                     self.send_queue_cv.wait()
-                tensor_id, remote_address, tensor, slot_mapping, is_mla = self.send_queue.popleft()
+                item = self.send_queue.popleft()
                 if not self.send_queue:
                     self.send_queue_cv.notify()
-            self.send_sync(tensor_id, tensor, remote_address, slot_mapping, is_mla)
+            self.send_sync(item)
 
     def wait_for_sent(self):
         if self.send_type == "PUT_ASYNC":
@@ -416,25 +433,21 @@ class P2pNcclEngine:
 
     def send_sync(
         self,
-        tensor_id: str,
-        tensor: torch.Tensor,
-        remote_address: typing.Optional[str] = None,
-        slot_mapping: torch.Tensor = None,
-        is_mla: bool = False,
+        item: SendQueueItem
     ) -> bool:
-        if remote_address is None:
+        if item.remote_address is None:
             return False
-        if remote_address not in self.socks:
-            self.create_connect(remote_address)
+        if item.remote_address not in self.socks:
+            self.create_connect(item.remote_address)
 
         with self.send_stream:
-            tensor = self.extract_kv_from_layer(is_mla, tensor, slot_mapping)
+            tensor = self.extract_kv_from_layer(item.is_mla, item.tensor, item.slot_mapping)
 
-        sock = self.socks[remote_address]
-        comm, rank = self.comms[remote_address]
+        sock = self.socks[item.remote_address]
+        comm, rank = self.comms[item.remote_address]
         data = {
             "cmd": "PUT",
-            "tensor_id": tensor_id,
+            "tensor_id": item.tensor_id,
             "shape": tensor.shape,
             "dtype": str(tensor.dtype).replace("torch.", "")
         }
@@ -445,7 +458,7 @@ class P2pNcclEngine:
             logger.error(
                 "🔴Send Tensor, Peer Out Of Memory/Threshold, %s 👉 %s, "
                 "MyRank:%s, data:%s, tensor:%s, size:%fGB, response:%s",
-                self.zmq_address, remote_address, rank, data, tensor.shape,
+                self.zmq_address, item.remote_address, rank, data, tensor.shape,
                 tensor.element_size() * tensor.numel() / 1024**3,
                 response.decode())
             return False
@@ -453,7 +466,7 @@ class P2pNcclEngine:
         self.send(comm, tensor.to(self.device), rank ^ 1, self.send_stream)
 
         if self.send_type == "PUT_ASYNC":
-            self.have_sent_tensor_id(tensor_id)
+            self.have_sent_tensor_id(item.tensor_id)
 
         return True
 
