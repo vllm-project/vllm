@@ -31,7 +31,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models import SupportsPP
-from vllm.model_executor.models.whisper import WhisperEncoder
+from vllm.model_executor.models.whisper import WhisperEncoder, WhisperForConditionalGeneration
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
@@ -301,11 +301,7 @@ class VoxtralMultiModalProcessor(
     info=VoxtralProcessingInfo,
     dummy_inputs=VoxtralDummyInputsBuilder)
 class VoxtralForConditionalGeneration(nn.Module, SupportsMultiModal,
-                                       SupportsPP):
-# class VoxtralForConditionalGeneration(nn.Module, SupportsMultiModal,
-#                                        SupportsPP, SupportsTranscription):
-# When adding `SupportsTranscription`, chat completion is disabled - why can't both be allowed?
-
+                                       SupportsPP, SupportsTranscription):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.tokenizer = cached_tokenizer_from_config(vllm_config.model_config)
@@ -457,6 +453,23 @@ class VoxtralForConditionalGeneration(nn.Module, SupportsMultiModal,
         prompts_dict["prompt_token_ids"] = tokenized.tokens
         return cast(PromptType, prompts_dict)
 
+    @classmethod
+    def validate_language(cls, language: str) -> bool:
+        # same as whisper
+        return WhisperForConditionalGeneration.validate_language(language)
+
+    @classmethod
+    def get_num_audio_tokens(cls, audio_duration_s: float,
+                             stt_config: SpeechToTextConfig,
+                             model_config: ModelConfig) -> Optional[int]:
+        """
+        Map from audio duration to number of audio tokens produced by the ASR 
+        model, without running a forward pass.
+        This is used for estimating the amount of processing for this audio.
+        """
+        tokenizer = cached_tokenizer_from_config(model_config)
+        adapter = VoxtralProcessorAdapter(tokenizer)
+        return adapter.get_num_audio_tokens(int(audio_duration_s * stt_config.sample_rate))
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
