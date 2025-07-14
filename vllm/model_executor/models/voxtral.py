@@ -4,10 +4,14 @@
 import math
 import re
 from collections.abc import Iterable, Mapping, Sequence
+import io
 from functools import cached_property
 from math import ceil
 from typing import Optional, Union, cast
+from vllm.inputs.data import PromptType
 from vllm.multimodal.parse import MultiModalDataItems, MultiModalDataParser
+from mistral_common.protocol.transcription.request import TranscriptionRequest
+from mistral_common.protocol.instruct.messages import AudioChunk
 from .interfaces import (MultiModalEmbeddings, SupportsMultiModal,
                          SupportsTranscription, SupportsV0Only)
 
@@ -18,11 +22,11 @@ from mistral_common.protocol.instruct.messages import (AudioChunk, RawAudio,
                                                        TextChunk, UserMessage)
 from mistral_common.protocol.instruct.request import ChatCompletionRequest
 from mistral_common.tokens.tokenizers.audio import Audio, AudioEncoder
-from mistral_common.audio import AudioFormat, mel_filter_bank
+from mistral_common.audio import mel_filter_bank
 from transformers import TensorType, WhisperConfig
 from transformers.tokenization_utils_base import TextInput
 
-from vllm.config import VllmConfig
+from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -216,7 +220,7 @@ class VoxtralDummyInputsBuilder(BaseDummyInputsBuilder[VoxtralProcessingInfo]
                 sampling_rate=self.info.get_hf_processor().sampling_rate,
                 format=format,
             )
-            chunk = AudioChunk.from_audio(audio_item)
+            chunk = AudioChunk(input_audio=RawAudio.from_audio(audio_item))
             audio_chunks.append(chunk)
 
         request = ChatCompletionRequest(messages=[
@@ -422,6 +426,37 @@ class VoxtralForConditionalGeneration(nn.Module, SupportsMultiModal,
     ) -> Optional[torch.Tensor]:
         return self.language_model.compute_logits(hidden_states,
                                                   sampling_metadata)
+
+    @classmethod
+    def get_speech_to_text_config(cls, model_config: ModelConfig,
+                                  task_type: str) -> SpeechToTextConfig:
+        tokenizer = cached_tokenizer_from_config(model_config)
+        max_audio_clip_s = tokenizer.instruct.audio_encoder.audio_config.chunk_length_s
+        sample_rate = tokenizer.instruct.audio_encoder.audio_config.sampling_rate
+        return SpeechToTextConfig(
+            max_audio_clip_s=max_audio_clip_s,
+            sample_rate=sample_rate,
+            # mistral_common and whisper encoder take care of chunking
+            min_energy_split_window_size=None,
+        )
+
+    @classmethod
+    # for speech-to-text transcription
+    def get_generation_prompt(cls, audio: np.ndarray,
+                              model_config: ModelConfig,
+                              stt_config: SpeechToTextConfig, language: str,
+                              task_type: str,
+                              request_prompt: str) -> PromptType:
+        tokenizer = cached_tokenizer_from_config(model_config)
+        audio = Audio(audio, stt_config.sample_rate, format="wav")  # lossless
+        req = TranscriptionRequest(model=model_config.model, audio=RawAudio.from_audio(audio), language=language)
+
+        tokenized = tokenizer.instruct.encode_transcription(req)
+        audio = (tokenized.audios[0].audio_array, stt_config.model_sr)
+        prompts_dict = {"multi_modal_data": {"audio": audio}}
+        prompts_dict["prompt_token_ids"] = tokenized.tokens
+        return cast(PromptType, prompts_dict)
+
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:

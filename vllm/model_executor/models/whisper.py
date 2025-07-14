@@ -814,6 +814,7 @@ class WhisperForConditionalGeneration(nn.Module, SupportsTranscription,
 
     @classmethod
     def get_generation_prompt(cls, audio: np.ndarray,
+                              model_config: ModelConfig,  # not needed here
                               stt_config: SpeechToTextConfig, language: str,
                               task_type: str,
                               request_prompt: str) -> PromptType:
