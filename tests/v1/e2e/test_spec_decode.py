@@ -108,8 +108,10 @@ def test_ngram_correctness(
      "yuhuili/EAGLE-LLaMA3.1-Instruct-8B", 1),
     ("eagle3", "meta-llama/Llama-3.1-8B-Instruct",
      "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B", 1),
-    ("eagle", "meta-llama/Llama-4-Scout-17B-16E-Instruct",
-     "morgendave/EAGLE-Llama-4-Scout-17B-16E-Instruct", 4),
+    pytest.param(
+        ("eagle", "meta-llama/Llama-4-Scout-17B-16E-Instruct",
+         "morgendave/EAGLE-Llama-4-Scout-17B-16E-Instruct", 4),
+        marks=pytest.mark.skip(reason="Skipping due to CI OOM issues")),
 ],
                          ids=["llama3_eagle", "llama3_eagle3", "llama4_eagle"])
 def test_eagle_correctness(
