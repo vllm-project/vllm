@@ -18,7 +18,7 @@
 # limitations under the License.
 """Inference-only LLaMA model compatible with HuggingFace weights."""
 from collections.abc import Iterable
-from typing import Any, Optional
+from typing import Any, Optional, Union, cast
 
 import torch
 from torch import nn
@@ -26,8 +26,8 @@ from transformers import Llama4TextConfig
 
 from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
+from vllm.distributed import get_ep_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (QKVParallelLinear,
@@ -38,6 +38,7 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
 
+from .interfaces import MixtureOfExperts
 from .llama import LlamaForCausalLM, LlamaMLP, LlamaModel
 from .utils import (AutoWeightsLoader, extract_layer_index, fast_topk,
                     is_pp_missing_parameter)
@@ -57,13 +58,21 @@ class Llama4MoE(nn.Module):
         router_scores = torch.sigmoid(router_scores.float())
         return (router_scores, router_indices.to(torch.int32))
 
-    def __init__(self,
-                 config: Llama4TextConfig,
-                 quant_config: Optional[QuantizationConfig] = None,
-                 prefix: str = ""):
+    def __init__(
+        self,
+        config: Llama4TextConfig,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+        enable_eplb: bool = False,
+    ):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
         self.top_k = config.num_experts_per_tok
+
+        self.ep_group = get_ep_group().device_group
+        self.ep_rank = self.ep_group.rank()
+        self.ep_size = self.ep_group.size()
+        self.n_routed_experts = config.num_local_experts
 
         intermediate_size_moe = config.intermediate_size
         self.router = ReplicatedLinear(config.hidden_size,
@@ -71,6 +80,23 @@ class Llama4MoE(nn.Module):
                                        bias=False,
                                        quant_config=None,
                                        prefix=f"{prefix}.router")
+
+        # Load balancing
+
+        vllm_config = get_current_vllm_config()
+        parallel_config = vllm_config.parallel_config
+        self.enable_eplb = enable_eplb
+
+        self.n_logical_experts = self.n_routed_experts
+        self.n_redundant_experts = parallel_config.num_redundant_experts
+        self.n_physical_experts = (self.n_logical_experts +
+                                   self.n_redundant_experts)
+        self.n_local_physical_experts = self.n_physical_experts // self.ep_size
+
+        self.physical_expert_start = (self.ep_rank *
+                                      self.n_local_physical_experts)
+        self.physical_expert_end = (self.physical_expert_start +
+                                    self.n_local_physical_experts)
 
         self.experts = FusedMoE(
             num_experts=config.num_local_experts,
@@ -82,7 +108,10 @@ class Llama4MoE(nn.Module):
             reduce_results=False,
             renormalize=False,
             quant_config=quant_config,
-            prefix=f"{prefix}.experts")
+            prefix=f"{prefix}.experts",
+            enable_eplb=enable_eplb,
+            num_redundant_experts=self.n_redundant_experts,
+        )
 
         self.shared_expert = LlamaMLP(
             hidden_size=config.hidden_size,
@@ -229,7 +258,8 @@ class Llama4Attention(nn.Module):
             k = self.qk_norm(k.float()).reshape(-1, self.kv_size).to(k.dtype)
 
         # We are applying temperature tuning (https://arxiv.org/abs/2501.19399)
-        # to NoPE layers, where the inference-time temperature tuning function
+        # to NoPE layers, where the inference-time temperature tuning
+        # function
         # is customized to not affect short context
         # while working at very long context
         # https://arxiv.org/abs/2501.19399
@@ -252,6 +282,7 @@ class Llama4DecoderLayer(nn.Module):
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
+        enable_eplb: bool = False,
     ) -> None:
         super().__init__()
 
@@ -278,10 +309,11 @@ class Llama4DecoderLayer(nn.Module):
         is_moe_layer = config.interleave_moe_layer_step > 0 and (
             self.layer_idx + 1) % config.interleave_moe_layer_step == 0
         if is_moe_layer:
-            self.feed_forward = Llama4MoE(
+            self.feed_forward: Union[Llama4MoE, LlamaMLP] = Llama4MoE(
                 config=config,
                 quant_config=quant_config,
                 prefix=f"{prefix}.feed_forward",
+                enable_eplb=enable_eplb,
             )
         else:
             self.feed_forward = LlamaMLP(
@@ -329,9 +361,26 @@ class Llama4Model(LlamaModel):
                  prefix: str = "",
                  layer_type: type[Llama4DecoderLayer] = Llama4DecoderLayer):
         self.num_experts = vllm_config.model_config.hf_config.num_local_experts
+        self.num_redundant_experts = (
+            vllm_config.parallel_config.num_redundant_experts)
+        self.enable_eplb = vllm_config.parallel_config.enable_eplb
+
+        # We need to create layers with enable_eplb parameter
+        # Store the original layer_type and override it with a lambda
+        original_layer_type = layer_type
+
+        def create_layer(prefix):
+            config = cast(Llama4TextConfig, vllm_config.model_config.hf_config)
+            return original_layer_type(config=config,
+                                       cache_config=vllm_config.cache_config,
+                                       quant_config=vllm_config.quant_config,
+                                       prefix=prefix,
+                                       enable_eplb=self.enable_eplb)
+
+        # Call parent init with our custom layer factory
         super().__init__(vllm_config=vllm_config,
                          prefix=prefix,
-                         layer_type=layer_type)
+                         layer_type=cast(type[nn.Module], create_layer))
 
     def load_moe_expert_weights(
         self,
@@ -370,8 +419,11 @@ class Llama4Model(LlamaModel):
                 new_loaded_weight = new_loaded_weight.transpose(-1, -2)
                 layer_idx = extract_layer_index(name)
                 # EP mapping
-                expert_map = self.layers[
-                    layer_idx].feed_forward.experts.expert_map
+                feed_forward = self.layers[layer_idx].feed_forward
+                if hasattr(feed_forward, 'experts'):
+                    expert_map = feed_forward.experts.expert_map
+                else:
+                    expert_map = None
                 if expert_map is not None:
                     local_expert_indices = (expert_map != -1) \
                                             .nonzero() \
@@ -390,6 +442,7 @@ class Llama4Model(LlamaModel):
 
             loaded_params.add(full_param_name)
             expert_param_loaded = True
+            is_expert = True
         return expert_param_loaded
 
     def load_weights(self, weights: Iterable[tuple[str,
@@ -407,7 +460,9 @@ class Llama4Model(LlamaModel):
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
-            num_experts=self.num_experts)
+            num_experts=self.num_experts,
+            num_redundant_experts=self.num_redundant_experts,
+        )
         expert_params_mapping_fused = FusedMoE.make_expert_params_mapping(
             ckpt_gate_proj_name="gate_up_proj",
             ckpt_down_proj_name="down_proj",
@@ -451,18 +506,54 @@ class Llama4Model(LlamaModel):
                     weight_loader(param, loaded_weight)
                 else:
                     weight_loader(param, loaded_weight, shard_id)
+                is_expert = False
                 loaded_params.add(name)
                 break
             else:
-                moe_loaded = self.load_moe_expert_weights(
-                    name,
-                    loaded_weight,
-                    params_dict,
-                    loaded_params,
-                    expert_params_mapping,
-                    fused=fused_experts_params)
+                # First try to handle as expert weight
+                is_expert_weight = False
+                for mapping in expert_params_mapping:
+                    param_name, weight_name, expert_id, shard_id = mapping
+                    if weight_name not in name:
+                        continue
 
-                if not moe_loaded:
+                    # Anyway, this is an expert weight and should not be
+                    # attempted to load as other weights later
+                    is_expert_weight = True
+
+                    # Do not modify `name` since the loop may continue here
+                    # Instead, create a new variable
+                    name_mapped = name.replace(weight_name, param_name)
+
+                    if is_pp_missing_parameter(name_mapped, self):
+                        continue
+
+                    # Skip loading extra parameters for GPTQ/modelopt models.
+                    if ((name_mapped.endswith(".bias")
+                         or name_mapped.endswith("_bias"))
+                            and name_mapped not in params_dict):
+                        continue
+
+                    param = params_dict[name_mapped]
+                    weight_loader = param.weight_loader
+                    weight_loader(param,
+                                  loaded_weight,
+                                  name_mapped,
+                                  shard_id=shard_id,
+                                  expert_id=expert_id)
+                    loaded_params.add(name_mapped)
+                    is_expert = True
+                    break
+                else:
+                    # If we've identified this as an expert weight but couldn't
+                    # load it
+                    if is_expert_weight:
+                        # We've checked that this is an expert weight
+                        # However it's not mapped locally to this rank
+                        # So we simply skip it
+                        continue
+
+                    # Not an expert weight, continue with regular loading
                     if is_pp_missing_parameter(name, self):
                         continue
 
@@ -500,6 +591,7 @@ class Llama4Model(LlamaModel):
                             # Regular weight loader (handles both
                             # param.weight_loader and default_weight_loader)
                             weight_loader(param, loaded_weight)
+                        is_expert = True
                         loaded_params.add(name)
                         continue
 
@@ -507,11 +599,12 @@ class Llama4Model(LlamaModel):
                     weight_loader = getattr(param, "weight_loader",
                                             default_weight_loader)
                     weight_loader(param, loaded_weight)
+                    is_expert = False
                     loaded_params.add(name)
         return loaded_params
 
 
-class Llama4ForCausalLM(LlamaForCausalLM):
+class Llama4ForCausalLM(LlamaForCausalLM, MixtureOfExperts):
 
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
@@ -525,13 +618,56 @@ class Llama4ForCausalLM(LlamaForCausalLM):
         # enable temperature tuning by default when max_model_len > 32K
         default_attn_temperature_tuning = \
             vllm_config.model_config.max_model_len > 32768
-        vllm_config.model_config.hf_config.attn_temperature_tuning \
-            = gen_config.get(
-                "attn_temperature_tuning", default_attn_temperature_tuning)
+        vllm_config.model_config.hf_config.attn_temperature_tuning = \
+            gen_config.get("attn_temperature_tuning",
+                          default_attn_temperature_tuning)
 
         super().__init__(vllm_config=vllm_config,
                          prefix=prefix,
                          layer_type=Llama4DecoderLayer)
+
+        self.expert_weights = []
+
+        # Set MoE hyperparameters
+        self.moe_layers: list[FusedMoE] = []
+        for layer in self.model.layers:
+            assert isinstance(layer, Llama4DecoderLayer)
+            if isinstance(layer.feed_forward, Llama4MoE):
+                self.moe_layers.append(layer.feed_forward.experts)
+
+        self.num_moe_layers = len(self.moe_layers)
+        self.num_expert_groups = 1
+
+        example_moe = None
+        for layer_idx in range(self.config.num_hidden_layers):
+            layer = self.model.layers[layer_idx]
+            if isinstance(layer.feed_forward, Llama4MoE):
+                example_moe = layer.feed_forward
+                break
+        assert example_moe is not None
+
+        self.num_logical_experts = example_moe.n_logical_experts
+        self.num_physical_experts = example_moe.n_physical_experts
+        self.num_local_physical_experts = example_moe.n_local_physical_experts
+        self.num_routed_experts = example_moe.n_routed_experts
+        self.num_redundant_experts = example_moe.n_redundant_experts
+        self.num_shared_experts = 1
+
+    def set_eplb_state(
+        self,
+        expert_load_view: torch.Tensor,
+        logical_to_physical_map: torch.Tensor,
+        logical_replica_count: torch.Tensor,
+    ) -> None:
+        for layer_idx, layer in enumerate(self.moe_layers):
+            # Register the expert weights.
+            self.expert_weights.append(layer.get_expert_weights())
+            layer.set_eplb_state(
+                moe_layer_idx=layer_idx,
+                expert_load_view=expert_load_view,
+                logical_to_physical_map=logical_to_physical_map,
+                logical_replica_count=logical_replica_count,
+            )
 
     def _init_model(self,
                     vllm_config: VllmConfig,
