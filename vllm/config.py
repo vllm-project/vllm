@@ -4710,6 +4710,15 @@ class VllmConfig:
                     "Only \"last\" pooling supports chunked "
                     "prefill and prefix caching; disabling both.")
 
+        if self.model_config.is_attention_free:
+            # If the model is not of pooling type and it is attention free,
+            # we make sure chunked prefill and prefix_caching are
+            # disabled so that the correct KVCacheCoordinator
+            # is loaded.
+            disable_chunked_prefill_reasons.append(
+                "This is an attention free model, "
+                "disabling chunked prefill and prefix caching.")
+
         if disable_chunked_prefill_reasons:
             for reason in disable_chunked_prefill_reasons:
                 logger.info(reason)

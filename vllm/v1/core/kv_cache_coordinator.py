@@ -388,7 +388,7 @@ def get_kv_cache_coordinator(
         kv_cache_config: KVCacheConfig, max_model_len: int, use_eagle: bool,
         enable_caching: bool, caching_hash_fn: Callable,
         enable_kv_cache_events: bool) -> KVCacheCoordinator:
-    if not enable_caching or len(kv_cache_config.kv_cache_groups) == 0:
+    if not enable_caching:
         # We instantiate this coordinator also for attention free models that
         # have 0 kv_cache_groups
         return KVCacheCoordinatorNoPrefixCache(kv_cache_config, max_model_len,
